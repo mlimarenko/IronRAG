@@ -30,6 +30,14 @@ pub struct ModelProfileSummary {
     pub model_name: String,
 }
 
+#[derive(Serialize)]
+pub struct ProviderGovernanceSummary {
+    pub workspace_id: Uuid,
+    pub provider_accounts: Vec<ProviderAccountSummary>,
+    pub model_profiles: Vec<ModelProfileSummary>,
+    pub warning: Option<String>,
+}
+
 #[derive(Deserialize)]
 pub struct WorkspaceScopedQuery {
     pub workspace_id: Option<Uuid>,
@@ -57,6 +65,7 @@ pub fn router() -> Router<crate::app::state::AppState> {
     Router::new()
         .route("/provider-accounts", get(list_provider_accounts).post(create_provider_account))
         .route("/model-profiles", get(list_model_profiles).post(create_model_profile))
+        .route("/provider-governance/{workspace_id}", get(get_provider_governance))
 }
 
 async fn list_provider_accounts(
@@ -150,4 +159,50 @@ async fn create_model_profile(
         profile_kind: row.profile_kind,
         model_name: row.model_name,
     }))
+}
+
+async fn get_provider_governance(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    axum::extract::Path(workspace_id): axum::extract::Path<Uuid>,
+) -> Result<Json<ProviderGovernanceSummary>, ApiError> {
+    auth.require_any_scope(&["providers:admin", "workspace:admin"])?;
+
+    let provider_accounts =
+        repositories::list_provider_accounts(&state.persistence.postgres, Some(workspace_id))
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .into_iter()
+            .map(|row| ProviderAccountSummary {
+                id: row.id,
+                workspace_id: row.workspace_id,
+                provider_kind: row.provider_kind,
+                label: row.label,
+                status: row.status,
+            })
+            .collect::<Vec<_>>();
+
+    let model_profiles =
+        repositories::list_model_profiles(&state.persistence.postgres, Some(workspace_id))
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .into_iter()
+            .map(|row| ModelProfileSummary {
+                id: row.id,
+                workspace_id: row.workspace_id,
+                provider_account_id: row.provider_account_id,
+                profile_kind: row.profile_kind,
+                model_name: row.model_name,
+            })
+            .collect::<Vec<_>>();
+
+    let warning = if provider_accounts.is_empty() {
+        Some("No provider accounts configured for this workspace yet".to_string())
+    } else if model_profiles.is_empty() {
+        Some("Provider accounts exist, but no model profiles are configured yet".to_string())
+    } else {
+        None
+    };
+
+    Ok(Json(ProviderGovernanceSummary { workspace_id, provider_accounts, model_profiles, warning }))
 }
