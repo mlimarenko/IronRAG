@@ -8,6 +8,7 @@ This repository is the runtime monorepo and contains:
 - `docker-compose.yml` — local development composition
 
 The spec/governance repository lives separately in `../spec-kit/`.
+The active enterprise maturity implementation program is tracked in `../spec-kit/specs/002-rustrag-enterprise/`.
 
 ## Foundation principles
 

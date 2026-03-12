@@ -1,6 +1,10 @@
 pub mod auth;
 pub mod ingestion;
+pub mod ingestion_state;
+pub mod operational;
 pub mod project;
 pub mod provider;
 pub mod retrieval;
+pub mod retrieval_diagnostics;
+pub mod usage_governance;
 pub mod workspace;

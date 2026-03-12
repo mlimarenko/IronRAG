@@ -35,4 +35,8 @@ check: backend-lint backend-test frontend-lint frontend-format-check frontend-ty
 
 check-strict: backend-lint backend-doc backend-test frontend-lint frontend-format-check frontend-typecheck
 
+enterprise-validate:
+	cd backend && $(MAKE) quality
+	cd frontend && npm run enterprise:check
+
 audit: backend-audit
