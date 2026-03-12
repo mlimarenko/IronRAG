@@ -51,6 +51,41 @@ export interface UsageSummary {
   estimated_cost: number
 }
 
+export interface IngestionJobDetail {
+  id: string
+  project_id: string
+  source_id?: string | null
+  trigger_kind: string
+  status: string
+  stage: string
+  requested_by?: string | null
+  error_message?: string | null
+  started_at?: string | null
+  finished_at?: string | null
+  retryable: boolean
+  lifecycle:
+    | 'Queued'
+    | 'Validating'
+    | 'Running'
+    | 'Partial'
+    | 'Completed'
+    | 'Failed'
+    | 'RetryableFailed'
+    | 'Canceled'
+}
+
+export interface ProjectReadinessSummary {
+  id: string
+  workspace_id: string
+  slug: string
+  name: string
+  ingestion_jobs: number
+  sources: number
+  documents: number
+  ready_for_query: boolean
+  indexing_state: string
+}
+
 const env = import.meta.env as ImportMetaEnv & FrontendEnv
 const backendUrl: string = env.VITE_BACKEND_URL ?? 'http://127.0.0.1:8080'
 
@@ -72,5 +107,20 @@ export async function fetchUsageSummary(projectId?: string): Promise<UsageSummar
   const { data } = await api.get<UsageSummary>('/v1/usage-summary', {
     params: projectId ? { project_id: projectId } : {},
   })
+  return data
+}
+
+export async function fetchIngestionJobDetail(id: string): Promise<IngestionJobDetail> {
+  const { data } = await api.get<IngestionJobDetail>(`/v1/ingestion-jobs/${id}`)
+  return data
+}
+
+export async function retryIngestionJob(id: string): Promise<IngestionJobDetail> {
+  const { data } = await api.post<IngestionJobDetail>(`/v1/ingestion-jobs/${id}/retry`)
+  return data
+}
+
+export async function fetchProjectReadiness(id: string): Promise<ProjectReadinessSummary> {
+  const { data } = await api.get<ProjectReadinessSummary>(`/v1/projects/${id}/readiness`)
   return data
 }
