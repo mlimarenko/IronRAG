@@ -1,0 +1,27 @@
+# Rust
+/target
+**/target
+Cargo.lock
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules
+.pnpm-store
+
+# Build artifacts
+dist
+coverage
+playwright-report
+test-results
+
+# IDE
+.vscode
+.idea
+.DS_Store
+
+# SQLx
+.sqlx

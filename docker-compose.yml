@@ -1,0 +1,46 @@
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: rustrag
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      RUSTRAG_BIND_ADDR: 0.0.0.0:8080
+      RUSTRAG_SERVICE_NAME: rustrag-backend
+      RUSTRAG_ENVIRONMENT: local-compose
+      RUSTRAG_DATABASE_URL: postgres://postgres:postgres@postgres:5432/rustrag
+      RUSTRAG_DATABASE_MAX_CONNECTIONS: 20
+      RUSTRAG_REDIS_URL: redis://redis:6379
+      RUSTRAG_LOG_FILTER: info
+    ports:
+      - "8080:8080"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    depends_on:
+      - backend
+    ports:
+      - "3000:3000"
+
+volumes:
+  postgres_data:

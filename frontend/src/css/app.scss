@@ -1,0 +1,28 @@
+.app-shell {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  min-height: 100vh;
+  font-family: Inter, system-ui, sans-serif;
+}
+
+.sidebar {
+  padding: 24px;
+  background: #111827;
+  color: #f9fafb;
+}
+
+.sidebar nav {
+  display: grid;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.sidebar a {
+  color: #cbd5e1;
+  text-decoration: none;
+}
+
+.content {
+  padding: 24px;
+  background: #f8fafc;
+}
