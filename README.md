@@ -9,10 +9,6 @@ This repository is the runtime monorepo and contains:
 
 The spec/governance repository lives separately in `../spec-kit/`.
 
-Enterprise-scoping and project-governance docs in this runtime repo:
-- `docs/ENTERPRISE-SCOPE-2-SPEC.md`
-- `docs/PROJECT-CONSTITUTION.md`
-
 ## Foundation principles
 
 - one instance, many workspaces
