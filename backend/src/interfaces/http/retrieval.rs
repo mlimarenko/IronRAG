@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::{Path, Query, State},
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -39,6 +39,24 @@ pub struct RetrievalRunSummary {
     pub model_profile_id: Option<Uuid>,
     pub top_k: i32,
     pub response_text: Option<String>,
+    pub answer_status: String,
+    pub weak_grounding: bool,
+}
+
+#[derive(Serialize)]
+pub struct RetrievalRunDetail {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub query_text: String,
+    pub model_profile_id: Option<Uuid>,
+    pub top_k: i32,
+    pub response_text: Option<String>,
+    pub answer_status: String,
+    pub weak_grounding: bool,
+    pub references: Vec<String>,
+    pub matched_chunk_ids: Vec<Uuid>,
+    pub warning: Option<String>,
+    pub debug_json: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -48,6 +66,9 @@ pub struct QueryResponse {
     pub answer: String,
     pub references: Vec<String>,
     pub mode: String,
+    pub answer_status: String,
+    pub weak_grounding: bool,
+    pub warning: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -79,6 +100,7 @@ pub fn router() -> Router<crate::app::state::AppState> {
             "/retrieval-runs",
             axum::routing::get(list_retrieval_runs).post(create_retrieval_run),
         )
+        .route("/retrieval-runs/{id}", axum::routing::get(get_retrieval_run_detail))
         .route("/query", axum::routing::post(run_query))
 }
 
@@ -90,13 +112,19 @@ async fn list_retrieval_runs(
         .await
         .map_err(|_| ApiError::Internal)?
         .into_iter()
-        .map(|row| RetrievalRunSummary {
-            id: row.id,
-            project_id: row.project_id,
-            query_text: row.query_text,
-            model_profile_id: row.model_profile_id,
-            top_k: row.top_k,
-            response_text: row.response_text,
+        .map(|row| {
+            let (answer_status, weak_grounding, _, _, _warning) =
+                extract_retrieval_debug(&row.debug_json);
+            RetrievalRunSummary {
+                id: row.id,
+                project_id: row.project_id,
+                query_text: row.query_text,
+                model_profile_id: row.model_profile_id,
+                top_k: row.top_k,
+                response_text: row.response_text,
+                answer_status,
+                weak_grounding,
+            }
         })
         .collect();
 
@@ -124,6 +152,8 @@ async fn create_retrieval_run(
     .await
     .map_err(|_| ApiError::Internal)?;
 
+    let (answer_status, weak_grounding, _, _, _) = extract_retrieval_debug(&row.debug_json);
+
     Ok(Json(RetrievalRunSummary {
         id: row.id,
         project_id: row.project_id,
@@ -131,6 +161,41 @@ async fn create_retrieval_run(
         model_profile_id: row.model_profile_id,
         top_k: row.top_k,
         response_text: row.response_text,
+        answer_status,
+        weak_grounding,
+    }))
+}
+
+async fn get_retrieval_run_detail(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<RetrievalRunDetail>, ApiError> {
+    auth.require_any_scope(&["query:run", "workspace:admin", "documents:read"])?;
+
+    let row = repositories::list_retrieval_runs(&state.persistence.postgres, None)
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .into_iter()
+        .find(|run| run.id == id)
+        .ok_or_else(|| ApiError::NotFound(format!("retrieval_run {id} not found")))?;
+
+    let (answer_status, weak_grounding, references, matched_chunk_ids, warning) =
+        extract_retrieval_debug(&row.debug_json);
+
+    Ok(Json(RetrievalRunDetail {
+        id: row.id,
+        project_id: row.project_id,
+        query_text: row.query_text,
+        model_profile_id: row.model_profile_id,
+        top_k: row.top_k,
+        response_text: row.response_text,
+        answer_status,
+        weak_grounding,
+        references,
+        matched_chunk_ids,
+        warning,
+        debug_json: row.debug_json,
     }))
 }
 
@@ -216,6 +281,13 @@ async fn persist_query_artifacts(
     payload: &QueryRequest,
     query_result: &QueryExecutionResult,
 ) -> Result<Json<QueryResponse>, ApiError> {
+    let weak_grounding =
+        query_result.references.is_empty() || query_result.matched_chunks.len() < 2;
+    let answer_status = if weak_grounding { "weakly_grounded" } else { "grounded" };
+    let warning = weak_grounding.then_some(
+        "The answer was generated with limited retrieval evidence; inspect references and project readiness.".to_string(),
+    );
+
     let row = repositories::create_retrieval_run(
         &state.persistence.postgres,
         payload.project_id,
@@ -230,6 +302,9 @@ async fn persist_query_artifacts(
             "usage": query_result.usage_json,
             "matched_chunk_ids": query_result.matched_chunks.iter().map(|chunk| chunk.id).collect::<Vec<_>>(),
             "references": query_result.references,
+            "answer_status": answer_status,
+            "weak_grounding": weak_grounding,
+            "warning": warning,
         }),
     )
     .await
@@ -290,6 +365,9 @@ async fn persist_query_artifacts(
         answer: query_result.output_text.clone(),
         references: query_result.references.clone(),
         mode: "gateway_live".into(),
+        answer_status: answer_status.to_string(),
+        weak_grounding,
+        warning,
     }))
 }
 
@@ -522,4 +600,42 @@ fn estimate_query_cost(
     let completion_cost =
         (f64::from(completion_tokens.unwrap_or(0)) / 1_000_000.0) * output_price_per_1m;
     prompt_cost + completion_cost
+}
+
+fn extract_retrieval_debug(
+    debug_json: &serde_json::Value,
+) -> (String, bool, Vec<String>, Vec<Uuid>, Option<String>) {
+    let answer_status = debug_json
+        .get("answer_status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("grounded")
+        .to_string();
+    let weak_grounding =
+        debug_json.get("weak_grounding").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    let references = debug_json
+        .get("references")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let matched_chunk_ids = debug_json
+        .get("matched_chunk_ids")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter_map(|value| Uuid::parse_str(value).ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let warning =
+        debug_json.get("warning").and_then(serde_json::Value::as_str).map(ToString::to_string);
+
+    (answer_status, weak_grounding, references, matched_chunk_ids, warning)
 }

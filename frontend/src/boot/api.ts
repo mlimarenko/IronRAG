@@ -86,6 +86,32 @@ export interface ProjectReadinessSummary {
   indexing_state: string
 }
 
+export interface QueryResponseSurface {
+  retrieval_run_id: string
+  project_id: string
+  answer: string
+  references: string[]
+  mode: string
+  answer_status: string
+  weak_grounding: boolean
+  warning?: string | null
+}
+
+export interface RetrievalRunDetail {
+  id: string
+  project_id: string
+  query_text: string
+  model_profile_id?: string | null
+  top_k: number
+  response_text?: string | null
+  answer_status: string
+  weak_grounding: boolean
+  references: string[]
+  matched_chunk_ids: string[]
+  warning?: string | null
+  debug_json: Record<string, unknown>
+}
+
 const env = import.meta.env as ImportMetaEnv & FrontendEnv
 const backendUrl: string = env.VITE_BACKEND_URL ?? 'http://127.0.0.1:8080'
 
@@ -122,5 +148,21 @@ export async function retryIngestionJob(id: string): Promise<IngestionJobDetail>
 
 export async function fetchProjectReadiness(id: string): Promise<ProjectReadinessSummary> {
   const { data } = await api.get<ProjectReadinessSummary>(`/v1/projects/${id}/readiness`)
+  return data
+}
+
+export async function runQuery(payload: {
+  project_id: string
+  query_text: string
+  model_profile_id?: string
+  embedding_model_profile_id?: string
+  top_k?: number
+}): Promise<QueryResponseSurface> {
+  const { data } = await api.post<QueryResponseSurface>('/v1/query', payload)
+  return data
+}
+
+export async function fetchRetrievalRunDetail(id: string): Promise<RetrievalRunDetail> {
+  const { data } = await api.get<RetrievalRunDetail>(`/v1/retrieval-runs/${id}`)
   return data
 }
