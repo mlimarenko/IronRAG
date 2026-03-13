@@ -62,7 +62,10 @@ onMounted(async () => {
     <h2>Workspaces</h2>
     <p>Manage isolated tenant-like containers for projects, provider accounts, and policies.</p>
 
-    <div class="state-card" :data-state="viewState.state">
+    <div
+      class="state-card"
+      :data-state="viewState.state"
+    >
       <h3>{{ viewState.title }}</h3>
       <p>{{ viewState.message }}</p>
       <p v-if="governance">
@@ -73,7 +76,10 @@ onMounted(async () => {
     </div>
 
     <ul v-if="workspaces.length > 0">
-      <li v-for="workspace in workspaces" :key="workspace.id">
+      <li
+        v-for="workspace in workspaces"
+        :key="workspace.id"
+      >
         {{ workspace.name }} ({{ workspace.slug }}) — {{ workspace.status }}
       </li>
     </ul>

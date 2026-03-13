@@ -31,12 +31,21 @@ onMounted(async () => {
     <p>Projects are the primary RAG work surface inside a workspace.</p>
 
     <p v-if="errorMessage">{{ errorMessage }}</p>
-    <div v-else class="projects-grid">
+    <div
+      v-else
+      class="projects-grid"
+    >
       <article class="panel">
         <h3>Projects</h3>
         <ul>
-          <li v-for="project in projects" :key="project.id">
-            <button type="button" @click="loadReadiness(project.id)">
+          <li
+            v-for="project in projects"
+            :key="project.id"
+          >
+            <button
+              type="button"
+              @click="loadReadiness(project.id)"
+            >
               {{ project.name }} ({{ project.slug }})
             </button>
           </li>

@@ -23,7 +23,10 @@ onMounted(async () => {
     </p>
 
     <p v-if="errorMessage">{{ errorMessage }}</p>
-    <div v-else-if="summary" class="summary-grid">
+    <div
+      v-else-if="summary"
+      class="summary-grid"
+    >
       <article class="summary-card">
         <h3>Usage events</h3>
         <p>{{ summary.usage_events }}</p>
