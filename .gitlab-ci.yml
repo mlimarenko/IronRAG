@@ -16,14 +16,16 @@ variables:
   ANSIBLE_HOST_KEY_CHECKING: "False"
   DEPLOY_BECOME: "false"
   DEPLOY_HOST: "10.0.1.109"
-  DEPLOY_PATH: "/opt/docker/lightrag"
+  DEPLOY_PATH: "/opt/docker/rustrag"
   DEPLOY_PORT: "22"
   DEPLOY_USER: "root"
-  APP_IMAGE_ENV_VAR: "LIGHTRAG_IMAGE"
-  APP_SERVICE_NAME: "lightrag"
-  APP_COMPOSE_PROJECT: "lightrag"
-  APP_COMPOSE_FILE: "docker-compose.yml"
-  APP_IMAGE_NAME: "$CI_REGISTRY_IMAGE"
+  APP_COMPOSE_PROJECT: "rustrag"
+  BACKEND_SERVICE_NAME: "backend"
+  BACKEND_IMAGE_ENV_VAR: "RUSTRAG_BACKEND_IMAGE"
+  BACKEND_IMAGE_NAME: "$CI_REGISTRY_IMAGE/backend"
+  FRONTEND_SERVICE_NAME: "frontend"
+  FRONTEND_IMAGE_ENV_VAR: "RUSTRAG_FRONTEND_IMAGE"
+  FRONTEND_IMAGE_NAME: "$CI_REGISTRY_IMAGE/frontend"
 
 python lint:
   stage: test
@@ -38,7 +40,7 @@ python lint:
   script:
     - ruff check .
 
-get version:
+backend get version:
   extends: .get_version
   rules:
     - if: '$CI_COMMIT_REF_NAME =~ /^(develop|master|release\/.+|feature\/.+|hotfix\/.+)$/'
@@ -58,37 +60,82 @@ get version:
       else
         CI_VERSION_FULL="${CI_VERSION}-${CI_VERSION_TAG}-${CI_BUILD_CODE}"
       fi
-      echo "Using version ${CI_VERSION_FULL}"
-      cat <<ENV > "$CI_PROJECT_DIR/version.env"
+      echo "Using backend version ${CI_VERSION_FULL}"
+      cat <<ENV > "$CI_PROJECT_DIR/backend-version.env"
       CI_VERSION=$CI_VERSION
       CI_VERSION_TAG=$CI_VERSION_TAG
       CI_VERSION_FULL=$CI_VERSION_FULL
       CI_BUILD_CODE=$CI_BUILD_CODE
-      DEPLOY_IMAGE=${APP_IMAGE_NAME}:${CI_VERSION_FULL}
+      BACKEND_DEPLOY_IMAGE=${BACKEND_IMAGE_NAME}:${CI_VERSION_FULL}
       ENV
   artifacts:
     reports:
-      dotenv: version.env
+      dotenv: backend-version.env
 
-build:
+frontend get version:
+  extends: .get_version
+  rules:
+    - if: '$CI_COMMIT_REF_NAME =~ /^(develop|master|release\/.+|feature\/.+|hotfix\/.+)$/'
+      when: on_success
+    - when: never
+  script:
+    - |
+      case "$CI_COMMIT_REF_NAME" in
+        master) export CI_VERSION_TAG="prod" ;;
+        release/*) export CI_VERSION_TAG="release" ;;
+        *) export CI_VERSION_TAG="dev" ;;
+      esac
+      export CI_VERSION="0.1.0"
+      export CI_BUILD_CODE="${CI_PIPELINE_IID}"
+      if [[ "$CI_COMMIT_REF_NAME" =~ ^release/ ]]; then
+        CI_VERSION_FULL="${CI_VERSION}-${CI_VERSION_TAG}"
+      else
+        CI_VERSION_FULL="${CI_VERSION}-${CI_VERSION_TAG}-${CI_BUILD_CODE}"
+      fi
+      echo "Using frontend version ${CI_VERSION_FULL}"
+      cat <<ENV > "$CI_PROJECT_DIR/frontend-version.env"
+      CI_VERSION=$CI_VERSION
+      CI_VERSION_TAG=$CI_VERSION_TAG
+      CI_VERSION_FULL=$CI_VERSION_FULL
+      CI_BUILD_CODE=$CI_BUILD_CODE
+      FRONTEND_DEPLOY_IMAGE=${FRONTEND_IMAGE_NAME}:${CI_VERSION_FULL}
+      ENV
+  artifacts:
+    reports:
+      dotenv: frontend-version.env
+
+backend build:
   extends: .build
   rules:
     - if: '$CI_COMMIT_REF_NAME == "develop"'
       when: on_success
     - when: never
+  needs:
+    - job: backend get version
   variables:
-    DOCKER_DEFAULT_CONTEXT: "."
-    DOCKER_FILE: "Dockerfile.deploy"
-    DOCKER_IMAGE_NAME: "$CI_REGISTRY_IMAGE"
+    DOCKER_DEFAULT_CONTEXT: "backend"
+    DOCKER_FILE: "backend/Dockerfile"
+    DOCKER_IMAGE_NAME: "$BACKEND_IMAGE_NAME"
     DOCKER_ARGS: ""
 
-deploy:
+frontend build:
+  extends: .build
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "develop"'
+      when: on_success
+    - when: never
+  needs:
+    - job: frontend get version
+  variables:
+    DOCKER_DEFAULT_CONTEXT: "frontend"
+    DOCKER_FILE: "frontend/Dockerfile"
+    DOCKER_IMAGE_NAME: "$FRONTEND_IMAGE_NAME"
+    DOCKER_ARGS: ""
+
+.deploy_common:
   stage: deploy
   image: gitlab.piping.space:4567/general/devopsimage:latest
   tags: [docker]
-  needs:
-    - job: build
-    - job: get version
   rules:
     - if: '$CI_COMMIT_REF_NAME == "develop"'
   before_script:
@@ -108,4 +155,25 @@ deploy:
     - chmod 600 ~/.ssh/config
   script:
     - unset SSH_AUTH_SOCK
-    - ansible-playbook -i "${DEPLOY_HOST}," ansible/deploy.yml -u "$DEPLOY_USER" --private-key ~/.ssh/id_ed25519 -e "ansible_port=${DEPLOY_PORT}" -e "deploy_image=${DEPLOY_IMAGE}"
+    - ansible-playbook -i "${DEPLOY_HOST}," ansible/deploy.yml -u "$DEPLOY_USER" --private-key ~/.ssh/id_ed25519 -e "ansible_port=${DEPLOY_PORT}"
+
+backend deploy:
+  extends: .deploy_common
+  needs:
+    - job: backend build
+    - job: backend get version
+  variables:
+    APP_SERVICE_NAME: "$BACKEND_SERVICE_NAME"
+    APP_IMAGE_ENV_VAR: "$BACKEND_IMAGE_ENV_VAR"
+    DEPLOY_IMAGE: "$BACKEND_DEPLOY_IMAGE"
+
+frontend deploy:
+  extends: .deploy_common
+  needs:
+    - job: frontend build
+    - job: frontend get version
+  variables:
+    APP_SERVICE_NAME: "$FRONTEND_SERVICE_NAME"
+    APP_IMAGE_ENV_VAR: "$FRONTEND_IMAGE_ENV_VAR"
+    DEPLOY_IMAGE: "$FRONTEND_DEPLOY_IMAGE"
+

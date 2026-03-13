@@ -1,15 +1,15 @@
 ---
-- name: Deploy RustRAG stack to pxm-lightrag01
+- name: Deploy RustRAG service to target host
   hosts: all
   gather_facts: false
   vars:
-    deploy_path: "{{ lookup('env', 'DEPLOY_PATH') | default('/opt/docker/lightrag', true) }}"
+    deploy_path: "{{ lookup('env', 'DEPLOY_PATH') | default('/opt/docker/rustrag', true) }}"
     compose_file: "{{ deploy_path }}/docker-compose.yml"
     env_file: "{{ deploy_path }}/.env"
     image_env_file: "{{ deploy_path }}/.images.env"
-    service_name: "{{ lookup('env', 'APP_SERVICE_NAME') | default('lightrag', true) }}"
-    compose_project: "{{ lookup('env', 'APP_COMPOSE_PROJECT') | default('lightrag', true) }}"
-    image_env_var: "{{ lookup('env', 'APP_IMAGE_ENV_VAR') | default('LIGHTRAG_IMAGE', true) }}"
+    service_name: "{{ lookup('env', 'APP_SERVICE_NAME') | default('rustrag', true) }}"
+    compose_project: "{{ lookup('env', 'APP_COMPOSE_PROJECT') | default('rustrag', true) }}"
+    image_env_var: "{{ lookup('env', 'APP_IMAGE_ENV_VAR') | default('RUSTRAG_IMAGE', true) }}"
     deploy_image: "{{ lookup('env', 'DEPLOY_IMAGE') | default('', true) }}"
     registry_url: "{{ lookup('env', 'CI_REGISTRY') | default('', true) }}"
     registry_user: "{{ lookup('env', 'CI_REGISTRY_USER') | default('', true) }}"
@@ -78,7 +78,7 @@
 
     - name: Restart application service from pulled image
       ansible.builtin.command:
-        cmd: flock /var/lock/rustrag-deploy.lock -c 'docker compose -p {{ compose_project }} --env-file {{ env_file }} --env-file {{ image_env_file }} -f {{ compose_file }} up -d --no-deps --no-build {{ service_name }}'
+        cmd: flock /var/lock/rustrag-compose-deploy.lock -c 'docker compose -p {{ compose_project }} --env-file {{ env_file }} --env-file {{ image_env_file }} -f {{ compose_file }} up -d --no-deps --no-build {{ service_name }}'
         chdir: "{{ deploy_path }}"
 
     - name: Show compose status for application service
