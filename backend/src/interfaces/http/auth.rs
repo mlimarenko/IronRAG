@@ -248,6 +248,88 @@ mod tests {
 
         assert!(auth.require_workspace_access(Uuid::now_v7()).is_ok());
     }
+
+    #[test]
+    fn require_any_scope_allows_matching_scope() {
+        let auth = AuthContext {
+            token_id: Uuid::now_v7(),
+            workspace_id: Some(Uuid::now_v7()),
+            token_kind: "workspace_token".into(),
+            scopes: vec!["documents:read".into(), "query:run".into()],
+        };
+
+        assert!(auth.require_any_scope(&["workspace:admin", "query:run"]).is_ok());
+    }
+
+    #[test]
+    fn require_any_scope_rejects_when_no_scope_matches() {
+        let auth = AuthContext {
+            token_id: Uuid::now_v7(),
+            workspace_id: Some(Uuid::now_v7()),
+            token_kind: "workspace_token".into(),
+            scopes: vec!["documents:read".into()],
+        };
+
+        assert!(matches!(
+            auth.require_any_scope(&["workspace:admin", "query:run"]),
+            Err(ApiError::Unauthorized)
+        ));
+    }
+
+    #[test]
+    fn require_any_scope_allows_instance_admin_without_explicit_scopes() {
+        let auth = AuthContext {
+            token_id: Uuid::now_v7(),
+            workspace_id: None,
+            token_kind: "instance_admin".into(),
+            scopes: Vec::new(),
+        };
+
+        assert!(auth.require_any_scope(&["workspace:admin"]).is_ok());
+    }
+
+    #[test]
+    fn hash_token_is_deterministic_and_sensitive_to_input() {
+        let first = hash_token("secret-token");
+        let second = hash_token("secret-token");
+        let different = hash_token("secret-token-2");
+
+        assert_eq!(first, second);
+        assert_ne!(first, different);
+        assert_eq!(first.len(), 64);
+    }
+
+    #[test]
+    fn mint_plaintext_token_uses_expected_prefix_and_hex_payload() {
+        let token = mint_plaintext_token();
+
+        assert!(token.starts_with("rtrg_"));
+        assert_eq!(token.len(), 37);
+        assert!(token[5..].chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn map_token_summary_falls_back_to_empty_scopes_for_invalid_json() {
+        let now = chrono::Utc::now();
+        let row = repositories::ApiTokenRow {
+            id: Uuid::now_v7(),
+            workspace_id: Some(Uuid::now_v7()),
+            token_kind: "workspace_token".into(),
+            label: "ops".into(),
+            token_hash: "hash".into(),
+            scope_json: serde_json::json!({"oops": true}),
+            status: "active".into(),
+            last_used_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let summary = map_token_summary(row);
+
+        assert!(summary.scopes.is_empty());
+        assert_eq!(summary.status, "active");
+        assert_eq!(summary.label, "ops");
+    }
 }
 
 impl FromRequestParts<AppState> for AuthContext {

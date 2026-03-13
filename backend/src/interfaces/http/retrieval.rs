@@ -720,4 +720,149 @@ mod tests {
         assert_eq!(matched_chunk_ids, vec![chunk_id]);
         assert_eq!(warning.as_deref(), Some("limited evidence"));
     }
+
+    #[test]
+    fn retrieval_debug_ignores_invalid_chunk_ids_and_uses_defaults() {
+        let valid_chunk_id = Uuid::now_v7();
+        let debug_json = serde_json::json!({
+            "references": ["document:1:chunk:2", 42],
+            "matched_chunk_ids": ["not-a-uuid", valid_chunk_id],
+            "weak_grounding": false
+        });
+
+        let (answer_status, weak_grounding, references, matched_chunk_ids, warning) =
+            extract_retrieval_debug(&debug_json);
+
+        assert_eq!(answer_status, "grounded");
+        assert!(!weak_grounding);
+        assert_eq!(references, vec!["document:1:chunk:2".to_string()]);
+        assert_eq!(matched_chunk_ids, vec![valid_chunk_id]);
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn extract_usage_tokens_handles_bounds_and_missing_values() {
+        let usage_json = serde_json::json!({
+            "prompt_tokens": 123,
+            "completion_tokens": i64::from(i32::MAX) + 1,
+            "total_tokens": "nope"
+        });
+
+        let (prompt_tokens, completion_tokens, total_tokens) = extract_usage_tokens(&usage_json);
+
+        assert_eq!(prompt_tokens, Some(123));
+        assert_eq!(completion_tokens, None);
+        assert_eq!(total_tokens, None);
+    }
+
+    #[test]
+    fn build_context_block_formats_ranked_chunks() {
+        let now = chrono::Utc::now();
+        let chunk_a = repositories::ChunkRow {
+            id: Uuid::now_v7(),
+            document_id: Uuid::now_v7(),
+            project_id: Uuid::now_v7(),
+            ordinal: 1,
+            content: "First fact".into(),
+            token_count: Some(10),
+            metadata_json: serde_json::json!({}),
+            created_at: now,
+        };
+        let chunk_b = repositories::ChunkRow {
+            id: Uuid::now_v7(),
+            document_id: Uuid::now_v7(),
+            project_id: Uuid::now_v7(),
+            ordinal: 2,
+            content: "Second fact".into(),
+            token_count: Some(12),
+            metadata_json: serde_json::json!({}),
+            created_at: now,
+        };
+
+        let context = build_context_block(&[chunk_a, chunk_b]);
+
+        assert!(context.starts_with("Context:\n"));
+        assert!(context.contains("[chunk:1] First fact"));
+        assert!(context.contains("[chunk:2] Second fact"));
+        assert!(context.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn build_context_block_returns_empty_string_for_no_chunks() {
+        assert!(build_context_block(&[]).is_empty());
+    }
+
+    #[test]
+    fn build_references_uses_document_and_chunk_ordinals() {
+        let chunk = repositories::ChunkRow {
+            id: Uuid::now_v7(),
+            document_id: Uuid::parse_str("aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa").unwrap(),
+            project_id: Uuid::now_v7(),
+            ordinal: 7,
+            content: "Fact".into(),
+            token_count: None,
+            metadata_json: serde_json::json!({}),
+            created_at: chrono::Utc::now(),
+        };
+
+        let references = build_references(&[chunk]);
+
+        assert_eq!(references, vec!["document:aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa:chunk:7".to_string()]);
+    }
+
+    #[test]
+    fn rank_chunks_prefers_semantic_score_and_deduplicates() {
+        let created_at = chrono::Utc::now();
+        let shared_id = Uuid::now_v7();
+        let lexical = repositories::ChunkRow {
+            id: shared_id,
+            document_id: Uuid::now_v7(),
+            project_id: Uuid::now_v7(),
+            ordinal: 1,
+            content: "Lexical".into(),
+            token_count: None,
+            metadata_json: serde_json::json!({}),
+            created_at,
+        };
+        let semantic_duplicate = repositories::ChunkRow {
+            id: shared_id,
+            document_id: lexical.document_id,
+            project_id: lexical.project_id,
+            ordinal: 1,
+            content: "Lexical".into(),
+            token_count: None,
+            metadata_json: serde_json::json!({}),
+            created_at,
+        };
+        let semantic_only = repositories::ChunkRow {
+            id: Uuid::now_v7(),
+            document_id: Uuid::now_v7(),
+            project_id: Uuid::now_v7(),
+            ordinal: 2,
+            content: "Semantic only".into(),
+            token_count: None,
+            metadata_json: serde_json::json!({}),
+            created_at,
+        };
+
+        let ranked = rank_chunks(
+            vec![lexical],
+            vec![
+                (shared_id, 0.6, semantic_duplicate),
+                (semantic_only.id, 0.8, semantic_only.clone()),
+            ],
+            5,
+        );
+
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].id, semantic_only.id);
+        assert_eq!(ranked[1].id, shared_id);
+    }
+
+    #[test]
+    fn estimate_query_cost_defaults_missing_usage_to_zero() {
+        let cost = estimate_query_cost(None, Some(250_000), 2.0, 8.0);
+
+        assert!((cost - 2.0).abs() < f64::EPSILON);
+    }
 }
