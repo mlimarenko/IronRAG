@@ -4,9 +4,9 @@
   gather_facts: false
   vars:
     deploy_path: "{{ lookup('env', 'DEPLOY_PATH') | default('/opt/docker/rustrag', true) }}"
-    compose_file: "{{ deploy_path }}/docker-compose.yml"
-    env_file: "{{ deploy_path }}/.env"
-    image_env_file: "{{ deploy_path }}/.images.env"
+    compose_file: "{{ lookup('env', 'COMPOSE_FILE') | default(deploy_path ~ '/docker-compose.yml', true) }}"
+    env_file: "{{ lookup('env', 'ENV_FILE') | default(deploy_path ~ '/.env', true) }}"
+    image_env_file: "{{ lookup('env', 'IMAGE_ENV_FILE') | default(deploy_path ~ '/.images.env', true) }}"
     service_name: "{{ lookup('env', 'APP_SERVICE_NAME') | default('rustrag', true) }}"
     compose_project: "{{ lookup('env', 'APP_COMPOSE_PROJECT') | default('rustrag', true) }}"
     image_env_var: "{{ lookup('env', 'APP_IMAGE_ENV_VAR') | default('RUSTRAG_IMAGE', true) }}"
@@ -15,6 +15,18 @@
     registry_user: "{{ lookup('env', 'CI_REGISTRY_USER') | default('', true) }}"
     registry_password: "{{ lookup('env', 'CI_REGISTRY_PASSWORD') | default('', true) }}"
     deploy_become: "{{ (lookup('env', 'DEPLOY_BECOME') | default('false', true)) | bool }}"
+    deploy_lock_file: "{{ lookup('env', 'DEPLOY_LOCK_FILE') | default('/var/lock/rustrag-compose-deploy.lock', true) }}"
+    compose_cmd:
+      - docker
+      - compose
+      - -p
+      - "{{ compose_project }}"
+      - --env-file
+      - "{{ env_file }}"
+      - --env-file
+      - "{{ image_env_file }}"
+      - -f
+      - "{{ compose_file }}"
 
   become: "{{ deploy_become }}"
 
@@ -50,6 +62,13 @@
         msg: "DEPLOY_IMAGE is required"
       when: deploy_image | length == 0
 
+    - name: Validate compose service and image env var names
+      ansible.builtin.assert:
+        that:
+          - service_name is match('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+          - image_env_var is match('^[A-Za-z_][A-Za-z0-9_]*$')
+        fail_msg: "APP_SERVICE_NAME or APP_IMAGE_ENV_VAR contains unsafe characters"
+
     - name: Fail when GitLab registry credentials are missing
       ansible.builtin.fail:
         msg: "CI_REGISTRY / CI_REGISTRY_USER / CI_REGISTRY_PASSWORD are required"
@@ -71,17 +90,38 @@
         create: true
         mode: "0600"
 
+    - name: Validate compose configuration for target service
+      ansible.builtin.command:
+        argv: "{{ compose_cmd + ['config', '--services'] }}"
+        chdir: "{{ deploy_path }}"
+      register: compose_services
+      changed_when: false
+
+    - name: Fail when target service is missing from compose file
+      ansible.builtin.fail:
+        msg: "Service '{{ service_name }}' not found in {{ compose_file }}"
+      when: service_name not in compose_services.stdout_lines
+
     - name: Pull application image
       ansible.builtin.command:
-        cmd: docker compose -p {{ compose_project }} --env-file {{ env_file }} --env-file {{ image_env_file }} -f {{ compose_file }} pull {{ service_name }}
+        argv: "{{ compose_cmd + ['pull', service_name] }}"
         chdir: "{{ deploy_path }}"
 
     - name: Restart application service from pulled image
-      ansible.builtin.command:
-        cmd: flock /var/lock/rustrag-compose-deploy.lock -c 'docker compose -p {{ compose_project }} --env-file {{ env_file }} --env-file {{ image_env_file }} -f {{ compose_file }} up -d --no-deps --no-build {{ service_name }}'
+      ansible.builtin.shell:
+        cmd: >-
+          flock {{ deploy_lock_file | quote }}
+          docker compose
+          -p {{ compose_project | quote }}
+          --env-file {{ env_file | quote }}
+          --env-file {{ image_env_file | quote }}
+          -f {{ compose_file | quote }}
+          up -d --no-deps --no-build {{ service_name | quote }}
         chdir: "{{ deploy_path }}"
+        executable: /bin/bash
 
     - name: Show compose status for application service
       ansible.builtin.command:
-        cmd: docker compose -p {{ compose_project }} --env-file {{ env_file }} --env-file {{ image_env_file }} -f {{ compose_file }} ps {{ service_name }}
+        argv: "{{ compose_cmd + ['ps', service_name] }}"
         chdir: "{{ deploy_path }}"
+      changed_when: false
