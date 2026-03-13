@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:17
+    image: pgvector/pgvector:0.8.2-pg18-trixie
     environment:
       POSTGRES_PASSWORD: postgres
       POSTGRES_USER: postgres

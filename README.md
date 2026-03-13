@@ -31,6 +31,7 @@ docker compose up --build
 > Notes:
 > - the backend image currently packages a host-built release binary due to a Dockerized Cargo build permission issue in the current environment
 > - the frontend passes local `npm run check`, but `docker compose build frontend` currently fails in this host/runtime on containerized `npm install` (`esbuild` postinstall -> `spawn sh EACCES`); for now treat local frontend build artifacts and local verification as the supported workaround until the container runtime issue is fixed
+> - the intended latest local stack is PostgreSQL 18 + pgvector and Redis 8.4; current containerized startup failures on this host are caused by AppArmor `docker-default` denying Unix socket creation inside containers, not by an application-level incompatibility with the latest stack
 
 ## Repository status
 
