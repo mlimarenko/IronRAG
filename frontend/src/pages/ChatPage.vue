@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { ref } from 'vue'
 
 import {
   fetchRetrievalRunDetail,
@@ -7,6 +7,9 @@ import {
   type QueryResponseSurface,
   type RetrievalRunDetail,
 } from 'src/boot/api'
+import RetrievalDiagnosticsPanel from 'src/components/chat/RetrievalDiagnosticsPanel.vue'
+import StatusPill from 'src/components/chat/StatusPill.vue'
+import TokenListSection from 'src/components/chat/TokenListSection.vue'
 
 const projectId = ref('')
 const queryText = ref('')
@@ -14,71 +17,6 @@ const result = ref<QueryResponseSurface | null>(null)
 const detail = ref<RetrievalRunDetail | null>(null)
 const errorMessage = ref<string | null>(null)
 const loading = ref(false)
-
-const answerStatusTone = computed(() => getStatusTone(result.value?.answer_status))
-const detailStatusTone = computed(() => getStatusTone(detail.value?.answer_status))
-const referenceCount = computed(() => result.value?.references.length ?? 0)
-const matchedChunkCount = computed(() => detail.value?.matched_chunk_ids.length ?? 0)
-const debugEntries = computed(() => formatDebugEntries(detail.value?.debug_json ?? {}))
-
-function getStatusTone(status?: string): 'positive' | 'warning' | 'negative' | 'neutral' {
-  const normalized = status?.toLowerCase() ?? ''
-
-  if (['grounded', 'complete', 'ok', 'success'].includes(normalized)) {
-    return 'positive'
-  }
-
-  if (
-    ['partial', 'weakly_grounded', 'weak', 'degraded', 'warning', 'fallback'].includes(normalized)
-  ) {
-    return 'warning'
-  }
-
-  if (['failed', 'error', 'ungrounded', 'empty', 'blocked'].includes(normalized)) {
-    return 'negative'
-  }
-
-  return 'neutral'
-}
-
-function formatStatusLabel(status?: string): string {
-  if (!status) {
-    return 'Unknown'
-  }
-
-  return status
-    .split(/[_-]/g)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ')
-}
-
-function formatDebugEntries(debugJson: Record<string, unknown>) {
-  return Object.entries(debugJson).map(([key, value]) => ({
-    key,
-    preview: formatDebugValue(value),
-  }))
-}
-
-function formatDebugValue(value: unknown): string {
-  if (value == null) {
-    return 'null'
-  }
-
-  if (typeof value === 'string') {
-    return value
-  }
-
-  if (typeof value === 'number' || typeof value === 'boolean') {
-    return String(value)
-  }
-
-  try {
-    return JSON.stringify(value, null, 2)
-  } catch {
-    return '[unserializable value]'
-  }
-}
 
 async function submitQuery() {
   loading.value = true
@@ -153,12 +91,7 @@ async function submitQuery() {
           <h3>Answer</h3>
           <p class="panel-subtitle">Final response from the query endpoint.</p>
         </div>
-        <span
-          class="status-pill"
-          :data-tone="answerStatusTone"
-        >
-          {{ formatStatusLabel(result.answer_status) }}
-        </span>
+        <StatusPill :status="result.answer_status" />
       </div>
 
       <div class="summary-grid">
@@ -172,7 +105,7 @@ async function submitQuery() {
         </div>
         <div class="summary-item">
           <span class="summary-item__label">References</span>
-          <strong>{{ referenceCount }}</strong>
+          <strong>{{ result.references.length }}</strong>
         </div>
       </div>
 
@@ -185,141 +118,17 @@ async function submitQuery() {
         Warning: {{ result.warning }}
       </p>
 
-      <div class="section-block">
-        <h4>Evidence references</h4>
-        <p
-          v-if="!result.references.length"
-          class="muted"
-        >
-          No references were returned for this answer.
-        </p>
-        <ul
-          v-else
-          class="token-list"
-        >
-          <li
-            v-for="reference in result.references"
-            :key="reference"
-          >
-            <code>{{ reference }}</code>
-          </li>
-        </ul>
-      </div>
+      <TokenListSection
+        title="Evidence references"
+        empty-message="No references were returned for this answer."
+        :items="result.references"
+      />
     </article>
 
-    <article
+    <RetrievalDiagnosticsPanel
       v-if="detail"
-      class="card result-panel diagnostics-panel"
-    >
-      <div class="panel-header">
-        <div>
-          <h3>Retrieval diagnostics</h3>
-          <p class="panel-subtitle">Detail from retrieval run {{ detail.id }}.</p>
-        </div>
-        <span
-          class="status-pill"
-          :data-tone="detailStatusTone"
-        >
-          {{ formatStatusLabel(detail.answer_status) }}
-        </span>
-      </div>
-
-      <div class="summary-grid">
-        <div class="summary-item">
-          <span class="summary-item__label">Top K</span>
-          <strong>{{ detail.top_k }}</strong>
-        </div>
-        <div class="summary-item">
-          <span class="summary-item__label">Matched chunks</span>
-          <strong>{{ matchedChunkCount }}</strong>
-        </div>
-        <div class="summary-item">
-          <span class="summary-item__label">Grounding</span>
-          <strong>{{ detail.weak_grounding ? 'Weak' : 'OK' }}</strong>
-        </div>
-      </div>
-
-      <div class="section-block">
-        <h4>Query text</h4>
-        <p class="answer-copy">{{ detail.query_text }}</p>
-      </div>
-
-      <p
-        v-if="detail.warning"
-        class="warning-banner"
-      >
-        Diagnostic warning: {{ detail.warning }}
-      </p>
-
-      <div class="diagnostics-columns">
-        <div class="section-block">
-          <h4>Matched chunk IDs</h4>
-          <p
-            v-if="!detail.matched_chunk_ids.length"
-            class="muted"
-          >
-            No chunk matches were recorded.
-          </p>
-          <ul
-            v-else
-            class="token-list"
-          >
-            <li
-              v-for="chunkId in detail.matched_chunk_ids"
-              :key="chunkId"
-            >
-              <code>{{ chunkId }}</code>
-            </li>
-          </ul>
-        </div>
-
-        <div class="section-block">
-          <h4>Recorded references</h4>
-          <p
-            v-if="!detail.references.length"
-            class="muted"
-          >
-            No references were stored on the retrieval run.
-          </p>
-          <ul
-            v-else
-            class="token-list"
-          >
-            <li
-              v-for="reference in detail.references"
-              :key="reference"
-            >
-              <code>{{ reference }}</code>
-            </li>
-          </ul>
-        </div>
-      </div>
-
-      <details class="debug-block">
-        <summary>Raw debug payload ({{ debugEntries.length }} entries)</summary>
-        <p
-          v-if="!debugEntries.length"
-          class="muted"
-        >
-          No debug payload was returned.
-        </p>
-        <dl
-          v-else
-          class="debug-list"
-        >
-          <div
-            v-for="entry in debugEntries"
-            :key="entry.key"
-            class="debug-list__row"
-          >
-            <dt>{{ entry.key }}</dt>
-            <dd>
-              <pre>{{ entry.preview }}</pre>
-            </dd>
-          </div>
-        </dl>
-      </details>
-    </article>
+      :detail="detail"
+    />
   </section>
 </template>
 
@@ -348,8 +157,7 @@ async function submitQuery() {
 
 .field__label,
 .summary-item__label,
-.panel-subtitle,
-.muted {
+.panel-subtitle {
   color: #526173;
 }
 
@@ -396,72 +204,24 @@ async function submitQuery() {
   align-items: flex-start;
 }
 
-.status-pill {
-  padding: 6px 10px;
-  border-radius: 999px;
-  font-size: 0.85rem;
-  font-weight: 700;
-  white-space: nowrap;
-  background: #e8edf3;
-  color: #324253;
-}
-
-.status-pill[data-tone='positive'] {
-  background: #dff7e6;
-  color: #166534;
-}
-
-.status-pill[data-tone='warning'] {
-  background: #fff4d8;
-  color: #9a6700;
-}
-
-.status-pill[data-tone='negative'] {
-  background: #fde2e2;
-  color: #b42318;
-}
-
-.summary-grid,
-.diagnostics-columns {
+.summary-grid {
   display: grid;
   gap: 12px;
-}
-
-.summary-grid {
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-}
-
-.diagnostics-columns {
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-}
-
-.summary-item,
-.section-block {
-  padding: 12px;
-  border-radius: 10px;
-  background: rgb(255 255 255 / 65%);
 }
 
 .summary-item {
   display: grid;
   gap: 4px;
+  padding: 12px;
+  border-radius: 10px;
+  background: rgb(255 255 255 / 65%);
 }
 
 .answer-copy {
   margin: 0;
   white-space: pre-wrap;
   line-height: 1.5;
-}
-
-.token-list {
-  display: grid;
-  gap: 8px;
-  padding-left: 20px;
-  margin: 0;
-}
-
-.token-list code {
-  overflow-wrap: anywhere;
 }
 
 .warning-banner,
@@ -478,51 +238,5 @@ async function submitQuery() {
 .error-banner {
   background: #fde2e2;
   color: #b42318;
-}
-
-.debug-block {
-  padding: 12px;
-  border-radius: 10px;
-  background: rgb(16 24 40 / 0.04);
-}
-
-.debug-block summary {
-  cursor: pointer;
-  font-weight: 600;
-}
-
-.debug-list {
-  margin: 12px 0 0;
-}
-
-.debug-list__row {
-  display: grid;
-  gap: 8px;
-  padding-top: 12px;
-  border-top: 1px solid #d7dee7;
-}
-
-.debug-list__row:first-child {
-  border-top: 0;
-  padding-top: 0;
-}
-
-.debug-list__row dt {
-  font-weight: 700;
-}
-
-.debug-list__row dd {
-  margin: 0;
-}
-
-.debug-list__row pre {
-  margin: 0;
-  padding: 10px;
-  border-radius: 8px;
-  overflow-x: auto;
-  background: #111827;
-  color: #f9fafb;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }
 </style>
