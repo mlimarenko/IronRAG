@@ -60,6 +60,7 @@ docker compose up --build backend postgres redis
 `docker compose build frontend` is currently not reliable in this host/runtime because containerized `npm install` fails during the `esbuild` postinstall step with `spawn sh EACCES`.
 
 Current pragmatic workaround:
+
 - validate frontend locally with `npm run check`
 - use the local SPA build output in `frontend/dist/spa`
 - run compose for backend dependencies and backend service separately until the container runtime issue is fixed

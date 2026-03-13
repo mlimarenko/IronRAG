@@ -33,14 +33,20 @@ onMounted(async () => {
 
       <h3>Provider accounts</h3>
       <ul>
-        <li v-for="provider in governance.provider_accounts" :key="provider.id">
+        <li
+          v-for="provider in governance.provider_accounts"
+          :key="provider.id"
+        >
           {{ provider.label }} — {{ provider.provider_kind }} — {{ provider.status }}
         </li>
       </ul>
 
       <h3>Model profiles</h3>
       <ul>
-        <li v-for="profile in governance.model_profiles" :key="profile.id">
+        <li
+          v-for="profile in governance.model_profiles"
+          :key="profile.id"
+        >
           {{ profile.profile_kind }} — {{ profile.model_name }}
         </li>
       </ul>

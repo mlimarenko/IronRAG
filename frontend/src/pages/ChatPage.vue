@@ -41,16 +41,31 @@ async function submitQuery() {
     <p>LightRAG-inspired query experience with retrieved chunks, graph entities, and citations.</p>
 
     <div class="query-form">
-      <input v-model="projectId" type="text" placeholder="Project ID" />
-      <textarea v-model="queryText" rows="4" placeholder="Ask a grounded question"></textarea>
-      <button type="button" :disabled="loading || !projectId || !queryText" @click="submitQuery">
+      <input
+        v-model="projectId"
+        type="text"
+        placeholder="Project ID"
+      >
+      <textarea
+        v-model="queryText"
+        rows="4"
+        placeholder="Ask a grounded question"
+      />
+      <button
+        type="button"
+        :disabled="loading || !projectId || !queryText"
+        @click="submitQuery"
+      >
         {{ loading ? 'Running…' : 'Run query' }}
       </button>
     </div>
 
     <p v-if="errorMessage">{{ errorMessage }}</p>
 
-    <article v-if="result" class="result-panel">
+    <article
+      v-if="result"
+      class="result-panel"
+    >
       <h3>Answer</h3>
       <p>{{ result.answer }}</p>
       <p>Status: {{ result.answer_status }}</p>
@@ -59,11 +74,19 @@ async function submitQuery() {
 
       <h4>References</h4>
       <ul>
-        <li v-for="reference in result.references" :key="reference">{{ reference }}</li>
+        <li
+          v-for="reference in result.references"
+          :key="reference"
+        >
+          {{ reference }}
+        </li>
       </ul>
     </article>
 
-    <article v-if="detail" class="result-panel">
+    <article
+      v-if="detail"
+      class="result-panel"
+    >
       <h3>Retrieval diagnostics</h3>
       <p>Matched chunks: {{ detail.matched_chunk_ids.length }}</p>
       <p>Top K: {{ detail.top_k }}</p>
