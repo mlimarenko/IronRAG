@@ -165,7 +165,10 @@ backend deploy:
   variables:
     APP_SERVICE_NAME: "$BACKEND_SERVICE_NAME"
     APP_IMAGE_ENV_VAR: "$BACKEND_IMAGE_ENV_VAR"
-    DEPLOY_IMAGE: "$BACKEND_DEPLOY_IMAGE"
+  script:
+    - export DEPLOY_IMAGE="$BACKEND_DEPLOY_IMAGE"
+    - unset SSH_AUTH_SOCK
+    - ansible-playbook -i "${DEPLOY_HOST}," ansible/deploy.yml -u "$DEPLOY_USER" --private-key ~/.ssh/id_ed25519 -e "ansible_port=${DEPLOY_PORT}"
 
 frontend deploy:
   extends: .deploy_common
@@ -175,5 +178,8 @@ frontend deploy:
   variables:
     APP_SERVICE_NAME: "$FRONTEND_SERVICE_NAME"
     APP_IMAGE_ENV_VAR: "$FRONTEND_IMAGE_ENV_VAR"
-    DEPLOY_IMAGE: "$FRONTEND_DEPLOY_IMAGE"
+  script:
+    - export DEPLOY_IMAGE="$FRONTEND_DEPLOY_IMAGE"
+    - unset SSH_AUTH_SOCK
+    - ansible-playbook -i "${DEPLOY_HOST}," ansible/deploy.yml -u "$DEPLOY_USER" --private-key ~/.ssh/id_ed25519 -e "ansible_port=${DEPLOY_PORT}"
 
