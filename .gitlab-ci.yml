@@ -77,10 +77,10 @@ build:
       when: on_success
     - when: never
   variables:
-    BUILD_CONTEXT: "."
-    BUILD_DOCKERFILE: "Dockerfile.deploy"
-    BUILD_IMAGE_NAME: "$CI_REGISTRY_IMAGE"
-    BUILD_IMAGE_TAG: "$CI_VERSION_FULL"
+    DOCKER_DEFAULT_CONTEXT: "."
+    DOCKER_FILE: "Dockerfile.deploy"
+    DOCKER_IMAGE_NAME: "$CI_REGISTRY_IMAGE"
+    DOCKER_ARGS: ""
 
 deploy:
   stage: deploy
