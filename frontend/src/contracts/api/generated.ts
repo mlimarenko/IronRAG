@@ -93,6 +93,26 @@ export interface paths {
     patch?: never
     trace?: never
   }
+  '/v1/workspaces/{id}/governance': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * Get workspace governance summary
+     * @description Requires `workspace:admin`, `usage:read`, `providers:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access their own workspace.
+     */
+    get: operations['getWorkspaceGovernance']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
   '/v1/projects': {
     parameters: {
       query?: never
@@ -105,9 +125,29 @@ export interface paths {
     put?: never
     /**
      * Create project
-     * @description Requires `projects:write`, `workspace:admin`, or an `instance_admin` token.
+     * @description Requires `projects:write`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only create projects in their own workspace.
      */
     post: operations['createProject']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/projects/{id}/readiness': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * Get project readiness summary
+     * @description Requires `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
+     */
+    get: operations['getProjectReadiness']
+    put?: never
+    post?: never
     delete?: never
     options?: never
     head?: never
@@ -147,9 +187,29 @@ export interface paths {
     put?: never
     /**
      * Create model profile
-     * @description Requires `providers:admin`, `workspace:admin`, or an `instance_admin` token.
+     * @description Requires `providers:admin`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only create profiles in their own workspace, and the provider account must belong to that workspace.
      */
     post: operations['createModelProfile']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/provider-governance/{workspace_id}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * Get provider governance summary
+     * @description Requires `providers:admin`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access their own workspace.
+     */
+    get: operations['getProviderGovernance']
+    put?: never
+    post?: never
     delete?: never
     options?: never
     head?: never
@@ -189,9 +249,49 @@ export interface paths {
     put?: never
     /**
      * Create ingestion job
-     * @description Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
+     * @description Requires `documents:write`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only create jobs for projects in their own workspace.
      */
     post: operations['createIngestionJob']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/ingestion-jobs/{id}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * Get ingestion job detail
+     * @description Requires `documents:read`, `documents:write`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access jobs in their own workspace.
+     */
+    get: operations['getIngestionJobDetail']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/ingestion-jobs/{id}/retry': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /**
+     * Retry an ingestion job
+     * @description Requires `documents:write`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only retry jobs in their own workspace.
+     */
+    post: operations['retryIngestionJob']
     delete?: never
     options?: never
     head?: never
@@ -340,9 +440,29 @@ export interface paths {
     put?: never
     /**
      * Create a retrieval run record manually
-     * @description Auth header is currently required by the handler, but no scope check is enforced.
+     * @description Requires `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only create runs for projects in their own workspace.
      */
     post: operations['createRetrievalRun']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/retrieval-runs/{id}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * Get retrieval run detail
+     * @description Requires `query:run`, `workspace:admin`, `documents:read`, or an `instance_admin` token. Workspace-scoped tokens may only access runs in their own workspace.
+     */
+    get: operations['getRetrievalRunDetail']
+    put?: never
+    post?: never
     delete?: never
     options?: never
     head?: never
@@ -435,6 +555,8 @@ export interface components {
       /** @enum {string} */
       redis: 'ok' | 'down'
     }
+    /** @enum {string} */
+    HealthState: 'healthy' | 'degraded' | 'failed' | 'unknown'
     VersionResponse: {
       service: string
       /** @example 0.1.0 */
@@ -475,6 +597,19 @@ export interface components {
       /** @example active */
       status: string
     }
+    WorkspaceGovernanceSummary: {
+      /** Format: uuid */
+      id: string
+      slug: string
+      name: string
+      status: string
+      projects: number
+      provider_accounts: number
+      model_profiles: number
+      api_tokens: number
+      health_state: components['schemas']['HealthState']
+      usage: components['schemas']['UsageGovernanceSummary']
+    }
     CreateWorkspaceRequest: {
       slug: string
       name: string
@@ -494,6 +629,20 @@ export interface components {
       slug: string
       name: string
       description?: string | null
+    }
+    ProjectReadinessSummary: {
+      /** Format: uuid */
+      id: string
+      /** Format: uuid */
+      workspace_id: string
+      slug: string
+      name: string
+      ingestion_jobs: number
+      sources: number
+      documents: number
+      ready_for_query: boolean
+      /** @example indexed */
+      indexing_state: string
     }
     ProviderAccountSummary: {
       /** Format: uuid */
@@ -537,6 +686,13 @@ export interface components {
       /** Format: int32 */
       max_output_tokens?: number | null
     }
+    ProviderGovernanceSummary: {
+      /** Format: uuid */
+      workspace_id: string
+      provider_accounts: components['schemas']['ProviderAccountSummary'][]
+      model_profiles: components['schemas']['ModelProfileSummary'][]
+      warning?: string | null
+    }
     SourceSummary: {
       /** Format: uuid */
       id: string
@@ -574,6 +730,35 @@ export interface components {
       source_id?: string | null
       trigger_kind: string
       requested_by?: string | null
+    }
+    /** @enum {string} */
+    IngestionLifecycleState:
+      | 'queued'
+      | 'validating'
+      | 'running'
+      | 'partial'
+      | 'completed'
+      | 'retryable_failed'
+      | 'canceled'
+      | 'failed'
+    IngestionJobDetail: {
+      /** Format: uuid */
+      id: string
+      /** Format: uuid */
+      project_id: string
+      /** Format: uuid */
+      source_id?: string | null
+      trigger_kind: string
+      status: string
+      stage: string
+      requested_by?: string | null
+      error_message?: string | null
+      /** Format: date-time */
+      started_at?: string | null
+      /** Format: date-time */
+      finished_at?: string | null
+      retryable: boolean
+      lifecycle: components['schemas']['IngestionLifecycleState']
     }
     DocumentSummary: {
       /** Format: uuid */
@@ -675,6 +860,29 @@ export interface components {
       /** Format: int32 */
       top_k: number
       response_text?: string | null
+      /** @example grounded */
+      answer_status: string
+      weak_grounding: boolean
+    }
+    RetrievalRunDetail: {
+      /** Format: uuid */
+      id: string
+      /** Format: uuid */
+      project_id: string
+      query_text: string
+      /** Format: uuid */
+      model_profile_id?: string | null
+      /** Format: int32 */
+      top_k: number
+      response_text?: string | null
+      answer_status: string
+      weak_grounding: boolean
+      references: string[]
+      matched_chunk_ids: string[]
+      warning?: string | null
+      debug_json: {
+        [key: string]: unknown
+      }
     }
     CreateRetrievalRunRequest: {
       /** Format: uuid */
@@ -711,6 +919,22 @@ export interface components {
       references: string[]
       /** @example gateway_live */
       mode: string
+      /** @example grounded */
+      answer_status: string
+      weak_grounding: boolean
+      warning?: string | null
+    }
+    UsageGovernanceSummary: {
+      /** Format: int64 */
+      usage_events: number
+      /** Format: int64 */
+      prompt_tokens: number
+      /** Format: int64 */
+      completion_tokens: number
+      /** Format: int64 */
+      total_tokens: number
+      /** Format: double */
+      estimated_cost: number
     }
     UsageEventSummary: {
       /** Format: uuid */
@@ -791,6 +1015,7 @@ export interface components {
     }
   }
   parameters: {
+    id: string
     workspaceId: string
     projectIdOptional: string
     documentId: string
@@ -935,6 +1160,31 @@ export interface operations {
       500: components['responses']['InternalError']
     }
   }
+  getWorkspaceGovernance: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        id: components['parameters']['id']
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Workspace governance summary */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['WorkspaceGovernanceSummary']
+        }
+      }
+      401: components['responses']['Unauthorized']
+      404: components['responses']['NotFound']
+      500: components['responses']['InternalError']
+    }
+  }
   listProjects: {
     parameters: {
       query?: {
@@ -981,6 +1231,31 @@ export interface operations {
         }
       }
       401: components['responses']['Unauthorized']
+      500: components['responses']['InternalError']
+    }
+  }
+  getProjectReadiness: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        id: components['parameters']['id']
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Project readiness summary */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ProjectReadinessSummary']
+        }
+      }
+      401: components['responses']['Unauthorized']
+      404: components['responses']['NotFound']
       500: components['responses']['InternalError']
     }
   }
@@ -1076,6 +1351,32 @@ export interface operations {
         }
         content: {
           'application/json': components['schemas']['ModelProfileSummary']
+        }
+      }
+      400: components['responses']['BadRequest']
+      401: components['responses']['Unauthorized']
+      404: components['responses']['NotFound']
+      500: components['responses']['InternalError']
+    }
+  }
+  getProviderGovernance: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        workspace_id: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Provider governance summary */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ProviderGovernanceSummary']
         }
       }
       401: components['responses']['Unauthorized']
@@ -1177,6 +1478,58 @@ export interface operations {
         }
       }
       401: components['responses']['Unauthorized']
+      404: components['responses']['NotFound']
+      500: components['responses']['InternalError']
+    }
+  }
+  getIngestionJobDetail: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        id: components['parameters']['id']
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Ingestion job detail */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['IngestionJobDetail']
+        }
+      }
+      401: components['responses']['Unauthorized']
+      404: components['responses']['NotFound']
+      500: components['responses']['InternalError']
+    }
+  }
+  retryIngestionJob: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        id: components['parameters']['id']
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Newly created retry ingestion job detail */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['IngestionJobDetail']
+        }
+      }
+      400: components['responses']['BadRequest']
+      401: components['responses']['Unauthorized']
+      404: components['responses']['NotFound']
       500: components['responses']['InternalError']
     }
   }
@@ -1420,6 +1773,32 @@ export interface operations {
       }
       400: components['responses']['BadRequest']
       401: components['responses']['Unauthorized']
+      404: components['responses']['NotFound']
+      500: components['responses']['InternalError']
+    }
+  }
+  getRetrievalRunDetail: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        id: components['parameters']['id']
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Retrieval run detail */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['RetrievalRunDetail']
+        }
+      }
+      401: components['responses']['Unauthorized']
+      404: components['responses']['NotFound']
       500: components['responses']['InternalError']
     }
   }

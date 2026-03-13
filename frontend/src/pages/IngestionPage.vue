@@ -43,21 +43,12 @@ onMounted(async () => {
     <p>Register sources, launch jobs, and inspect indexing state.</p>
 
     <p v-if="errorMessage">{{ errorMessage }}</p>
-    <div
-      v-else
-      class="ingestion-grid"
-    >
+    <div v-else class="ingestion-grid">
       <article class="panel">
         <h3>Jobs</h3>
         <ul>
-          <li
-            v-for="job in jobs"
-            :key="job.id"
-          >
-            <button
-              type="button"
-              @click="loadJobDetail(job.id)"
-            >
+          <li v-for="job in jobs" :key="job.id">
+            <button type="button" @click="loadJobDetail(job.id)">
               {{ job.project_id }} — {{ job.status }} / {{ job.stage }}
             </button>
           </li>
@@ -72,11 +63,7 @@ onMounted(async () => {
           <p>Stage: {{ selectedJob.stage }}</p>
           <p>Lifecycle: {{ selectedJob.lifecycle }}</p>
           <p v-if="selectedJob.error_message">Error: {{ selectedJob.error_message }}</p>
-          <button
-            v-if="selectedJob.retryable"
-            type="button"
-            @click="handleRetry(selectedJob.id)"
-          >
+          <button v-if="selectedJob.retryable" type="button" @click="handleRetry(selectedJob.id)">
             Retry job
           </button>
         </template>

@@ -790,6 +790,13 @@ components:
         Bearer token minted by `POST /v1/auth/tokens`.
         Note: some read/list endpoints are currently public and do not require auth.
   parameters:
+    id:
+      in: path
+      name: id
+      required: true
+      schema:
+        type: string
+        format: uuid
     workspaceId:
       in: query
       name: workspace_id
@@ -896,6 +903,10 @@ components:
         redis:
           type: string
           enum: [ok, down]
+
+    HealthState:
+      type: string
+      enum: [healthy, degraded, failed, unknown]
 
     VersionResponse:
       type: object
