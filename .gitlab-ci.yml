@@ -82,7 +82,7 @@ backend build:
   needs:
     - job: get version
   variables:
-    DOCKER_DEFAULT_CONTEXT: "backend"
+    DOCKER_DEFAULT_CONTEXT: "."
     DOCKER_FILE: "backend/Dockerfile"
     DOCKER_IMAGE_NAME: "$BACKEND_IMAGE_NAME"
     DOCKER_ARGS: ""
