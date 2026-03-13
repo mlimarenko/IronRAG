@@ -1,6 +1,8 @@
 services:
   postgres:
     image: pgvector/pgvector:0.8.2-pg18-trixie
+    security_opt:
+      - apparmor=unconfined
     environment:
       POSTGRES_PASSWORD: postgres
       POSTGRES_USER: postgres
@@ -8,10 +10,12 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql
 
   redis:
-    image: redis:7-alpine
+    image: redis:8.4
+    security_opt:
+      - apparmor=unconfined
     ports:
       - "6379:6379"
 
@@ -19,6 +23,8 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    security_opt:
+      - apparmor=unconfined
     depends_on:
       - postgres
       - redis
