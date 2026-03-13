@@ -7,6 +7,11 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_USER: postgres
       POSTGRES_DB: rustrag
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d rustrag"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
     ports:
       - "5432:5432"
     volumes:
@@ -16,6 +21,11 @@ services:
     image: redis:8.4
     security_opt:
       - apparmor=unconfined
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
     ports:
       - "6379:6379"
 
@@ -25,9 +35,12 @@ services:
       dockerfile: Dockerfile
     security_opt:
       - apparmor=unconfined
+    restart: unless-stopped
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       bind_addr: 0.0.0.0:8080
       service_name: rustrag-backend
