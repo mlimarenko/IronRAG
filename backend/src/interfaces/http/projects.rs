@@ -150,3 +150,101 @@ async fn get_project_readiness(
         indexing_state: indexing_state.to_string(),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+
+    fn project() -> repositories::ProjectRow {
+        repositories::ProjectRow {
+            id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            slug: "demo".into(),
+            name: "Demo".into(),
+            description: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn ingestion_job(status: &str, created_at: chrono::DateTime<Utc>) -> repositories::IngestionJobRow {
+        repositories::IngestionJobRow {
+            id: Uuid::now_v7(),
+            project_id: Uuid::now_v7(),
+            source_id: None,
+            trigger_kind: "manual".into(),
+            status: status.into(),
+            stage: "done".into(),
+            requested_by: None,
+            error_message: None,
+            started_at: None,
+            finished_at: None,
+            created_at,
+        }
+    }
+
+    fn summarize_readiness(
+        project: repositories::ProjectRow,
+        sources: usize,
+        documents: usize,
+        ingestion_jobs: Vec<repositories::IngestionJobRow>,
+    ) -> ProjectReadinessSummary {
+        let latest_job = ingestion_jobs.iter().max_by_key(|job| job.created_at);
+        let latest_status = latest_job.map(|job| job.status.as_str());
+        let ready_for_query = documents > 0 && matches!(latest_status, Some("completed"));
+        let indexing_state = if documents == 0 {
+            "not_indexed"
+        } else {
+            match latest_status {
+                Some("completed") => "indexed",
+                Some("partial") => "partial",
+                Some("queued" | "running" | "validating") => "ingesting",
+                Some("retryable_failed" | "failed" | "canceled") => "stale",
+                Some(_) | None => "ingesting",
+            }
+        };
+
+        ProjectReadinessSummary {
+            id: project.id,
+            workspace_id: project.workspace_id,
+            slug: project.slug,
+            name: project.name,
+            ingestion_jobs: ingestion_jobs.len(),
+            sources,
+            documents,
+            ready_for_query,
+            indexing_state: indexing_state.into(),
+        }
+    }
+
+    #[test]
+    fn readiness_uses_latest_ingestion_job_status() {
+        let now = Utc::now();
+        let summary = summarize_readiness(
+            project(),
+            1,
+            3,
+            vec![
+                ingestion_job("completed", now - Duration::minutes(10)),
+                ingestion_job("failed", now),
+            ],
+        );
+
+        assert!(!summary.ready_for_query);
+        assert_eq!(summary.indexing_state, "stale");
+    }
+
+    #[test]
+    fn readiness_marks_completed_latest_job_as_indexed() {
+        let summary = summarize_readiness(
+            project(),
+            1,
+            2,
+            vec![ingestion_job("completed", Utc::now())],
+        );
+
+        assert!(summary.ready_for_query);
+        assert_eq!(summary.indexing_state, "indexed");
+    }
+}

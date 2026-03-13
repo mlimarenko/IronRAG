@@ -663,3 +663,61 @@ fn extract_retrieval_debug(
 
     (answer_status, weak_grounding, references, matched_chunk_ids, warning)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_validation_rejects_empty_text() {
+        let payload = QueryRequest {
+            project_id: Uuid::now_v7(),
+            query_text: "   ".into(),
+            model_profile_id: None,
+            embedding_model_profile_id: None,
+            top_k: Some(8),
+        };
+
+        assert!(matches!(
+            validate_query_payload(&payload),
+            Err(ApiError::BadRequest(message)) if message.contains("query_text")
+        ));
+    }
+
+    #[test]
+    fn query_validation_rejects_non_positive_top_k() {
+        let payload = QueryRequest {
+            project_id: Uuid::now_v7(),
+            query_text: "hello".into(),
+            model_profile_id: None,
+            embedding_model_profile_id: None,
+            top_k: Some(0),
+        };
+
+        assert!(matches!(
+            validate_query_payload(&payload),
+            Err(ApiError::BadRequest(message)) if message.contains("top_k")
+        ));
+    }
+
+    #[test]
+    fn retrieval_debug_extracts_expected_fields() {
+        let chunk_id = Uuid::now_v7();
+        let debug_json = serde_json::json!({
+            "answer_status": "weakly_grounded",
+            "weak_grounding": true,
+            "references": ["document:1:chunk:2"],
+            "matched_chunk_ids": [chunk_id],
+            "warning": "limited evidence"
+        });
+
+        let (answer_status, weak_grounding, references, matched_chunk_ids, warning) =
+            extract_retrieval_debug(&debug_json);
+
+        assert_eq!(answer_status, "weakly_grounded");
+        assert!(weak_grounding);
+        assert_eq!(references, vec!["document:1:chunk:2".to_string()]);
+        assert_eq!(matched_chunk_ids, vec![chunk_id]);
+        assert_eq!(warning.as_deref(), Some("limited evidence"));
+    }
+}

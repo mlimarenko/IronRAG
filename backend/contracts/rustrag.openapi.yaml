@@ -126,6 +126,27 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalError'
+  /v1/workspaces/{id}/governance:
+    get:
+      tags: [workspaces, usage]
+      summary: Get workspace governance summary
+      operationId: getWorkspaceGovernance
+      description: Requires `workspace:admin`, `usage:read`, `providers:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access their own workspace.
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Workspace governance summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkspaceGovernanceSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /v1/projects:
     get:
       tags: [projects]
@@ -149,7 +170,7 @@ paths:
       tags: [projects]
       summary: Create project
       operationId: createProject
-      description: Requires `projects:write`, `workspace:admin`, or an `instance_admin` token.
+      description: Requires `projects:write`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only create projects in their own workspace.
       requestBody:
         required: true
         content:
@@ -165,6 +186,27 @@ paths:
                 $ref: '#/components/schemas/ProjectSummary'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/projects/{id}/readiness:
+    get:
+      tags: [projects]
+      summary: Get project readiness summary
+      operationId: getProjectReadiness
+      description: Requires `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Project readiness summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectReadinessSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
   /v1/provider-accounts:
@@ -231,7 +273,7 @@ paths:
       tags: [providers]
       summary: Create model profile
       operationId: createModelProfile
-      description: Requires `providers:admin`, `workspace:admin`, or an `instance_admin` token.
+      description: Requires `providers:admin`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only create profiles in their own workspace, and the provider account must belong to that workspace.
       requestBody:
         required: true
         content:
@@ -245,6 +287,34 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ModelProfileSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/provider-governance/{workspace_id}:
+    get:
+      tags: [providers]
+      summary: Get provider governance summary
+      operationId: getProviderGovernance
+      description: Requires `providers:admin`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access their own workspace.
+      parameters:
+        - name: workspace_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Provider governance summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderGovernanceSummary'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '500':
@@ -313,7 +383,7 @@ paths:
       tags: [ingestion]
       summary: Create ingestion job
       operationId: createIngestionJob
-      description: Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
+      description: Requires `documents:write`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only create jobs for projects in their own workspace.
       requestBody:
         required: true
         content:
@@ -329,6 +399,52 @@ paths:
                 $ref: '#/components/schemas/IngestionJobSummary'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/ingestion-jobs/{id}:
+    get:
+      tags: [ingestion]
+      summary: Get ingestion job detail
+      operationId: getIngestionJobDetail
+      description: Requires `documents:read`, `documents:write`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access jobs in their own workspace.
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Ingestion job detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestionJobDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/ingestion-jobs/{id}/retry:
+    post:
+      tags: [ingestion]
+      summary: Retry an ingestion job
+      operationId: retryIngestionJob
+      description: Requires `documents:write`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only retry jobs in their own workspace.
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Newly created retry ingestion job detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestionJobDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
   /v1/documents:
@@ -548,7 +664,7 @@ paths:
       tags: [retrieval]
       summary: Create a retrieval run record manually
       operationId: createRetrievalRun
-      description: Auth header is currently required by the handler, but no scope check is enforced.
+      description: Requires `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only create runs for projects in their own workspace.
       requestBody:
         required: true
         content:
@@ -566,6 +682,29 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/retrieval-runs/{id}:
+    get:
+      tags: [retrieval]
+      summary: Get retrieval run detail
+      operationId: getRetrievalRunDetail
+      description: Requires `query:run`, `workspace:admin`, `documents:read`, or an `instance_admin` token. Workspace-scoped tokens may only access runs in their own workspace.
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Retrieval run detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RetrievalRunDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
   /v1/query:
@@ -826,6 +965,36 @@ components:
           type: string
           example: active
 
+    WorkspaceGovernanceSummary:
+      type: object
+      required: [id, slug, name, status, projects, provider_accounts, model_profiles, api_tokens, health_state, usage]
+      properties:
+        id:
+          type: string
+          format: uuid
+        slug:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+        projects:
+          type: integer
+          minimum: 0
+        provider_accounts:
+          type: integer
+          minimum: 0
+        model_profiles:
+          type: integer
+          minimum: 0
+        api_tokens:
+          type: integer
+          minimum: 0
+        health_state:
+          $ref: '#/components/schemas/HealthState'
+        usage:
+          $ref: '#/components/schemas/UsageGovernanceSummary'
+
     CreateWorkspaceRequest:
       type: object
       required: [slug, name]
@@ -865,6 +1034,35 @@ components:
           type: string
         description:
           type: [string, 'null']
+
+    ProjectReadinessSummary:
+      type: object
+      required: [id, workspace_id, slug, name, ingestion_jobs, sources, documents, ready_for_query, indexing_state]
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        slug:
+          type: string
+        name:
+          type: string
+        ingestion_jobs:
+          type: integer
+          minimum: 0
+        sources:
+          type: integer
+          minimum: 0
+        documents:
+          type: integer
+          minimum: 0
+        ready_for_query:
+          type: boolean
+        indexing_state:
+          type: string
+          example: indexed
 
     ProviderAccountSummary:
       type: object
@@ -940,6 +1138,24 @@ components:
           type: [integer, 'null']
           format: int32
 
+    ProviderGovernanceSummary:
+      type: object
+      required: [workspace_id, provider_accounts, model_profiles]
+      properties:
+        workspace_id:
+          type: string
+          format: uuid
+        provider_accounts:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProviderAccountSummary'
+        model_profiles:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModelProfileSummary'
+        warning:
+          type: [string, 'null']
+
     SourceSummary:
       type: object
       required: [id, project_id, source_kind, label, status]
@@ -1007,6 +1223,44 @@ components:
           type: string
         requested_by:
           type: [string, 'null']
+
+    IngestionLifecycleState:
+      type: string
+      enum: [queued, validating, running, partial, completed, retryable_failed, canceled, failed]
+
+    IngestionJobDetail:
+      type: object
+      required: [id, project_id, trigger_kind, status, stage, retryable, lifecycle]
+      properties:
+        id:
+          type: string
+          format: uuid
+        project_id:
+          type: string
+          format: uuid
+        source_id:
+          type: [string, 'null']
+          format: uuid
+        trigger_kind:
+          type: string
+        status:
+          type: string
+        stage:
+          type: string
+        requested_by:
+          type: [string, 'null']
+        error_message:
+          type: [string, 'null']
+        started_at:
+          type: [string, 'null']
+          format: date-time
+        finished_at:
+          type: [string, 'null']
+          format: date-time
+        retryable:
+          type: boolean
+        lifecycle:
+          $ref: '#/components/schemas/IngestionLifecycleState'
 
     DocumentSummary:
       type: object
@@ -1178,7 +1432,7 @@ components:
 
     RetrievalRunSummary:
       type: object
-      required: [id, project_id, query_text, top_k]
+      required: [id, project_id, query_text, top_k, answer_status, weak_grounding]
       properties:
         id:
           type: string
@@ -1196,6 +1450,50 @@ components:
           format: int32
         response_text:
           type: [string, 'null']
+        answer_status:
+          type: string
+          example: grounded
+        weak_grounding:
+          type: boolean
+
+    RetrievalRunDetail:
+      type: object
+      required: [id, project_id, query_text, top_k, answer_status, weak_grounding, references, matched_chunk_ids, debug_json]
+      properties:
+        id:
+          type: string
+          format: uuid
+        project_id:
+          type: string
+          format: uuid
+        query_text:
+          type: string
+        model_profile_id:
+          type: [string, 'null']
+          format: uuid
+        top_k:
+          type: integer
+          format: int32
+        response_text:
+          type: [string, 'null']
+        answer_status:
+          type: string
+        weak_grounding:
+          type: boolean
+        references:
+          type: array
+          items:
+            type: string
+        matched_chunk_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        warning:
+          type: [string, 'null']
+        debug_json:
+          type: object
+          additionalProperties: true
 
     CreateRetrievalRunRequest:
       type: object
@@ -1236,7 +1534,7 @@ components:
 
     QueryResponse:
       type: object
-      required: [retrieval_run_id, project_id, answer, references, mode]
+      required: [retrieval_run_id, project_id, answer, references, mode, answer_status, weak_grounding]
       properties:
         retrieval_run_id:
           type: string
@@ -1255,6 +1553,37 @@ components:
         mode:
           type: string
           example: gateway_live
+        answer_status:
+          type: string
+          example: grounded
+        weak_grounding:
+          type: boolean
+        warning:
+          type: [string, 'null']
+
+    UsageGovernanceSummary:
+      type: object
+      required: [usage_events, prompt_tokens, completion_tokens, total_tokens, estimated_cost]
+      properties:
+        usage_events:
+          type: integer
+          format: int64
+          minimum: 0
+        prompt_tokens:
+          type: integer
+          format: int64
+          minimum: 0
+        completion_tokens:
+          type: integer
+          format: int64
+          minimum: 0
+        total_tokens:
+          type: integer
+          format: int64
+          minimum: 0
+        estimated_cost:
+          type: number
+          format: double
 
     UsageEventSummary:
       type: object

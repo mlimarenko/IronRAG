@@ -206,6 +206,50 @@ fn map_token_summary(row: repositories::ApiTokenRow) -> TokenSummary {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn workspace_token(workspace_id: Option<Uuid>) -> AuthContext {
+        AuthContext {
+            token_id: Uuid::now_v7(),
+            workspace_id,
+            token_kind: "workspace_token".into(),
+            scopes: vec!["workspace:admin".into()],
+        }
+    }
+
+    #[test]
+    fn workspace_access_allows_matching_workspace() {
+        let workspace_id = Uuid::now_v7();
+        let auth = workspace_token(Some(workspace_id));
+
+        assert!(auth.require_workspace_access(workspace_id).is_ok());
+    }
+
+    #[test]
+    fn workspace_access_rejects_mismatched_workspace() {
+        let auth = workspace_token(Some(Uuid::now_v7()));
+
+        assert!(matches!(
+            auth.require_workspace_access(Uuid::now_v7()),
+            Err(ApiError::Unauthorized)
+        ));
+    }
+
+    #[test]
+    fn instance_admin_can_access_any_workspace() {
+        let auth = AuthContext {
+            token_id: Uuid::now_v7(),
+            workspace_id: None,
+            token_kind: "instance_admin".into(),
+            scopes: Vec::new(),
+        };
+
+        assert!(auth.require_workspace_access(Uuid::now_v7()).is_ok());
+    }
+}
+
 impl FromRequestParts<AppState> for AuthContext {
     type Rejection = (StatusCode, &'static str);
 
