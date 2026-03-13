@@ -1,0 +1,111 @@
+include:
+  - project: "General/Templates"
+    file: "/docker-builds/docker.gitlab-ci.yml"
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_TAG || $CI_MERGE_REQUEST_EVENT_TYPE
+      when: never
+    - if: '$CI_COMMIT_REF_NAME =~ /^(develop|master|release\/.+|feature\/.+|hotfix\/.+)$/'
+      when: always
+    - when: never
+
+variables:
+  CI_VALIDATE_REPO: "false"
+  EXPORT_VAULT_VARS: "false"
+  ANSIBLE_HOST_KEY_CHECKING: "False"
+  DEPLOY_BECOME: "false"
+  DEPLOY_HOST: "10.0.1.109"
+  DEPLOY_PATH: "/opt/docker/lightrag"
+  DEPLOY_PORT: "22"
+  DEPLOY_USER: "root"
+  APP_IMAGE_ENV_VAR: "LIGHTRAG_IMAGE"
+  APP_SERVICE_NAME: "lightrag"
+  APP_COMPOSE_PROJECT: "lightrag"
+  APP_COMPOSE_FILE: "docker-compose.yml"
+  APP_IMAGE_NAME: "$CI_REGISTRY_IMAGE"
+
+python lint:
+  stage: test
+  image: python:3.13
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "develop"'
+      when: never
+    - when: on_success
+  before_script:
+    - python -m pip install --upgrade pip
+    - pip install ruff
+  script:
+    - ruff check .
+
+get version:
+  extends: .get_version
+  rules:
+    - if: '$CI_COMMIT_REF_NAME =~ /^(develop|master|release\/.+|feature\/.+|hotfix\/.+)$/'
+      when: on_success
+    - when: never
+  script:
+    - |
+      case "$CI_COMMIT_REF_NAME" in
+        master) export CI_VERSION_TAG="prod" ;;
+        release/*) export CI_VERSION_TAG="release" ;;
+        *) export CI_VERSION_TAG="dev" ;;
+      esac
+      export CI_VERSION="0.1.0"
+      export CI_BUILD_CODE="${CI_PIPELINE_IID}"
+      if [[ "$CI_COMMIT_REF_NAME" =~ ^release/ ]]; then
+        CI_VERSION_FULL="${CI_VERSION}-${CI_VERSION_TAG}"
+      else
+        CI_VERSION_FULL="${CI_VERSION}-${CI_VERSION_TAG}-${CI_BUILD_CODE}"
+      fi
+      echo "Using version ${CI_VERSION_FULL}"
+      cat <<ENV > "$CI_PROJECT_DIR/version.env"
+      CI_VERSION=$CI_VERSION
+      CI_VERSION_TAG=$CI_VERSION_TAG
+      CI_VERSION_FULL=$CI_VERSION_FULL
+      CI_BUILD_CODE=$CI_BUILD_CODE
+      DEPLOY_IMAGE=${APP_IMAGE_NAME}:${CI_VERSION_FULL}
+      ENV
+  artifacts:
+    reports:
+      dotenv: version.env
+
+build:
+  extends: .build
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "develop"'
+      when: on_success
+    - when: never
+  variables:
+    BUILD_CONTEXT: "."
+    BUILD_DOCKERFILE: "Dockerfile.deploy"
+    BUILD_IMAGE_NAME: "$CI_REGISTRY_IMAGE"
+    BUILD_IMAGE_TAG: "$CI_VERSION_FULL"
+
+deploy:
+  stage: deploy
+  image: gitlab.piping.space:4567/general/devopsimage:latest
+  tags: [docker]
+  needs:
+    - job: build
+    - job: get version
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "develop"'
+  before_script:
+    - test -n "$SSH_PRIVATE_KEY_B64" || (echo "SSH_PRIVATE_KEY_B64 is required" && exit 1)
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - echo "$SSH_PRIVATE_KEY_B64" | tr -d '\r' | base64 -d > ~/.ssh/id_ed25519
+    - chmod 600 ~/.ssh/id_ed25519
+    - |
+      cat > ~/.ssh/config <<'CFG'
+      Host *
+        IdentityFile ~/.ssh/id_ed25519
+        IdentitiesOnly yes
+        IdentityAgent none
+        StrictHostKeyChecking no
+      CFG
+    - chmod 600 ~/.ssh/config
+  script:
+    - unset SSH_AUTH_SOCK
+    - ansible-playbook -i "${DEPLOY_HOST}," ansible/deploy.yml -u "$DEPLOY_USER" --private-key ~/.ssh/id_ed25519 -e "ansible_port=${DEPLOY_PORT}" -e "deploy_image=${DEPLOY_IMAGE}"

@@ -1,0 +1,6 @@
+FROM busybox:1.37
+
+COPY frontend/dist/spa /srv/frontend
+COPY backend /srv/backend
+COPY docker-compose.yml /srv/docker-compose.yml
+COPY README.md /srv/README.md

@@ -1,0 +1,87 @@
+---
+- name: Deploy RustRAG stack to pxm-lightrag01
+  hosts: all
+  gather_facts: false
+  vars:
+    deploy_path: "{{ lookup('env', 'DEPLOY_PATH') | default('/opt/docker/lightrag', true) }}"
+    compose_file: "{{ deploy_path }}/docker-compose.yml"
+    env_file: "{{ deploy_path }}/.env"
+    image_env_file: "{{ deploy_path }}/.images.env"
+    service_name: "{{ lookup('env', 'APP_SERVICE_NAME') | default('lightrag', true) }}"
+    compose_project: "{{ lookup('env', 'APP_COMPOSE_PROJECT') | default('lightrag', true) }}"
+    image_env_var: "{{ lookup('env', 'APP_IMAGE_ENV_VAR') | default('LIGHTRAG_IMAGE', true) }}"
+    deploy_image: "{{ lookup('env', 'DEPLOY_IMAGE') | default('', true) }}"
+    registry_url: "{{ lookup('env', 'CI_REGISTRY') | default('', true) }}"
+    registry_user: "{{ lookup('env', 'CI_REGISTRY_USER') | default('', true) }}"
+    registry_password: "{{ lookup('env', 'CI_REGISTRY_PASSWORD') | default('', true) }}"
+    deploy_become: "{{ (lookup('env', 'DEPLOY_BECOME') | default('false', true)) | bool }}"
+
+  become: "{{ deploy_become }}"
+
+  tasks:
+    - name: Ensure deploy path exists
+      ansible.builtin.file:
+        path: "{{ deploy_path }}"
+        state: directory
+        mode: "0755"
+
+    - name: Ensure compose file exists on target host
+      ansible.builtin.stat:
+        path: "{{ compose_file }}"
+      register: compose_file_stat
+
+    - name: Fail when compose file is missing on target host
+      ansible.builtin.fail:
+        msg: "Compose file not found at {{ compose_file }} on target host"
+      when: not compose_file_stat.stat.exists
+
+    - name: Ensure env file exists on target host
+      ansible.builtin.stat:
+        path: "{{ env_file }}"
+      register: env_file_stat
+
+    - name: Fail when env file is missing on target host
+      ansible.builtin.fail:
+        msg: ".env not found at {{ env_file }} on target host"
+      when: not env_file_stat.stat.exists
+
+    - name: Fail when deploy image is missing
+      ansible.builtin.fail:
+        msg: "DEPLOY_IMAGE is required"
+      when: deploy_image | length == 0
+
+    - name: Fail when GitLab registry credentials are missing
+      ansible.builtin.fail:
+        msg: "CI_REGISTRY / CI_REGISTRY_USER / CI_REGISTRY_PASSWORD are required"
+      when: registry_url | length == 0 or registry_user | length == 0 or registry_password | length == 0
+
+    - name: Login host Docker daemon to GitLab registry
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          echo "{{ registry_password }}" | docker login "{{ registry_url }}" -u "{{ registry_user }}" --password-stdin
+        executable: /bin/bash
+      no_log: true
+
+    - name: Pin deploy image tag
+      ansible.builtin.lineinfile:
+        path: "{{ image_env_file }}"
+        regexp: "^{{ image_env_var }}="
+        line: "{{ image_env_var }}={{ deploy_image }}"
+        create: true
+        mode: "0600"
+
+    - name: Pull application image
+      ansible.builtin.command:
+        cmd: docker compose -p {{ compose_project }} --env-file {{ env_file }} --env-file {{ image_env_file }} -f {{ compose_file }} pull {{ service_name }}
+        chdir: "{{ deploy_path }}"
+
+    - name: Restart application service from pulled image
+      ansible.builtin.command:
+        cmd: flock /var/lock/rustrag-deploy.lock -c 'docker compose -p {{ compose_project }} --env-file {{ env_file }} --env-file {{ image_env_file }} -f {{ compose_file }} up -d --no-deps --no-build {{ service_name }}'
+        chdir: "{{ deploy_path }}"
+
+    - name: Show compose status for application service
+      ansible.builtin.command:
+        cmd: docker compose -p {{ compose_project }} --env-file {{ env_file }} --env-file {{ image_env_file }} -f {{ compose_file }} ps {{ service_name }}
+        chdir: "{{ deploy_path }}"
