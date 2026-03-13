@@ -103,6 +103,12 @@ async fn create_source(
     Json(payload): Json<CreateSourceRequest>,
 ) -> Result<Json<SourceSummary>, ApiError> {
     auth.require_any_scope(&["documents:write", "workspace:admin"])?;
+    let project = repositories::get_project_by_id(&state.persistence.postgres, payload.project_id)
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("project {} not found", payload.project_id)))?;
+    auth.require_workspace_access(project.workspace_id)?;
+
     let row = repositories::create_source(
         &state.persistence.postgres,
         payload.project_id,
@@ -148,6 +154,12 @@ async fn create_ingestion_job(
     Json(payload): Json<CreateIngestionJobRequest>,
 ) -> Result<Json<IngestionJobSummary>, ApiError> {
     auth.require_any_scope(&["documents:write", "workspace:admin"])?;
+    let project = repositories::get_project_by_id(&state.persistence.postgres, payload.project_id)
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("project {} not found", payload.project_id)))?;
+    auth.require_workspace_access(project.workspace_id)?;
+
     let row = repositories::create_ingestion_job(
         &state.persistence.postgres,
         payload.project_id,
@@ -175,12 +187,16 @@ async fn get_ingestion_job_detail(
 ) -> Result<Json<IngestionJobDetail>, ApiError> {
     auth.require_any_scope(&["documents:read", "documents:write", "workspace:admin"])?;
 
-    let row = repositories::list_ingestion_jobs(&state.persistence.postgres, None)
+    let row = repositories::get_ingestion_job_by_id(&state.persistence.postgres, id)
         .await
         .map_err(|_| ApiError::Internal)?
-        .into_iter()
-        .find(|job| job.id == id)
         .ok_or_else(|| ApiError::NotFound(format!("ingestion_job {id} not found")))?;
+
+    let project = repositories::get_project_by_id(&state.persistence.postgres, row.project_id)
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("project {} not found", row.project_id)))?;
+    auth.require_workspace_access(project.workspace_id)?;
 
     Ok(Json(map_ingestion_job_detail(row)))
 }
@@ -192,12 +208,16 @@ async fn retry_ingestion_job(
 ) -> Result<Json<IngestionJobDetail>, ApiError> {
     auth.require_any_scope(&["documents:write", "workspace:admin"])?;
 
-    let row = repositories::list_ingestion_jobs(&state.persistence.postgres, None)
+    let row = repositories::get_ingestion_job_by_id(&state.persistence.postgres, id)
         .await
         .map_err(|_| ApiError::Internal)?
-        .into_iter()
-        .find(|job| job.id == id)
         .ok_or_else(|| ApiError::NotFound(format!("ingestion_job {id} not found")))?;
+
+    let project = repositories::get_project_by_id(&state.persistence.postgres, row.project_id)
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("project {} not found", row.project_id)))?;
+    auth.require_workspace_access(project.workspace_id)?;
 
     if !is_retryable_ingestion_state(&row.status) {
         return Err(ApiError::BadRequest(format!("ingestion_job {id} is not currently retryable")));

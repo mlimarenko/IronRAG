@@ -79,6 +79,8 @@ async fn create_project(
     Json(payload): Json<CreateProjectRequest>,
 ) -> Result<Json<ProjectSummary>, ApiError> {
     auth.require_any_scope(&["projects:write", "workspace:admin"])?;
+    auth.require_workspace_access(payload.workspace_id)?;
+
     let row = repositories::create_project(
         &state.persistence.postgres,
         payload.workspace_id,
@@ -105,12 +107,11 @@ async fn get_project_readiness(
 ) -> Result<Json<ProjectReadinessSummary>, ApiError> {
     auth.require_any_scope(&["documents:read", "query:run", "workspace:admin"])?;
 
-    let project = repositories::list_projects(&state.persistence.postgres, None)
+    let project = repositories::get_project_by_id(&state.persistence.postgres, id)
         .await
         .map_err(|_| ApiError::Internal)?
-        .into_iter()
-        .find(|project| project.id == id)
         .ok_or_else(|| ApiError::NotFound(format!("project {id} not found")))?;
+    auth.require_workspace_access(project.workspace_id)?;
 
     let sources = repositories::list_sources(&state.persistence.postgres, Some(id))
         .await
@@ -122,16 +123,19 @@ async fn get_project_readiness(
         .await
         .map_err(|_| ApiError::Internal)?;
 
-    let has_completed_job = ingestion_jobs.iter().any(|job| job.status == "completed");
-    let ready_for_query = !documents.is_empty() && has_completed_job;
+    let latest_job = ingestion_jobs.iter().max_by_key(|job| job.created_at);
+    let latest_status = latest_job.map(|job| job.status.as_str());
+    let ready_for_query = !documents.is_empty() && matches!(latest_status, Some("completed"));
     let indexing_state = if documents.is_empty() {
         "not_indexed"
-    } else if has_completed_job {
-        "indexed"
-    } else if ingestion_jobs.iter().any(|job| job.status == "partial") {
-        "partial"
     } else {
-        "ingesting"
+        match latest_status {
+            Some("completed") => "indexed",
+            Some("partial") => "partial",
+            Some("queued" | "running" | "validating") => "ingesting",
+            Some("retryable_failed" | "failed" | "canceled") => "stale",
+            Some(_) | None => "ingesting",
+        }
     };
 
     Ok(Json(ProjectReadinessSummary {

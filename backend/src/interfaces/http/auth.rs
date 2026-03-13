@@ -35,6 +35,24 @@ impl AuthContext {
 
         Err(ApiError::Unauthorized)
     }
+
+    /// Ensures the caller is allowed to access a specific workspace.
+    ///
+    /// Instance administrators may access any workspace. Workspace-scoped tokens must
+    /// match the target workspace id exactly.
+    ///
+    /// # Errors
+    /// Returns [`ApiError::Unauthorized`] when the caller does not belong to the target workspace.
+    pub fn require_workspace_access(&self, workspace_id: Uuid) -> Result<(), ApiError> {
+        if self.token_kind == "instance_admin" {
+            return Ok(());
+        }
+
+        match self.workspace_id {
+            Some(token_workspace_id) if token_workspace_id == workspace_id => Ok(()),
+            _ => Err(ApiError::Unauthorized),
+        }
+    }
 }
 
 #[derive(Serialize)]

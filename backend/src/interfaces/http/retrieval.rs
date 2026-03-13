@@ -132,20 +132,31 @@ async fn list_retrieval_runs(
 }
 
 async fn create_retrieval_run(
-    _auth: AuthContext,
+    auth: AuthContext,
     State(state): State<AppState>,
     Json(payload): Json<CreateRetrievalRunRequest>,
 ) -> Result<Json<RetrievalRunSummary>, ApiError> {
+    auth.require_any_scope(&["query:run", "workspace:admin"])?;
     if payload.query_text.trim().is_empty() {
         return Err(ApiError::BadRequest("query_text must not be empty".into()));
     }
+    let top_k = payload.top_k.unwrap_or(8);
+    if top_k <= 0 {
+        return Err(ApiError::BadRequest("top_k must be greater than zero".into()));
+    }
+
+    let project = repositories::get_project_by_id(&state.persistence.postgres, payload.project_id)
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("project {} not found", payload.project_id)))?;
+    auth.require_workspace_access(project.workspace_id)?;
 
     let row = repositories::create_retrieval_run(
         &state.persistence.postgres,
         payload.project_id,
         &payload.query_text,
         payload.model_profile_id,
-        payload.top_k.unwrap_or(8),
+        top_k,
         payload.response_text.as_deref(),
         serde_json::json!({"mode":"manual"}),
     )
@@ -173,12 +184,16 @@ async fn get_retrieval_run_detail(
 ) -> Result<Json<RetrievalRunDetail>, ApiError> {
     auth.require_any_scope(&["query:run", "workspace:admin", "documents:read"])?;
 
-    let row = repositories::list_retrieval_runs(&state.persistence.postgres, None)
+    let row = repositories::get_retrieval_run_by_id(&state.persistence.postgres, id)
         .await
         .map_err(|_| ApiError::Internal)?
-        .into_iter()
-        .find(|run| run.id == id)
         .ok_or_else(|| ApiError::NotFound(format!("retrieval_run {id} not found")))?;
+
+    let project = repositories::get_project_by_id(&state.persistence.postgres, row.project_id)
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("project {} not found", row.project_id)))?;
+    auth.require_workspace_access(project.workspace_id)?;
 
     let (answer_status, weak_grounding, references, matched_chunk_ids, warning) =
         extract_retrieval_debug(&row.debug_json);
@@ -207,6 +222,12 @@ async fn run_query(
     auth.require_any_scope(&["query:run", "workspace:admin"])?;
     validate_query_payload(&payload)?;
 
+    let project = repositories::get_project_by_id(&state.persistence.postgres, payload.project_id)
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("project {} not found", payload.project_id)))?;
+    auth.require_workspace_access(project.workspace_id)?;
+
     let query_result = execute_query(&state, &payload).await?;
     persist_query_artifacts(&state, &payload, &query_result).await
 }
@@ -214,6 +235,9 @@ async fn run_query(
 fn validate_query_payload(payload: &QueryRequest) -> Result<(), ApiError> {
     if payload.query_text.trim().is_empty() {
         return Err(ApiError::BadRequest("query_text must not be empty".into()));
+    }
+    if payload.top_k.unwrap_or(8) <= 0 {
+        return Err(ApiError::BadRequest("top_k must be greater than zero".into()));
     }
     Ok(())
 }

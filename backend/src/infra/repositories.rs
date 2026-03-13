@@ -948,6 +948,56 @@ pub async fn get_project_by_id(pool: &PgPool, id: Uuid) -> Result<Option<Project
     .await
 }
 
+/// Loads a workspace by primary key.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while querying the `workspace` row.
+pub async fn get_workspace_by_id(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<Option<WorkspaceRow>, sqlx::Error> {
+    sqlx::query_as::<_, WorkspaceRow>(
+        "select id, slug, name, status, created_at, updated_at from workspace where id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Loads an ingestion job by primary key.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while querying the `ingestion_job` row.
+pub async fn get_ingestion_job_by_id(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<Option<IngestionJobRow>, sqlx::Error> {
+    sqlx::query_as::<_, IngestionJobRow>(
+        "select id, project_id, source_id, trigger_kind, status, stage, requested_by, error_message, started_at, finished_at, created_at, updated_at
+         from ingestion_job where id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Loads a retrieval run by primary key.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while querying the `retrieval_run` row.
+pub async fn get_retrieval_run_by_id(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<Option<RetrievalRunRow>, sqlx::Error> {
+    sqlx::query_as::<_, RetrievalRunRow>(
+        "select id, project_id, query_text, model_profile_id, top_k, response_text, debug_json, created_at
+         from retrieval_run where id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
 /// Lists usage events, optionally filtered by project.
 ///
 /// # Errors
@@ -1089,4 +1139,28 @@ pub async fn get_usage_cost_totals(
             .await
         }
     }
+}
+
+/// Aggregates usage and estimated cost totals for one workspace.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while aggregating usage and cost totals.
+pub async fn get_workspace_usage_cost_totals(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<UsageCostTotalsRow, sqlx::Error> {
+    sqlx::query_as::<_, UsageCostTotalsRow>(
+        "select
+            count(distinct ue.id) as usage_events,
+            sum(ue.prompt_tokens)::bigint as prompt_tokens,
+            sum(ue.completion_tokens)::bigint as completion_tokens,
+            sum(ue.total_tokens)::bigint as total_tokens,
+            coalesce(sum(cl.estimated_cost), 0) as estimated_cost
+         from usage_event ue
+         left join cost_ledger cl on cl.usage_event_id = ue.id
+         where ue.workspace_id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await
 }

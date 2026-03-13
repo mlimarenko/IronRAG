@@ -95,6 +95,7 @@ async fn create_provider_account(
     Json(payload): Json<CreateProviderAccountRequest>,
 ) -> Result<Json<ProviderAccountSummary>, ApiError> {
     auth.require_any_scope(&["providers:admin", "workspace:admin"])?;
+    auth.require_workspace_access(payload.workspace_id)?;
     let row = repositories::create_provider_account(
         &state.persistence.postgres,
         payload.workspace_id,
@@ -140,6 +141,22 @@ async fn create_model_profile(
     Json(payload): Json<CreateModelProfileRequest>,
 ) -> Result<Json<ModelProfileSummary>, ApiError> {
     auth.require_any_scope(&["providers:admin", "workspace:admin"])?;
+    auth.require_workspace_access(payload.workspace_id)?;
+
+    let provider_account = repositories::get_provider_account_by_id(
+        &state.persistence.postgres,
+        payload.provider_account_id,
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?
+    .ok_or_else(|| ApiError::NotFound("provider_account not found".into()))?;
+
+    if provider_account.workspace_id != payload.workspace_id {
+        return Err(ApiError::BadRequest(
+            "provider_account_id does not belong to workspace_id".into(),
+        ));
+    }
+
     let row = repositories::create_model_profile(
         &state.persistence.postgres,
         payload.workspace_id,
@@ -167,6 +184,7 @@ async fn get_provider_governance(
     axum::extract::Path(workspace_id): axum::extract::Path<Uuid>,
 ) -> Result<Json<ProviderGovernanceSummary>, ApiError> {
     auth.require_any_scope(&["providers:admin", "workspace:admin"])?;
+    auth.require_workspace_access(workspace_id)?;
 
     let provider_accounts =
         repositories::list_provider_accounts(&state.persistence.postgres, Some(workspace_id))

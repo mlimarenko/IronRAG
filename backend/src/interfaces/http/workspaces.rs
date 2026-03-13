@@ -87,11 +87,11 @@ async fn get_workspace_governance(
 ) -> Result<Json<WorkspaceGovernanceSummary>, ApiError> {
     auth.require_any_scope(&["workspace:admin", "usage:read", "providers:admin"])?;
 
-    let workspace = repositories::list_workspaces(&state.persistence.postgres)
+    auth.require_workspace_access(id)?;
+
+    let workspace = repositories::get_workspace_by_id(&state.persistence.postgres, id)
         .await
         .map_err(|_| ApiError::Internal)?
-        .into_iter()
-        .find(|row| row.id == id)
         .ok_or_else(|| ApiError::NotFound(format!("workspace {id} not found")))?;
 
     let projects = repositories::list_projects(&state.persistence.postgres, Some(id))
@@ -108,7 +108,7 @@ async fn get_workspace_governance(
         .await
         .map_err(|_| ApiError::Internal)?;
 
-    let totals = repositories::get_usage_cost_totals(&state.persistence.postgres, None)
+    let totals = repositories::get_workspace_usage_cost_totals(&state.persistence.postgres, id)
         .await
         .map_err(|_| ApiError::Internal)?;
 
