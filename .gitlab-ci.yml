@@ -40,7 +40,7 @@ python lint:
   script:
     - ruff check .
 
-backend get version:
+get version:
   extends: .get_version
   rules:
     - if: '$CI_COMMIT_REF_NAME =~ /^(develop|master|release\/.+|feature\/.+|hotfix\/.+)$/'
@@ -60,49 +60,18 @@ backend get version:
       else
         CI_VERSION_FULL="${CI_VERSION}-${CI_VERSION_TAG}-${CI_BUILD_CODE}"
       fi
-      echo "Using backend version ${CI_VERSION_FULL}"
-      cat <<ENV > "$CI_PROJECT_DIR/backend-version.env"
+      echo "Using version ${CI_VERSION_FULL}"
+      cat <<ENV > "$CI_PROJECT_DIR/version.env"
       CI_VERSION=$CI_VERSION
       CI_VERSION_TAG=$CI_VERSION_TAG
       CI_VERSION_FULL=$CI_VERSION_FULL
       CI_BUILD_CODE=$CI_BUILD_CODE
       BACKEND_DEPLOY_IMAGE=${BACKEND_IMAGE_NAME}:${CI_VERSION_FULL}
-      ENV
-  artifacts:
-    reports:
-      dotenv: backend-version.env
-
-frontend get version:
-  extends: .get_version
-  rules:
-    - if: '$CI_COMMIT_REF_NAME =~ /^(develop|master|release\/.+|feature\/.+|hotfix\/.+)$/'
-      when: on_success
-    - when: never
-  script:
-    - |
-      case "$CI_COMMIT_REF_NAME" in
-        master) export CI_VERSION_TAG="prod" ;;
-        release/*) export CI_VERSION_TAG="release" ;;
-        *) export CI_VERSION_TAG="dev" ;;
-      esac
-      export CI_VERSION="0.1.0"
-      export CI_BUILD_CODE="${CI_PIPELINE_IID}"
-      if [[ "$CI_COMMIT_REF_NAME" =~ ^release/ ]]; then
-        CI_VERSION_FULL="${CI_VERSION}-${CI_VERSION_TAG}"
-      else
-        CI_VERSION_FULL="${CI_VERSION}-${CI_VERSION_TAG}-${CI_BUILD_CODE}"
-      fi
-      echo "Using frontend version ${CI_VERSION_FULL}"
-      cat <<ENV > "$CI_PROJECT_DIR/frontend-version.env"
-      CI_VERSION=$CI_VERSION
-      CI_VERSION_TAG=$CI_VERSION_TAG
-      CI_VERSION_FULL=$CI_VERSION_FULL
-      CI_BUILD_CODE=$CI_BUILD_CODE
       FRONTEND_DEPLOY_IMAGE=${FRONTEND_IMAGE_NAME}:${CI_VERSION_FULL}
       ENV
   artifacts:
     reports:
-      dotenv: frontend-version.env
+      dotenv: version.env
 
 backend build:
   extends: .build
@@ -111,7 +80,7 @@ backend build:
       when: on_success
     - when: never
   needs:
-    - job: backend get version
+    - job: get version
   variables:
     DOCKER_DEFAULT_CONTEXT: "backend"
     DOCKER_FILE: "backend/Dockerfile"
@@ -125,7 +94,7 @@ frontend build:
       when: on_success
     - when: never
   needs:
-    - job: frontend get version
+    - job: get version
   variables:
     DOCKER_DEFAULT_CONTEXT: "frontend"
     DOCKER_FILE: "frontend/Dockerfile"
@@ -161,7 +130,7 @@ backend deploy:
   extends: .deploy_common
   needs:
     - job: backend build
-    - job: backend get version
+    - job: get version
   variables:
     APP_SERVICE_NAME: "$BACKEND_SERVICE_NAME"
     APP_IMAGE_ENV_VAR: "$BACKEND_IMAGE_ENV_VAR"
@@ -174,7 +143,7 @@ frontend deploy:
   extends: .deploy_common
   needs:
     - job: frontend build
-    - job: frontend get version
+    - job: get version
   variables:
     APP_SERVICE_NAME: "$FRONTEND_SERVICE_NAME"
     APP_IMAGE_ENV_VAR: "$FRONTEND_IMAGE_ENV_VAR"
