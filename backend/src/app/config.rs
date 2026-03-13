@@ -43,3 +43,30 @@ impl Settings {
         cfg.try_deserialize()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_env_has_sane_local_defaults() {
+        let settings = Settings::from_env().expect("settings should load with defaults");
+
+        assert_eq!(settings.bind_addr, "0.0.0.0:8080");
+        assert_eq!(settings.service_name, "rustrag-backend");
+        assert_eq!(settings.environment, "local");
+        assert_eq!(settings.database_max_connections, 20);
+        assert_eq!(settings.redis_url, "redis://127.0.0.1:6379");
+        assert_eq!(settings.log_filter, "info");
+    }
+
+    #[test]
+    fn from_env_provides_default_database_url() {
+        let settings = Settings::from_env().expect("settings should load with defaults");
+
+        assert_eq!(
+            settings.database_url,
+            "postgres://postgres:postgres@127.0.0.1:5432/rustrag"
+        );
+    }
+}

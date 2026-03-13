@@ -264,3 +264,41 @@ fn map_ingestion_job_detail(row: repositories::IngestionJobRow) -> IngestionJobD
         lifecycle,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn ingestion_job(status: &str) -> repositories::IngestionJobRow {
+        repositories::IngestionJobRow {
+            id: Uuid::now_v7(),
+            project_id: Uuid::now_v7(),
+            source_id: None,
+            trigger_kind: "manual".into(),
+            status: status.into(),
+            stage: "stage".into(),
+            requested_by: Some("tester".into()),
+            error_message: None,
+            started_at: None,
+            finished_at: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn maps_retryable_failed_state() {
+        let detail = map_ingestion_job_detail(ingestion_job("retryable_failed"));
+
+        assert!(detail.retryable);
+        assert!(matches!(detail.lifecycle, IngestionLifecycleState::RetryableFailed));
+    }
+
+    #[test]
+    fn maps_unknown_state_to_failed_lifecycle() {
+        let detail = map_ingestion_job_detail(ingestion_job("totally_unknown"));
+
+        assert!(!detail.retryable);
+        assert!(matches!(detail.lifecycle, IngestionLifecycleState::Failed));
+    }
+}
