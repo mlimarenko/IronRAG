@@ -8,7 +8,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql
 
   redis:
     image: redis:7-alpine
@@ -23,13 +23,14 @@ services:
       - postgres
       - redis
     environment:
-      RUSTRAG_BIND_ADDR: 0.0.0.0:8080
-      RUSTRAG_SERVICE_NAME: rustrag-backend
-      RUSTRAG_ENVIRONMENT: local-compose
-      RUSTRAG_DATABASE_URL: postgres://postgres:postgres@postgres:5432/rustrag
-      RUSTRAG_DATABASE_MAX_CONNECTIONS: 20
-      RUSTRAG_REDIS_URL: redis://redis:6379
-      RUSTRAG_LOG_FILTER: info
+      bind_addr: 0.0.0.0:8080
+      service_name: rustrag-backend
+      environment: local-compose
+      database_url: postgres://postgres:postgres@postgres:5432/rustrag
+      database_max_connections: 20
+      redis_url: redis://redis:6379
+      log_filter: info
+      RUST_BACKTRACE: full
     ports:
       - "8080:8080"
 

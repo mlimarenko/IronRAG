@@ -1,6 +1,8 @@
 use rustrag_backend::app;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    app::run().await
+fn main() -> anyhow::Result<()> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()?
+        .block_on(app::run())
 }

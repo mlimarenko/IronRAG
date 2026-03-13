@@ -28,6 +28,7 @@ impl Settings {
             .set_default("bind_addr", "0.0.0.0:8080")?
             .set_default("service_name", "rustrag-backend")?
             .set_default("environment", "local")?
+            .set_default("database_url", "postgres://postgres:postgres@127.0.0.1:5432/rustrag")?
             .set_default("database_max_connections", 20)?
             .set_default("redis_url", "redis://127.0.0.1:6379")?
             .set_default("log_filter", "info")?
@@ -35,6 +36,7 @@ impl Settings {
             .set_default("openai_output_price_per_1m", 2.0)?
             .set_default("deepseek_input_price_per_1m", 0.27)?
             .set_default("deepseek_output_price_per_1m", 1.10)?
+            .add_source(config::Environment::default().separator("__"))
             .add_source(config::Environment::with_prefix("RUSTRAG").separator("__"))
             .build()?;
 
