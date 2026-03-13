@@ -33,6 +33,7 @@ docker compose up --build
 > - the backend image is now built as a multi-stage Docker image, so CI can publish a self-contained backend artifact to a registry without relying on a host-built binary
 > - the frontend passes local `npm run check`, but `docker compose build frontend` currently fails in this host/runtime on containerized `npm install` (`esbuild` postinstall -> `spawn sh EACCES`); for now treat local frontend build artifacts and local verification as the supported workaround until the container runtime issue is fixed
 > - the intended latest local stack is PostgreSQL 18 + pgvector and Redis 8.4; current containerized startup failures on this host are caused by AppArmor `docker-default` denying Unix socket creation inside containers, not by an application-level incompatibility with the latest stack
+> - backend image build validation on this host now fails later, inside Docker build networking, because the builder cannot resolve `index.crates.io`; that is a host/runtime networking issue rather than a packaging-layout issue
 
 ## Deployment shape
 

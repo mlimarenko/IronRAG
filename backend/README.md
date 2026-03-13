@@ -72,8 +72,8 @@ docker compose up --build backend postgres redis
 ```
 
 > Notes:
-> - in this environment the backend container image currently expects a host-built release binary at `backend/target/release/rustrag-backend`; this avoids a known Dockerized Cargo build permission issue in the current host/runtime
-> - `docker compose build backend` is currently verified locally
+> - the backend container image is built as a multi-stage Docker image and no longer depends on a prebuilt host binary, which makes CI/registry publishing sane again
+> - `docker compose build backend` should remain the primary validation path for backend image packaging; on this host the current failure mode is Docker builder DNS resolution to `index.crates.io`, not the image layout itself
 > - `docker compose build frontend` is currently blocked in this host/runtime by containerized `npm install` failing during `esbuild` postinstall with `spawn sh EACCES`; use local frontend checks/build as the current workaround
 
 ## Notes

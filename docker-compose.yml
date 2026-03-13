@@ -30,6 +30,7 @@ services:
       - "6379:6379"
 
   backend:
+    image: ${RUSTRAG_BACKEND_IMAGE:-rustrag-backend:local}
     build:
       context: ./backend
       dockerfile: Dockerfile
