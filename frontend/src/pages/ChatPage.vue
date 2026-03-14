@@ -19,8 +19,8 @@ const detail = ref<RetrievalRunDetail | null>(null)
 const errorMessage = ref<string | null>(null)
 const loading = ref(false)
 
-const selectedProject = computed(() => flowStore.selectedProject)
-const selectedProjectId = computed(() => flowStore.projectId)
+const selectedProject = flowStore.selectedProject
+const selectedProjectId = flowStore.projectId
 
 onMounted(async () => {
   await flowStore.bootstrap()
@@ -32,12 +32,12 @@ async function submitQuery() {
   result.value = null
   detail.value = null
   try {
-    if (!selectedProjectId.value) {
+    if (!selectedProjectId) {
       throw new Error('Create and select a project in Setup before asking questions.')
     }
 
     const response = await runQuery({
-      project_id: selectedProjectId.value,
+      project_id: selectedProjectId,
       query_text: queryText.value.trim(),
       top_k: 8,
     })

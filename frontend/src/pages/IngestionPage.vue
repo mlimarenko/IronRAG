@@ -14,19 +14,19 @@ const text = ref('')
 const statusMessage = ref<string | null>(null)
 const errorMessage = ref<string | null>(null)
 
-const selectedProjectId = computed(() => flowStore.projectId)
-const selectedProject = computed(() => flowStore.selectedProject)
+const selectedProjectId = flowStore.projectId
+const selectedProject = flowStore.selectedProject
 const projectState = computed(() =>
-  selectedProjectId.value ? documentsStore.byProjectId[selectedProjectId.value] ?? null : null,
+  selectedProjectId ? documentsStore.byProjectId[selectedProjectId] ?? null : null,
 )
 
 onMounted(async () => {
   await flowStore.bootstrap()
-  if (selectedProjectId.value) {
+  if (selectedProjectId) {
     await Promise.all([
-      documentsStore.fetchProjectDocuments(selectedProjectId.value),
-      documentsStore.fetchProjectJobs(selectedProjectId.value),
-      documentsStore.fetchProjectSources(selectedProjectId.value),
+      documentsStore.fetchProjectDocuments(selectedProjectId),
+      documentsStore.fetchProjectJobs(selectedProjectId),
+      documentsStore.fetchProjectSources(selectedProjectId),
     ])
   }
 })
@@ -35,7 +35,7 @@ async function ingestCurrentText() {
   errorMessage.value = null
   statusMessage.value = null
 
-  if (!selectedProjectId.value) {
+  if (!selectedProjectId) {
     errorMessage.value = 'Create and select a project first in Setup.'
     return
   }
@@ -44,7 +44,7 @@ async function ingestCurrentText() {
     let sourceId = projectState.value?.sources.data[0]?.id
     if (!sourceId) {
       const source = await documentsStore.createSourceForProject({
-        project_id: selectedProjectId.value,
+        project_id: selectedProjectId,
         source_kind: 'text',
         label: sourceLabel.value.trim() || 'Pasted text',
       })
@@ -52,7 +52,7 @@ async function ingestCurrentText() {
     }
 
     const result = await documentsStore.ingestTextForProject({
-      project_id: selectedProjectId.value,
+      project_id: selectedProjectId,
       source_id: sourceId,
       external_key: externalKey.value.trim(),
       title: title.value.trim() || null,
@@ -60,9 +60,9 @@ async function ingestCurrentText() {
     })
 
     await Promise.all([
-      documentsStore.fetchProjectDocuments(selectedProjectId.value),
-      documentsStore.fetchProjectJobs(selectedProjectId.value),
-      documentsStore.fetchProjectSources(selectedProjectId.value),
+      documentsStore.fetchProjectDocuments(selectedProjectId),
+      documentsStore.fetchProjectJobs(selectedProjectId),
+      documentsStore.fetchProjectSources(selectedProjectId),
     ])
 
     statusMessage.value = `Indexed ${result.chunkCount} chunks into document ${result.documentId}.`

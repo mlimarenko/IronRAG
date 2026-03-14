@@ -11,8 +11,8 @@ const projectsStore = useProjectsStore()
 
 const hasWorkspace = computed(() => workspacesStore.items.length > 0)
 const hasProject = computed(() => projectsStore.items.length > 0)
-const selectedWorkspace = computed(() => flowStore.selectedWorkspace)
-const selectedProject = computed(() => flowStore.selectedProject)
+const selectedWorkspace = flowStore.selectedWorkspace
+const selectedProject = flowStore.selectedProject
 
 onMounted(async () => {
   await flowStore.bootstrap()
