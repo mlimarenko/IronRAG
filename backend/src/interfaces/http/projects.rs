@@ -181,6 +181,15 @@ mod tests {
             started_at: None,
             finished_at: None,
             created_at,
+            updated_at: created_at,
+            idempotency_key: None,
+            parent_job_id: None,
+            attempt_count: 0,
+            worker_id: None,
+            lease_expires_at: None,
+            heartbeat_at: None,
+            payload_json: serde_json::json!({}),
+            result_json: serde_json::json!({}),
         }
     }
 

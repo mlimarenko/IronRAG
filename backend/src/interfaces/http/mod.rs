@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod authorization;
 pub mod chunks;
 pub mod content;
 pub mod content_support;

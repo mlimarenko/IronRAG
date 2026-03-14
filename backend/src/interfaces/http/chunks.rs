@@ -8,7 +8,13 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     infra::repositories,
-    interfaces::http::{auth::AuthContext, router_support::ApiError},
+    interfaces::http::{
+        auth::AuthContext,
+        authorization::{
+            POLICY_DOCUMENTS_READ, load_document_and_authorize, load_project_and_authorize,
+        },
+        router_support::ApiError,
+    },
 };
 
 #[derive(Deserialize)]
@@ -37,13 +43,15 @@ async fn list_chunks(
     State(state): State<AppState>,
     Query(query): Query<ChunksQuery>,
 ) -> Result<Json<Vec<ChunkSummary>>, ApiError> {
-    auth.require_any_scope(&["documents:read", "workspace:admin"])?;
+    auth.require_any_scope(POLICY_DOCUMENTS_READ)?;
 
     let items = if let Some(document_id) = query.document_id {
+        load_document_and_authorize(&auth, &state, document_id, POLICY_DOCUMENTS_READ).await?;
         repositories::list_chunks_by_document(&state.persistence.postgres, document_id)
             .await
             .map_err(|_| ApiError::Internal)?
     } else if let Some(project_id) = query.project_id {
+        load_project_and_authorize(&auth, &state, project_id, POLICY_DOCUMENTS_READ).await?;
         repositories::list_chunks_by_project(
             &state.persistence.postgres,
             project_id,

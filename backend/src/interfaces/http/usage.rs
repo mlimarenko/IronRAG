@@ -9,7 +9,11 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     infra::repositories,
-    interfaces::http::{auth::AuthContext, router_support::ApiError},
+    interfaces::http::{
+        auth::AuthContext,
+        authorization::{POLICY_USAGE_READ, filter_workspace_rows, load_project_and_authorize},
+        router_support::ApiError,
+    },
 };
 
 #[derive(Deserialize)]
@@ -70,14 +74,21 @@ async fn list_usage_events(
     State(state): State<AppState>,
     Query(query): Query<ProjectScopedQuery>,
 ) -> Result<Json<Vec<UsageEventSummary>>, ApiError> {
-    auth.require_any_scope(&["usage:read", "workspace:admin"])?;
+    auth.require_any_scope(POLICY_USAGE_READ)?;
+    if let Some(project_id) = query.project_id {
+        load_project_and_authorize(&auth, &state, project_id, POLICY_USAGE_READ).await?;
+    }
 
-    let items = repositories::list_usage_events(&state.persistence.postgres, query.project_id)
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .into_iter()
-        .map(map_usage_event)
-        .collect();
+    let items = filter_workspace_rows(
+        &auth,
+        repositories::list_usage_events(&state.persistence.postgres, query.project_id)
+            .await
+            .map_err(|_| ApiError::Internal)?,
+        |row| row.workspace_id,
+    )
+    .into_iter()
+    .map(map_usage_event)
+    .collect();
 
     Ok(Json(items))
 }
@@ -87,12 +98,18 @@ async fn get_usage_event(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<UsageEventSummary>, ApiError> {
-    auth.require_any_scope(&["usage:read", "workspace:admin"])?;
+    auth.require_any_scope(POLICY_USAGE_READ)?;
 
     let row = repositories::get_usage_event_by_id(&state.persistence.postgres, id)
         .await
         .map_err(|_| ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("usage_event {id} not found")))?;
+
+    if let Some(workspace_id) = row.workspace_id {
+        auth.require_workspace_access(workspace_id)?;
+    } else if auth.token_kind != "instance_admin" {
+        return Err(ApiError::Unauthorized);
+    }
 
     Ok(Json(map_usage_event(row)))
 }
@@ -102,14 +119,21 @@ async fn list_cost_ledger(
     State(state): State<AppState>,
     Query(query): Query<ProjectScopedQuery>,
 ) -> Result<Json<Vec<CostLedgerSummary>>, ApiError> {
-    auth.require_any_scope(&["usage:read", "workspace:admin"])?;
+    auth.require_any_scope(POLICY_USAGE_READ)?;
+    if let Some(project_id) = query.project_id {
+        load_project_and_authorize(&auth, &state, project_id, POLICY_USAGE_READ).await?;
+    }
 
-    let items = repositories::list_cost_ledger(&state.persistence.postgres, query.project_id)
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .into_iter()
-        .map(map_cost_ledger)
-        .collect();
+    let items = filter_workspace_rows(
+        &auth,
+        repositories::list_cost_ledger(&state.persistence.postgres, query.project_id)
+            .await
+            .map_err(|_| ApiError::Internal)?,
+        |row| row.workspace_id,
+    )
+    .into_iter()
+    .map(map_cost_ledger)
+    .collect();
 
     Ok(Json(items))
 }
@@ -119,12 +143,18 @@ async fn get_cost_ledger(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<CostLedgerSummary>, ApiError> {
-    auth.require_any_scope(&["usage:read", "workspace:admin"])?;
+    auth.require_any_scope(POLICY_USAGE_READ)?;
 
     let row = repositories::get_cost_ledger_by_id(&state.persistence.postgres, id)
         .await
         .map_err(|_| ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("cost_ledger {id} not found")))?;
+
+    if let Some(workspace_id) = row.workspace_id {
+        auth.require_workspace_access(workspace_id)?;
+    } else if auth.token_kind != "instance_admin" {
+        return Err(ApiError::Unauthorized);
+    }
 
     Ok(Json(map_cost_ledger(row)))
 }
@@ -134,7 +164,14 @@ async fn get_usage_summary(
     State(state): State<AppState>,
     Query(query): Query<ProjectScopedQuery>,
 ) -> Result<Json<UsageCostTotals>, ApiError> {
-    auth.require_any_scope(&["usage:read", "workspace:admin"])?;
+    auth.require_any_scope(POLICY_USAGE_READ)?;
+    if let Some(project_id) = query.project_id {
+        load_project_and_authorize(&auth, &state, project_id, POLICY_USAGE_READ).await?;
+    } else if auth.token_kind != "instance_admin" {
+        return Err(ApiError::BadRequest(
+            "project_id is required for workspace-scoped usage reads".into(),
+        ));
+    }
 
     let totals = repositories::get_usage_cost_totals(&state.persistence.postgres, query.project_id)
         .await

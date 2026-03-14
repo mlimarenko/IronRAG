@@ -8,7 +8,13 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     infra::repositories,
-    interfaces::http::{auth::AuthContext, router_support::ApiError},
+    interfaces::http::{
+        auth::AuthContext,
+        authorization::{
+            POLICY_DOCUMENTS_READ, POLICY_DOCUMENTS_WRITE, load_project_and_authorize,
+        },
+        router_support::ApiError,
+    },
 };
 
 #[derive(Serialize)]
@@ -42,10 +48,15 @@ pub fn router() -> Router<crate::app::state::AppState> {
 }
 
 async fn list_documents(
+    auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<ProjectScopedQuery>,
 ) -> Result<Json<Vec<DocumentSummary>>, ApiError> {
-    let items = repositories::list_documents(&state.persistence.postgres, query.project_id)
+    let project_id =
+        query.project_id.ok_or_else(|| ApiError::BadRequest("project_id is required".into()))?;
+    load_project_and_authorize(&auth, &state, project_id, POLICY_DOCUMENTS_READ).await?;
+
+    let items = repositories::list_documents(&state.persistence.postgres, Some(project_id))
         .await
         .map_err(|_| ApiError::Internal)?
         .into_iter()
@@ -68,7 +79,7 @@ async fn create_document(
     State(state): State<AppState>,
     Json(payload): Json<CreateDocumentRequest>,
 ) -> Result<Json<DocumentSummary>, ApiError> {
-    auth.require_any_scope(&["documents:write", "workspace:admin"])?;
+    load_project_and_authorize(&auth, &state, payload.project_id, POLICY_DOCUMENTS_WRITE).await?;
     if payload.external_key.trim().is_empty() {
         return Err(ApiError::BadRequest("external_key must not be empty".into()));
     }

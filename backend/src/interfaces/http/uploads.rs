@@ -6,18 +6,20 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
+    infra::repositories,
     interfaces::http::{
         auth::AuthContext,
-        content_support::{TextIngestRequest, ingest_plain_text},
+        authorization::{POLICY_DOCUMENTS_WRITE, load_project_and_authorize},
         router_support::ApiError,
     },
 };
 
 #[derive(serde::Serialize)]
 pub struct UploadIngestResponse {
-    pub document_id: Uuid,
+    pub ingestion_job_id: Uuid,
     pub external_key: String,
-    pub chunk_count: usize,
+    pub status: String,
+    pub stage: String,
     pub mime_type: Option<String>,
 }
 
@@ -30,7 +32,7 @@ async fn upload_and_ingest(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> Result<Json<UploadIngestResponse>, ApiError> {
-    auth.require_any_scope(&["documents:write", "workspace:admin"])?;
+    auth.require_any_scope(POLICY_DOCUMENTS_WRITE)?;
     let mut project_id: Option<Uuid> = None;
     let mut source_id: Option<Uuid> = None;
     let mut title: Option<String> = None;
@@ -86,6 +88,7 @@ async fn upload_and_ingest(
     }
 
     let project_id = project_id.ok_or_else(|| ApiError::BadRequest("missing project_id".into()))?;
+    load_project_and_authorize(&auth, &state, project_id, POLICY_DOCUMENTS_WRITE).await?;
     let file_bytes = file_bytes.ok_or_else(|| ApiError::BadRequest("missing file".into()))?;
     let external_key = file_name.unwrap_or_else(|| format!("upload-{}", Uuid::now_v7()));
 
@@ -98,20 +101,45 @@ async fn upload_and_ingest(
         return Err(ApiError::BadRequest("uploaded file is empty".into()));
     }
 
-    let (document_id, chunk_count) = ingest_plain_text(
-        &state,
-        TextIngestRequest {
-            project_id,
-            source_id,
-            external_key: &external_key,
-            title: title.as_deref().or(Some(&external_key)),
-            mime_type: mime_type.as_deref(),
-            text: &text,
-            ingest_mode: "multipart_text_upload_v1",
-            extra_metadata: serde_json::json!({ "file_name": external_key }),
-        },
+    let idempotency_key = format!("upload-ingest:{}:{}", project_id, external_key);
+    let job = repositories::create_ingestion_job(
+        &state.persistence.postgres,
+        project_id,
+        source_id,
+        "upload_ingest",
+        None,
+        None,
+        Some(&idempotency_key),
+        serde_json::json!({
+            "project_id": project_id,
+            "source_id": source_id,
+            "external_key": external_key,
+            "title": title.as_deref().or(Some(&external_key)),
+            "mime_type": mime_type.clone(),
+            "text": text,
+            "ingest_mode": "multipart_text_upload_v1",
+            "extra_metadata": { "file_name": external_key },
+        }),
     )
-    .await?;
+    .await
+    .map_err(|error| match error {
+        sqlx::Error::Database(database_error)
+            if database_error.constraint() == Some("idx_ingestion_job_idempotency_key") =>
+        {
+            ApiError::Conflict("an ingestion job already exists for this idempotency key".into())
+        }
+        _ => ApiError::Internal,
+    })?;
 
-    Ok(Json(UploadIngestResponse { document_id, external_key, chunk_count, mime_type }))
+    Ok(Json(UploadIngestResponse {
+        ingestion_job_id: job.id,
+        external_key,
+        status: job.status,
+        stage: job.stage,
+        mime_type: job
+            .payload_json
+            .get("mime_type")
+            .and_then(serde_json::Value::as_str)
+            .map(std::string::ToString::to_string),
+    }))
 }

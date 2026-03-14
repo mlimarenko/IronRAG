@@ -166,6 +166,9 @@ async fn create_ingestion_job(
         payload.source_id,
         &payload.trigger_kind,
         payload.requested_by.as_deref(),
+        None,
+        None,
+        serde_json::json!({}),
     )
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -223,12 +226,17 @@ async fn retry_ingestion_job(
         return Err(ApiError::BadRequest(format!("ingestion_job {id} is not currently retryable")));
     }
 
+    let retry_idempotency_key =
+        row.idempotency_key.as_deref().map(|key| format!("{key}:retry:{}", Uuid::now_v7()));
     let retried = repositories::create_ingestion_job(
         &state.persistence.postgres,
         row.project_id,
         row.source_id,
         &row.trigger_kind,
         row.requested_by.as_deref(),
+        Some(row.id),
+        retry_idempotency_key.as_deref(),
+        row.payload_json.clone(),
     )
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -283,6 +291,15 @@ mod tests {
             started_at: None,
             finished_at: None,
             created_at: Utc::now(),
+            updated_at: Utc::now(),
+            idempotency_key: None,
+            parent_job_id: None,
+            attempt_count: 0,
+            worker_id: None,
+            lease_expires_at: None,
+            heartbeat_at: None,
+            payload_json: serde_json::json!({}),
+            result_json: serde_json::json!({}),
         }
     }
 

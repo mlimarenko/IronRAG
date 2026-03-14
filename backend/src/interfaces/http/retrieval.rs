@@ -10,7 +10,11 @@ use crate::{
     app::state::AppState,
     infra::{repositories, vector_search},
     integrations::llm::{ChatRequest, EmbeddingRequest},
-    interfaces::http::{auth::AuthContext, router_support::ApiError},
+    interfaces::http::{
+        auth::AuthContext,
+        authorization::{POLICY_QUERY_READ, POLICY_QUERY_RUN, load_project_and_authorize},
+        router_support::ApiError,
+    },
     shared::similarity::cosine_similarity,
 };
 
@@ -105,28 +109,53 @@ pub fn router() -> Router<crate::app::state::AppState> {
 }
 
 async fn list_retrieval_runs(
+    auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<ProjectScopedQuery>,
 ) -> Result<Json<Vec<RetrievalRunSummary>>, ApiError> {
-    let items = repositories::list_retrieval_runs(&state.persistence.postgres, query.project_id)
+    auth.require_any_scope(POLICY_QUERY_READ)?;
+    if let Some(project_id) = query.project_id {
+        load_project_and_authorize(&auth, &state, project_id, POLICY_QUERY_READ).await?;
+    }
+
+    let rows = repositories::list_retrieval_runs(&state.persistence.postgres, query.project_id)
         .await
-        .map_err(|_| ApiError::Internal)?
-        .into_iter()
-        .map(|row| {
-            let (answer_status, weak_grounding, _, _, _warning) =
-                extract_retrieval_debug(&row.debug_json);
-            RetrievalRunSummary {
-                id: row.id,
-                project_id: row.project_id,
-                query_text: row.query_text,
-                model_profile_id: row.model_profile_id,
-                top_k: row.top_k,
-                response_text: row.response_text,
-                answer_status,
-                weak_grounding,
+        .map_err(|_| ApiError::Internal)?;
+    let items = if auth.token_kind == "instance_admin" {
+        rows
+    } else {
+        let workspace_id = auth.workspace_id.ok_or(ApiError::Unauthorized)?;
+        let mut visible = Vec::new();
+        for row in rows {
+            let project =
+                repositories::get_project_by_id(&state.persistence.postgres, row.project_id)
+                    .await
+                    .map_err(|_| ApiError::Internal)?
+                    .ok_or_else(|| {
+                        ApiError::NotFound(format!("project {} not found", row.project_id))
+                    })?;
+            if project.workspace_id == workspace_id {
+                visible.push(row);
             }
-        })
-        .collect();
+        }
+        visible
+    }
+    .into_iter()
+    .map(|row| {
+        let (answer_status, weak_grounding, _, _, _warning) =
+            extract_retrieval_debug(&row.debug_json);
+        RetrievalRunSummary {
+            id: row.id,
+            project_id: row.project_id,
+            query_text: row.query_text,
+            model_profile_id: row.model_profile_id,
+            top_k: row.top_k,
+            response_text: row.response_text,
+            answer_status,
+            weak_grounding,
+        }
+    })
+    .collect();
 
     Ok(Json(items))
 }
@@ -136,7 +165,7 @@ async fn create_retrieval_run(
     State(state): State<AppState>,
     Json(payload): Json<CreateRetrievalRunRequest>,
 ) -> Result<Json<RetrievalRunSummary>, ApiError> {
-    auth.require_any_scope(&["query:run", "workspace:admin"])?;
+    auth.require_any_scope(POLICY_QUERY_RUN)?;
     if payload.query_text.trim().is_empty() {
         return Err(ApiError::BadRequest("query_text must not be empty".into()));
     }
@@ -145,11 +174,8 @@ async fn create_retrieval_run(
         return Err(ApiError::BadRequest("top_k must be greater than zero".into()));
     }
 
-    let project = repositories::get_project_by_id(&state.persistence.postgres, payload.project_id)
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::NotFound(format!("project {} not found", payload.project_id)))?;
-    auth.require_workspace_access(project.workspace_id)?;
+    let _project =
+        load_project_and_authorize(&auth, &state, payload.project_id, POLICY_QUERY_RUN).await?;
 
     let row = repositories::create_retrieval_run(
         &state.persistence.postgres,
@@ -182,18 +208,14 @@ async fn get_retrieval_run_detail(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<RetrievalRunDetail>, ApiError> {
-    auth.require_any_scope(&["query:run", "workspace:admin", "documents:read"])?;
+    auth.require_any_scope(POLICY_QUERY_READ)?;
 
     let row = repositories::get_retrieval_run_by_id(&state.persistence.postgres, id)
         .await
         .map_err(|_| ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("retrieval_run {id} not found")))?;
 
-    let project = repositories::get_project_by_id(&state.persistence.postgres, row.project_id)
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::NotFound(format!("project {} not found", row.project_id)))?;
-    auth.require_workspace_access(project.workspace_id)?;
+    load_project_and_authorize(&auth, &state, row.project_id, POLICY_QUERY_READ).await?;
 
     let (answer_status, weak_grounding, references, matched_chunk_ids, warning) =
         extract_retrieval_debug(&row.debug_json);
@@ -219,14 +241,9 @@ async fn run_query(
     State(state): State<AppState>,
     Json(payload): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, ApiError> {
-    auth.require_any_scope(&["query:run", "workspace:admin"])?;
+    let _project =
+        load_project_and_authorize(&auth, &state, payload.project_id, POLICY_QUERY_RUN).await?;
     validate_query_payload(&payload)?;
-
-    let project = repositories::get_project_by_id(&state.persistence.postgres, payload.project_id)
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::NotFound(format!("project {} not found", payload.project_id)))?;
-    auth.require_workspace_access(project.workspace_id)?;
 
     let query_result = execute_query(&state, &payload).await?;
     persist_query_artifacts(&state, &payload, &query_result).await

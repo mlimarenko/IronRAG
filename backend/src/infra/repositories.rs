@@ -270,6 +270,41 @@ pub struct IngestionJobRow {
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub idempotency_key: Option<String>,
+    pub parent_job_id: Option<Uuid>,
+    pub attempt_count: i32,
+    pub worker_id: Option<String>,
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    pub heartbeat_at: Option<DateTime<Utc>>,
+    pub payload_json: serde_json::Value,
+    pub result_json: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IngestionExecutionPayload {
+    pub project_id: Uuid,
+    pub source_id: Option<Uuid>,
+    pub external_key: String,
+    pub title: Option<String>,
+    pub mime_type: Option<String>,
+    pub text: String,
+    pub ingest_mode: String,
+    pub extra_metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct IngestionJobAttemptRow {
+    pub id: Uuid,
+    pub job_id: Uuid,
+    pub attempt_no: i32,
+    pub worker_id: Option<String>,
+    pub status: String,
+    pub stage: String,
+    pub error_message: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Database repository helper: `list_sources`.
@@ -334,7 +369,7 @@ pub async fn list_ingestion_jobs(
     match project_id {
         Some(project_id) => {
             sqlx::query_as::<_, IngestionJobRow>(
-                "select id, project_id, source_id, trigger_kind, status, stage, requested_by, error_message, started_at, finished_at, created_at
+                "select id, project_id, source_id, trigger_kind, status, stage, requested_by, error_message, started_at, finished_at, created_at, updated_at, idempotency_key, parent_job_id, attempt_count, worker_id, lease_expires_at, heartbeat_at, payload_json, result_json
                  from ingestion_job where project_id = $1 order by created_at desc",
             )
             .bind(project_id)
@@ -343,7 +378,7 @@ pub async fn list_ingestion_jobs(
         }
         None => {
             sqlx::query_as::<_, IngestionJobRow>(
-                "select id, project_id, source_id, trigger_kind, status, stage, requested_by, error_message, started_at, finished_at, created_at
+                "select id, project_id, source_id, trigger_kind, status, stage, requested_by, error_message, started_at, finished_at, created_at, updated_at, idempotency_key, parent_job_id, attempt_count, worker_id, lease_expires_at, heartbeat_at, payload_json, result_json
                  from ingestion_job order by created_at desc",
             )
             .fetch_all(pool)
@@ -362,17 +397,23 @@ pub async fn create_ingestion_job(
     source_id: Option<Uuid>,
     trigger_kind: &str,
     requested_by: Option<&str>,
+    parent_job_id: Option<Uuid>,
+    idempotency_key: Option<&str>,
+    payload_json: serde_json::Value,
 ) -> Result<IngestionJobRow, sqlx::Error> {
     sqlx::query_as::<_, IngestionJobRow>(
-        "insert into ingestion_job (id, project_id, source_id, trigger_kind, status, stage, requested_by)
-         values ($1, $2, $3, $4, 'queued', 'created', $5)
-         returning id, project_id, source_id, trigger_kind, status, stage, requested_by, error_message, started_at, finished_at, created_at",
+        "insert into ingestion_job (id, project_id, source_id, trigger_kind, status, stage, requested_by, parent_job_id, idempotency_key, payload_json)
+         values ($1, $2, $3, $4, 'queued', 'created', $5, $6, $7, $8)
+         returning id, project_id, source_id, trigger_kind, status, stage, requested_by, error_message, started_at, finished_at, created_at, updated_at, idempotency_key, parent_job_id, attempt_count, worker_id, lease_expires_at, heartbeat_at, payload_json, result_json",
     )
     .bind(Uuid::now_v7())
     .bind(project_id)
     .bind(source_id)
     .bind(trigger_kind)
     .bind(requested_by)
+    .bind(parent_job_id)
+    .bind(idempotency_key)
+    .bind(payload_json)
     .fetch_one(pool)
     .await
 }
@@ -973,7 +1014,7 @@ pub async fn get_ingestion_job_by_id(
     id: Uuid,
 ) -> Result<Option<IngestionJobRow>, sqlx::Error> {
     sqlx::query_as::<_, IngestionJobRow>(
-        "select id, project_id, source_id, trigger_kind, status, stage, requested_by, error_message, started_at, finished_at, created_at, updated_at
+        "select id, project_id, source_id, trigger_kind, status, stage, requested_by, error_message, started_at, finished_at, created_at, updated_at, idempotency_key, parent_job_id, attempt_count, worker_id, lease_expires_at, heartbeat_at, payload_json, result_json
          from ingestion_job where id = $1",
     )
     .bind(id)
@@ -985,6 +1026,269 @@ pub async fn get_ingestion_job_by_id(
 ///
 /// # Errors
 /// Returns any `SQLx` error raised while querying the `retrieval_run` row.
+pub fn parse_ingestion_execution_payload(
+    row: &IngestionJobRow,
+) -> Result<IngestionExecutionPayload, serde_json::Error> {
+    serde_json::from_value(row.payload_json.clone())
+}
+
+pub async fn record_ingestion_job_attempt_claim(
+    pool: &PgPool,
+    job_id: Uuid,
+    attempt_no: i32,
+    worker_id: &str,
+    stage: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "insert into ingestion_job_attempt (id, job_id, attempt_no, worker_id, status, stage)
+         values ($1, $2, $3, $4, 'running', $5)
+         on conflict (job_id, attempt_no) do update
+         set worker_id = excluded.worker_id,
+             status = excluded.status,
+             stage = excluded.stage,
+             error_message = null,
+             finished_at = null",
+    )
+    .bind(Uuid::now_v7())
+    .bind(job_id)
+    .bind(attempt_no)
+    .bind(worker_id)
+    .bind(stage)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn mark_ingestion_job_attempt_stage(
+    pool: &PgPool,
+    job_id: Uuid,
+    attempt_no: i32,
+    worker_id: &str,
+    status: &str,
+    stage: &str,
+    error_message: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "update ingestion_job_attempt
+         set worker_id = $4,
+             status = $5,
+             stage = $6,
+             error_message = $7
+         where job_id = $1 and attempt_no = $2 and (worker_id = $3 or worker_id is null)",
+    )
+    .bind(job_id)
+    .bind(attempt_no)
+    .bind(worker_id)
+    .bind(worker_id)
+    .bind(status)
+    .bind(stage)
+    .bind(error_message)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn complete_ingestion_job_attempt(
+    pool: &PgPool,
+    job_id: Uuid,
+    attempt_no: i32,
+    worker_id: &str,
+    stage: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "update ingestion_job_attempt
+         set worker_id = $4,
+             status = 'completed',
+             stage = $5,
+             error_message = null,
+             finished_at = now()
+         where job_id = $1 and attempt_no = $2 and (worker_id = $3 or worker_id is null)",
+    )
+    .bind(job_id)
+    .bind(attempt_no)
+    .bind(worker_id)
+    .bind(worker_id)
+    .bind(stage)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn fail_ingestion_job_attempt(
+    pool: &PgPool,
+    job_id: Uuid,
+    attempt_no: i32,
+    worker_id: &str,
+    stage: &str,
+    error_message: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "update ingestion_job_attempt
+         set worker_id = $4,
+             status = 'retryable_failed',
+             stage = $5,
+             error_message = $6,
+             finished_at = now()
+         where job_id = $1 and attempt_no = $2 and (worker_id = $3 or worker_id is null)",
+    )
+    .bind(job_id)
+    .bind(attempt_no)
+    .bind(worker_id)
+    .bind(worker_id)
+    .bind(stage)
+    .bind(error_message)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn recover_expired_ingestion_job_leases(
+    pool: &PgPool,
+) -> Result<Vec<IngestionJobRow>, sqlx::Error> {
+    sqlx::query_as::<_, IngestionJobRow>(
+        "update ingestion_job
+         set status = 'queued',
+             stage = 'requeued_after_lease_expiry',
+             worker_id = null,
+             lease_expires_at = null,
+             error_message = null,
+             updated_at = now()
+         where status = 'running'
+           and lease_expires_at is not null
+           and lease_expires_at < now()
+         returning id, project_id, source_id, trigger_kind, status, stage, requested_by, error_message, started_at, finished_at, created_at, updated_at, idempotency_key, parent_job_id, attempt_count, worker_id, lease_expires_at, heartbeat_at, payload_json, result_json",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn claim_next_ingestion_job(
+    pool: &PgPool,
+    worker_id: &str,
+    lease_duration: chrono::Duration,
+) -> Result<Option<IngestionJobRow>, sqlx::Error> {
+    let lease_expires_at = Utc::now() + lease_duration;
+    let claimed = sqlx::query_as::<_, IngestionJobRow>(
+        "with candidate as (
+            select id
+            from ingestion_job
+            where status = 'queued'
+              and (lease_expires_at is null or lease_expires_at < now())
+            order by created_at asc
+            limit 1
+            for update skip locked
+         )
+         update ingestion_job as job
+         set status = 'running',
+             stage = case
+                 when job.attempt_count = 0 then 'claimed'
+                 else 'reclaimed_after_lease_expiry'
+             end,
+             started_at = coalesce(job.started_at, now()),
+             finished_at = null,
+             updated_at = now(),
+             attempt_count = job.attempt_count + 1,
+             worker_id = $1,
+             lease_expires_at = $2,
+             heartbeat_at = now()
+         from candidate
+         where job.id = candidate.id
+         returning job.id, job.project_id, job.source_id, job.trigger_kind, job.status, job.stage, job.requested_by, job.error_message, job.started_at, job.finished_at, job.created_at, job.updated_at, job.idempotency_key, job.parent_job_id, job.attempt_count, job.worker_id, job.lease_expires_at, job.heartbeat_at, job.payload_json, job.result_json",
+    )
+    .bind(worker_id)
+    .bind(lease_expires_at)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(job) = &claimed {
+        record_ingestion_job_attempt_claim(pool, job.id, job.attempt_count, worker_id, &job.stage)
+            .await?;
+    }
+
+    Ok(claimed)
+}
+
+pub async fn mark_ingestion_job_stage(
+    pool: &PgPool,
+    job_id: Uuid,
+    worker_id: &str,
+    status: &str,
+    stage: &str,
+    error_message: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "update ingestion_job
+         set status = $2,
+             stage = $3,
+             error_message = $4,
+             worker_id = $5,
+             heartbeat_at = now(),
+             updated_at = now()
+         where id = $1",
+    )
+    .bind(job_id)
+    .bind(status)
+    .bind(stage)
+    .bind(error_message)
+    .bind(worker_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn complete_ingestion_job(
+    pool: &PgPool,
+    job_id: Uuid,
+    worker_id: &str,
+    result_json: serde_json::Value,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "update ingestion_job
+         set status = 'completed',
+             stage = 'completed',
+             worker_id = $2,
+             error_message = null,
+             finished_at = now(),
+             heartbeat_at = now(),
+             lease_expires_at = null,
+             result_json = $3,
+             updated_at = now()
+         where id = $1",
+    )
+    .bind(job_id)
+    .bind(worker_id)
+    .bind(result_json)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn fail_ingestion_job(
+    pool: &PgPool,
+    job_id: Uuid,
+    worker_id: &str,
+    error_message: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "update ingestion_job
+         set status = 'retryable_failed',
+             stage = 'failed',
+             worker_id = $2,
+             error_message = $3,
+             finished_at = now(),
+             heartbeat_at = now(),
+             lease_expires_at = null,
+             updated_at = now()
+         where id = $1",
+    )
+    .bind(job_id)
+    .bind(worker_id)
+    .bind(error_message)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn get_retrieval_run_by_id(
     pool: &PgPool,
     id: Uuid,

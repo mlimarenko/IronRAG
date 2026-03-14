@@ -7,7 +7,8 @@ use crate::{
     infra::repositories,
     interfaces::http::{
         auth::AuthContext,
-        content_support::{TextIngestRequest, embed_project_chunks_with_usage, ingest_plain_text},
+        authorization::{POLICY_DOCUMENTS_WRITE, POLICY_QUERY_READ, load_project_and_authorize},
+        content_support::embed_project_chunks_with_usage,
         router_support::ApiError,
     },
 };
@@ -23,8 +24,9 @@ pub struct IngestTextRequest {
 
 #[derive(Serialize)]
 pub struct IngestTextResponse {
-    pub document_id: Uuid,
-    pub chunk_count: usize,
+    pub ingestion_job_id: Uuid,
+    pub status: String,
+    pub stage: String,
 }
 
 #[derive(Deserialize)]
@@ -71,7 +73,7 @@ async fn ingest_text(
     State(state): State<AppState>,
     Json(payload): Json<IngestTextRequest>,
 ) -> Result<Json<IngestTextResponse>, ApiError> {
-    auth.require_any_scope(&["documents:write", "workspace:admin"])?;
+    load_project_and_authorize(&auth, &state, payload.project_id, POLICY_DOCUMENTS_WRITE).await?;
     if payload.external_key.trim().is_empty() {
         return Err(ApiError::BadRequest("external_key must not be empty".into()));
     }
@@ -79,22 +81,38 @@ async fn ingest_text(
         return Err(ApiError::BadRequest("text must not be empty".into()));
     }
 
-    let (document_id, chunk_count) = ingest_plain_text(
-        &state,
-        TextIngestRequest {
-            project_id: payload.project_id,
-            source_id: payload.source_id,
-            external_key: &payload.external_key,
-            title: payload.title.as_deref(),
-            mime_type: Some("text/plain"),
-            text: &payload.text,
-            ingest_mode: "text_chunking_v1",
-            extra_metadata: serde_json::json!({}),
-        },
+    let idempotency_key =
+        format!("ingest-text:{}:{}", payload.project_id, payload.external_key.trim());
+    let job = repositories::create_ingestion_job(
+        &state.persistence.postgres,
+        payload.project_id,
+        payload.source_id,
+        "text_ingest",
+        None,
+        None,
+        Some(&idempotency_key),
+        serde_json::json!({
+            "project_id": payload.project_id,
+            "source_id": payload.source_id,
+            "external_key": payload.external_key,
+            "title": payload.title,
+            "mime_type": "text/plain",
+            "text": payload.text,
+            "ingest_mode": "text_chunking_v1",
+            "extra_metadata": {},
+        }),
     )
-    .await?;
+    .await
+    .map_err(|error| match error {
+        sqlx::Error::Database(database_error)
+            if database_error.constraint() == Some("idx_ingestion_job_idempotency_key") =>
+        {
+            ApiError::Conflict("an ingestion job already exists for this idempotency key".into())
+        }
+        _ => ApiError::Internal,
+    })?;
 
-    Ok(Json(IngestTextResponse { document_id, chunk_count }))
+    Ok(Json(IngestTextResponse { ingestion_job_id: job.id, status: job.status, stage: job.stage }))
 }
 
 async fn search_chunks(
@@ -102,7 +120,7 @@ async fn search_chunks(
     State(state): State<AppState>,
     Json(payload): Json<SearchChunksRequest>,
 ) -> Result<Json<Vec<ChunkResult>>, ApiError> {
-    auth.require_any_scope(&["documents:read", "query:run", "workspace:admin"])?;
+    load_project_and_authorize(&auth, &state, payload.project_id, POLICY_QUERY_READ).await?;
     if payload.query_text.trim().is_empty() {
         return Err(ApiError::BadRequest("query_text must not be empty".into()));
     }
@@ -132,7 +150,9 @@ async fn embed_project_chunks(
     State(state): State<AppState>,
     Json(payload): Json<EmbedProjectChunksRequest>,
 ) -> Result<Json<EmbedProjectChunksResponse>, ApiError> {
-    auth.require_any_scope(&["documents:write", "workspace:admin"])?;
+    let project =
+        load_project_and_authorize(&auth, &state, payload.project_id, POLICY_DOCUMENTS_WRITE)
+            .await?;
 
     let (provider_kind, model_name) = match payload.embedding_model_profile_id {
         Some(model_profile_id) => {
@@ -143,6 +163,9 @@ async fn embed_project_chunks(
             .await
             .map_err(|_| ApiError::Internal)?
             .ok_or_else(|| ApiError::NotFound("embedding model_profile not found".into()))?;
+            if profile.workspace_id != project.workspace_id {
+                return Err(ApiError::Unauthorized);
+            }
             let provider = repositories::get_provider_account_by_id(
                 &state.persistence.postgres,
                 profile.provider_account_id,
@@ -150,6 +173,9 @@ async fn embed_project_chunks(
             .await
             .map_err(|_| ApiError::Internal)?
             .ok_or_else(|| ApiError::NotFound("embedding provider_account not found".into()))?;
+            if provider.workspace_id != project.workspace_id {
+                return Err(ApiError::Unauthorized);
+            }
             (provider.provider_kind, profile.model_name)
         }
         None => (payload.provider_kind.clone(), payload.model_name.clone()),

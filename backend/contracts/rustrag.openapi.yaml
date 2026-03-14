@@ -23,6 +23,9 @@ tags:
   - name: documents
   - name: content
   - name: retrieval
+  - name: product
+  - name: graph
+  - name: integrations
   - name: usage
 paths:
   /v1/health:
@@ -65,6 +68,26 @@ paths:
               schema:
                 $ref: '#/components/schemas/VersionResponse'
   /v1/auth/tokens:
+    get:
+      tags: [auth]
+      summary: List API tokens
+      operationId: listTokens
+      description: Requires `workspace:admin` scope or an `instance_admin` token. Instance admin callers may optionally filter by `workspace_id`; workspace-scoped tokens are implicitly limited to their own workspace even if the query parameter is omitted.
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      responses:
+        '200':
+          description: Visible API token summaries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TokenSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
     post:
       tags: [auth]
       summary: Mint an API token
@@ -85,6 +108,72 @@ paths:
                 $ref: '#/components/schemas/TokenCreateResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/auth/bootstrap-token:
+    post:
+      tags: [auth]
+      summary: Mint an API token using the bootstrap secret
+      operationId: createBootstrapToken
+      security: []
+      description: |
+        Requires a `bootstrap_secret` field in the request body matching the backend
+        `RJUSTRAG_BOOTSTRAP_TOKEN` or `RUSTRAG_BOOTSTRAP_TOKEN` environment variable.
+        This route is intended for initial setup when no regular API token exists yet.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BootstrapTokenRequest'
+      responses:
+        '200':
+          description: Newly minted API token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenCreateResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/auth/tokens/{id}:
+    get:
+      tags: [auth]
+      summary: Get API token summary
+      operationId: getToken
+      description: Requires `workspace:admin` scope or an `instance_admin` token. Workspace-scoped tokens may only access tokens from their own workspace.
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Token summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [auth]
+      summary: Revoke API token
+      operationId: revokeToken
+      description: Requires `workspace:admin` scope or an `instance_admin` token. Workspace-scoped tokens may only revoke tokens from their own workspace.
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '204':
+          description: Token revoked
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
   /v1/workspaces:
@@ -319,6 +408,198 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalError'
+  /v1/provider-defaults/{workspace_id}:
+    get:
+      tags: [providers]
+      summary: Get onboarding provider defaults summary
+      operationId: getProviderDefaultsSummary
+      description: Requires `providers:admin`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access their own workspace.
+      parameters:
+        - name: workspace_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Workspace onboarding defaults summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnboardingDefaultsSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/projects/{project_id}/defaults:
+    get:
+      tags: [providers, projects]
+      summary: Get project provider defaults
+      operationId: getProjectDefaults
+      description: Requires one of `projects:write`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Project defaults
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectDefaultsDto'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [providers, projects]
+      summary: Update project provider defaults
+      operationId: updateProjectDefaults
+      description: Requires `projects:write`, `workspace:admin`, or an `instance_admin` token. Validates that any referenced provider account and model profiles belong to the project's workspace. The backend currently persists only chat and embedding default profile ids on the project row; provider account, rerank model, and retrieval/chunk settings are validated and echoed in the response but are not persisted.
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectDefaultsUpsertRequest'
+      responses:
+        '200':
+          description: Updated project defaults
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectDefaultsDto'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/integrations/{workspace_id}:
+    get:
+      tags: [integrations]
+      summary: Get integrations workspace summary
+      operationId: getIntegrationsWorkspaceSummary
+      description: Requires `providers:admin`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access their own workspace. Returns up to 5 example projects and all workspace API tokens.
+      parameters:
+        - name: workspace_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Workspace integrations summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntegrationsWorkspaceSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/integrations/{workspace_id}/examples:
+    get:
+      tags: [integrations]
+      summary: List example projects for integrations setup
+      operationId: listWorkspaceExampleProjects
+      description: Requires `providers:admin`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access their own workspace.
+      parameters:
+        - name: workspace_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 25
+      responses:
+        '200':
+          description: Example project list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/IntegrationExampleProjectSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/integrations/{workspace_id}/tokens/{id}:
+    delete:
+      tags: [integrations, auth]
+      summary: Revoke a workspace API token from the integrations surface
+      operationId: revokeWorkspaceToken
+      description: Requires `workspace:admin` scope or an `instance_admin` token. The token must belong to the specified workspace.
+      parameters:
+        - name: workspace_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/id'
+      responses:
+        '204':
+          description: Token revoked
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/integrations-products/{workspace_id}:
+    get:
+      tags: [integrations]
+      summary: Get integrations product snapshot
+      operationId: getIntegrationsProduct
+      description: Requires `providers:admin`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access their own workspace. Response wraps the snapshot under a top-level `snapshot` field.
+      parameters:
+        - name: workspace_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Integrations product snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntegrationsProductResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /v1/sources:
     get:
       tags: [ingestion]
@@ -493,9 +774,13 @@ paths:
   /v1/content/ingest-text:
     post:
       tags: [content]
-      summary: Ingest plain text and create chunks
+      summary: Queue plain text for ingestion
       operationId: ingestText
-      description: Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
+      description: |
+        Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
+
+        The current backend enqueues an ingestion job and returns its queued lifecycle state; it does not synchronously create a document/chunk result in this response.
+        Workspace-scoped tokens may only queue jobs for projects in their own workspace.
       requestBody:
         required: true
         content:
@@ -504,7 +789,7 @@ paths:
               $ref: '#/components/schemas/IngestTextRequest'
       responses:
         '200':
-          description: Text ingested and chunked
+          description: Ingestion job accepted and queued
           content:
             application/json:
               schema:
@@ -513,6 +798,10 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalError'
   /v1/content/search-chunks:
@@ -599,12 +888,15 @@ paths:
   /v1/uploads/ingest:
     post:
       tags: [content]
-      summary: Upload a UTF-8 text-like file and ingest it
+      summary: Upload a UTF-8 text-like file and queue ingestion
       operationId: uploadAndIngest
       description: |
         Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
 
-        Current implementation only supports UTF-8 text-like uploads. Expected multipart fields:
+        Current implementation only supports UTF-8 text-like uploads. The backend decodes the uploaded body as UTF-8 text, enqueues an ingestion job, and returns the queued job metadata rather than a completed document/chunk result.
+        Workspace-scoped tokens may only queue jobs for projects in their own workspace.
+
+        Expected multipart fields:
         - `project_id` (required)
         - `source_id` (optional)
         - `title` (optional)
@@ -630,7 +922,7 @@ paths:
                   format: binary
       responses:
         '200':
-          description: Uploaded file ingested successfully
+          description: Ingestion job accepted and queued for the uploaded file
           content:
             application/json:
               schema:
@@ -639,6 +931,10 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalError'
   /v1/retrieval-runs:
@@ -730,6 +1026,278 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/QueryResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/product/projects/{id}:
+    get:
+      tags: [product, projects]
+      summary: Get product-oriented project overview
+      operationId: getProductProjectOverview
+      description: Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Project overview with readiness, query contract, citations, and capability hints
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductProjectOverviewDto'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/product/projects/{id}/diagnostics:
+    get:
+      tags: [product, projects]
+      summary: Get project diagnostics
+      operationId: getProductProjectDiagnostics
+      description: Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Project diagnostics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductProjectDiagnosticsDto'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/product/projects/{id}/query-contract:
+    get:
+      tags: [product, projects]
+      summary: Get product query contract description
+      operationId: getProductProjectQueryContract
+      description: Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Query contract descriptor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductQueryContractDto'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/product/documents/{id}:
+    get:
+      tags: [product, documents]
+      summary: Get product-oriented document overview
+      operationId: getProductDocumentOverview
+      description: Requires `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access documents in their own workspace. Usage and cost attribution are currently exposed at project scope because per-document attribution is not persisted yet.
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Document overview
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductDocumentOverviewDto'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/product/documents/{id}/diagnostics:
+    get:
+      tags: [product, documents]
+      summary: Get document diagnostics
+      operationId: getProductDocumentDiagnostics
+      description: Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access documents in their own workspace.
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Document diagnostics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductDocumentDiagnosticsDto'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/graph-products/{project_id}:
+    get:
+      tags: [graph, product]
+      summary: Get graph product snapshot
+      operationId: getGraphProduct
+      description: Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Graph snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GraphProductResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/graph-products/{project_id}/summary:
+    get:
+      tags: [graph, product]
+      summary: Get graph project summary
+      operationId: getGraphSummary
+      description: Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Graph summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GraphProjectSummaryResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/graph-products/{project_id}/search:
+    get:
+      tags: [graph, product]
+      summary: Search graph entities and relations
+      operationId: searchGraph
+      description: Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Query parameter `q` must be non-empty.
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 50
+      responses:
+        '200':
+          description: Graph search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GraphSearchResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/graph-products/{project_id}/entities/{entity_id}:
+    get:
+      tags: [graph, product]
+      summary: Get graph entity detail
+      operationId: getGraphEntityDetail
+      description: Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: entity_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Graph entity detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GraphEntityDetailResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/graph-products/{project_id}/entities/{entity_id}/subgraph:
+    get:
+      tags: [graph, product]
+      summary: Get a bounded subgraph around an entity
+      operationId: getGraphSubgraph
+      description: Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Depth defaults to 1 and must be <= 3.
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: entity_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: depth
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            maximum: 3
+      responses:
+        '200':
+          description: Graph subgraph response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GraphSubgraphResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -855,6 +1423,12 @@ components:
             type: string
     NotFound:
       description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorBody'
+    Conflict:
+      description: Conflict
       content:
         application/json:
           schema:
@@ -1333,14 +1907,17 @@ components:
 
     IngestTextResponse:
       type: object
-      required: [document_id, chunk_count]
+      required: [ingestion_job_id, status, stage]
       properties:
-        document_id:
+        ingestion_job_id:
           type: string
           format: uuid
-        chunk_count:
-          type: integer
-          minimum: 0
+        status:
+          type: string
+          description: Current ingestion job status, initially `queued`.
+        stage:
+          type: string
+          description: Current ingestion job stage, initially `queued`.
 
     SearchChunksRequest:
       type: object
@@ -1428,16 +2005,19 @@ components:
 
     UploadIngestResponse:
       type: object
-      required: [document_id, external_key, chunk_count]
+      required: [ingestion_job_id, external_key, status, stage]
       properties:
-        document_id:
+        ingestion_job_id:
           type: string
           format: uuid
         external_key:
           type: string
-        chunk_count:
-          type: integer
-          minimum: 0
+        status:
+          type: string
+          description: Current ingestion job status, initially `queued`.
+        stage:
+          type: string
+          description: Current ingestion job stage, initially `queued`.
         mime_type:
           type: [string, 'null']
 
@@ -1651,3 +2231,767 @@ components:
         pricing_snapshot_json:
           type: object
           additionalProperties: true
+
+
+    BootstrapTokenRequest:
+      type: object
+      required: [token_kind, label, scopes]
+      properties:
+        workspace_id:
+          type: [string, 'null']
+          format: uuid
+        token_kind:
+          type: string
+          example: workspace_token
+        label:
+          type: string
+          example: bootstrap-local
+        scopes:
+          type: array
+          items:
+            type: string
+        bootstrap_secret:
+          type: [string, 'null']
+          description: Must match the backend bootstrap token environment variable.
+
+    TokenSummary:
+      type: object
+      required: [id, token_kind, label, status, scopes, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: [string, 'null']
+          format: uuid
+        token_kind:
+          type: string
+        label:
+          type: string
+        status:
+          type: string
+          example: active
+        scopes:
+          type: array
+          items:
+            type: string
+        last_used_at:
+          type: [string, 'null']
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    IntegrationExampleProjectSummary:
+      type: object
+      required: [id, workspace_id, slug, name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        slug:
+          type: string
+        name:
+          type: string
+
+    IntegrationTokenSummary:
+      allOf:
+        - $ref: '#/components/schemas/TokenSummary'
+
+    IntegrationsWorkspaceSummary:
+      type: object
+      required: [workspace_id, example_projects, api_tokens]
+      properties:
+        workspace_id:
+          type: string
+          format: uuid
+        example_projects:
+          type: array
+          items:
+            $ref: '#/components/schemas/IntegrationExampleProjectSummary'
+        api_tokens:
+          type: array
+          items:
+            $ref: '#/components/schemas/IntegrationTokenSummary'
+
+    ProviderDefaultProfileDto:
+      type: object
+      required: [profile_kind, model_name]
+      properties:
+        profile_kind:
+          type: string
+          enum: [chat, embedding, rerank]
+        model_name:
+          type: string
+        temperature:
+          type: [number, 'null']
+        max_output_tokens:
+          type: [integer, 'null']
+          format: int32
+
+    ProviderDefaultTemplateDto:
+      type: object
+      required: [provider_kind, label, chat_profile]
+      properties:
+        provider_kind:
+          type: string
+          enum: [open_ai, deep_seek, open_ai_compatible]
+        label:
+          type: string
+        api_base_url:
+          type: [string, 'null']
+          format: uri
+        chat_profile:
+          $ref: '#/components/schemas/ProviderDefaultProfileDto'
+        embedding_profile:
+          oneOf:
+            - $ref: '#/components/schemas/ProviderDefaultProfileDto'
+            - type: 'null'
+        rerank_profile:
+          oneOf:
+            - $ref: '#/components/schemas/ProviderDefaultProfileDto'
+            - type: 'null'
+
+    OnboardingDefaultsSummary:
+      type: object
+      required: [workspace_id, provider_defaults, project_defaults, persistence_state]
+      properties:
+        workspace_id:
+          type: string
+          format: uuid
+        provider_defaults:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProviderDefaultTemplateDto'
+        project_defaults:
+          $ref: '#/components/schemas/ProjectDefaultsDto'
+        persistence_state:
+          type: string
+        warning:
+          type: [string, 'null']
+
+    ProjectDefaultsUpsertRequest:
+      type: object
+      properties:
+        provider_account_id:
+          type: [string, 'null']
+          format: uuid
+        chat_model_profile_id:
+          type: [string, 'null']
+          format: uuid
+        embedding_model_profile_id:
+          type: [string, 'null']
+          format: uuid
+        rerank_model_profile_id:
+          type: [string, 'null']
+          format: uuid
+        retrieval_top_k:
+          type: [integer, 'null']
+          format: int32
+        chunk_size:
+          type: [integer, 'null']
+          format: int32
+        chunk_overlap:
+          type: [integer, 'null']
+          format: int32
+
+    ProjectDefaultsDto:
+      type: object
+      required: [workspace_id, retrieval_top_k, chunk_size, chunk_overlap]
+      properties:
+        workspace_id:
+          type: string
+          format: uuid
+        project_id:
+          type: [string, 'null']
+          format: uuid
+        provider_account_id:
+          type: [string, 'null']
+          format: uuid
+        chat_model_profile_id:
+          type: [string, 'null']
+          format: uuid
+        embedding_model_profile_id:
+          type: [string, 'null']
+          format: uuid
+        rerank_model_profile_id:
+          type: [string, 'null']
+          format: uuid
+        retrieval_top_k:
+          type: integer
+          format: int32
+        chunk_size:
+          type: integer
+          format: int32
+        chunk_overlap:
+          type: integer
+          format: int32
+
+    PlaceholderCapabilityDto:
+      type: object
+      required: [implemented, status, reason]
+      properties:
+        implemented:
+          type: boolean
+        status:
+          type: string
+          enum: [ready, partial, planned]
+        reason:
+          type: string
+
+    CitationReferenceDto:
+      type: object
+      required: [kind, label]
+      properties:
+        kind:
+          type: string
+        label:
+          type: string
+        chunk_id:
+          type: [string, 'null']
+          format: uuid
+        document_id:
+          type: [string, 'null']
+          format: uuid
+        source_id:
+          type: [string, 'null']
+          format: uuid
+        score:
+          type: [number, 'null']
+          format: double
+
+    RetrievalDebugMetadataDto:
+      type: object
+      required: [matched_chunk_ids, references, answer_status, weak_grounding]
+      properties:
+        matched_chunk_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        references:
+          type: array
+          items:
+            type: string
+        warning:
+          type: [string, 'null']
+        answer_status:
+          type: string
+        weak_grounding:
+          type: boolean
+
+    OperationalObservabilityDto:
+      type: object
+      required: [trace_hint, metrics_hint, logging_hint]
+      properties:
+        trace_hint:
+          type: string
+        metrics_hint:
+          type: string
+        logging_hint:
+          type: string
+
+    ProductProjectReadinessDto:
+      type: object
+      required: [project_id, workspace_id, documents, sources, ingestion_jobs, ready_for_query, indexing_state]
+      properties:
+        project_id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        documents:
+          type: integer
+          minimum: 0
+        sources:
+          type: integer
+          minimum: 0
+        ingestion_jobs:
+          type: integer
+          minimum: 0
+        ready_for_query:
+          type: boolean
+        indexing_state:
+          type: string
+
+    ProductQueryContractDto:
+      type: object
+      required: [route, method, request_fields, response_fields, citation_fields, debug_fields]
+      properties:
+        route:
+          type: string
+        method:
+          type: string
+        request_fields:
+          type: array
+          items:
+            type: string
+        response_fields:
+          type: array
+          items:
+            type: string
+        citation_fields:
+          type: array
+          items:
+            type: string
+        debug_fields:
+          type: array
+          items:
+            type: string
+
+    ProductProjectCapabilitiesDto:
+      type: object
+      required: [query_contract, citations, retrieval_debug_metadata, diagnostics]
+      properties:
+        query_contract:
+          $ref: '#/components/schemas/PlaceholderCapabilityDto'
+        citations:
+          $ref: '#/components/schemas/PlaceholderCapabilityDto'
+        retrieval_debug_metadata:
+          $ref: '#/components/schemas/PlaceholderCapabilityDto'
+        diagnostics:
+          $ref: '#/components/schemas/PlaceholderCapabilityDto'
+
+    ProductProjectOverviewDto:
+      type: object
+      required: [id, workspace_id, slug, name, readiness, query_contract, citations, observability, capabilities]
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        slug:
+          type: string
+        name:
+          type: string
+        description:
+          type: [string, 'null']
+        readiness:
+          $ref: '#/components/schemas/ProductProjectReadinessDto'
+        query_contract:
+          $ref: '#/components/schemas/ProductQueryContractDto'
+        citations:
+          type: array
+          items:
+            $ref: '#/components/schemas/CitationReferenceDto'
+        retrieval_debug:
+          oneOf:
+            - $ref: '#/components/schemas/RetrievalDebugMetadataDto'
+            - type: 'null'
+        observability:
+          $ref: '#/components/schemas/OperationalObservabilityDto'
+        capabilities:
+          $ref: '#/components/schemas/ProductProjectCapabilitiesDto'
+
+    ProductProjectDiagnosticsDto:
+      type: object
+      required: [project_id, workspace_id, observability]
+      properties:
+        project_id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        latest_ingestion_job:
+          oneOf:
+            - $ref: '#/components/schemas/IngestionJobSummary'
+            - type: 'null'
+        latest_retrieval_run:
+          oneOf:
+            - $ref: '#/components/schemas/RetrievalRunSummary'
+            - type: 'null'
+        retrieval_debug:
+          oneOf:
+            - $ref: '#/components/schemas/RetrievalDebugMetadataDto'
+            - type: 'null'
+        observability:
+          $ref: '#/components/schemas/OperationalObservabilityDto'
+
+    ProductDocumentCapabilitiesDto:
+      type: object
+      required: [provider_usage_attribution, cost_accounting, workspace_project_attribution, citations]
+      properties:
+        provider_usage_attribution:
+          $ref: '#/components/schemas/PlaceholderCapabilityDto'
+        cost_accounting:
+          $ref: '#/components/schemas/PlaceholderCapabilityDto'
+        workspace_project_attribution:
+          $ref: '#/components/schemas/PlaceholderCapabilityDto'
+        citations:
+          $ref: '#/components/schemas/PlaceholderCapabilityDto'
+
+    ProductDocumentOverviewDto:
+      type: object
+      required: [id, project_id, external_key, usage, costs, capabilities]
+      properties:
+        id:
+          type: string
+          format: uuid
+        project_id:
+          type: string
+          format: uuid
+        source_id:
+          type: [string, 'null']
+          format: uuid
+        external_key:
+          type: string
+        title:
+          type: [string, 'null']
+        mime_type:
+          type: [string, 'null']
+        checksum:
+          type: [string, 'null']
+        usage:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsageEventSummary'
+        costs:
+          type: array
+          items:
+            $ref: '#/components/schemas/CostLedgerSummary'
+        capabilities:
+          $ref: '#/components/schemas/ProductDocumentCapabilitiesDto'
+
+    ProductDocumentDiagnosticsDto:
+      type: object
+      required: [document_id, project_id, project_workspace_id, ingestion_jobs, citations, usage, costs]
+      properties:
+        document_id:
+          type: string
+          format: uuid
+        project_id:
+          type: string
+          format: uuid
+        project_workspace_id:
+          type: string
+          format: uuid
+        ingestion_jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/IngestionJobSummary'
+        citations:
+          type: array
+          items:
+            $ref: '#/components/schemas/CitationReferenceDto'
+        usage:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsageEventSummary'
+        costs:
+          type: array
+          items:
+            $ref: '#/components/schemas/CostLedgerSummary'
+
+    GraphCoverageSummary:
+      type: object
+      required: [project_id, entity_count, relation_count, extraction_runs, status]
+      properties:
+        project_id:
+          type: string
+          format: uuid
+        entity_count:
+          type: integer
+          minimum: 0
+        relation_count:
+          type: integer
+          minimum: 0
+        extraction_runs:
+          type: integer
+          minimum: 0
+        status:
+          type: string
+        warning:
+          type: [string, 'null']
+
+    GraphEntitySummary:
+      type: object
+      required: [id, project_id, canonical_name, source_chunk_count]
+      properties:
+        id:
+          type: string
+          format: uuid
+        project_id:
+          type: string
+          format: uuid
+        canonical_name:
+          type: string
+        entity_type:
+          type: [string, 'null']
+        source_chunk_count:
+          type: integer
+          minimum: 0
+
+    GraphRelationSummary:
+      type: object
+      required: [id, project_id, relation_type, from_entity_id, to_entity_id, source_chunk_count]
+      properties:
+        id:
+          type: string
+          format: uuid
+        project_id:
+          type: string
+          format: uuid
+        relation_type:
+          type: string
+        from_entity_id:
+          type: string
+          format: uuid
+        to_entity_id:
+          type: string
+          format: uuid
+        source_chunk_count:
+          type: integer
+          minimum: 0
+
+    GraphProductSnapshot:
+      type: object
+      required: [project_id, coverage, entities, relations, generated_at]
+      properties:
+        project_id:
+          type: string
+          format: uuid
+        coverage:
+          $ref: '#/components/schemas/GraphCoverageSummary'
+        entities:
+          type: array
+          items:
+            $ref: '#/components/schemas/GraphEntitySummary'
+        relations:
+          type: array
+          items:
+            $ref: '#/components/schemas/GraphRelationSummary'
+        generated_at:
+          type: string
+          format: date-time
+
+    GraphProductResponse:
+      type: object
+      required: [snapshot]
+      properties:
+        snapshot:
+          $ref: '#/components/schemas/GraphProductSnapshot'
+
+    GraphKindCount:
+      type: object
+      required: [name, count]
+      properties:
+        name:
+          type: string
+        count:
+          type: integer
+          minimum: 0
+
+    GraphProjectSummaryResponse:
+      type: object
+      required: [project_id, coverage, entity_kinds, relation_kinds, top_entities, sample_relations, generated_at]
+      properties:
+        project_id:
+          type: string
+          format: uuid
+        coverage:
+          $ref: '#/components/schemas/GraphCoverageSummary'
+        entity_kinds:
+          type: array
+          items:
+            $ref: '#/components/schemas/GraphKindCount'
+        relation_kinds:
+          type: array
+          items:
+            $ref: '#/components/schemas/GraphKindCount'
+        top_entities:
+          type: array
+          items:
+            $ref: '#/components/schemas/GraphEntitySummary'
+        sample_relations:
+          type: array
+          items:
+            $ref: '#/components/schemas/GraphRelationSummary'
+        generated_at:
+          type: string
+          format: date-time
+
+    GraphEntitySearchHit:
+      type: object
+      required: [entity, match_reasons]
+      properties:
+        entity:
+          $ref: '#/components/schemas/GraphEntitySummary'
+        match_reasons:
+          type: array
+          items:
+            type: string
+
+    GraphRelationSearchHit:
+      type: object
+      required: [relation, from_entity_name, to_entity_name, match_reasons]
+      properties:
+        relation:
+          $ref: '#/components/schemas/GraphRelationSummary'
+        from_entity_name:
+          type: string
+        to_entity_name:
+          type: string
+        match_reasons:
+          type: array
+          items:
+            type: string
+
+    GraphSearchResponse:
+      type: object
+      required: [project_id, query, searched_fields, result_count, entity_results, relation_results, generated_at]
+      properties:
+        project_id:
+          type: string
+          format: uuid
+        query:
+          type: string
+        searched_fields:
+          type: array
+          items:
+            type: string
+        result_count:
+          type: integer
+          minimum: 0
+        entity_results:
+          type: array
+          items:
+            $ref: '#/components/schemas/GraphEntitySearchHit'
+        relation_results:
+          type: array
+          items:
+            $ref: '#/components/schemas/GraphRelationSearchHit'
+        generated_at:
+          type: string
+          format: date-time
+        warning:
+          type: [string, 'null']
+
+    GraphRelationDetail:
+      type: object
+      required: [relation, from_entity_name, to_entity_name]
+      properties:
+        relation:
+          $ref: '#/components/schemas/GraphRelationSummary'
+        from_entity_name:
+          type: string
+        to_entity_name:
+          type: string
+
+    GraphEntityDetailResponse:
+      type: object
+      required: [project_id, entity, aliases, source_document_ids, source_chunk_ids, observed_relation_count, incoming_relations, outgoing_relations, generated_at]
+      properties:
+        project_id:
+          type: string
+          format: uuid
+        entity:
+          $ref: '#/components/schemas/GraphEntitySummary'
+        aliases:
+          type: array
+          items:
+            type: string
+        source_document_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        source_chunk_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        observed_relation_count:
+          type: integer
+          minimum: 0
+        incoming_relations:
+          type: array
+          items:
+            $ref: '#/components/schemas/GraphRelationDetail'
+        outgoing_relations:
+          type: array
+          items:
+            $ref: '#/components/schemas/GraphRelationDetail'
+        generated_at:
+          type: string
+          format: date-time
+        warning:
+          type: [string, 'null']
+
+    GraphSubgraphResponse:
+      type: object
+      required: [project_id, focus_entity_id, depth, entity_count, relation_count, entities, relations, generated_at]
+      properties:
+        project_id:
+          type: string
+          format: uuid
+        focus_entity_id:
+          type: string
+          format: uuid
+        depth:
+          type: integer
+          minimum: 0
+        entity_count:
+          type: integer
+          minimum: 0
+        relation_count:
+          type: integer
+          minimum: 0
+        entities:
+          type: array
+          items:
+            $ref: '#/components/schemas/GraphEntitySummary'
+        relations:
+          type: array
+          items:
+            $ref: '#/components/schemas/GraphRelationDetail'
+        generated_at:
+          type: string
+          format: date-time
+        warning:
+          type: [string, 'null']
+
+    IntegrationsProductSnapshot:
+      type: object
+      required: [workspace_id, provider_accounts, model_profiles, projects, available_scopes, generated_at]
+      properties:
+        workspace_id:
+          type: string
+          format: uuid
+        provider_accounts:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProviderAccountSummary'
+        model_profiles:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModelProfileSummary'
+        projects:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProjectSummary'
+        available_scopes:
+          type: array
+          items:
+            type: string
+        generated_at:
+          type: string
+          format: date-time
+        warning:
+          type: [string, 'null']
+
+    IntegrationsProductResponse:
+      type: object
+      required: [snapshot]
+      properties:
+        snapshot:
+          $ref: '#/components/schemas/IntegrationsProductSnapshot'

@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 
-use crate::interfaces::http;
+use crate::{interfaces::http, services::ingestion_worker};
 
 /// Boots the HTTP server and serves the `RustRAG` API.
 ///
@@ -18,6 +18,9 @@ pub async fn run() -> anyhow::Result<()> {
     crate::shared::telemetry::init(&config.log_filter);
 
     let state = state::AppState::new(config.clone()).await?;
+    let shutdown = shutdown::ShutdownSignal::new();
+    let worker_handle =
+        ingestion_worker::spawn_ingestion_worker(state.clone(), shutdown.subscribe());
     let router = Router::new()
         .nest("/v1", http::router())
         .layer(CorsLayer::permissive())
@@ -27,6 +30,11 @@ pub async fn run() -> anyhow::Result<()> {
     let addr: SocketAddr = config.bind_addr.parse()?;
     info!(service = %config.service_name, environment = %config.environment, %addr, "starting rustrag backend");
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, router).await?;
+    let server = axum::serve(listener, router).with_graceful_shutdown(async move {
+        let _ = tokio::signal::ctrl_c().await;
+    });
+    server.await?;
+    shutdown.trigger();
+    let _ = worker_handle.await;
     Ok(())
 }
