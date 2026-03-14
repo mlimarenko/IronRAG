@@ -16,9 +16,9 @@ const routeMeta = computed(() => {
   }
 
   return {
-    workspaceLabel: meta.workspaceLabel ?? 'Default workspace',
-    projectLabel: meta.projectLabel ?? 'Project not selected',
-    environmentLabel: meta.environmentLabel ?? 'API boundary ready',
+    workspaceLabel: meta.workspaceLabel ?? 'Current workspace',
+    projectLabel: meta.projectLabel ?? 'Current project',
+    environmentLabel: meta.environmentLabel ?? 'Ready to work',
     environmentStatus: meta.environmentStatus ?? 'Healthy',
   }
 })

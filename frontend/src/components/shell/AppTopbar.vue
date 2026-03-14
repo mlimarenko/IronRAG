@@ -9,9 +9,9 @@ withDefaults(
     environmentStatus?: string
   }>(),
   {
-    workspaceLabel: 'Default workspace',
-    projectLabel: 'Project not selected',
-    environmentLabel: 'API boundary ready',
+    workspaceLabel: 'Current workspace',
+    projectLabel: 'Current project',
+    environmentLabel: 'Ready to work',
     environmentStatus: 'Healthy',
   },
 )

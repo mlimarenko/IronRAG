@@ -36,13 +36,13 @@ function isActive(item: NavItem) {
     <div class="app-sidebar__brand">
       <div>
         <p class="app-sidebar__eyebrow">RustRAG</p>
-        <h1>RAG Workspace</h1>
+        <h1>Document Q&A</h1>
       </div>
-      <StatusBadge label="Minimal flow" tone="info" emphasis="strong" />
+      <StatusBadge label="Simple mode" tone="info" emphasis="strong" />
     </div>
 
     <p class="app-sidebar__summary">
-      Create a workspace, create a project, ingest content, then ask grounded questions.
+      Four steps: setup, ingest text, ask a question, inspect the answer.
     </p>
 
     <nav class="app-sidebar__nav" aria-label="Primary">
