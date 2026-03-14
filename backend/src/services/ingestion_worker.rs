@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::Context;
 use sha2::{Digest, Sha256};
@@ -47,6 +50,7 @@ async fn run_ingestion_worker(state: Arc<AppState>, mut shutdown: broadcast::Rec
                     Ok(Some(job)) => {
                         let job_id = job.id;
                         let attempt_no = job.attempt_count;
+                        let started_at = Instant::now();
                         info!(
                             %worker_id,
                             job_id = %job_id,
@@ -57,8 +61,23 @@ async fn run_ingestion_worker(state: Arc<AppState>, mut shutdown: broadcast::Rec
                             "claimed ingestion job",
                         );
                         if let Err(error) = execute_job(state.clone(), &worker_id, job).await {
-                            error!(%worker_id, job_id=%job_id, ?error, "ingestion worker job execution crashed");
-                            fail_job(&state, job_id, Some(attempt_no), &worker_id, &error).await;
+                            error!(
+                                %worker_id,
+                                job_id = %job_id,
+                                attempt_no,
+                                elapsed_ms = started_at.elapsed().as_millis(),
+                                ?error,
+                                "ingestion worker job execution crashed",
+                            );
+                            fail_job(
+                                &state,
+                                job_id,
+                                Some(attempt_no),
+                                &worker_id,
+                                started_at.elapsed().as_millis(),
+                                &error,
+                            )
+                            .await;
                         }
                     }
                     Ok(None) => {}
@@ -77,6 +96,7 @@ async fn execute_job(
     job: IngestionJobRow,
 ) -> anyhow::Result<()> {
     let attempt_no = job.attempt_count;
+    let started_at = Instant::now();
     let payload = repositories::parse_ingestion_execution_payload(&job)
         .context("ingestion job payload missing or invalid")?;
 
@@ -185,7 +205,14 @@ async fn execute_job(
     )
     .await?;
 
-    info!(job_id=%job.id, %worker_id, document_id=%document.id, chunk_count, "completed ingestion job");
+    info!(
+        job_id = %job.id,
+        %worker_id,
+        document_id = %document.id,
+        chunk_count,
+        elapsed_ms = started_at.elapsed().as_millis(),
+        "completed ingestion job",
+    );
     Ok(())
 }
 
@@ -194,10 +221,18 @@ pub async fn fail_job(
     job_id: Uuid,
     attempt_no: Option<i32>,
     worker_id: &str,
+    elapsed_ms: u128,
     error: &anyhow::Error,
 ) {
     let message = error.to_string();
-    error!(job_id=%job_id, %worker_id, attempt_no, error=%message, "ingestion job failed");
+    error!(
+        job_id = %job_id,
+        %worker_id,
+        attempt_no,
+        elapsed_ms,
+        error = %message,
+        "ingestion job failed",
+    );
 
     if let Some(attempt_no) = attempt_no {
         if let Err(attempt_error) = repositories::fail_ingestion_job_attempt(
@@ -231,6 +266,7 @@ fn sha256_hex(text: &str) -> String {
 async fn recover_expired_leases(state: &AppState, worker_id: &str) -> anyhow::Result<()> {
     let recovered =
         repositories::recover_expired_ingestion_job_leases(&state.persistence.postgres).await?;
+    let recovered_count = recovered.len();
     for job in recovered {
         if job.attempt_count > 0 {
             repositories::fail_ingestion_job_attempt(
@@ -243,7 +279,22 @@ async fn recover_expired_leases(state: &AppState, worker_id: &str) -> anyhow::Re
             )
             .await?;
         }
-        warn!(job_id=%job.id, previous_worker_id=?job.worker_id, attempt_no=job.attempt_count, "requeued abandoned ingestion job after lease expiry");
+        warn!(
+            %worker_id,
+            job_id = %job.id,
+            project_id = %job.project_id,
+            source_id = ?job.source_id,
+            previous_worker_id = ?job.worker_id,
+            attempt_no = job.attempt_count,
+            "requeued abandoned ingestion job after lease expiry",
+        );
+    }
+    if recovered_count > 0 {
+        warn!(
+            %worker_id,
+            recovered_count,
+            "recovered expired ingestion job leases",
+        );
     }
     Ok(())
 }
