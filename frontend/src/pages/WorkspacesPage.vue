@@ -21,7 +21,7 @@ function isUnauthorizedMessage(message: string): boolean {
 onMounted(async () => {
   try {
     const { data } =
-      await api.get<{ id: string; slug: string; name: string; status: string }[]>('/v1/workspaces')
+      await api.get<{ id: string; slug: string; name: string; status: string }[]>('/workspaces')
     workspaces.value = data
 
     if (data.length === 0) {
@@ -30,7 +30,7 @@ onMounted(async () => {
     }
 
     try {
-      const response = await api.get<WorkspaceGovernanceSummary>(`/v1/workspaces/${data[0].id}/governance`)
+      const response = await api.get<WorkspaceGovernanceSummary>(`/workspaces/${data[0].id}/governance`)
       governance.value = response.data
     } catch (error) {
       const message = extractErrorMessage(error)

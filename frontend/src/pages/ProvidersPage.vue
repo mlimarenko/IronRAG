@@ -20,7 +20,7 @@ function isUnauthorizedMessage(message: string): boolean {
 
 onMounted(async () => {
   try {
-    const { data } = await api.get<{ id: string }[]>('/v1/workspaces')
+    const { data } = await api.get<{ id: string }[]>('/workspaces')
     workspaceId.value = data[0]?.id ?? null
 
     if (!workspaceId.value) {

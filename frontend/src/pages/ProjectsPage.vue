@@ -36,7 +36,7 @@ async function loadReadiness(id: string) {
 
 onMounted(async () => {
   try {
-    const { data } = await api.get<{ id: string; name: string; slug: string }[]>('/v1/projects')
+    const { data } = await api.get<{ id: string; name: string; slug: string }[]>('/projects')
     projects.value = data
 
     if (data.length === 0) {

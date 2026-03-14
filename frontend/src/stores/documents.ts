@@ -108,7 +108,7 @@ export const useDocumentsStore = defineStore('documents', () => {
     state.jobs.status = 'loading'
     state.jobs.error = null
     try {
-      const { data } = await api.get<IngestionJobDetail[]>('/v1/ingestion-jobs', {
+      const { data } = await api.get<IngestionJobDetail[]>('/ingestion-jobs', {
         params: projectId ? { project_id: projectId } : {},
       })
       state.jobs.data = data
