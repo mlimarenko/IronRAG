@@ -20,7 +20,7 @@ withDefaults(
 
 <template>
   <section class="page-section">
-    <header class="page-section__header rr-panel">
+    <header class="page-section__header">
       <div class="page-section__copy">
         <p
           v-if="eyebrow"
@@ -70,18 +70,15 @@ withDefaults(
 .page-section__header {
   display: flex;
   justify-content: space-between;
-  gap: var(--rr-space-5);
+  gap: var(--rr-space-4);
   align-items: flex-start;
-  padding: var(--rr-space-5);
-  border-radius: var(--rr-radius-lg);
-  background:
-    radial-gradient(circle at top right, rgb(44 93 215 / 0.08), transparent 22%),
-    linear-gradient(180deg, rgb(255 255 255 / 0.96), rgb(248 246 241 / 0.95));
+  padding: var(--rr-space-4) 0 var(--rr-space-5);
+  border-bottom: 1px solid var(--rr-color-border-subtle);
 }
 
 .page-section__copy {
   display: grid;
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
 }
 
@@ -98,16 +95,16 @@ withDefaults(
 
 .page-section__title-row h1 {
   margin: 0;
-  font-size: clamp(1.6rem, 2.2vw, 2.1rem);
-  line-height: 1.02;
-  letter-spacing: -0.03em;
+  font-size: clamp(1.35rem, 2vw, 1.75rem);
+  line-height: 1.1;
+  letter-spacing: -0.025em;
 }
 
 .page-section__description {
-  max-width: 54ch;
+  max-width: 48ch;
   margin: 0;
   color: var(--rr-color-text-secondary);
-  font-size: 0.94rem;
+  font-size: 0.9rem;
 }
 
 .page-section__actions {
@@ -126,7 +123,7 @@ withDefaults(
 @media (width <= 900px) {
   .page-section__header {
     flex-direction: column;
-    padding: var(--rr-space-5);
+    padding: var(--rr-space-3) 0 var(--rr-space-4);
   }
 
   .page-section__actions {

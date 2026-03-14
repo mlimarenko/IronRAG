@@ -1,29 +1,30 @@
 :root {
-  --rr-font-sans: 'Aptos', 'Inter', 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
-  --rr-color-bg-canvas: #f4f0e8;
-  --rr-color-bg-canvas-deep: #ebe5dc;
-  --rr-color-bg-surface: rgb(255 255 255 / 0.84);
-  --rr-color-bg-surface-strong: #fffdfa;
-  --rr-color-bg-surface-muted: #f6f1ea;
-  --rr-color-bg-contrast: #172033;
-  --rr-color-text-primary: #162033;
-  --rr-color-text-secondary: #4d5869;
-  --rr-color-text-muted: #697486;
-  --rr-color-text-inverse: #fcfaf7;
-  --rr-color-border-subtle: rgb(120 138 164 / 0.24);
-  --rr-color-border-strong: rgb(44 93 215 / 0.24);
-  --rr-color-border-focus: rgb(44 93 215 / 0.38);
-  --rr-color-accent-50: #e5ecff;
-  --rr-color-accent-100: #d3dfff;
-  --rr-color-accent-600: #2c5dd7;
-  --rr-color-accent-700: #2146ab;
-  --rr-color-info-600: #2c5dd7;
-  --rr-color-success-50: #e1f6e9;
-  --rr-color-success-600: #177245;
-  --rr-color-warning-50: #fff2d6;
-  --rr-color-warning-600: #a45b18;
-  --rr-color-danger-50: #ffe2dc;
-  --rr-color-danger-600: #b64031;
+  --rr-font-sans: 'Inter', 'Geist', 'Segoe UI Variable', 'Segoe UI', system-ui, -apple-system,
+    BlinkMacSystemFont, sans-serif;
+  --rr-color-bg-canvas: #f5f7fb;
+  --rr-color-bg-canvas-deep: #edf1f7;
+  --rr-color-bg-surface: rgb(255 255 255 / 0.92);
+  --rr-color-bg-surface-strong: #fff;
+  --rr-color-bg-surface-muted: #f7f9fc;
+  --rr-color-bg-contrast: #111827;
+  --rr-color-text-primary: #0f172a;
+  --rr-color-text-secondary: #334155;
+  --rr-color-text-muted: #64748b;
+  --rr-color-text-inverse: #f8fafc;
+  --rr-color-border-subtle: rgb(148 163 184 / 0.22);
+  --rr-color-border-strong: rgb(37 99 235 / 0.26);
+  --rr-color-border-focus: rgb(37 99 235 / 0.38);
+  --rr-color-accent-50: #e8f0ff;
+  --rr-color-accent-100: #dbe8ff;
+  --rr-color-accent-600: #2563eb;
+  --rr-color-accent-700: #1d4ed8;
+  --rr-color-info-600: #2563eb;
+  --rr-color-success-50: #eaf8ef;
+  --rr-color-success-600: #15803d;
+  --rr-color-warning-50: #fff6e6;
+  --rr-color-warning-600: #b45309;
+  --rr-color-danger-50: #feeceb;
+  --rr-color-danger-600: #c2410c;
   --rr-space-1: 0.25rem;
   --rr-space-2: 0.5rem;
   --rr-space-3: 0.75rem;
@@ -32,14 +33,14 @@
   --rr-space-6: 1.5rem;
   --rr-space-7: 2rem;
   --rr-space-8: 2.5rem;
-  --rr-radius-sm: 0.85rem;
-  --rr-radius-md: 1rem;
-  --rr-radius-lg: 1.35rem;
-  --rr-radius-xl: 1.75rem;
+  --rr-radius-sm: 0.75rem;
+  --rr-radius-md: 0.9rem;
+  --rr-radius-lg: 1.1rem;
+  --rr-radius-xl: 1.4rem;
   --rr-radius-pill: 999px;
-  --rr-shadow-sm: 0 12px 28px rgb(22 32 51 / 0.06);
-  --rr-shadow-md: 0 18px 40px rgb(22 32 51 / 0.08);
-  --rr-shadow-lg: 0 22px 56px rgb(22 32 51 / 0.1);
+  --rr-shadow-sm: 0 8px 24px rgb(15 23 42 / 0.05);
+  --rr-shadow-md: 0 16px 32px rgb(15 23 42 / 0.07);
+  --rr-shadow-lg: 0 22px 48px rgb(15 23 42 / 0.08);
   --rr-motion-base: 180ms ease;
 }
 
@@ -60,8 +61,8 @@ body {
   font-family: var(--rr-font-sans);
   color: var(--rr-color-text-primary);
   background:
-    radial-gradient(circle at top left, rgb(44 93 215 / 0.12), transparent 26%),
-    radial-gradient(circle at bottom right, rgb(23 114 69 / 0.07), transparent 22%),
+    radial-gradient(circle at top left, rgb(37 99 235 / 0.07), transparent 24%),
+    radial-gradient(circle at bottom right, rgb(15 23 42 / 0.04), transparent 20%),
     linear-gradient(180deg, var(--rr-color-bg-canvas) 0%, var(--rr-color-bg-canvas-deep) 100%);
   line-height: 1.45;
   text-rendering: optimizelegibility;
@@ -83,7 +84,7 @@ h1,
 h2,
 h3,
 h4 {
-  letter-spacing: -0.03em;
+  letter-spacing: -0.025em;
 }
 
 img {
@@ -99,7 +100,7 @@ textarea {
 
 .rr-page-grid {
   display: grid;
-  gap: var(--rr-space-5);
+  gap: var(--rr-space-4);
 }
 
 .rr-grid {
@@ -123,26 +124,22 @@ textarea {
 .rr-panel {
   display: grid;
   gap: var(--rr-space-4);
-  padding: var(--rr-space-6);
+  padding: var(--rr-space-5);
   border: 1px solid var(--rr-color-border-subtle);
   border-radius: var(--rr-radius-lg);
-  background:
-    linear-gradient(180deg, rgb(255 255 255 / 0.97), rgb(248 246 241 / 0.92)),
-    var(--rr-color-bg-surface);
+  background: var(--rr-color-bg-surface-strong);
   box-shadow: var(--rr-shadow-sm);
 }
 
 .rr-panel--muted {
-  background:
-    linear-gradient(180deg, rgb(251 248 243 / 0.98), rgb(243 238 230 / 0.96)),
-    var(--rr-color-bg-surface-muted);
+  background: var(--rr-color-bg-surface-muted);
 }
 
 .rr-panel--accent {
   border-color: var(--rr-color-border-strong);
   background:
-    radial-gradient(circle at top right, rgb(44 93 215 / 0.12), transparent 30%),
-    linear-gradient(180deg, rgb(255 255 255 / 0.98), rgb(246 244 238 / 0.96));
+    linear-gradient(180deg, rgb(255 255 255 / 0.98), rgb(248 250 255 / 0.98)),
+    var(--rr-color-bg-surface-strong);
 }
 
 .rr-panel > :first-child,
@@ -159,9 +156,9 @@ textarea {
 
 .rr-kicker {
   margin: 0;
-  font-size: 0.74rem;
+  font-size: 0.72rem;
   font-weight: 700;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--rr-color-accent-700);
 }
@@ -185,24 +182,24 @@ textarea {
   display: grid;
   gap: var(--rr-space-2);
   min-height: 100%;
-  padding: var(--rr-space-4);
+  padding: 0.95rem 1rem;
   border: 1px solid var(--rr-color-border-subtle);
   border-radius: var(--rr-radius-md);
-  background: rgb(255 255 255 / 0.58);
+  background: rgb(255 255 255 / 0.72);
 }
 
 .rr-stat__label {
   margin: 0;
   font-size: 0.74rem;
   font-weight: 700;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--rr-color-text-muted);
 }
 
 .rr-stat strong {
-  font-size: 1rem;
-  line-height: 1.25;
+  font-size: 0.98rem;
+  line-height: 1.3;
 }
 
 .rr-stat p {
@@ -277,17 +274,17 @@ textarea.rr-control {
   min-height: 44px;
   padding: 0 var(--rr-space-5);
   border: 1px solid transparent;
-  border-radius: var(--rr-radius-pill);
-  background: linear-gradient(135deg, var(--rr-color-accent-700), var(--rr-color-accent-600));
+  border-radius: var(--rr-radius-sm);
+  background: var(--rr-color-bg-contrast);
   color: var(--rr-color-text-inverse);
   text-decoration: none;
   font-weight: 700;
   letter-spacing: 0.01em;
   cursor: pointer;
-  box-shadow: 0 12px 24px rgb(44 93 215 / 0.18);
+  box-shadow: none;
   transition:
     transform var(--rr-motion-base),
-    box-shadow var(--rr-motion-base),
+    background var(--rr-motion-base),
     opacity var(--rr-motion-base),
     border-color var(--rr-motion-base);
 }
@@ -295,7 +292,7 @@ textarea.rr-control {
 .rr-button:hover:not(:disabled),
 .rr-button:focus-visible:not(:disabled) {
   transform: translateY(-1px);
-  box-shadow: 0 16px 30px rgb(44 93 215 / 0.22);
+  background: #1f2937;
 }
 
 .rr-button:focus-visible {
@@ -312,7 +309,7 @@ textarea.rr-control {
 
 .rr-button--secondary {
   border-color: var(--rr-color-border-subtle);
-  background: rgb(255 255 255 / 0.72);
+  background: rgb(255 255 255 / 0.84);
   color: var(--rr-color-text-primary);
   box-shadow: none;
 }
@@ -394,8 +391,8 @@ textarea.rr-control {
   gap: 4px;
   padding: 4px;
   border: 1px solid var(--rr-color-border-subtle);
-  border-radius: var(--rr-radius-pill);
-  background: rgb(255 255 255 / 0.68);
+  border-radius: var(--rr-radius-sm);
+  background: rgb(255 255 255 / 0.72);
 }
 
 .rr-segmented__button {

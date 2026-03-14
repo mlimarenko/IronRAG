@@ -68,7 +68,6 @@ onMounted(async () => {
     <PageSection
       :eyebrow="t('flow.overview.eyebrow')"
       :title="t('flow.overview.title')"
-      :description="t('flow.overview.description')"
       status="focused"
       :status-label="t('shell.status.focused')"
     >
@@ -82,24 +81,10 @@ onMounted(async () => {
         <article class="rr-stat">
           <p class="rr-stat__label">{{ t('flow.overview.stats.workspace.label') }}</p>
           <strong>{{ selectedWorkspace?.name ?? t('flow.common.empty') }}</strong>
-          <p>
-            {{
-              hasWorkspace
-                ? t('flow.overview.stats.workspace.ready')
-                : t('flow.overview.stats.workspace.empty')
-            }}
-          </p>
         </article>
         <article class="rr-stat">
           <p class="rr-stat__label">{{ t('flow.overview.stats.project.label') }}</p>
           <strong>{{ selectedProject?.name ?? t('flow.common.empty') }}</strong>
-          <p>
-            {{
-              hasProject
-                ? t('flow.overview.stats.project.ready')
-                : t('flow.overview.stats.project.empty')
-            }}
-          </p>
         </article>
         <article class="rr-stat">
           <p class="rr-stat__label">{{ t('flow.overview.stats.next.label') }}</p>
@@ -107,86 +92,55 @@ onMounted(async () => {
         </article>
       </div>
 
-      <div class="rr-grid rr-grid--cards">
-        <article class="flow-card rr-panel" data-state="workspace">
-          <div class="flow-card__header">
-            <h3>{{ t('flow.overview.cards.workspace.title') }}</h3>
-            <StatusBadge
-              :status="hasProject ? 'ready' : hasWorkspace ? 'partial' : 'draft'"
-              :label="
-                hasProject
-                  ? t('flow.overview.cards.workspace.ready')
-                  : hasWorkspace
-                    ? t('flow.overview.cards.workspace.partial')
-                    : t('flow.overview.cards.workspace.draft')
-              "
-            />
-          </div>
-          <p>{{ t('flow.overview.cards.workspace.body') }}</p>
+      <article class="rr-panel flow-shortcuts">
+        <div class="flow-shortcuts__header">
+          <h3>Open</h3>
+          <StatusBadge
+            :status="hasProject ? 'ready' : hasWorkspace ? 'partial' : 'draft'"
+            :label="nextAction"
+          />
+        </div>
+
+        <div class="flow-shortcuts__actions">
           <RouterLink class="rr-button rr-button--secondary" to="/setup">
-            {{ t('flow.overview.cards.workspace.action') }}
+            {{ t('flow.overview.cards.workspace.title') }}
           </RouterLink>
-        </article>
-
-        <article class="flow-card rr-panel" data-state="library">
-          <div class="flow-card__header">
-            <h3>{{ t('flow.overview.cards.library.title') }}</h3>
-            <StatusBadge
-              :status="selectedProject ? 'ready' : 'blocked'"
-              :label="
-                selectedProject
-                  ? t('flow.overview.cards.library.ready')
-                  : t('flow.overview.cards.library.blocked')
-              "
-            />
-          </div>
-          <p>{{ t('flow.overview.cards.library.body') }}</p>
-          <RouterLink class="rr-button rr-button--secondary" to="/files">
-            {{ t('flow.overview.cards.library.action') }}
+          <RouterLink class="rr-button rr-button--secondary" to="/ingest">
+            {{ t('flow.overview.cards.library.title') }}
           </RouterLink>
-        </article>
-
-        <article class="flow-card rr-panel" data-state="search">
-          <div class="flow-card__header">
-            <h3>{{ t('flow.overview.cards.search.title') }}</h3>
-            <StatusBadge
-              :status="selectedProject ? 'ready' : 'blocked'"
-              :label="
-                selectedProject
-                  ? t('flow.overview.cards.search.ready')
-                  : t('flow.overview.cards.search.blocked')
-              "
-            />
-          </div>
-          <p>{{ t('flow.overview.cards.search.body') }}</p>
-          <RouterLink class="rr-button rr-button--secondary" to="/search">
-            {{ t('flow.overview.cards.search.action') }}
+          <RouterLink class="rr-button rr-button--secondary" to="/ask">
+            {{ t('flow.overview.cards.search.title') }}
           </RouterLink>
-        </article>
-      </div>
+        </div>
+      </article>
     </PageSection>
   </section>
 </template>
 
 <style scoped>
-.flow-card {
-  gap: var(--rr-space-4);
+.flow-shortcuts {
+  gap: var(--rr-space-3);
 }
 
-.flow-card__header {
+.flow-shortcuts__header {
   display: flex;
   justify-content: space-between;
   gap: var(--rr-space-3);
   align-items: center;
 }
 
-.flow-card h3,
-.flow-card p {
+.flow-shortcuts__header h3 {
   margin: 0;
 }
 
+.flow-shortcuts__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rr-space-3);
+}
+
 @media (width <= 700px) {
-  .flow-card__header {
+  .flow-shortcuts__header {
     flex-direction: column;
     align-items: flex-start;
   }

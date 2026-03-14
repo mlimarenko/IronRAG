@@ -9,7 +9,7 @@ import AppTopbar from './AppTopbar.vue'
 const route = useRoute()
 const { t } = useI18n()
 
-type ShellSection = 'processing' | 'setup' | 'files' | 'search' | 'graph' | 'api'
+type ShellSection = 'processing' | 'context' | 'files' | 'ask' | 'graph' | 'api'
 
 const routeMeta = computed(() => {
   const meta = route.meta as {
@@ -50,7 +50,7 @@ const routeMeta = computed(() => {
 <style scoped>
 .app-shell {
   display: grid;
-  grid-template-columns: minmax(248px, 284px) minmax(0, 1fr);
+  grid-template-columns: minmax(220px, 248px) minmax(0, 1fr);
   min-height: 100vh;
   color: var(--rr-color-text-primary);
 }
@@ -60,21 +60,16 @@ const routeMeta = computed(() => {
   top: 0;
   align-self: start;
   min-height: 100vh;
-  padding: 26px 20px;
-  border-right: 1px solid rgb(120 138 164 / 0.16);
-  background:
-    radial-gradient(circle at top, rgb(44 93 215 / 0.22), transparent 34%),
-    linear-gradient(180deg, #192132 0%, #141b28 100%);
+  padding: 20px 16px;
+  border-right: 1px solid rgb(15 23 42 / 0.08);
+  background: linear-gradient(180deg, #0f172a 0%, #111827 100%);
 }
 
 .app-shell__main {
   display: grid;
-  gap: var(--rr-space-4);
+  gap: var(--rr-space-3);
   align-content: start;
-  padding: 24px;
-  background:
-    radial-gradient(circle at top right, rgb(44 93 215 / 0.08), transparent 24%),
-    linear-gradient(180deg, rgb(255 255 255 / 0.1), rgb(255 255 255 / 0.04));
+  padding: 20px;
 }
 
 .app-shell__content {
@@ -95,7 +90,7 @@ const routeMeta = computed(() => {
   }
 
   .app-shell__main {
-    padding: 18px;
+    padding: 16px;
   }
 }
 </style>

@@ -338,12 +338,11 @@ async function uploadCurrentFile() {
     <PageSection
       :eyebrow="t('flow.library.eyebrow')"
       :title="t('flow.library.title')"
-      :description="t('flow.library.description')"
       :status="pageStatus.status"
       :status-label="pageStatus.label"
     >
       <template #actions>
-        <RouterLink class="rr-button rr-button--secondary" to="/search">
+        <RouterLink class="rr-button rr-button--secondary" to="/ask">
           {{ t('flow.library.action') }}
         </RouterLink>
       </template>
@@ -360,7 +359,6 @@ async function uploadCurrentFile() {
         <article class="rr-stat">
           <p class="rr-stat__label">{{ t('flow.library.stats.documents') }}</p>
           <strong>{{ documents.length }}</strong>
-          <p>{{ t('flow.library.stats.documentsHint') }}</p>
         </article>
       </div>
 
@@ -375,10 +373,7 @@ async function uploadCurrentFile() {
         <div class="ingestion-primary rr-grid">
           <article class="rr-panel rr-panel--accent rr-stack">
             <div class="ingestion-panel__heading">
-              <div>
-                <p class="rr-kicker">{{ t('flow.library.form.kicker') }}</p>
-                <h3>{{ t('flow.library.form.title') }}</h3>
-              </div>
+              <h3>{{ t('flow.library.form.title') }}</h3>
               <StatusBadge
                 :status="selectedProjectId ? 'ready' : 'blocked'"
                 :label="selectedProjectId ? t('flow.library.form.ready') : t('flow.library.form.needsSetup')"
@@ -430,21 +425,15 @@ async function uploadCurrentFile() {
 
           <article class="rr-panel rr-stack">
             <div class="ingestion-panel__heading">
-              <div>
-                <p class="rr-kicker">{{ t('flow.library.upload.kicker') }}</p>
-                <h3>{{ t('flow.library.upload.title') }}</h3>
-              </div>
+              <h3>{{ t('flow.library.upload.title') }}</h3>
               <StatusBadge
                 :status="selectedProjectId ? 'ready' : 'blocked'"
                 :label="selectedProjectId ? t('flow.library.upload.ready') : t('flow.library.upload.needsSetup')"
               />
             </div>
 
-            <p class="rr-note">
-              {{ t('flow.library.upload.supportedHint') }}
-            </p>
-            <p class="rr-note">
-              {{ t('flow.library.upload.blockedHint') }}
+            <p class="rr-banner" data-tone="info">
+              {{ t('flow.library.upload.supportedHint') }} {{ t('flow.library.upload.blockedHint') }}
             </p>
 
             <div class="rr-form-grid">
@@ -493,10 +482,7 @@ async function uploadCurrentFile() {
         <div class="ingestion-side rr-grid">
           <article class="rr-panel">
             <div class="ingestion-panel__heading">
-              <div>
-                <p class="rr-kicker">{{ t('flow.library.lists.documents.kicker') }}</p>
-                <h3>{{ t('flow.library.lists.documents.title') }}</h3>
-              </div>
+              <h3>{{ t('flow.library.lists.documents.title') }}</h3>
               <StatusBadge
                 :status="documents.length ? 'ready' : 'draft'"
                 :label="documents.length ? t('flow.library.lists.documents.ready') : t('flow.library.lists.documents.empty')"
@@ -516,10 +502,7 @@ async function uploadCurrentFile() {
 
           <article class="rr-panel rr-panel--muted">
             <div class="ingestion-panel__heading">
-              <div>
-                <p class="rr-kicker">{{ t('flow.library.lists.sources.kicker') }}</p>
-                <h3>{{ t('flow.library.lists.sources.title') }}</h3>
-              </div>
+              <h3>{{ t('flow.library.lists.sources.title') }}</h3>
               <StatusBadge
                 :status="sources.length ? 'ready' : 'draft'"
                 :label="sources.length ? t('flow.library.lists.sources.ready') : t('flow.library.lists.sources.empty')"
@@ -539,10 +522,7 @@ async function uploadCurrentFile() {
 
           <article v-if="latestJob" class="rr-panel rr-panel--muted">
             <div class="ingestion-panel__heading">
-              <div>
-                <p class="rr-kicker">{{ t('flow.library.lists.job.kicker') }}</p>
-                <h3>{{ t('flow.library.lists.job.title') }}</h3>
-              </div>
+              <h3>{{ t('flow.library.lists.job.title') }}</h3>
               <StatusBadge :status="latestJob.status" :label="latestJob.stage" />
             </div>
 
@@ -572,11 +552,12 @@ async function uploadCurrentFile() {
   display: flex;
   justify-content: space-between;
   gap: var(--rr-space-3);
-  align-items: flex-start;
+  align-items: center;
 }
 
 .ingestion-panel__heading h3 {
-  margin: 4px 0 0;
+  margin: 0;
+  font-size: 1rem;
 }
 
 @media (width <= 1100px) {

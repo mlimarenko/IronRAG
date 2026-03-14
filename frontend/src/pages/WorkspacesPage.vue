@@ -136,12 +136,11 @@ async function createProjectItem() {
     <PageSection
       :eyebrow="t('flow.workspace.eyebrow')"
       :title="t('flow.workspace.title')"
-      :description="t('flow.workspace.description')"
       :status="setupStatus.status"
       :status-label="setupStatus.label"
     >
       <template #actions>
-        <RouterLink class="rr-button rr-button--secondary" to="/files" :aria-disabled="!selectedProject">
+        <RouterLink class="rr-button rr-button--secondary" to="/ingest" :aria-disabled="!selectedProject">
           {{ t('flow.workspace.stats.nextReady') }}
         </RouterLink>
       </template>
@@ -149,13 +148,11 @@ async function createProjectItem() {
       <div class="rr-stat-strip">
         <article class="rr-stat">
           <p class="rr-stat__label">{{ t('flow.workspace.stats.workspaces') }}</p>
-          <strong>{{ workspaces.length }}</strong>
-          <p>{{ selectedWorkspace?.name ?? t('flow.common.empty') }}</p>
+          <strong>{{ selectedWorkspace?.name ?? t('flow.common.empty') }}</strong>
         </article>
         <article class="rr-stat">
           <p class="rr-stat__label">{{ t('flow.workspace.stats.projects') }}</p>
-          <strong>{{ projects.length }}</strong>
-          <p>{{ selectedProject?.name ?? t('flow.common.empty') }}</p>
+          <strong>{{ selectedProject?.name ?? t('flow.common.empty') }}</strong>
         </article>
         <article class="rr-stat">
           <p class="rr-stat__label">{{ t('flow.workspace.stats.next') }}</p>
@@ -170,10 +167,7 @@ async function createProjectItem() {
       <div class="setup-grid">
         <article class="rr-panel rr-panel--accent setup-panel">
           <div class="setup-panel__heading">
-            <div>
-              <p class="rr-kicker">{{ t('flow.workspace.panels.workspace.kicker') }}</p>
-              <h3>{{ t('flow.workspace.panels.workspace.title') }}</h3>
-            </div>
+            <h3>{{ t('flow.workspace.panels.workspace.kicker') }}</h3>
             <StatusBadge
               :status="selectedWorkspace ? 'ready' : 'draft'"
               :label="selectedWorkspace ? t('flow.workspace.panels.workspace.selectedBadge') : t('flow.workspace.panels.workspace.required')"
@@ -231,10 +225,7 @@ async function createProjectItem() {
 
         <article class="rr-panel setup-panel">
           <div class="setup-panel__heading">
-            <div>
-              <p class="rr-kicker">{{ t('flow.workspace.panels.project.kicker') }}</p>
-              <h3>{{ t('flow.workspace.panels.project.title') }}</h3>
-            </div>
+            <h3>{{ t('flow.workspace.panels.project.kicker') }}</h3>
             <StatusBadge
               :status="selectedProject ? 'ready' : selectedWorkspace ? 'partial' : 'blocked'"
               :label="
@@ -321,11 +312,12 @@ async function createProjectItem() {
   display: flex;
   justify-content: space-between;
   gap: var(--rr-space-3);
-  align-items: flex-start;
+  align-items: center;
 }
 
 .setup-panel__heading h3 {
-  margin: 4px 0 0;
+  margin: 0;
+  font-size: 1rem;
 }
 
 @media (width <= 1100px) {

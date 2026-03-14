@@ -115,12 +115,11 @@ async function submitQuery() {
     <PageSection
       :eyebrow="t('flow.search.eyebrow')"
       :title="t('flow.search.title')"
-      :description="t('flow.search.description')"
       :status="pageStatus.status"
       :status-label="pageStatus.label"
     >
       <template #actions>
-        <RouterLink class="rr-button rr-button--secondary" to="/files">
+        <RouterLink class="rr-button rr-button--secondary" to="/ingest">
           {{ t('flow.search.action') }}
         </RouterLink>
       </template>
@@ -137,22 +136,12 @@ async function submitQuery() {
         <article class="rr-stat">
           <p class="rr-stat__label">{{ t('flow.search.stats.answer') }}</p>
           <strong>{{ result?.answer_status ?? t('flow.search.stats.idle') }}</strong>
-          <p>
-            {{
-              result
-                ? t('flow.search.stats.references', { count: result.references.length })
-                : t('flow.search.stats.empty')
-            }}
-          </p>
         </article>
       </div>
 
       <article class="rr-panel rr-panel--accent query-panel">
         <div class="query-panel__heading">
-          <div>
-            <p class="rr-kicker">{{ t('flow.search.query.kicker') }}</p>
-            <h3>{{ t('flow.search.query.title') }}</h3>
-          </div>
+          <h3>{{ t('flow.search.query.title') }}</h3>
           <StatusPill :status="result?.answer_status ?? (selectedProject ? 'ready' : 'blocked')" />
         </div>
 
@@ -162,7 +151,7 @@ async function submitQuery() {
             v-model="queryText"
             class="rr-control"
             rows="5"
-            placeholder="Ask a question about the indexed files"
+            placeholder="Ask about indexed content"
           />
         </label>
 
@@ -184,10 +173,7 @@ async function submitQuery() {
 
       <article v-if="result" class="rr-panel result-panel">
         <div class="result-panel__header">
-          <div>
-            <p class="rr-kicker">{{ t('flow.search.result.kicker') }}</p>
-            <h3>{{ t('flow.search.result.title') }}</h3>
-          </div>
+          <h3>{{ t('flow.search.result.title') }}</h3>
           <StatusPill :status="result.answer_status" />
         </div>
 
@@ -220,8 +206,6 @@ async function submitQuery() {
       </article>
 
       <article v-else class="rr-panel rr-panel--muted">
-        <p class="rr-kicker">{{ t('flow.search.result.waitingKicker') }}</p>
-        <h3>{{ t('flow.search.result.waitingTitle') }}</h3>
         <p class="rr-note">{{ t('flow.search.result.waitingBody') }}</p>
       </article>
 
@@ -241,12 +225,13 @@ async function submitQuery() {
   display: flex;
   justify-content: space-between;
   gap: var(--rr-space-3);
-  align-items: flex-start;
+  align-items: center;
 }
 
 .query-panel__heading h3,
 .result-panel__header h3 {
-  margin: 4px 0 0;
+  margin: 0;
+  font-size: 1rem;
 }
 
 .answer-copy {
