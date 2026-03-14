@@ -41,8 +41,8 @@ export const useDocumentsStore = defineStore('documents', () => {
       }>
     >
   >({})
-  const ingestState = ref<AsyncState<{ documentId: string; chunkCount: number } | null>>(
-    createAsyncState<{ documentId: string; chunkCount: number } | null>(null),
+  const ingestState = ref<AsyncState<{ ingestionJobId: string; status: string; stage: string } | null>>(
+    createAsyncState<{ ingestionJobId: string; status: string; stage: string } | null>(null),
   )
   const createSourceState = ref<AsyncState<SourceSummary | null>>(
     createAsyncState<SourceSummary | null>(null),
@@ -247,14 +247,17 @@ export const useDocumentsStore = defineStore('documents', () => {
     }
   }
 
-  async function ingestTextForProject(payload: IngestTextRequest): Promise<{ documentId: string; chunkCount: number }> {
+  async function ingestTextForProject(
+    payload: IngestTextRequest,
+  ): Promise<{ ingestionJobId: string; status: string; stage: string }> {
     ingestState.value.status = 'loading'
     ingestState.value.error = null
     try {
       const created = await ingestText(payload)
       ingestState.value.data = {
-        documentId: created.document_id,
-        chunkCount: created.chunk_count,
+        ingestionJobId: created.ingestion_job_id,
+        status: created.status,
+        stage: created.stage,
       }
       ingestState.value.status = 'success'
       ingestState.value.lastLoadedAt = new Date().toISOString()

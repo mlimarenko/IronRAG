@@ -2,6 +2,7 @@ use axum::{
     Json, Router,
     extract::{Multipart, State},
 };
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -87,21 +88,63 @@ async fn upload_and_ingest(
         }
     }
 
-    let project_id = project_id.ok_or_else(|| ApiError::BadRequest("missing project_id".into()))?;
-    load_project_and_authorize(&auth, &state, project_id, POLICY_DOCUMENTS_WRITE).await?;
-    let file_bytes = file_bytes.ok_or_else(|| ApiError::BadRequest("missing file".into()))?;
+    let project_id = project_id.ok_or_else(|| {
+        warn!("rejecting upload ingestion request without project_id");
+        ApiError::BadRequest("missing project_id".into())
+    })?;
+    let project =
+        load_project_and_authorize(&auth, &state, project_id, POLICY_DOCUMENTS_WRITE).await?;
+    let file_bytes = file_bytes.ok_or_else(|| {
+        warn!(
+            workspace_id = %project.workspace_id,
+            project_id = %project_id,
+            source_id = ?source_id,
+            "rejecting upload ingestion request without file payload",
+        );
+        ApiError::BadRequest("missing file".into())
+    })?;
     let external_key = file_name.unwrap_or_else(|| format!("upload-{}", Uuid::now_v7()));
+    let file_size_bytes = file_bytes.len();
 
     let text = String::from_utf8(file_bytes).map_err(|_| {
+        warn!(
+            workspace_id = %project.workspace_id,
+            project_id = %project_id,
+            source_id = ?source_id,
+            external_key = %external_key,
+            mime_type = ?mime_type,
+            file_size_bytes,
+            "rejecting upload ingestion request with unsupported file encoding",
+        );
         ApiError::BadRequest(
             "only utf-8 text-like uploads are supported in foundation stage".into(),
         )
     })?;
     if text.trim().is_empty() {
+        warn!(
+            workspace_id = %project.workspace_id,
+            project_id = %project_id,
+            source_id = ?source_id,
+            external_key = %external_key,
+            mime_type = ?mime_type,
+            file_size_bytes,
+            "rejecting upload ingestion request with empty file content",
+        );
         return Err(ApiError::BadRequest("uploaded file is empty".into()));
     }
 
+    let text_len = text.len();
     let idempotency_key = format!("upload-ingest:{}:{}", project_id, external_key);
+    info!(
+        workspace_id = %project.workspace_id,
+        project_id = %project_id,
+        source_id = ?source_id,
+        external_key = %external_key,
+        mime_type = ?mime_type,
+        file_size_bytes,
+        text_len,
+        "accepted upload ingestion request",
+    );
     let job = repositories::create_ingestion_job(
         &state.persistence.postgres,
         project_id,
@@ -113,7 +156,7 @@ async fn upload_and_ingest(
         serde_json::json!({
             "project_id": project_id,
             "source_id": source_id,
-            "external_key": external_key,
+            "external_key": external_key.clone(),
             "title": title.as_deref().or(Some(&external_key)),
             "mime_type": mime_type.clone(),
             "text": text,
@@ -126,10 +169,31 @@ async fn upload_and_ingest(
         sqlx::Error::Database(database_error)
             if database_error.constraint() == Some("idx_ingestion_job_idempotency_key") =>
         {
+            warn!(
+                workspace_id = %project.workspace_id,
+                project_id = %project_id,
+                source_id = ?source_id,
+                external_key = %external_key,
+                "duplicate upload ingestion request",
+            );
             ApiError::Conflict("an ingestion job already exists for this idempotency key".into())
         }
         _ => ApiError::Internal,
     })?;
+
+    info!(
+        workspace_id = %project.workspace_id,
+        project_id = %project_id,
+        source_id = ?source_id,
+        ingestion_job_id = %job.id,
+        status = %job.status,
+        stage = %job.stage,
+        external_key = %external_key,
+        mime_type = ?mime_type,
+        file_size_bytes,
+        text_len,
+        "created ingestion job for upload request",
+    );
 
     Ok(Json(UploadIngestResponse {
         ingestion_job_id: job.id,

@@ -7,9 +7,10 @@ import StatusBadge from 'src/components/shell/StatusBadge.vue'
 import {
   getSelectedProjectId,
   getSelectedWorkspaceId,
-  resetSelectedProjectId,
   setSelectedProjectId,
   setSelectedWorkspaceId,
+  syncSelectedProjectId,
+  syncSelectedWorkspaceId,
 } from 'src/stores/flow'
 
 interface WorkspaceItem {
@@ -35,19 +36,8 @@ const workspaceError = ref<string | null>(null)
 const projectError = ref<string | null>(null)
 const successMessage = ref<string | null>(null)
 
-const selectedWorkspaceId = computed({
-  get: () => getSelectedWorkspaceId(),
-  set: (value: string) => {
-    setSelectedWorkspaceId(value)
-  },
-})
-
-const selectedProjectId = computed({
-  get: () => getSelectedProjectId(),
-  set: (value: string) => {
-    setSelectedProjectId(value)
-  },
-})
+const selectedWorkspaceId = ref(getSelectedWorkspaceId())
+const selectedProjectId = ref(getSelectedProjectId())
 
 const selectedWorkspace = computed(
   () => workspaces.value.find((item) => item.id === selectedWorkspaceId.value) ?? null,
@@ -68,24 +58,25 @@ const setupStatus = computed(() => {
 })
 
 watch(selectedWorkspaceId, async (value) => {
-  resetSelectedProjectId()
+  setSelectedWorkspaceId(value)
   projects.value = value ? await fetchProjects(value) : []
-  if (!getSelectedProjectId() && projects.value.length > 0) {
-    setSelectedProjectId(projects.value[0]?.id ?? '')
-  }
+  selectedProjectId.value = syncSelectedProjectId(projects.value)
+})
+
+watch(selectedProjectId, (value) => {
+  setSelectedProjectId(value)
 })
 
 onMounted(async () => {
   workspaces.value = await fetchWorkspaces()
-  if (!getSelectedWorkspaceId() && workspaces.value.length > 0) {
-    setSelectedWorkspaceId(workspaces.value[0]?.id ?? '')
-  }
-  const workspaceId = getSelectedWorkspaceId()
+  const workspaceId = syncSelectedWorkspaceId(workspaces.value)
+  selectedWorkspaceId.value = workspaceId
   if (workspaceId) {
     projects.value = await fetchProjects(workspaceId)
-    if (!getSelectedProjectId() && projects.value.length > 0) {
-      setSelectedProjectId(projects.value[0]?.id ?? '')
-    }
+    selectedProjectId.value = syncSelectedProjectId(projects.value)
+  } else {
+    projects.value = []
+    selectedProjectId.value = syncSelectedProjectId([])
   }
 })
 
@@ -99,7 +90,7 @@ async function createWorkspaceItem() {
     })
     workspaces.value = [created, ...workspaces.value.filter((item) => item.id !== created.id)]
     workspaceForm.value = { slug: '', name: '' }
-    setSelectedWorkspaceId(created.id)
+    selectedWorkspaceId.value = created.id
     successMessage.value = `Workspace ${created.name} created.`
   } catch (error) {
     workspaceError.value = error instanceof Error ? error.message : 'Failed to create workspace'
@@ -109,21 +100,21 @@ async function createWorkspaceItem() {
 async function createProjectItem() {
   projectError.value = null
   successMessage.value = null
-  if (!getSelectedWorkspaceId()) {
+  if (!selectedWorkspaceId.value) {
     projectError.value = 'Select or create a workspace first.'
     return
   }
 
   try {
     const created = await createProject({
-      workspace_id: getSelectedWorkspaceId(),
+      workspace_id: selectedWorkspaceId.value,
       slug: projectForm.value.slug.trim(),
       name: projectForm.value.name.trim(),
       description: projectForm.value.description.trim() || null,
     })
     projects.value = [created, ...projects.value.filter((item) => item.id !== created.id)]
     projectForm.value = { slug: '', name: '', description: '' }
-    setSelectedProjectId(created.id)
+    selectedProjectId.value = created.id
     successMessage.value = `Project ${created.name} created.`
   } catch (error) {
     projectError.value = error instanceof Error ? error.message : 'Failed to create project'
@@ -297,7 +288,7 @@ async function createProjectItem() {
             <button
               type="button"
               class="rr-button"
-              :disabled="!projectForm.name || !projectForm.slug || !getSelectedWorkspaceId()"
+              :disabled="!projectForm.name || !projectForm.slug || !selectedWorkspaceId"
               @click="createProjectItem"
             >
               Create project

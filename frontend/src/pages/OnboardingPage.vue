@@ -306,7 +306,7 @@ async function submitDocument() {
     }
 
     flashMessage.value = t('onboarding.messages.documentCreated')
-    latestResult.value = `${ingested.documentId} · ${String(ingested.chunkCount)} chunks`
+    latestResult.value = `${ingested.ingestionJobId} · ${ingested.status}/${ingested.stage}`
     await refreshState()
   } catch (error) {
     refreshError.value = extractError(error)

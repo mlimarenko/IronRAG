@@ -17,8 +17,8 @@ import PageSection from 'src/components/shell/PageSection.vue'
 import {
   getSelectedProjectId,
   getSelectedWorkspaceId,
-  setSelectedProjectId,
-  setSelectedWorkspaceId,
+  syncSelectedProjectId,
+  syncSelectedWorkspaceId,
 } from 'src/stores/flow'
 
 interface WorkspaceItem {
@@ -43,12 +43,13 @@ const detail = ref<RetrievalRunDetail | null>(null)
 const errorMessage = ref<string | null>(null)
 const loading = ref(false)
 
-const selectedProjectId = computed(() => getSelectedProjectId())
+const selectedWorkspaceId = ref(getSelectedWorkspaceId())
+const selectedProjectId = ref(getSelectedProjectId())
 const selectedProject = computed(
-  () => projects.value.find((item) => item.id === getSelectedProjectId()) ?? null,
+  () => projects.value.find((item) => item.id === selectedProjectId.value) ?? null,
 )
 const selectedWorkspace = computed(
-  () => workspaces.value.find((item) => item.id === getSelectedWorkspaceId()) ?? null,
+  () => workspaces.value.find((item) => item.id === selectedWorkspaceId.value) ?? null,
 )
 const pageStatus = computed(() => {
   if (result.value) {
@@ -67,15 +68,14 @@ const pageStatus = computed(() => {
 
 onMounted(async () => {
   workspaces.value = await fetchWorkspaces()
-  if (!getSelectedWorkspaceId() && workspaces.value.length > 0) {
-    setSelectedWorkspaceId(workspaces.value[0]?.id ?? '')
-  }
-  const workspaceId = getSelectedWorkspaceId()
+  const workspaceId = syncSelectedWorkspaceId(workspaces.value)
+  selectedWorkspaceId.value = workspaceId
   if (workspaceId) {
     projects.value = await fetchProjects(workspaceId)
-    if (!getSelectedProjectId() && projects.value.length > 0) {
-      setSelectedProjectId(projects.value[0]?.id ?? '')
-    }
+    selectedProjectId.value = syncSelectedProjectId(projects.value)
+  } else {
+    projects.value = []
+    selectedProjectId.value = syncSelectedProjectId([])
   }
 })
 

@@ -4,6 +4,8 @@ use axum::{
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -33,6 +35,8 @@ struct QueryExecutionResult {
     matched_chunks: Vec<repositories::ChunkRow>,
     references: Vec<String>,
     top_k: i32,
+    lexical_chunk_count: usize,
+    semantic_chunk_count: usize,
 }
 
 #[derive(Serialize)]
@@ -167,15 +171,36 @@ async fn create_retrieval_run(
 ) -> Result<Json<RetrievalRunSummary>, ApiError> {
     auth.require_any_scope(POLICY_QUERY_RUN)?;
     if payload.query_text.trim().is_empty() {
+        warn!(
+            project_id = %payload.project_id,
+            model_profile_id = ?payload.model_profile_id,
+            "rejecting retrieval run creation with empty query_text",
+        );
         return Err(ApiError::BadRequest("query_text must not be empty".into()));
     }
     let top_k = payload.top_k.unwrap_or(8);
     if top_k <= 0 {
+        warn!(
+            project_id = %payload.project_id,
+            model_profile_id = ?payload.model_profile_id,
+            top_k,
+            "rejecting retrieval run creation with non-positive top_k",
+        );
         return Err(ApiError::BadRequest("top_k must be greater than zero".into()));
     }
 
-    let _project =
+    let project =
         load_project_and_authorize(&auth, &state, payload.project_id, POLICY_QUERY_RUN).await?;
+
+    info!(
+        workspace_id = %project.workspace_id,
+        project_id = %payload.project_id,
+        model_profile_id = ?payload.model_profile_id,
+        top_k,
+        query_len = payload.query_text.trim().chars().count(),
+        response_present = payload.response_text.is_some(),
+        "accepted retrieval run request",
+    );
 
     let row = repositories::create_retrieval_run(
         &state.persistence.postgres,
@@ -190,6 +215,17 @@ async fn create_retrieval_run(
     .map_err(|_| ApiError::Internal)?;
 
     let (answer_status, weak_grounding, _, _, _) = extract_retrieval_debug(&row.debug_json);
+
+    info!(
+        workspace_id = %project.workspace_id,
+        project_id = %row.project_id,
+        retrieval_run_id = %row.id,
+        model_profile_id = ?row.model_profile_id,
+        top_k = row.top_k,
+        answer_status,
+        weak_grounding,
+        "created retrieval run",
+    );
 
     Ok(Json(RetrievalRunSummary {
         id: row.id,
@@ -241,12 +277,114 @@ async fn run_query(
     State(state): State<AppState>,
     Json(payload): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, ApiError> {
-    let _project =
+    let project =
         load_project_and_authorize(&auth, &state, payload.project_id, POLICY_QUERY_RUN).await?;
-    validate_query_payload(&payload)?;
+    let top_k = payload.top_k.unwrap_or(8);
+    if let Err(error) = validate_query_payload(&payload) {
+        warn!(
+            workspace_id = %project.workspace_id,
+            project_id = %payload.project_id,
+            model_profile_id = ?payload.model_profile_id,
+            embedding_model_profile_id = ?payload.embedding_model_profile_id,
+            top_k,
+            query_len = payload.query_text.trim().chars().count(),
+            error = %error,
+            "rejecting query request",
+        );
+        return Err(error);
+    }
+    let started_at = Instant::now();
 
-    let query_result = execute_query(&state, &payload).await?;
-    persist_query_artifacts(&state, &payload, &query_result).await
+    info!(
+        workspace_id = %project.workspace_id,
+        project_id = %payload.project_id,
+        model_profile_id = ?payload.model_profile_id,
+        embedding_model_profile_id = ?payload.embedding_model_profile_id,
+        top_k,
+        query_len = payload.query_text.trim().chars().count(),
+        "accepted query request",
+    );
+
+    let query_result = match execute_query(&state, &payload).await {
+        Ok(result) => result,
+        Err(error) => {
+            warn!(
+                workspace_id = %project.workspace_id,
+                project_id = %payload.project_id,
+                model_profile_id = ?payload.model_profile_id,
+                embedding_model_profile_id = ?payload.embedding_model_profile_id,
+                top_k,
+                latency_ms = started_at.elapsed().as_millis(),
+                error = %error,
+                phase = "execute_query",
+                "query request failed",
+            );
+            return Err(error);
+        }
+    };
+    let matched_chunk_count = query_result.matched_chunks.len();
+    let (prompt_tokens, completion_tokens, total_tokens) =
+        extract_usage_tokens(&query_result.usage_json);
+    let response = match persist_query_artifacts(&state, &payload, &query_result).await {
+        Ok(response) => response,
+        Err(error) => {
+            warn!(
+                workspace_id = %project.workspace_id,
+                project_id = %payload.project_id,
+                model_profile_id = ?payload.model_profile_id,
+                embedding_model_profile_id = ?payload.embedding_model_profile_id,
+                provider_kind = %query_result.provider_kind,
+                model_name = %query_result.model_name,
+                top_k,
+                matched_chunk_count,
+                latency_ms = started_at.elapsed().as_millis(),
+                error = %error,
+                phase = "persist_query_artifacts",
+                "query request failed",
+            );
+            return Err(error);
+        }
+    };
+
+    if response.0.weak_grounding {
+        warn!(
+            workspace_id = %project.workspace_id,
+            project_id = %payload.project_id,
+            retrieval_run_id = %response.0.retrieval_run_id,
+            provider_kind = %query_result.provider_kind,
+            model_name = %query_result.model_name,
+            answer_status = %response.0.answer_status,
+            lexical_chunk_count = query_result.lexical_chunk_count,
+            semantic_chunk_count = query_result.semantic_chunk_count,
+            matched_chunk_count,
+            reference_count = response.0.references.len(),
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            latency_ms = started_at.elapsed().as_millis(),
+            "query completed with weak grounding",
+        );
+    } else {
+        info!(
+            workspace_id = %project.workspace_id,
+            project_id = %payload.project_id,
+            retrieval_run_id = %response.0.retrieval_run_id,
+            provider_kind = %query_result.provider_kind,
+            model_name = %query_result.model_name,
+            answer_status = %response.0.answer_status,
+            lexical_chunk_count = query_result.lexical_chunk_count,
+            semantic_chunk_count = query_result.semantic_chunk_count,
+            matched_chunk_count,
+            reference_count = response.0.references.len(),
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            latency_ms = started_at.elapsed().as_millis(),
+            "query completed",
+        );
+    }
+
+    Ok(response)
 }
 
 fn validate_query_payload(payload: &QueryRequest) -> Result<(), ApiError> {
@@ -274,6 +412,7 @@ async fn execute_query(
     )
     .await
     .map_err(|_| ApiError::Internal)?;
+    let lexical_chunk_count = lexical_chunks.len();
     let (embedding_provider_kind, embedding_model_name, _) = resolve_embedding_model(
         state,
         payload.embedding_model_profile_id,
@@ -291,7 +430,20 @@ async fn execute_query(
         &embedding_model_name,
     )
     .await?;
+    let semantic_chunk_count = semantic_chunks.len();
     let matched_chunks = rank_chunks(lexical_chunks, semantic_chunks, top_k);
+    info!(
+        project_id = %payload.project_id,
+        provider_kind = %provider_kind,
+        model_name = %model_name,
+        embedding_provider_kind = %embedding_provider_kind,
+        embedding_model_name = %embedding_model_name,
+        top_k,
+        lexical_chunk_count,
+        semantic_chunk_count,
+        matched_chunk_count = matched_chunks.len(),
+        "retrieval evidence prepared",
+    );
     let context_block = build_context_block(&matched_chunks);
 
     let gateway_response = state
@@ -314,6 +466,8 @@ async fn execute_query(
         matched_chunks,
         references,
         top_k,
+        lexical_chunk_count,
+        semantic_chunk_count,
     })
 }
 
@@ -489,7 +643,16 @@ async fn collect_semantic_chunks(
         Ok(query_embedding) => {
             search_semantic_chunks(state, project_id, top_k, &query_embedding.embedding).await
         }
-        Err(_) => Ok(Vec::new()),
+        Err(error) => {
+            warn!(
+                project_id = %project_id,
+                provider_kind,
+                model_name,
+                ?error,
+                "semantic retrieval embedding failed; continuing with lexical results",
+            );
+            Ok(Vec::new())
+        }
     }
 }
 

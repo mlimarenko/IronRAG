@@ -27,6 +27,14 @@ But the implementation should be cleaner: explicit API resources, typed client b
 - provider/token management belongs in admin flows, not hidden settings drawers
 - long-running ingestion should be job-driven and inspectable
 
+## Minimal Flow UI Reference
+
+The live minimal flow is the `/setup -> /ingest -> /ask` path.
+
+- token and pattern reference: `frontend/docs/architecture/minimal-flow-ui.md`
+- shared CSS tokens: `frontend/src/css/app.scss`
+- selection persistence: `frontend/src/stores/flow.ts`
+
 ## API Contract Boundary
 
 The frontend contract boundary is generated from the backend OpenAPI document instead of being maintained by hand.

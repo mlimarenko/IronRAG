@@ -4,13 +4,18 @@ use axum::{
     routing::get,
 };
 use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
     domains::ingestion_state::IngestionLifecycleState,
     infra::repositories,
-    interfaces::http::{auth::AuthContext, router_support::ApiError},
+    interfaces::http::{
+        auth::AuthContext,
+        authorization::load_ingestion_job_and_authorize,
+        router_support::ApiError,
+    },
     shared::retry::is_retryable_ingestion_state,
 };
 
@@ -160,6 +165,15 @@ async fn create_ingestion_job(
         .ok_or_else(|| ApiError::NotFound(format!("project {} not found", payload.project_id)))?;
     auth.require_workspace_access(project.workspace_id)?;
 
+    info!(
+        workspace_id = %project.workspace_id,
+        project_id = %payload.project_id,
+        source_id = ?payload.source_id,
+        trigger_kind = %payload.trigger_kind,
+        requested_by_present = payload.requested_by.is_some(),
+        "accepted ingestion job creation request",
+    );
+
     let row = repositories::create_ingestion_job(
         &state.persistence.postgres,
         payload.project_id,
@@ -172,6 +186,17 @@ async fn create_ingestion_job(
     )
     .await
     .map_err(|_| ApiError::Internal)?;
+
+    info!(
+        workspace_id = %project.workspace_id,
+        project_id = %row.project_id,
+        source_id = ?row.source_id,
+        ingestion_job_id = %row.id,
+        trigger_kind = %row.trigger_kind,
+        status = %row.status,
+        stage = %row.stage,
+        "created ingestion job",
+    );
 
     Ok(Json(IngestionJobSummary {
         id: row.id,
@@ -209,23 +234,31 @@ async fn retry_ingestion_job(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<IngestionJobDetail>, ApiError> {
-    auth.require_any_scope(&["documents:write", "workspace:admin"])?;
-
-    let row = repositories::get_ingestion_job_by_id(&state.persistence.postgres, id)
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::NotFound(format!("ingestion_job {id} not found")))?;
-
-    let project = repositories::get_project_by_id(&state.persistence.postgres, row.project_id)
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::NotFound(format!("project {} not found", row.project_id)))?;
-    auth.require_workspace_access(project.workspace_id)?;
+    let (row, project) =
+        load_ingestion_job_and_authorize(&auth, &state, id, &["documents:write", "workspace:admin"])
+            .await?;
 
     if !is_retryable_ingestion_state(&row.status) {
+        warn!(
+            workspace_id = %project.workspace_id,
+            project_id = %row.project_id,
+            ingestion_job_id = %row.id,
+            status = %row.status,
+            stage = %row.stage,
+            "rejecting ingestion job retry request because job is not retryable",
+        );
         return Err(ApiError::BadRequest(format!("ingestion_job {id} is not currently retryable")));
     }
 
+    info!(
+        workspace_id = %project.workspace_id,
+        project_id = %row.project_id,
+        ingestion_job_id = %row.id,
+        source_id = ?row.source_id,
+        trigger_kind = %row.trigger_kind,
+        attempt_count = row.attempt_count,
+        "accepted ingestion job retry request",
+    );
     let retry_idempotency_key =
         row.idempotency_key.as_deref().map(|key| format!("{key}:retry:{}", Uuid::now_v7()));
     let retried = repositories::create_ingestion_job(
@@ -240,6 +273,18 @@ async fn retry_ingestion_job(
     )
     .await
     .map_err(|_| ApiError::Internal)?;
+
+    info!(
+        workspace_id = %project.workspace_id,
+        project_id = %retried.project_id,
+        ingestion_job_id = %retried.id,
+        parent_job_id = ?retried.parent_job_id,
+        source_id = ?retried.source_id,
+        trigger_kind = %retried.trigger_kind,
+        status = %retried.status,
+        stage = %retried.stage,
+        "created retry ingestion job",
+    );
 
     Ok(Json(map_ingestion_job_detail(retried)))
 }

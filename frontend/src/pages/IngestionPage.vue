@@ -5,11 +5,13 @@ import { RouterLink } from 'vue-router'
 import {
   createSource,
   fetchDocuments,
+  fetchIngestionJobDetail,
   fetchProjects,
   fetchSources,
   fetchWorkspaces,
   ingestText,
   type DocumentSummary,
+  type IngestionJobDetail,
   type SourceSummary,
 } from 'src/boot/api'
 import PageSection from 'src/components/shell/PageSection.vue'
@@ -17,8 +19,8 @@ import StatusBadge from 'src/components/shell/StatusBadge.vue'
 import {
   getSelectedProjectId,
   getSelectedWorkspaceId,
-  setSelectedProjectId,
-  setSelectedWorkspaceId,
+  syncSelectedProjectId,
+  syncSelectedWorkspaceId,
 } from 'src/stores/flow'
 
 interface WorkspaceItem {
@@ -45,13 +47,15 @@ const text = ref('')
 const statusMessage = ref<string | null>(null)
 const errorMessage = ref<string | null>(null)
 const loading = ref(false)
+const latestJob = ref<IngestionJobDetail | null>(null)
 
-const selectedProjectId = computed(() => getSelectedProjectId())
+const selectedWorkspaceId = ref(getSelectedWorkspaceId())
+const selectedProjectId = ref(getSelectedProjectId())
 const selectedProject = computed(
-  () => projects.value.find((item) => item.id === getSelectedProjectId()) ?? null,
+  () => projects.value.find((item) => item.id === selectedProjectId.value) ?? null,
 )
 const selectedWorkspace = computed(
-  () => workspaces.value.find((item) => item.id === getSelectedWorkspaceId()) ?? null,
+  () => workspaces.value.find((item) => item.id === selectedWorkspaceId.value) ?? null,
 )
 const pageStatus = computed(() => {
   if (!selectedProject.value) {
@@ -71,17 +75,39 @@ async function loadProjectData(projectId: string) {
   sources.value = srcs
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms)
+  })
+}
+
+async function waitForIngestionJob(jobId: string): Promise<IngestionJobDetail | null> {
+  const terminalStatuses = new Set(['completed', 'failed', 'retryable_failed', 'canceled'])
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const detail = await fetchIngestionJobDetail(jobId)
+    latestJob.value = detail
+
+    if (terminalStatuses.has(detail.status)) {
+      return detail
+    }
+
+    await sleep(700)
+  }
+
+  return latestJob.value
+}
+
 onMounted(async () => {
   workspaces.value = await fetchWorkspaces()
-  if (!getSelectedWorkspaceId() && workspaces.value.length > 0) {
-    setSelectedWorkspaceId(workspaces.value[0]?.id ?? '')
-  }
-  const workspaceId = getSelectedWorkspaceId()
+  const workspaceId = syncSelectedWorkspaceId(workspaces.value)
+  selectedWorkspaceId.value = workspaceId
   if (workspaceId) {
     projects.value = await fetchProjects(workspaceId)
-    if (!getSelectedProjectId() && projects.value.length > 0) {
-      setSelectedProjectId(projects.value[0]?.id ?? '')
-    }
+    selectedProjectId.value = syncSelectedProjectId(projects.value)
+  } else {
+    projects.value = []
+    selectedProjectId.value = syncSelectedProjectId([])
   }
   if (selectedProjectId.value) {
     await loadProjectData(selectedProjectId.value)
@@ -92,6 +118,7 @@ async function ingestCurrentText() {
   errorMessage.value = null
   statusMessage.value = null
   loading.value = true
+  latestJob.value = null
 
   if (!selectedProjectId.value) {
     errorMessage.value = 'Create and select a project first in Setup.'
@@ -119,10 +146,27 @@ async function ingestCurrentText() {
       text: text.value,
     })
 
-    await loadProjectData(selectedProjectId.value)
+    statusMessage.value = `Queued ingestion job ${result.ingestion_job_id}. Waiting for completion…`
 
-    statusMessage.value = `Indexed ${String(result.chunk_count)} chunks into document ${result.document_id}.`
-    text.value = ''
+    const jobDetail = await waitForIngestionJob(result.ingestion_job_id)
+    await loadProjectData(selectedProjectId.value)
+    if (jobDetail?.status === 'completed') {
+      statusMessage.value = `Completed ingestion job ${jobDetail.id}. Indexed content is now visible below.`
+      text.value = ''
+      title.value = ''
+      externalKey.value = `note-${String(Date.now())}`
+      return
+    }
+
+    if (jobDetail?.error_message) {
+      errorMessage.value = `Ingestion job ${jobDetail.id} failed: ${jobDetail.error_message}`
+      statusMessage.value = null
+      return
+    }
+
+    const status = jobDetail?.status ?? result.status
+    const stage = jobDetail?.stage ?? result.stage
+    statusMessage.value = `Ingestion job ${result.ingestion_job_id} is ${status} at stage ${stage}.`
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : 'Failed to ingest text'
   } finally {
@@ -292,6 +336,21 @@ async function ingestCurrentText() {
                 <span class="rr-muted">{{ source.source_kind }} · {{ source.status }}</span>
               </li>
             </ul>
+          </article>
+
+          <article v-if="latestJob" class="rr-panel rr-panel--muted">
+            <div class="ingestion-panel__heading">
+              <div>
+                <p class="rr-kicker">Latest job</p>
+                <h3>Tracked ingestion status</h3>
+              </div>
+              <StatusBadge :status="latestJob.status" :label="latestJob.stage" />
+            </div>
+
+            <p class="rr-note">
+              Job {{ latestJob.id }} is {{ latestJob.status }}.
+              <span v-if="latestJob.error_message"> {{ latestJob.error_message }}</span>
+            </p>
           </article>
         </div>
       </div>

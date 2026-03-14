@@ -1,5 +1,6 @@
 use axum::{Json, Router, extract::State};
 use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -73,16 +74,40 @@ async fn ingest_text(
     State(state): State<AppState>,
     Json(payload): Json<IngestTextRequest>,
 ) -> Result<Json<IngestTextResponse>, ApiError> {
-    load_project_and_authorize(&auth, &state, payload.project_id, POLICY_DOCUMENTS_WRITE).await?;
+    let project =
+        load_project_and_authorize(&auth, &state, payload.project_id, POLICY_DOCUMENTS_WRITE)
+            .await?;
     if payload.external_key.trim().is_empty() {
+        warn!(
+            workspace_id = %project.workspace_id,
+            project_id = %payload.project_id,
+            source_id = ?payload.source_id,
+            "rejecting text ingestion request with empty external_key",
+        );
         return Err(ApiError::BadRequest("external_key must not be empty".into()));
     }
     if payload.text.trim().is_empty() {
+        warn!(
+            workspace_id = %project.workspace_id,
+            project_id = %payload.project_id,
+            source_id = ?payload.source_id,
+            external_key = %payload.external_key.trim(),
+            "rejecting text ingestion request with empty text payload",
+        );
         return Err(ApiError::BadRequest("text must not be empty".into()));
     }
 
-    let idempotency_key =
-        format!("ingest-text:{}:{}", payload.project_id, payload.external_key.trim());
+    let external_key = payload.external_key.trim().to_string();
+    let text_len = payload.text.len();
+    let idempotency_key = format!("ingest-text:{}:{}", payload.project_id, external_key);
+    info!(
+        workspace_id = %project.workspace_id,
+        project_id = %payload.project_id,
+        source_id = ?payload.source_id,
+        external_key = %external_key,
+        text_len,
+        "accepted text ingestion request",
+    );
     let job = repositories::create_ingestion_job(
         &state.persistence.postgres,
         payload.project_id,
@@ -94,7 +119,7 @@ async fn ingest_text(
         serde_json::json!({
             "project_id": payload.project_id,
             "source_id": payload.source_id,
-            "external_key": payload.external_key,
+            "external_key": external_key,
             "title": payload.title,
             "mime_type": "text/plain",
             "text": payload.text,
@@ -107,10 +132,29 @@ async fn ingest_text(
         sqlx::Error::Database(database_error)
             if database_error.constraint() == Some("idx_ingestion_job_idempotency_key") =>
         {
+            warn!(
+                workspace_id = %project.workspace_id,
+                project_id = %payload.project_id,
+                source_id = ?payload.source_id,
+                external_key = %external_key,
+                "duplicate text ingestion request",
+            );
             ApiError::Conflict("an ingestion job already exists for this idempotency key".into())
         }
         _ => ApiError::Internal,
     })?;
+
+    info!(
+        workspace_id = %project.workspace_id,
+        project_id = %payload.project_id,
+        source_id = ?payload.source_id,
+        ingestion_job_id = %job.id,
+        status = %job.status,
+        stage = %job.stage,
+        external_key = %external_key,
+        text_len,
+        "created ingestion job for text request",
+    );
 
     Ok(Json(IngestTextResponse { ingestion_job_id: job.id, status: job.status, stage: job.stage }))
 }
@@ -120,8 +164,15 @@ async fn search_chunks(
     State(state): State<AppState>,
     Json(payload): Json<SearchChunksRequest>,
 ) -> Result<Json<Vec<ChunkResult>>, ApiError> {
-    load_project_and_authorize(&auth, &state, payload.project_id, POLICY_QUERY_READ).await?;
+    let project =
+        load_project_and_authorize(&auth, &state, payload.project_id, POLICY_QUERY_READ).await?;
     if payload.query_text.trim().is_empty() {
+        warn!(
+            workspace_id = %project.workspace_id,
+            project_id = %payload.project_id,
+            top_k = payload.top_k.unwrap_or(5),
+            "rejecting chunk search request with empty query_text",
+        );
         return Err(ApiError::BadRequest("query_text must not be empty".into()));
     }
 

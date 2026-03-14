@@ -47,6 +47,15 @@ async fn run_ingestion_worker(state: Arc<AppState>, mut shutdown: broadcast::Rec
                     Ok(Some(job)) => {
                         let job_id = job.id;
                         let attempt_no = job.attempt_count;
+                        info!(
+                            %worker_id,
+                            job_id = %job_id,
+                            project_id = %job.project_id,
+                            source_id = ?job.source_id,
+                            attempt_no,
+                            trigger_kind = %job.trigger_kind,
+                            "claimed ingestion job",
+                        );
                         if let Err(error) = execute_job(state.clone(), &worker_id, job).await {
                             error!(%worker_id, job_id=%job_id, ?error, "ingestion worker job execution crashed");
                             fail_job(&state, job_id, Some(attempt_no), &worker_id, &error).await;
@@ -70,6 +79,18 @@ async fn execute_job(
     let attempt_no = job.attempt_count;
     let payload = repositories::parse_ingestion_execution_payload(&job)
         .context("ingestion job payload missing or invalid")?;
+
+    info!(
+        job_id = %job.id,
+        %worker_id,
+        project_id = %payload.project_id,
+        source_id = ?payload.source_id,
+        attempt_no,
+        external_key = %payload.external_key,
+        ingest_mode = %payload.ingest_mode,
+        text_len = payload.text.len(),
+        "starting ingestion job",
+    );
 
     repositories::mark_ingestion_job_stage(
         &state.persistence.postgres,
@@ -176,6 +197,8 @@ pub async fn fail_job(
     error: &anyhow::Error,
 ) {
     let message = error.to_string();
+    error!(job_id=%job_id, %worker_id, attempt_no, error=%message, "ingestion job failed");
+
     if let Some(attempt_no) = attempt_no {
         if let Err(attempt_error) = repositories::fail_ingestion_job_attempt(
             &state.persistence.postgres,

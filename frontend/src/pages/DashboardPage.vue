@@ -8,8 +8,8 @@ import StatusBadge from 'src/components/shell/StatusBadge.vue'
 import {
   getSelectedProjectId,
   getSelectedWorkspaceId,
-  setSelectedProjectId,
-  setSelectedWorkspaceId,
+  syncSelectedProjectId,
+  syncSelectedWorkspaceId,
 } from 'src/stores/flow'
 
 interface WorkspaceItem {
@@ -49,16 +49,13 @@ const nextAction = computed(() => {
 
 onMounted(async () => {
   workspaces.value = await fetchWorkspaces()
-  const workspaceId = getSelectedWorkspaceId()
-  if (!workspaceId && workspaces.value.length > 0) {
-    setSelectedWorkspaceId(workspaces.value[0]?.id ?? '')
-  }
-  const activeWorkspaceId = getSelectedWorkspaceId()
+  const activeWorkspaceId = syncSelectedWorkspaceId(workspaces.value)
   if (activeWorkspaceId) {
     projects.value = await fetchProjects(activeWorkspaceId)
-    if (!getSelectedProjectId() && projects.value.length > 0) {
-      setSelectedProjectId(projects.value[0]?.id ?? '')
-    }
+    syncSelectedProjectId(projects.value)
+  } else {
+    projects.value = []
+    syncSelectedProjectId([])
   }
 })
 </script>

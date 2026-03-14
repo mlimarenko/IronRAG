@@ -196,8 +196,9 @@ export interface IngestTextRequest {
 }
 
 export interface IngestTextResponse {
-  document_id: string
-  chunk_count: number
+  ingestion_job_id: string
+  status: string
+  stage: string
 }
 
 export interface QueryResponseSurface {

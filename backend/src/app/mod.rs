@@ -4,8 +4,11 @@ pub mod state;
 
 use axum::Router;
 use std::net::SocketAddr;
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
-use tracing::info;
+use tower_http::{
+    cors::CorsLayer,
+    trace::{DefaultMakeSpan, DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer},
+};
+use tracing::{Level, info};
 
 use crate::{interfaces::http, services::ingestion_worker};
 
@@ -24,7 +27,13 @@ pub async fn run() -> anyhow::Result<()> {
     let router = Router::new()
         .nest("/v1", http::router())
         .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_request(DefaultOnRequest::new().level(Level::INFO))
+                .on_response(DefaultOnResponse::new().level(Level::INFO))
+                .on_failure(DefaultOnFailure::new().level(Level::ERROR)),
+        )
         .with_state(state);
 
     let addr: SocketAddr = config.bind_addr.parse()?;
