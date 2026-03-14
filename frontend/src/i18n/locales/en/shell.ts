@@ -1,33 +1,42 @@
 export default {
   brand: {
     eyebrow: 'RustRAG',
-    title: 'Product console',
-    subtitle: 'A cleaner shell for workspace, content, and grounded search.',
+    title: 'RustRAG',
+    subtitle: 'Operator shell for grounded content workflows.',
     badge: 'Preview',
   },
   nav: {
-    primary: 'Core',
-    manage: 'Manage',
+    primary: 'Product',
+    manage: 'Context',
     items: {
-      overview: {
-        label: 'Overview',
-        caption: 'Flow status',
+      processing: {
+        label: 'Processing',
+        caption: 'Pipeline status',
       },
-      workspace: {
-        label: 'Workspace',
-        caption: 'Context',
+      files: {
+        label: 'Files',
+        caption: 'Indexed content',
       },
-      library: {
-        label: 'Library',
-        caption: 'Content',
+      ask: {
+        label: 'Ask',
+        caption: 'Grounded answers',
       },
-      search: {
-        label: 'Search',
-        caption: 'Answers',
+      graph: {
+        label: 'Graph',
+        caption: 'Knowledge signals',
+      },
+      api: {
+        label: 'API',
+        caption: 'Integration surface',
+      },
+      context: {
+        label: 'Context',
+        caption: 'Workspace and project',
       },
     },
   },
   topbar: {
+    surface: 'Surface',
     language: 'Language',
     state: 'Runtime',
   },
@@ -41,21 +50,23 @@ export default {
     healthy: 'Healthy',
   },
   pages: {
-    overview: {
-      section: 'Overview',
-      title: 'Minimal product flow',
+    processing: {
+      title: 'Processing',
     },
-    workspace: {
-      section: 'Workspace',
-      title: 'Workspace and project context',
+    context: {
+      title: 'Context',
     },
-    library: {
-      section: 'Library',
-      title: 'Content library',
+    files: {
+      title: 'Files',
     },
-    search: {
-      section: 'Search',
-      title: 'Grounded answers',
+    ask: {
+      title: 'Ask',
+    },
+    graph: {
+      title: 'Graph',
+    },
+    api: {
+      title: 'API',
     },
   },
 } as const

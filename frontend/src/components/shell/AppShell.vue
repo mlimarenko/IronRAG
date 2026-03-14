@@ -9,19 +9,18 @@ import AppTopbar from './AppTopbar.vue'
 const route = useRoute()
 const { t } = useI18n()
 
-type ShellSection = 'overview' | 'workspace' | 'library' | 'search'
+type ShellSection = 'processing' | 'context' | 'files' | 'ask' | 'graph' | 'api'
 
 const routeMeta = computed(() => {
   const meta = route.meta as {
     shellSection?: ShellSection
     shellStatus?: 'focused' | 'ready' | 'healthy'
   }
-  const section = meta.shellSection ?? 'overview'
+  const section = meta.shellSection ?? 'processing'
   const shellStatus = meta.shellStatus ?? 'ready'
 
   return {
-    sectionLabel: t(`shell.pages.${section}.section`),
-    pageTitle: t(`shell.pages.${section}.title`),
+    sectionLabel: t(`shell.pages.${section}.title`),
     environmentLabel: t(`shell.status.${shellStatus}`),
     environmentStatus: shellStatus,
   }
@@ -37,7 +36,6 @@ const routeMeta = computed(() => {
     <div class="app-shell__main">
       <AppTopbar
         :section-label="routeMeta.sectionLabel"
-        :page-title="routeMeta.pageTitle"
         :environment-label="routeMeta.environmentLabel"
         :environment-status="routeMeta.environmentStatus"
       />

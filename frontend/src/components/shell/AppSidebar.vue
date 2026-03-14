@@ -10,7 +10,7 @@ const { t } = useI18n()
 
 interface NavItem {
   to: string
-  key: 'overview' | 'workspace' | 'library' | 'search'
+  key: 'processing' | 'files' | 'ask' | 'graph' | 'api' | 'context'
 }
 
 interface NavGroup {
@@ -22,15 +22,17 @@ const navGroups = computed<readonly NavGroup[]>(() => [
   {
     label: t('shell.nav.primary'),
     items: [
-      { to: '/', key: 'overview' },
-      { to: '/ask', key: 'search' },
+      { to: '/', key: 'processing' },
+      { to: '/ingest', key: 'files' },
+      { to: '/ask', key: 'ask' },
+      { to: '/graph', key: 'graph' },
+      { to: '/api', key: 'api' },
     ],
   },
   {
     label: t('shell.nav.manage'),
     items: [
-      { to: '/setup', key: 'workspace' },
-      { to: '/ingest', key: 'library' },
+      { to: '/setup', key: 'context' },
     ],
   },
 ])
@@ -62,7 +64,7 @@ function isActive(item: NavItem) {
         v-for="group in navGroups"
         :key="group.label"
         class="app-sidebar__group"
-        aria-label="Primary"
+        :aria-label="group.label"
       >
         <p class="app-sidebar__group-label">{{ group.label }}</p>
         <div class="app-sidebar__nav">
@@ -74,7 +76,6 @@ function isActive(item: NavItem) {
             :data-active="isActive(item)"
           >
             <span class="app-sidebar__label">{{ t(`shell.nav.items.${item.key}.label`) }}</span>
-            <span class="app-sidebar__caption">{{ t(`shell.nav.items.${item.key}.caption`) }}</span>
           </RouterLink>
         </div>
       </nav>
@@ -96,7 +97,7 @@ function isActive(item: NavItem) {
 
 .app-sidebar__brand-copy {
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 
 .app-sidebar__eyebrow {
@@ -118,9 +119,9 @@ function isActive(item: NavItem) {
 
 .app-sidebar__subtitle {
   margin: 0;
-  max-width: 24ch;
+  max-width: 22ch;
   color: rgb(203 213 225 / 0.8);
-  font-size: 0.92rem;
+  font-size: 0.88rem;
 }
 
 .app-sidebar__groups,
@@ -140,9 +141,10 @@ function isActive(item: NavItem) {
 }
 
 .app-sidebar__link {
-  display: grid;
-  gap: 3px;
-  padding: 13px 15px;
+  display: flex;
+  align-items: center;
+  min-height: 48px;
+  padding: 12px 15px;
   border: 1px solid rgb(148 163 184 / 0.12);
   border-radius: var(--rr-radius-md);
   color: rgb(203 213 225 / 0.94);
@@ -170,10 +172,5 @@ function isActive(item: NavItem) {
 .app-sidebar__label {
   font-weight: 700;
   color: var(--rr-color-text-inverse);
-}
-
-.app-sidebar__caption {
-  font-size: 0.86rem;
-  color: rgb(148 163 184 / 0.88);
 }
 </style>

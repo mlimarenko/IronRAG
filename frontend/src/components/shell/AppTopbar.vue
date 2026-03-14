@@ -11,13 +11,11 @@ const { locale, localeOptions, setLocale } = useAppLocale()
 withDefaults(
   defineProps<{
     sectionLabel?: string
-    pageTitle?: string
     environmentLabel?: string
     environmentStatus?: string
   }>(),
   {
     sectionLabel: undefined,
-    pageTitle: undefined,
     environmentLabel: undefined,
     environmentStatus: 'ready',
   },
@@ -27,8 +25,8 @@ withDefaults(
 <template>
   <header class="app-topbar">
     <div class="app-topbar__copy">
+      <span class="app-topbar__label">{{ t('shell.topbar.surface') }}</span>
       <p class="app-topbar__section">{{ sectionLabel }}</p>
-      <h2>{{ pageTitle }}</h2>
     </div>
 
     <div class="app-topbar__controls">
@@ -41,6 +39,7 @@ withDefaults(
             type="button"
             class="rr-segmented__button"
             :data-active="locale === option"
+            :aria-pressed="locale === option"
             @click="setLocale(option)"
           >
             {{ t(`shell.locale.${option}`) }}
@@ -65,12 +64,12 @@ withDefaults(
   justify-content: space-between;
   gap: var(--rr-space-4);
   align-items: center;
-  padding: 18px 20px;
+  padding: 14px 18px;
   border: 1px solid var(--rr-color-border-subtle);
-  border-radius: var(--rr-radius-lg);
+  border-radius: var(--rr-radius-md);
   background:
-    radial-gradient(circle at top right, rgb(44 93 215 / 0.12), transparent 24%),
-    rgb(255 255 255 / 0.8);
+    radial-gradient(circle at top right, rgb(44 93 215 / 0.08), transparent 22%),
+    rgb(255 255 255 / 0.76);
   box-shadow: var(--rr-shadow-sm);
 }
 
@@ -84,18 +83,9 @@ withDefaults(
 
 .app-topbar__section {
   margin: 0;
-  font-size: 0.78rem;
+  font-size: 0.96rem;
   font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--rr-color-text-muted);
-}
-
-.app-topbar__copy h2 {
-  margin: 0;
-  font-size: clamp(1.4rem, 2vw, 1.8rem);
-  line-height: 1.05;
-  letter-spacing: -0.03em;
+  color: var(--rr-color-text-primary);
 }
 
 .app-topbar__controls {

@@ -1,33 +1,42 @@
 export default {
   brand: {
     eyebrow: 'RustRAG',
-    title: 'Продуктовая консоль',
-    subtitle: 'Более чистый shell для workspace, контента и grounded search.',
+    title: 'RustRAG',
+    subtitle: 'Операторский shell для grounded content workflows.',
     badge: 'Preview',
   },
   nav: {
-    primary: 'Основа',
-    manage: 'Управление',
+    primary: 'Product',
+    manage: 'Context',
     items: {
-      overview: {
-        label: 'Обзор',
-        caption: 'Состояние потока',
+      processing: {
+        label: 'Processing',
+        caption: 'Статус пайплайна',
       },
-      workspace: {
-        label: 'Workspace',
-        caption: 'Контекст',
+      files: {
+        label: 'Files',
+        caption: 'Индексированный контент',
       },
-      library: {
-        label: 'Библиотека',
-        caption: 'Контент',
+      ask: {
+        label: 'Ask',
+        caption: 'Grounded-ответы',
       },
-      search: {
-        label: 'Поиск',
-        caption: 'Ответы',
+      graph: {
+        label: 'Graph',
+        caption: 'Knowledge signals',
+      },
+      api: {
+        label: 'API',
+        caption: 'Integration surface',
+      },
+      context: {
+        label: 'Context',
+        caption: 'Workspace и project',
       },
     },
   },
   topbar: {
+    surface: 'Surface',
     language: 'Язык',
     state: 'Состояние',
   },
@@ -41,21 +50,23 @@ export default {
     healthy: 'Стабильно',
   },
   pages: {
-    overview: {
-      section: 'Обзор',
-      title: 'Минимальный продуктовый поток',
+    processing: {
+      title: 'Processing',
     },
-    workspace: {
-      section: 'Workspace',
-      title: 'Контекст workspace и project',
+    context: {
+      title: 'Context',
     },
-    library: {
-      section: 'Библиотека',
-      title: 'Библиотека контента',
+    files: {
+      title: 'Files',
     },
-    search: {
-      section: 'Поиск',
-      title: 'Grounded-ответы',
+    ask: {
+      title: 'Ask',
+    },
+    graph: {
+      title: 'Graph',
+    },
+    api: {
+      title: 'API',
     },
   },
 } as const

@@ -11,7 +11,7 @@ const routes = [
             path: '',
             component: () => import('src/pages/DashboardPage.vue'),
             meta: {
-              shellSection: 'overview',
+              shellSection: 'processing',
               shellStatus: 'focused',
             },
           },
@@ -19,7 +19,7 @@ const routes = [
             path: 'setup',
             component: () => import('src/pages/WorkspacesPage.vue'),
             meta: {
-              shellSection: 'workspace',
+              shellSection: 'context',
               shellStatus: 'ready',
             },
           },
@@ -27,7 +27,7 @@ const routes = [
             path: 'ingest',
             component: () => import('src/pages/IngestionPage.vue'),
             meta: {
-              shellSection: 'library',
+              shellSection: 'files',
               shellStatus: 'ready',
             },
           },
@@ -35,7 +35,23 @@ const routes = [
             path: 'ask',
             component: () => import('src/pages/ChatPage.vue'),
             meta: {
-              shellSection: 'search',
+              shellSection: 'ask',
+              shellStatus: 'healthy',
+            },
+          },
+          {
+            path: 'graph',
+            component: () => import('src/pages/GraphPage.vue'),
+            meta: {
+              shellSection: 'graph',
+              shellStatus: 'ready',
+            },
+          },
+          {
+            path: 'api',
+            component: () => import('src/pages/ApiIntegrationsPage.vue'),
+            meta: {
+              shellSection: 'api',
               shellStatus: 'healthy',
             },
           },
