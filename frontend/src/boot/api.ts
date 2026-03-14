@@ -201,6 +201,14 @@ export interface IngestTextResponse {
   stage: string
 }
 
+export interface UploadIngestResponse {
+  ingestion_job_id: string
+  external_key: string
+  status: string
+  stage: string
+  mime_type?: string | null
+}
+
 export interface QueryResponseSurface {
   retrieval_run_id: string
   project_id: string
@@ -381,6 +389,26 @@ export async function searchChunks(payload: SearchChunksRequest): Promise<Search
 
 export async function ingestText(payload: IngestTextRequest): Promise<IngestTextResponse> {
   const { data } = await api.post<IngestTextResponse>('/content/ingest-text', payload)
+  return data
+}
+
+export async function uploadAndIngest(payload: {
+  project_id: string
+  source_id?: string | null
+  title?: string | null
+  file: File
+}): Promise<UploadIngestResponse> {
+  const formData = new FormData()
+  formData.append('project_id', payload.project_id)
+  if (payload.source_id) {
+    formData.append('source_id', payload.source_id)
+  }
+  if (payload.title) {
+    formData.append('title', payload.title)
+  }
+  formData.append('file', payload.file)
+
+  const { data } = await api.post<UploadIngestResponse>('/uploads/ingest', formData)
   return data
 }
 

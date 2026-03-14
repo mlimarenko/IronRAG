@@ -98,7 +98,7 @@ export default {
   library: {
     eyebrow: 'Content',
     title: 'Library',
-    description: 'Index text into the active project.',
+    description: 'Index pasted text or UTF-8 text-like files into the active project.',
     action: 'Open search',
     statusBlocked: 'Select a project in Workspace',
     statusDraft: 'Ready for the first item',
@@ -123,6 +123,24 @@ export default {
       text: 'Text',
       action: 'Index content',
       actionBusy: 'Indexing...',
+    },
+    upload: {
+      kicker: 'Upload',
+      title: 'Upload a text-like file',
+      ready: 'Project selected',
+      needsSetup: 'Needs setup',
+      sourceLabel: 'Upload source label',
+      titleLabel: 'Document title',
+      file: 'File',
+      selected: 'Selected file',
+      supportedHint:
+        'Current backend support is limited to UTF-8 text-like files such as .txt, .md, .csv, .json, and .yaml.',
+      blockedHint:
+        'PDF and image ingestion are not available yet because the backend has no parser or OCR extraction flow for them.',
+      unsupportedError: 'Choose a UTF-8 text-like file. Binary uploads are not supported in the current backend.',
+      blockedError: 'PDF and image uploads are blocked for now because backend extraction is not implemented.',
+      action: 'Upload and index',
+      actionBusy: 'Uploading...',
     },
     lists: {
       documents: {

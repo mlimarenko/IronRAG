@@ -98,7 +98,7 @@ export default {
   library: {
     eyebrow: 'Контент',
     title: 'Библиотека',
-    description: 'Индексируйте текст в активный project.',
+    description: 'Индексируйте вставленный текст или UTF-8 text-like файлы в активный project.',
     action: 'Открыть поиск',
     statusBlocked: 'Выберите project в Workspace',
     statusDraft: 'Готово для первого элемента',
@@ -123,6 +123,26 @@ export default {
       text: 'Текст',
       action: 'Индексировать контент',
       actionBusy: 'Индексация...',
+    },
+    upload: {
+      kicker: 'Upload',
+      title: 'Загрузить text-like файл',
+      ready: 'Project выбран',
+      needsSetup: 'Нужна настройка',
+      sourceLabel: 'Label upload source',
+      titleLabel: 'Заголовок документа',
+      file: 'Файл',
+      selected: 'Выбранный файл',
+      supportedHint:
+        'Текущий backend поддерживает только UTF-8 text-like файлы, например .txt, .md, .csv, .json и .yaml.',
+      blockedHint:
+        'PDF и image ingest пока недоступны: в backend ещё нет parser/OCR pipeline для их извлечения.',
+      unsupportedError:
+        'Выберите UTF-8 text-like файл. Binary uploads текущий backend пока не поддерживает.',
+      blockedError:
+        'PDF и image uploads пока заблокированы, потому что backend extraction ещё не реализован.',
+      action: 'Загрузить и проиндексировать',
+      actionBusy: 'Загрузка...',
     },
     lists: {
       documents: {
