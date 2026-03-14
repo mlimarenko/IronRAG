@@ -41,37 +41,41 @@ async fn upload_and_ingest(
     let mut mime_type: Option<String> = None;
     let mut file_bytes: Option<Vec<u8>> = None;
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|_| ApiError::BadRequest("invalid multipart payload".into()))?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(|_| {
+        warn!("rejecting upload ingestion request with invalid multipart payload");
+        ApiError::BadRequest("invalid multipart payload".into())
+    })? {
         let name = field.name().unwrap_or_default().to_string();
         match name.as_str() {
             "project_id" => {
-                let text = field
-                    .text()
-                    .await
-                    .map_err(|_| ApiError::BadRequest("invalid project_id".into()))?;
+                let text = field.text().await.map_err(|_| {
+                    warn!("rejecting upload ingestion request with unreadable project_id");
+                    ApiError::BadRequest("invalid project_id".into())
+                })?;
                 project_id = Some(
-                    text.parse()
-                        .map_err(|_| ApiError::BadRequest("project_id must be uuid".into()))?,
+                    text.parse().map_err(|_| {
+                        warn!(project_id = %text, "rejecting upload ingestion request with non-uuid project_id");
+                        ApiError::BadRequest("project_id must be uuid".into())
+                    })?,
                 );
             }
             "source_id" => {
-                let text = field
-                    .text()
-                    .await
-                    .map_err(|_| ApiError::BadRequest("invalid source_id".into()))?;
+                let text = field.text().await.map_err(|_| {
+                    warn!("rejecting upload ingestion request with unreadable source_id");
+                    ApiError::BadRequest("invalid source_id".into())
+                })?;
                 source_id = Some(
-                    text.parse()
-                        .map_err(|_| ApiError::BadRequest("source_id must be uuid".into()))?,
+                    text.parse().map_err(|_| {
+                        warn!(source_id = %text, "rejecting upload ingestion request with non-uuid source_id");
+                        ApiError::BadRequest("source_id must be uuid".into())
+                    })?,
                 );
             }
             "title" => {
-                title = Some(
-                    field.text().await.map_err(|_| ApiError::BadRequest("invalid title".into()))?,
-                );
+                title = Some(field.text().await.map_err(|_| {
+                    warn!("rejecting upload ingestion request with unreadable title field");
+                    ApiError::BadRequest("invalid title".into())
+                })?);
             }
             "file" => {
                 file_name = field.file_name().map(std::string::ToString::to_string);
@@ -80,7 +84,14 @@ async fn upload_and_ingest(
                     field
                         .bytes()
                         .await
-                        .map_err(|_| ApiError::BadRequest("invalid file body".into()))?
+                        .map_err(|_| {
+                            warn!(
+                                file_name = ?file_name,
+                                mime_type = ?mime_type,
+                                "rejecting upload ingestion request with unreadable file body",
+                            );
+                            ApiError::BadRequest("invalid file body".into())
+                        })?
                         .to_vec(),
                 );
             }

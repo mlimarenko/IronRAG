@@ -5,7 +5,7 @@ use axum::{
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -308,16 +308,13 @@ async fn run_query(
     let query_result = match execute_query(&state, &payload).await {
         Ok(result) => result,
         Err(error) => {
-            warn!(
-                workspace_id = %project.workspace_id,
-                project_id = %payload.project_id,
-                model_profile_id = ?payload.model_profile_id,
-                embedding_model_profile_id = ?payload.embedding_model_profile_id,
+            log_query_request_failure(
+                project.workspace_id,
+                &payload,
                 top_k,
-                latency_ms = started_at.elapsed().as_millis(),
-                error = %error,
-                phase = "execute_query",
-                "query request failed",
+                started_at.elapsed().as_millis(),
+                "execute_query",
+                &error,
             );
             return Err(error);
         }
@@ -328,19 +325,13 @@ async fn run_query(
     let response = match persist_query_artifacts(&state, &payload, &query_result).await {
         Ok(response) => response,
         Err(error) => {
-            warn!(
-                workspace_id = %project.workspace_id,
-                project_id = %payload.project_id,
-                model_profile_id = ?payload.model_profile_id,
-                embedding_model_profile_id = ?payload.embedding_model_profile_id,
-                provider_kind = %query_result.provider_kind,
-                model_name = %query_result.model_name,
+            log_query_request_failure(
+                project.workspace_id,
+                &payload,
                 top_k,
-                matched_chunk_count,
-                latency_ms = started_at.elapsed().as_millis(),
-                error = %error,
-                phase = "persist_query_artifacts",
-                "query request failed",
+                started_at.elapsed().as_millis(),
+                "persist_query_artifacts",
+                &error,
             );
             return Err(error);
         }
@@ -395,6 +386,44 @@ fn validate_query_payload(payload: &QueryRequest) -> Result<(), ApiError> {
         return Err(ApiError::BadRequest("top_k must be greater than zero".into()));
     }
     Ok(())
+}
+
+fn log_query_request_failure(
+    workspace_id: Uuid,
+    payload: &QueryRequest,
+    top_k: i32,
+    latency_ms: u128,
+    phase: &str,
+    error: &ApiError,
+) {
+    match error {
+        ApiError::Internal => {
+            error!(
+                workspace_id = %workspace_id,
+                project_id = %payload.project_id,
+                model_profile_id = ?payload.model_profile_id,
+                embedding_model_profile_id = ?payload.embedding_model_profile_id,
+                top_k,
+                latency_ms,
+                phase,
+                error = %error,
+                "query request failed",
+            );
+        }
+        _ => {
+            warn!(
+                workspace_id = %workspace_id,
+                project_id = %payload.project_id,
+                model_profile_id = ?payload.model_profile_id,
+                embedding_model_profile_id = ?payload.embedding_model_profile_id,
+                top_k,
+                latency_ms,
+                phase,
+                error = %error,
+                "query request failed",
+            );
+        }
+    }
 }
 
 async fn execute_query(
@@ -987,7 +1016,10 @@ mod tests {
 
         let references = build_references(&[chunk]);
 
-        assert_eq!(references, vec!["document:aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa:chunk:7".to_string()]);
+        assert_eq!(
+            references,
+            vec!["document:aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa:chunk:7".to_string()]
+        );
     }
 
     #[test]
