@@ -12,7 +12,7 @@ import {
 import RetrievalDiagnosticsPanel from 'src/components/chat/RetrievalDiagnosticsPanel.vue'
 import StatusPill from 'src/components/chat/StatusPill.vue'
 import TokenListSection from 'src/components/chat/TokenListSection.vue'
-import { useFlowStore } from 'src/stores/flow'
+import { getSelectedProjectId, getSelectedWorkspaceId, setSelectedProjectId, setSelectedWorkspaceId } from 'src/stores/flow'
 
 interface WorkspaceItem {
   id: string
@@ -27,7 +27,6 @@ interface ProjectItem {
   workspace_id: string
 }
 
-const flowStore = useFlowStore()
 const workspaces = ref<WorkspaceItem[]>([])
 const projects = ref<ProjectItem[]>([])
 
@@ -37,23 +36,24 @@ const detail = ref<RetrievalRunDetail | null>(null)
 const errorMessage = ref<string | null>(null)
 const loading = ref(false)
 
-const selectedProjectId = computed(() => flowStore.projectId)
+const selectedProjectId = computed(() => getSelectedProjectId())
 const selectedProject = computed(
-  () => projects.value.find((item) => item.id === flowStore.projectId) ?? null,
+  () => projects.value.find((item) => item.id === getSelectedProjectId()) ?? null,
 )
 const selectedWorkspace = computed(
-  () => workspaces.value.find((item) => item.id === flowStore.workspaceId) ?? null,
+  () => workspaces.value.find((item) => item.id === getSelectedWorkspaceId()) ?? null,
 )
 
 onMounted(async () => {
   workspaces.value = await fetchWorkspaces()
-  if (!flowStore.workspaceId && workspaces.value.length > 0) {
-    flowStore.selectWorkspace(workspaces.value[0]?.id ?? '')
+  if (!getSelectedWorkspaceId() && workspaces.value.length > 0) {
+    setSelectedWorkspaceId(workspaces.value[0]?.id ?? '')
   }
-  if (flowStore.workspaceId) {
-    projects.value = await fetchProjects(flowStore.workspaceId)
-    if (!flowStore.projectId && projects.value.length > 0) {
-      flowStore.selectProject(projects.value[0]?.id ?? '')
+  const workspaceId = getSelectedWorkspaceId()
+  if (workspaceId) {
+    projects.value = await fetchProjects(workspaceId)
+    if (!getSelectedProjectId() && projects.value.length > 0) {
+      setSelectedProjectId(projects.value[0]?.id ?? '')
     }
   }
 })

@@ -1,30 +1,30 @@
-import { ref } from 'vue'
-import { defineStore } from 'pinia'
+const WORKSPACE_KEY = 'rustrag:selected-workspace-id'
+const PROJECT_KEY = 'rustrag:selected-project-id'
 
-export const useFlowStore = defineStore('flow', () => {
-  const workspaceId = ref('')
-  const projectId = ref('')
+export function getSelectedWorkspaceId(): string {
+  return window.sessionStorage.getItem(WORKSPACE_KEY) ?? ''
+}
 
-  function selectWorkspace(id: string) {
-    workspaceId.value = id
-    if (!id) {
-      projectId.value = ''
-    }
+export function setSelectedWorkspaceId(id: string): void {
+  if (id) {
+    window.sessionStorage.setItem(WORKSPACE_KEY, id)
+  } else {
+    window.sessionStorage.removeItem(WORKSPACE_KEY)
   }
+}
 
-  function selectProject(id: string) {
-    projectId.value = id
-  }
+export function getSelectedProjectId(): string {
+  return window.sessionStorage.getItem(PROJECT_KEY) ?? ''
+}
 
-  function resetProject() {
-    projectId.value = ''
+export function setSelectedProjectId(id: string): void {
+  if (id) {
+    window.sessionStorage.setItem(PROJECT_KEY, id)
+  } else {
+    window.sessionStorage.removeItem(PROJECT_KEY)
   }
+}
 
-  return {
-    workspaceId,
-    projectId,
-    selectWorkspace,
-    selectProject,
-    resetProject,
-  }
-})
+export function resetSelectedProjectId(): void {
+  window.sessionStorage.removeItem(PROJECT_KEY)
+}

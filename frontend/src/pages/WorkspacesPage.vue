@@ -2,7 +2,13 @@
 import { computed, onMounted, ref, watch } from 'vue'
 
 import { createProject, createWorkspace, fetchProjects, fetchWorkspaces } from 'src/boot/api'
-import { useFlowStore } from 'src/stores/flow'
+import {
+  getSelectedProjectId,
+  getSelectedWorkspaceId,
+  resetSelectedProjectId,
+  setSelectedProjectId,
+  setSelectedWorkspaceId,
+} from 'src/stores/flow'
 
 interface WorkspaceItem {
   id: string
@@ -19,8 +25,6 @@ interface ProjectItem {
   description?: string | null
 }
 
-const flowStore = useFlowStore()
-
 const workspaces = ref<WorkspaceItem[]>([])
 const projects = ref<ProjectItem[]>([])
 const workspaceForm = ref({ slug: '', name: '' })
@@ -30,37 +34,35 @@ const projectError = ref<string | null>(null)
 const successMessage = ref<string | null>(null)
 
 const selectedWorkspaceId = computed({
-  get: () => flowStore.workspaceId,
+  get: () => getSelectedWorkspaceId(),
   set: (value: string) => {
-    flowStore.selectWorkspace(value)
+    setSelectedWorkspaceId(value)
   },
 })
 
 const selectedProjectId = computed({
-  get: () => flowStore.projectId,
-  set: (value: string) => flowStore.selectProject(value),
+  get: () => getSelectedProjectId(),
+  set: (value: string) => setSelectedProjectId(value),
 })
 
-watch(
-  () => flowStore.workspaceId,
-  async (value) => {
-    flowStore.resetProject()
-    projects.value = value ? await fetchProjects(value) : []
-    if (!flowStore.projectId && projects.value.length > 0) {
-      flowStore.selectProject(projects.value[0]?.id ?? '')
-    }
-  },
-)
+watch(selectedWorkspaceId, async (value) => {
+  resetSelectedProjectId()
+  projects.value = value ? await fetchProjects(value) : []
+  if (!getSelectedProjectId() && projects.value.length > 0) {
+    setSelectedProjectId(projects.value[0]?.id ?? '')
+  }
+})
 
 onMounted(async () => {
   workspaces.value = await fetchWorkspaces()
-  if (!flowStore.workspaceId && workspaces.value.length > 0) {
-    flowStore.selectWorkspace(workspaces.value[0]?.id ?? '')
+  if (!getSelectedWorkspaceId() && workspaces.value.length > 0) {
+    setSelectedWorkspaceId(workspaces.value[0]?.id ?? '')
   }
-  if (flowStore.workspaceId) {
-    projects.value = await fetchProjects(flowStore.workspaceId)
-    if (!flowStore.projectId && projects.value.length > 0) {
-      flowStore.selectProject(projects.value[0]?.id ?? '')
+  const workspaceId = getSelectedWorkspaceId()
+  if (workspaceId) {
+    projects.value = await fetchProjects(workspaceId)
+    if (!getSelectedProjectId() && projects.value.length > 0) {
+      setSelectedProjectId(projects.value[0]?.id ?? '')
     }
   }
 })
@@ -75,7 +77,7 @@ async function createWorkspaceItem() {
     })
     workspaces.value = [created, ...workspaces.value.filter((item) => item.id !== created.id)]
     workspaceForm.value = { slug: '', name: '' }
-    flowStore.selectWorkspace(created.id)
+    setSelectedWorkspaceId(created.id)
     successMessage.value = `Workspace ${created.name} created.`
   } catch (error) {
     workspaceError.value = error instanceof Error ? error.message : 'Failed to create workspace'
@@ -85,21 +87,21 @@ async function createWorkspaceItem() {
 async function createProjectItem() {
   projectError.value = null
   successMessage.value = null
-  if (!flowStore.workspaceId) {
+  if (!getSelectedWorkspaceId()) {
     projectError.value = 'Select or create a workspace first.'
     return
   }
 
   try {
     const created = await createProject({
-      workspace_id: flowStore.workspaceId,
+      workspace_id: getSelectedWorkspaceId(),
       slug: projectForm.value.slug.trim(),
       name: projectForm.value.name.trim(),
       description: projectForm.value.description.trim() || null,
     })
     projects.value = [created, ...projects.value.filter((item) => item.id !== created.id)]
     projectForm.value = { slug: '', name: '', description: '' }
-    flowStore.selectProject(created.id)
+    setSelectedProjectId(created.id)
     successMessage.value = `Project ${created.name} created.`
   } catch (error) {
     projectError.value = error instanceof Error ? error.message : 'Failed to create project'
@@ -174,7 +176,7 @@ async function createProjectItem() {
           <textarea v-model="projectForm.description" rows="3" placeholder="Optional description" />
         </label>
 
-        <button type="button" :disabled="!projectForm.name || !projectForm.slug || !flowStore.workspaceId" @click="createProjectItem">
+        <button type="button" :disabled="!projectForm.name || !projectForm.slug || !getSelectedWorkspaceId()" @click="createProjectItem">
           Create project
         </button>
         <p v-if="projectError" class="error-banner">{{ projectError }}</p>

@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 
 import { fetchProjects, fetchWorkspaces } from 'src/boot/api'
-import { useFlowStore } from 'src/stores/flow'
+import { getSelectedProjectId, getSelectedWorkspaceId, setSelectedProjectId, setSelectedWorkspaceId } from 'src/stores/flow'
 
 interface WorkspaceItem {
   id: string
@@ -16,28 +16,29 @@ interface ProjectItem {
   name: string
 }
 
-const flowStore = useFlowStore()
 const workspaces = ref<WorkspaceItem[]>([])
 const projects = ref<ProjectItem[]>([])
 
 const hasWorkspace = computed(() => workspaces.value.length > 0)
 const hasProject = computed(() => projects.value.length > 0)
 const selectedWorkspace = computed(
-  () => workspaces.value.find((item) => item.id === flowStore.workspaceId) ?? null,
+  () => workspaces.value.find((item) => item.id === getSelectedWorkspaceId()) ?? null,
 )
 const selectedProject = computed(
-  () => projects.value.find((item) => item.id === flowStore.projectId) ?? null,
+  () => projects.value.find((item) => item.id === getSelectedProjectId()) ?? null,
 )
 
 onMounted(async () => {
   workspaces.value = await fetchWorkspaces()
-  if (!flowStore.workspaceId && workspaces.value.length > 0) {
-    flowStore.selectWorkspace(workspaces.value[0]?.id ?? '')
+  const workspaceId = getSelectedWorkspaceId()
+  if (!workspaceId && workspaces.value.length > 0) {
+    setSelectedWorkspaceId(workspaces.value[0]?.id ?? '')
   }
-  if (flowStore.workspaceId) {
-    projects.value = await fetchProjects(flowStore.workspaceId)
-    if (!flowStore.projectId && projects.value.length > 0) {
-      flowStore.selectProject(projects.value[0]?.id ?? '')
+  const activeWorkspaceId = getSelectedWorkspaceId()
+  if (activeWorkspaceId) {
+    projects.value = await fetchProjects(activeWorkspaceId)
+    if (!getSelectedProjectId() && projects.value.length > 0) {
+      setSelectedProjectId(projects.value[0]?.id ?? '')
     }
   }
 })
