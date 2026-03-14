@@ -1,14 +1,28 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 
+import { createProject, createWorkspace, fetchProjects, fetchWorkspaces } from 'src/boot/api'
 import { useFlowStore } from 'src/stores/flow'
-import { useProjectsStore } from 'src/stores/projects'
-import { useWorkspacesStore } from 'src/stores/workspaces'
+
+interface WorkspaceItem {
+  id: string
+  slug: string
+  name: string
+  status?: string
+}
+
+interface ProjectItem {
+  id: string
+  slug: string
+  name: string
+  workspace_id: string
+  description?: string | null
+}
 
 const flowStore = useFlowStore()
-const workspacesStore = useWorkspacesStore()
-const projectsStore = useProjectsStore()
 
+const workspaces = ref<WorkspaceItem[]>([])
+const projects = ref<ProjectItem[]>([])
 const workspaceForm = ref({ slug: '', name: '' })
 const projectForm = ref({ slug: '', name: '', description: '' })
 const workspaceError = ref<string | null>(null)
@@ -17,15 +31,8 @@ const successMessage = ref<string | null>(null)
 
 const selectedWorkspaceId = computed({
   get: () => flowStore.workspaceId,
-  set: async (value: string) => {
+  set: (value: string) => {
     flowStore.selectWorkspace(value)
-    flowStore.resetProject()
-    if (value) {
-      const projects = await projectsStore.fetchList(value)
-      if (projects.length > 0) {
-        flowStore.selectProject(projects[0]?.id ?? '')
-      }
-    }
   },
 })
 
@@ -34,15 +41,26 @@ const selectedProjectId = computed({
   set: (value: string) => flowStore.selectProject(value),
 })
 
+watch(
+  () => flowStore.workspaceId,
+  async (value) => {
+    flowStore.resetProject()
+    projects.value = value ? await fetchProjects(value) : []
+    if (!flowStore.projectId && projects.value.length > 0) {
+      flowStore.selectProject(projects.value[0]?.id ?? '')
+    }
+  },
+)
+
 onMounted(async () => {
-  const workspaces = await workspacesStore.fetchList()
-  if (!flowStore.workspaceId && workspaces.length > 0) {
-    flowStore.selectWorkspace(workspaces[0]?.id ?? '')
+  workspaces.value = await fetchWorkspaces()
+  if (!flowStore.workspaceId && workspaces.value.length > 0) {
+    flowStore.selectWorkspace(workspaces.value[0]?.id ?? '')
   }
   if (flowStore.workspaceId) {
-    const projects = await projectsStore.fetchList(flowStore.workspaceId)
-    if (!flowStore.projectId && projects.length > 0) {
-      flowStore.selectProject(projects[0]?.id ?? '')
+    projects.value = await fetchProjects(flowStore.workspaceId)
+    if (!flowStore.projectId && projects.value.length > 0) {
+      flowStore.selectProject(projects.value[0]?.id ?? '')
     }
   }
 })
@@ -51,10 +69,11 @@ async function createWorkspaceItem() {
   workspaceError.value = null
   successMessage.value = null
   try {
-    const created = await workspacesStore.createItem({
+    const created = await createWorkspace({
       slug: workspaceForm.value.slug.trim(),
       name: workspaceForm.value.name.trim(),
     })
+    workspaces.value = [created, ...workspaces.value.filter((item) => item.id !== created.id)]
     workspaceForm.value = { slug: '', name: '' }
     flowStore.selectWorkspace(created.id)
     successMessage.value = `Workspace ${created.name} created.`
@@ -72,12 +91,13 @@ async function createProjectItem() {
   }
 
   try {
-    const created = await projectsStore.createItem({
+    const created = await createProject({
       workspace_id: flowStore.workspaceId,
       slug: projectForm.value.slug.trim(),
       name: projectForm.value.name.trim(),
       description: projectForm.value.description.trim() || null,
     })
+    projects.value = [created, ...projects.value.filter((item) => item.id !== created.id)]
     projectForm.value = { slug: '', name: '', description: '' }
     flowStore.selectProject(created.id)
     successMessage.value = `Project ${created.name} created.`
@@ -103,7 +123,7 @@ async function createProjectItem() {
           <span>Selected workspace</span>
           <select v-model="selectedWorkspaceId">
             <option value="">Choose workspace</option>
-            <option v-for="workspace in workspacesStore.items" :key="workspace.id" :value="workspace.id">
+            <option v-for="workspace in workspaces" :key="workspace.id" :value="workspace.id">
               {{ workspace.name }} ({{ workspace.slug }})
             </option>
           </select>
@@ -130,9 +150,9 @@ async function createProjectItem() {
         <h3>2. Project</h3>
         <label class="field">
           <span>Selected project</span>
-          <select v-model="selectedProjectId" :disabled="projectsStore.items.length === 0">
+          <select v-model="selectedProjectId" :disabled="projects.length === 0">
             <option value="">Choose project</option>
-            <option v-for="project in projectsStore.items" :key="project.id" :value="project.id">
+            <option v-for="project in projects" :key="project.id" :value="project.id">
               {{ project.name }} ({{ project.slug }})
             </option>
           </select>

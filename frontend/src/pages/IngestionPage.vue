@@ -1,16 +1,28 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 
+import { fetchProjects, fetchWorkspaces } from 'src/boot/api'
 import { useDocumentsStore } from 'src/stores/documents'
 import { useFlowStore } from 'src/stores/flow'
-import { useProjectsStore } from 'src/stores/projects'
-import { useWorkspacesStore } from 'src/stores/workspaces'
+
+interface WorkspaceItem {
+  id: string
+  slug: string
+  name: string
+}
+
+interface ProjectItem {
+  id: string
+  slug: string
+  name: string
+  workspace_id: string
+}
 
 const flowStore = useFlowStore()
 const documentsStore = useDocumentsStore()
-const workspacesStore = useWorkspacesStore()
-const projectsStore = useProjectsStore()
 
+const workspaces = ref<WorkspaceItem[]>([])
+const projects = ref<ProjectItem[]>([])
 const sourceLabel = ref('Pasted text')
 const externalKey = ref(`note-${Date.now()}`)
 const title = ref('')
@@ -20,24 +32,24 @@ const errorMessage = ref<string | null>(null)
 
 const selectedProjectId = computed(() => flowStore.projectId)
 const selectedProject = computed(
-  () => projectsStore.items.find((item) => item.id === flowStore.projectId) ?? null,
+  () => projects.value.find((item) => item.id === flowStore.projectId) ?? null,
 )
 const selectedWorkspace = computed(
-  () => workspacesStore.items.find((item) => item.id === flowStore.workspaceId) ?? null,
+  () => workspaces.value.find((item) => item.id === flowStore.workspaceId) ?? null,
 )
 const projectState = computed(() =>
   selectedProjectId.value ? documentsStore.byProjectId[selectedProjectId.value] ?? null : null,
 )
 
 onMounted(async () => {
-  const workspaces = await workspacesStore.fetchList()
-  if (!flowStore.workspaceId && workspaces.length > 0) {
-    flowStore.selectWorkspace(workspaces[0]?.id ?? '')
+  workspaces.value = await fetchWorkspaces()
+  if (!flowStore.workspaceId && workspaces.value.length > 0) {
+    flowStore.selectWorkspace(workspaces.value[0]?.id ?? '')
   }
   if (flowStore.workspaceId) {
-    const projects = await projectsStore.fetchList(flowStore.workspaceId)
-    if (!flowStore.projectId && projects.length > 0) {
-      flowStore.selectProject(projects[0]?.id ?? '')
+    projects.value = await fetchProjects(flowStore.workspaceId)
+    if (!flowStore.projectId && projects.value.length > 0) {
+      flowStore.selectProject(projects.value[0]?.id ?? '')
     }
   }
   if (selectedProjectId.value) {
