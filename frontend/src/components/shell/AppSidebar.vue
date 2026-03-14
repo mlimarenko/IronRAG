@@ -18,12 +18,8 @@ const navItems: readonly NavItem[] = [
   { to: '/workspaces', label: 'Workspaces', caption: 'Governance and scope' },
   { to: '/projects', label: 'Projects', caption: 'Readiness and content' },
   { to: '/providers', label: 'Providers', caption: 'Accounts and models' },
-  { to: '/api', label: 'API & Integrations', caption: 'Tokens, examples, endpoints' },
-  { to: '/onboarding', label: 'Onboarding', caption: 'Workspace to first document' },
   { to: '/ingestion', label: 'Ingestion', caption: 'Jobs and retries' },
   { to: '/chat', label: 'Chat', caption: 'Grounded queries' },
-  { to: '/graph', label: 'Graph', caption: 'Graph coverage and evidence' },
-  { to: '/diagnostics', label: 'Diagnostics', caption: 'Project and document health' },
 ] as const
 
 const activePath = computed(() => route.path)
