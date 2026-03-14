@@ -11,19 +11,38 @@ import RetrievalDiagnosticsPanel from 'src/components/chat/RetrievalDiagnosticsP
 import StatusPill from 'src/components/chat/StatusPill.vue'
 import TokenListSection from 'src/components/chat/TokenListSection.vue'
 import { useFlowStore } from 'src/stores/flow'
+import { useProjectsStore } from 'src/stores/projects'
+import { useWorkspacesStore } from 'src/stores/workspaces'
 
 const flowStore = useFlowStore()
+const workspacesStore = useWorkspacesStore()
+const projectsStore = useProjectsStore()
+
 const queryText = ref('')
 const result = ref<QueryResponseSurface | null>(null)
 const detail = ref<RetrievalRunDetail | null>(null)
 const errorMessage = ref<string | null>(null)
 const loading = ref(false)
 
-const selectedProject = flowStore.selectedProject
-const selectedProjectId = flowStore.projectId
+const selectedProjectId = computed(() => flowStore.projectId)
+const selectedProject = computed(
+  () => projectsStore.items.find((item) => item.id === flowStore.projectId) ?? null,
+)
+const selectedWorkspace = computed(
+  () => workspacesStore.items.find((item) => item.id === flowStore.workspaceId) ?? null,
+)
 
 onMounted(async () => {
-  await flowStore.bootstrap()
+  const workspaces = await workspacesStore.fetchList()
+  if (!flowStore.workspaceId && workspaces.length > 0) {
+    flowStore.selectWorkspace(workspaces[0]?.id ?? '')
+  }
+  if (flowStore.workspaceId) {
+    const projects = await projectsStore.fetchList(flowStore.workspaceId)
+    if (!flowStore.projectId && projects.length > 0) {
+      flowStore.selectProject(projects[0]?.id ?? '')
+    }
+  }
 })
 
 async function submitQuery() {
@@ -32,12 +51,12 @@ async function submitQuery() {
   result.value = null
   detail.value = null
   try {
-    if (!selectedProjectId) {
+    if (!selectedProjectId.value) {
       throw new Error('Create and select a project in Setup before asking questions.')
     }
 
     const response = await runQuery({
-      project_id: selectedProjectId,
+      project_id: selectedProjectId.value,
       query_text: queryText.value.trim(),
       top_k: 8,
     })
@@ -64,7 +83,7 @@ async function submitQuery() {
     </header>
 
     <div class="context-card">
-      <p><strong>Workspace:</strong> {{ flowStore.selectedWorkspace?.name ?? 'not selected' }}</p>
+      <p><strong>Workspace:</strong> {{ selectedWorkspace?.name ?? 'not selected' }}</p>
       <p><strong>Project:</strong> {{ selectedProject?.name ?? 'not selected' }}</p>
       <p v-if="!selectedProject">Go to Setup first, then ingest some text before querying.</p>
     </div>

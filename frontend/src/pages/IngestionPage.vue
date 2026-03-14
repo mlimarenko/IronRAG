@@ -3,9 +3,13 @@ import { computed, onMounted, ref } from 'vue'
 
 import { useDocumentsStore } from 'src/stores/documents'
 import { useFlowStore } from 'src/stores/flow'
+import { useProjectsStore } from 'src/stores/projects'
+import { useWorkspacesStore } from 'src/stores/workspaces'
 
 const flowStore = useFlowStore()
 const documentsStore = useDocumentsStore()
+const workspacesStore = useWorkspacesStore()
+const projectsStore = useProjectsStore()
 
 const sourceLabel = ref('Pasted text')
 const externalKey = ref(`note-${Date.now()}`)
@@ -14,19 +18,33 @@ const text = ref('')
 const statusMessage = ref<string | null>(null)
 const errorMessage = ref<string | null>(null)
 
-const selectedProjectId = flowStore.projectId
-const selectedProject = flowStore.selectedProject
+const selectedProjectId = computed(() => flowStore.projectId)
+const selectedProject = computed(
+  () => projectsStore.items.find((item) => item.id === flowStore.projectId) ?? null,
+)
+const selectedWorkspace = computed(
+  () => workspacesStore.items.find((item) => item.id === flowStore.workspaceId) ?? null,
+)
 const projectState = computed(() =>
-  selectedProjectId ? documentsStore.byProjectId[selectedProjectId] ?? null : null,
+  selectedProjectId.value ? documentsStore.byProjectId[selectedProjectId.value] ?? null : null,
 )
 
 onMounted(async () => {
-  await flowStore.bootstrap()
-  if (selectedProjectId) {
+  const workspaces = await workspacesStore.fetchList()
+  if (!flowStore.workspaceId && workspaces.length > 0) {
+    flowStore.selectWorkspace(workspaces[0]?.id ?? '')
+  }
+  if (flowStore.workspaceId) {
+    const projects = await projectsStore.fetchList(flowStore.workspaceId)
+    if (!flowStore.projectId && projects.length > 0) {
+      flowStore.selectProject(projects[0]?.id ?? '')
+    }
+  }
+  if (selectedProjectId.value) {
     await Promise.all([
-      documentsStore.fetchProjectDocuments(selectedProjectId),
-      documentsStore.fetchProjectJobs(selectedProjectId),
-      documentsStore.fetchProjectSources(selectedProjectId),
+      documentsStore.fetchProjectDocuments(selectedProjectId.value),
+      documentsStore.fetchProjectJobs(selectedProjectId.value),
+      documentsStore.fetchProjectSources(selectedProjectId.value),
     ])
   }
 })
@@ -35,7 +53,7 @@ async function ingestCurrentText() {
   errorMessage.value = null
   statusMessage.value = null
 
-  if (!selectedProjectId) {
+  if (!selectedProjectId.value) {
     errorMessage.value = 'Create and select a project first in Setup.'
     return
   }
@@ -44,7 +62,7 @@ async function ingestCurrentText() {
     let sourceId = projectState.value?.sources.data[0]?.id
     if (!sourceId) {
       const source = await documentsStore.createSourceForProject({
-        project_id: selectedProjectId,
+        project_id: selectedProjectId.value,
         source_kind: 'text',
         label: sourceLabel.value.trim() || 'Pasted text',
       })
@@ -52,7 +70,7 @@ async function ingestCurrentText() {
     }
 
     const result = await documentsStore.ingestTextForProject({
-      project_id: selectedProjectId,
+      project_id: selectedProjectId.value,
       source_id: sourceId,
       external_key: externalKey.value.trim(),
       title: title.value.trim() || null,
@@ -60,9 +78,9 @@ async function ingestCurrentText() {
     })
 
     await Promise.all([
-      documentsStore.fetchProjectDocuments(selectedProjectId),
-      documentsStore.fetchProjectJobs(selectedProjectId),
-      documentsStore.fetchProjectSources(selectedProjectId),
+      documentsStore.fetchProjectDocuments(selectedProjectId.value),
+      documentsStore.fetchProjectJobs(selectedProjectId.value),
+      documentsStore.fetchProjectSources(selectedProjectId.value),
     ])
 
     statusMessage.value = `Indexed ${result.chunkCount} chunks into document ${result.documentId}.`
@@ -81,7 +99,7 @@ async function ingestCurrentText() {
     </header>
 
     <div class="context-card">
-      <p><strong>Workspace:</strong> {{ flowStore.selectedWorkspace?.name ?? 'not selected' }}</p>
+      <p><strong>Workspace:</strong> {{ selectedWorkspace?.name ?? 'not selected' }}</p>
       <p><strong>Project:</strong> {{ selectedProject?.name ?? 'not selected' }}</p>
       <p v-if="!selectedProject">Go to Setup first and create/select a project.</p>
     </div>

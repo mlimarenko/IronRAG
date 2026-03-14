@@ -17,7 +17,16 @@ const successMessage = ref<string | null>(null)
 
 const selectedWorkspaceId = computed({
   get: () => flowStore.workspaceId,
-  set: (value: string) => flowStore.selectWorkspace(value),
+  set: async (value: string) => {
+    flowStore.selectWorkspace(value)
+    flowStore.resetProject()
+    if (value) {
+      const projects = await projectsStore.fetchList(value)
+      if (projects.length > 0) {
+        flowStore.selectProject(projects[0]?.id ?? '')
+      }
+    }
+  },
 })
 
 const selectedProjectId = computed({
@@ -26,7 +35,16 @@ const selectedProjectId = computed({
 })
 
 onMounted(async () => {
-  await flowStore.bootstrap()
+  const workspaces = await workspacesStore.fetchList()
+  if (!flowStore.workspaceId && workspaces.length > 0) {
+    flowStore.selectWorkspace(workspaces[0]?.id ?? '')
+  }
+  if (flowStore.workspaceId) {
+    const projects = await projectsStore.fetchList(flowStore.workspaceId)
+    if (!flowStore.projectId && projects.length > 0) {
+      flowStore.selectProject(projects[0]?.id ?? '')
+    }
+  }
 })
 
 async function createWorkspaceItem() {

@@ -11,11 +11,24 @@ const projectsStore = useProjectsStore()
 
 const hasWorkspace = computed(() => workspacesStore.items.length > 0)
 const hasProject = computed(() => projectsStore.items.length > 0)
-const selectedWorkspace = flowStore.selectedWorkspace
-const selectedProject = flowStore.selectedProject
+const selectedWorkspace = computed(
+  () => workspacesStore.items.find((item) => item.id === flowStore.workspaceId) ?? null,
+)
+const selectedProject = computed(
+  () => projectsStore.items.find((item) => item.id === flowStore.projectId) ?? null,
+)
 
 onMounted(async () => {
-  await flowStore.bootstrap()
+  const workspaces = await workspacesStore.fetchList()
+  if (!flowStore.workspaceId && workspaces.length > 0) {
+    flowStore.selectWorkspace(workspaces[0]?.id ?? '')
+  }
+  if (flowStore.workspaceId) {
+    const projects = await projectsStore.fetchList(flowStore.workspaceId)
+    if (!flowStore.projectId && projects.length > 0) {
+      flowStore.selectProject(projects[0]?.id ?? '')
+    }
+  }
 })
 </script>
 
