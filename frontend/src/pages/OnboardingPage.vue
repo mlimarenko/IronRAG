@@ -84,7 +84,7 @@ const providerState = computed(() => {
     return null
   }
 
-  return providersStore.governanceByWorkspaceId[workspaceId].data ?? null
+  return providersStore.governanceByWorkspaceId[workspaceId]?.data ?? null
 })
 const projectDocumentState = computed(() => {
   const projectId = selectedProjectId.value
@@ -100,7 +100,7 @@ const readiness = computed(() => {
     return null
   }
 
-  return projectsStore.readinessById[projectId].data ?? null
+  return projectsStore.readinessById[projectId]?.data ?? null
 })
 
 const checklist = computed(() => {
