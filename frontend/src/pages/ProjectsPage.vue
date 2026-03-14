@@ -6,9 +6,32 @@ import { api, fetchProjectReadiness, type ProjectReadinessSummary } from 'src/bo
 const projects = ref<{ id: string; name: string; slug: string }[]>([])
 const readiness = ref<ProjectReadinessSummary | null>(null)
 const errorMessage = ref<string | null>(null)
+const infoMessage = ref<string | null>(null)
+
+function extractErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'Unknown project error'
+}
+
+function isUnauthorizedMessage(message: string): boolean {
+  const normalized = message.toLowerCase()
+  return normalized.includes('401') || normalized.includes('unauthorized') || normalized.includes('authorization')
+}
 
 async function loadReadiness(id: string) {
-  readiness.value = await fetchProjectReadiness(id)
+  errorMessage.value = null
+  infoMessage.value = null
+
+  try {
+    readiness.value = await fetchProjectReadiness(id)
+  } catch (error) {
+    const message = extractErrorMessage(error)
+    if (isUnauthorizedMessage(message)) {
+      infoMessage.value = 'Project list is visible, but readiness details require an authorized API token.'
+      readiness.value = null
+    } else {
+      errorMessage.value = message
+    }
+  }
 }
 
 onMounted(async () => {
@@ -16,11 +39,14 @@ onMounted(async () => {
     const { data } = await api.get<{ id: string; name: string; slug: string }[]>('/v1/projects')
     projects.value = data
 
-    if (data.length > 0) {
-      await loadReadiness(data[0].id)
+    if (data.length === 0) {
+      infoMessage.value = 'No projects created yet. Create a workspace and project to start ingestion and retrieval.'
+      return
     }
+
+    await loadReadiness(data[0].id)
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : 'Unknown project error'
+    errorMessage.value = extractErrorMessage(error)
   }
 })
 </script>
@@ -37,7 +63,8 @@ onMounted(async () => {
     >
       <article class="panel">
         <h3>Projects</h3>
-        <ul>
+        <p v-if="projects.length === 0">{{ infoMessage ?? 'No projects found yet.' }}</p>
+        <ul v-else>
           <li
             v-for="project in projects"
             :key="project.id"
@@ -54,14 +81,18 @@ onMounted(async () => {
 
       <article class="panel">
         <h3>Readiness</h3>
-        <p v-if="!readiness">No readiness data loaded.</p>
-        <template v-else>
-          <p>Indexing state: {{ readiness.indexing_state }}</p>
+        <p v-if="readiness">
+          Indexing state: {{ readiness.indexing_state }}
+        </p>
+        <template v-if="readiness">
           <p>Ready for query: {{ readiness.ready_for_query ? 'yes' : 'no' }}</p>
           <p>Sources: {{ readiness.sources }}</p>
           <p>Documents: {{ readiness.documents }}</p>
           <p>Ingestion jobs: {{ readiness.ingestion_jobs }}</p>
         </template>
+        <p v-else>
+          {{ infoMessage ?? 'No readiness data loaded.' }}
+        </p>
       </article>
     </div>
   </section>

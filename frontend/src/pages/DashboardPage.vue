@@ -5,12 +5,27 @@ import { fetchUsageSummary, type UsageSummary } from 'src/boot/api'
 
 const summary = ref<UsageSummary | null>(null)
 const errorMessage = ref<string | null>(null)
+const infoMessage = ref<string | null>(null)
+
+function extractErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'Unknown dashboard error'
+}
+
+function isUnauthorizedMessage(message: string): boolean {
+  const normalized = message.toLowerCase()
+  return normalized.includes('401') || normalized.includes('unauthorized') || normalized.includes('authorization')
+}
 
 onMounted(async () => {
   try {
     summary.value = await fetchUsageSummary()
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : 'Unknown dashboard error'
+    const message = extractErrorMessage(error)
+    if (isUnauthorizedMessage(message)) {
+      infoMessage.value = 'Usage summary requires an authorized API token. Public shell is up; protected metrics are hidden.'
+    } else {
+      errorMessage.value = message
+    }
   }
 })
 </script>
@@ -39,6 +54,13 @@ onMounted(async () => {
         <h3>Estimated cost</h3>
         <p>{{ summary.estimated_cost }}</p>
       </article>
+    </div>
+    <div
+      v-else
+      class="summary-card"
+    >
+      <h3>Public shell is online</h3>
+      <p>{{ infoMessage ?? 'Protected metrics are unavailable until an API token is configured in the UI flow.' }}</p>
     </div>
   </section>
 </template>
