@@ -133,10 +133,41 @@ export default {
       titleLabel: 'Название файла',
       file: 'Файл',
       selected: 'Выбранный файл',
+      browse: 'Выбрать файл',
+      supportedNowBadge: 'Работает сейчас',
+      supportedNowHint: 'UTF-8 text-like файлы сразу попадают в текущий chunking pipeline.',
+      plannedBadge: 'Запланировано',
+      plannedHint:
+        'PDF и image выбор уже виден в UI, но upload остаётся отключённым, пока не появятся backend extraction adapters.',
+      unsupportedBadge: 'Не поддерживается',
+      unsupportedHint: 'Архивы и произвольные binary форматы пока вне scope этого MVP.',
+      dropzoneIdleBadge: 'Один файл',
+      dropzoneTitle: 'Перетащите файл сюда или выберите с диска',
+      dropzoneBody:
+        'Сейчас поддерживается только single-file upload. Text-like файлы работают уже сейчас; PDF и image показаны как planned.',
+      dropzoneActiveTitle: 'Отпустите, чтобы выбрать этот файл',
+      dropzoneActiveBody:
+        'Страница сначала классифицирует его как supported now, planned или unsupported.',
       supportedHint: 'Сейчас поддерживаются только UTF-8 text-like файлы.',
-      blockedHint: 'PDF и image файлы потребуют backend extraction, прежде чем их можно будет индексировать.',
+      blockedHint:
+        'PDF и image файлы потребуют backend extraction, прежде чем их можно будет индексировать.',
       unsupportedError: 'Выберите UTF-8 text-like файл.',
       blockedError: 'PDF и image uploads остаются заблокированы до появления backend extraction.',
+      selection: {
+        textLike: 'Работает сейчас: этот UTF-8 text-like файл можно загрузить и проиндексировать.',
+        pdfPlanned:
+          'Planned: PDF upload пока не подключён к text extraction, поэтому submit остаётся отключённым.',
+        imagePlanned:
+          'Planned: image upload пока не подключён к OCR/extraction, поэтому submit остаётся отключённым.',
+        binaryUnsupported: 'Не поддерживается: для текущего MVP нужен UTF-8 text-like файл.',
+        textLikeKind: 'Text-like',
+        pdfKind: 'PDF',
+        imageKind: 'Image',
+        binaryKind: 'Binary',
+        readyLabel: 'Работает сейчас',
+        plannedLabel: 'Запланировано',
+        unsupportedLabel: 'Не поддерживается',
+      },
       action: 'Загрузить и проиндексировать',
       actionBusy: 'Загрузка...',
     },

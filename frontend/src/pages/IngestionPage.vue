@@ -38,6 +38,19 @@ interface ProjectItem {
   workspace_id: string
 }
 
+type UploadSupportStatus = 'supported_now' | 'planned' | 'unsupported'
+type UploadFileKind = 'text_like' | 'pdf' | 'image' | 'binary'
+
+interface UploadSelectionState {
+  supportStatus: UploadSupportStatus
+  fileKind: UploadFileKind
+  fileKindLabel: string
+  badgeLabel: string
+  badgeTone: 'positive' | 'warning' | 'negative'
+  bannerTone: 'success' | 'warning' | 'danger'
+  message: string
+}
+
 const { t } = useI18n()
 
 const workspaces = ref<WorkspaceItem[]>([])
@@ -51,13 +64,15 @@ const title = ref('')
 const uploadTitle = ref('')
 const text = ref('')
 const uploadFile = ref<File | null>(null)
+const uploadInputRef = ref<HTMLInputElement | null>(null)
 const uploadInputKey = ref(0)
+const isUploadDragActive = ref(false)
 const statusMessage = ref<string | null>(null)
 const errorMessage = ref<string | null>(null)
 const loading = ref(false)
 const latestJob = ref<IngestionJobDetail | null>(null)
 const acceptedUploadTypes =
-  '.txt,.md,.markdown,.csv,.json,.yaml,.yml,.xml,.html,.htm,.log,.rst,.toml,.ini,.cfg,.conf,.ts,.tsx,.js,.jsx,.mjs,.cjs,.py,.rs,.java,.kt,.go,.sh,.sql,.css,.scss,text/plain,text/markdown,text/csv,application/json,application/xml,text/xml'
+  '.txt,.md,.markdown,.csv,.json,.yaml,.yml,.xml,.html,.htm,.log,.rst,.toml,.ini,.cfg,.conf,.ts,.tsx,.js,.jsx,.mjs,.cjs,.py,.rs,.java,.kt,.go,.sh,.sql,.css,.scss,.pdf,.png,.jpg,.jpeg,.gif,.bmp,.webp,.svg,.tif,.tiff,.heic,.heif,text/plain,text/markdown,text/csv,application/json,application/xml,text/xml,application/pdf,image/*'
 const textLikeExtensions = new Set([
   'txt',
   'md',
@@ -91,6 +106,19 @@ const textLikeExtensions = new Set([
   'css',
   'scss',
 ])
+const imageExtensions = new Set([
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'bmp',
+  'webp',
+  'svg',
+  'tif',
+  'tiff',
+  'heic',
+  'heif',
+])
 
 const selectedProjectId = computed(() => getSelectedProjectId())
 const selectedProject = computed(
@@ -105,7 +133,10 @@ const pageStatus = computed(() => {
   }
 
   if (documents.value.length > 0) {
-    return { status: 'ready', label: t('flow.library.documentsCount', { count: documents.value.length }) }
+    return {
+      status: 'ready',
+      label: t('flow.library.documentsCount', { count: documents.value.length }),
+    }
   }
 
   return { status: 'draft', label: t('flow.library.statusDraft') }
@@ -119,7 +150,7 @@ async function loadProjectData(projectId: string) {
 
 function getFileExtension(fileName: string): string {
   const segments = fileName.toLowerCase().split('.')
-  return segments.length > 1 ? segments.at(-1) ?? '' : ''
+  return segments.length > 1 ? (segments.at(-1) ?? '') : ''
 }
 
 function isBlockedBinaryUpload(file: File): boolean {
@@ -137,6 +168,97 @@ function isTextLikeUpload(file: File): boolean {
     textLikeExtensions.has(extension)
   )
 }
+
+function classifyUploadKind(file: File): UploadFileKind {
+  const extension = getFileExtension(file.name)
+
+  if (extension === 'pdf' || file.type === 'application/pdf') {
+    return 'pdf'
+  }
+
+  if (file.type.startsWith('image/') || imageExtensions.has(extension)) {
+    return 'image'
+  }
+
+  if (isTextLikeUpload(file)) {
+    return 'text_like'
+  }
+
+  return 'binary'
+}
+
+function describeUploadSelection(file: File): UploadSelectionState {
+  const fileKind = classifyUploadKind(file)
+
+  switch (fileKind) {
+    case 'text_like':
+      return {
+        supportStatus: 'supported_now',
+        fileKind,
+        fileKindLabel: t('flow.library.upload.selection.textLikeKind'),
+        badgeLabel: t('flow.library.upload.selection.readyLabel'),
+        badgeTone: 'positive',
+        bannerTone: 'success',
+        message: t('flow.library.upload.selection.textLike'),
+      }
+    case 'pdf':
+      return {
+        supportStatus: 'planned',
+        fileKind,
+        fileKindLabel: t('flow.library.upload.selection.pdfKind'),
+        badgeLabel: t('flow.library.upload.selection.plannedLabel'),
+        badgeTone: 'warning',
+        bannerTone: 'warning',
+        message: t('flow.library.upload.selection.pdfPlanned'),
+      }
+    case 'image':
+      return {
+        supportStatus: 'planned',
+        fileKind,
+        fileKindLabel: t('flow.library.upload.selection.imageKind'),
+        badgeLabel: t('flow.library.upload.selection.plannedLabel'),
+        badgeTone: 'warning',
+        bannerTone: 'warning',
+        message: t('flow.library.upload.selection.imagePlanned'),
+      }
+    default:
+      return {
+        supportStatus: 'unsupported',
+        fileKind,
+        fileKindLabel: t('flow.library.upload.selection.binaryKind'),
+        badgeLabel: t('flow.library.upload.selection.unsupportedLabel'),
+        badgeTone: 'negative',
+        bannerTone: 'danger',
+        message: t('flow.library.upload.selection.binaryUnsupported'),
+      }
+  }
+}
+
+function formatFileSize(bytes: number): string {
+  const units = ['B', 'KB', 'MB', 'GB']
+  let value = bytes
+  let unitIndex = 0
+
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+
+  const precision = unitIndex === 0 ? 0 : 1
+  return `${value.toFixed(precision)} ${units[unitIndex]}`
+}
+
+const uploadSelection = computed(() =>
+  uploadFile.value ? describeUploadSelection(uploadFile.value) : null,
+)
+const canUploadSelectedFile = computed(() =>
+  Boolean(
+    selectedProjectId.value &&
+    uploadFile.value &&
+    uploadSelection.value?.supportStatus === 'supported_now' &&
+    !loading.value,
+  ),
+)
 
 function upsertSource(source: SourceSummary) {
   sources.value = [source, ...sources.value.filter((item) => item.id !== source.id)]
@@ -180,23 +302,58 @@ async function waitForIngestionJob(jobId: string): Promise<IngestionJobDetail | 
   return latestJob.value
 }
 
+function clearSelectedUpload() {
+  uploadFile.value = null
+  uploadTitle.value = ''
+  uploadInputKey.value += 1
+  isUploadDragActive.value = false
+}
+
+function setUploadFile(file: File | null) {
+  uploadFile.value = file
+  isUploadDragActive.value = false
+  statusMessage.value = null
+  errorMessage.value = null
+
+  if (file && !uploadTitle.value.trim()) {
+    uploadTitle.value = file.name
+  }
+}
+
+function openUploadPicker() {
+  uploadInputRef.value?.click()
+}
+
 function handleUploadFileChange(event: Event) {
   const input = event.target as HTMLInputElement
-  uploadFile.value = input.files?.[0] ?? null
-  if (uploadFile.value && !uploadTitle.value.trim()) {
-    uploadTitle.value = uploadFile.value.name
+  setUploadFile(input.files?.[0] ?? null)
+}
+
+function handleUploadDragEnter() {
+  isUploadDragActive.value = true
+}
+
+function handleUploadDragOver(event: DragEvent) {
+  event.preventDefault()
+  isUploadDragActive.value = true
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'copy'
   }
-  if (uploadFile.value && isBlockedBinaryUpload(uploadFile.value)) {
-    errorMessage.value = t('flow.library.upload.blockedError')
-    statusMessage.value = null
+}
+
+function handleUploadDragLeave(event: DragEvent) {
+  const currentTarget = event.currentTarget as HTMLElement | null
+  const relatedTarget = event.relatedTarget as Node | null
+  if (currentTarget?.contains(relatedTarget)) {
     return
   }
-  if (uploadFile.value && !isTextLikeUpload(uploadFile.value)) {
-    errorMessage.value = t('flow.library.upload.unsupportedError')
-    statusMessage.value = null
-    return
-  }
-  errorMessage.value = null
+
+  isUploadDragActive.value = false
+}
+
+function handleUploadDrop(event: DragEvent) {
+  event.preventDefault()
+  setUploadFile(event.dataTransfer?.files?.[0] ?? null)
 }
 
 onMounted(async () => {
@@ -283,14 +440,13 @@ async function uploadCurrentFile() {
     return
   }
 
-  if (isBlockedBinaryUpload(uploadFile.value)) {
-    errorMessage.value = t('flow.library.upload.blockedError')
-    loading.value = false
-    return
-  }
-
-  if (!isTextLikeUpload(uploadFile.value)) {
-    errorMessage.value = t('flow.library.upload.unsupportedError')
+  const selection = uploadSelection.value
+  if (!selection || selection.supportStatus !== 'supported_now') {
+    errorMessage.value =
+      selection?.message ??
+      (isBlockedBinaryUpload(uploadFile.value)
+        ? t('flow.library.upload.blockedError')
+        : t('flow.library.upload.unsupportedError'))
     loading.value = false
     return
   }
@@ -310,9 +466,7 @@ async function uploadCurrentFile() {
     await loadProjectData(selectedProjectId.value)
     if (jobDetail?.status === 'completed') {
       statusMessage.value = `Completed processing run ${jobDetail.id}. Indexed content is now visible below.`
-      uploadTitle.value = ''
-      uploadFile.value = null
-      uploadInputKey.value += 1
+      clearSelectedUpload()
       return
     }
 
@@ -376,19 +530,33 @@ async function uploadCurrentFile() {
               <h3>{{ t('flow.library.form.title') }}</h3>
               <StatusBadge
                 :status="selectedProjectId ? 'ready' : 'blocked'"
-                :label="selectedProjectId ? t('flow.library.form.ready') : t('flow.library.form.needsSetup')"
+                :label="
+                  selectedProjectId
+                    ? t('flow.library.form.ready')
+                    : t('flow.library.form.needsSetup')
+                "
               />
             </div>
 
             <div class="rr-form-grid">
               <label class="rr-field">
                 <span class="rr-field__label">{{ t('flow.library.form.sourceLabel') }}</span>
-                <input v-model="sourceLabel" class="rr-control" type="text" placeholder="Pasted text">
+                <input
+                  v-model="sourceLabel"
+                  class="rr-control"
+                  type="text"
+                  placeholder="Pasted text"
+                />
               </label>
               <div class="rr-form-grid rr-form-grid--two">
                 <label class="rr-field">
                   <span class="rr-field__label">{{ t('flow.library.form.externalKey') }}</span>
-                  <input v-model="externalKey" class="rr-control" type="text" placeholder="note-001">
+                  <input
+                    v-model="externalKey"
+                    class="rr-control"
+                    type="text"
+                    placeholder="note-001"
+                  />
                 </label>
                 <label class="rr-field">
                   <span class="rr-field__label">{{ t('flow.library.form.titleLabel') }}</span>
@@ -397,7 +565,7 @@ async function uploadCurrentFile() {
                     class="rr-control"
                     type="text"
                     placeholder="Support policy excerpt"
-                  >
+                  />
                 </label>
               </div>
               <label class="rr-field">
@@ -428,18 +596,83 @@ async function uploadCurrentFile() {
               <h3>{{ t('flow.library.upload.title') }}</h3>
               <StatusBadge
                 :status="selectedProjectId ? 'ready' : 'blocked'"
-                :label="selectedProjectId ? t('flow.library.upload.ready') : t('flow.library.upload.needsSetup')"
+                :label="
+                  selectedProjectId
+                    ? t('flow.library.upload.ready')
+                    : t('flow.library.upload.needsSetup')
+                "
               />
             </div>
 
-            <p class="rr-banner" data-tone="info">
-              {{ t('flow.library.upload.supportedHint') }} {{ t('flow.library.upload.blockedHint') }}
-            </p>
+            <div class="upload-support-summary">
+              <div class="upload-support-summary__item">
+                <StatusBadge tone="positive" :label="t('flow.library.upload.supportedNowBadge')" />
+                <p>{{ t('flow.library.upload.supportedNowHint') }}</p>
+              </div>
+              <div class="upload-support-summary__item">
+                <StatusBadge tone="warning" :label="t('flow.library.upload.plannedBadge')" />
+                <p>{{ t('flow.library.upload.plannedHint') }}</p>
+              </div>
+              <div class="upload-support-summary__item">
+                <StatusBadge tone="negative" :label="t('flow.library.upload.unsupportedBadge')" />
+                <p>{{ t('flow.library.upload.unsupportedHint') }}</p>
+              </div>
+            </div>
+
+            <div
+              class="upload-dropzone"
+              :class="{ 'is-active': isUploadDragActive, 'is-selected': !!uploadFile }"
+              @click="openUploadPicker"
+              @dragenter.prevent="handleUploadDragEnter"
+              @dragover.prevent="handleUploadDragOver"
+              @dragleave.prevent="handleUploadDragLeave"
+              @drop.prevent="handleUploadDrop"
+            >
+              <input
+                :key="uploadInputKey"
+                ref="uploadInputRef"
+                class="upload-dropzone__input"
+                type="file"
+                :accept="acceptedUploadTypes"
+                @change="handleUploadFileChange"
+              />
+
+              <div class="upload-dropzone__body">
+                <StatusBadge tone="info" :label="t('flow.library.upload.dropzoneIdleBadge')" />
+                <h4>
+                  {{
+                    isUploadDragActive
+                      ? t('flow.library.upload.dropzoneActiveTitle')
+                      : t('flow.library.upload.dropzoneTitle')
+                  }}
+                </h4>
+                <p>
+                  {{
+                    isUploadDragActive
+                      ? t('flow.library.upload.dropzoneActiveBody')
+                      : t('flow.library.upload.dropzoneBody')
+                  }}
+                </p>
+                <button
+                  type="button"
+                  class="rr-button rr-button--secondary"
+                  :disabled="loading"
+                  @click="openUploadPicker"
+                >
+                  {{ t('flow.library.upload.browse') }}
+                </button>
+              </div>
+            </div>
 
             <div class="rr-form-grid">
               <label class="rr-field">
                 <span class="rr-field__label">{{ t('flow.library.upload.sourceLabel') }}</span>
-                <input v-model="uploadSourceLabel" class="rr-control" type="text" placeholder="Uploaded file">
+                <input
+                  v-model="uploadSourceLabel"
+                  class="rr-control"
+                  type="text"
+                  placeholder="Uploaded file"
+                />
               </label>
               <label class="rr-field">
                 <span class="rr-field__label">{{ t('flow.library.upload.titleLabel') }}</span>
@@ -448,32 +681,34 @@ async function uploadCurrentFile() {
                   class="rr-control"
                   type="text"
                   placeholder="Knowledge-base article"
-                >
-              </label>
-              <label class="rr-field">
-                <span class="rr-field__label">{{ t('flow.library.upload.file') }}</span>
-                <input
-                  :key="uploadInputKey"
-                  class="rr-control"
-                  type="file"
-                  :accept="acceptedUploadTypes"
-                  @change="handleUploadFileChange"
-                >
+                />
               </label>
             </div>
 
-            <p v-if="uploadFile" class="rr-note">
-              {{ t('flow.library.upload.selected') }}: {{ uploadFile.name }}
+            <div v-if="uploadFile && uploadSelection" class="upload-selection-card">
+              <div class="upload-selection-card__meta">
+                <strong>{{ uploadFile.name }}</strong>
+                <span class="rr-muted">
+                  {{ uploadSelection.fileKindLabel }} · {{ formatFileSize(uploadFile.size) }}
+                </span>
+              </div>
+              <StatusBadge :tone="uploadSelection.badgeTone" :label="uploadSelection.badgeLabel" />
+            </div>
+
+            <p v-if="uploadSelection" class="rr-banner" :data-tone="uploadSelection.bannerTone">
+              {{ uploadSelection.message }}
             </p>
 
             <div class="rr-action-row">
               <button
                 type="button"
                 class="rr-button"
-                :disabled="!selectedProjectId || !uploadFile || loading"
+                :disabled="!canUploadSelectedFile"
                 @click="uploadCurrentFile"
               >
-                {{ loading ? t('flow.library.upload.actionBusy') : t('flow.library.upload.action') }}
+                {{
+                  loading ? t('flow.library.upload.actionBusy') : t('flow.library.upload.action')
+                }}
               </button>
             </div>
           </article>
@@ -485,7 +720,11 @@ async function uploadCurrentFile() {
               <h3>{{ t('flow.library.lists.documents.title') }}</h3>
               <StatusBadge
                 :status="documents.length ? 'ready' : 'draft'"
-                :label="documents.length ? t('flow.library.lists.documents.ready') : t('flow.library.lists.documents.empty')"
+                :label="
+                  documents.length
+                    ? t('flow.library.lists.documents.ready')
+                    : t('flow.library.lists.documents.empty')
+                "
               />
             </div>
 
@@ -505,7 +744,11 @@ async function uploadCurrentFile() {
               <h3>{{ t('flow.library.lists.sources.title') }}</h3>
               <StatusBadge
                 :status="sources.length ? 'ready' : 'draft'"
-                :label="sources.length ? t('flow.library.lists.sources.ready') : t('flow.library.lists.sources.empty')"
+                :label="
+                  sources.length
+                    ? t('flow.library.lists.sources.ready')
+                    : t('flow.library.lists.sources.empty')
+                "
               />
             </div>
 
@@ -560,6 +803,88 @@ async function uploadCurrentFile() {
   font-size: 1rem;
 }
 
+.upload-support-summary {
+  display: grid;
+  gap: var(--rr-space-3);
+}
+
+.upload-support-summary__item {
+  display: grid;
+  gap: var(--rr-space-2);
+  padding: var(--rr-space-3);
+  border: 1px solid var(--rr-color-border-muted);
+  border-radius: var(--rr-radius-lg);
+  background:
+    linear-gradient(135deg, rgb(15 23 42 / 0.02), rgb(15 23 42 / 0.06)), var(--rr-color-surface);
+}
+
+.upload-support-summary__item p {
+  margin: 0;
+  color: var(--rr-color-text-secondary);
+}
+
+.upload-dropzone {
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+  border: 1.5px dashed rgb(15 23 42 / 0.16);
+  border-radius: var(--rr-radius-xl);
+  background:
+    radial-gradient(circle at top right, rgb(59 130 246 / 0.14), transparent 42%),
+    linear-gradient(160deg, rgb(255 255 255 / 0.96), rgb(241 245 249 / 0.88));
+  transition:
+    border-color 160ms ease,
+    transform 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.upload-dropzone.is-active {
+  border-color: var(--rr-color-accent-700);
+  box-shadow: 0 18px 45px rgb(59 130 246 / 0.15);
+  transform: translateY(-1px);
+}
+
+.upload-dropzone.is-selected {
+  border-color: rgb(15 23 42 / 0.28);
+}
+
+.upload-dropzone__input {
+  display: none;
+}
+
+.upload-dropzone__body {
+  display: grid;
+  justify-items: start;
+  gap: var(--rr-space-3);
+  padding: var(--rr-space-4);
+}
+
+.upload-dropzone__body h4,
+.upload-dropzone__body p {
+  margin: 0;
+}
+
+.upload-dropzone__body p {
+  max-width: 42rem;
+  color: var(--rr-color-text-secondary);
+}
+
+.upload-selection-card {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--rr-space-3);
+  align-items: center;
+  padding: var(--rr-space-3);
+  border-radius: var(--rr-radius-lg);
+  border: 1px solid var(--rr-color-border-muted);
+  background: var(--rr-color-surface-muted);
+}
+
+.upload-selection-card__meta {
+  display: grid;
+  gap: 6px;
+}
+
 @media (width <= 1100px) {
   .ingestion-grid {
     grid-template-columns: 1fr;
@@ -569,6 +894,11 @@ async function uploadCurrentFile() {
 @media (width <= 700px) {
   .ingestion-panel__heading {
     flex-direction: column;
+  }
+
+  .upload-selection-card {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }
 </style>

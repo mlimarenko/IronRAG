@@ -35,12 +35,12 @@ paths:
       operationId: getHealth
       security: []
       responses:
-        '200':
+        "200":
           description: Service health
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HealthResponse'
+                $ref: "#/components/schemas/HealthResponse"
   /v1/ready:
     get:
       tags: [system]
@@ -48,12 +48,12 @@ paths:
       operationId: getReadiness
       security: []
       responses:
-        '200':
+        "200":
           description: Readiness probe result
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ReadinessResponse'
+                $ref: "#/components/schemas/ReadinessResponse"
   /v1/version:
     get:
       tags: [system]
@@ -61,12 +61,12 @@ paths:
       operationId: getVersion
       security: []
       responses:
-        '200':
+        "200":
           description: Service version metadata
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/VersionResponse'
+                $ref: "#/components/schemas/VersionResponse"
   /v1/auth/tokens:
     get:
       tags: [auth]
@@ -74,20 +74,20 @@ paths:
       operationId: listTokens
       description: Requires `workspace:admin` scope or an `instance_admin` token. Instance admin callers may optionally filter by `workspace_id`; workspace-scoped tokens are implicitly limited to their own workspace even if the query parameter is omitted.
       parameters:
-        - $ref: '#/components/parameters/workspaceId'
+        - $ref: "#/components/parameters/workspaceId"
       responses:
-        '200':
+        "200":
           description: Visible API token summaries
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/TokenSummary'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                  $ref: "#/components/schemas/TokenSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
     post:
       tags: [auth]
       summary: Mint an API token
@@ -98,18 +98,18 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CreateTokenRequest'
+              $ref: "#/components/schemas/CreateTokenRequest"
       responses:
-        '200':
+        "200":
           description: Newly minted API token
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TokenCreateResponse'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/TokenCreateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/auth/bootstrap-token:
     post:
       tags: [auth]
@@ -125,20 +125,20 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/BootstrapTokenRequest'
+              $ref: "#/components/schemas/BootstrapTokenRequest"
       responses:
-        '200':
+        "200":
           description: Newly minted API token
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TokenCreateResponse'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/TokenCreateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/auth/tokens/{id}:
     get:
       tags: [auth]
@@ -146,36 +146,36 @@ paths:
       operationId: getToken
       description: Requires `workspace:admin` scope or an `instance_admin` token. Workspace-scoped tokens may only access tokens from their own workspace.
       parameters:
-        - $ref: '#/components/parameters/id'
+        - $ref: "#/components/parameters/id"
       responses:
-        '200':
+        "200":
           description: Token summary
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TokenSummary'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/TokenSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
     delete:
       tags: [auth]
       summary: Revoke API token
       operationId: revokeToken
       description: Requires `workspace:admin` scope or an `instance_admin` token. Workspace-scoped tokens may only revoke tokens from their own workspace.
       parameters:
-        - $ref: '#/components/parameters/id'
+        - $ref: "#/components/parameters/id"
       responses:
-        '204':
+        "204":
           description: Token revoked
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/workspaces:
     get:
       tags: [workspaces]
@@ -183,16 +183,16 @@ paths:
       operationId: listWorkspaces
       security: []
       responses:
-        '200':
+        "200":
           description: Workspace list
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/WorkspaceSummary'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                  $ref: "#/components/schemas/WorkspaceSummary"
+        "500":
+          $ref: "#/components/responses/InternalError"
     post:
       tags: [workspaces]
       summary: Create workspace
@@ -203,18 +203,18 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CreateWorkspaceRequest'
+              $ref: "#/components/schemas/CreateWorkspaceRequest"
       responses:
-        '200':
+        "200":
           description: Created workspace
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/WorkspaceSummary'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/WorkspaceSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/workspaces/{id}/governance:
     get:
       tags: [workspaces, usage]
@@ -222,20 +222,20 @@ paths:
       operationId: getWorkspaceGovernance
       description: Requires `workspace:admin`, `usage:read`, `providers:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access their own workspace.
       parameters:
-        - $ref: '#/components/parameters/id'
+        - $ref: "#/components/parameters/id"
       responses:
-        '200':
+        "200":
           description: Workspace governance summary
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/WorkspaceGovernanceSummary'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/WorkspaceGovernanceSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/projects:
     get:
       tags: [projects]
@@ -243,18 +243,18 @@ paths:
       operationId: listProjects
       security: []
       parameters:
-        - $ref: '#/components/parameters/workspaceId'
+        - $ref: "#/components/parameters/workspaceId"
       responses:
-        '200':
+        "200":
           description: Project list
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/ProjectSummary'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                  $ref: "#/components/schemas/ProjectSummary"
+        "500":
+          $ref: "#/components/responses/InternalError"
     post:
       tags: [projects]
       summary: Create project
@@ -265,18 +265,18 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CreateProjectRequest'
+              $ref: "#/components/schemas/CreateProjectRequest"
       responses:
-        '200':
+        "200":
           description: Created project
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ProjectSummary'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/ProjectSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/projects/{id}/readiness:
     get:
       tags: [projects]
@@ -284,20 +284,20 @@ paths:
       operationId: getProjectReadiness
       description: Requires `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
       parameters:
-        - $ref: '#/components/parameters/id'
+        - $ref: "#/components/parameters/id"
       responses:
-        '200':
+        "200":
           description: Project readiness summary
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ProjectReadinessSummary'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/ProjectReadinessSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/provider-accounts:
     get:
       tags: [providers]
@@ -305,18 +305,18 @@ paths:
       operationId: listProviderAccounts
       security: []
       parameters:
-        - $ref: '#/components/parameters/workspaceId'
+        - $ref: "#/components/parameters/workspaceId"
       responses:
-        '200':
+        "200":
           description: Provider account list
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/ProviderAccountSummary'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                  $ref: "#/components/schemas/ProviderAccountSummary"
+        "500":
+          $ref: "#/components/responses/InternalError"
     post:
       tags: [providers]
       summary: Create provider account
@@ -327,18 +327,18 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CreateProviderAccountRequest'
+              $ref: "#/components/schemas/CreateProviderAccountRequest"
       responses:
-        '200':
+        "200":
           description: Created provider account
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ProviderAccountSummary'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/ProviderAccountSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/model-profiles:
     get:
       tags: [providers]
@@ -346,18 +346,18 @@ paths:
       operationId: listModelProfiles
       security: []
       parameters:
-        - $ref: '#/components/parameters/workspaceId'
+        - $ref: "#/components/parameters/workspaceId"
       responses:
-        '200':
+        "200":
           description: Model profile list
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/ModelProfileSummary'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                  $ref: "#/components/schemas/ModelProfileSummary"
+        "500":
+          $ref: "#/components/responses/InternalError"
     post:
       tags: [providers]
       summary: Create model profile
@@ -368,22 +368,22 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CreateModelProfileRequest'
+              $ref: "#/components/schemas/CreateModelProfileRequest"
       responses:
-        '200':
+        "200":
           description: Created model profile
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ModelProfileSummary'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/ModelProfileSummary"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/provider-governance/{workspace_id}:
     get:
       tags: [providers]
@@ -398,16 +398,16 @@ paths:
             type: string
             format: uuid
       responses:
-        '200':
+        "200":
           description: Provider governance summary
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ProviderGovernanceSummary'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/ProviderGovernanceSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/provider-defaults/{workspace_id}:
     get:
       tags: [providers]
@@ -422,16 +422,16 @@ paths:
             type: string
             format: uuid
       responses:
-        '200':
+        "200":
           description: Workspace onboarding defaults summary
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/OnboardingDefaultsSummary'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/OnboardingDefaultsSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/projects/{project_id}/defaults:
     get:
       tags: [providers, projects]
@@ -446,18 +446,18 @@ paths:
             type: string
             format: uuid
       responses:
-        '200':
+        "200":
           description: Project defaults
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ProjectDefaultsDto'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/ProjectDefaultsDto"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
     put:
       tags: [providers, projects]
       summary: Update project provider defaults
@@ -475,22 +475,22 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ProjectDefaultsUpsertRequest'
+              $ref: "#/components/schemas/ProjectDefaultsUpsertRequest"
       responses:
-        '200':
+        "200":
           description: Updated project defaults
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ProjectDefaultsDto'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/ProjectDefaultsDto"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/integrations/{workspace_id}:
     get:
       tags: [integrations]
@@ -505,18 +505,18 @@ paths:
             type: string
             format: uuid
       responses:
-        '200':
+        "200":
           description: Workspace integrations summary
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/IntegrationsWorkspaceSummary'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/IntegrationsWorkspaceSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/integrations/{workspace_id}/examples:
     get:
       tags: [integrations]
@@ -539,18 +539,18 @@ paths:
             minimum: 1
             maximum: 25
       responses:
-        '200':
+        "200":
           description: Example project list
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/IntegrationExampleProjectSummary'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                  $ref: "#/components/schemas/IntegrationExampleProjectSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/integrations/{workspace_id}/tokens/{id}:
     delete:
       tags: [integrations, auth]
@@ -564,16 +564,16 @@ paths:
           schema:
             type: string
             format: uuid
-        - $ref: '#/components/parameters/id'
+        - $ref: "#/components/parameters/id"
       responses:
-        '204':
+        "204":
           description: Token revoked
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/integrations-products/{workspace_id}:
     get:
       tags: [integrations]
@@ -588,18 +588,18 @@ paths:
             type: string
             format: uuid
       responses:
-        '200':
+        "200":
           description: Integrations product snapshot
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/IntegrationsProductResponse'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/IntegrationsProductResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/sources:
     get:
       tags: [ingestion]
@@ -607,18 +607,18 @@ paths:
       operationId: listSources
       security: []
       parameters:
-        - $ref: '#/components/parameters/projectIdOptional'
+        - $ref: "#/components/parameters/projectIdOptional"
       responses:
-        '200':
+        "200":
           description: Source list
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/SourceSummary'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                  $ref: "#/components/schemas/SourceSummary"
+        "500":
+          $ref: "#/components/responses/InternalError"
     post:
       tags: [ingestion]
       summary: Create source
@@ -629,18 +629,18 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CreateSourceRequest'
+              $ref: "#/components/schemas/CreateSourceRequest"
       responses:
-        '200':
+        "200":
           description: Created source
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SourceSummary'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/SourceSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/ingestion-jobs:
     get:
       tags: [ingestion]
@@ -648,18 +648,18 @@ paths:
       operationId: listIngestionJobs
       security: []
       parameters:
-        - $ref: '#/components/parameters/projectIdOptional'
+        - $ref: "#/components/parameters/projectIdOptional"
       responses:
-        '200':
+        "200":
           description: Ingestion job list
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/IngestionJobSummary'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                  $ref: "#/components/schemas/IngestionJobSummary"
+        "500":
+          $ref: "#/components/responses/InternalError"
     post:
       tags: [ingestion]
       summary: Create ingestion job
@@ -670,20 +670,20 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CreateIngestionJobRequest'
+              $ref: "#/components/schemas/CreateIngestionJobRequest"
       responses:
-        '200':
+        "200":
           description: Created ingestion job
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/IngestionJobSummary'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/IngestionJobSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/ingestion-jobs/{id}:
     get:
       tags: [ingestion]
@@ -691,20 +691,20 @@ paths:
       operationId: getIngestionJobDetail
       description: Requires `documents:read`, `documents:write`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access jobs in their own workspace.
       parameters:
-        - $ref: '#/components/parameters/id'
+        - $ref: "#/components/parameters/id"
       responses:
-        '200':
+        "200":
           description: Ingestion job detail
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/IngestionJobDetail'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/IngestionJobDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/ingestion-jobs/{id}/retry:
     post:
       tags: [ingestion]
@@ -712,22 +712,22 @@ paths:
       operationId: retryIngestionJob
       description: Requires `documents:write`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only retry jobs in their own workspace.
       parameters:
-        - $ref: '#/components/parameters/id'
+        - $ref: "#/components/parameters/id"
       responses:
-        '200':
+        "200":
           description: Newly created retry ingestion job detail
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/IngestionJobDetail'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/IngestionJobDetail"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/documents:
     get:
       tags: [documents]
@@ -735,18 +735,18 @@ paths:
       operationId: listDocuments
       security: []
       parameters:
-        - $ref: '#/components/parameters/projectIdOptional'
+        - $ref: "#/components/parameters/projectIdOptional"
       responses:
-        '200':
+        "200":
           description: Document list
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/DocumentSummary'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                  $ref: "#/components/schemas/DocumentSummary"
+        "500":
+          $ref: "#/components/responses/InternalError"
     post:
       tags: [documents]
       summary: Create document metadata record
@@ -757,20 +757,20 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CreateDocumentRequest'
+              $ref: "#/components/schemas/CreateDocumentRequest"
       responses:
-        '200':
+        "200":
           description: Created document
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DocumentSummary'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/DocumentSummary"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/content/ingest-text:
     post:
       tags: [content]
@@ -786,24 +786,24 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/IngestTextRequest'
+              $ref: "#/components/schemas/IngestTextRequest"
       responses:
-        '200':
+        "200":
           description: Ingestion job accepted and queued
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/IngestTextResponse'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/IngestTextResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/content/search-chunks:
     post:
       tags: [content]
@@ -815,22 +815,22 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/SearchChunksRequest'
+              $ref: "#/components/schemas/SearchChunksRequest"
       responses:
-        '200':
+        "200":
           description: Matching chunk list
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/ChunkResult'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                  $ref: "#/components/schemas/ChunkResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/content/embed-project:
     post:
       tags: [content]
@@ -846,20 +846,20 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/EmbedProjectChunksRequest'
+              $ref: "#/components/schemas/EmbedProjectChunksRequest"
       responses:
-        '200':
+        "200":
           description: Embedding job result summary
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/EmbedProjectChunksResponse'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/EmbedProjectChunksResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/chunks:
     get:
       tags: [documents]
@@ -867,33 +867,33 @@ paths:
       operationId: listChunks
       description: Requires `documents:read`, `workspace:admin`, or an `instance_admin` token.
       parameters:
-        - $ref: '#/components/parameters/projectIdOptional'
-        - $ref: '#/components/parameters/documentId'
-        - $ref: '#/components/parameters/limit'
+        - $ref: "#/components/parameters/projectIdOptional"
+        - $ref: "#/components/parameters/documentId"
+        - $ref: "#/components/parameters/limit"
       responses:
-        '200':
+        "200":
           description: Chunk list
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/ChunkSummary'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                  $ref: "#/components/schemas/ChunkSummary"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/uploads/ingest:
     post:
       tags: [content]
-      summary: Upload a UTF-8 text-like file and queue ingestion
+      summary: Upload a file and queue ingestion when a supported adapter exists
       operationId: uploadAndIngest
       description: |
         Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
 
-        Current implementation only supports UTF-8 text-like uploads. The backend decodes the uploaded body as UTF-8 text, enqueues an ingestion job, and returns the queued job metadata rather than a completed document/chunk result.
+        Current implementation supports UTF-8 text-like uploads only. The backend classifies the selected file, rejects PDF/image uploads with explicit "planned" validation errors, decodes accepted text-like content as UTF-8 text, enqueues an ingestion job, and returns queued job metadata rather than a completed document/chunk result.
         Workspace-scoped tokens may only queue jobs for projects in their own workspace.
 
         Expected multipart fields:
@@ -921,22 +921,22 @@ paths:
                   type: string
                   format: binary
       responses:
-        '200':
+        "200":
           description: Ingestion job accepted and queued for the uploaded file
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/UploadIngestResponse'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/UploadIngestResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/retrieval-runs:
     get:
       tags: [retrieval]
@@ -944,18 +944,18 @@ paths:
       operationId: listRetrievalRuns
       security: []
       parameters:
-        - $ref: '#/components/parameters/projectIdOptional'
+        - $ref: "#/components/parameters/projectIdOptional"
       responses:
-        '200':
+        "200":
           description: Retrieval run list
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/RetrievalRunSummary'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                  $ref: "#/components/schemas/RetrievalRunSummary"
+        "500":
+          $ref: "#/components/responses/InternalError"
     post:
       tags: [retrieval]
       summary: Create a retrieval run record manually
@@ -966,22 +966,22 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CreateRetrievalRunRequest'
+              $ref: "#/components/schemas/CreateRetrievalRunRequest"
       responses:
-        '200':
+        "200":
           description: Created retrieval run
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/RetrievalRunSummary'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/RetrievalRunSummary"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/retrieval-runs/{id}:
     get:
       tags: [retrieval]
@@ -989,20 +989,20 @@ paths:
       operationId: getRetrievalRunDetail
       description: Requires `query:run`, `workspace:admin`, `documents:read`, or an `instance_admin` token. Workspace-scoped tokens may only access runs in their own workspace.
       parameters:
-        - $ref: '#/components/parameters/id'
+        - $ref: "#/components/parameters/id"
       responses:
-        '200':
+        "200":
           description: Retrieval run detail
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/RetrievalRunDetail'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/RetrievalRunDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/query:
     post:
       tags: [retrieval]
@@ -1018,22 +1018,22 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/QueryRequest'
+              $ref: "#/components/schemas/QueryRequest"
       responses:
-        '200':
+        "200":
           description: Query result
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/QueryResponse'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/QueryResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/product/projects/{id}:
     get:
       tags: [product, projects]
@@ -1041,20 +1041,20 @@ paths:
       operationId: getProductProjectOverview
       description: Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
       parameters:
-        - $ref: '#/components/parameters/id'
+        - $ref: "#/components/parameters/id"
       responses:
-        '200':
+        "200":
           description: Project overview with readiness, query contract, citations, and capability hints
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ProductProjectOverviewDto'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/ProductProjectOverviewDto"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/product/projects/{id}/diagnostics:
     get:
       tags: [product, projects]
@@ -1062,20 +1062,20 @@ paths:
       operationId: getProductProjectDiagnostics
       description: Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
       parameters:
-        - $ref: '#/components/parameters/id'
+        - $ref: "#/components/parameters/id"
       responses:
-        '200':
+        "200":
           description: Project diagnostics
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ProductProjectDiagnosticsDto'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/ProductProjectDiagnosticsDto"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/product/projects/{id}/query-contract:
     get:
       tags: [product, projects]
@@ -1083,20 +1083,20 @@ paths:
       operationId: getProductProjectQueryContract
       description: Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
       parameters:
-        - $ref: '#/components/parameters/id'
+        - $ref: "#/components/parameters/id"
       responses:
-        '200':
+        "200":
           description: Query contract descriptor
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ProductQueryContractDto'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/ProductQueryContractDto"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/product/documents/{id}:
     get:
       tags: [product, documents]
@@ -1104,20 +1104,20 @@ paths:
       operationId: getProductDocumentOverview
       description: Requires `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access documents in their own workspace. Usage and cost attribution are currently exposed at project scope because per-document attribution is not persisted yet.
       parameters:
-        - $ref: '#/components/parameters/id'
+        - $ref: "#/components/parameters/id"
       responses:
-        '200':
+        "200":
           description: Document overview
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ProductDocumentOverviewDto'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/ProductDocumentOverviewDto"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/product/documents/{id}/diagnostics:
     get:
       tags: [product, documents]
@@ -1125,20 +1125,20 @@ paths:
       operationId: getProductDocumentDiagnostics
       description: Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access documents in their own workspace.
       parameters:
-        - $ref: '#/components/parameters/id'
+        - $ref: "#/components/parameters/id"
       responses:
-        '200':
+        "200":
           description: Document diagnostics
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ProductDocumentDiagnosticsDto'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/ProductDocumentDiagnosticsDto"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/graph-products/{project_id}:
     get:
       tags: [graph, product]
@@ -1153,18 +1153,18 @@ paths:
             type: string
             format: uuid
       responses:
-        '200':
+        "200":
           description: Graph snapshot
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GraphProductResponse'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/GraphProductResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/graph-products/{project_id}/summary:
     get:
       tags: [graph, product]
@@ -1179,18 +1179,18 @@ paths:
             type: string
             format: uuid
       responses:
-        '200':
+        "200":
           description: Graph summary
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GraphProjectSummaryResponse'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/GraphProjectSummaryResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/graph-products/{project_id}/search:
     get:
       tags: [graph, product]
@@ -1218,20 +1218,20 @@ paths:
             minimum: 1
             maximum: 50
       responses:
-        '200':
+        "200":
           description: Graph search results
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GraphSearchResponse'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/GraphSearchResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/graph-products/{project_id}/entities/{entity_id}:
     get:
       tags: [graph, product]
@@ -1252,18 +1252,18 @@ paths:
             type: string
             format: uuid
       responses:
-        '200':
+        "200":
           description: Graph entity detail
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GraphEntityDetailResponse'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/GraphEntityDetailResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/graph-products/{project_id}/entities/{entity_id}/subgraph:
     get:
       tags: [graph, product]
@@ -1292,20 +1292,20 @@ paths:
             minimum: 0
             maximum: 3
       responses:
-        '200':
+        "200":
           description: Graph subgraph response
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GraphSubgraphResponse'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: "#/components/schemas/GraphSubgraphResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/usage-events:
     get:
       tags: [usage]
@@ -1313,20 +1313,20 @@ paths:
       operationId: listUsageEvents
       description: Requires `usage:read`, `workspace:admin`, or an `instance_admin` token.
       parameters:
-        - $ref: '#/components/parameters/projectIdOptional'
+        - $ref: "#/components/parameters/projectIdOptional"
       responses:
-        '200':
+        "200":
           description: Usage event list
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/UsageEventSummary'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                  $ref: "#/components/schemas/UsageEventSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/cost-ledger:
     get:
       tags: [usage]
@@ -1334,20 +1334,20 @@ paths:
       operationId: listCostLedger
       description: Requires `usage:read`, `workspace:admin`, or an `instance_admin` token.
       parameters:
-        - $ref: '#/components/parameters/projectIdOptional'
+        - $ref: "#/components/parameters/projectIdOptional"
       responses:
-        '200':
+        "200":
           description: Cost ledger entry list
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/CostLedgerSummary'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                  $ref: "#/components/schemas/CostLedgerSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
 components:
   securitySchemes:
     bearerAuth:
@@ -1399,13 +1399,13 @@ components:
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/ApiErrorBody'
+            $ref: "#/components/schemas/ApiErrorBody"
     Unauthorized:
       description: Unauthorized
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/ApiErrorBody'
+            $ref: "#/components/schemas/ApiErrorBody"
           examples:
             apiErrorEnvelope:
               value:
@@ -1426,19 +1426,19 @@ components:
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/ApiErrorBody'
+            $ref: "#/components/schemas/ApiErrorBody"
     Conflict:
       description: Conflict
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/ApiErrorBody'
+            $ref: "#/components/schemas/ApiErrorBody"
     InternalError:
       description: Internal server error
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/ApiErrorBody'
+            $ref: "#/components/schemas/ApiErrorBody"
         text/plain:
           schema:
             type: string
@@ -1499,7 +1499,7 @@ components:
       required: [token_kind, label, scopes]
       properties:
         workspace_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         token_kind:
           type: string
@@ -1521,7 +1521,7 @@ components:
           type: string
           format: uuid
         workspace_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         token_kind:
           type: string
@@ -1552,7 +1552,19 @@ components:
 
     WorkspaceGovernanceSummary:
       type: object
-      required: [id, slug, name, status, projects, provider_accounts, model_profiles, api_tokens, health_state, usage]
+      required:
+        [
+          id,
+          slug,
+          name,
+          status,
+          projects,
+          provider_accounts,
+          model_profiles,
+          api_tokens,
+          health_state,
+          usage,
+        ]
       properties:
         id:
           type: string
@@ -1576,9 +1588,9 @@ components:
           type: integer
           minimum: 0
         health_state:
-          $ref: '#/components/schemas/HealthState'
+          $ref: "#/components/schemas/HealthState"
         usage:
-          $ref: '#/components/schemas/UsageGovernanceSummary'
+          $ref: "#/components/schemas/UsageGovernanceSummary"
 
     CreateWorkspaceRequest:
       type: object
@@ -1604,7 +1616,7 @@ components:
         name:
           type: string
         description:
-          type: [string, 'null']
+          type: [string, "null"]
 
     CreateProjectRequest:
       type: object
@@ -1618,11 +1630,22 @@ components:
         name:
           type: string
         description:
-          type: [string, 'null']
+          type: [string, "null"]
 
     ProjectReadinessSummary:
       type: object
-      required: [id, workspace_id, slug, name, ingestion_jobs, sources, documents, ready_for_query, indexing_state]
+      required:
+        [
+          id,
+          workspace_id,
+          slug,
+          name,
+          ingestion_jobs,
+          sources,
+          documents,
+          ready_for_query,
+          indexing_state,
+        ]
       properties:
         id:
           type: string
@@ -1680,12 +1703,13 @@ components:
         label:
           type: string
         api_base_url:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uri
 
     ModelProfileSummary:
       type: object
-      required: [id, workspace_id, provider_account_id, profile_kind, model_name]
+      required:
+        [id, workspace_id, provider_account_id, profile_kind, model_name]
       properties:
         id:
           type: string
@@ -1718,9 +1742,9 @@ components:
         model_name:
           type: string
         temperature:
-          type: [number, 'null']
+          type: [number, "null"]
         max_output_tokens:
-          type: [integer, 'null']
+          type: [integer, "null"]
           format: int32
 
     ProviderGovernanceSummary:
@@ -1733,13 +1757,13 @@ components:
         provider_accounts:
           type: array
           items:
-            $ref: '#/components/schemas/ProviderAccountSummary'
+            $ref: "#/components/schemas/ProviderAccountSummary"
         model_profiles:
           type: array
           items:
-            $ref: '#/components/schemas/ModelProfileSummary'
+            $ref: "#/components/schemas/ModelProfileSummary"
         warning:
-          type: [string, 'null']
+          type: [string, "null"]
 
     SourceSummary:
       type: object
@@ -1783,7 +1807,7 @@ components:
           type: string
           format: uuid
         source_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         trigger_kind:
           type: string
@@ -1802,20 +1826,31 @@ components:
           type: string
           format: uuid
         source_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         trigger_kind:
           type: string
         requested_by:
-          type: [string, 'null']
+          type: [string, "null"]
 
     IngestionLifecycleState:
       type: string
-      enum: [queued, validating, running, partial, completed, retryable_failed, canceled, failed]
+      enum:
+        [
+          queued,
+          validating,
+          running,
+          partial,
+          completed,
+          retryable_failed,
+          canceled,
+          failed,
+        ]
 
     IngestionJobDetail:
       type: object
-      required: [id, project_id, trigger_kind, status, stage, retryable, lifecycle]
+      required:
+        [id, project_id, trigger_kind, status, stage, retryable, lifecycle]
       properties:
         id:
           type: string
@@ -1824,7 +1859,7 @@ components:
           type: string
           format: uuid
         source_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         trigger_kind:
           type: string
@@ -1833,19 +1868,19 @@ components:
         stage:
           type: string
         requested_by:
-          type: [string, 'null']
+          type: [string, "null"]
         error_message:
-          type: [string, 'null']
+          type: [string, "null"]
         started_at:
-          type: [string, 'null']
+          type: [string, "null"]
           format: date-time
         finished_at:
-          type: [string, 'null']
+          type: [string, "null"]
           format: date-time
         retryable:
           type: boolean
         lifecycle:
-          $ref: '#/components/schemas/IngestionLifecycleState'
+          $ref: "#/components/schemas/IngestionLifecycleState"
 
     DocumentSummary:
       type: object
@@ -1858,16 +1893,16 @@ components:
           type: string
           format: uuid
         source_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         external_key:
           type: string
         title:
-          type: [string, 'null']
+          type: [string, "null"]
         mime_type:
-          type: [string, 'null']
+          type: [string, "null"]
         checksum:
-          type: [string, 'null']
+          type: [string, "null"]
 
     CreateDocumentRequest:
       type: object
@@ -1877,16 +1912,16 @@ components:
           type: string
           format: uuid
         source_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         external_key:
           type: string
         title:
-          type: [string, 'null']
+          type: [string, "null"]
         mime_type:
-          type: [string, 'null']
+          type: [string, "null"]
         checksum:
-          type: [string, 'null']
+          type: [string, "null"]
 
     IngestTextRequest:
       type: object
@@ -1896,12 +1931,12 @@ components:
           type: string
           format: uuid
         source_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         external_key:
           type: string
         title:
-          type: [string, 'null']
+          type: [string, "null"]
         text:
           type: string
 
@@ -1929,7 +1964,7 @@ components:
         query_text:
           type: string
         top_k:
-          type: [integer, 'null']
+          type: [integer, "null"]
           format: int32
 
     ChunkResult:
@@ -1960,10 +1995,10 @@ components:
         model_name:
           type: string
         embedding_model_profile_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         limit:
-          type: [integer, 'null']
+          type: [integer, "null"]
           format: int64
 
     EmbedProjectChunksResponse:
@@ -2000,12 +2035,21 @@ components:
         content:
           type: string
         token_count:
-          type: [integer, 'null']
+          type: [integer, "null"]
           format: int32
 
     UploadIngestResponse:
       type: object
-      required: [ingestion_job_id, external_key, status, stage]
+      required:
+        [
+          ingestion_job_id,
+          external_key,
+          status,
+          stage,
+          file_kind,
+          adapter_status,
+          ingest_mode,
+        ]
       properties:
         ingestion_job_id:
           type: string
@@ -2019,11 +2063,23 @@ components:
           type: string
           description: Current ingestion job stage, initially `queued`.
         mime_type:
-          type: [string, 'null']
+          type: [string, "null"]
+        file_kind:
+          type: string
+          enum: [text_like, pdf, image, binary]
+          description: Backend-classified file kind. Current successful uploads return `text_like`.
+        adapter_status:
+          type: string
+          enum: [supported_now, planned]
+          description: Adapter availability for the classified file kind. Current successful uploads return `supported_now`.
+        ingest_mode:
+          type: string
+          description: Backend pipeline mode used for the accepted upload, currently `multipart_text_upload_v1`.
 
     RetrievalRunSummary:
       type: object
-      required: [id, project_id, query_text, top_k, answer_status, weak_grounding]
+      required:
+        [id, project_id, query_text, top_k, answer_status, weak_grounding]
       properties:
         id:
           type: string
@@ -2034,13 +2090,13 @@ components:
         query_text:
           type: string
         model_profile_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         top_k:
           type: integer
           format: int32
         response_text:
-          type: [string, 'null']
+          type: [string, "null"]
         answer_status:
           type: string
           example: grounded
@@ -2049,7 +2105,18 @@ components:
 
     RetrievalRunDetail:
       type: object
-      required: [id, project_id, query_text, top_k, answer_status, weak_grounding, references, matched_chunk_ids, debug_json]
+      required:
+        [
+          id,
+          project_id,
+          query_text,
+          top_k,
+          answer_status,
+          weak_grounding,
+          references,
+          matched_chunk_ids,
+          debug_json,
+        ]
       properties:
         id:
           type: string
@@ -2060,13 +2127,13 @@ components:
         query_text:
           type: string
         model_profile_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         top_k:
           type: integer
           format: int32
         response_text:
-          type: [string, 'null']
+          type: [string, "null"]
         answer_status:
           type: string
         weak_grounding:
@@ -2081,7 +2148,7 @@ components:
             type: string
             format: uuid
         warning:
-          type: [string, 'null']
+          type: [string, "null"]
         debug_json:
           type: object
           additionalProperties: true
@@ -2096,13 +2163,13 @@ components:
         query_text:
           type: string
         model_profile_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         top_k:
-          type: [integer, 'null']
+          type: [integer, "null"]
           format: int32
         response_text:
-          type: [string, 'null']
+          type: [string, "null"]
 
     QueryRequest:
       type: object
@@ -2114,18 +2181,27 @@ components:
         query_text:
           type: string
         model_profile_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         embedding_model_profile_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         top_k:
-          type: [integer, 'null']
+          type: [integer, "null"]
           format: int32
 
     QueryResponse:
       type: object
-      required: [retrieval_run_id, project_id, answer, references, mode, answer_status, weak_grounding]
+      required:
+        [
+          retrieval_run_id,
+          project_id,
+          answer,
+          references,
+          mode,
+          answer_status,
+          weak_grounding,
+        ]
       properties:
         retrieval_run_id:
           type: string
@@ -2150,11 +2226,18 @@ components:
         weak_grounding:
           type: boolean
         warning:
-          type: [string, 'null']
+          type: [string, "null"]
 
     UsageGovernanceSummary:
       type: object
-      required: [usage_events, prompt_tokens, completion_tokens, total_tokens, estimated_cost]
+      required:
+        [
+          usage_events,
+          prompt_tokens,
+          completion_tokens,
+          total_tokens,
+          estimated_cost,
+        ]
       properties:
         usage_events:
           type: integer
@@ -2184,22 +2267,22 @@ components:
           type: string
           format: uuid
         project_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         model_profile_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         usage_kind:
           type: string
           example: query
         prompt_tokens:
-          type: [integer, 'null']
+          type: [integer, "null"]
           format: int32
         completion_tokens:
-          type: [integer, 'null']
+          type: [integer, "null"]
           format: int32
         total_tokens:
-          type: [integer, 'null']
+          type: [integer, "null"]
           format: int32
         raw_usage_json:
           type: object
@@ -2207,13 +2290,22 @@ components:
 
     CostLedgerSummary:
       type: object
-      required: [id, usage_event_id, provider_kind, model_name, currency, estimated_cost, pricing_snapshot_json]
+      required:
+        [
+          id,
+          usage_event_id,
+          provider_kind,
+          model_name,
+          currency,
+          estimated_cost,
+          pricing_snapshot_json,
+        ]
       properties:
         id:
           type: string
           format: uuid
         project_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         usage_event_id:
           type: string
@@ -2232,13 +2324,12 @@ components:
           type: object
           additionalProperties: true
 
-
     BootstrapTokenRequest:
       type: object
       required: [token_kind, label, scopes]
       properties:
         workspace_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         token_kind:
           type: string
@@ -2251,7 +2342,7 @@ components:
           items:
             type: string
         bootstrap_secret:
-          type: [string, 'null']
+          type: [string, "null"]
           description: Must match the backend bootstrap token environment variable.
 
     TokenSummary:
@@ -2262,7 +2353,7 @@ components:
           type: string
           format: uuid
         workspace_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         token_kind:
           type: string
@@ -2276,7 +2367,7 @@ components:
           items:
             type: string
         last_used_at:
-          type: [string, 'null']
+          type: [string, "null"]
           format: date-time
         created_at:
           type: string
@@ -2302,7 +2393,7 @@ components:
 
     IntegrationTokenSummary:
       allOf:
-        - $ref: '#/components/schemas/TokenSummary'
+        - $ref: "#/components/schemas/TokenSummary"
 
     IntegrationsWorkspaceSummary:
       type: object
@@ -2314,11 +2405,11 @@ components:
         example_projects:
           type: array
           items:
-            $ref: '#/components/schemas/IntegrationExampleProjectSummary'
+            $ref: "#/components/schemas/IntegrationExampleProjectSummary"
         api_tokens:
           type: array
           items:
-            $ref: '#/components/schemas/IntegrationTokenSummary'
+            $ref: "#/components/schemas/IntegrationTokenSummary"
 
     ProviderDefaultProfileDto:
       type: object
@@ -2330,9 +2421,9 @@ components:
         model_name:
           type: string
         temperature:
-          type: [number, 'null']
+          type: [number, "null"]
         max_output_tokens:
-          type: [integer, 'null']
+          type: [integer, "null"]
           format: int32
 
     ProviderDefaultTemplateDto:
@@ -2345,22 +2436,23 @@ components:
         label:
           type: string
         api_base_url:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uri
         chat_profile:
-          $ref: '#/components/schemas/ProviderDefaultProfileDto'
+          $ref: "#/components/schemas/ProviderDefaultProfileDto"
         embedding_profile:
           oneOf:
-            - $ref: '#/components/schemas/ProviderDefaultProfileDto'
-            - type: 'null'
+            - $ref: "#/components/schemas/ProviderDefaultProfileDto"
+            - type: "null"
         rerank_profile:
           oneOf:
-            - $ref: '#/components/schemas/ProviderDefaultProfileDto'
-            - type: 'null'
+            - $ref: "#/components/schemas/ProviderDefaultProfileDto"
+            - type: "null"
 
     OnboardingDefaultsSummary:
       type: object
-      required: [workspace_id, provider_defaults, project_defaults, persistence_state]
+      required:
+        [workspace_id, provider_defaults, project_defaults, persistence_state]
       properties:
         workspace_id:
           type: string
@@ -2368,37 +2460,37 @@ components:
         provider_defaults:
           type: array
           items:
-            $ref: '#/components/schemas/ProviderDefaultTemplateDto'
+            $ref: "#/components/schemas/ProviderDefaultTemplateDto"
         project_defaults:
-          $ref: '#/components/schemas/ProjectDefaultsDto'
+          $ref: "#/components/schemas/ProjectDefaultsDto"
         persistence_state:
           type: string
         warning:
-          type: [string, 'null']
+          type: [string, "null"]
 
     ProjectDefaultsUpsertRequest:
       type: object
       properties:
         provider_account_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         chat_model_profile_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         embedding_model_profile_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         rerank_model_profile_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         retrieval_top_k:
-          type: [integer, 'null']
+          type: [integer, "null"]
           format: int32
         chunk_size:
-          type: [integer, 'null']
+          type: [integer, "null"]
           format: int32
         chunk_overlap:
-          type: [integer, 'null']
+          type: [integer, "null"]
           format: int32
 
     ProjectDefaultsDto:
@@ -2409,19 +2501,19 @@ components:
           type: string
           format: uuid
         project_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         provider_account_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         chat_model_profile_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         embedding_model_profile_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         rerank_model_profile_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         retrieval_top_k:
           type: integer
@@ -2454,16 +2546,16 @@ components:
         label:
           type: string
         chunk_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         document_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         source_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         score:
-          type: [number, 'null']
+          type: [number, "null"]
           format: double
 
     RetrievalDebugMetadataDto:
@@ -2480,7 +2572,7 @@ components:
           items:
             type: string
         warning:
-          type: [string, 'null']
+          type: [string, "null"]
         answer_status:
           type: string
         weak_grounding:
@@ -2499,7 +2591,16 @@ components:
 
     ProductProjectReadinessDto:
       type: object
-      required: [project_id, workspace_id, documents, sources, ingestion_jobs, ready_for_query, indexing_state]
+      required:
+        [
+          project_id,
+          workspace_id,
+          documents,
+          sources,
+          ingestion_jobs,
+          ready_for_query,
+          indexing_state,
+        ]
       properties:
         project_id:
           type: string
@@ -2523,7 +2624,15 @@ components:
 
     ProductQueryContractDto:
       type: object
-      required: [route, method, request_fields, response_fields, citation_fields, debug_fields]
+      required:
+        [
+          route,
+          method,
+          request_fields,
+          response_fields,
+          citation_fields,
+          debug_fields,
+        ]
       properties:
         route:
           type: string
@@ -2548,20 +2657,32 @@ components:
 
     ProductProjectCapabilitiesDto:
       type: object
-      required: [query_contract, citations, retrieval_debug_metadata, diagnostics]
+      required:
+        [query_contract, citations, retrieval_debug_metadata, diagnostics]
       properties:
         query_contract:
-          $ref: '#/components/schemas/PlaceholderCapabilityDto'
+          $ref: "#/components/schemas/PlaceholderCapabilityDto"
         citations:
-          $ref: '#/components/schemas/PlaceholderCapabilityDto'
+          $ref: "#/components/schemas/PlaceholderCapabilityDto"
         retrieval_debug_metadata:
-          $ref: '#/components/schemas/PlaceholderCapabilityDto'
+          $ref: "#/components/schemas/PlaceholderCapabilityDto"
         diagnostics:
-          $ref: '#/components/schemas/PlaceholderCapabilityDto'
+          $ref: "#/components/schemas/PlaceholderCapabilityDto"
 
     ProductProjectOverviewDto:
       type: object
-      required: [id, workspace_id, slug, name, readiness, query_contract, citations, observability, capabilities]
+      required:
+        [
+          id,
+          workspace_id,
+          slug,
+          name,
+          readiness,
+          query_contract,
+          citations,
+          observability,
+          capabilities,
+        ]
       properties:
         id:
           type: string
@@ -2574,23 +2695,23 @@ components:
         name:
           type: string
         description:
-          type: [string, 'null']
+          type: [string, "null"]
         readiness:
-          $ref: '#/components/schemas/ProductProjectReadinessDto'
+          $ref: "#/components/schemas/ProductProjectReadinessDto"
         query_contract:
-          $ref: '#/components/schemas/ProductQueryContractDto'
+          $ref: "#/components/schemas/ProductQueryContractDto"
         citations:
           type: array
           items:
-            $ref: '#/components/schemas/CitationReferenceDto'
+            $ref: "#/components/schemas/CitationReferenceDto"
         retrieval_debug:
           oneOf:
-            - $ref: '#/components/schemas/RetrievalDebugMetadataDto'
-            - type: 'null'
+            - $ref: "#/components/schemas/RetrievalDebugMetadataDto"
+            - type: "null"
         observability:
-          $ref: '#/components/schemas/OperationalObservabilityDto'
+          $ref: "#/components/schemas/OperationalObservabilityDto"
         capabilities:
-          $ref: '#/components/schemas/ProductProjectCapabilitiesDto'
+          $ref: "#/components/schemas/ProductProjectCapabilitiesDto"
 
     ProductProjectDiagnosticsDto:
       type: object
@@ -2604,31 +2725,37 @@ components:
           format: uuid
         latest_ingestion_job:
           oneOf:
-            - $ref: '#/components/schemas/IngestionJobSummary'
-            - type: 'null'
+            - $ref: "#/components/schemas/IngestionJobSummary"
+            - type: "null"
         latest_retrieval_run:
           oneOf:
-            - $ref: '#/components/schemas/RetrievalRunSummary'
-            - type: 'null'
+            - $ref: "#/components/schemas/RetrievalRunSummary"
+            - type: "null"
         retrieval_debug:
           oneOf:
-            - $ref: '#/components/schemas/RetrievalDebugMetadataDto'
-            - type: 'null'
+            - $ref: "#/components/schemas/RetrievalDebugMetadataDto"
+            - type: "null"
         observability:
-          $ref: '#/components/schemas/OperationalObservabilityDto'
+          $ref: "#/components/schemas/OperationalObservabilityDto"
 
     ProductDocumentCapabilitiesDto:
       type: object
-      required: [provider_usage_attribution, cost_accounting, workspace_project_attribution, citations]
+      required:
+        [
+          provider_usage_attribution,
+          cost_accounting,
+          workspace_project_attribution,
+          citations,
+        ]
       properties:
         provider_usage_attribution:
-          $ref: '#/components/schemas/PlaceholderCapabilityDto'
+          $ref: "#/components/schemas/PlaceholderCapabilityDto"
         cost_accounting:
-          $ref: '#/components/schemas/PlaceholderCapabilityDto'
+          $ref: "#/components/schemas/PlaceholderCapabilityDto"
         workspace_project_attribution:
-          $ref: '#/components/schemas/PlaceholderCapabilityDto'
+          $ref: "#/components/schemas/PlaceholderCapabilityDto"
         citations:
-          $ref: '#/components/schemas/PlaceholderCapabilityDto'
+          $ref: "#/components/schemas/PlaceholderCapabilityDto"
 
     ProductDocumentOverviewDto:
       type: object
@@ -2641,30 +2768,39 @@ components:
           type: string
           format: uuid
         source_id:
-          type: [string, 'null']
+          type: [string, "null"]
           format: uuid
         external_key:
           type: string
         title:
-          type: [string, 'null']
+          type: [string, "null"]
         mime_type:
-          type: [string, 'null']
+          type: [string, "null"]
         checksum:
-          type: [string, 'null']
+          type: [string, "null"]
         usage:
           type: array
           items:
-            $ref: '#/components/schemas/UsageEventSummary'
+            $ref: "#/components/schemas/UsageEventSummary"
         costs:
           type: array
           items:
-            $ref: '#/components/schemas/CostLedgerSummary'
+            $ref: "#/components/schemas/CostLedgerSummary"
         capabilities:
-          $ref: '#/components/schemas/ProductDocumentCapabilitiesDto'
+          $ref: "#/components/schemas/ProductDocumentCapabilitiesDto"
 
     ProductDocumentDiagnosticsDto:
       type: object
-      required: [document_id, project_id, project_workspace_id, ingestion_jobs, citations, usage, costs]
+      required:
+        [
+          document_id,
+          project_id,
+          project_workspace_id,
+          ingestion_jobs,
+          citations,
+          usage,
+          costs,
+        ]
       properties:
         document_id:
           type: string
@@ -2678,23 +2814,24 @@ components:
         ingestion_jobs:
           type: array
           items:
-            $ref: '#/components/schemas/IngestionJobSummary'
+            $ref: "#/components/schemas/IngestionJobSummary"
         citations:
           type: array
           items:
-            $ref: '#/components/schemas/CitationReferenceDto'
+            $ref: "#/components/schemas/CitationReferenceDto"
         usage:
           type: array
           items:
-            $ref: '#/components/schemas/UsageEventSummary'
+            $ref: "#/components/schemas/UsageEventSummary"
         costs:
           type: array
           items:
-            $ref: '#/components/schemas/CostLedgerSummary'
+            $ref: "#/components/schemas/CostLedgerSummary"
 
     GraphCoverageSummary:
       type: object
-      required: [project_id, entity_count, relation_count, extraction_runs, status]
+      required:
+        [project_id, entity_count, relation_count, extraction_runs, status]
       properties:
         project_id:
           type: string
@@ -2711,7 +2848,7 @@ components:
         status:
           type: string
         warning:
-          type: [string, 'null']
+          type: [string, "null"]
 
     GraphEntitySummary:
       type: object
@@ -2726,14 +2863,22 @@ components:
         canonical_name:
           type: string
         entity_type:
-          type: [string, 'null']
+          type: [string, "null"]
         source_chunk_count:
           type: integer
           minimum: 0
 
     GraphRelationSummary:
       type: object
-      required: [id, project_id, relation_type, from_entity_id, to_entity_id, source_chunk_count]
+      required:
+        [
+          id,
+          project_id,
+          relation_type,
+          from_entity_id,
+          to_entity_id,
+          source_chunk_count,
+        ]
       properties:
         id:
           type: string
@@ -2761,15 +2906,15 @@ components:
           type: string
           format: uuid
         coverage:
-          $ref: '#/components/schemas/GraphCoverageSummary'
+          $ref: "#/components/schemas/GraphCoverageSummary"
         entities:
           type: array
           items:
-            $ref: '#/components/schemas/GraphEntitySummary'
+            $ref: "#/components/schemas/GraphEntitySummary"
         relations:
           type: array
           items:
-            $ref: '#/components/schemas/GraphRelationSummary'
+            $ref: "#/components/schemas/GraphRelationSummary"
         generated_at:
           type: string
           format: date-time
@@ -2779,7 +2924,7 @@ components:
       required: [snapshot]
       properties:
         snapshot:
-          $ref: '#/components/schemas/GraphProductSnapshot'
+          $ref: "#/components/schemas/GraphProductSnapshot"
 
     GraphKindCount:
       type: object
@@ -2793,29 +2938,38 @@ components:
 
     GraphProjectSummaryResponse:
       type: object
-      required: [project_id, coverage, entity_kinds, relation_kinds, top_entities, sample_relations, generated_at]
+      required:
+        [
+          project_id,
+          coverage,
+          entity_kinds,
+          relation_kinds,
+          top_entities,
+          sample_relations,
+          generated_at,
+        ]
       properties:
         project_id:
           type: string
           format: uuid
         coverage:
-          $ref: '#/components/schemas/GraphCoverageSummary'
+          $ref: "#/components/schemas/GraphCoverageSummary"
         entity_kinds:
           type: array
           items:
-            $ref: '#/components/schemas/GraphKindCount'
+            $ref: "#/components/schemas/GraphKindCount"
         relation_kinds:
           type: array
           items:
-            $ref: '#/components/schemas/GraphKindCount'
+            $ref: "#/components/schemas/GraphKindCount"
         top_entities:
           type: array
           items:
-            $ref: '#/components/schemas/GraphEntitySummary'
+            $ref: "#/components/schemas/GraphEntitySummary"
         sample_relations:
           type: array
           items:
-            $ref: '#/components/schemas/GraphRelationSummary'
+            $ref: "#/components/schemas/GraphRelationSummary"
         generated_at:
           type: string
           format: date-time
@@ -2825,7 +2979,7 @@ components:
       required: [entity, match_reasons]
       properties:
         entity:
-          $ref: '#/components/schemas/GraphEntitySummary'
+          $ref: "#/components/schemas/GraphEntitySummary"
         match_reasons:
           type: array
           items:
@@ -2836,7 +2990,7 @@ components:
       required: [relation, from_entity_name, to_entity_name, match_reasons]
       properties:
         relation:
-          $ref: '#/components/schemas/GraphRelationSummary'
+          $ref: "#/components/schemas/GraphRelationSummary"
         from_entity_name:
           type: string
         to_entity_name:
@@ -2848,7 +3002,16 @@ components:
 
     GraphSearchResponse:
       type: object
-      required: [project_id, query, searched_fields, result_count, entity_results, relation_results, generated_at]
+      required:
+        [
+          project_id,
+          query,
+          searched_fields,
+          result_count,
+          entity_results,
+          relation_results,
+          generated_at,
+        ]
       properties:
         project_id:
           type: string
@@ -2865,23 +3028,23 @@ components:
         entity_results:
           type: array
           items:
-            $ref: '#/components/schemas/GraphEntitySearchHit'
+            $ref: "#/components/schemas/GraphEntitySearchHit"
         relation_results:
           type: array
           items:
-            $ref: '#/components/schemas/GraphRelationSearchHit'
+            $ref: "#/components/schemas/GraphRelationSearchHit"
         generated_at:
           type: string
           format: date-time
         warning:
-          type: [string, 'null']
+          type: [string, "null"]
 
     GraphRelationDetail:
       type: object
       required: [relation, from_entity_name, to_entity_name]
       properties:
         relation:
-          $ref: '#/components/schemas/GraphRelationSummary'
+          $ref: "#/components/schemas/GraphRelationSummary"
         from_entity_name:
           type: string
         to_entity_name:
@@ -2889,13 +3052,24 @@ components:
 
     GraphEntityDetailResponse:
       type: object
-      required: [project_id, entity, aliases, source_document_ids, source_chunk_ids, observed_relation_count, incoming_relations, outgoing_relations, generated_at]
+      required:
+        [
+          project_id,
+          entity,
+          aliases,
+          source_document_ids,
+          source_chunk_ids,
+          observed_relation_count,
+          incoming_relations,
+          outgoing_relations,
+          generated_at,
+        ]
       properties:
         project_id:
           type: string
           format: uuid
         entity:
-          $ref: '#/components/schemas/GraphEntitySummary'
+          $ref: "#/components/schemas/GraphEntitySummary"
         aliases:
           type: array
           items:
@@ -2916,20 +3090,30 @@ components:
         incoming_relations:
           type: array
           items:
-            $ref: '#/components/schemas/GraphRelationDetail'
+            $ref: "#/components/schemas/GraphRelationDetail"
         outgoing_relations:
           type: array
           items:
-            $ref: '#/components/schemas/GraphRelationDetail'
+            $ref: "#/components/schemas/GraphRelationDetail"
         generated_at:
           type: string
           format: date-time
         warning:
-          type: [string, 'null']
+          type: [string, "null"]
 
     GraphSubgraphResponse:
       type: object
-      required: [project_id, focus_entity_id, depth, entity_count, relation_count, entities, relations, generated_at]
+      required:
+        [
+          project_id,
+          focus_entity_id,
+          depth,
+          entity_count,
+          relation_count,
+          entities,
+          relations,
+          generated_at,
+        ]
       properties:
         project_id:
           type: string
@@ -2949,20 +3133,28 @@ components:
         entities:
           type: array
           items:
-            $ref: '#/components/schemas/GraphEntitySummary'
+            $ref: "#/components/schemas/GraphEntitySummary"
         relations:
           type: array
           items:
-            $ref: '#/components/schemas/GraphRelationDetail'
+            $ref: "#/components/schemas/GraphRelationDetail"
         generated_at:
           type: string
           format: date-time
         warning:
-          type: [string, 'null']
+          type: [string, "null"]
 
     IntegrationsProductSnapshot:
       type: object
-      required: [workspace_id, provider_accounts, model_profiles, projects, available_scopes, generated_at]
+      required:
+        [
+          workspace_id,
+          provider_accounts,
+          model_profiles,
+          projects,
+          available_scopes,
+          generated_at,
+        ]
       properties:
         workspace_id:
           type: string
@@ -2970,15 +3162,15 @@ components:
         provider_accounts:
           type: array
           items:
-            $ref: '#/components/schemas/ProviderAccountSummary'
+            $ref: "#/components/schemas/ProviderAccountSummary"
         model_profiles:
           type: array
           items:
-            $ref: '#/components/schemas/ModelProfileSummary'
+            $ref: "#/components/schemas/ModelProfileSummary"
         projects:
           type: array
           items:
-            $ref: '#/components/schemas/ProjectSummary'
+            $ref: "#/components/schemas/ProjectSummary"
         available_scopes:
           type: array
           items:
@@ -2987,11 +3179,11 @@ components:
           type: string
           format: date-time
         warning:
-          type: [string, 'null']
+          type: [string, "null"]
 
     IntegrationsProductResponse:
       type: object
       required: [snapshot]
       properties:
         snapshot:
-          $ref: '#/components/schemas/IntegrationsProductSnapshot'
+          $ref: "#/components/schemas/IntegrationsProductSnapshot"

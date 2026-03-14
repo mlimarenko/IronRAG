@@ -589,10 +589,10 @@ export interface paths {
     get?: never
     put?: never
     /**
-     * Upload a UTF-8 text-like file and queue ingestion
+     * Upload a file and queue ingestion when a supported adapter exists
      * @description Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
      *
-     *     Current implementation only supports UTF-8 text-like uploads. The backend decodes the uploaded body as UTF-8 text, enqueues an ingestion job, and returns the queued job metadata rather than a completed document/chunk result.
+     *     Current implementation supports UTF-8 text-like uploads only. The backend classifies the selected file, rejects PDF/image uploads with explicit "planned" validation errors, decodes accepted text-like content as UTF-8 text, enqueues an ingestion job, and returns queued job metadata rather than a completed document/chunk result.
      *     Workspace-scoped tokens may only queue jobs for projects in their own workspace.
      *
      *     Expected multipart fields:
@@ -1234,6 +1234,18 @@ export interface components {
       /** @description Current ingestion job stage, initially `queued`. */
       stage: string
       mime_type?: string | null
+      /**
+       * @description Backend-classified file kind. Current successful uploads return `text_like`.
+       * @enum {string}
+       */
+      file_kind: 'text_like' | 'pdf' | 'image' | 'binary'
+      /**
+       * @description Adapter availability for the classified file kind. Current successful uploads return `supported_now`.
+       * @enum {string}
+       */
+      adapter_status: 'supported_now' | 'planned'
+      /** @description Backend pipeline mode used for the accepted upload, currently `multipart_text_upload_v1`. */
+      ingest_mode: string
     }
     RetrievalRunSummary: {
       /** Format: uuid */

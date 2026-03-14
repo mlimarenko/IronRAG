@@ -207,6 +207,9 @@ export interface UploadIngestResponse {
   status: string
   stage: string
   mime_type?: string | null
+  file_kind: 'text_like' | 'pdf' | 'image' | 'binary'
+  adapter_status: 'supported_now' | 'planned'
+  ingest_mode: string
 }
 
 export interface QueryResponseSurface {
@@ -252,10 +255,12 @@ api.interceptors.response.use(
       const body =
         typeof error.response?.data === 'string'
           ? error.response.data
-          : error.response?.data?.message ?? error.response?.data?.error ?? null
+          : (error.response?.data?.message ?? error.response?.data?.error ?? null)
 
       const detail = body ? `: ${body}` : ''
-      const normalized = new Error(`${method} ${url} failed with ${status ?? 'network error'}${detail}`)
+      const normalized = new Error(
+        `${method} ${url} failed with ${status ?? 'network error'}${detail}`,
+      )
       return Promise.reject(normalized)
     }
 
@@ -290,7 +295,9 @@ export async function createProject(payload: CreateProjectRequest): Promise<Proj
   return data
 }
 
-export async function fetchProviderAccounts(workspaceId?: string): Promise<ProviderAccountSummary[]> {
+export async function fetchProviderAccounts(
+  workspaceId?: string,
+): Promise<ProviderAccountSummary[]> {
   const { data } = await api.get<ProviderAccountSummary[]>('/provider-accounts', {
     params: workspaceId ? { workspace_id: workspaceId } : {},
   })

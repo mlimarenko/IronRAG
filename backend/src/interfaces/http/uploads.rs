@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use axum::{
     Json, Router,
     extract::{Multipart, State},
@@ -22,10 +24,105 @@ pub struct UploadIngestResponse {
     pub status: String,
     pub stage: String,
     pub mime_type: Option<String>,
+    pub file_kind: String,
+    pub adapter_status: String,
+    pub ingest_mode: String,
 }
 
 pub fn router() -> Router<crate::app::state::AppState> {
     Router::new().route("/uploads/ingest", axum::routing::post(upload_and_ingest))
+}
+
+const MULTIPART_TEXT_UPLOAD_MODE: &str = "multipart_text_upload_v1";
+const TEXT_LIKE_EXTENSIONS: &[&str] = &[
+    "txt", "md", "markdown", "csv", "json", "yaml", "yml", "xml", "html", "htm", "log", "rst",
+    "toml", "ini", "cfg", "conf", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "rs", "java", "kt",
+    "go", "sh", "sql", "css", "scss",
+];
+const IMAGE_EXTENSIONS: &[&str] =
+    &["png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "tif", "tiff", "heic", "heif"];
+const TEXT_LIKE_MIME_TYPES: &[&str] = &["application/json", "application/xml", "text/xml"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UploadFileKind {
+    TextLike,
+    Pdf,
+    Image,
+    Binary,
+}
+
+impl UploadFileKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::TextLike => "text_like",
+            Self::Pdf => "pdf",
+            Self::Image => "image",
+            Self::Binary => "binary",
+        }
+    }
+}
+
+fn detect_upload_file_kind(
+    file_name: Option<&str>,
+    mime_type: Option<&str>,
+    file_bytes: &[u8],
+) -> UploadFileKind {
+    let normalized_mime =
+        mime_type.map(str::trim).filter(|value| !value.is_empty()).map(str::to_ascii_lowercase);
+    let extension = file_name
+        .and_then(|value| Path::new(value).extension().and_then(|ext| ext.to_str()))
+        .map(str::to_ascii_lowercase);
+
+    if normalized_mime.as_deref() == Some("application/pdf") || extension.as_deref() == Some("pdf")
+    {
+        return UploadFileKind::Pdf;
+    }
+    if normalized_mime.as_deref().is_some_and(|value| value.starts_with("image/"))
+        || extension.as_deref().is_some_and(|value| IMAGE_EXTENSIONS.contains(&value))
+    {
+        return UploadFileKind::Image;
+    }
+    if normalized_mime
+        .as_deref()
+        .is_some_and(|value| value.starts_with("text/") || TEXT_LIKE_MIME_TYPES.contains(&value))
+        || extension.as_deref().is_some_and(|value| TEXT_LIKE_EXTENSIONS.contains(&value))
+        || std::str::from_utf8(file_bytes).is_ok()
+    {
+        return UploadFileKind::TextLike;
+    }
+
+    UploadFileKind::Binary
+}
+
+fn decode_upload_text(
+    file_name: Option<&str>,
+    mime_type: Option<&str>,
+    file_bytes: Vec<u8>,
+) -> Result<(UploadFileKind, String), ApiError> {
+    let file_kind = detect_upload_file_kind(file_name, mime_type, &file_bytes);
+
+    match file_kind {
+        UploadFileKind::TextLike => {
+            String::from_utf8(file_bytes).map(|text| (file_kind, text)).map_err(|_| {
+                ApiError::BadRequest(
+                    "selected file is treated as text-like but could not be decoded as utf-8"
+                        .into(),
+                )
+            })
+        }
+        UploadFileKind::Pdf => Err(ApiError::BadRequest(
+            "pdf uploads are planned but blocked until backend pdf text extraction is implemented"
+                .into(),
+        )),
+        UploadFileKind::Image => Err(ApiError::BadRequest(
+            "image uploads are planned but blocked until backend OCR/extraction is implemented"
+                .into(),
+        )),
+        UploadFileKind::Binary => Err(ApiError::BadRequest(
+            "only utf-8 text-like uploads are supported right now; pdf/image adapters are planned"
+                .into(),
+        )),
+    }
 }
 
 async fn upload_and_ingest(
@@ -117,20 +214,22 @@ async fn upload_and_ingest(
     let external_key = file_name.unwrap_or_else(|| format!("upload-{}", Uuid::now_v7()));
     let file_size_bytes = file_bytes.len();
 
-    let text = String::from_utf8(file_bytes).map_err(|_| {
-        warn!(
-            workspace_id = %project.workspace_id,
-            project_id = %project_id,
-            source_id = ?source_id,
-            external_key = %external_key,
-            mime_type = ?mime_type,
-            file_size_bytes,
-            "rejecting upload ingestion request with unsupported file encoding",
-        );
-        ApiError::BadRequest(
-            "only utf-8 text-like uploads are supported in foundation stage".into(),
-        )
-    })?;
+    let (file_kind, text) =
+        decode_upload_text(Some(external_key.as_str()), mime_type.as_deref(), file_bytes).map_err(
+            |error| {
+                warn!(
+                    workspace_id = %project.workspace_id,
+                    project_id = %project_id,
+                    source_id = ?source_id,
+                    external_key = %external_key,
+                    mime_type = ?mime_type,
+                    file_size_bytes,
+                    error = %error,
+                    "rejecting upload ingestion request for unsupported file kind or encoding",
+                );
+                error
+            },
+        )?;
     if text.trim().is_empty() {
         warn!(
             workspace_id = %project.workspace_id,
@@ -138,6 +237,7 @@ async fn upload_and_ingest(
             source_id = ?source_id,
             external_key = %external_key,
             mime_type = ?mime_type,
+            file_kind = file_kind.as_str(),
             file_size_bytes,
             "rejecting upload ingestion request with empty file content",
         );
@@ -152,6 +252,7 @@ async fn upload_and_ingest(
         source_id = ?source_id,
         external_key = %external_key,
         mime_type = ?mime_type,
+        file_kind = file_kind.as_str(),
         file_size_bytes,
         text_len,
         "accepted upload ingestion request",
@@ -171,8 +272,15 @@ async fn upload_and_ingest(
             "title": title.as_deref().or(Some(&external_key)),
             "mime_type": mime_type.clone(),
             "text": text,
-            "ingest_mode": "multipart_text_upload_v1",
-            "extra_metadata": { "file_name": external_key },
+            "file_kind": file_kind.as_str(),
+            "adapter_status": "supported_now",
+            "ingest_mode": MULTIPART_TEXT_UPLOAD_MODE,
+            "extra_metadata": {
+                "file_name": external_key.clone(),
+                "original_file_name": external_key.clone(),
+                "file_kind": file_kind.as_str(),
+                "adapter_status": "supported_now",
+            },
         }),
     )
     .await
@@ -201,6 +309,7 @@ async fn upload_and_ingest(
         stage = %job.stage,
         external_key = %external_key,
         mime_type = ?mime_type,
+        file_kind = file_kind.as_str(),
         file_size_bytes,
         text_len,
         "created ingestion job for upload request",
@@ -216,5 +325,62 @@ async fn upload_and_ingest(
             .get("mime_type")
             .and_then(serde_json::Value::as_str)
             .map(std::string::ToString::to_string),
+        file_kind: job
+            .payload_json
+            .get("file_kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(file_kind.as_str())
+            .to_string(),
+        adapter_status: job
+            .payload_json
+            .get("adapter_status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("supported_now")
+            .to_string(),
+        ingest_mode: job
+            .payload_json
+            .get("ingest_mode")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(MULTIPART_TEXT_UPLOAD_MODE)
+            .to_string(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_pdf_by_extension() {
+        assert_eq!(
+            detect_upload_file_kind(Some("manual.pdf"), None, b"%PDF-1.7"),
+            UploadFileKind::Pdf
+        );
+    }
+
+    #[test]
+    fn detects_image_by_mime_type() {
+        assert_eq!(
+            detect_upload_file_kind(Some("photo.bin"), Some("image/png"), &[0x89, 0x50, 0x4e]),
+            UploadFileKind::Image
+        );
+    }
+
+    #[test]
+    fn accepts_extensionless_utf8_text() {
+        assert_eq!(
+            detect_upload_file_kind(Some("Dockerfile"), None, b"FROM rust:1.86"),
+            UploadFileKind::TextLike
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_utf8_when_file_is_text_like() {
+        let result = decode_upload_text(Some("notes.txt"), Some("text/plain"), vec![0xff, 0xfe]);
+
+        assert!(matches!(result, Err(ApiError::BadRequest(_))));
+        if let Err(ApiError::BadRequest(message)) = result {
+            assert!(message.contains("utf-8"));
+        }
+    }
 }
