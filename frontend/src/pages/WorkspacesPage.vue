@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { RouterLink } from 'vue-router'
 
 import { createProject, createWorkspace, fetchProjects, fetchWorkspaces } from 'src/boot/api'
 import PageSection from 'src/components/shell/PageSection.vue'
@@ -28,6 +30,8 @@ interface ProjectItem {
   description?: string | null
 }
 
+const { t } = useI18n()
+
 const workspaces = ref<WorkspaceItem[]>([])
 const projects = ref<ProjectItem[]>([])
 const workspaceForm = ref({ slug: '', name: '' })
@@ -36,8 +40,19 @@ const workspaceError = ref<string | null>(null)
 const projectError = ref<string | null>(null)
 const successMessage = ref<string | null>(null)
 
-const selectedWorkspaceId = ref(getSelectedWorkspaceId())
-const selectedProjectId = ref(getSelectedProjectId())
+const selectedWorkspaceId = computed({
+  get: () => getSelectedWorkspaceId(),
+  set: (value: string) => {
+    setSelectedWorkspaceId(value)
+  },
+})
+
+const selectedProjectId = computed({
+  get: () => getSelectedProjectId(),
+  set: (value: string) => {
+    setSelectedProjectId(value)
+  },
+})
 
 const selectedWorkspace = computed(
   () => workspaces.value.find((item) => item.id === selectedWorkspaceId.value) ?? null,
@@ -47,36 +62,30 @@ const selectedProject = computed(
 )
 const setupStatus = computed(() => {
   if (selectedProject.value) {
-    return { status: 'ready', label: 'Project selected' }
+    return { status: 'ready', label: t('flow.workspace.statusReady') }
   }
 
   if (selectedWorkspace.value) {
-    return { status: 'partial', label: 'Workspace selected' }
+    return { status: 'partial', label: t('flow.workspace.statusPartial') }
   }
 
-  return { status: 'draft', label: 'Create your first workspace' }
+  return { status: 'draft', label: t('flow.workspace.statusDraft') }
 })
 
 watch(selectedWorkspaceId, async (value) => {
-  setSelectedWorkspaceId(value)
   projects.value = value ? await fetchProjects(value) : []
-  selectedProjectId.value = syncSelectedProjectId(projects.value)
-})
-
-watch(selectedProjectId, (value) => {
-  setSelectedProjectId(value)
+  syncSelectedProjectId(projects.value)
 })
 
 onMounted(async () => {
   workspaces.value = await fetchWorkspaces()
   const workspaceId = syncSelectedWorkspaceId(workspaces.value)
-  selectedWorkspaceId.value = workspaceId
   if (workspaceId) {
     projects.value = await fetchProjects(workspaceId)
-    selectedProjectId.value = syncSelectedProjectId(projects.value)
+    syncSelectedProjectId(projects.value)
   } else {
     projects.value = []
-    selectedProjectId.value = syncSelectedProjectId([])
+    syncSelectedProjectId([])
   }
 })
 
@@ -90,8 +99,8 @@ async function createWorkspaceItem() {
     })
     workspaces.value = [created, ...workspaces.value.filter((item) => item.id !== created.id)]
     workspaceForm.value = { slug: '', name: '' }
-    selectedWorkspaceId.value = created.id
-    successMessage.value = `Workspace ${created.name} created.`
+    setSelectedWorkspaceId(created.id)
+    successMessage.value = `${t('flow.workspace.success')}: ${created.name}`
   } catch (error) {
     workspaceError.value = error instanceof Error ? error.message : 'Failed to create workspace'
   }
@@ -100,22 +109,22 @@ async function createWorkspaceItem() {
 async function createProjectItem() {
   projectError.value = null
   successMessage.value = null
-  if (!selectedWorkspaceId.value) {
+  if (!getSelectedWorkspaceId()) {
     projectError.value = 'Select or create a workspace first.'
     return
   }
 
   try {
     const created = await createProject({
-      workspace_id: selectedWorkspaceId.value,
+      workspace_id: getSelectedWorkspaceId(),
       slug: projectForm.value.slug.trim(),
       name: projectForm.value.name.trim(),
       description: projectForm.value.description.trim() || null,
     })
     projects.value = [created, ...projects.value.filter((item) => item.id !== created.id)]
     projectForm.value = { slug: '', name: '', description: '' }
-    selectedProjectId.value = created.id
-    successMessage.value = `Project ${created.name} created.`
+    syncSelectedProjectId([created, ...projects.value.filter((item) => item.id !== created.id)])
+    successMessage.value = `${t('flow.workspace.success')}: ${created.name}`
   } catch (error) {
     projectError.value = error instanceof Error ? error.message : 'Failed to create project'
   }
@@ -125,35 +134,36 @@ async function createProjectItem() {
 <template>
   <section class="rr-page-grid setup-page">
     <PageSection
-      eyebrow="Step 1"
-      title="Set up workspace and project context"
-      description="Choose the active workspace first, then keep one project selected for ingestion and grounded querying."
+      :eyebrow="t('flow.workspace.eyebrow')"
+      :title="t('flow.workspace.title')"
+      :description="t('flow.workspace.description')"
       :status="setupStatus.status"
       :status-label="setupStatus.label"
     >
+      <template #actions>
+        <RouterLink class="rr-button rr-button--secondary" to="/ingest" :aria-disabled="!selectedProject">
+          {{ t('flow.workspace.stats.nextReady') }}
+        </RouterLink>
+      </template>
+
       <div class="rr-stat-strip">
         <article class="rr-stat">
-          <p class="rr-stat__label">Workspaces</p>
+          <p class="rr-stat__label">{{ t('flow.workspace.stats.workspaces') }}</p>
           <strong>{{ workspaces.length }}</strong>
-          <p>{{ selectedWorkspace?.name ?? 'No active workspace selected yet.' }}</p>
+          <p>{{ selectedWorkspace?.name ?? t('flow.common.empty') }}</p>
         </article>
         <article class="rr-stat">
-          <p class="rr-stat__label">Projects in scope</p>
+          <p class="rr-stat__label">{{ t('flow.workspace.stats.projects') }}</p>
           <strong>{{ projects.length }}</strong>
-          <p>{{ selectedProject?.name ?? 'Pick or create one for the minimal flow.' }}</p>
+          <p>{{ selectedProject?.name ?? t('flow.common.empty') }}</p>
         </article>
         <article class="rr-stat">
-          <p class="rr-stat__label">Next step</p>
-          <strong>{{ selectedProject ? 'Continue to ingest' : 'Finish project setup' }}</strong>
-          <p>The selection made here becomes the default context for the next pages.</p>
+          <p class="rr-stat__label">{{ t('flow.workspace.stats.next') }}</p>
+          <strong>{{ selectedProject ? t('flow.workspace.stats.nextReady') : t('flow.workspace.stats.nextSetup') }}</strong>
         </article>
       </div>
 
-      <p
-        v-if="successMessage"
-        class="rr-banner"
-        data-tone="success"
-      >
+      <p v-if="successMessage" class="rr-banner" data-tone="success">
         {{ successMessage }}
       </p>
 
@@ -161,30 +171,29 @@ async function createProjectItem() {
         <article class="rr-panel rr-panel--accent setup-panel">
           <div class="setup-panel__heading">
             <div>
-              <p class="rr-kicker">Workspace</p>
-              <h3>Create or select a workspace</h3>
+              <p class="rr-kicker">{{ t('flow.workspace.panels.workspace.kicker') }}</p>
+              <h3>{{ t('flow.workspace.panels.workspace.title') }}</h3>
             </div>
             <StatusBadge
               :status="selectedWorkspace ? 'ready' : 'draft'"
-              :label="selectedWorkspace ? 'Selected' : 'Required'"
+              :label="selectedWorkspace ? t('flow.workspace.panels.workspace.selectedBadge') : t('flow.workspace.panels.workspace.required')"
             />
           </div>
 
           <div class="rr-form-grid">
             <label class="rr-field">
-              <span class="rr-field__label">Selected workspace</span>
+              <span class="rr-field__label">{{ t('flow.workspace.panels.workspace.selected') }}</span>
               <select v-model="selectedWorkspaceId" class="rr-control">
-                <option value="">Choose workspace</option>
+                <option value="">{{ t('flow.workspace.panels.workspace.empty') }}</option>
                 <option v-for="workspace in workspaces" :key="workspace.id" :value="workspace.id">
                   {{ workspace.name }} ({{ workspace.slug }})
                 </option>
               </select>
-              <p class="rr-field__hint">The selected workspace defines which projects are available below.</p>
             </label>
 
             <div class="rr-form-grid rr-form-grid--two">
               <label class="rr-field">
-                <span class="rr-field__label">Workspace name</span>
+                <span class="rr-field__label">{{ t('flow.workspace.panels.workspace.name') }}</span>
                 <input
                   v-model="workspaceForm.name"
                   class="rr-control"
@@ -193,7 +202,7 @@ async function createProjectItem() {
                 >
               </label>
               <label class="rr-field">
-                <span class="rr-field__label">Workspace slug</span>
+                <span class="rr-field__label">{{ t('flow.workspace.panels.workspace.slug') }}</span>
                 <input
                   v-model="workspaceForm.slug"
                   class="rr-control"
@@ -211,15 +220,11 @@ async function createProjectItem() {
               :disabled="!workspaceForm.name || !workspaceForm.slug"
               @click="createWorkspaceItem"
             >
-              Create workspace
+              {{ t('flow.workspace.panels.workspace.create') }}
             </button>
           </div>
 
-          <p
-            v-if="workspaceError"
-            class="rr-banner"
-            data-tone="danger"
-          >
+          <p v-if="workspaceError" class="rr-banner" data-tone="danger">
             {{ workspaceError }}
           </p>
         </article>
@@ -227,34 +232,35 @@ async function createProjectItem() {
         <article class="rr-panel setup-panel">
           <div class="setup-panel__heading">
             <div>
-              <p class="rr-kicker">Project</p>
-              <h3>Create or select a project</h3>
+              <p class="rr-kicker">{{ t('flow.workspace.panels.project.kicker') }}</p>
+              <h3>{{ t('flow.workspace.panels.project.title') }}</h3>
             </div>
             <StatusBadge
               :status="selectedProject ? 'ready' : selectedWorkspace ? 'partial' : 'blocked'"
-              :label="selectedProject ? 'Selected' : selectedWorkspace ? 'Workspace ready' : 'Needs workspace'"
+              :label="
+                selectedProject
+                  ? t('flow.workspace.panels.project.selectedBadge')
+                  : selectedWorkspace
+                    ? t('flow.workspace.panels.project.workspaceReady')
+                    : t('flow.workspace.panels.project.needsWorkspace')
+              "
             />
           </div>
 
           <div class="rr-form-grid">
             <label class="rr-field">
-              <span class="rr-field__label">Selected project</span>
-              <select
-                v-model="selectedProjectId"
-                class="rr-control"
-                :disabled="projects.length === 0"
-              >
-                <option value="">Choose project</option>
+              <span class="rr-field__label">{{ t('flow.workspace.panels.project.selected') }}</span>
+              <select v-model="selectedProjectId" class="rr-control" :disabled="projects.length === 0">
+                <option value="">{{ t('flow.workspace.panels.project.empty') }}</option>
                 <option v-for="project in projects" :key="project.id" :value="project.id">
                   {{ project.name }} ({{ project.slug }})
                 </option>
               </select>
-              <p class="rr-field__hint">Ingest and Ask will use this project automatically.</p>
             </label>
 
             <div class="rr-form-grid rr-form-grid--two">
               <label class="rr-field">
-                <span class="rr-field__label">Project name</span>
+                <span class="rr-field__label">{{ t('flow.workspace.panels.project.name') }}</span>
                 <input
                   v-model="projectForm.name"
                   class="rr-control"
@@ -263,7 +269,7 @@ async function createProjectItem() {
                 >
               </label>
               <label class="rr-field">
-                <span class="rr-field__label">Project slug</span>
+                <span class="rr-field__label">{{ t('flow.workspace.panels.project.slug') }}</span>
                 <input
                   v-model="projectForm.slug"
                   class="rr-control"
@@ -274,12 +280,12 @@ async function createProjectItem() {
             </div>
 
             <label class="rr-field">
-              <span class="rr-field__label">Description</span>
+              <span class="rr-field__label">{{ t('flow.workspace.panels.project.description') }}</span>
               <textarea
                 v-model="projectForm.description"
                 class="rr-control"
                 rows="4"
-                placeholder="Optional description"
+                :placeholder="t('flow.workspace.panels.project.descriptionPlaceholder')"
               />
             </label>
           </div>
@@ -288,18 +294,14 @@ async function createProjectItem() {
             <button
               type="button"
               class="rr-button"
-              :disabled="!projectForm.name || !projectForm.slug || !selectedWorkspaceId"
+              :disabled="!projectForm.name || !projectForm.slug || !getSelectedWorkspaceId()"
               @click="createProjectItem"
             >
-              Create project
+              {{ t('flow.workspace.panels.project.create') }}
             </button>
           </div>
 
-          <p
-            v-if="projectError"
-            class="rr-banner"
-            data-tone="danger"
-          >
+          <p v-if="projectError" class="rr-banner" data-tone="danger">
             {{ projectError }}
           </p>
         </article>
@@ -313,10 +315,6 @@ async function createProjectItem() {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--rr-space-4);
-}
-
-.setup-panel {
-  align-content: start;
 }
 
 .setup-panel__heading {

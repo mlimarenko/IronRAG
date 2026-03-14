@@ -1,29 +1,29 @@
 :root {
-  --rr-font-sans: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
-  --rr-color-bg-canvas: #edf3f9;
-  --rr-color-bg-canvas-deep: #dce7f2;
-  --rr-color-bg-surface: rgb(255 255 255 / 0.88);
-  --rr-color-bg-surface-strong: #fff;
-  --rr-color-bg-surface-muted: #f5f8fc;
-  --rr-color-bg-contrast: #0f172a;
-  --rr-color-text-primary: #102033;
-  --rr-color-text-secondary: #43556c;
-  --rr-color-text-muted: #62748a;
-  --rr-color-text-inverse: #f8fafc;
-  --rr-color-border-subtle: rgb(148 163 184 / 0.28);
-  --rr-color-border-strong: rgb(37 99 235 / 0.24);
-  --rr-color-border-focus: rgb(37 99 235 / 0.46);
-  --rr-color-accent-50: #dbeafe;
-  --rr-color-accent-100: #bfdbfe;
-  --rr-color-accent-600: #2563eb;
-  --rr-color-accent-700: #1d4ed8;
-  --rr-color-info-600: #2563eb;
-  --rr-color-success-50: #dcfce7;
-  --rr-color-success-600: #15803d;
-  --rr-color-warning-50: #fef3c7;
-  --rr-color-warning-600: #b45309;
-  --rr-color-danger-50: #fee2e2;
-  --rr-color-danger-600: #b42318;
+  --rr-font-sans: 'Aptos', 'Inter', 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
+  --rr-color-bg-canvas: #f4f0e8;
+  --rr-color-bg-canvas-deep: #ebe5dc;
+  --rr-color-bg-surface: rgb(255 255 255 / 0.84);
+  --rr-color-bg-surface-strong: #fffdfa;
+  --rr-color-bg-surface-muted: #f6f1ea;
+  --rr-color-bg-contrast: #172033;
+  --rr-color-text-primary: #162033;
+  --rr-color-text-secondary: #4d5869;
+  --rr-color-text-muted: #697486;
+  --rr-color-text-inverse: #fcfaf7;
+  --rr-color-border-subtle: rgb(120 138 164 / 0.24);
+  --rr-color-border-strong: rgb(44 93 215 / 0.24);
+  --rr-color-border-focus: rgb(44 93 215 / 0.38);
+  --rr-color-accent-50: #e5ecff;
+  --rr-color-accent-100: #d3dfff;
+  --rr-color-accent-600: #2c5dd7;
+  --rr-color-accent-700: #2146ab;
+  --rr-color-info-600: #2c5dd7;
+  --rr-color-success-50: #e1f6e9;
+  --rr-color-success-600: #177245;
+  --rr-color-warning-50: #fff2d6;
+  --rr-color-warning-600: #a45b18;
+  --rr-color-danger-50: #ffe2dc;
+  --rr-color-danger-600: #b64031;
   --rr-space-1: 0.25rem;
   --rr-space-2: 0.5rem;
   --rr-space-3: 0.75rem;
@@ -32,14 +32,14 @@
   --rr-space-6: 1.5rem;
   --rr-space-7: 2rem;
   --rr-space-8: 2.5rem;
-  --rr-radius-sm: 0.75rem;
+  --rr-radius-sm: 0.85rem;
   --rr-radius-md: 1rem;
-  --rr-radius-lg: 1.5rem;
+  --rr-radius-lg: 1.35rem;
   --rr-radius-xl: 1.75rem;
   --rr-radius-pill: 999px;
-  --rr-shadow-sm: 0 12px 30px rgb(15 23 42 / 0.06);
-  --rr-shadow-md: 0 18px 44px rgb(15 23 42 / 0.1);
-  --rr-shadow-lg: 0 24px 64px rgb(15 23 42 / 0.12);
+  --rr-shadow-sm: 0 12px 28px rgb(22 32 51 / 0.06);
+  --rr-shadow-md: 0 18px 40px rgb(22 32 51 / 0.08);
+  --rr-shadow-lg: 0 22px 56px rgb(22 32 51 / 0.1);
   --rr-motion-base: 180ms ease;
 }
 
@@ -60,10 +60,10 @@ body {
   font-family: var(--rr-font-sans);
   color: var(--rr-color-text-primary);
   background:
-    radial-gradient(circle at top left, rgb(37 99 235 / 0.12), transparent 26%),
-    radial-gradient(circle at bottom right, rgb(14 165 233 / 0.08), transparent 22%),
+    radial-gradient(circle at top left, rgb(44 93 215 / 0.12), transparent 26%),
+    radial-gradient(circle at bottom right, rgb(23 114 69 / 0.07), transparent 22%),
     linear-gradient(180deg, var(--rr-color-bg-canvas) 0%, var(--rr-color-bg-canvas-deep) 100%);
-  line-height: 1.5;
+  line-height: 1.45;
   text-rendering: optimizelegibility;
 }
 
@@ -79,6 +79,13 @@ a {
   color: var(--rr-color-accent-700);
 }
 
+h1,
+h2,
+h3,
+h4 {
+  letter-spacing: -0.03em;
+}
+
 img {
   max-width: 100%;
 }
@@ -92,7 +99,7 @@ textarea {
 
 .rr-page-grid {
   display: grid;
-  gap: var(--rr-space-6);
+  gap: var(--rr-space-5);
 }
 
 .rr-grid {
@@ -120,22 +127,22 @@ textarea {
   border: 1px solid var(--rr-color-border-subtle);
   border-radius: var(--rr-radius-lg);
   background:
-    linear-gradient(180deg, rgb(255 255 255 / 0.96), rgb(247 250 252 / 0.92)),
+    linear-gradient(180deg, rgb(255 255 255 / 0.97), rgb(248 246 241 / 0.92)),
     var(--rr-color-bg-surface);
   box-shadow: var(--rr-shadow-sm);
 }
 
 .rr-panel--muted {
   background:
-    linear-gradient(180deg, rgb(248 251 255 / 0.98), rgb(241 245 249 / 0.96)),
+    linear-gradient(180deg, rgb(251 248 243 / 0.98), rgb(243 238 230 / 0.96)),
     var(--rr-color-bg-surface-muted);
 }
 
 .rr-panel--accent {
   border-color: var(--rr-color-border-strong);
   background:
-    radial-gradient(circle at top right, rgb(37 99 235 / 0.14), transparent 30%),
-    linear-gradient(180deg, rgb(255 255 255 / 0.98), rgb(243 247 252 / 0.96));
+    radial-gradient(circle at top right, rgb(44 93 215 / 0.12), transparent 30%),
+    linear-gradient(180deg, rgb(255 255 255 / 0.98), rgb(246 244 238 / 0.96));
 }
 
 .rr-panel > :first-child,
@@ -152,9 +159,9 @@ textarea {
 
 .rr-kicker {
   margin: 0;
-  font-size: 0.78rem;
+  font-size: 0.74rem;
   font-weight: 700;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--rr-color-accent-700);
 }
@@ -181,20 +188,20 @@ textarea {
   padding: var(--rr-space-4);
   border: 1px solid var(--rr-color-border-subtle);
   border-radius: var(--rr-radius-md);
-  background: rgb(255 255 255 / 0.64);
+  background: rgb(255 255 255 / 0.58);
 }
 
 .rr-stat__label {
   margin: 0;
-  font-size: 0.78rem;
+  font-size: 0.74rem;
   font-weight: 700;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--rr-color-text-muted);
 }
 
 .rr-stat strong {
-  font-size: 1.05rem;
+  font-size: 1rem;
   line-height: 1.25;
 }
 
@@ -249,7 +256,7 @@ textarea {
 .rr-control:focus {
   outline: none;
   border-color: var(--rr-color-border-focus);
-  box-shadow: 0 0 0 4px rgb(37 99 235 / 0.12);
+  box-shadow: 0 0 0 4px rgb(44 93 215 / 0.1);
 }
 
 textarea.rr-control {
@@ -277,7 +284,7 @@ textarea.rr-control {
   font-weight: 700;
   letter-spacing: 0.01em;
   cursor: pointer;
-  box-shadow: 0 12px 24px rgb(37 99 235 / 0.18);
+  box-shadow: 0 12px 24px rgb(44 93 215 / 0.18);
   transition:
     transform var(--rr-motion-base),
     box-shadow var(--rr-motion-base),
@@ -288,7 +295,7 @@ textarea.rr-control {
 .rr-button:hover:not(:disabled),
 .rr-button:focus-visible:not(:disabled) {
   transform: translateY(-1px);
-  box-shadow: 0 16px 30px rgb(37 99 235 / 0.24);
+  box-shadow: 0 16px 30px rgb(44 93 215 / 0.22);
 }
 
 .rr-button:focus-visible {
@@ -305,7 +312,7 @@ textarea.rr-control {
 
 .rr-button--secondary {
   border-color: var(--rr-color-border-subtle);
-  background: rgb(255 255 255 / 0.7);
+  background: rgb(255 255 255 / 0.72);
   color: var(--rr-color-text-primary);
   box-shadow: none;
 }
@@ -380,6 +387,36 @@ textarea.rr-control {
   background: rgb(15 23 42 / 0.08);
   font-size: 0.88rem;
   overflow-wrap: anywhere;
+}
+
+.rr-segmented {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--rr-color-border-subtle);
+  border-radius: var(--rr-radius-pill);
+  background: rgb(255 255 255 / 0.68);
+}
+
+.rr-segmented__button {
+  min-width: 42px;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--rr-radius-pill);
+  background: transparent;
+  color: var(--rr-color-text-secondary);
+  font-size: 0.84rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    background var(--rr-motion-base),
+    color var(--rr-motion-base);
+}
+
+.rr-segmented__button[data-active='true'] {
+  background: var(--rr-color-bg-contrast);
+  color: var(--rr-color-text-inverse);
 }
 
 @media (width <= 1100px) {

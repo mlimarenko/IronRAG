@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { RouterLink } from 'vue-router'
 
 import { fetchProjects, fetchWorkspaces } from 'src/boot/api'
@@ -24,6 +25,8 @@ interface ProjectItem {
   name: string
 }
 
+const { t } = useI18n()
+
 const workspaces = ref<WorkspaceItem[]>([])
 const projects = ref<ProjectItem[]>([])
 
@@ -37,14 +40,14 @@ const selectedProject = computed(
 )
 const nextAction = computed(() => {
   if (!hasWorkspace.value) {
-    return 'Create the first workspace in Setup.'
+    return t('flow.overview.stats.next.setup')
   }
 
   if (!hasProject.value) {
-    return 'Create or select a project in Setup.'
+    return t('flow.overview.stats.next.project')
   }
 
-  return 'Open Ingest and index the first text sample.'
+  return t('flow.overview.stats.next.ingest')
 })
 
 onMounted(async () => {
@@ -63,95 +66,102 @@ onMounted(async () => {
 <template>
   <section class="rr-page-grid overview-page">
     <PageSection
-      eyebrow="Minimal flow"
-      title="Get from zero to a grounded answer"
-      description="The shell is now focused on one practical path: establish workspace context, ingest content into a project, then query it with evidence-aware answers."
+      :eyebrow="t('flow.overview.eyebrow')"
+      :title="t('flow.overview.title')"
+      :description="t('flow.overview.description')"
       status="focused"
-      status-label="Four-step operator flow"
+      :status-label="t('shell.status.focused')"
     >
       <template #actions>
         <RouterLink class="rr-button" to="/setup">
-          Start with setup
+          {{ t('flow.overview.cta') }}
         </RouterLink>
       </template>
 
       <div class="rr-stat-strip">
         <article class="rr-stat">
-          <p class="rr-stat__label">Active workspace</p>
-          <strong>{{ selectedWorkspace?.name ?? 'Not selected yet' }}</strong>
-          <p>{{ hasWorkspace ? 'Selection is persisted across the flow.' : 'Create one to unlock projects.' }}</p>
+          <p class="rr-stat__label">{{ t('flow.overview.stats.workspace.label') }}</p>
+          <strong>{{ selectedWorkspace?.name ?? t('flow.common.empty') }}</strong>
+          <p>
+            {{
+              hasWorkspace
+                ? t('flow.overview.stats.workspace.ready')
+                : t('flow.overview.stats.workspace.empty')
+            }}
+          </p>
         </article>
         <article class="rr-stat">
-          <p class="rr-stat__label">Active project</p>
-          <strong>{{ selectedProject?.name ?? 'Not selected yet' }}</strong>
-          <p>{{ hasProject ? 'Ingest and Ask use the same project context.' : 'Projects appear after workspace selection.' }}</p>
+          <p class="rr-stat__label">{{ t('flow.overview.stats.project.label') }}</p>
+          <strong>{{ selectedProject?.name ?? t('flow.common.empty') }}</strong>
+          <p>
+            {{
+              hasProject
+                ? t('flow.overview.stats.project.ready')
+                : t('flow.overview.stats.project.empty')
+            }}
+          </p>
         </article>
         <article class="rr-stat">
-          <p class="rr-stat__label">Next action</p>
+          <p class="rr-stat__label">{{ t('flow.overview.stats.next.label') }}</p>
           <strong>{{ nextAction }}</strong>
-          <p>The Overview page stays descriptive and keeps the practical path explicit.</p>
         </article>
       </div>
 
       <div class="rr-grid rr-grid--cards">
-        <article class="flow-card rr-panel" data-state="setup">
+        <article class="flow-card rr-panel" data-state="workspace">
           <div class="flow-card__header">
-            <span class="flow-card__step">1</span>
+            <h3>{{ t('flow.overview.cards.workspace.title') }}</h3>
             <StatusBadge
               :status="hasProject ? 'ready' : hasWorkspace ? 'partial' : 'draft'"
-              :label="hasProject ? 'Project selected' : hasWorkspace ? 'Workspace selected' : 'Needs setup'"
+              :label="
+                hasProject
+                  ? t('flow.overview.cards.workspace.ready')
+                  : hasWorkspace
+                    ? t('flow.overview.cards.workspace.partial')
+                    : t('flow.overview.cards.workspace.draft')
+              "
             />
           </div>
-          <div class="flow-card__body">
-            <h3>Setup workspace and project</h3>
-            <p>Create the containers RustRAG needs and keep one project selected across the flow.</p>
-          </div>
-          <div class="flow-card__footer">
-            <p>Workspace: <strong>{{ selectedWorkspace?.name ?? 'none' }}</strong></p>
-            <RouterLink class="rr-button rr-button--secondary" to="/setup">
-              Open setup
-            </RouterLink>
-          </div>
+          <p>{{ t('flow.overview.cards.workspace.body') }}</p>
+          <RouterLink class="rr-button rr-button--secondary" to="/setup">
+            {{ t('flow.overview.cards.workspace.action') }}
+          </RouterLink>
         </article>
 
-        <article class="flow-card rr-panel" data-state="ingest">
+        <article class="flow-card rr-panel" data-state="library">
           <div class="flow-card__header">
-            <span class="flow-card__step">2</span>
+            <h3>{{ t('flow.overview.cards.library.title') }}</h3>
             <StatusBadge
               :status="selectedProject ? 'ready' : 'blocked'"
-              :label="selectedProject ? 'Project ready' : 'Select a project first'"
+              :label="
+                selectedProject
+                  ? t('flow.overview.cards.library.ready')
+                  : t('flow.overview.cards.library.blocked')
+              "
             />
           </div>
-          <div class="flow-card__body">
-            <h3>Ingest content</h3>
-            <p>Paste text into the selected project and turn it into indexed chunks for retrieval.</p>
-          </div>
-          <div class="flow-card__footer">
-            <p>Project: <strong>{{ selectedProject?.name ?? 'none' }}</strong></p>
-            <RouterLink class="rr-button rr-button--secondary" to="/ingest">
-              Open ingest
-            </RouterLink>
-          </div>
+          <p>{{ t('flow.overview.cards.library.body') }}</p>
+          <RouterLink class="rr-button rr-button--secondary" to="/ingest">
+            {{ t('flow.overview.cards.library.action') }}
+          </RouterLink>
         </article>
 
-        <article class="flow-card rr-panel" data-state="ask">
+        <article class="flow-card rr-panel" data-state="search">
           <div class="flow-card__header">
-            <span class="flow-card__step">3</span>
+            <h3>{{ t('flow.overview.cards.search.title') }}</h3>
             <StatusBadge
               :status="selectedProject ? 'ready' : 'blocked'"
-              :label="selectedProject ? 'Ready to query' : 'Needs project context'"
+              :label="
+                selectedProject
+                  ? t('flow.overview.cards.search.ready')
+                  : t('flow.overview.cards.search.blocked')
+              "
             />
           </div>
-          <div class="flow-card__body">
-            <h3>Ask a grounded question</h3>
-            <p>Run a query against the indexed content and inspect answer quality with supporting references.</p>
-          </div>
-          <div class="flow-card__footer">
-            <p>Workspace: <strong>{{ selectedWorkspace?.name ?? 'none' }}</strong></p>
-            <RouterLink class="rr-button rr-button--secondary" to="/ask">
-              Open ask
-            </RouterLink>
-          </div>
+          <p>{{ t('flow.overview.cards.search.body') }}</p>
+          <RouterLink class="rr-button rr-button--secondary" to="/ask">
+            {{ t('flow.overview.cards.search.action') }}
+          </RouterLink>
         </article>
       </div>
     </PageSection>
@@ -160,55 +170,25 @@ onMounted(async () => {
 
 <style scoped>
 .flow-card {
-  gap: var(--rr-space-5);
+  gap: var(--rr-space-4);
 }
 
-.flow-card__header,
-.flow-card__footer {
+.flow-card__header {
   display: flex;
   justify-content: space-between;
   gap: var(--rr-space-3);
   align-items: center;
 }
 
-.flow-card__body {
-  display: grid;
-  gap: var(--rr-space-3);
-}
-
-.flow-card__body h3,
-.flow-card__body p,
-.flow-card__footer p {
+.flow-card h3,
+.flow-card p {
   margin: 0;
 }
 
-.flow-card__footer {
-  flex-wrap: wrap;
-  align-items: flex-end;
-}
-
-.flow-card__step {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 2.1rem;
-  height: 2.1rem;
-  border-radius: var(--rr-radius-pill);
-  background: var(--rr-color-accent-50);
-  color: var(--rr-color-accent-700);
-  font-weight: 700;
-}
-
-.flow-card[data-state='ask'] .flow-card__step {
-  background: rgb(14 165 233 / 0.12);
-  color: #0369a1;
-}
-
-@media (width <= 900px) {
-  .flow-card__header,
-  .flow-card__footer {
-    align-items: flex-start;
+@media (width <= 700px) {
+  .flow-card__header {
     flex-direction: column;
+    align-items: flex-start;
   }
 }
 </style>

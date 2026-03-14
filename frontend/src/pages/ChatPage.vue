@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { RouterLink } from 'vue-router'
 
 import {
@@ -34,6 +35,8 @@ interface ProjectItem {
   workspace_id: string
 }
 
+const { t } = useI18n()
+
 const workspaces = ref<WorkspaceItem[]>([])
 const projects = ref<ProjectItem[]>([])
 
@@ -43,39 +46,37 @@ const detail = ref<RetrievalRunDetail | null>(null)
 const errorMessage = ref<string | null>(null)
 const loading = ref(false)
 
-const selectedWorkspaceId = ref(getSelectedWorkspaceId())
-const selectedProjectId = ref(getSelectedProjectId())
+const selectedProjectId = computed(() => getSelectedProjectId())
 const selectedProject = computed(
-  () => projects.value.find((item) => item.id === selectedProjectId.value) ?? null,
+  () => projects.value.find((item) => item.id === getSelectedProjectId()) ?? null,
 )
 const selectedWorkspace = computed(
-  () => workspaces.value.find((item) => item.id === selectedWorkspaceId.value) ?? null,
+  () => workspaces.value.find((item) => item.id === getSelectedWorkspaceId()) ?? null,
 )
 const pageStatus = computed(() => {
   if (result.value) {
     return {
       status: result.value.answer_status,
-      label: result.value.weak_grounding ? 'Answer returned with weak grounding' : 'Answer returned',
+      label: result.value.weak_grounding ? t('flow.search.statusWeak') : t('flow.search.statusReady'),
     }
   }
 
   if (!selectedProject.value) {
-    return { status: 'blocked', label: 'Select a project before querying' }
+    return { status: 'blocked', label: t('flow.search.statusBlocked') }
   }
 
-  return { status: 'draft', label: 'Ready to run a grounded query' }
+  return { status: 'draft', label: t('flow.search.statusDraft') }
 })
 
 onMounted(async () => {
   workspaces.value = await fetchWorkspaces()
   const workspaceId = syncSelectedWorkspaceId(workspaces.value)
-  selectedWorkspaceId.value = workspaceId
   if (workspaceId) {
     projects.value = await fetchProjects(workspaceId)
-    selectedProjectId.value = syncSelectedProjectId(projects.value)
+    syncSelectedProjectId(projects.value)
   } else {
     projects.value = []
-    selectedProjectId.value = syncSelectedProjectId([])
+    syncSelectedProjectId([])
   }
 })
 
@@ -112,56 +113,57 @@ async function submitQuery() {
 <template>
   <section class="rr-page-grid chat-page">
     <PageSection
-      eyebrow="Step 3"
-      title="Ask grounded questions"
-      description="Run a query against the active project, inspect answer status, and keep the retrieval diagnostics close to the response instead of hidden behind a different admin flow."
+      :eyebrow="t('flow.search.eyebrow')"
+      :title="t('flow.search.title')"
+      :description="t('flow.search.description')"
       :status="pageStatus.status"
       :status-label="pageStatus.label"
     >
       <template #actions>
         <RouterLink class="rr-button rr-button--secondary" to="/ingest">
-          Back to ingest
+          {{ t('flow.search.action') }}
         </RouterLink>
       </template>
 
       <div class="rr-stat-strip">
         <article class="rr-stat">
-          <p class="rr-stat__label">Workspace</p>
-          <strong>{{ selectedWorkspace?.name ?? 'Not selected' }}</strong>
-          <p>Project context stays visible while evaluating answers.</p>
+          <p class="rr-stat__label">{{ t('flow.search.stats.workspace') }}</p>
+          <strong>{{ selectedWorkspace?.name ?? t('flow.common.empty') }}</strong>
         </article>
         <article class="rr-stat">
-          <p class="rr-stat__label">Project</p>
-          <strong>{{ selectedProject?.name ?? 'Not selected' }}</strong>
-          <p>{{ selectedProject ? 'Queries target this single active project.' : 'Setup must define the active project first.' }}</p>
+          <p class="rr-stat__label">{{ t('flow.search.stats.project') }}</p>
+          <strong>{{ selectedProject?.name ?? t('flow.common.empty') }}</strong>
         </article>
         <article class="rr-stat">
-          <p class="rr-stat__label">Last answer</p>
-          <strong>{{ result?.answer_status ?? 'No query run yet' }}</strong>
-          <p>{{ result ? `${result.references.length} references returned.` : 'Run a query to inspect response quality.' }}</p>
+          <p class="rr-stat__label">{{ t('flow.search.stats.answer') }}</p>
+          <strong>{{ result?.answer_status ?? t('flow.search.stats.idle') }}</strong>
+          <p>
+            {{
+              result
+                ? t('flow.search.stats.references', { count: result.references.length })
+                : t('flow.search.stats.empty')
+            }}
+          </p>
         </article>
       </div>
 
       <article class="rr-panel rr-panel--accent query-panel">
         <div class="query-panel__heading">
           <div>
-            <p class="rr-kicker">Query runner</p>
-            <h3>Ask about the indexed content</h3>
+            <p class="rr-kicker">{{ t('flow.search.query.kicker') }}</p>
+            <h3>{{ t('flow.search.query.title') }}</h3>
           </div>
           <StatusPill :status="result?.answer_status ?? (selectedProject ? 'ready' : 'blocked')" />
         </div>
 
         <label class="rr-field">
-          <span class="rr-field__label">Question</span>
+          <span class="rr-field__label">{{ t('flow.search.query.question') }}</span>
           <textarea
             v-model="queryText"
             class="rr-control"
             rows="5"
             placeholder="Ask a grounded question about the indexed content"
           />
-          <p class="rr-field__hint">
-            Keep the prompt scoped to information you actually indexed in the selected project.
-          </p>
         </label>
 
         <div class="rr-action-row">
@@ -171,67 +173,56 @@ async function submitQuery() {
             :disabled="loading || !selectedProjectId || !queryText.trim()"
             @click="submitQuery"
           >
-            {{ loading ? 'Running…' : 'Run query' }}
+            {{ loading ? t('flow.search.query.actionBusy') : t('flow.search.query.action') }}
           </button>
         </div>
       </article>
 
-      <p
-        v-if="errorMessage"
-        class="rr-banner"
-        data-tone="danger"
-      >
+      <p v-if="errorMessage" class="rr-banner" data-tone="danger">
         {{ errorMessage }}
       </p>
 
       <article v-if="result" class="rr-panel result-panel">
         <div class="result-panel__header">
           <div>
-            <p class="rr-kicker">Answer</p>
-            <h3>Final response surface</h3>
-            <p class="rr-note">This is the direct response from the query endpoint, paired with the retrieval trace below.</p>
+            <p class="rr-kicker">{{ t('flow.search.result.kicker') }}</p>
+            <h3>{{ t('flow.search.result.title') }}</h3>
           </div>
           <StatusPill :status="result.answer_status" />
         </div>
 
         <div class="rr-stat-strip">
           <div class="rr-stat">
-            <p class="rr-stat__label">Mode</p>
+            <p class="rr-stat__label">{{ t('flow.search.result.mode') }}</p>
             <strong>{{ result.mode }}</strong>
           </div>
           <div class="rr-stat">
-            <p class="rr-stat__label">Grounding</p>
-            <strong>{{ result.weak_grounding ? 'Weak' : 'OK' }}</strong>
+            <p class="rr-stat__label">{{ t('flow.search.result.grounding') }}</p>
+            <strong>{{ result.weak_grounding ? t('flow.search.result.groundingWeak') : t('flow.search.result.groundingOk') }}</strong>
           </div>
           <div class="rr-stat">
-            <p class="rr-stat__label">References</p>
+            <p class="rr-stat__label">{{ t('flow.search.result.references') }}</p>
             <strong>{{ result.references.length }}</strong>
           </div>
         </div>
 
         <p class="answer-copy">{{ result.answer }}</p>
 
-        <p
-          v-if="result.warning"
-          class="rr-banner"
-          data-tone="warning"
-        >
-          Warning: {{ result.warning }}
+        <p v-if="result.warning" class="rr-banner" data-tone="warning">
+          {{ t('flow.search.result.warningPrefix') }}: {{ result.warning }}
         </p>
 
         <TokenListSection
-          title="Evidence references"
-          empty-message="No references were returned for this answer."
+          :title="t('flow.search.result.listTitle')"
+          :empty-message="t('flow.search.result.listEmpty')"
           :items="result.references"
         />
       </article>
 
       <article v-else class="rr-panel rr-panel--muted">
-        <p class="rr-kicker">Waiting for first query</p>
-        <h3>Run a question once Setup and Ingest are complete</h3>
-        <p class="rr-note">
-          The Ask page keeps the form, answer surface, and retrieval diagnostics in one place so the minimal flow stays coherent.
-        </p>
+        <p class="rr-kicker">{{ t('flow.search.result.waitingKicker') }}</p>
+        <h3>{{ t('flow.search.result.waitingTitle') }}</h3>
+        <p class="rr-note">{{ t('flow.search.result.waitingBody') }}</p>
       </article>
 
       <RetrievalDiagnosticsPanel v-if="detail" :detail="detail" />

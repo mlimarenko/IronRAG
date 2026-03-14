@@ -1,25 +1,29 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
 
 import AppSidebar from './AppSidebar.vue'
 import AppTopbar from './AppTopbar.vue'
 
 const route = useRoute()
+const { t } = useI18n()
+
+type ShellSection = 'overview' | 'workspace' | 'library' | 'search'
 
 const routeMeta = computed(() => {
   const meta = route.meta as {
-    workspaceLabel?: string
-    projectLabel?: string
-    environmentLabel?: string
-    environmentStatus?: string
+    shellSection?: ShellSection
+    shellStatus?: 'focused' | 'ready' | 'healthy'
   }
+  const section = meta.shellSection ?? 'overview'
+  const shellStatus = meta.shellStatus ?? 'ready'
 
   return {
-    workspaceLabel: meta.workspaceLabel ?? 'Current workspace',
-    projectLabel: meta.projectLabel ?? 'Current project',
-    environmentLabel: meta.environmentLabel ?? 'Ready to work',
-    environmentStatus: meta.environmentStatus ?? 'Healthy',
+    sectionLabel: t(`shell.pages.${section}.section`),
+    pageTitle: t(`shell.pages.${section}.title`),
+    environmentLabel: t(`shell.status.${shellStatus}`),
+    environmentStatus: shellStatus,
   }
 })
 </script>
@@ -32,8 +36,8 @@ const routeMeta = computed(() => {
 
     <div class="app-shell__main">
       <AppTopbar
-        :workspace-label="routeMeta.workspaceLabel"
-        :project-label="routeMeta.projectLabel"
+        :section-label="routeMeta.sectionLabel"
+        :page-title="routeMeta.pageTitle"
         :environment-label="routeMeta.environmentLabel"
         :environment-status="routeMeta.environmentStatus"
       />
@@ -48,7 +52,7 @@ const routeMeta = computed(() => {
 <style scoped>
 .app-shell {
   display: grid;
-  grid-template-columns: minmax(260px, 300px) minmax(0, 1fr);
+  grid-template-columns: minmax(248px, 284px) minmax(0, 1fr);
   min-height: 100vh;
   color: var(--rr-color-text-primary);
 }
@@ -58,26 +62,26 @@ const routeMeta = computed(() => {
   top: 0;
   align-self: start;
   min-height: 100vh;
-  padding: 28px 22px;
-  border-right: 1px solid rgb(148 163 184 / 0.12);
+  padding: 26px 20px;
+  border-right: 1px solid rgb(120 138 164 / 0.16);
   background:
-    radial-gradient(circle at top, rgb(59 130 246 / 0.2), transparent 34%),
-    linear-gradient(180deg, #10203a 0%, #0f172a 100%);
+    radial-gradient(circle at top, rgb(44 93 215 / 0.22), transparent 34%),
+    linear-gradient(180deg, #192132 0%, #141b28 100%);
 }
 
 .app-shell__main {
   display: grid;
-  gap: var(--rr-space-5);
+  gap: var(--rr-space-4);
   align-content: start;
-  padding: 28px;
+  padding: 24px;
   background:
-    radial-gradient(circle at top right, rgb(59 130 246 / 0.07), transparent 24%),
-    linear-gradient(180deg, rgb(255 255 255 / 0.08), rgb(255 255 255 / 0.02));
+    radial-gradient(circle at top right, rgb(44 93 215 / 0.08), transparent 24%),
+    linear-gradient(180deg, rgb(255 255 255 / 0.1), rgb(255 255 255 / 0.04));
 }
 
 .app-shell__content {
   display: grid;
-  gap: var(--rr-space-5);
+  gap: var(--rr-space-4);
 }
 
 @media (width <= 1100px) {
@@ -93,7 +97,7 @@ const routeMeta = computed(() => {
   }
 
   .app-shell__main {
-    padding: 22px;
+    padding: 18px;
   }
 }
 </style>

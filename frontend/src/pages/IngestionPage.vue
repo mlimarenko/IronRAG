@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { RouterLink } from 'vue-router'
 
 import {
@@ -36,6 +37,8 @@ interface ProjectItem {
   workspace_id: string
 }
 
+const { t } = useI18n()
+
 const workspaces = ref<WorkspaceItem[]>([])
 const projects = ref<ProjectItem[]>([])
 const documents = ref<DocumentSummary[]>([])
@@ -49,24 +52,23 @@ const errorMessage = ref<string | null>(null)
 const loading = ref(false)
 const latestJob = ref<IngestionJobDetail | null>(null)
 
-const selectedWorkspaceId = ref(getSelectedWorkspaceId())
-const selectedProjectId = ref(getSelectedProjectId())
+const selectedProjectId = computed(() => getSelectedProjectId())
 const selectedProject = computed(
-  () => projects.value.find((item) => item.id === selectedProjectId.value) ?? null,
+  () => projects.value.find((item) => item.id === getSelectedProjectId()) ?? null,
 )
 const selectedWorkspace = computed(
-  () => workspaces.value.find((item) => item.id === selectedWorkspaceId.value) ?? null,
+  () => workspaces.value.find((item) => item.id === getSelectedWorkspaceId()) ?? null,
 )
 const pageStatus = computed(() => {
   if (!selectedProject.value) {
-    return { status: 'blocked', label: 'Select a project in Setup' }
+    return { status: 'blocked', label: t('flow.library.statusBlocked') }
   }
 
   if (documents.value.length > 0) {
-    return { status: 'ready', label: `${String(documents.value.length)} indexed documents` }
+    return { status: 'ready', label: t('flow.library.documentsCount', { count: documents.value.length }) }
   }
 
-  return { status: 'draft', label: 'Ready for first ingest' }
+  return { status: 'draft', label: t('flow.library.statusDraft') }
 })
 
 async function loadProjectData(projectId: string) {
@@ -101,13 +103,12 @@ async function waitForIngestionJob(jobId: string): Promise<IngestionJobDetail | 
 onMounted(async () => {
   workspaces.value = await fetchWorkspaces()
   const workspaceId = syncSelectedWorkspaceId(workspaces.value)
-  selectedWorkspaceId.value = workspaceId
   if (workspaceId) {
     projects.value = await fetchProjects(workspaceId)
-    selectedProjectId.value = syncSelectedProjectId(projects.value)
+    syncSelectedProjectId(projects.value)
   } else {
     projects.value = []
-    selectedProjectId.value = syncSelectedProjectId([])
+    syncSelectedProjectId([])
   }
   if (selectedProjectId.value) {
     await loadProjectData(selectedProjectId.value)
@@ -146,7 +147,7 @@ async function ingestCurrentText() {
       text: text.value,
     })
 
-    statusMessage.value = `Queued ingestion job ${result.ingestion_job_id}. Waiting for completion…`
+    statusMessage.value = `Queued ingestion job ${result.ingestion_job_id}. Waiting for completion...`
 
     const jobDetail = await waitForIngestionJob(result.ingestion_job_id)
     await loadProjectData(selectedProjectId.value)
@@ -178,53 +179,38 @@ async function ingestCurrentText() {
 <template>
   <section class="rr-page-grid ingestion-page">
     <PageSection
-      eyebrow="Step 2"
-      title="Ingest text into the active project"
-      description="Create a simple text source if needed, send content through indexing, and keep the resulting documents visible alongside the current project context."
+      :eyebrow="t('flow.library.eyebrow')"
+      :title="t('flow.library.title')"
+      :description="t('flow.library.description')"
       :status="pageStatus.status"
       :status-label="pageStatus.label"
     >
       <template #actions>
         <RouterLink class="rr-button rr-button--secondary" to="/ask">
-          Continue to ask
+          {{ t('flow.library.action') }}
         </RouterLink>
       </template>
 
       <div class="rr-stat-strip">
         <article class="rr-stat">
-          <p class="rr-stat__label">Workspace</p>
-          <strong>{{ selectedWorkspace?.name ?? 'Not selected' }}</strong>
-          <p>The active workspace stays visible while you prepare content.</p>
+          <p class="rr-stat__label">{{ t('flow.library.stats.workspace') }}</p>
+          <strong>{{ selectedWorkspace?.name ?? t('flow.common.empty') }}</strong>
         </article>
         <article class="rr-stat">
-          <p class="rr-stat__label">Project</p>
-          <strong>{{ selectedProject?.name ?? 'Not selected' }}</strong>
-          <p>{{ selectedProject ? 'Ingestion targets this project only.' : 'Setup must establish project context first.' }}</p>
+          <p class="rr-stat__label">{{ t('flow.library.stats.project') }}</p>
+          <strong>{{ selectedProject?.name ?? t('flow.common.empty') }}</strong>
         </article>
         <article class="rr-stat">
-          <p class="rr-stat__label">Documents</p>
+          <p class="rr-stat__label">{{ t('flow.library.stats.documents') }}</p>
           <strong>{{ documents.length }}</strong>
-          <p>Indexed documents currently available for grounded retrieval.</p>
-        </article>
-        <article class="rr-stat">
-          <p class="rr-stat__label">Sources</p>
-          <strong>{{ sources.length }}</strong>
-          <p>Simple mode starts with a single text source and grows from there.</p>
+          <p>{{ t('flow.library.stats.documentsHint') }}</p>
         </article>
       </div>
 
-      <p
-        v-if="statusMessage"
-        class="rr-banner"
-        data-tone="success"
-      >
+      <p v-if="statusMessage" class="rr-banner" data-tone="success">
         {{ statusMessage }}
       </p>
-      <p
-        v-if="errorMessage"
-        class="rr-banner"
-        data-tone="danger"
-      >
+      <p v-if="errorMessage" class="rr-banner" data-tone="danger">
         {{ errorMessage }}
       </p>
 
@@ -232,37 +218,27 @@ async function ingestCurrentText() {
         <article class="rr-panel rr-panel--accent rr-stack">
           <div class="ingestion-panel__heading">
             <div>
-              <p class="rr-kicker">Paste text</p>
-              <h3>Send content to the indexing pipeline</h3>
+              <p class="rr-kicker">{{ t('flow.library.form.kicker') }}</p>
+              <h3>{{ t('flow.library.form.title') }}</h3>
             </div>
             <StatusBadge
               :status="selectedProjectId ? 'ready' : 'blocked'"
-              :label="selectedProjectId ? 'Project selected' : 'Needs setup'"
+              :label="selectedProjectId ? t('flow.library.form.ready') : t('flow.library.form.needsSetup')"
             />
           </div>
 
           <div class="rr-form-grid">
             <label class="rr-field">
-              <span class="rr-field__label">Source label</span>
-              <input
-                v-model="sourceLabel"
-                class="rr-control"
-                type="text"
-                placeholder="Pasted text"
-              >
+              <span class="rr-field__label">{{ t('flow.library.form.sourceLabel') }}</span>
+              <input v-model="sourceLabel" class="rr-control" type="text" placeholder="Pasted text">
             </label>
             <div class="rr-form-grid rr-form-grid--two">
               <label class="rr-field">
-                <span class="rr-field__label">External key</span>
-                <input
-                  v-model="externalKey"
-                  class="rr-control"
-                  type="text"
-                  placeholder="note-001"
-                >
+                <span class="rr-field__label">{{ t('flow.library.form.externalKey') }}</span>
+                <input v-model="externalKey" class="rr-control" type="text" placeholder="note-001">
               </label>
               <label class="rr-field">
-                <span class="rr-field__label">Title</span>
+                <span class="rr-field__label">{{ t('flow.library.form.titleLabel') }}</span>
                 <input
                   v-model="title"
                   class="rr-control"
@@ -272,16 +248,13 @@ async function ingestCurrentText() {
               </label>
             </div>
             <label class="rr-field">
-              <span class="rr-field__label">Text content</span>
+              <span class="rr-field__label">{{ t('flow.library.form.text') }}</span>
               <textarea
                 v-model="text"
                 class="rr-control"
                 rows="12"
                 placeholder="Paste the content you want RustRAG to index"
               />
-              <p class="rr-field__hint">
-                Keep this minimal flow simple: one selected project, one source label, one text paste.
-              </p>
             </label>
           </div>
 
@@ -292,7 +265,7 @@ async function ingestCurrentText() {
               :disabled="!selectedProjectId || !text.trim() || loading"
               @click="ingestCurrentText"
             >
-              {{ loading ? 'Indexing…' : 'Ingest text' }}
+              {{ loading ? t('flow.library.form.actionBusy') : t('flow.library.form.action') }}
             </button>
           </div>
         </article>
@@ -301,14 +274,17 @@ async function ingestCurrentText() {
           <article class="rr-panel">
             <div class="ingestion-panel__heading">
               <div>
-                <p class="rr-kicker">Indexed content</p>
-                <h3>Documents available to Ask</h3>
+                <p class="rr-kicker">{{ t('flow.library.lists.documents.kicker') }}</p>
+                <h3>{{ t('flow.library.lists.documents.title') }}</h3>
               </div>
-              <StatusBadge :status="documents.length ? 'ready' : 'draft'" :label="documents.length ? 'Indexed' : 'Empty'" />
+              <StatusBadge
+                :status="documents.length ? 'ready' : 'draft'"
+                :label="documents.length ? t('flow.library.lists.documents.ready') : t('flow.library.lists.documents.empty')"
+              />
             </div>
 
             <p v-if="!documents.length" class="rr-note">
-              No indexed documents yet. Paste content on the left to create the first one.
+              {{ t('flow.library.lists.documents.emptyMessage') }}
             </p>
             <ul v-else class="rr-list">
               <li v-for="document in documents" :key="document.id">
@@ -321,14 +297,17 @@ async function ingestCurrentText() {
           <article class="rr-panel rr-panel--muted">
             <div class="ingestion-panel__heading">
               <div>
-                <p class="rr-kicker">Source registry</p>
-                <h3>Known sources for the project</h3>
+                <p class="rr-kicker">{{ t('flow.library.lists.sources.kicker') }}</p>
+                <h3>{{ t('flow.library.lists.sources.title') }}</h3>
               </div>
-              <StatusBadge :status="sources.length ? 'ready' : 'draft'" :label="sources.length ? 'Present' : 'Will be created'" />
+              <StatusBadge
+                :status="sources.length ? 'ready' : 'draft'"
+                :label="sources.length ? t('flow.library.lists.sources.ready') : t('flow.library.lists.sources.empty')"
+              />
             </div>
 
             <p v-if="!sources.length" class="rr-note">
-              The first ingest automatically creates a text source if one does not exist yet.
+              {{ t('flow.library.lists.sources.emptyMessage') }}
             </p>
             <ul v-else class="rr-list">
               <li v-for="source in sources" :key="source.id">
@@ -341,8 +320,8 @@ async function ingestCurrentText() {
           <article v-if="latestJob" class="rr-panel rr-panel--muted">
             <div class="ingestion-panel__heading">
               <div>
-                <p class="rr-kicker">Latest job</p>
-                <h3>Tracked ingestion status</h3>
+                <p class="rr-kicker">{{ t('flow.library.lists.job.kicker') }}</p>
+                <h3>{{ t('flow.library.lists.job.title') }}</h3>
               </div>
               <StatusBadge :status="latestJob.status" :label="latestJob.stage" />
             </div>
@@ -361,7 +340,7 @@ async function ingestCurrentText() {
 <style scoped>
 .ingestion-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.3fr) minmax(320px, 0.7fr);
+  grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.75fr);
   gap: var(--rr-space-4);
 }
 

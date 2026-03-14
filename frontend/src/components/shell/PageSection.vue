@@ -64,7 +64,7 @@ withDefaults(
 <style scoped>
 .page-section {
   display: grid;
-  gap: var(--rr-space-6);
+  gap: var(--rr-space-5);
 }
 
 .page-section__header {
@@ -72,16 +72,16 @@ withDefaults(
   justify-content: space-between;
   gap: var(--rr-space-5);
   align-items: flex-start;
-  padding: var(--rr-space-7);
+  padding: var(--rr-space-6);
   border-radius: var(--rr-radius-lg);
   background:
-    radial-gradient(circle at top right, rgb(59 130 246 / 0.14), transparent 24%),
-    linear-gradient(180deg, rgb(255 255 255 / 0.98), rgb(248 250 252 / 0.94));
+    radial-gradient(circle at top right, rgb(44 93 215 / 0.12), transparent 24%),
+    linear-gradient(180deg, rgb(255 255 255 / 0.96), rgb(248 246 241 / 0.94));
 }
 
 .page-section__copy {
   display: grid;
-  gap: var(--rr-space-3);
+  gap: var(--rr-space-2);
   min-width: 0;
 }
 
@@ -98,16 +98,16 @@ withDefaults(
 
 .page-section__title-row h1 {
   margin: 0;
-  font-size: clamp(1.95rem, 2.6vw, 2.8rem);
-  line-height: 1.02;
+  font-size: clamp(1.8rem, 2.4vw, 2.45rem);
+  line-height: 1;
   letter-spacing: -0.03em;
 }
 
 .page-section__description {
-  max-width: 76ch;
+  max-width: 62ch;
   margin: 0;
   color: var(--rr-color-text-secondary);
-  font-size: 1.02rem;
+  font-size: 0.98rem;
 }
 
 .page-section__actions {
@@ -126,7 +126,7 @@ withDefaults(
 @media (width <= 900px) {
   .page-section__header {
     flex-direction: column;
-    padding: var(--rr-space-6);
+    padding: var(--rr-space-5);
   }
 
   .page-section__actions {
