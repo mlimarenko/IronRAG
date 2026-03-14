@@ -1,44 +1,35 @@
 export default {
   brand: {
-    eyebrow: 'RustRAG',
     title: 'RustRAG',
-    subtitle: 'Поиск и ответы по вашим файлам.',
-    badge: 'Preview',
+    subtitle: 'RAG flow',
   },
   nav: {
-    primary: 'Разделы',
-    manage: 'Настройка',
+    primary: 'Основное',
+    manage: 'Ещё',
     items: {
       files: {
-        label: 'Files',
-        caption: 'Добавление и просмотр файлов',
+        label: 'Файлы',
       },
       processing: {
-        label: 'Processing',
-        caption: 'Статус и следующие шаги',
+        label: 'Обзор',
       },
-      search: {
-        label: 'Search',
-        caption: 'Вопросы по вашим файлам',
+      ask: {
+        label: 'Вопросы',
       },
       graph: {
-        label: 'Graph',
-        caption: 'Связи и сигналы знаний',
+        label: 'Граф',
       },
       api: {
         label: 'API',
-        caption: 'Интеграции поверх тех же данных',
       },
-      setup: {
-        label: 'Setup',
-        caption: 'Выбор пространства и коллекции',
+      context: {
+        label: 'Настройка',
       },
     },
   },
   topbar: {
-    surface: 'Раздел',
+    surface: 'Workspace',
     language: 'Язык',
-    state: 'Статус',
   },
   locale: {
     en: 'EN',
@@ -51,19 +42,19 @@ export default {
   },
   pages: {
     files: {
-      title: 'Files',
+      title: 'Файлы',
     },
     processing: {
-      title: 'Processing',
+      title: 'Обзор',
     },
-    setup: {
-      title: 'Setup',
+    context: {
+      title: 'Настройка',
     },
-    search: {
-      title: 'Search',
+    ask: {
+      title: 'Вопросы',
     },
     graph: {
-      title: 'Graph',
+      title: 'Граф',
     },
     api: {
       title: 'API',

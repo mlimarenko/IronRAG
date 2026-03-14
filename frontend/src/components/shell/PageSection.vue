@@ -64,21 +64,19 @@ withDefaults(
 <style scoped>
 .page-section {
   display: grid;
-  gap: var(--rr-space-4);
+  gap: var(--rr-space-5);
 }
 
 .page-section__header {
   display: flex;
   justify-content: space-between;
-  gap: var(--rr-space-4);
-  align-items: flex-start;
-  padding: var(--rr-space-4) 0 var(--rr-space-5);
-  border-bottom: 1px solid var(--rr-color-border-subtle);
+  gap: var(--rr-space-5);
+  align-items: end;
 }
 
 .page-section__copy {
   display: grid;
-  gap: 4px;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -95,16 +93,17 @@ withDefaults(
 
 .page-section__title-row h1 {
   margin: 0;
-  font-size: clamp(1.35rem, 2vw, 1.75rem);
-  line-height: 1.1;
-  letter-spacing: -0.025em;
+  font-family: var(--rr-font-display);
+  font-size: clamp(1.6rem, 2.5vw, 2.1rem);
+  line-height: 1;
+  letter-spacing: -0.035em;
 }
 
 .page-section__description {
-  max-width: 48ch;
+  max-width: 54ch;
   margin: 0;
   color: var(--rr-color-text-secondary);
-  font-size: 0.9rem;
+  font-size: 0.96rem;
 }
 
 .page-section__actions {
@@ -123,7 +122,7 @@ withDefaults(
 @media (width <= 900px) {
   .page-section__header {
     flex-direction: column;
-    padding: var(--rr-space-3) 0 var(--rr-space-4);
+    align-items: flex-start;
   }
 
   .page-section__actions {

@@ -1,44 +1,35 @@
 export default {
   brand: {
-    eyebrow: 'RustRAG',
     title: 'RustRAG',
-    subtitle: 'Search and answer across your files.',
-    badge: 'Preview',
+    subtitle: 'RAG flow',
   },
   nav: {
-    primary: 'Explore',
-    manage: 'Manage',
+    primary: 'Flow',
+    manage: 'More',
     items: {
       files: {
         label: 'Files',
-        caption: 'Add and review indexed files',
       },
       processing: {
-        label: 'Processing',
-        caption: 'Status and next steps',
+        label: 'Overview',
       },
-      search: {
-        label: 'Search',
-        caption: 'Ask questions over your files',
+      ask: {
+        label: 'Ask',
       },
       graph: {
         label: 'Graph',
-        caption: 'Explore connected knowledge',
       },
       api: {
         label: 'API',
-        caption: 'Build on the same data',
       },
-      setup: {
+      context: {
         label: 'Setup',
-        caption: 'Choose your space and collection',
       },
     },
   },
   topbar: {
-    surface: 'Section',
+    surface: 'Workspace',
     language: 'Language',
-    state: 'Status',
   },
   locale: {
     en: 'EN',
@@ -54,13 +45,13 @@ export default {
       title: 'Files',
     },
     processing: {
-      title: 'Processing',
+      title: 'Overview',
     },
-    setup: {
+    context: {
       title: 'Setup',
     },
-    search: {
-      title: 'Search',
+    ask: {
+      title: 'Ask',
     },
     graph: {
       title: 'Graph',

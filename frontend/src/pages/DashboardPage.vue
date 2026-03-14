@@ -5,7 +5,6 @@ import { RouterLink } from 'vue-router'
 
 import { fetchProjects, fetchWorkspaces } from 'src/boot/api'
 import PageSection from 'src/components/shell/PageSection.vue'
-import StatusBadge from 'src/components/shell/StatusBadge.vue'
 import {
   getSelectedProjectId,
   getSelectedWorkspaceId,
@@ -66,8 +65,8 @@ onMounted(async () => {
 <template>
   <section class="rr-page-grid overview-page">
     <PageSection
-      :eyebrow="t('flow.overview.eyebrow')"
       :title="t('flow.overview.title')"
+      :description="t('flow.overview.description')"
       status="focused"
       :status-label="t('shell.status.focused')"
     >
@@ -92,15 +91,8 @@ onMounted(async () => {
         </article>
       </div>
 
-      <article class="rr-panel flow-shortcuts">
-        <div class="flow-shortcuts__header">
-          <h3>Open</h3>
-          <StatusBadge
-            :status="hasProject ? 'ready' : hasWorkspace ? 'partial' : 'draft'"
-            :label="nextAction"
-          />
-        </div>
-
+      <article class="rr-panel rr-panel--muted flow-shortcuts">
+        <p class="flow-shortcuts__title">{{ nextAction }}</p>
         <div class="flow-shortcuts__actions">
           <RouterLink class="rr-button rr-button--secondary" to="/setup">
             {{ t('flow.overview.cards.workspace.title') }}
@@ -119,30 +111,19 @@ onMounted(async () => {
 
 <style scoped>
 .flow-shortcuts {
-  gap: var(--rr-space-3);
+  gap: var(--rr-space-4);
 }
 
-.flow-shortcuts__header {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--rr-space-3);
-  align-items: center;
-}
-
-.flow-shortcuts__header h3 {
+.flow-shortcuts__title {
   margin: 0;
+  font-size: 0.98rem;
+  font-weight: 650;
+  color: var(--rr-color-text-secondary);
 }
 
 .flow-shortcuts__actions {
   display: flex;
   flex-wrap: wrap;
   gap: var(--rr-space-3);
-}
-
-@media (width <= 700px) {
-  .flow-shortcuts__header {
-    flex-direction: column;
-    align-items: flex-start;
-  }
 }
 </style>

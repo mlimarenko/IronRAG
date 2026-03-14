@@ -134,8 +134,8 @@ async function createProjectItem() {
 <template>
   <section class="rr-page-grid setup-page">
     <PageSection
-      :eyebrow="t('flow.workspace.eyebrow')"
       :title="t('flow.workspace.title')"
+      :description="t('flow.workspace.description')"
       :status="setupStatus.status"
       :status-label="setupStatus.label"
     >
@@ -167,7 +167,7 @@ async function createProjectItem() {
       <div class="setup-grid">
         <article class="rr-panel rr-panel--accent setup-panel">
           <div class="setup-panel__heading">
-            <h3>{{ t('flow.workspace.panels.workspace.kicker') }}</h3>
+            <h3>{{ t('flow.workspace.panels.workspace.title') }}</h3>
             <StatusBadge
               :status="selectedWorkspace ? 'ready' : 'draft'"
               :label="selectedWorkspace ? t('flow.workspace.panels.workspace.selectedBadge') : t('flow.workspace.panels.workspace.required')"
@@ -225,7 +225,7 @@ async function createProjectItem() {
 
         <article class="rr-panel setup-panel">
           <div class="setup-panel__heading">
-            <h3>{{ t('flow.workspace.panels.project.kicker') }}</h3>
+            <h3>{{ t('flow.workspace.panels.project.title') }}</h3>
             <StatusBadge
               :status="selectedProject ? 'ready' : selectedWorkspace ? 'partial' : 'blocked'"
               :label="
@@ -275,7 +275,7 @@ async function createProjectItem() {
               <textarea
                 v-model="projectForm.description"
                 class="rr-control"
-                rows="4"
+                rows="3"
                 :placeholder="t('flow.workspace.panels.project.descriptionPlaceholder')"
               />
             </label>

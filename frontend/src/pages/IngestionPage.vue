@@ -356,6 +356,18 @@ function handleUploadDrop(event: DragEvent) {
   setUploadFile(event.dataTransfer?.files?.[0] ?? null)
 }
 
+function formatRunStartedMessage(jobId: string) {
+  return `Run ${jobId} started. Waiting for completion.`
+}
+
+function formatRunCompletedMessage(jobId: string) {
+  return `Run ${jobId} completed. Content is indexed.`
+}
+
+function formatRunProgressMessage(jobId: string, status: string, stage: string) {
+  return `Run ${jobId}: ${status} at ${stage}.`
+}
+
 onMounted(async () => {
   workspaces.value = await fetchWorkspaces()
   const workspaceId = syncSelectedWorkspaceId(workspaces.value)
@@ -378,7 +390,7 @@ async function ingestCurrentText() {
   latestJob.value = null
 
   if (!selectedProjectId.value) {
-    errorMessage.value = 'Create and select a collection first in Setup.'
+    errorMessage.value = 'Choose a collection in Setup first.'
     loading.value = false
     return
   }
@@ -394,12 +406,12 @@ async function ingestCurrentText() {
       text: text.value,
     })
 
-    statusMessage.value = `Started processing run ${result.ingestion_job_id}. Waiting for completion...`
+    statusMessage.value = formatRunStartedMessage(result.ingestion_job_id)
 
     const jobDetail = await waitForIngestionJob(result.ingestion_job_id)
     await loadProjectData(selectedProjectId.value)
     if (jobDetail?.status === 'completed') {
-      statusMessage.value = `Completed processing run ${jobDetail.id}. Indexed content is now visible below.`
+      statusMessage.value = formatRunCompletedMessage(jobDetail.id)
       text.value = ''
       title.value = ''
       externalKey.value = `note-${String(Date.now())}`
@@ -407,16 +419,16 @@ async function ingestCurrentText() {
     }
 
     if (jobDetail?.error_message) {
-      errorMessage.value = `Processing run ${jobDetail.id} failed: ${jobDetail.error_message}`
+      errorMessage.value = `Run ${jobDetail.id} failed: ${jobDetail.error_message}`
       statusMessage.value = null
       return
     }
 
     const status = jobDetail?.status ?? result.status
     const stage = jobDetail?.stage ?? result.stage
-    statusMessage.value = `Processing run ${result.ingestion_job_id} is ${status} at stage ${stage}.`
+    statusMessage.value = formatRunProgressMessage(result.ingestion_job_id, status, stage)
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : 'Failed to index text'
+    errorMessage.value = error instanceof Error ? error.message : 'Indexing failed'
   } finally {
     loading.value = false
   }
@@ -429,13 +441,13 @@ async function uploadCurrentFile() {
   latestJob.value = null
 
   if (!selectedProjectId.value) {
-    errorMessage.value = 'Create and select a collection first in Setup.'
+    errorMessage.value = 'Choose a collection in Setup first.'
     loading.value = false
     return
   }
 
   if (!uploadFile.value) {
-    errorMessage.value = 'Choose a file before uploading.'
+    errorMessage.value = 'Choose a file first.'
     loading.value = false
     return
   }
@@ -460,27 +472,27 @@ async function uploadCurrentFile() {
       file: uploadFile.value,
     })
 
-    statusMessage.value = `Started processing run ${result.ingestion_job_id}. Waiting for completion...`
+    statusMessage.value = formatRunStartedMessage(result.ingestion_job_id)
 
     const jobDetail = await waitForIngestionJob(result.ingestion_job_id)
     await loadProjectData(selectedProjectId.value)
     if (jobDetail?.status === 'completed') {
-      statusMessage.value = `Completed processing run ${jobDetail.id}. Indexed content is now visible below.`
+      statusMessage.value = formatRunCompletedMessage(jobDetail.id)
       clearSelectedUpload()
       return
     }
 
     if (jobDetail?.error_message) {
-      errorMessage.value = `Processing run ${jobDetail.id} failed: ${jobDetail.error_message}`
+      errorMessage.value = `Run ${jobDetail.id} failed: ${jobDetail.error_message}`
       statusMessage.value = null
       return
     }
 
     const status = jobDetail?.status ?? result.status
     const stage = jobDetail?.stage ?? result.stage
-    statusMessage.value = `Processing run ${result.ingestion_job_id} is ${status} at stage ${stage}.`
+    statusMessage.value = formatRunProgressMessage(result.ingestion_job_id, status, stage)
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : 'Failed to upload and index file'
+    errorMessage.value = error instanceof Error ? error.message : 'Upload failed'
   } finally {
     loading.value = false
   }
@@ -490,8 +502,8 @@ async function uploadCurrentFile() {
 <template>
   <section class="rr-page-grid ingestion-page">
     <PageSection
-      :eyebrow="t('flow.library.eyebrow')"
       :title="t('flow.library.title')"
+      :description="t('flow.library.description')"
       :status="pageStatus.status"
       :status-label="pageStatus.label"
     >
@@ -564,7 +576,7 @@ async function uploadCurrentFile() {
                     v-model="title"
                     class="rr-control"
                     type="text"
-                    placeholder="Support policy excerpt"
+                    placeholder="Support policy"
                   />
                 </label>
               </div>
@@ -574,7 +586,7 @@ async function uploadCurrentFile() {
                   v-model="text"
                   class="rr-control"
                   rows="12"
-                  placeholder="Paste the content you want RustRAG to index"
+                  placeholder="Paste content to index"
                 />
               </label>
             </div>
@@ -604,20 +616,9 @@ async function uploadCurrentFile() {
               />
             </div>
 
-            <div class="upload-support-summary">
-              <div class="upload-support-summary__item">
-                <StatusBadge tone="positive" :label="t('flow.library.upload.supportedNowBadge')" />
-                <p>{{ t('flow.library.upload.supportedNowHint') }}</p>
-              </div>
-              <div class="upload-support-summary__item">
-                <StatusBadge tone="warning" :label="t('flow.library.upload.plannedBadge')" />
-                <p>{{ t('flow.library.upload.plannedHint') }}</p>
-              </div>
-              <div class="upload-support-summary__item">
-                <StatusBadge tone="negative" :label="t('flow.library.upload.unsupportedBadge')" />
-                <p>{{ t('flow.library.upload.unsupportedHint') }}</p>
-              </div>
-            </div>
+            <p class="rr-banner" data-tone="info">
+              {{ t('flow.library.upload.hintCompact') }}
+            </p>
 
             <div
               class="upload-dropzone"
@@ -680,7 +681,7 @@ async function uploadCurrentFile() {
                   v-model="uploadTitle"
                   class="rr-control"
                   type="text"
-                  placeholder="Knowledge-base article"
+                  placeholder="Article title"
                 />
               </label>
             </div>
@@ -770,7 +771,7 @@ async function uploadCurrentFile() {
             </div>
 
             <p class="rr-note">
-              Job {{ latestJob.id }} is {{ latestJob.status }}.
+              Run {{ latestJob.id }} is {{ latestJob.status }}.
               <span v-if="latestJob.error_message"> {{ latestJob.error_message }}</span>
             </p>
           </article>
@@ -801,26 +802,6 @@ async function uploadCurrentFile() {
 .ingestion-panel__heading h3 {
   margin: 0;
   font-size: 1rem;
-}
-
-.upload-support-summary {
-  display: grid;
-  gap: var(--rr-space-3);
-}
-
-.upload-support-summary__item {
-  display: grid;
-  gap: var(--rr-space-2);
-  padding: var(--rr-space-3);
-  border: 1px solid var(--rr-color-border-muted);
-  border-radius: var(--rr-radius-lg);
-  background:
-    linear-gradient(135deg, rgb(15 23 42 / 0.02), rgb(15 23 42 / 0.06)), var(--rr-color-surface);
-}
-
-.upload-support-summary__item p {
-  margin: 0;
-  color: var(--rr-color-text-secondary);
 }
 
 .upload-dropzone {
@@ -876,8 +857,8 @@ async function uploadCurrentFile() {
   align-items: center;
   padding: var(--rr-space-3);
   border-radius: var(--rr-radius-lg);
-  border: 1px solid var(--rr-color-border-muted);
-  background: var(--rr-color-surface-muted);
+  border: 1px solid var(--rr-color-border-subtle);
+  background: var(--rr-color-bg-surface-muted);
 }
 
 .upload-selection-card__meta {

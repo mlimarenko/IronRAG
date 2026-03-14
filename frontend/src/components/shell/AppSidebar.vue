@@ -3,8 +3,6 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { RouterLink, useRoute } from 'vue-router'
 
-import StatusBadge from './StatusBadge.vue'
-
 const route = useRoute()
 const { t } = useI18n()
 
@@ -23,16 +21,16 @@ const navGroups = computed<readonly NavGroup[]>(() => [
     label: t('shell.nav.primary'),
     items: [
       { to: '/', key: 'processing' },
+      { to: '/setup', key: 'context' },
       { to: '/ingest', key: 'files' },
       { to: '/ask', key: 'ask' },
-      { to: '/graph', key: 'graph' },
-      { to: '/api', key: 'api' },
     ],
   },
   {
     label: t('shell.nav.manage'),
     items: [
-      { to: '/setup', key: 'context' },
+      { to: '/graph', key: 'graph' },
+      { to: '/api', key: 'api' },
     ],
   },
 ])
@@ -51,8 +49,13 @@ function isActive(item: NavItem) {
 <template>
   <aside class="app-sidebar">
     <div class="app-sidebar__brand">
-      <h1>{{ t('shell.brand.title') }}</h1>
-      <StatusBadge :label="t('shell.brand.badge')" tone="info" />
+      <RouterLink to="/" class="app-sidebar__brand-link">
+        <span class="app-sidebar__brand-mark">R</span>
+        <div class="app-sidebar__brand-copy">
+          <h1>{{ t('shell.brand.title') }}</h1>
+          <p>{{ t('shell.brand.subtitle') }}</p>
+        </div>
+      </RouterLink>
     </div>
 
     <div class="app-sidebar__groups">
@@ -82,23 +85,49 @@ function isActive(item: NavItem) {
 <style scoped>
 .app-sidebar {
   display: grid;
-  gap: var(--rr-space-6);
+  gap: var(--rr-space-7);
   align-content: start;
 }
 
-.app-sidebar__brand {
-  display: flex;
+.app-sidebar__brand-link {
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--rr-space-3);
+  gap: 12px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.app-sidebar__brand-mark {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  background: var(--rr-color-bg-contrast);
+  color: var(--rr-color-text-inverse);
+  font-family: var(--rr-font-display);
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.app-sidebar__brand-copy {
+  display: grid;
+  gap: 2px;
 }
 
 .app-sidebar__brand h1 {
   margin: 0;
-  font-size: 1.15rem;
+  font-family: var(--rr-font-display);
+  font-size: 1.12rem;
   line-height: 1.1;
   letter-spacing: -0.02em;
-  color: var(--rr-color-text-inverse);
+  color: var(--rr-color-text-primary);
+}
+
+.app-sidebar__brand p {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--rr-color-text-secondary);
 }
 
 .app-sidebar__groups,
@@ -109,39 +138,41 @@ function isActive(item: NavItem) {
 }
 
 .app-sidebar__group-label {
-  margin: 0 0 4px;
+  margin: 0 0 6px;
   font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.07em;
   text-transform: uppercase;
-  color: rgb(148 163 184 / 0.7);
+  color: var(--rr-color-text-muted);
 }
 
 .app-sidebar__link {
   display: flex;
   align-items: center;
-  min-height: 42px;
+  min-height: 44px;
   padding: 10px 12px;
   border: 1px solid transparent;
-  border-radius: var(--rr-radius-sm);
-  color: rgb(203 213 225 / 0.92);
+  border-radius: calc(var(--rr-radius-sm) + 2px);
+  color: var(--rr-color-text-secondary);
   text-decoration: none;
-  background: transparent;
+  background: rgb(255 255 255 / 0.38);
   transition:
     border-color var(--rr-motion-base),
     background var(--rr-motion-base),
-    color var(--rr-motion-base);
+    color var(--rr-motion-base),
+    transform var(--rr-motion-base);
 }
 
 .app-sidebar__link:hover,
 .app-sidebar__link[data-active='true'] {
-  border-color: rgb(96 165 250 / 0.24);
-  background: rgb(148 163 184 / 0.12);
-  color: #fff;
+  border-color: rgb(59 130 246 / 0.16);
+  background: var(--rr-color-bg-surface-strong);
+  color: var(--rr-color-text-primary);
+  transform: translateX(2px);
 }
 
 .app-sidebar__label {
   font-size: 0.94rem;
-  font-weight: 600;
+  font-weight: 650;
 }
 </style>

@@ -14,9 +14,8 @@ defineProps<{
   <article class="rr-panel diagnostics-panel">
     <div class="panel-header">
       <div>
-        <p class="rr-kicker">Retrieval trace</p>
-        <h3>Retrieval diagnostics</h3>
-        <p class="panel-subtitle">Detail from retrieval run {{ detail.id }}.</p>
+        <h3>Trace</h3>
+        <p class="panel-subtitle">Run {{ detail.id }}</p>
       </div>
       <StatusPill :status="detail.answer_status" />
     </div>

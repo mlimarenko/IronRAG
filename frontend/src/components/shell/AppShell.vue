@@ -14,15 +14,11 @@ type ShellSection = 'processing' | 'context' | 'files' | 'ask' | 'graph' | 'api'
 const routeMeta = computed(() => {
   const meta = route.meta as {
     shellSection?: ShellSection
-    shellStatus?: 'focused' | 'ready' | 'healthy'
   }
   const section = meta.shellSection ?? 'processing'
-  const shellStatus = meta.shellStatus ?? 'ready'
 
   return {
     sectionLabel: t(`shell.pages.${section}.title`),
-    environmentLabel: t(`shell.status.${shellStatus}`),
-    environmentStatus: shellStatus,
   }
 })
 </script>
@@ -34,11 +30,7 @@ const routeMeta = computed(() => {
     </aside>
 
     <div class="app-shell__main">
-      <AppTopbar
-        :section-label="routeMeta.sectionLabel"
-        :environment-label="routeMeta.environmentLabel"
-        :environment-status="routeMeta.environmentStatus"
-      />
+      <AppTopbar :section-label="routeMeta.sectionLabel" />
 
       <main class="app-shell__content">
         <router-view />
@@ -50,7 +42,7 @@ const routeMeta = computed(() => {
 <style scoped>
 .app-shell {
   display: grid;
-  grid-template-columns: minmax(220px, 248px) minmax(0, 1fr);
+  grid-template-columns: minmax(228px, 248px) minmax(0, 1fr);
   min-height: 100vh;
   color: var(--rr-color-text-primary);
 }
@@ -60,21 +52,24 @@ const routeMeta = computed(() => {
   top: 0;
   align-self: start;
   min-height: 100vh;
-  padding: 20px 16px;
-  border-right: 1px solid rgb(15 23 42 / 0.08);
-  background: linear-gradient(180deg, #0f172a 0%, #111827 100%);
+  padding: 24px 16px;
+  border-right: 1px solid var(--rr-color-border-subtle);
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.94), rgb(247 248 243 / 0.96)),
+    var(--rr-color-bg-surface-strong);
 }
 
 .app-shell__main {
   display: grid;
-  gap: var(--rr-space-3);
+  gap: var(--rr-space-4);
   align-content: start;
-  padding: 20px;
+  padding: 24px 28px 32px;
 }
 
 .app-shell__content {
   display: grid;
-  gap: var(--rr-space-4);
+  gap: var(--rr-space-5);
+  width: min(100%, 1180px);
 }
 
 @media (width <= 1100px) {
@@ -86,11 +81,11 @@ const routeMeta = computed(() => {
     position: static;
     min-height: auto;
     border-right: 0;
-    border-bottom: 1px solid rgb(148 163 184 / 0.12);
+    border-bottom: 1px solid var(--rr-color-border-subtle);
   }
 
   .app-shell__main {
-    padding: 16px;
+    padding: 18px 16px 24px;
   }
 }
 </style>

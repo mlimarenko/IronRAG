@@ -1,24 +1,25 @@
 :root {
-  --rr-font-sans: 'Inter', 'Geist', 'Segoe UI Variable', 'Segoe UI', system-ui, -apple-system,
-    BlinkMacSystemFont, sans-serif;
-  --rr-color-bg-canvas: #f5f7fb;
-  --rr-color-bg-canvas-deep: #edf1f7;
-  --rr-color-bg-surface: rgb(255 255 255 / 0.92);
+  --rr-font-sans: 'Aptos', 'Inter Tight', 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
+  --rr-font-display: 'Aptos Display', 'Inter Tight', 'Segoe UI Variable Display', 'Segoe UI',
+    sans-serif;
+  --rr-color-bg-canvas: #f3f4ee;
+  --rr-color-bg-canvas-deep: #ebeee5;
+  --rr-color-bg-surface: rgb(255 255 255 / 0.88);
   --rr-color-bg-surface-strong: #fff;
-  --rr-color-bg-surface-muted: #f7f9fc;
-  --rr-color-bg-contrast: #111827;
-  --rr-color-text-primary: #0f172a;
-  --rr-color-text-secondary: #334155;
-  --rr-color-text-muted: #64748b;
+  --rr-color-bg-surface-muted: #f6f7f2;
+  --rr-color-bg-contrast: #182131;
+  --rr-color-text-primary: #111927;
+  --rr-color-text-secondary: #425164;
+  --rr-color-text-muted: #6b7788;
   --rr-color-text-inverse: #f8fafc;
-  --rr-color-border-subtle: rgb(148 163 184 / 0.22);
-  --rr-color-border-strong: rgb(37 99 235 / 0.26);
-  --rr-color-border-focus: rgb(37 99 235 / 0.38);
-  --rr-color-accent-50: #e8f0ff;
-  --rr-color-accent-100: #dbe8ff;
-  --rr-color-accent-600: #2563eb;
-  --rr-color-accent-700: #1d4ed8;
-  --rr-color-info-600: #2563eb;
+  --rr-color-border-subtle: rgb(107 119 136 / 0.18);
+  --rr-color-border-strong: rgb(29 78 216 / 0.2);
+  --rr-color-border-focus: rgb(29 78 216 / 0.34);
+  --rr-color-accent-50: #eaf0ff;
+  --rr-color-accent-100: #dce8ff;
+  --rr-color-accent-600: #1d4ed8;
+  --rr-color-accent-700: #1e40af;
+  --rr-color-info-600: #1d4ed8;
   --rr-color-success-50: #eaf8ef;
   --rr-color-success-600: #15803d;
   --rr-color-warning-50: #fff6e6;
@@ -38,9 +39,9 @@
   --rr-radius-lg: 1.1rem;
   --rr-radius-xl: 1.4rem;
   --rr-radius-pill: 999px;
-  --rr-shadow-sm: 0 8px 24px rgb(15 23 42 / 0.05);
-  --rr-shadow-md: 0 16px 32px rgb(15 23 42 / 0.07);
-  --rr-shadow-lg: 0 22px 48px rgb(15 23 42 / 0.08);
+  --rr-shadow-sm: 0 10px 30px rgb(17 25 39 / 0.04);
+  --rr-shadow-md: 0 18px 42px rgb(17 25 39 / 0.06);
+  --rr-shadow-lg: 0 24px 54px rgb(17 25 39 / 0.07);
   --rr-motion-base: 180ms ease;
 }
 
@@ -61,10 +62,10 @@ body {
   font-family: var(--rr-font-sans);
   color: var(--rr-color-text-primary);
   background:
-    radial-gradient(circle at top left, rgb(37 99 235 / 0.07), transparent 24%),
-    radial-gradient(circle at bottom right, rgb(15 23 42 / 0.04), transparent 20%),
+    radial-gradient(circle at top left, rgb(29 78 216 / 0.06), transparent 24%),
+    radial-gradient(circle at top right, rgb(245 158 11 / 0.05), transparent 18%),
     linear-gradient(180deg, var(--rr-color-bg-canvas) 0%, var(--rr-color-bg-canvas-deep) 100%);
-  line-height: 1.45;
+  line-height: 1.5;
   text-rendering: optimizelegibility;
 }
 
@@ -84,7 +85,8 @@ h1,
 h2,
 h3,
 h4 {
-  letter-spacing: -0.025em;
+  font-family: var(--rr-font-display);
+  letter-spacing: -0.03em;
 }
 
 img {
@@ -100,7 +102,7 @@ textarea {
 
 .rr-page-grid {
   display: grid;
-  gap: var(--rr-space-4);
+  gap: var(--rr-space-5);
 }
 
 .rr-grid {
@@ -127,7 +129,7 @@ textarea {
   padding: var(--rr-space-5);
   border: 1px solid var(--rr-color-border-subtle);
   border-radius: var(--rr-radius-lg);
-  background: var(--rr-color-bg-surface-strong);
+  background: rgb(255 255 255 / 0.92);
   box-shadow: var(--rr-shadow-sm);
 }
 
@@ -138,7 +140,7 @@ textarea {
 .rr-panel--accent {
   border-color: var(--rr-color-border-strong);
   background:
-    linear-gradient(180deg, rgb(255 255 255 / 0.98), rgb(248 250 255 / 0.98)),
+    linear-gradient(180deg, rgb(255 255 255 / 0.98), rgb(243 247 255 / 0.96)),
     var(--rr-color-bg-surface-strong);
 }
 
@@ -160,7 +162,7 @@ textarea {
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--rr-color-accent-700);
+  color: var(--rr-color-text-muted);
 }
 
 .rr-note {
@@ -174,18 +176,18 @@ textarea {
 
 .rr-stat-strip {
   display: grid;
-  gap: var(--rr-space-4);
+  gap: var(--rr-space-3);
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }
 
 .rr-stat {
   display: grid;
-  gap: var(--rr-space-2);
+  gap: 6px;
   min-height: 100%;
   padding: 0.95rem 1rem;
   border: 1px solid var(--rr-color-border-subtle);
-  border-radius: var(--rr-radius-md);
-  background: rgb(255 255 255 / 0.72);
+  border-radius: calc(var(--rr-radius-md) + 2px);
+  background: rgb(255 255 255 / 0.7);
 }
 
 .rr-stat__label {
@@ -198,8 +200,9 @@ textarea {
 }
 
 .rr-stat strong {
-  font-size: 0.98rem;
-  line-height: 1.3;
+  font-family: var(--rr-font-display);
+  font-size: 1.05rem;
+  line-height: 1.2;
 }
 
 .rr-stat p {
@@ -222,8 +225,8 @@ textarea {
 }
 
 .rr-field__label {
-  font-size: 0.92rem;
-  font-weight: 700;
+  font-size: 0.9rem;
+  font-weight: 650;
   color: var(--rr-color-text-primary);
 }
 
@@ -235,7 +238,7 @@ textarea {
 
 .rr-control {
   width: 100%;
-  padding: 0.8rem 0.9rem;
+  padding: 0.82rem 0.92rem;
   border: 1px solid var(--rr-color-border-subtle);
   border-radius: var(--rr-radius-sm);
   background: var(--rr-color-bg-surface-strong);
@@ -274,11 +277,11 @@ textarea.rr-control {
   min-height: 44px;
   padding: 0 var(--rr-space-5);
   border: 1px solid transparent;
-  border-radius: var(--rr-radius-sm);
+  border-radius: calc(var(--rr-radius-sm) + 2px);
   background: var(--rr-color-bg-contrast);
   color: var(--rr-color-text-inverse);
   text-decoration: none;
-  font-weight: 700;
+  font-weight: 650;
   letter-spacing: 0.01em;
   cursor: pointer;
   box-shadow: none;
@@ -309,7 +312,7 @@ textarea.rr-control {
 
 .rr-button--secondary {
   border-color: var(--rr-color-border-subtle);
-  background: rgb(255 255 255 / 0.84);
+  background: rgb(255 255 255 / 0.72);
   color: var(--rr-color-text-primary);
   box-shadow: none;
 }
@@ -324,7 +327,7 @@ textarea.rr-control {
   padding: var(--rr-space-4);
   border: 1px solid transparent;
   border-radius: var(--rr-radius-md);
-  font-weight: 600;
+  font-weight: 650;
 }
 
 .rr-banner[data-tone='success'] {
@@ -391,8 +394,8 @@ textarea.rr-control {
   gap: 4px;
   padding: 4px;
   border: 1px solid var(--rr-color-border-subtle);
-  border-radius: var(--rr-radius-sm);
-  background: rgb(255 255 255 / 0.72);
+  border-radius: calc(var(--rr-radius-sm) + 2px);
+  background: rgb(255 255 255 / 0.78);
 }
 
 .rr-segmented__button {

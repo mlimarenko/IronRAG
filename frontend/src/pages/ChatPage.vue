@@ -87,7 +87,7 @@ async function submitQuery() {
   detail.value = null
   try {
     if (!selectedProjectId.value) {
-      throw new Error('Create and select a collection in Setup before searching.')
+      throw new Error('Choose a collection in Setup first.')
     }
 
     const response = await runQuery({
@@ -103,7 +103,7 @@ async function submitQuery() {
       detail.value = null
     }
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : 'Unknown search error'
+    errorMessage.value = error instanceof Error ? error.message : 'Search failed'
   } finally {
     loading.value = false
   }
@@ -113,8 +113,8 @@ async function submitQuery() {
 <template>
   <section class="rr-page-grid chat-page">
     <PageSection
-      :eyebrow="t('flow.search.eyebrow')"
       :title="t('flow.search.title')"
+      :description="t('flow.search.description')"
       :status="pageStatus.status"
       :status-label="pageStatus.label"
     >
@@ -142,7 +142,6 @@ async function submitQuery() {
       <article class="rr-panel rr-panel--accent query-panel">
         <div class="query-panel__heading">
           <h3>{{ t('flow.search.query.title') }}</h3>
-          <StatusPill :status="result?.answer_status ?? (selectedProject ? 'ready' : 'blocked')" />
         </div>
 
         <label class="rr-field">
@@ -150,8 +149,8 @@ async function submitQuery() {
           <textarea
             v-model="queryText"
             class="rr-control"
-            rows="5"
-            placeholder="Ask about indexed content"
+            rows="4"
+            placeholder="Ask about the indexed content"
           />
         </label>
 
