@@ -1,105 +1,230 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
-import { api, type WorkspaceGovernanceSummary } from 'src/boot/api'
+import { useFlowStore } from 'src/stores/flow'
+import { useProjectsStore } from 'src/stores/projects'
+import { useWorkspacesStore } from 'src/stores/workspaces'
 
-const workspaces = ref<{ id: string; slug: string; name: string; status: string }[]>([])
-const governance = ref<WorkspaceGovernanceSummary | null>(null)
-const loading = ref(true)
-const infoMessage = ref<string | null>(null)
-const errorMessage = ref<string | null>(null)
+const flowStore = useFlowStore()
+const workspacesStore = useWorkspacesStore()
+const projectsStore = useProjectsStore()
 
-function extractErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'Unknown workspace error'
-}
+const workspaceForm = ref({ slug: '', name: '' })
+const projectForm = ref({ slug: '', name: '', description: '' })
+const workspaceError = ref<string | null>(null)
+const projectError = ref<string | null>(null)
+const successMessage = ref<string | null>(null)
 
-function isUnauthorizedMessage(message: string): boolean {
-  const normalized = message.toLowerCase()
-  return normalized.includes('401') || normalized.includes('unauthorized') || normalized.includes('authorization')
-}
+const selectedWorkspaceId = computed({
+  get: () => flowStore.workspaceId,
+  set: (value: string) => flowStore.selectWorkspace(value),
+})
+
+const selectedProjectId = computed({
+  get: () => flowStore.projectId,
+  set: (value: string) => flowStore.selectProject(value),
+})
 
 onMounted(async () => {
-  try {
-    const { data } =
-      await api.get<{ id: string; slug: string; name: string; status: string }[]>('/workspaces')
-    workspaces.value = data
-
-    if (data.length === 0) {
-      infoMessage.value = 'No workspaces created yet. Create the first workspace to unlock governance views.'
-      return
-    }
-
-    try {
-      const response = await api.get<WorkspaceGovernanceSummary>(`/workspaces/${data[0].id}/governance`)
-      governance.value = response.data
-    } catch (error) {
-      const message = extractErrorMessage(error)
-      if (isUnauthorizedMessage(message)) {
-        infoMessage.value = 'Workspace list is available, but governance details require an authorized API token.'
-      } else {
-        errorMessage.value = message
-      }
-    }
-  } catch (error) {
-    errorMessage.value = extractErrorMessage(error)
-  } finally {
-    loading.value = false
-  }
+  await flowStore.bootstrap()
 })
+
+async function createWorkspaceItem() {
+  workspaceError.value = null
+  successMessage.value = null
+  try {
+    const created = await workspacesStore.createItem({
+      slug: workspaceForm.value.slug.trim(),
+      name: workspaceForm.value.name.trim(),
+    })
+    workspaceForm.value = { slug: '', name: '' }
+    flowStore.selectWorkspace(created.id)
+    successMessage.value = `Workspace ${created.name} created.`
+  } catch (error) {
+    workspaceError.value = error instanceof Error ? error.message : 'Failed to create workspace'
+  }
+}
+
+async function createProjectItem() {
+  projectError.value = null
+  successMessage.value = null
+  if (!flowStore.workspaceId) {
+    projectError.value = 'Select or create a workspace first.'
+    return
+  }
+
+  try {
+    const created = await projectsStore.createItem({
+      workspace_id: flowStore.workspaceId,
+      slug: projectForm.value.slug.trim(),
+      name: projectForm.value.name.trim(),
+      description: projectForm.value.description.trim() || null,
+    })
+    projectForm.value = { slug: '', name: '', description: '' }
+    flowStore.selectProject(created.id)
+    successMessage.value = `Project ${created.name} created.`
+  } catch (error) {
+    projectError.value = error instanceof Error ? error.message : 'Failed to create project'
+  }
+}
 </script>
 
 <template>
-  <section>
-    <h2>Workspaces</h2>
-    <p>Manage isolated tenant-like containers for projects, provider accounts, and policies.</p>
+  <section class="setup-page">
+    <header>
+      <h2>Setup</h2>
+      <p>Create a workspace and project, then keep them selected for ingestion and querying.</p>
+    </header>
 
-    <p v-if="loading">Loading workspaces…</p>
-    <p v-else-if="errorMessage">{{ errorMessage }}</p>
-    <div
-      v-else
-      class="state-card"
-    >
-      <template v-if="governance">
-        <h3>{{ governance.name }}</h3>
-        <p>
-          Projects: {{ governance.projects }} • Providers: {{ governance.provider_accounts }} •
-          Models: {{ governance.model_profiles }}
-        </p>
-        <p>
-          Usage events: {{ governance.usage.usage_events }} • Total tokens:
-          {{ governance.usage.total_tokens }} • Estimated cost:
-          {{ governance.usage.estimated_cost }}
-        </p>
-      </template>
+    <p v-if="successMessage" class="success-banner">{{ successMessage }}</p>
 
-      <template v-else>
-        <h3>{{ workspaces.length > 0 ? 'Workspace list ready' : 'No workspaces found' }}</h3>
-        <p>
-          {{
-            infoMessage ??
-            'Create the first workspace to start operating RustRAG.'
-          }}
-        </p>
-      </template>
+    <div class="setup-grid">
+      <article class="panel">
+        <h3>1. Workspace</h3>
+        <label class="field">
+          <span>Selected workspace</span>
+          <select v-model="selectedWorkspaceId">
+            <option value="">Choose workspace</option>
+            <option v-for="workspace in workspacesStore.items" :key="workspace.id" :value="workspace.id">
+              {{ workspace.name }} ({{ workspace.slug }})
+            </option>
+          </select>
+        </label>
+
+        <div class="form-grid">
+          <label class="field">
+            <span>Workspace name</span>
+            <input v-model="workspaceForm.name" type="text" placeholder="Acme knowledge base">
+          </label>
+          <label class="field">
+            <span>Workspace slug</span>
+            <input v-model="workspaceForm.slug" type="text" placeholder="acme-kb">
+          </label>
+        </div>
+
+        <button type="button" :disabled="!workspaceForm.name || !workspaceForm.slug" @click="createWorkspaceItem">
+          Create workspace
+        </button>
+        <p v-if="workspaceError" class="error-banner">{{ workspaceError }}</p>
+      </article>
+
+      <article class="panel">
+        <h3>2. Project</h3>
+        <label class="field">
+          <span>Selected project</span>
+          <select v-model="selectedProjectId" :disabled="projectsStore.items.length === 0">
+            <option value="">Choose project</option>
+            <option v-for="project in projectsStore.items" :key="project.id" :value="project.id">
+              {{ project.name }} ({{ project.slug }})
+            </option>
+          </select>
+        </label>
+
+        <div class="form-grid">
+          <label class="field">
+            <span>Project name</span>
+            <input v-model="projectForm.name" type="text" placeholder="Customer support docs">
+          </label>
+          <label class="field">
+            <span>Project slug</span>
+            <input v-model="projectForm.slug" type="text" placeholder="support-docs">
+          </label>
+        </div>
+
+        <label class="field">
+          <span>Description</span>
+          <textarea v-model="projectForm.description" rows="3" placeholder="Optional description" />
+        </label>
+
+        <button type="button" :disabled="!projectForm.name || !projectForm.slug || !flowStore.workspaceId" @click="createProjectItem">
+          Create project
+        </button>
+        <p v-if="projectError" class="error-banner">{{ projectError }}</p>
+      </article>
     </div>
-
-    <ul v-if="workspaces.length > 0">
-      <li
-        v-for="workspace in workspaces"
-        :key="workspace.id"
-      >
-        {{ workspace.name }} ({{ workspace.slug }}) — {{ workspace.status }}
-      </li>
-    </ul>
   </section>
 </template>
 
 <style scoped>
-.state-card {
-  margin: 16px 0;
-  padding: 16px;
-  border-radius: 12px;
+.setup-page {
+  display: grid;
+  gap: 16px;
+}
+
+.setup-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.panel {
+  display: grid;
+  gap: 14px;
+  padding: 20px;
   border: 1px solid #d7dee7;
+  border-radius: 16px;
   background: #f8fbff;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+}
+
+input,
+textarea,
+select {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #c8d5e3;
+  border-radius: 10px;
+  font: inherit;
+  background: #fff;
+}
+
+button {
+  width: fit-content;
+  padding: 10px 16px;
+  border: 0;
+  border-radius: 999px;
+  background: #215dff;
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.error-banner,
+.success-banner {
+  padding: 12px 14px;
+  border-radius: 10px;
+}
+
+.error-banner {
+  background: #fde2e2;
+  color: #b42318;
+}
+
+.success-banner {
+  background: #dcfce7;
+  color: #166534;
+}
+
+@media (width <= 1100px) {
+  .setup-grid,
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

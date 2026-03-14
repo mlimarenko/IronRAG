@@ -1,82 +1,140 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted } from 'vue'
 
-import { fetchUsageSummary, type UsageSummary } from 'src/boot/api'
+import { useFlowStore } from 'src/stores/flow'
+import { useProjectsStore } from 'src/stores/projects'
+import { useWorkspacesStore } from 'src/stores/workspaces'
 
-const summary = ref<UsageSummary | null>(null)
-const errorMessage = ref<string | null>(null)
-const infoMessage = ref<string | null>(null)
+const flowStore = useFlowStore()
+const workspacesStore = useWorkspacesStore()
+const projectsStore = useProjectsStore()
 
-function extractErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'Unknown dashboard error'
-}
-
-function isUnauthorizedMessage(message: string): boolean {
-  const normalized = message.toLowerCase()
-  return normalized.includes('401') || normalized.includes('unauthorized') || normalized.includes('authorization')
-}
+const hasWorkspace = computed(() => workspacesStore.items.length > 0)
+const hasProject = computed(() => projectsStore.items.length > 0)
+const selectedWorkspace = computed(() => flowStore.selectedWorkspace)
+const selectedProject = computed(() => flowStore.selectedProject)
 
 onMounted(async () => {
-  try {
-    summary.value = await fetchUsageSummary()
-  } catch (error) {
-    const message = extractErrorMessage(error)
-    if (isUnauthorizedMessage(message)) {
-      infoMessage.value = 'Usage summary requires an authorized API token. Public shell is up; protected metrics are hidden.'
-    } else {
-      errorMessage.value = message
-    }
-  }
+  await flowStore.bootstrap()
 })
 </script>
 
 <template>
-  <section>
-    <h2>Dashboard</h2>
-    <p>
-      RustRAG instance overview: workspaces, projects, ingestion activity, and recent query runs.
-    </p>
+  <section class="overview-page">
+    <header class="hero-card">
+      <p class="eyebrow">RustRAG minimal flow</p>
+      <h2>Get from zero to a grounded answer</h2>
+      <p>
+        This UI is now focused on one path: create a workspace, create a project, ingest text,
+        then ask questions against that project.
+      </p>
+    </header>
 
-    <p v-if="errorMessage">{{ errorMessage }}</p>
-    <div
-      v-else-if="summary"
-      class="summary-grid"
-    >
-      <article class="summary-card">
-        <h3>Usage events</h3>
-        <p>{{ summary.usage_events }}</p>
+    <div class="overview-grid">
+      <article class="step-card">
+        <span class="step-card__index">1</span>
+        <h3>Setup workspace and project</h3>
+        <p>Create the basic containers RustRAG needs before ingestion and querying.</p>
+        <p class="step-card__state">
+          {{ hasWorkspace ? 'Workspace ready' : 'No workspace yet' }} ·
+          {{ hasProject ? 'Project ready' : 'No project yet' }}
+        </p>
+        <RouterLink to="/setup">Open setup</RouterLink>
       </article>
-      <article class="summary-card">
-        <h3>Total tokens</h3>
-        <p>{{ summary.total_tokens }}</p>
+
+      <article class="step-card">
+        <span class="step-card__index">2</span>
+        <h3>Ingest content</h3>
+        <p>Paste text into the selected project and turn it into indexed chunks.</p>
+        <p class="step-card__state">
+          Current project:
+          <strong>{{ selectedProject?.name ?? 'not selected' }}</strong>
+        </p>
+        <RouterLink to="/ingest">Open ingest</RouterLink>
       </article>
-      <article class="summary-card">
-        <h3>Estimated cost</h3>
-        <p>{{ summary.estimated_cost }}</p>
+
+      <article class="step-card">
+        <span class="step-card__index">3</span>
+        <h3>Ask a question</h3>
+        <p>Run a grounded query and inspect the answer with evidence references.</p>
+        <p class="step-card__state">
+          Workspace:
+          <strong>{{ selectedWorkspace?.name ?? 'not selected' }}</strong>
+        </p>
+        <RouterLink to="/ask">Open ask</RouterLink>
       </article>
-    </div>
-    <div
-      v-else
-      class="summary-card"
-    >
-      <h3>Public shell is online</h3>
-      <p>{{ infoMessage ?? 'Protected metrics are unavailable until an API token is configured in the UI flow.' }}</p>
     </div>
   </section>
 </template>
 
 <style scoped>
-.summary-grid {
+.overview-page {
+  display: grid;
+  gap: 20px;
+}
+
+.hero-card,
+.step-card {
+  padding: 20px;
+  border: 1px solid #d7dee7;
+  border-radius: 16px;
+  background: #f8fbff;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #496280;
+}
+
+.hero-card h2,
+.step-card h3 {
+  margin-top: 0;
+}
+
+.overview-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 16px;
-  margin-top: 16px;
 }
 
-.summary-card {
-  padding: 16px;
-  border: 1px solid #d7dee7;
-  border-radius: 12px;
-  background: #f8fbff;
+.step-card {
+  display: grid;
+  gap: 10px;
+}
+
+.step-card__index {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-weight: 700;
+}
+
+.step-card__state {
+  color: #526173;
+}
+
+.step-card a {
+  width: fit-content;
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: #215dff;
+  color: #fff;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+@media (width <= 1100px) {
+  .overview-grid {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

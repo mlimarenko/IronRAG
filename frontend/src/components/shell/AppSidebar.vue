@@ -14,12 +14,10 @@ interface NavItem {
 }
 
 const navItems: readonly NavItem[] = [
-  { to: '/', label: 'Dashboard', caption: 'Instance posture', match: 'exact' },
-  { to: '/workspaces', label: 'Workspaces', caption: 'Governance and scope' },
-  { to: '/projects', label: 'Projects', caption: 'Readiness and content' },
-  { to: '/providers', label: 'Providers', caption: 'Accounts and models' },
-  { to: '/ingestion', label: 'Ingestion', caption: 'Jobs and retries' },
-  { to: '/chat', label: 'Chat', caption: 'Grounded queries' },
+  { to: '/', label: 'Overview', caption: 'What to do next', match: 'exact' },
+  { to: '/setup', label: 'Setup', caption: 'Workspace and project' },
+  { to: '/ingest', label: 'Ingest', caption: 'Paste text and index it' },
+  { to: '/ask', label: 'Ask', caption: 'Query the indexed content' },
 ] as const
 
 const activePath = computed(() => route.path)
@@ -38,13 +36,13 @@ function isActive(item: NavItem) {
     <div class="app-sidebar__brand">
       <div>
         <p class="app-sidebar__eyebrow">RustRAG</p>
-        <h1>Operator Console</h1>
+        <h1>RAG Workspace</h1>
       </div>
-      <StatusBadge label="Live workspace" tone="info" emphasis="strong" />
+      <StatusBadge label="Minimal flow" tone="info" emphasis="strong" />
     </div>
 
     <p class="app-sidebar__summary">
-      Workspace, project, provider, ingestion, and query operations in one console.
+      Create a workspace, create a project, ingest content, then ask grounded questions.
     </p>
 
     <nav class="app-sidebar__nav" aria-label="Primary">

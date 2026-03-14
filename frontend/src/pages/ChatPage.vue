@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import {
   fetchRetrievalRunDetail,
@@ -10,13 +10,21 @@ import {
 import RetrievalDiagnosticsPanel from 'src/components/chat/RetrievalDiagnosticsPanel.vue'
 import StatusPill from 'src/components/chat/StatusPill.vue'
 import TokenListSection from 'src/components/chat/TokenListSection.vue'
+import { useFlowStore } from 'src/stores/flow'
 
-const projectId = ref('')
+const flowStore = useFlowStore()
 const queryText = ref('')
 const result = ref<QueryResponseSurface | null>(null)
 const detail = ref<RetrievalRunDetail | null>(null)
 const errorMessage = ref<string | null>(null)
 const loading = ref(false)
+
+const selectedProject = computed(() => flowStore.selectedProject)
+const selectedProjectId = computed(() => flowStore.projectId)
+
+onMounted(async () => {
+  await flowStore.bootstrap()
+})
 
 async function submitQuery() {
   loading.value = true
@@ -24,14 +32,22 @@ async function submitQuery() {
   result.value = null
   detail.value = null
   try {
+    if (!selectedProjectId.value) {
+      throw new Error('Create and select a project in Setup before asking questions.')
+    }
+
     const response = await runQuery({
-      project_id: projectId.value.trim(),
+      project_id: selectedProjectId.value,
       query_text: queryText.value.trim(),
       top_k: 8,
     })
 
     result.value = response
-    detail.value = await fetchRetrievalRunDetail(response.retrieval_run_id)
+    try {
+      detail.value = await fetchRetrievalRunDetail(response.retrieval_run_id)
+    } catch {
+      detail.value = null
+    }
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : 'Unknown query error'
   } finally {
@@ -42,32 +58,31 @@ async function submitQuery() {
 
 <template>
   <section class="chat-page">
-    <h2>Chat / Query</h2>
-    <p>LightRAG-inspired query experience with retrieved chunks, graph entities, and citations.</p>
+    <header>
+      <h2>Ask</h2>
+      <p>Run a grounded query against the currently selected project.</p>
+    </header>
+
+    <div class="context-card">
+      <p><strong>Workspace:</strong> {{ flowStore.selectedWorkspace?.name ?? 'not selected' }}</p>
+      <p><strong>Project:</strong> {{ selectedProject?.name ?? 'not selected' }}</p>
+      <p v-if="!selectedProject">Go to Setup first, then ingest some text before querying.</p>
+    </div>
 
     <div class="query-form card">
-      <label class="field">
-        <span class="field__label">Project ID</span>
-        <input
-          v-model="projectId"
-          type="text"
-          placeholder="Project UUID"
-        >
-      </label>
-
       <label class="field">
         <span class="field__label">Question</span>
         <textarea
           v-model="queryText"
           rows="4"
-          placeholder="Ask a grounded question"
+          placeholder="Ask a grounded question about the indexed content"
         />
       </label>
 
       <div class="query-form__actions">
         <button
           type="button"
-          :disabled="loading || !projectId || !queryText"
+          :disabled="loading || !selectedProjectId || !queryText.trim()"
           @click="submitQuery"
         >
           {{ loading ? 'Running…' : 'Run query' }}
@@ -75,17 +90,11 @@ async function submitQuery() {
       </div>
     </div>
 
-    <p
-      v-if="errorMessage"
-      class="error-banner"
-    >
+    <p v-if="errorMessage" class="error-banner">
       {{ errorMessage }}
     </p>
 
-    <article
-      v-if="result"
-      class="card result-panel"
-    >
+    <article v-if="result" class="card result-panel">
       <div class="panel-header">
         <div>
           <h3>Answer</h3>
@@ -111,10 +120,7 @@ async function submitQuery() {
 
       <p class="answer-copy">{{ result.answer }}</p>
 
-      <p
-        v-if="result.warning"
-        class="warning-banner"
-      >
+      <p v-if="result.warning" class="warning-banner">
         Warning: {{ result.warning }}
       </p>
 
@@ -125,10 +131,7 @@ async function submitQuery() {
       />
     </article>
 
-    <RetrievalDiagnosticsPanel
-      v-if="detail"
-      :detail="detail"
-    />
+    <RetrievalDiagnosticsPanel v-if="detail" :detail="detail" />
   </section>
 </template>
 
@@ -138,6 +141,7 @@ async function submitQuery() {
   gap: 16px;
 }
 
+.context-card,
 .card {
   padding: 16px;
   border: 1px solid #d7dee7;
@@ -161,7 +165,6 @@ async function submitQuery() {
   color: #526173;
 }
 
-.query-form input,
 .query-form textarea {
   width: 100%;
   padding: 10px 12px;
