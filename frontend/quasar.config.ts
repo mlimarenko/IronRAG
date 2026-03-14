@@ -3,7 +3,7 @@ import { configure } from 'quasar/wrappers'
 export default configure(function () {
   return {
     supportTS: true,
-    boot: ['api'],
+    boot: ['chunk-recovery', 'api'],
     css: ['app.scss'],
     build: {
       vueRouterMode: 'history',
