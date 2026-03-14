@@ -1,8 +1,16 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 
-import { fetchProjects, fetchWorkspaces } from 'src/boot/api'
-import { useDocumentsStore } from 'src/stores/documents'
+import {
+  createSource,
+  fetchDocuments,
+  fetchProjects,
+  fetchSources,
+  fetchWorkspaces,
+  ingestText,
+  type DocumentSummary,
+  type SourceSummary,
+} from 'src/boot/api'
 import {
   getSelectedProjectId,
   getSelectedWorkspaceId,
@@ -23,16 +31,17 @@ interface ProjectItem {
   workspace_id: string
 }
 
-const documentsStore = useDocumentsStore()
-
 const workspaces = ref<WorkspaceItem[]>([])
 const projects = ref<ProjectItem[]>([])
+const documents = ref<DocumentSummary[]>([])
+const sources = ref<SourceSummary[]>([])
 const sourceLabel = ref('Pasted text')
 const externalKey = ref(`note-${Date.now()}`)
 const title = ref('')
 const text = ref('')
 const statusMessage = ref<string | null>(null)
 const errorMessage = ref<string | null>(null)
+const loading = ref(false)
 
 const selectedProjectId = computed(() => getSelectedProjectId())
 const selectedProject = computed(
@@ -41,9 +50,12 @@ const selectedProject = computed(
 const selectedWorkspace = computed(
   () => workspaces.value.find((item) => item.id === getSelectedWorkspaceId()) ?? null,
 )
-const projectState = computed(() =>
-  selectedProjectId.value ? documentsStore.byProjectId[selectedProjectId.value] ?? null : null,
-)
+
+async function loadProjectData(projectId: string) {
+  const [docs, srcs] = await Promise.all([fetchDocuments(projectId), fetchSources(projectId)])
+  documents.value = docs
+  sources.value = srcs
+}
 
 onMounted(async () => {
   workspaces.value = await fetchWorkspaces()
@@ -58,35 +70,34 @@ onMounted(async () => {
     }
   }
   if (selectedProjectId.value) {
-    await Promise.all([
-      documentsStore.fetchProjectDocuments(selectedProjectId.value),
-      documentsStore.fetchProjectJobs(selectedProjectId.value),
-      documentsStore.fetchProjectSources(selectedProjectId.value),
-    ])
+    await loadProjectData(selectedProjectId.value)
   }
 })
 
 async function ingestCurrentText() {
   errorMessage.value = null
   statusMessage.value = null
+  loading.value = true
 
   if (!selectedProjectId.value) {
     errorMessage.value = 'Create and select a project first in Setup.'
+    loading.value = false
     return
   }
 
   try {
-    let sourceId = projectState.value?.sources.data[0]?.id
+    let sourceId = sources.value[0]?.id
     if (!sourceId) {
-      const source = await documentsStore.createSourceForProject({
+      const source = await createSource({
         project_id: selectedProjectId.value,
         source_kind: 'text',
         label: sourceLabel.value.trim() || 'Pasted text',
       })
       sourceId = source.id
+      sources.value = [source, ...sources.value.filter((item) => item.id !== source.id)]
     }
 
-    const result = await documentsStore.ingestTextForProject({
+    const result = await ingestText({
       project_id: selectedProjectId.value,
       source_id: sourceId,
       external_key: externalKey.value.trim(),
@@ -94,16 +105,14 @@ async function ingestCurrentText() {
       text: text.value,
     })
 
-    await Promise.all([
-      documentsStore.fetchProjectDocuments(selectedProjectId.value),
-      documentsStore.fetchProjectJobs(selectedProjectId.value),
-      documentsStore.fetchProjectSources(selectedProjectId.value),
-    ])
+    await loadProjectData(selectedProjectId.value)
 
-    statusMessage.value = `Indexed ${result.chunkCount} chunks into document ${result.documentId}.`
+    statusMessage.value = `Indexed ${result.chunk_count} chunks into document ${result.document_id}.`
     text.value = ''
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : 'Failed to ingest text'
+  } finally {
+    loading.value = false
   }
 }
 </script>
@@ -144,25 +153,25 @@ async function ingestCurrentText() {
           <textarea v-model="text" rows="12" placeholder="Paste the content you want RustRAG to index" />
         </label>
 
-        <button type="button" :disabled="!selectedProjectId || !text.trim() || documentsStore.ingestState.status === 'loading'" @click="ingestCurrentText">
-          {{ documentsStore.ingestState.status === 'loading' ? 'Indexing…' : 'Ingest text' }}
+        <button type="button" :disabled="!selectedProjectId || !text.trim() || loading" @click="ingestCurrentText">
+          {{ loading ? 'Indexing…' : 'Ingest text' }}
         </button>
       </article>
 
       <article class="panel">
         <h3>Indexed content</h3>
-        <p v-if="!projectState?.documents.data.length">No indexed documents yet.</p>
+        <p v-if="!documents.length">No indexed documents yet.</p>
         <ul v-else>
-          <li v-for="document in projectState.documents.data" :key="document.id">
+          <li v-for="document in documents" :key="document.id">
             {{ document.title || document.external_key }}
           </li>
         </ul>
 
-        <h3>Recent jobs</h3>
-        <p v-if="!projectState?.jobs.data.length">No ingestion jobs yet.</p>
+        <h3>Sources</h3>
+        <p v-if="!sources.length">No sources yet.</p>
         <ul v-else>
-          <li v-for="job in projectState.jobs.data" :key="job.id">
-            {{ job.status }} / {{ job.stage }}
+          <li v-for="source in sources" :key="source.id">
+            {{ source.label }} · {{ source.source_kind }}
           </li>
         </ul>
       </article>
