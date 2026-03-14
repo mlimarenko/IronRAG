@@ -234,34 +234,34 @@ export const api = axios.create({
 })
 
 export async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
-  const { data } = await api.get<WorkspaceSummary[]>('/v1/workspaces')
+  const { data } = await api.get<WorkspaceSummary[]>('/workspaces')
   return data
 }
 
 export async function createWorkspace(payload: CreateWorkspaceRequest): Promise<WorkspaceSummary> {
-  const { data } = await api.post<WorkspaceSummary>('/v1/workspaces', payload)
+  const { data } = await api.post<WorkspaceSummary>('/workspaces', payload)
   return data
 }
 
 export async function fetchWorkspaceGovernance(id: string): Promise<WorkspaceGovernanceSummary> {
-  const { data } = await api.get<WorkspaceGovernanceSummary>(`/v1/workspaces/${id}/governance`)
+  const { data } = await api.get<WorkspaceGovernanceSummary>(`/workspaces/${id}/governance`)
   return data
 }
 
 export async function fetchProjects(workspaceId?: string): Promise<ProjectSummary[]> {
-  const { data } = await api.get<ProjectSummary[]>('/v1/projects', {
+  const { data } = await api.get<ProjectSummary[]>('/projects', {
     params: workspaceId ? { workspace_id: workspaceId } : {},
   })
   return data
 }
 
 export async function createProject(payload: CreateProjectRequest): Promise<ProjectSummary> {
-  const { data } = await api.post<ProjectSummary>('/v1/projects', payload)
+  const { data } = await api.post<ProjectSummary>('/projects', payload)
   return data
 }
 
 export async function fetchProviderAccounts(workspaceId?: string): Promise<ProviderAccountSummary[]> {
-  const { data } = await api.get<ProviderAccountSummary[]>('/v1/provider-accounts', {
+  const { data } = await api.get<ProviderAccountSummary[]>('/provider-accounts', {
     params: workspaceId ? { workspace_id: workspaceId } : {},
   })
   return data
@@ -270,12 +270,12 @@ export async function fetchProviderAccounts(workspaceId?: string): Promise<Provi
 export async function createProviderAccount(
   payload: CreateProviderAccountRequest,
 ): Promise<ProviderAccountSummary> {
-  const { data } = await api.post<ProviderAccountSummary>('/v1/provider-accounts', payload)
+  const { data } = await api.post<ProviderAccountSummary>('/provider-accounts', payload)
   return data
 }
 
 export async function fetchModelProfiles(workspaceId?: string): Promise<ModelProfileSummary[]> {
-  const { data } = await api.get<ModelProfileSummary[]>('/v1/model-profiles', {
+  const { data } = await api.get<ModelProfileSummary[]>('/model-profiles', {
     params: workspaceId ? { workspace_id: workspaceId } : {},
   })
   return data
@@ -284,58 +284,58 @@ export async function fetchModelProfiles(workspaceId?: string): Promise<ModelPro
 export async function createModelProfile(
   payload: CreateModelProfileRequest,
 ): Promise<ModelProfileSummary> {
-  const { data } = await api.post<ModelProfileSummary>('/v1/model-profiles', payload)
+  const { data } = await api.post<ModelProfileSummary>('/model-profiles', payload)
   return data
 }
 
 export async function fetchProviderGovernance(id: string): Promise<ProviderGovernanceSummary> {
-  const { data } = await api.get<ProviderGovernanceSummary>(`/v1/provider-governance/${id}`)
+  const { data } = await api.get<ProviderGovernanceSummary>(`/provider-governance/${id}`)
   return data
 }
 
 export async function fetchSources(projectId?: string): Promise<SourceSummary[]> {
-  const { data } = await api.get<SourceSummary[]>('/v1/sources', {
+  const { data } = await api.get<SourceSummary[]>('/sources', {
     params: projectId ? { project_id: projectId } : {},
   })
   return data
 }
 
 export async function createSource(payload: CreateSourceRequest): Promise<SourceSummary> {
-  const { data } = await api.post<SourceSummary>('/v1/sources', payload)
+  const { data } = await api.post<SourceSummary>('/sources', payload)
   return data
 }
 
 export async function fetchUsageSummary(projectId?: string): Promise<UsageSummary> {
-  const { data } = await api.get<UsageSummary>('/v1/usage-summary', {
+  const { data } = await api.get<UsageSummary>('/usage-summary', {
     params: projectId ? { project_id: projectId } : {},
   })
   return data
 }
 
 export async function fetchIngestionJobDetail(id: string): Promise<IngestionJobDetail> {
-  const { data } = await api.get<IngestionJobDetail>(`/v1/ingestion-jobs/${id}`)
+  const { data } = await api.get<IngestionJobDetail>(`/ingestion-jobs/${id}`)
   return data
 }
 
 export async function createIngestionJob(
   payload: CreateIngestionJobRequest,
 ): Promise<IngestionJobDetail> {
-  const { data } = await api.post<IngestionJobDetail>('/v1/ingestion-jobs', payload)
+  const { data } = await api.post<IngestionJobDetail>('/ingestion-jobs', payload)
   return data
 }
 
 export async function retryIngestionJob(id: string): Promise<IngestionJobDetail> {
-  const { data } = await api.post<IngestionJobDetail>(`/v1/ingestion-jobs/${id}/retry`)
+  const { data } = await api.post<IngestionJobDetail>(`/ingestion-jobs/${id}/retry`)
   return data
 }
 
 export async function fetchProjectReadiness(id: string): Promise<ProjectReadinessSummary> {
-  const { data } = await api.get<ProjectReadinessSummary>(`/v1/projects/${id}/readiness`)
+  const { data } = await api.get<ProjectReadinessSummary>(`/projects/${id}/readiness`)
   return data
 }
 
 export async function fetchDocuments(projectId?: string): Promise<DocumentSummary[]> {
-  const { data } = await api.get<DocumentSummary[]>('/v1/documents', {
+  const { data } = await api.get<DocumentSummary[]>('/documents', {
     params: projectId ? { project_id: projectId } : {},
   })
   return data
@@ -346,19 +346,19 @@ export async function fetchChunks(options: {
   document_id?: string
   limit?: number
 }): Promise<ChunkSummary[]> {
-  const { data } = await api.get<ChunkSummary[]>('/v1/chunks', {
+  const { data } = await api.get<ChunkSummary[]>('/chunks', {
     params: options,
   })
   return data
 }
 
 export async function searchChunks(payload: SearchChunksRequest): Promise<SearchChunkResult[]> {
-  const { data } = await api.post<SearchChunkResult[]>('/v1/content/search-chunks', payload)
+  const { data } = await api.post<SearchChunkResult[]>('/content/search-chunks', payload)
   return data
 }
 
 export async function ingestText(payload: IngestTextRequest): Promise<IngestTextResponse> {
-  const { data } = await api.post<IngestTextResponse>('/v1/content/ingest-text', payload)
+  const { data } = await api.post<IngestTextResponse>('/content/ingest-text', payload)
   return data
 }
 
@@ -369,11 +369,11 @@ export async function runQuery(payload: {
   embedding_model_profile_id?: string
   top_k?: number
 }): Promise<QueryResponseSurface> {
-  const { data } = await api.post<QueryResponseSurface>('/v1/query', payload)
+  const { data } = await api.post<QueryResponseSurface>('/query', payload)
   return data
 }
 
 export async function fetchRetrievalRunDetail(id: string): Promise<RetrievalRunDetail> {
-  const { data } = await api.get<RetrievalRunDetail>(`/v1/retrieval-runs/${id}`)
+  const { data } = await api.get<RetrievalRunDetail>(`/retrieval-runs/${id}`)
   return data
 }
