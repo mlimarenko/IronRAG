@@ -489,6 +489,23 @@ pub async fn create_document(
     .await
 }
 
+/// Database repository helper: `get_document_by_id`.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while executing the underlying database query.
+pub async fn get_document_by_id(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<Option<DocumentRow>, sqlx::Error> {
+    sqlx::query_as::<_, DocumentRow>(
+        "select id, project_id, source_id, external_key, title, mime_type, checksum, created_at, updated_at
+         from document where id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct RetrievalRunRow {
     pub id: Uuid,
