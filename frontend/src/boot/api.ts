@@ -233,6 +233,27 @@ export const api = axios.create({
   baseURL: env.VITE_BACKEND_URL?.trim() || '/v1',
 })
 
+api.interceptors.response.use(
+  (response) => response,
+  (error: unknown) => {
+    if (axios.isAxiosError(error)) {
+      const status = error.response?.status
+      const method = error.config?.method?.toUpperCase() ?? 'REQUEST'
+      const url = error.config?.url ?? 'unknown-url'
+      const body =
+        typeof error.response?.data === 'string'
+          ? error.response.data
+          : error.response?.data?.message ?? error.response?.data?.error ?? null
+
+      const detail = body ? `: ${body}` : ''
+      const normalized = new Error(`${method} ${url} failed with ${status ?? 'network error'}${detail}`)
+      return Promise.reject(normalized)
+    }
+
+    return Promise.reject(error)
+  },
+)
+
 export async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
   const { data } = await api.get<WorkspaceSummary[]>('/workspaces')
   return data
