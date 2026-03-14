@@ -23,26 +23,26 @@ const label = computed(() => formatStatusLabel(props.status))
 <style scoped>
 .status-pill {
   padding: 6px 10px;
-  border-radius: 999px;
+  border-radius: var(--rr-radius-pill);
   font-size: 0.85rem;
   font-weight: 700;
   white-space: nowrap;
-  background: #e8edf3;
-  color: #324253;
+  background: rgb(148 163 184 / 0.12);
+  color: var(--rr-color-text-secondary);
 }
 
 .status-pill[data-tone='positive'] {
-  background: #dff7e6;
-  color: #166534;
+  background: var(--rr-color-success-50);
+  color: var(--rr-color-success-600);
 }
 
 .status-pill[data-tone='warning'] {
-  background: #fff4d8;
-  color: #9a6700;
+  background: var(--rr-color-warning-50);
+  color: var(--rr-color-warning-600);
 }
 
 .status-pill[data-tone='negative'] {
-  background: #fde2e2;
-  color: #b42318;
+  background: var(--rr-color-danger-50);
+  color: var(--rr-color-danger-600);
 }
 </style>

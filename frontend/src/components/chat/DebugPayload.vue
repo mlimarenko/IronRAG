@@ -39,9 +39,10 @@ const debugEntries = computed(() => formatDebugEntries(props.debugJson))
 
 <style scoped>
 .debug-block {
-  padding: 12px;
-  border-radius: 10px;
-  background: rgb(16 24 40 / 0.04);
+  padding: var(--rr-space-4);
+  border: 1px solid var(--rr-color-border-subtle);
+  border-radius: var(--rr-radius-md);
+  background: rgb(16 24 40 / 0.03);
 }
 
 .debug-block summary {
@@ -50,18 +51,18 @@ const debugEntries = computed(() => formatDebugEntries(props.debugJson))
 }
 
 .muted {
-  color: #526173;
+  color: var(--rr-color-text-secondary);
 }
 
 .debug-list {
-  margin: 12px 0 0;
+  margin: var(--rr-space-3) 0 0;
 }
 
 .debug-list__row {
   display: grid;
-  gap: 8px;
-  padding-top: 12px;
-  border-top: 1px solid #d7dee7;
+  gap: var(--rr-space-2);
+  padding-top: var(--rr-space-3);
+  border-top: 1px solid var(--rr-color-border-subtle);
 }
 
 .debug-list__row:first-child {
@@ -79,11 +80,11 @@ const debugEntries = computed(() => formatDebugEntries(props.debugJson))
 
 .debug-list__row pre {
   margin: 0;
-  padding: 10px;
-  border-radius: 8px;
+  padding: var(--rr-space-3);
+  border-radius: var(--rr-radius-sm);
   overflow-x: auto;
-  background: #111827;
-  color: #f9fafb;
+  background: var(--rr-color-bg-contrast);
+  color: var(--rr-color-text-inverse);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }

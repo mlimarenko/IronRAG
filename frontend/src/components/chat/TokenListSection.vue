@@ -7,7 +7,7 @@ defineProps<{
 </script>
 
 <template>
-  <div class="section-block">
+  <div class="section-block rr-panel rr-panel--muted">
     <h4>{{ title }}</h4>
     <p
       v-if="!items.length"
@@ -31,23 +31,26 @@ defineProps<{
 
 <style scoped>
 .section-block {
-  padding: 12px;
-  border-radius: 10px;
-  background: rgb(255 255 255 / 65%);
+  gap: var(--rr-space-3);
+}
+
+.section-block h4 {
+  margin: 0;
 }
 
 .muted {
-  color: #526173;
+  color: var(--rr-color-text-secondary);
 }
 
 .token-list {
   display: grid;
-  gap: 8px;
+  gap: var(--rr-space-2);
   padding-left: 20px;
   margin: 0;
 }
 
 .token-list code {
   overflow-wrap: anywhere;
+  color: var(--rr-color-text-primary);
 }
 </style>

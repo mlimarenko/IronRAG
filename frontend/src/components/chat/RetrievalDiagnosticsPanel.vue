@@ -11,9 +11,10 @@ defineProps<{
 </script>
 
 <template>
-  <article class="card result-panel diagnostics-panel">
+  <article class="rr-panel diagnostics-panel">
     <div class="panel-header">
       <div>
+        <p class="rr-kicker">Retrieval trace</p>
         <h3>Retrieval diagnostics</h3>
         <p class="panel-subtitle">Detail from retrieval run {{ detail.id }}.</p>
       </div>
@@ -65,34 +66,31 @@ defineProps<{
 </template>
 
 <style scoped>
-.card {
-  padding: 16px;
-  border: 1px solid #d7dee7;
-  border-radius: 12px;
-  background: #f8fbff;
-}
-
-.result-panel {
+.diagnostics-panel {
   display: grid;
-  gap: 16px;
+  gap: var(--rr-space-5);
 }
 
 .panel-header {
   display: flex;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--rr-space-3);
   align-items: flex-start;
+}
+
+.panel-header h3 {
+  margin: 4px 0 0;
 }
 
 .panel-subtitle,
 .summary-item__label {
-  color: #526173;
+  color: var(--rr-color-text-secondary);
 }
 
 .summary-grid,
 .diagnostics-columns {
   display: grid;
-  gap: 12px;
+  gap: var(--rr-space-3);
 }
 
 .summary-grid {
@@ -105,9 +103,9 @@ defineProps<{
 
 .summary-item,
 .section-block {
-  padding: 12px;
-  border-radius: 10px;
-  background: rgb(255 255 255 / 65%);
+  padding: var(--rr-space-4);
+  border-radius: var(--rr-radius-sm);
+  background: rgb(255 255 255 / 0.64);
 }
 
 .summary-item {
@@ -121,10 +119,9 @@ defineProps<{
   line-height: 1.5;
 }
 
-.warning-banner {
-  padding: 12px 14px;
-  border-radius: 10px;
-  background: #fff4d8;
-  color: #7c5600;
+@media (width <= 700px) {
+  .panel-header {
+    flex-direction: column;
+  }
 }
 </style>

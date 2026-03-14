@@ -83,7 +83,7 @@ const resolvedLabel = computed(() => props.label ?? formatLabel(props.status))
   gap: 6px;
   min-height: 28px;
   padding: 0 10px;
-  border-radius: 999px;
+  border-radius: var(--rr-radius-pill);
   border: 1px solid transparent;
   font-size: 0.8rem;
   font-weight: 700;
@@ -93,47 +93,47 @@ const resolvedLabel = computed(() => props.label ?? formatLabel(props.status))
 
 .status-badge[data-emphasis='subtle'] {
   background: rgb(148 163 184 / 0.12);
-  color: #475569;
+  color: var(--rr-color-text-secondary);
 }
 
 .status-badge[data-emphasis='strong'] {
-  background: #0f172a;
-  color: #f8fafc;
+  background: var(--rr-color-bg-contrast);
+  color: var(--rr-color-text-inverse);
 }
 
 .status-badge[data-tone='positive'][data-emphasis='subtle'] {
   background: rgb(34 197 94 / 0.14);
-  color: #166534;
+  color: var(--rr-color-success-600);
 }
 
 .status-badge[data-tone='warning'][data-emphasis='subtle'] {
   background: rgb(245 158 11 / 0.16);
-  color: #92400e;
+  color: var(--rr-color-warning-600);
 }
 
 .status-badge[data-tone='negative'][data-emphasis='subtle'] {
   background: rgb(239 68 68 / 0.13);
-  color: #b91c1c;
+  color: var(--rr-color-danger-600);
 }
 
 .status-badge[data-tone='info'][data-emphasis='subtle'] {
   background: rgb(59 130 246 / 0.13);
-  color: #1d4ed8;
+  color: var(--rr-color-accent-700);
 }
 
 .status-badge[data-tone='positive'][data-emphasis='strong'] {
-  background: #166534;
+  background: var(--rr-color-success-600);
 }
 
 .status-badge[data-tone='warning'][data-emphasis='strong'] {
-  background: #92400e;
+  background: var(--rr-color-warning-600);
 }
 
 .status-badge[data-tone='negative'][data-emphasis='strong'] {
-  background: #991b1b;
+  background: var(--rr-color-danger-600);
 }
 
 .status-badge[data-tone='info'][data-emphasis='strong'] {
-  background: #1d4ed8;
+  background: var(--rr-color-accent-700);
 }
 </style>

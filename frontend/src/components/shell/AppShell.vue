@@ -50,34 +50,50 @@ const routeMeta = computed(() => {
   display: grid;
   grid-template-columns: minmax(260px, 300px) minmax(0, 1fr);
   min-height: 100vh;
-  color: #0f172a;
+  color: var(--rr-color-text-primary);
 }
 
 .app-shell__sidebar {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  min-height: 100vh;
   padding: 28px 22px;
+  border-right: 1px solid rgb(148 163 184 / 0.12);
   background:
-    radial-gradient(circle at top, rgb(59 130 246 / 0.22), transparent 35%),
-    linear-gradient(180deg, #0f172a 0%, #111827 100%);
+    radial-gradient(circle at top, rgb(59 130 246 / 0.2), transparent 34%),
+    linear-gradient(180deg, #10203a 0%, #0f172a 100%);
 }
 
 .app-shell__main {
   display: grid;
-  gap: 20px;
+  gap: var(--rr-space-5);
   align-content: start;
-  padding: 24px;
+  padding: 28px;
   background:
     radial-gradient(circle at top right, rgb(59 130 246 / 0.07), transparent 24%),
-    linear-gradient(180deg, #f8fafc 0%, #eef4fb 100%);
+    linear-gradient(180deg, rgb(255 255 255 / 0.08), rgb(255 255 255 / 0.02));
 }
 
 .app-shell__content {
   display: grid;
-  gap: 20px;
+  gap: var(--rr-space-5);
 }
 
 @media (width <= 1100px) {
   .app-shell {
     grid-template-columns: 1fr;
+  }
+
+  .app-shell__sidebar {
+    position: static;
+    min-height: auto;
+    border-right: 0;
+    border-bottom: 1px solid rgb(148 163 184 / 0.12);
+  }
+
+  .app-shell__main {
+    padding: 22px;
   }
 }
 </style>

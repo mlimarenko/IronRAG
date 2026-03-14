@@ -46,20 +46,22 @@ withDefaults(
 .app-topbar {
   display: flex;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--rr-space-4);
   align-items: center;
-  padding: 16px 20px;
-  border: 1px solid #d7dee7;
-  border-radius: 20px;
-  background: rgb(255 255 255 / 0.88);
-  box-shadow: 0 10px 30px rgb(15 23 42 / 0.05);
+  padding: 18px 22px;
+  border: 1px solid var(--rr-color-border-subtle);
+  border-radius: var(--rr-radius-lg);
+  background:
+    radial-gradient(circle at top right, rgb(37 99 235 / 0.12), transparent 24%),
+    rgb(255 255 255 / 0.84);
+  box-shadow: var(--rr-shadow-sm);
 }
 
 .app-topbar__context,
 .app-topbar__meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: var(--rr-space-3);
   align-items: center;
 }
 
@@ -67,10 +69,14 @@ withDefaults(
   display: grid;
   gap: 4px;
   min-width: 160px;
+  padding: 10px 14px;
+  border: 1px solid rgb(148 163 184 / 0.18);
+  border-radius: var(--rr-radius-md);
+  background: rgb(255 255 255 / 0.56);
 }
 
 .app-topbar__item strong {
-  color: #0f172a;
+  color: var(--rr-color-text-primary);
 }
 
 .app-topbar__item--compact {
@@ -82,7 +88,7 @@ withDefaults(
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: #64748b;
+  color: var(--rr-color-text-muted);
 }
 
 @media (width <= 900px) {

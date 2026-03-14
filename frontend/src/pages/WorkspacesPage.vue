@@ -2,6 +2,8 @@
 import { computed, onMounted, ref, watch } from 'vue'
 
 import { createProject, createWorkspace, fetchProjects, fetchWorkspaces } from 'src/boot/api'
+import PageSection from 'src/components/shell/PageSection.vue'
+import StatusBadge from 'src/components/shell/StatusBadge.vue'
 import {
   getSelectedProjectId,
   getSelectedWorkspaceId,
@@ -42,7 +44,27 @@ const selectedWorkspaceId = computed({
 
 const selectedProjectId = computed({
   get: () => getSelectedProjectId(),
-  set: (value: string) => setSelectedProjectId(value),
+  set: (value: string) => {
+    setSelectedProjectId(value)
+  },
+})
+
+const selectedWorkspace = computed(
+  () => workspaces.value.find((item) => item.id === selectedWorkspaceId.value) ?? null,
+)
+const selectedProject = computed(
+  () => projects.value.find((item) => item.id === selectedProjectId.value) ?? null,
+)
+const setupStatus = computed(() => {
+  if (selectedProject.value) {
+    return { status: 'ready', label: 'Project selected' }
+  }
+
+  if (selectedWorkspace.value) {
+    return { status: 'partial', label: 'Workspace selected' }
+  }
+
+  return { status: 'draft', label: 'Create your first workspace' }
 })
 
 watch(selectedWorkspaceId, async (value) => {
@@ -110,161 +132,222 @@ async function createProjectItem() {
 </script>
 
 <template>
-  <section class="setup-page">
-    <header>
-      <h2>Setup</h2>
-      <p>Create a workspace and project, then keep them selected for ingestion and querying.</p>
-    </header>
+  <section class="rr-page-grid setup-page">
+    <PageSection
+      eyebrow="Step 1"
+      title="Set up workspace and project context"
+      description="Choose the active workspace first, then keep one project selected for ingestion and grounded querying."
+      :status="setupStatus.status"
+      :status-label="setupStatus.label"
+    >
+      <div class="rr-stat-strip">
+        <article class="rr-stat">
+          <p class="rr-stat__label">Workspaces</p>
+          <strong>{{ workspaces.length }}</strong>
+          <p>{{ selectedWorkspace?.name ?? 'No active workspace selected yet.' }}</p>
+        </article>
+        <article class="rr-stat">
+          <p class="rr-stat__label">Projects in scope</p>
+          <strong>{{ projects.length }}</strong>
+          <p>{{ selectedProject?.name ?? 'Pick or create one for the minimal flow.' }}</p>
+        </article>
+        <article class="rr-stat">
+          <p class="rr-stat__label">Next step</p>
+          <strong>{{ selectedProject ? 'Continue to ingest' : 'Finish project setup' }}</strong>
+          <p>The selection made here becomes the default context for the next pages.</p>
+        </article>
+      </div>
 
-    <p v-if="successMessage" class="success-banner">{{ successMessage }}</p>
+      <p
+        v-if="successMessage"
+        class="rr-banner"
+        data-tone="success"
+      >
+        {{ successMessage }}
+      </p>
 
-    <div class="setup-grid">
-      <article class="panel">
-        <h3>1. Workspace</h3>
-        <label class="field">
-          <span>Selected workspace</span>
-          <select v-model="selectedWorkspaceId">
-            <option value="">Choose workspace</option>
-            <option v-for="workspace in workspaces" :key="workspace.id" :value="workspace.id">
-              {{ workspace.name }} ({{ workspace.slug }})
-            </option>
-          </select>
-        </label>
+      <div class="setup-grid">
+        <article class="rr-panel rr-panel--accent setup-panel">
+          <div class="setup-panel__heading">
+            <div>
+              <p class="rr-kicker">Workspace</p>
+              <h3>Create or select a workspace</h3>
+            </div>
+            <StatusBadge
+              :status="selectedWorkspace ? 'ready' : 'draft'"
+              :label="selectedWorkspace ? 'Selected' : 'Required'"
+            />
+          </div>
 
-        <div class="form-grid">
-          <label class="field">
-            <span>Workspace name</span>
-            <input v-model="workspaceForm.name" type="text" placeholder="Acme knowledge base">
-          </label>
-          <label class="field">
-            <span>Workspace slug</span>
-            <input v-model="workspaceForm.slug" type="text" placeholder="acme-kb">
-          </label>
-        </div>
+          <div class="rr-form-grid">
+            <label class="rr-field">
+              <span class="rr-field__label">Selected workspace</span>
+              <select v-model="selectedWorkspaceId" class="rr-control">
+                <option value="">Choose workspace</option>
+                <option v-for="workspace in workspaces" :key="workspace.id" :value="workspace.id">
+                  {{ workspace.name }} ({{ workspace.slug }})
+                </option>
+              </select>
+              <p class="rr-field__hint">The selected workspace defines which projects are available below.</p>
+            </label>
 
-        <button type="button" :disabled="!workspaceForm.name || !workspaceForm.slug" @click="createWorkspaceItem">
-          Create workspace
-        </button>
-        <p v-if="workspaceError" class="error-banner">{{ workspaceError }}</p>
-      </article>
+            <div class="rr-form-grid rr-form-grid--two">
+              <label class="rr-field">
+                <span class="rr-field__label">Workspace name</span>
+                <input
+                  v-model="workspaceForm.name"
+                  class="rr-control"
+                  type="text"
+                  placeholder="Acme knowledge base"
+                >
+              </label>
+              <label class="rr-field">
+                <span class="rr-field__label">Workspace slug</span>
+                <input
+                  v-model="workspaceForm.slug"
+                  class="rr-control"
+                  type="text"
+                  placeholder="acme-kb"
+                >
+              </label>
+            </div>
+          </div>
 
-      <article class="panel">
-        <h3>2. Project</h3>
-        <label class="field">
-          <span>Selected project</span>
-          <select v-model="selectedProjectId" :disabled="projects.length === 0">
-            <option value="">Choose project</option>
-            <option v-for="project in projects" :key="project.id" :value="project.id">
-              {{ project.name }} ({{ project.slug }})
-            </option>
-          </select>
-        </label>
+          <div class="rr-action-row">
+            <button
+              type="button"
+              class="rr-button"
+              :disabled="!workspaceForm.name || !workspaceForm.slug"
+              @click="createWorkspaceItem"
+            >
+              Create workspace
+            </button>
+          </div>
 
-        <div class="form-grid">
-          <label class="field">
-            <span>Project name</span>
-            <input v-model="projectForm.name" type="text" placeholder="Customer support docs">
-          </label>
-          <label class="field">
-            <span>Project slug</span>
-            <input v-model="projectForm.slug" type="text" placeholder="support-docs">
-          </label>
-        </div>
+          <p
+            v-if="workspaceError"
+            class="rr-banner"
+            data-tone="danger"
+          >
+            {{ workspaceError }}
+          </p>
+        </article>
 
-        <label class="field">
-          <span>Description</span>
-          <textarea v-model="projectForm.description" rows="3" placeholder="Optional description" />
-        </label>
+        <article class="rr-panel setup-panel">
+          <div class="setup-panel__heading">
+            <div>
+              <p class="rr-kicker">Project</p>
+              <h3>Create or select a project</h3>
+            </div>
+            <StatusBadge
+              :status="selectedProject ? 'ready' : selectedWorkspace ? 'partial' : 'blocked'"
+              :label="selectedProject ? 'Selected' : selectedWorkspace ? 'Workspace ready' : 'Needs workspace'"
+            />
+          </div>
 
-        <button type="button" :disabled="!projectForm.name || !projectForm.slug || !getSelectedWorkspaceId()" @click="createProjectItem">
-          Create project
-        </button>
-        <p v-if="projectError" class="error-banner">{{ projectError }}</p>
-      </article>
-    </div>
+          <div class="rr-form-grid">
+            <label class="rr-field">
+              <span class="rr-field__label">Selected project</span>
+              <select
+                v-model="selectedProjectId"
+                class="rr-control"
+                :disabled="projects.length === 0"
+              >
+                <option value="">Choose project</option>
+                <option v-for="project in projects" :key="project.id" :value="project.id">
+                  {{ project.name }} ({{ project.slug }})
+                </option>
+              </select>
+              <p class="rr-field__hint">Ingest and Ask will use this project automatically.</p>
+            </label>
+
+            <div class="rr-form-grid rr-form-grid--two">
+              <label class="rr-field">
+                <span class="rr-field__label">Project name</span>
+                <input
+                  v-model="projectForm.name"
+                  class="rr-control"
+                  type="text"
+                  placeholder="Customer support docs"
+                >
+              </label>
+              <label class="rr-field">
+                <span class="rr-field__label">Project slug</span>
+                <input
+                  v-model="projectForm.slug"
+                  class="rr-control"
+                  type="text"
+                  placeholder="support-docs"
+                >
+              </label>
+            </div>
+
+            <label class="rr-field">
+              <span class="rr-field__label">Description</span>
+              <textarea
+                v-model="projectForm.description"
+                class="rr-control"
+                rows="4"
+                placeholder="Optional description"
+              />
+            </label>
+          </div>
+
+          <div class="rr-action-row">
+            <button
+              type="button"
+              class="rr-button"
+              :disabled="!projectForm.name || !projectForm.slug || !getSelectedWorkspaceId()"
+              @click="createProjectItem"
+            >
+              Create project
+            </button>
+          </div>
+
+          <p
+            v-if="projectError"
+            class="rr-banner"
+            data-tone="danger"
+          >
+            {{ projectError }}
+          </p>
+        </article>
+      </div>
+    </PageSection>
   </section>
 </template>
 
 <style scoped>
-.setup-page {
-  display: grid;
-  gap: 16px;
-}
-
 .setup-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
+  gap: var(--rr-space-4);
 }
 
-.panel {
-  display: grid;
-  gap: 14px;
-  padding: 20px;
-  border: 1px solid #d7dee7;
-  border-radius: 16px;
-  background: #f8fbff;
+.setup-panel {
+  align-content: start;
 }
 
-.form-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+.setup-panel__heading {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--rr-space-3);
+  align-items: flex-start;
 }
 
-.field {
-  display: grid;
-  gap: 6px;
-}
-
-input,
-textarea,
-select {
-  width: 100%;
-  padding: 10px 12px;
-  border: 1px solid #c8d5e3;
-  border-radius: 10px;
-  font: inherit;
-  background: #fff;
-}
-
-button {
-  width: fit-content;
-  padding: 10px 16px;
-  border: 0;
-  border-radius: 999px;
-  background: #215dff;
-  color: #fff;
-  font: inherit;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-button:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.error-banner,
-.success-banner {
-  padding: 12px 14px;
-  border-radius: 10px;
-}
-
-.error-banner {
-  background: #fde2e2;
-  color: #b42318;
-}
-
-.success-banner {
-  background: #dcfce7;
-  color: #166534;
+.setup-panel__heading h3 {
+  margin: 4px 0 0;
 }
 
 @media (width <= 1100px) {
-  .setup-grid,
-  .form-grid {
+  .setup-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (width <= 700px) {
+  .setup-panel__heading {
+    flex-direction: column;
   }
 }
 </style>

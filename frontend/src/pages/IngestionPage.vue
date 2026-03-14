@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { RouterLink } from 'vue-router'
 
 import {
   createSource,
@@ -11,6 +12,8 @@ import {
   type DocumentSummary,
   type SourceSummary,
 } from 'src/boot/api'
+import PageSection from 'src/components/shell/PageSection.vue'
+import StatusBadge from 'src/components/shell/StatusBadge.vue'
 import {
   getSelectedProjectId,
   getSelectedWorkspaceId,
@@ -36,7 +39,7 @@ const projects = ref<ProjectItem[]>([])
 const documents = ref<DocumentSummary[]>([])
 const sources = ref<SourceSummary[]>([])
 const sourceLabel = ref('Pasted text')
-const externalKey = ref(`note-${Date.now()}`)
+const externalKey = ref(`note-${String(Date.now())}`)
 const title = ref('')
 const text = ref('')
 const statusMessage = ref<string | null>(null)
@@ -50,6 +53,17 @@ const selectedProject = computed(
 const selectedWorkspace = computed(
   () => workspaces.value.find((item) => item.id === getSelectedWorkspaceId()) ?? null,
 )
+const pageStatus = computed(() => {
+  if (!selectedProject.value) {
+    return { status: 'blocked', label: 'Select a project in Setup' }
+  }
+
+  if (documents.value.length > 0) {
+    return { status: 'ready', label: `${String(documents.value.length)} indexed documents` }
+  }
+
+  return { status: 'draft', label: 'Ready for first ingest' }
+})
 
 async function loadProjectData(projectId: string) {
   const [docs, srcs] = await Promise.all([fetchDocuments(projectId), fetchSources(projectId)])
@@ -107,7 +121,7 @@ async function ingestCurrentText() {
 
     await loadProjectData(selectedProjectId.value)
 
-    statusMessage.value = `Indexed ${result.chunk_count} chunks into document ${result.document_id}.`
+    statusMessage.value = `Indexed ${String(result.chunk_count)} chunks into document ${result.document_id}.`
     text.value = ''
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : 'Failed to ingest text'
@@ -118,143 +132,200 @@ async function ingestCurrentText() {
 </script>
 
 <template>
-  <section class="ingestion-page">
-    <header>
-      <h2>Ingest</h2>
-      <p>Paste text into the selected project and send it to the indexing pipeline.</p>
-    </header>
+  <section class="rr-page-grid ingestion-page">
+    <PageSection
+      eyebrow="Step 2"
+      title="Ingest text into the active project"
+      description="Create a simple text source if needed, send content through indexing, and keep the resulting documents visible alongside the current project context."
+      :status="pageStatus.status"
+      :status-label="pageStatus.label"
+    >
+      <template #actions>
+        <RouterLink class="rr-button rr-button--secondary" to="/ask">
+          Continue to ask
+        </RouterLink>
+      </template>
 
-    <div class="context-card">
-      <p><strong>Workspace:</strong> {{ selectedWorkspace?.name ?? 'not selected' }}</p>
-      <p><strong>Project:</strong> {{ selectedProject?.name ?? 'not selected' }}</p>
-      <p v-if="!selectedProject">Go to Setup first and create/select a project.</p>
-    </div>
+      <div class="rr-stat-strip">
+        <article class="rr-stat">
+          <p class="rr-stat__label">Workspace</p>
+          <strong>{{ selectedWorkspace?.name ?? 'Not selected' }}</strong>
+          <p>The active workspace stays visible while you prepare content.</p>
+        </article>
+        <article class="rr-stat">
+          <p class="rr-stat__label">Project</p>
+          <strong>{{ selectedProject?.name ?? 'Not selected' }}</strong>
+          <p>{{ selectedProject ? 'Ingestion targets this project only.' : 'Setup must establish project context first.' }}</p>
+        </article>
+        <article class="rr-stat">
+          <p class="rr-stat__label">Documents</p>
+          <strong>{{ documents.length }}</strong>
+          <p>Indexed documents currently available for grounded retrieval.</p>
+        </article>
+        <article class="rr-stat">
+          <p class="rr-stat__label">Sources</p>
+          <strong>{{ sources.length }}</strong>
+          <p>Simple mode starts with a single text source and grows from there.</p>
+        </article>
+      </div>
 
-    <p v-if="statusMessage" class="success-banner">{{ statusMessage }}</p>
-    <p v-if="errorMessage" class="error-banner">{{ errorMessage }}</p>
+      <p
+        v-if="statusMessage"
+        class="rr-banner"
+        data-tone="success"
+      >
+        {{ statusMessage }}
+      </p>
+      <p
+        v-if="errorMessage"
+        class="rr-banner"
+        data-tone="danger"
+      >
+        {{ errorMessage }}
+      </p>
 
-    <div class="ingestion-grid">
-      <article class="panel">
-        <h3>Paste text</h3>
-        <label class="field">
-          <span>Source label</span>
-          <input v-model="sourceLabel" type="text" placeholder="Pasted text">
-        </label>
-        <label class="field">
-          <span>External key</span>
-          <input v-model="externalKey" type="text" placeholder="note-001">
-        </label>
-        <label class="field">
-          <span>Title</span>
-          <input v-model="title" type="text" placeholder="Internal handbook excerpt">
-        </label>
-        <label class="field">
-          <span>Text content</span>
-          <textarea v-model="text" rows="12" placeholder="Paste the content you want RustRAG to index" />
-        </label>
+      <div class="ingestion-grid">
+        <article class="rr-panel rr-panel--accent rr-stack">
+          <div class="ingestion-panel__heading">
+            <div>
+              <p class="rr-kicker">Paste text</p>
+              <h3>Send content to the indexing pipeline</h3>
+            </div>
+            <StatusBadge
+              :status="selectedProjectId ? 'ready' : 'blocked'"
+              :label="selectedProjectId ? 'Project selected' : 'Needs setup'"
+            />
+          </div>
 
-        <button type="button" :disabled="!selectedProjectId || !text.trim() || loading" @click="ingestCurrentText">
-          {{ loading ? 'Indexing…' : 'Ingest text' }}
-        </button>
-      </article>
+          <div class="rr-form-grid">
+            <label class="rr-field">
+              <span class="rr-field__label">Source label</span>
+              <input
+                v-model="sourceLabel"
+                class="rr-control"
+                type="text"
+                placeholder="Pasted text"
+              >
+            </label>
+            <div class="rr-form-grid rr-form-grid--two">
+              <label class="rr-field">
+                <span class="rr-field__label">External key</span>
+                <input
+                  v-model="externalKey"
+                  class="rr-control"
+                  type="text"
+                  placeholder="note-001"
+                >
+              </label>
+              <label class="rr-field">
+                <span class="rr-field__label">Title</span>
+                <input
+                  v-model="title"
+                  class="rr-control"
+                  type="text"
+                  placeholder="Internal handbook excerpt"
+                >
+              </label>
+            </div>
+            <label class="rr-field">
+              <span class="rr-field__label">Text content</span>
+              <textarea
+                v-model="text"
+                class="rr-control"
+                rows="12"
+                placeholder="Paste the content you want RustRAG to index"
+              />
+              <p class="rr-field__hint">
+                Keep this minimal flow simple: one selected project, one source label, one text paste.
+              </p>
+            </label>
+          </div>
 
-      <article class="panel">
-        <h3>Indexed content</h3>
-        <p v-if="!documents.length">No indexed documents yet.</p>
-        <ul v-else>
-          <li v-for="document in documents" :key="document.id">
-            {{ document.title || document.external_key }}
-          </li>
-        </ul>
+          <div class="rr-action-row">
+            <button
+              type="button"
+              class="rr-button"
+              :disabled="!selectedProjectId || !text.trim() || loading"
+              @click="ingestCurrentText"
+            >
+              {{ loading ? 'Indexing…' : 'Ingest text' }}
+            </button>
+          </div>
+        </article>
 
-        <h3>Sources</h3>
-        <p v-if="!sources.length">No sources yet.</p>
-        <ul v-else>
-          <li v-for="source in sources" :key="source.id">
-            {{ source.label }} · {{ source.source_kind }}
-          </li>
-        </ul>
-      </article>
-    </div>
+        <div class="ingestion-side rr-grid">
+          <article class="rr-panel">
+            <div class="ingestion-panel__heading">
+              <div>
+                <p class="rr-kicker">Indexed content</p>
+                <h3>Documents available to Ask</h3>
+              </div>
+              <StatusBadge :status="documents.length ? 'ready' : 'draft'" :label="documents.length ? 'Indexed' : 'Empty'" />
+            </div>
+
+            <p v-if="!documents.length" class="rr-note">
+              No indexed documents yet. Paste content on the left to create the first one.
+            </p>
+            <ul v-else class="rr-list">
+              <li v-for="document in documents" :key="document.id">
+                <strong>{{ document.title || document.external_key }}</strong>
+                <span class="rr-muted">{{ document.status ?? 'Indexed' }}</span>
+              </li>
+            </ul>
+          </article>
+
+          <article class="rr-panel rr-panel--muted">
+            <div class="ingestion-panel__heading">
+              <div>
+                <p class="rr-kicker">Source registry</p>
+                <h3>Known sources for the project</h3>
+              </div>
+              <StatusBadge :status="sources.length ? 'ready' : 'draft'" :label="sources.length ? 'Present' : 'Will be created'" />
+            </div>
+
+            <p v-if="!sources.length" class="rr-note">
+              The first ingest automatically creates a text source if one does not exist yet.
+            </p>
+            <ul v-else class="rr-list">
+              <li v-for="source in sources" :key="source.id">
+                <strong>{{ source.label }}</strong>
+                <span class="rr-muted">{{ source.source_kind }} · {{ source.status }}</span>
+              </li>
+            </ul>
+          </article>
+        </div>
+      </div>
+    </PageSection>
   </section>
 </template>
 
 <style scoped>
-.ingestion-page {
-  display: grid;
-  gap: 16px;
-}
-
-.context-card,
-.panel {
-  padding: 16px;
-  border: 1px solid #d7dee7;
-  border-radius: 16px;
-  background: #f8fbff;
-}
-
 .ingestion-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.65fr);
-  gap: 16px;
+  grid-template-columns: minmax(0, 1.3fr) minmax(320px, 0.7fr);
+  gap: var(--rr-space-4);
 }
 
-.panel {
-  display: grid;
-  gap: 12px;
+.ingestion-panel__heading {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--rr-space-3);
+  align-items: flex-start;
 }
 
-.field {
-  display: grid;
-  gap: 6px;
-}
-
-input,
-textarea {
-  width: 100%;
-  padding: 10px 12px;
-  border: 1px solid #c8d5e3;
-  border-radius: 10px;
-  font: inherit;
-  background: #fff;
-}
-
-button {
-  width: fit-content;
-  padding: 10px 16px;
-  border: 0;
-  border-radius: 999px;
-  background: #215dff;
-  color: #fff;
-  font: inherit;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-button:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.error-banner,
-.success-banner {
-  padding: 12px 14px;
-  border-radius: 10px;
-}
-
-.error-banner {
-  background: #fde2e2;
-  color: #b42318;
-}
-
-.success-banner {
-  background: #dcfce7;
-  color: #166534;
+.ingestion-panel__heading h3 {
+  margin: 4px 0 0;
 }
 
 @media (width <= 1100px) {
   .ingestion-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (width <= 700px) {
+  .ingestion-panel__heading {
+    flex-direction: column;
   }
 }
 </style>

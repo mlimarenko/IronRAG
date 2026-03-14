@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { RouterLink } from 'vue-router'
 
 import {
   fetchProjects,
@@ -12,7 +13,13 @@ import {
 import RetrievalDiagnosticsPanel from 'src/components/chat/RetrievalDiagnosticsPanel.vue'
 import StatusPill from 'src/components/chat/StatusPill.vue'
 import TokenListSection from 'src/components/chat/TokenListSection.vue'
-import { getSelectedProjectId, getSelectedWorkspaceId, setSelectedProjectId, setSelectedWorkspaceId } from 'src/stores/flow'
+import PageSection from 'src/components/shell/PageSection.vue'
+import {
+  getSelectedProjectId,
+  getSelectedWorkspaceId,
+  setSelectedProjectId,
+  setSelectedWorkspaceId,
+} from 'src/stores/flow'
 
 interface WorkspaceItem {
   id: string
@@ -43,6 +50,20 @@ const selectedProject = computed(
 const selectedWorkspace = computed(
   () => workspaces.value.find((item) => item.id === getSelectedWorkspaceId()) ?? null,
 )
+const pageStatus = computed(() => {
+  if (result.value) {
+    return {
+      status: result.value.answer_status,
+      label: result.value.weak_grounding ? 'Answer returned with weak grounding' : 'Answer returned',
+    }
+  }
+
+  if (!selectedProject.value) {
+    return { status: 'blocked', label: 'Select a project before querying' }
+  }
+
+  return { status: 'draft', label: 'Ready to run a grounded query' }
+})
 
 onMounted(async () => {
   workspaces.value = await fetchWorkspaces()
@@ -89,189 +110,165 @@ async function submitQuery() {
 </script>
 
 <template>
-  <section class="chat-page">
-    <header>
-      <h2>Ask</h2>
-      <p>Run a grounded query against the currently selected project.</p>
-    </header>
+  <section class="rr-page-grid chat-page">
+    <PageSection
+      eyebrow="Step 3"
+      title="Ask grounded questions"
+      description="Run a query against the active project, inspect answer status, and keep the retrieval diagnostics close to the response instead of hidden behind a different admin flow."
+      :status="pageStatus.status"
+      :status-label="pageStatus.label"
+    >
+      <template #actions>
+        <RouterLink class="rr-button rr-button--secondary" to="/ingest">
+          Back to ingest
+        </RouterLink>
+      </template>
 
-    <div class="context-card">
-      <p><strong>Workspace:</strong> {{ selectedWorkspace?.name ?? 'not selected' }}</p>
-      <p><strong>Project:</strong> {{ selectedProject?.name ?? 'not selected' }}</p>
-      <p v-if="!selectedProject">Go to Setup first, then ingest some text before querying.</p>
-    </div>
-
-    <div class="query-form card">
-      <label class="field">
-        <span class="field__label">Question</span>
-        <textarea
-          v-model="queryText"
-          rows="4"
-          placeholder="Ask a grounded question about the indexed content"
-        />
-      </label>
-
-      <div class="query-form__actions">
-        <button
-          type="button"
-          :disabled="loading || !selectedProjectId || !queryText.trim()"
-          @click="submitQuery"
-        >
-          {{ loading ? 'Running…' : 'Run query' }}
-        </button>
-      </div>
-    </div>
-
-    <p v-if="errorMessage" class="error-banner">
-      {{ errorMessage }}
-    </p>
-
-    <article v-if="result" class="card result-panel">
-      <div class="panel-header">
-        <div>
-          <h3>Answer</h3>
-          <p class="panel-subtitle">Final response from the query endpoint.</p>
-        </div>
-        <StatusPill :status="result.answer_status" />
+      <div class="rr-stat-strip">
+        <article class="rr-stat">
+          <p class="rr-stat__label">Workspace</p>
+          <strong>{{ selectedWorkspace?.name ?? 'Not selected' }}</strong>
+          <p>Project context stays visible while evaluating answers.</p>
+        </article>
+        <article class="rr-stat">
+          <p class="rr-stat__label">Project</p>
+          <strong>{{ selectedProject?.name ?? 'Not selected' }}</strong>
+          <p>{{ selectedProject ? 'Queries target this single active project.' : 'Setup must define the active project first.' }}</p>
+        </article>
+        <article class="rr-stat">
+          <p class="rr-stat__label">Last answer</p>
+          <strong>{{ result?.answer_status ?? 'No query run yet' }}</strong>
+          <p>{{ result ? `${result.references.length} references returned.` : 'Run a query to inspect response quality.' }}</p>
+        </article>
       </div>
 
-      <div class="summary-grid">
-        <div class="summary-item">
-          <span class="summary-item__label">Mode</span>
-          <strong>{{ result.mode }}</strong>
+      <article class="rr-panel rr-panel--accent query-panel">
+        <div class="query-panel__heading">
+          <div>
+            <p class="rr-kicker">Query runner</p>
+            <h3>Ask about the indexed content</h3>
+          </div>
+          <StatusPill :status="result?.answer_status ?? (selectedProject ? 'ready' : 'blocked')" />
         </div>
-        <div class="summary-item">
-          <span class="summary-item__label">Grounding</span>
-          <strong>{{ result.weak_grounding ? 'Weak' : 'OK' }}</strong>
-        </div>
-        <div class="summary-item">
-          <span class="summary-item__label">References</span>
-          <strong>{{ result.references.length }}</strong>
-        </div>
-      </div>
 
-      <p class="answer-copy">{{ result.answer }}</p>
+        <label class="rr-field">
+          <span class="rr-field__label">Question</span>
+          <textarea
+            v-model="queryText"
+            class="rr-control"
+            rows="5"
+            placeholder="Ask a grounded question about the indexed content"
+          />
+          <p class="rr-field__hint">
+            Keep the prompt scoped to information you actually indexed in the selected project.
+          </p>
+        </label>
 
-      <p v-if="result.warning" class="warning-banner">
-        Warning: {{ result.warning }}
+        <div class="rr-action-row">
+          <button
+            type="button"
+            class="rr-button"
+            :disabled="loading || !selectedProjectId || !queryText.trim()"
+            @click="submitQuery"
+          >
+            {{ loading ? 'Running…' : 'Run query' }}
+          </button>
+        </div>
+      </article>
+
+      <p
+        v-if="errorMessage"
+        class="rr-banner"
+        data-tone="danger"
+      >
+        {{ errorMessage }}
       </p>
 
-      <TokenListSection
-        title="Evidence references"
-        empty-message="No references were returned for this answer."
-        :items="result.references"
-      />
-    </article>
+      <article v-if="result" class="rr-panel result-panel">
+        <div class="result-panel__header">
+          <div>
+            <p class="rr-kicker">Answer</p>
+            <h3>Final response surface</h3>
+            <p class="rr-note">This is the direct response from the query endpoint, paired with the retrieval trace below.</p>
+          </div>
+          <StatusPill :status="result.answer_status" />
+        </div>
 
-    <RetrievalDiagnosticsPanel v-if="detail" :detail="detail" />
+        <div class="rr-stat-strip">
+          <div class="rr-stat">
+            <p class="rr-stat__label">Mode</p>
+            <strong>{{ result.mode }}</strong>
+          </div>
+          <div class="rr-stat">
+            <p class="rr-stat__label">Grounding</p>
+            <strong>{{ result.weak_grounding ? 'Weak' : 'OK' }}</strong>
+          </div>
+          <div class="rr-stat">
+            <p class="rr-stat__label">References</p>
+            <strong>{{ result.references.length }}</strong>
+          </div>
+        </div>
+
+        <p class="answer-copy">{{ result.answer }}</p>
+
+        <p
+          v-if="result.warning"
+          class="rr-banner"
+          data-tone="warning"
+        >
+          Warning: {{ result.warning }}
+        </p>
+
+        <TokenListSection
+          title="Evidence references"
+          empty-message="No references were returned for this answer."
+          :items="result.references"
+        />
+      </article>
+
+      <article v-else class="rr-panel rr-panel--muted">
+        <p class="rr-kicker">Waiting for first query</p>
+        <h3>Run a question once Setup and Ingest are complete</h3>
+        <p class="rr-note">
+          The Ask page keeps the form, answer surface, and retrieval diagnostics in one place so the minimal flow stays coherent.
+        </p>
+      </article>
+
+      <RetrievalDiagnosticsPanel v-if="detail" :detail="detail" />
+    </PageSection>
   </section>
 </template>
 
 <style scoped>
-.chat-page {
-  display: grid;
-  gap: 16px;
-}
-
-.context-card,
-.card {
-  padding: 16px;
-  border: 1px solid #d7dee7;
-  border-radius: 12px;
-  background: #f8fbff;
-}
-
-.query-form {
-  display: grid;
-  gap: 12px;
-}
-
-.field {
-  display: grid;
-  gap: 6px;
-}
-
-.field__label,
-.summary-item__label,
-.panel-subtitle {
-  color: #526173;
-}
-
-.query-form textarea {
-  width: 100%;
-  padding: 10px 12px;
-  border: 1px solid #c8d5e3;
-  border-radius: 10px;
-  font: inherit;
-  background: #fff;
-}
-
-.query-form__actions {
-  display: flex;
-  justify-content: flex-start;
-}
-
-.query-form button {
-  padding: 10px 16px;
-  border: 0;
-  border-radius: 999px;
-  background: #215dff;
-  color: #fff;
-  font: inherit;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.query-form button:disabled {
-  cursor: not-allowed;
-  opacity: 0.6;
-}
-
+.query-panel,
 .result-panel {
-  display: grid;
-  gap: 16px;
+  gap: var(--rr-space-5);
 }
 
-.panel-header {
+.query-panel__heading,
+.result-panel__header {
   display: flex;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--rr-space-3);
   align-items: flex-start;
 }
 
-.summary-grid {
-  display: grid;
-  gap: 12px;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-}
-
-.summary-item {
-  display: grid;
-  gap: 4px;
-  padding: 12px;
-  border-radius: 10px;
-  background: rgb(255 255 255 / 65%);
+.query-panel__heading h3,
+.result-panel__header h3 {
+  margin: 4px 0 0;
 }
 
 .answer-copy {
   margin: 0;
   white-space: pre-wrap;
-  line-height: 1.5;
+  line-height: 1.65;
+  color: var(--rr-color-text-primary);
 }
 
-.warning-banner,
-.error-banner {
-  padding: 12px 14px;
-  border-radius: 10px;
-}
-
-.warning-banner {
-  background: #fff4d8;
-  color: #7c5600;
-}
-
-.error-banner {
-  background: #fde2e2;
-  color: #b42318;
+@media (width <= 700px) {
+  .query-panel__heading,
+  .result-panel__header {
+    flex-direction: column;
+  }
 }
 </style>

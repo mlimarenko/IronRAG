@@ -63,14 +63,14 @@ function isActive(item: NavItem) {
 <style scoped>
 .app-sidebar {
   display: grid;
-  gap: 24px;
+  gap: var(--rr-space-6);
   align-content: start;
 }
 
 .app-sidebar__brand {
   display: flex;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--rr-space-4);
   align-items: flex-start;
 }
 
@@ -85,50 +85,59 @@ function isActive(item: NavItem) {
 
 .app-sidebar__brand h1 {
   margin: 0;
-  font-size: 1.35rem;
-  line-height: 1.1;
+  font-size: 1.45rem;
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+  color: var(--rr-color-text-inverse);
 }
 
 .app-sidebar__summary {
   margin: 0;
-  color: #94a3b8;
+  max-width: 26ch;
+  color: rgb(203 213 225 / 0.86);
   font-size: 0.95rem;
 }
 
 .app-sidebar__nav {
   display: grid;
-  gap: 10px;
+  gap: var(--rr-space-3);
 }
 
 .app-sidebar__link {
   display: grid;
   gap: 4px;
-  padding: 14px;
+  padding: 14px 16px;
   border: 1px solid rgb(148 163 184 / 0.14);
-  border-radius: 16px;
-  color: #cbd5e1;
+  border-radius: var(--rr-radius-md);
+  color: rgb(203 213 225 / 0.94);
   text-decoration: none;
-  background: rgb(15 23 42 / 0.32);
+  background:
+    linear-gradient(180deg, rgb(15 23 42 / 0.44), rgb(15 23 42 / 0.3)),
+    rgb(15 23 42 / 0.32);
   transition:
-    transform 120ms ease,
-    border-color 120ms ease,
-    background 120ms ease;
+    transform var(--rr-motion-base),
+    border-color var(--rr-motion-base),
+    background var(--rr-motion-base),
+    box-shadow var(--rr-motion-base);
 }
 
 .app-sidebar__link:hover,
 .app-sidebar__link[data-active='true'] {
   transform: translateY(-1px);
   border-color: rgb(96 165 250 / 0.45);
-  background: rgb(30 41 59 / 0.82);
+  background:
+    radial-gradient(circle at right top, rgb(37 99 235 / 0.22), transparent 42%),
+    rgb(30 41 59 / 0.92);
+  box-shadow: 0 16px 28px rgb(2 6 23 / 0.18);
 }
 
 .app-sidebar__label {
   font-weight: 700;
-  color: #f8fafc;
+  color: var(--rr-color-text-inverse);
 }
 
 .app-sidebar__caption {
   font-size: 0.86rem;
-  color: #94a3b8;
+  color: rgb(148 163 184 / 0.88);
 }
 </style>
