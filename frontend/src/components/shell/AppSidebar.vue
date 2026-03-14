@@ -14,7 +14,7 @@ interface NavItem {
 }
 
 const navItems: readonly NavItem[] = [
-  { to: '/', label: 'Overview', caption: 'What to do next', match: 'exact' },
+  { to: '/', label: 'Overview', caption: 'Start here', match: 'exact' },
   { to: '/setup', label: 'Setup', caption: 'Workspace and project' },
   { to: '/ingest', label: 'Ingest', caption: 'Paste text and index it' },
   { to: '/ask', label: 'Ask', caption: 'Query the indexed content' },
