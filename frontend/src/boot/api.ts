@@ -227,10 +227,10 @@ export interface RetrievalRunDetail {
 }
 
 const env = import.meta.env as ImportMetaEnv & FrontendEnv
-export const backendUrl: string = env.VITE_BACKEND_URL ?? 'http://127.0.0.1:8080'
+export const backendUrl: string = env.VITE_BACKEND_URL?.trim() || window.location.origin
 
 export const api = axios.create({
-  baseURL: backendUrl,
+  baseURL: env.VITE_BACKEND_URL?.trim() || '/v1',
 })
 
 export async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
