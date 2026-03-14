@@ -1,44 +1,22 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { onMounted, ref } from 'vue'
 
-import { api, fetchWorkspaceGovernance, type WorkspaceGovernanceSummary } from 'src/boot/api'
-import { buildOperatorState } from 'src/pages/support/view-state'
+import { api, type WorkspaceGovernanceSummary } from 'src/boot/api'
 
 const workspaces = ref<{ id: string; slug: string; name: string; status: string }[]>([])
 const governance = ref<WorkspaceGovernanceSummary | null>(null)
 const loading = ref(true)
+const infoMessage = ref<string | null>(null)
 const errorMessage = ref<string | null>(null)
 
-const viewState = computed(() => {
-  if (loading.value) {
-    return buildOperatorState(
-      'loading',
-      'Loading workspaces',
-      'Fetching workspace governance state.',
-    )
-  }
+function extractErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'Unknown workspace error'
+}
 
-  if (errorMessage.value) {
-    return buildOperatorState('error', 'Workspace governance unavailable', errorMessage.value)
-  }
-
-  if (governance.value) {
-    return buildOperatorState(
-      governance.value.health_state === 'Healthy' ? 'success' : 'degraded',
-      governance.value.name,
-      `Projects: ${String(governance.value.projects)} • Providers: ${String(governance.value.provider_accounts)} • Models: ${String(governance.value.model_profiles)}`,
-      {
-        workspaceLabel: governance.value.slug,
-      },
-    )
-  }
-
-  return buildOperatorState(
-    'empty',
-    'No workspaces found',
-    'Create the first workspace to start operating RustRAG.',
-  )
-})
+function isUnauthorizedMessage(message: string): boolean {
+  const normalized = message.toLowerCase()
+  return normalized.includes('401') || normalized.includes('unauthorized') || normalized.includes('authorization')
+}
 
 onMounted(async () => {
   try {
@@ -46,11 +24,24 @@ onMounted(async () => {
       await api.get<{ id: string; slug: string; name: string; status: string }[]>('/v1/workspaces')
     workspaces.value = data
 
-    if (data.length > 0) {
-      governance.value = await fetchWorkspaceGovernance(data[0].id)
+    if (data.length === 0) {
+      infoMessage.value = 'No workspaces created yet. Create the first workspace to unlock governance views.'
+      return
+    }
+
+    try {
+      const response = await api.get<WorkspaceGovernanceSummary>(`/v1/workspaces/${data[0].id}/governance`)
+      governance.value = response.data
+    } catch (error) {
+      const message = extractErrorMessage(error)
+      if (isUnauthorizedMessage(message)) {
+        infoMessage.value = 'Workspace list is available, but governance details require an authorized API token.'
+      } else {
+        errorMessage.value = message
+      }
     }
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : 'Unknown workspace error'
+    errorMessage.value = extractErrorMessage(error)
   } finally {
     loading.value = false
   }
@@ -62,17 +53,34 @@ onMounted(async () => {
     <h2>Workspaces</h2>
     <p>Manage isolated tenant-like containers for projects, provider accounts, and policies.</p>
 
+    <p v-if="loading">Loading workspaces…</p>
+    <p v-else-if="errorMessage">{{ errorMessage }}</p>
     <div
+      v-else
       class="state-card"
-      :data-state="viewState.state"
     >
-      <h3>{{ viewState.title }}</h3>
-      <p>{{ viewState.message }}</p>
-      <p v-if="governance">
-        Usage events: {{ governance.usage.usage_events }} • Total tokens:
-        {{ governance.usage.total_tokens }} • Estimated cost:
-        {{ governance.usage.estimated_cost }}
-      </p>
+      <template v-if="governance">
+        <h3>{{ governance.name }}</h3>
+        <p>
+          Projects: {{ governance.projects }} • Providers: {{ governance.provider_accounts }} •
+          Models: {{ governance.model_profiles }}
+        </p>
+        <p>
+          Usage events: {{ governance.usage.usage_events }} • Total tokens:
+          {{ governance.usage.total_tokens }} • Estimated cost:
+          {{ governance.usage.estimated_cost }}
+        </p>
+      </template>
+
+      <template v-else>
+        <h3>{{ workspaces.length > 0 ? 'Workspace list ready' : 'No workspaces found' }}</h3>
+        <p>
+          {{
+            infoMessage ??
+            'Create the first workspace to start operating RustRAG.'
+          }}
+        </p>
+      </template>
     </div>
 
     <ul v-if="workspaces.length > 0">
