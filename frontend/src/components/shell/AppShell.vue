@@ -9,7 +9,7 @@ import AppTopbar from './AppTopbar.vue'
 const route = useRoute()
 const { t } = useI18n()
 
-type ShellSection = 'processing' | 'context' | 'files' | 'ask' | 'graph' | 'api'
+type ShellSection = 'processing' | 'setup' | 'files' | 'search' | 'graph' | 'api'
 
 const routeMeta = computed(() => {
   const meta = route.meta as {

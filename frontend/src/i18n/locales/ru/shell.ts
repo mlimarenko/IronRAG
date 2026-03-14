@@ -2,43 +2,43 @@ export default {
   brand: {
     eyebrow: 'RustRAG',
     title: 'RustRAG',
-    subtitle: 'Операторский shell для grounded content workflows.',
+    subtitle: 'Поиск и ответы по вашим файлам.',
     badge: 'Preview',
   },
   nav: {
-    primary: 'Product',
-    manage: 'Context',
+    primary: 'Разделы',
+    manage: 'Настройка',
     items: {
-      processing: {
-        label: 'Processing',
-        caption: 'Статус пайплайна',
-      },
       files: {
         label: 'Files',
-        caption: 'Индексированный контент',
+        caption: 'Добавление и просмотр файлов',
       },
-      ask: {
-        label: 'Ask',
-        caption: 'Grounded-ответы',
+      processing: {
+        label: 'Processing',
+        caption: 'Статус и следующие шаги',
+      },
+      search: {
+        label: 'Search',
+        caption: 'Вопросы по вашим файлам',
       },
       graph: {
         label: 'Graph',
-        caption: 'Knowledge signals',
+        caption: 'Связи и сигналы знаний',
       },
       api: {
         label: 'API',
-        caption: 'Integration surface',
+        caption: 'Интеграции поверх тех же данных',
       },
-      context: {
-        label: 'Context',
-        caption: 'Workspace и project',
+      setup: {
+        label: 'Setup',
+        caption: 'Выбор пространства и коллекции',
       },
     },
   },
   topbar: {
-    surface: 'Surface',
+    surface: 'Раздел',
     language: 'Язык',
-    state: 'Состояние',
+    state: 'Статус',
   },
   locale: {
     en: 'EN',
@@ -50,17 +50,17 @@ export default {
     healthy: 'Стабильно',
   },
   pages: {
-    processing: {
-      title: 'Processing',
-    },
-    context: {
-      title: 'Context',
-    },
     files: {
       title: 'Files',
     },
-    ask: {
-      title: 'Ask',
+    processing: {
+      title: 'Processing',
+    },
+    setup: {
+      title: 'Setup',
+    },
+    search: {
+      title: 'Search',
     },
     graph: {
       title: 'Graph',

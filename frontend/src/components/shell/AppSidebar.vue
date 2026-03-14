@@ -10,7 +10,7 @@ const { t } = useI18n()
 
 interface NavItem {
   to: string
-  key: 'processing' | 'files' | 'ask' | 'graph' | 'api' | 'context'
+  key: 'files' | 'processing' | 'search' | 'graph' | 'api' | 'setup'
 }
 
 interface NavGroup {
@@ -22,9 +22,9 @@ const navGroups = computed<readonly NavGroup[]>(() => [
   {
     label: t('shell.nav.primary'),
     items: [
-      { to: '/', key: 'processing' },
-      { to: '/ingest', key: 'files' },
-      { to: '/ask', key: 'ask' },
+      { to: '/files', key: 'files' },
+      { to: '/processing', key: 'processing' },
+      { to: '/search', key: 'search' },
       { to: '/graph', key: 'graph' },
       { to: '/api', key: 'api' },
     ],
@@ -32,7 +32,7 @@ const navGroups = computed<readonly NavGroup[]>(() => [
   {
     label: t('shell.nav.manage'),
     items: [
-      { to: '/setup', key: 'context' },
+      { to: '/setup', key: 'setup' },
     ],
   },
 ])
@@ -75,7 +75,10 @@ function isActive(item: NavItem) {
             class="app-sidebar__link"
             :data-active="isActive(item)"
           >
-            <span class="app-sidebar__label">{{ t(`shell.nav.items.${item.key}.label`) }}</span>
+            <span class="app-sidebar__copy">
+              <span class="app-sidebar__label">{{ t(`shell.nav.items.${item.key}.label`) }}</span>
+              <span class="app-sidebar__caption">{{ t(`shell.nav.items.${item.key}.caption`) }}</span>
+            </span>
           </RouterLink>
         </div>
       </nav>
@@ -169,8 +172,19 @@ function isActive(item: NavItem) {
   box-shadow: 0 16px 28px rgb(2 6 23 / 0.14);
 }
 
+.app-sidebar__copy {
+  display: grid;
+  gap: 2px;
+}
+
 .app-sidebar__label {
   font-weight: 700;
   color: var(--rr-color-text-inverse);
+}
+
+.app-sidebar__caption {
+  color: rgb(191 219 254 / 0.76);
+  font-size: 0.82rem;
+  line-height: 1.3;
 }
 </style>

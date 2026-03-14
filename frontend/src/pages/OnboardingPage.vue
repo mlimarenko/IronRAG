@@ -350,7 +350,7 @@ onMounted(async () => {
         flat
         icon="upload"
         :label="t('onboarding.actions.openIngestion')"
-        @click="router.push('/ingestion')"
+        @click="router.push('/files')"
       />
     </template>
 

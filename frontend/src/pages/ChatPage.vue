@@ -87,7 +87,7 @@ async function submitQuery() {
   detail.value = null
   try {
     if (!selectedProjectId.value) {
-      throw new Error('Create and select a project in Setup before asking questions.')
+      throw new Error('Create and select a collection in Setup before searching.')
     }
 
     const response = await runQuery({
@@ -103,7 +103,7 @@ async function submitQuery() {
       detail.value = null
     }
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : 'Unknown query error'
+    errorMessage.value = error instanceof Error ? error.message : 'Unknown search error'
   } finally {
     loading.value = false
   }
@@ -120,7 +120,7 @@ async function submitQuery() {
       :status-label="pageStatus.label"
     >
       <template #actions>
-        <RouterLink class="rr-button rr-button--secondary" to="/ingest">
+        <RouterLink class="rr-button rr-button--secondary" to="/files">
           {{ t('flow.search.action') }}
         </RouterLink>
       </template>
@@ -162,7 +162,7 @@ async function submitQuery() {
             v-model="queryText"
             class="rr-control"
             rows="5"
-            placeholder="Ask a grounded question about the indexed content"
+            placeholder="Ask a question about the indexed files"
           />
         </label>
 

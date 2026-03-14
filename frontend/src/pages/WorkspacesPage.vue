@@ -102,7 +102,7 @@ async function createWorkspaceItem() {
     setSelectedWorkspaceId(created.id)
     successMessage.value = `${t('flow.workspace.success')}: ${created.name}`
   } catch (error) {
-    workspaceError.value = error instanceof Error ? error.message : 'Failed to create workspace'
+    workspaceError.value = error instanceof Error ? error.message : 'Failed to create space'
   }
 }
 
@@ -110,7 +110,7 @@ async function createProjectItem() {
   projectError.value = null
   successMessage.value = null
   if (!getSelectedWorkspaceId()) {
-    projectError.value = 'Select or create a workspace first.'
+    projectError.value = 'Select or create a space first.'
     return
   }
 
@@ -126,7 +126,7 @@ async function createProjectItem() {
     syncSelectedProjectId([created, ...projects.value.filter((item) => item.id !== created.id)])
     successMessage.value = `${t('flow.workspace.success')}: ${created.name}`
   } catch (error) {
-    projectError.value = error instanceof Error ? error.message : 'Failed to create project'
+    projectError.value = error instanceof Error ? error.message : 'Failed to create collection'
   }
 }
 </script>
@@ -141,7 +141,7 @@ async function createProjectItem() {
       :status-label="setupStatus.label"
     >
       <template #actions>
-        <RouterLink class="rr-button rr-button--secondary" to="/ingest" :aria-disabled="!selectedProject">
+        <RouterLink class="rr-button rr-button--secondary" to="/files" :aria-disabled="!selectedProject">
           {{ t('flow.workspace.stats.nextReady') }}
         </RouterLink>
       </template>

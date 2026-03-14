@@ -2,43 +2,43 @@ export default {
   brand: {
     eyebrow: 'RustRAG',
     title: 'RustRAG',
-    subtitle: 'Operator shell for grounded content workflows.',
+    subtitle: 'Search and answer across your files.',
     badge: 'Preview',
   },
   nav: {
-    primary: 'Product',
-    manage: 'Context',
+    primary: 'Explore',
+    manage: 'Manage',
     items: {
-      processing: {
-        label: 'Processing',
-        caption: 'Pipeline status',
-      },
       files: {
         label: 'Files',
-        caption: 'Indexed content',
+        caption: 'Add and review indexed files',
       },
-      ask: {
-        label: 'Ask',
-        caption: 'Grounded answers',
+      processing: {
+        label: 'Processing',
+        caption: 'Status and next steps',
+      },
+      search: {
+        label: 'Search',
+        caption: 'Ask questions over your files',
       },
       graph: {
         label: 'Graph',
-        caption: 'Knowledge signals',
+        caption: 'Explore connected knowledge',
       },
       api: {
         label: 'API',
-        caption: 'Integration surface',
+        caption: 'Build on the same data',
       },
-      context: {
-        label: 'Context',
-        caption: 'Workspace and project',
+      setup: {
+        label: 'Setup',
+        caption: 'Choose your space and collection',
       },
     },
   },
   topbar: {
-    surface: 'Surface',
+    surface: 'Section',
     language: 'Language',
-    state: 'Runtime',
+    state: 'Status',
   },
   locale: {
     en: 'EN',
@@ -50,17 +50,17 @@ export default {
     healthy: 'Healthy',
   },
   pages: {
-    processing: {
-      title: 'Processing',
-    },
-    context: {
-      title: 'Context',
-    },
     files: {
       title: 'Files',
     },
-    ask: {
-      title: 'Ask',
+    processing: {
+      title: 'Processing',
+    },
+    setup: {
+      title: 'Setup',
+    },
+    search: {
+      title: 'Search',
     },
     graph: {
       title: 'Graph',

@@ -141,7 +141,7 @@ onMounted(async () => {
             />
           </div>
           <p>{{ t('flow.overview.cards.library.body') }}</p>
-          <RouterLink class="rr-button rr-button--secondary" to="/ingest">
+          <RouterLink class="rr-button rr-button--secondary" to="/files">
             {{ t('flow.overview.cards.library.action') }}
           </RouterLink>
         </article>
@@ -159,7 +159,7 @@ onMounted(async () => {
             />
           </div>
           <p>{{ t('flow.overview.cards.search.body') }}</p>
-          <RouterLink class="rr-button rr-button--secondary" to="/ask">
+          <RouterLink class="rr-button rr-button--secondary" to="/search">
             {{ t('flow.overview.cards.search.action') }}
           </RouterLink>
         </article>

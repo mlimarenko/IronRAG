@@ -221,7 +221,7 @@ async function ingestCurrentText() {
   latestJob.value = null
 
   if (!selectedProjectId.value) {
-    errorMessage.value = 'Create and select a project first in Setup.'
+    errorMessage.value = 'Create and select a collection first in Setup.'
     loading.value = false
     return
   }
@@ -237,12 +237,12 @@ async function ingestCurrentText() {
       text: text.value,
     })
 
-    statusMessage.value = `Queued ingestion job ${result.ingestion_job_id}. Waiting for completion...`
+    statusMessage.value = `Started processing run ${result.ingestion_job_id}. Waiting for completion...`
 
     const jobDetail = await waitForIngestionJob(result.ingestion_job_id)
     await loadProjectData(selectedProjectId.value)
     if (jobDetail?.status === 'completed') {
-      statusMessage.value = `Completed ingestion job ${jobDetail.id}. Indexed content is now visible below.`
+      statusMessage.value = `Completed processing run ${jobDetail.id}. Indexed content is now visible below.`
       text.value = ''
       title.value = ''
       externalKey.value = `note-${String(Date.now())}`
@@ -250,16 +250,16 @@ async function ingestCurrentText() {
     }
 
     if (jobDetail?.error_message) {
-      errorMessage.value = `Ingestion job ${jobDetail.id} failed: ${jobDetail.error_message}`
+      errorMessage.value = `Processing run ${jobDetail.id} failed: ${jobDetail.error_message}`
       statusMessage.value = null
       return
     }
 
     const status = jobDetail?.status ?? result.status
     const stage = jobDetail?.stage ?? result.stage
-    statusMessage.value = `Ingestion job ${result.ingestion_job_id} is ${status} at stage ${stage}.`
+    statusMessage.value = `Processing run ${result.ingestion_job_id} is ${status} at stage ${stage}.`
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : 'Failed to ingest text'
+    errorMessage.value = error instanceof Error ? error.message : 'Failed to index text'
   } finally {
     loading.value = false
   }
@@ -272,7 +272,7 @@ async function uploadCurrentFile() {
   latestJob.value = null
 
   if (!selectedProjectId.value) {
-    errorMessage.value = 'Create and select a project first in Setup.'
+    errorMessage.value = 'Create and select a collection first in Setup.'
     loading.value = false
     return
   }
@@ -304,12 +304,12 @@ async function uploadCurrentFile() {
       file: uploadFile.value,
     })
 
-    statusMessage.value = `Queued ingestion job ${result.ingestion_job_id}. Waiting for completion...`
+    statusMessage.value = `Started processing run ${result.ingestion_job_id}. Waiting for completion...`
 
     const jobDetail = await waitForIngestionJob(result.ingestion_job_id)
     await loadProjectData(selectedProjectId.value)
     if (jobDetail?.status === 'completed') {
-      statusMessage.value = `Completed ingestion job ${jobDetail.id}. Indexed content is now visible below.`
+      statusMessage.value = `Completed processing run ${jobDetail.id}. Indexed content is now visible below.`
       uploadTitle.value = ''
       uploadFile.value = null
       uploadInputKey.value += 1
@@ -317,16 +317,16 @@ async function uploadCurrentFile() {
     }
 
     if (jobDetail?.error_message) {
-      errorMessage.value = `Ingestion job ${jobDetail.id} failed: ${jobDetail.error_message}`
+      errorMessage.value = `Processing run ${jobDetail.id} failed: ${jobDetail.error_message}`
       statusMessage.value = null
       return
     }
 
     const status = jobDetail?.status ?? result.status
     const stage = jobDetail?.stage ?? result.stage
-    statusMessage.value = `Ingestion job ${result.ingestion_job_id} is ${status} at stage ${stage}.`
+    statusMessage.value = `Processing run ${result.ingestion_job_id} is ${status} at stage ${stage}.`
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : 'Failed to upload and ingest file'
+    errorMessage.value = error instanceof Error ? error.message : 'Failed to upload and index file'
   } finally {
     loading.value = false
   }
@@ -343,7 +343,7 @@ async function uploadCurrentFile() {
       :status-label="pageStatus.label"
     >
       <template #actions>
-        <RouterLink class="rr-button rr-button--secondary" to="/ask">
+        <RouterLink class="rr-button rr-button--secondary" to="/search">
           {{ t('flow.library.action') }}
         </RouterLink>
       </template>
@@ -401,7 +401,7 @@ async function uploadCurrentFile() {
                     v-model="title"
                     class="rr-control"
                     type="text"
-                    placeholder="Internal handbook excerpt"
+                    placeholder="Support policy excerpt"
                   >
                 </label>
               </div>
