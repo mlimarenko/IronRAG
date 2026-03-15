@@ -35,7 +35,7 @@ import {
 } from 'src/pages/support/ingestion-status'
 import { buildFileInventory, matchesInventoryFilter } from 'src/pages/support/file-library'
 import { formatProjectReadiness } from 'src/lib/projectReadiness'
-import { getSelectedProjectId, getSelectedWorkspaceId } from 'src/stores/flow'
+import { getSelectedProjectId } from 'src/stores/flow'
 import { formatShortDateTime } from 'src/lib/formatting'
 import { hydrateWorkspaceProjectScope, useRouteSyncedSelection } from 'src/lib/productFlow'
 
@@ -84,6 +84,7 @@ interface JobViewModel {
 
 const MAX_VISIBLE_QUEUE_ITEMS = 6
 const FILE_GROUP_ORDER = ['attention', 'processing', 'ready'] as const
+const MAX_VISIBLE_DOCUMENTS_PER_GROUP = 8
 const POLL_INTERVAL_MS = 900
 const MAX_POLL_ATTEMPTS = 12
 const AUTO_REFRESH_INTERVAL_MS = 3000
@@ -170,9 +171,6 @@ const imageExtensions = new Set([
 const selectedProjectId = computed(() => getSelectedProjectId())
 const selectedProject = computed(
   () => projects.value.find((item) => item.id === getSelectedProjectId()) ?? null,
-)
-const selectedWorkspace = computed(
-  () => workspaces.value.find((item) => item.id === getSelectedWorkspaceId()) ?? null,
 )
 const sourceLabelById = computed(() => new Map(sources.value.map((item) => [item.id, item.label])))
 
@@ -372,7 +370,7 @@ const inventoryGroups = computed(() => {
 
   return FILE_GROUP_ORDER.map((key) => ({
     key,
-    records: groups[key].slice(0, MAX_VISIBLE_QUEUE_ITEMS),
+    records: groups[key].slice(0, MAX_VISIBLE_DOCUMENTS_PER_GROUP),
     total: groups[key].length,
   })).filter((group) => group.total > 0)
 })
@@ -429,6 +427,7 @@ const latestSession = computed(() => recentSessions.value.at(0) ?? null)
 const latestSessionRoute = computed(() =>
   latestSession.value ? `/search?session=${encodeURIComponent(latestSession.value.id)}` : '/search',
 )
+const primaryDocumentCount = computed(() => Math.min(filteredFileInventory.value.length, 12))
 
 function setFeedbackState(state: FeedbackState | null) {
   feedback.value = state
@@ -1005,562 +1004,572 @@ onUnmounted(() => {
         >
           {{ t('flow.library.processing.refresh') }}
         </button>
-        <RouterLink class="rr-button" to="/search" :aria-disabled="!canGoToAsk">
+        <RouterLink
+          class="rr-button"
+          to="/search"
+          :aria-disabled="!canGoToAsk"
+        >
           {{ t('flow.library.action') }}
         </RouterLink>
       </template>
 
       <article class="rr-panel rr-panel--accent flow-reset">
-        <div class="flow-reset__hero">
-          <div class="flow-reset__copy">
-            <p class="rr-kicker">{{ t('flow.library.eyebrow') }}</p>
-            <h2>{{ t('flow.library.title') }}</h2>
-            <p>{{ t('flow.library.description') }}</p>
-          </div>
-          <StatusBadge :status="pageStatus.status" :label="pageStatus.label" emphasis="strong" />
-        </div>
-
-        <div class="flow-reset__scope">
-          <article class="flow-reset__scope-card">
-            <span>{{ t('flow.library.stats.workspace') }}</span>
-            <strong>{{ selectedWorkspace?.name ?? t('flow.common.empty') }}</strong>
-          </article>
-          <article class="flow-reset__scope-card">
-            <span>{{ t('flow.library.stats.project') }}</span>
-            <strong>{{ selectedProject?.name ?? t('flow.common.empty') }}</strong>
-          </article>
-          <article class="flow-reset__scope-card">
-            <span>{{ t('flow.library.stats.documents') }}</span>
-            <strong>{{ documents.length }}</strong>
-            <small>{{ t('flow.library.stats.documentsHint') }}</small>
-          </article>
-        </div>
-
-        <article v-if="feedback" class="feedback-banner" :data-tone="feedback.tone">
+        <article
+          v-if="feedback"
+          class="feedback-banner"
+          :data-tone="feedback.tone"
+        >
           <strong>{{ feedback.title }}</strong>
           <p>{{ feedback.body }}</p>
-          <p v-if="feedback.detail" class="feedback-banner__detail">
+          <p
+            v-if="feedback.detail"
+            class="feedback-banner__detail"
+          >
             {{ feedback.detail }}
           </p>
           <div
             v-if="feedback.tone === 'success' && canGoToAsk"
             class="rr-action-row feedback-banner__actions"
           >
-            <RouterLink class="rr-button" to="/search">
+            <RouterLink
+              class="rr-button"
+              to="/search"
+            >
               {{ t('flow.library.notices.openAskAction') }}
             </RouterLink>
           </div>
         </article>
 
-        <div class="front-door-grid">
-          <article class="rr-panel rr-stack front-door-summary">
+        <div class="flow-reset__layout flow-reset__layout--primary">
+          <article class="rr-panel rr-stack upload-focus">
             <div class="ingestion-panel__heading">
               <div class="rr-stack rr-stack--tight">
-                <p class="rr-kicker">{{ t('flow.library.frontDoor.progressEyebrow') }}</p>
-                <h3>{{ t('flow.library.frontDoor.progressTitle') }}</h3>
+                <p class="rr-kicker">{{ t('flow.library.upload.kicker') }}</p>
+                <h3>{{ t('flow.library.upload.title') }}</h3>
+              </div>
+              <StatusBadge
+                :status="selectedProjectId ? 'ready' : 'blocked'"
+                :label="
+                  selectedProjectId
+                    ? t('flow.library.upload.ready')
+                    : t('flow.library.upload.needsSetup')
+                "
+              />
+            </div>
+
+            <p class="rr-note">{{ t('flow.library.upload.helper') }}</p>
+
+            <div
+              class="upload-dropzone"
+              :class="{ 'is-active': isUploadDragActive, 'is-selected': !!uploadFile }"
+              @click="openUploadPicker"
+              @dragenter.prevent="handleUploadDragEnter"
+              @dragover.prevent="handleUploadDragOver"
+              @dragleave.prevent="handleUploadDragLeave"
+              @drop.prevent="handleUploadDrop"
+            >
+              <input
+                :key="uploadInputKey"
+                ref="uploadInputRef"
+                class="upload-dropzone__input"
+                type="file"
+                :accept="acceptedUploadTypes"
+                @change="handleUploadFileChange"
+              >
+
+              <div class="upload-dropzone__body">
+                <StatusBadge
+                  tone="info"
+                  :label="t('flow.library.upload.dropzoneIdleBadge')"
+                />
+                <h4>
+                  {{
+                    isUploadDragActive
+                      ? t('flow.library.upload.dropzoneActiveTitle')
+                      : t('flow.library.upload.dropzoneTitle')
+                  }}
+                </h4>
+                <p>
+                  {{
+                    isUploadDragActive
+                      ? t('flow.library.upload.dropzoneActiveBody')
+                      : t('flow.library.upload.dropzoneBody')
+                  }}
+                </p>
+                <button
+                  type="button"
+                  class="rr-button rr-button--secondary"
+                  :disabled="submitMode === 'upload'"
+                  @click.stop="openUploadPicker"
+                >
+                  {{ t('flow.library.upload.browse') }}
+                </button>
+              </div>
+            </div>
+
+            <label class="rr-field">
+              <span class="rr-field__label">{{ t('flow.library.upload.titleLabel') }}</span>
+              <input
+                v-model="uploadTitle"
+                class="rr-control"
+                type="text"
+                :placeholder="t('flow.library.upload.titlePlaceholder')"
+              >
+              <p class="rr-field__hint">{{ t('flow.library.upload.titleHint') }}</p>
+            </label>
+
+            <div
+              v-if="uploadFile && uploadSelection"
+              class="upload-selection-card"
+            >
+              <div class="upload-selection-card__meta">
+                <strong>{{ uploadFile.name }}</strong>
+                <span class="rr-muted">
+                  {{ uploadSelection.fileKindLabel }} · {{ formatFileSize(uploadFile.size) }}
+                </span>
+              </div>
+              <StatusBadge
+                :tone="uploadSelection.badgeTone"
+                :label="uploadSelection.badgeLabel"
+              />
+            </div>
+
+            <p
+              v-if="uploadSelection"
+              class="rr-banner"
+              :data-tone="uploadSelection.bannerTone"
+            >
+              {{ uploadSelection.message }}
+            </p>
+
+            <div class="rr-action-row">
+              <button
+                type="button"
+                class="rr-button"
+                :disabled="!canUploadSelectedFile"
+                @click="uploadCurrentFile"
+              >
+                {{
+                  submitMode === 'upload'
+                    ? t('flow.library.upload.actionBusy')
+                    : t('flow.library.upload.action')
+                }}
+              </button>
+            </div>
+          </article>
+
+          <article class="rr-panel rr-panel--accent rr-stack processing-overview">
+            <div class="processing-overview__topline">
+              <div class="rr-stack rr-stack--tight">
+                <p class="rr-kicker">{{ t('flow.library.nextActions.kicker') }}</p>
+                <strong>{{ nextActionLabel }}</strong>
+                <p class="rr-note">{{ nextActionHint }}</p>
+              </div>
+              <div class="rr-action-row">
+                <RouterLink
+                  class="rr-button"
+                  :to="nextActionRoute"
+                  :aria-disabled="nextActionLabel === t('flow.library.nextActions.waitForReady')"
+                >
+                  {{ nextActionLabel }}
+                </RouterLink>
+                <RouterLink
+                  v-if="latestSession"
+                  class="rr-button rr-button--secondary"
+                  :to="latestSessionRoute"
+                >
+                  {{ t('flow.library.frontDoor.resumeAsk') }}
+                </RouterLink>
+              </div>
+            </div>
+
+            <div class="ingestion-panel__heading">
+              <div class="rr-stack rr-stack--tight">
+                <p class="rr-kicker">{{ t('flow.library.processing.kicker') }}</p>
+                <h3>{{ t('flow.library.processing.readinessTitle') }}</h3>
               </div>
               <StatusBadge
                 :status="
-                  canGoToAsk
-                    ? 'ready'
+                  readinessPresentation.queryable
+                    ? readinessPresentation.hasFailures
+                      ? 'partial'
+                      : 'ready'
                     : activeJobsCount > 0
                       ? 'partial'
-                      : selectedProjectId
-                        ? 'draft'
-                        : 'blocked'
+                      : documents.length
+                        ? 'partial'
+                        : 'draft'
                 "
-                :label="nextActionLabel"
+                :label="
+                  readinessPresentation.queryable
+                    ? readinessPresentation.askLabel
+                    : activeJobsCount > 0
+                      ? t('flow.library.processing.queueActive', { count: activeJobsCount })
+                      : documents.length
+                        ? readinessPresentation.stateLabel
+                        : t('flow.library.processing.queueIdle')
+                "
+                emphasis="strong"
               />
             </div>
+
+            <p class="rr-note">
+              {{
+                readinessPresentation.queryable
+                  ? readinessPresentation.libraryHint
+                  : activeJobsCount > 0
+                    ? t('flow.library.processing.readinessProcessing')
+                    : documents.length
+                      ? readinessPresentation.libraryHint
+                      : t('flow.library.processing.readinessEmpty')
+              }}
+            </p>
+            <p
+              v-if="readinessPresentation.freshnessHint"
+              class="rr-banner"
+              data-tone="warning"
+            >
+              {{ readinessPresentation.freshnessHint }}
+            </p>
 
             <div class="processing-human">
               <article class="processing-human__card">
                 <span>{{ t('flow.library.stats.documents') }}</span>
-                <strong>{{ documents.length }}</strong>
-                <small>{{ t('flow.library.stats.documentsHint') }}</small>
+                <strong>{{ filesReadyCount }}</strong>
+                <small>{{ t('flow.library.processing.filesReadyHint') }}</small>
               </article>
               <article class="processing-human__card">
                 <span>{{ t('flow.library.processing.filesProcessing') }}</span>
-                <strong>{{ activeJobsCount }}</strong>
+                <strong>{{ filesProcessingCount }}</strong>
                 <small>{{ processingStatHint }}</small>
               </article>
               <article class="processing-human__card">
-                <span>{{ t('flow.library.frontDoor.recentAskLabel') }}</span>
-                <strong>{{ latestSession ? latestSession.message_count : 0 }}</strong>
-                <small>{{
-                  latestSession
-                    ? latestSession.title || t('flow.home.sessions.fallbackTitle')
-                    : t('flow.library.frontDoor.recentAskEmpty')
-                }}</small>
+                <span>{{ t('flow.library.processing.filesAttention') }}</span>
+                <strong>{{ filesAttentionCount }}</strong>
+                <small>{{ t('flow.library.processing.filesAttentionHint') }}</small>
               </article>
             </div>
 
-            <div class="rr-action-row">
-              <RouterLink class="rr-button" :to="nextActionRoute">{{ nextActionLabel }}</RouterLink>
-              <RouterLink
-                v-if="latestSession"
-                class="rr-button rr-button--secondary"
-                :to="latestSessionRoute"
-              >
-                {{ t('flow.library.frontDoor.resumeAsk') }}
-              </RouterLink>
+            <div class="next-action-card">
+              <div class="rr-stack rr-stack--tight">
+                <p class="rr-kicker">{{ t('flow.library.nextActions.kicker') }}</p>
+                <strong>{{ nextActionLabel }}</strong>
+                <p class="rr-note">{{ nextActionHint }}</p>
+              </div>
+              <div class="rr-action-row">
+                <RouterLink
+                  class="rr-button"
+                  :to="nextActionRoute"
+                  :aria-disabled="nextActionLabel === t('flow.library.nextActions.waitForReady')"
+                >
+                  {{ nextActionLabel }}
+                </RouterLink>
+                <button
+                  type="button"
+                  class="rr-button rr-button--secondary"
+                  :disabled="queueLoading"
+                  @click="refreshProcessingState(true)"
+                >
+                  {{ t('flow.library.processing.refresh') }}
+                </button>
+              </div>
             </div>
-          </article>
 
-          <div class="flow-reset__layout">
-            <article class="rr-panel rr-stack upload-focus">
-              <div class="ingestion-panel__heading">
+            <details
+              v-if="highlightedJobView"
+              class="secondary-disclosure"
+            >
+              <summary>{{ t('flow.library.processing.detailsToggle') }}</summary>
+
+              <p class="rr-note">{{ highlightedJobView.presentation.summary }}</p>
+
+              <div class="processing-human">
+                <article class="processing-human__card">
+                  <span>{{ t('flow.library.processing.currentSource') }}</span>
+                  <strong>{{ highlightedJobView.sourceLabel }}</strong>
+                </article>
+                <article class="processing-human__card">
+                  <span>{{ t('flow.library.processing.currentTrigger') }}</span>
+                  <strong>{{ highlightedJobView.triggerLabel }}</strong>
+                </article>
+                <article class="processing-human__card">
+                  <span>{{ t('flow.library.processing.currentUpdated') }}</span>
+                  <strong>{{
+                    highlightedJobView.updatedLabel ?? t('flow.library.processing.updating')
+                  }}</strong>
+                </article>
+                <article class="processing-human__card">
+                  <span>{{ t('flow.library.processing.currentDuration') }}</span>
+                  <strong>{{
+                    highlightedJobView.durationLabel ?? t('flow.library.processing.notStarted')
+                  }}</strong>
+                </article>
+              </div>
+
+              <div
+                v-if="highlightedJobSteps.length"
+                class="processing-steps processing-steps--compact"
+              >
+                <article
+                  v-for="step in highlightedJobSteps"
+                  :key="step.key"
+                  class="processing-step"
+                  :data-state="step.state"
+                >
+                  <div class="processing-step__dot" />
+                  <div class="processing-step__copy">
+                    <strong>{{ step.label }}</strong>
+                    <p>{{ step.description }}</p>
+                  </div>
+                </article>
+              </div>
+
+              <article
+                v-if="highlightedJobView.error"
+                class="processing-error"
+              >
+                <strong>{{ highlightedJobView.error.title }}</strong>
+                <p>{{ highlightedJobView.error.body }}</p>
+                <p
+                  v-if="highlightedJobView.error.detail"
+                  class="processing-error__detail"
+                >
+                  {{ highlightedJobView.error.detail }}
+                </p>
+              </article>
+
+              <div class="rr-action-row">
+                <button
+                  v-if="highlightedJobView.job.retryable"
+                  type="button"
+                  class="rr-button"
+                  :disabled="retryingJobId === highlightedJobView.job.id"
+                  @click="retryJob(highlightedJobView.job.id)"
+                >
+                  {{
+                    retryingJobId === highlightedJobView.job.id
+                      ? t('flow.library.processing.retryBusy')
+                      : t('flow.library.processing.retryAction')
+                  }}
+                </button>
+              </div>
+            </details>
+          </article>
+        </div>
+
+        <article
+          v-if="documents.length || recentJobs.length"
+          class="rr-panel rr-stack file-library-panel"
+        >
+          <div class="file-library-panel__summary">
+            <article class="processing-human__card">
+              <span>{{ t('flow.library.inventory.summaryLabel') }}</span>
+              <strong>{{ primaryDocumentCount }}</strong>
+              <small>{{ t('flow.library.inventory.summaryHint') }}</small>
+            </article>
+            <article class="processing-human__card">
+              <span>{{ t('flow.library.processing.filesProcessing') }}</span>
+              <strong>{{ filesProcessingCount }}</strong>
+              <small>{{ processingStatHint }}</small>
+            </article>
+            <article class="processing-human__card">
+              <span>{{ t('flow.library.processing.filesAttention') }}</span>
+              <strong>{{ filesAttentionCount }}</strong>
+              <small>{{ t('flow.library.processing.filesAttentionHint') }}</small>
+            </article>
+          </div>
+          <div class="ingestion-panel__heading">
+            <div class="rr-stack rr-stack--tight">
+              <p class="rr-kicker">{{ t('flow.library.inventory.kicker') }}</p>
+              <h3>{{ t('flow.library.inventory.title') }}</h3>
+            </div>
+            <StatusBadge
+              :status="documents.length ? 'ready' : activeJobsCount > 0 ? 'partial' : 'draft'"
+              :label="
+                documents.length
+                  ? t('flow.library.inventory.summaryReady', {
+                    count: filteredFileInventory.length,
+                  })
+                  : t('flow.library.inventory.emptyBadge')
+              "
+            />
+          </div>
+
+          <p class="rr-note">{{ t('flow.library.inventory.helper') }}</p>
+
+          <div
+            v-if="documents.length"
+            class="file-library-toolbar"
+          >
+            <label class="rr-field file-library-toolbar__search">
+              <span class="rr-field__label">{{ t('flow.library.inventory.searchLabel') }}</span>
+              <input
+                v-model="librarySearch"
+                class="rr-control"
+                type="search"
+                :placeholder="t('flow.library.inventory.searchPlaceholder')"
+              >
+            </label>
+          </div>
+
+          <EmptyStateCard
+            v-if="!documents.length"
+            :title="t('flow.library.inventory.emptyTitle')"
+            :message="t('flow.library.inventory.emptyBody')"
+          />
+
+          <div
+            v-else
+            class="file-library-list recent-files-list"
+          >
+            <section
+              v-for="group in inventoryGroups"
+              :key="group.key"
+              class="inventory-group"
+            >
+              <div class="inventory-group__header">
                 <div class="rr-stack rr-stack--tight">
-                  <p class="rr-kicker">{{ t('flow.library.upload.kicker') }}</p>
-                  <h3>{{ t('flow.library.upload.title') }}</h3>
+                  <strong>{{ t(`flow.library.inventory.groups.${group.key}.title`) }}</strong>
+                  <p class="rr-note">
+                    {{ t(`flow.library.inventory.groups.${group.key}.hint`) }}
+                  </p>
                 </div>
                 <StatusBadge
-                  :status="selectedProjectId ? 'ready' : 'blocked'"
+                  :tone="
+                    group.key === 'attention'
+                      ? 'warning'
+                      : group.key === 'processing'
+                        ? 'info'
+                        : 'positive'
+                  "
                   :label="
-                    selectedProjectId
-                      ? t('flow.library.upload.ready')
-                      : t('flow.library.upload.needsSetup')
+                    t(`flow.library.inventory.groups.${group.key}.count`, { count: group.total })
                   "
                 />
               </div>
 
-              <p class="rr-note">{{ t('flow.library.upload.helper') }}</p>
-
-              <div
-                class="upload-dropzone"
-                :class="{ 'is-active': isUploadDragActive, 'is-selected': !!uploadFile }"
-                @click="openUploadPicker"
-                @dragenter.prevent="handleUploadDragEnter"
-                @dragover.prevent="handleUploadDragOver"
-                @dragleave.prevent="handleUploadDragLeave"
-                @drop.prevent="handleUploadDrop"
+              <button
+                v-for="record in group.records"
+                :key="record.id"
+                type="button"
+                class="file-library-row"
+                :data-active="selectedInventoryRecord?.id === record.id"
+                @click="selectDocument(record.id)"
               >
-                <input
-                  :key="uploadInputKey"
-                  ref="uploadInputRef"
-                  class="upload-dropzone__input"
-                  type="file"
-                  :accept="acceptedUploadTypes"
-                  @change="handleUploadFileChange"
-                />
-
-                <div class="upload-dropzone__body">
-                  <StatusBadge tone="info" :label="t('flow.library.upload.dropzoneIdleBadge')" />
-                  <h4>
-                    {{
-                      isUploadDragActive
-                        ? t('flow.library.upload.dropzoneActiveTitle')
-                        : t('flow.library.upload.dropzoneTitle')
-                    }}
-                  </h4>
-                  <p>
-                    {{
-                      isUploadDragActive
-                        ? t('flow.library.upload.dropzoneActiveBody')
-                        : t('flow.library.upload.dropzoneBody')
-                    }}
-                  </p>
-                  <button
-                    type="button"
-                    class="rr-button rr-button--secondary"
-                    :disabled="submitMode === 'upload'"
-                    @click.stop="openUploadPicker"
-                  >
-                    {{ t('flow.library.upload.browse') }}
-                  </button>
+                <div class="file-library-row__copy">
+                  <div class="file-library-row__title-line">
+                    <strong>{{ record.title }}</strong>
+                    <StatusBadge
+                      :tone="record.statusTone"
+                      :label="record.statusLabel"
+                    />
+                  </div>
+                  <p class="rr-muted">{{ record.summaryLabel }}</p>
                 </div>
-              </div>
+                <div class="file-library-row__meta">
+                  <span v-if="record.updatedAt">{{ record.updatedAt }}</span>
+                  <span>{{ record.mimeLabel }}</span>
+                </div>
+              </button>
+            </section>
 
-              <label class="rr-field">
-                <span class="rr-field__label">{{ t('flow.library.upload.titleLabel') }}</span>
-                <input
-                  v-model="uploadTitle"
-                  class="rr-control"
-                  type="text"
-                  :placeholder="t('flow.library.upload.titlePlaceholder')"
-                />
-                <p class="rr-field__hint">{{ t('flow.library.upload.titleHint') }}</p>
-              </label>
+            <EmptyStateCard
+              v-if="!inventoryGroups.length"
+              :title="t('flow.library.inventory.filteredEmptyTitle')"
+              :message="t('flow.library.inventory.filteredEmptyBody')"
+            />
+          </div>
 
-              <div v-if="uploadFile && uploadSelection" class="upload-selection-card">
-                <div class="upload-selection-card__meta">
-                  <strong>{{ uploadFile.name }}</strong>
-                  <span class="rr-muted">
-                    {{ uploadSelection.fileKindLabel }} · {{ formatFileSize(uploadFile.size) }}
-                  </span>
+          <details
+            v-if="selectedInventoryRecord"
+            class="secondary-disclosure file-detail-disclosure"
+          >
+            <summary>
+              {{
+                t('flow.library.inventory.detailToggle', { title: selectedInventoryRecord.title })
+              }}
+            </summary>
+
+            <article class="file-library-detail">
+              <div class="file-library-detail__header">
+                <div class="rr-stack rr-stack--tight">
+                  <p class="rr-kicker">{{ t('flow.library.inventory.detailKicker') }}</p>
+                  <h4>{{ selectedInventoryRecord.title }}</h4>
                 </div>
                 <StatusBadge
-                  :tone="uploadSelection.badgeTone"
-                  :label="uploadSelection.badgeLabel"
+                  :tone="selectedInventoryRecord.statusTone"
+                  :label="selectedInventoryRecord.statusLabel"
+                  emphasis="strong"
                 />
               </div>
 
-              <p v-if="uploadSelection" class="rr-banner" :data-tone="uploadSelection.bannerTone">
-                {{ uploadSelection.message }}
-              </p>
+              <dl class="file-library-detail__facts">
+                <div>
+                  <dt>{{ t('flow.library.inventory.fields.externalKey') }}</dt>
+                  <dd>{{ selectedInventoryRecord.subtitle }}</dd>
+                </div>
+                <div>
+                  <dt>{{ t('flow.library.inventory.fields.source') }}</dt>
+                  <dd>{{ selectedInventoryRecord.sourceLabel }}</dd>
+                </div>
+                <div>
+                  <dt>{{ t('flow.library.inventory.fields.mime') }}</dt>
+                  <dd>{{ selectedInventoryRecord.mimeLabel }}</dd>
+                </div>
+                <div v-if="selectedInventoryRecord.updatedAt">
+                  <dt>{{ t('flow.library.inventory.fields.updated') }}</dt>
+                  <dd>{{ selectedInventoryRecord.updatedAt }}</dd>
+                </div>
+              </dl>
+
+              <article
+                class="rr-banner file-library-detail__readiness"
+                :data-tone="
+                  selectedInventoryRecord.statusTone === 'warning'
+                    ? 'warning'
+                    : selectedInventoryRecord.statusTone === 'info'
+                      ? 'info'
+                      : 'success'
+                "
+              >
+                <strong>{{ selectedInventoryRecord.readinessLabel }}</strong>
+                <p>{{ selectedInventoryRecord.readinessHint }}</p>
+              </article>
+
+              <div class="file-library-detail__trust-grid">
+                <article class="file-library-detail__trust-card">
+                  <span>{{ t('flow.library.inventory.provenance.label') }}</span>
+                  <strong>{{ selectedInventoryRecord.provenanceLabel }}</strong>
+                  <p class="rr-note">{{ selectedInventoryRecord.provenanceHint }}</p>
+                </article>
+                <article class="file-library-detail__trust-card">
+                  <span>{{ t('flow.library.inventory.nextStepLabel') }}</span>
+                  <strong>{{ selectedInventoryRecord.nextStepLabel }}</strong>
+                  <p class="rr-note">{{ selectedInventoryRecord.summaryLabel }}</p>
+                </article>
+              </div>
 
               <div class="rr-action-row">
                 <button
                   type="button"
                   class="rr-button"
-                  :disabled="!canUploadSelectedFile"
-                  @click="uploadCurrentFile"
+                  :disabled="!canGoToAsk"
+                  @click="useDocumentTitleForSearch"
                 >
-                  {{
-                    submitMode === 'upload'
-                      ? t('flow.library.upload.actionBusy')
-                      : t('flow.library.upload.action')
-                  }}
+                  {{ t('flow.library.inventory.searchAction') }}
                 </button>
               </div>
             </article>
-
-            <article class="rr-panel rr-panel--accent rr-stack processing-overview">
-              <div class="ingestion-panel__heading">
-                <div class="rr-stack rr-stack--tight">
-                  <p class="rr-kicker">{{ t('flow.library.processing.kicker') }}</p>
-                  <h3>{{ t('flow.library.processing.readinessTitle') }}</h3>
-                </div>
-                <StatusBadge
-                  :status="
-                    readinessPresentation.queryable
-                      ? readinessPresentation.hasFailures
-                        ? 'partial'
-                        : 'ready'
-                      : activeJobsCount > 0
-                        ? 'partial'
-                        : documents.length
-                          ? 'partial'
-                          : 'draft'
-                  "
-                  :label="
-                    readinessPresentation.queryable
-                      ? readinessPresentation.askLabel
-                      : activeJobsCount > 0
-                        ? t('flow.library.processing.queueActive', { count: activeJobsCount })
-                        : documents.length
-                          ? readinessPresentation.stateLabel
-                          : t('flow.library.processing.queueIdle')
-                  "
-                  emphasis="strong"
-                />
-              </div>
-
-              <p class="rr-note">
-                {{
-                  readinessPresentation.queryable
-                    ? readinessPresentation.libraryHint
-                    : activeJobsCount > 0
-                      ? t('flow.library.processing.readinessProcessing')
-                      : documents.length
-                        ? readinessPresentation.libraryHint
-                        : t('flow.library.processing.readinessEmpty')
-                }}
-              </p>
-              <p v-if="readinessPresentation.freshnessHint" class="rr-banner" data-tone="warning">
-                {{ readinessPresentation.freshnessHint }}
-              </p>
-
-              <div class="processing-human">
-                <article class="processing-human__card">
-                  <span>{{ t('flow.library.stats.documents') }}</span>
-                  <strong>{{ filesReadyCount }}</strong>
-                  <small>{{ t('flow.library.processing.filesReadyHint') }}</small>
-                </article>
-                <article class="processing-human__card">
-                  <span>{{ t('flow.library.processing.filesProcessing') }}</span>
-                  <strong>{{ filesProcessingCount }}</strong>
-                  <small>{{ processingStatHint }}</small>
-                </article>
-                <article class="processing-human__card">
-                  <span>{{ t('flow.library.processing.filesAttention') }}</span>
-                  <strong>{{ filesAttentionCount }}</strong>
-                  <small>{{ t('flow.library.processing.filesAttentionHint') }}</small>
-                </article>
-              </div>
-
-              <div class="next-action-card">
-                <div class="rr-stack rr-stack--tight">
-                  <p class="rr-kicker">{{ t('flow.library.nextActions.kicker') }}</p>
-                  <strong>{{ nextActionLabel }}</strong>
-                  <p class="rr-note">{{ nextActionHint }}</p>
-                </div>
-                <div class="rr-action-row">
-                  <RouterLink
-                    class="rr-button"
-                    :to="nextActionRoute"
-                    :aria-disabled="nextActionLabel === t('flow.library.nextActions.waitForReady')"
-                  >
-                    {{ nextActionLabel }}
-                  </RouterLink>
-                  <button
-                    type="button"
-                    class="rr-button rr-button--secondary"
-                    :disabled="queueLoading"
-                    @click="refreshProcessingState(true)"
-                  >
-                    {{ t('flow.library.processing.refresh') }}
-                  </button>
-                </div>
-              </div>
-
-              <details v-if="highlightedJobView" class="secondary-disclosure">
-                <summary>{{ t('flow.library.processing.detailsToggle') }}</summary>
-
-                <p class="rr-note">{{ highlightedJobView.presentation.summary }}</p>
-
-                <div class="processing-human">
-                  <article class="processing-human__card">
-                    <span>{{ t('flow.library.processing.currentSource') }}</span>
-                    <strong>{{ highlightedJobView.sourceLabel }}</strong>
-                  </article>
-                  <article class="processing-human__card">
-                    <span>{{ t('flow.library.processing.currentTrigger') }}</span>
-                    <strong>{{ highlightedJobView.triggerLabel }}</strong>
-                  </article>
-                  <article class="processing-human__card">
-                    <span>{{ t('flow.library.processing.currentUpdated') }}</span>
-                    <strong>{{
-                      highlightedJobView.updatedLabel ?? t('flow.library.processing.updating')
-                    }}</strong>
-                  </article>
-                  <article class="processing-human__card">
-                    <span>{{ t('flow.library.processing.currentDuration') }}</span>
-                    <strong>{{
-                      highlightedJobView.durationLabel ?? t('flow.library.processing.notStarted')
-                    }}</strong>
-                  </article>
-                </div>
-
-                <div
-                  v-if="highlightedJobSteps.length"
-                  class="processing-steps processing-steps--compact"
-                >
-                  <article
-                    v-for="step in highlightedJobSteps"
-                    :key="step.key"
-                    class="processing-step"
-                    :data-state="step.state"
-                  >
-                    <div class="processing-step__dot" />
-                    <div class="processing-step__copy">
-                      <strong>{{ step.label }}</strong>
-                      <p>{{ step.description }}</p>
-                    </div>
-                  </article>
-                </div>
-
-                <article v-if="highlightedJobView.error" class="processing-error">
-                  <strong>{{ highlightedJobView.error.title }}</strong>
-                  <p>{{ highlightedJobView.error.body }}</p>
-                  <p v-if="highlightedJobView.error.detail" class="processing-error__detail">
-                    {{ highlightedJobView.error.detail }}
-                  </p>
-                </article>
-
-                <div class="rr-action-row">
-                  <button
-                    v-if="highlightedJobView.job.retryable"
-                    type="button"
-                    class="rr-button"
-                    :disabled="retryingJobId === highlightedJobView.job.id"
-                    @click="retryJob(highlightedJobView.job.id)"
-                  >
-                    {{
-                      retryingJobId === highlightedJobView.job.id
-                        ? t('flow.library.processing.retryBusy')
-                        : t('flow.library.processing.retryAction')
-                    }}
-                  </button>
-                </div>
-              </details>
-            </article>
-          </div>
-
-          <article
-            v-if="documents.length || recentJobs.length"
-            class="rr-panel rr-stack file-library-panel"
-          >
-            <div class="ingestion-panel__heading">
-              <div class="rr-stack rr-stack--tight">
-                <p class="rr-kicker">{{ t('flow.library.inventory.kicker') }}</p>
-                <h3>{{ t('flow.library.inventory.title') }}</h3>
-              </div>
-              <StatusBadge
-                :status="documents.length ? 'ready' : activeJobsCount > 0 ? 'partial' : 'draft'"
-                :label="
-                  documents.length
-                    ? t('flow.library.inventory.summaryReady', {
-                        count: filteredFileInventory.length,
-                      })
-                    : t('flow.library.inventory.emptyBadge')
-                "
-              />
-            </div>
-
-            <p class="rr-note">{{ t('flow.library.inventory.helper') }}</p>
-
-            <div v-if="documents.length" class="file-library-toolbar">
-              <label class="rr-field file-library-toolbar__search">
-                <span class="rr-field__label">{{ t('flow.library.inventory.searchLabel') }}</span>
-                <input
-                  v-model="librarySearch"
-                  class="rr-control"
-                  type="search"
-                  :placeholder="t('flow.library.inventory.searchPlaceholder')"
-                />
-              </label>
-            </div>
-
-            <EmptyStateCard
-              v-if="!documents.length"
-              :title="t('flow.library.inventory.emptyTitle')"
-              :message="t('flow.library.inventory.emptyBody')"
-            />
-
-            <div v-else class="file-library-list recent-files-list">
-              <section v-for="group in inventoryGroups" :key="group.key" class="inventory-group">
-                <div class="inventory-group__header">
-                  <div class="rr-stack rr-stack--tight">
-                    <strong>{{ t(`flow.library.inventory.groups.${group.key}.title`) }}</strong>
-                    <p class="rr-note">
-                      {{ t(`flow.library.inventory.groups.${group.key}.hint`) }}
-                    </p>
-                  </div>
-                  <StatusBadge
-                    :tone="
-                      group.key === 'attention'
-                        ? 'warning'
-                        : group.key === 'processing'
-                          ? 'info'
-                          : 'positive'
-                    "
-                    :label="
-                      t(`flow.library.inventory.groups.${group.key}.count`, { count: group.total })
-                    "
-                  />
-                </div>
-
-                <button
-                  v-for="record in group.records"
-                  :key="record.id"
-                  type="button"
-                  class="file-library-row"
-                  :data-active="selectedInventoryRecord?.id === record.id"
-                  @click="selectDocument(record.id)"
-                >
-                  <div class="file-library-row__copy">
-                    <div class="file-library-row__title-line">
-                      <strong>{{ record.title }}</strong>
-                      <StatusBadge :tone="record.statusTone" :label="record.statusLabel" />
-                    </div>
-                    <p class="rr-muted">{{ record.summaryLabel }}</p>
-                  </div>
-                  <div class="file-library-row__meta">
-                    <span v-if="record.updatedAt">{{ record.updatedAt }}</span>
-                    <span>{{ record.mimeLabel }}</span>
-                  </div>
-                </button>
-              </section>
-
-              <EmptyStateCard
-                v-if="!inventoryGroups.length"
-                :title="t('flow.library.inventory.filteredEmptyTitle')"
-                :message="t('flow.library.inventory.filteredEmptyBody')"
-              />
-            </div>
-
-            <details
-              v-if="selectedInventoryRecord"
-              class="secondary-disclosure file-detail-disclosure"
-            >
-              <summary>
-                {{
-                  t('flow.library.inventory.detailToggle', { title: selectedInventoryRecord.title })
-                }}
-              </summary>
-
-              <article class="file-library-detail">
-                <div class="file-library-detail__header">
-                  <div class="rr-stack rr-stack--tight">
-                    <p class="rr-kicker">{{ t('flow.library.inventory.detailKicker') }}</p>
-                    <h4>{{ selectedInventoryRecord.title }}</h4>
-                  </div>
-                  <StatusBadge
-                    :tone="selectedInventoryRecord.statusTone"
-                    :label="selectedInventoryRecord.statusLabel"
-                    emphasis="strong"
-                  />
-                </div>
-
-                <dl class="file-library-detail__facts">
-                  <div>
-                    <dt>{{ t('flow.library.inventory.fields.externalKey') }}</dt>
-                    <dd>{{ selectedInventoryRecord.subtitle }}</dd>
-                  </div>
-                  <div>
-                    <dt>{{ t('flow.library.inventory.fields.source') }}</dt>
-                    <dd>{{ selectedInventoryRecord.sourceLabel }}</dd>
-                  </div>
-                  <div>
-                    <dt>{{ t('flow.library.inventory.fields.kind') }}</dt>
-                    <dd>{{ selectedInventoryRecord.sourceKindLabel }}</dd>
-                  </div>
-                  <div>
-                    <dt>{{ t('flow.library.inventory.fields.mime') }}</dt>
-                    <dd>{{ selectedInventoryRecord.mimeLabel }}</dd>
-                  </div>
-                  <div v-if="selectedInventoryRecord.updatedAt">
-                    <dt>{{ t('flow.library.inventory.fields.updated') }}</dt>
-                    <dd>{{ selectedInventoryRecord.updatedAt }}</dd>
-                  </div>
-                  <div v-if="selectedInventoryRecord.checksumShort">
-                    <dt>{{ t('flow.library.inventory.fields.checksum') }}</dt>
-                    <dd>{{ selectedInventoryRecord.checksumShort }}</dd>
-                  </div>
-                </dl>
-
-                <article
-                  class="rr-banner file-library-detail__readiness"
-                  :data-tone="
-                    selectedInventoryRecord.statusTone === 'warning'
-                      ? 'warning'
-                      : selectedInventoryRecord.statusTone === 'info'
-                        ? 'info'
-                        : 'success'
-                  "
-                >
-                  <strong>{{ selectedInventoryRecord.readinessLabel }}</strong>
-                  <p>{{ selectedInventoryRecord.readinessHint }}</p>
-                </article>
-
-                <div class="file-library-detail__trust-grid">
-                  <article class="file-library-detail__trust-card">
-                    <span>{{ t('flow.library.inventory.provenance.label') }}</span>
-                    <strong>{{ selectedInventoryRecord.provenanceLabel }}</strong>
-                    <p class="rr-note">{{ selectedInventoryRecord.provenanceHint }}</p>
-                  </article>
-                  <article class="file-library-detail__trust-card">
-                    <span>{{ t('flow.library.inventory.nextStepLabel') }}</span>
-                    <strong>{{ selectedInventoryRecord.nextStepLabel }}</strong>
-                    <p class="rr-note">{{ selectedInventoryRecord.summaryLabel }}</p>
-                  </article>
-                </div>
-
-                <div class="rr-action-row">
-                  <button
-                    type="button"
-                    class="rr-button"
-                    :disabled="!canGoToAsk"
-                    @click="useDocumentTitleForSearch"
-                  >
-                    {{ t('flow.library.inventory.searchAction') }}
-                  </button>
-                </div>
-              </article>
-            </details>
-          </article>
-        </div>
+          </details>
+        </article>
+        <button
+          type="button"
+          class="rr-button rr-button--secondary flow-reset__refresh"
+          :disabled="queueLoading"
+          @click="refreshProcessingState(true)"
+        >
+          {{ t('flow.library.processing.refresh') }}
+        </button>
       </article>
     </PageSection>
   </section>

@@ -631,8 +631,7 @@ export default {
     inventory: {
       kicker: 'Recent files',
       title: 'Recent files',
-      helper:
-        'Files are grouped by the next practical move: fix anything that needs attention, wait on files still getting ready, or move into Ask once files are searchable.',
+      helper: 'See what is ready, what is still processing, and what needs attention.',
       emptyBadge: 'No files yet',
       emptyTitle: 'No indexed files yet',
       emptyBody: 'Completed files will appear here as soon as processing finishes.',
@@ -645,6 +644,8 @@ export default {
       processingTitle: 'Related document activity',
       searchAction: 'Open Ask',
       summaryEmpty: 'No matching files',
+      summaryLabel: 'Documents in view',
+      summaryHint: 'Upload more or open Ask when ready.',
       summaryReady: '{count} files in view',
       summaryAttention: '{count} need attention out of {total}',
       unknownSource: 'Unknown source',
@@ -691,11 +692,9 @@ export default {
         hint: '{hint}',
       },
       provenance: {
-        label: 'Saved source details',
-        hintWithChecksum:
-          'Saved from {source} ({kind}), type {mime}, checksum {checksum}. Use this to confirm where this file came from.',
-        hintWithoutChecksum:
-          'Saved from {source} ({kind}), type {mime}. Use this to confirm where this file came from.',
+        label: 'Added from',
+        hintWithChecksum: 'Added from {source}. File type: {mime}.',
+        hintWithoutChecksum: 'Added from {source}. File type: {mime}.',
       },
       nextStepLabel: 'Suggested next step',
       nextSteps: {
