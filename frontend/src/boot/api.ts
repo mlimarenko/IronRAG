@@ -248,6 +248,9 @@ export interface UploadIngestResponse {
 export interface QueryResponseSurface {
   retrieval_run_id: string
   project_id: string
+  session_id: string
+  user_message_id: string
+  assistant_message_id: string
   answer: string
   references: string[]
   mode: string
@@ -256,9 +259,30 @@ export interface QueryResponseSurface {
   warning?: string | null
 }
 
+export interface ChatSessionSurface {
+  id: string
+  project_id: string
+  title?: string | null
+  created_at: string
+  updated_at: string
+  message_count: number
+  last_message_preview?: string | null
+}
+
+export interface ChatMessageSurface {
+  id: string
+  session_id: string
+  project_id: string
+  role: string
+  content: string
+  retrieval_run_id?: string | null
+  created_at: string
+}
+
 export interface RetrievalRunDetail {
   id: string
   project_id: string
+  session_id?: string | null
   query_text: string
   model_profile_id?: string | null
   top_k: number
@@ -613,6 +637,9 @@ export async function uploadAndIngest(payload: {
 
 export async function runQuery(payload: {
   project_id: string
+  session_id?: string
+  create_session?: boolean
+  session_title?: string
   query_text: string
   model_profile_id?: string
   embedding_model_profile_id?: string
@@ -666,5 +693,17 @@ export async function fetchGraphEntityDetail(
   const { data } = await api.get<GraphEntityDetailResponse>(
     `/graph-products/${projectId}/entities/${entityId}`,
   )
+  return data
+}
+
+export async function fetchChatSessions(projectId: string): Promise<ChatSessionSurface[]> {
+  const { data } = await api.get<ChatSessionSurface[]>('/chat-sessions', {
+    params: { project_id: projectId },
+  })
+  return data
+}
+
+export async function fetchChatMessages(sessionId: string): Promise<ChatMessageSurface[]> {
+  const { data } = await api.get<ChatMessageSurface[]>(`/chat-sessions/${sessionId}/messages`)
   return data
 }

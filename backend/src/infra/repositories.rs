@@ -507,9 +507,31 @@ pub async fn get_document_by_id(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ChatSessionRow {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub project_id: Uuid,
+    pub title: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ChatMessageRow {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub project_id: Uuid,
+    pub role: String,
+    pub content: String,
+    pub retrieval_run_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct RetrievalRunRow {
     pub id: Uuid,
     pub project_id: Uuid,
+    pub session_id: Option<Uuid>,
     pub query_text: String,
     pub model_profile_id: Option<Uuid>,
     pub top_k: i32,
@@ -529,7 +551,7 @@ pub async fn list_retrieval_runs(
     match project_id {
         Some(project_id) => {
             sqlx::query_as::<_, RetrievalRunRow>(
-                "select id, project_id, query_text, model_profile_id, top_k, response_text, debug_json, created_at
+                "select id, project_id, session_id, query_text, model_profile_id, top_k, response_text, debug_json, created_at
                  from retrieval_run where project_id = $1 order by created_at desc",
             )
             .bind(project_id)
@@ -538,7 +560,7 @@ pub async fn list_retrieval_runs(
         }
         None => {
             sqlx::query_as::<_, RetrievalRunRow>(
-                "select id, project_id, query_text, model_profile_id, top_k, response_text, debug_json, created_at
+                "select id, project_id, session_id, query_text, model_profile_id, top_k, response_text, debug_json, created_at
                  from retrieval_run order by created_at desc",
             )
             .fetch_all(pool)
@@ -554,6 +576,7 @@ pub async fn list_retrieval_runs(
 pub async fn create_retrieval_run(
     pool: &PgPool,
     project_id: Uuid,
+    session_id: Option<Uuid>,
     query_text: &str,
     model_profile_id: Option<Uuid>,
     top_k: i32,
@@ -561,18 +584,109 @@ pub async fn create_retrieval_run(
     debug_json: serde_json::Value,
 ) -> Result<RetrievalRunRow, sqlx::Error> {
     sqlx::query_as::<_, RetrievalRunRow>(
-        "insert into retrieval_run (id, project_id, query_text, model_profile_id, top_k, response_text, debug_json)
-         values ($1, $2, $3, $4, $5, $6, $7)
-         returning id, project_id, query_text, model_profile_id, top_k, response_text, debug_json, created_at",
+        "insert into retrieval_run (id, project_id, session_id, query_text, model_profile_id, top_k, response_text, debug_json)
+         values ($1, $2, $3, $4, $5, $6, $7, $8)
+         returning id, project_id, session_id, query_text, model_profile_id, top_k, response_text, debug_json, created_at",
     )
     .bind(Uuid::now_v7())
     .bind(project_id)
+    .bind(session_id)
     .bind(query_text)
     .bind(model_profile_id)
     .bind(top_k)
     .bind(response_text)
     .bind(debug_json)
     .fetch_one(pool)
+    .await
+}
+
+pub async fn create_chat_session(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    title: &str,
+) -> Result<ChatSessionRow, sqlx::Error> {
+    sqlx::query_as::<_, ChatSessionRow>(
+        "insert into chat_session (id, workspace_id, project_id, title)
+         values ($1, $2, $3, $4)
+         returning id, workspace_id, project_id, title, created_at, updated_at",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(project_id)
+    .bind(title)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn get_chat_session_by_id(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<Option<ChatSessionRow>, sqlx::Error> {
+    sqlx::query_as::<_, ChatSessionRow>(
+        "select id, workspace_id, project_id, title, created_at, updated_at
+         from chat_session where id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
+pub async fn list_chat_sessions_by_project(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<Vec<ChatSessionRow>, sqlx::Error> {
+    sqlx::query_as::<_, ChatSessionRow>(
+        "select id, workspace_id, project_id, title, created_at, updated_at
+         from chat_session where project_id = $1
+         order by updated_at desc, created_at desc",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn create_chat_message(
+    pool: &PgPool,
+    session_id: Uuid,
+    project_id: Uuid,
+    role: &str,
+    content: &str,
+    retrieval_run_id: Option<Uuid>,
+) -> Result<ChatMessageRow, sqlx::Error> {
+    let message = sqlx::query_as::<_, ChatMessageRow>(
+        "insert into chat_message (id, session_id, project_id, role, content, retrieval_run_id)
+         values ($1, $2, $3, $4, $5, $6)
+         returning id, session_id, project_id, role, content, retrieval_run_id, created_at",
+    )
+    .bind(Uuid::now_v7())
+    .bind(session_id)
+    .bind(project_id)
+    .bind(role)
+    .bind(content)
+    .bind(retrieval_run_id)
+    .fetch_one(pool)
+    .await?;
+
+    sqlx::query("update chat_session set updated_at = now() where id = $1")
+        .bind(session_id)
+        .execute(pool)
+        .await?;
+
+    Ok(message)
+}
+
+pub async fn list_chat_messages_by_session(
+    pool: &PgPool,
+    session_id: Uuid,
+) -> Result<Vec<ChatMessageRow>, sqlx::Error> {
+    sqlx::query_as::<_, ChatMessageRow>(
+        "select id, session_id, project_id, role, content, retrieval_run_id, created_at
+         from chat_message where session_id = $1
+         order by created_at asc, id asc",
+    )
+    .bind(session_id)
+    .fetch_all(pool)
     .await
 }
 
@@ -1327,7 +1441,7 @@ pub async fn get_retrieval_run_by_id(
     id: Uuid,
 ) -> Result<Option<RetrievalRunRow>, sqlx::Error> {
     sqlx::query_as::<_, RetrievalRunRow>(
-        "select id, project_id, query_text, model_profile_id, top_k, response_text, debug_json, created_at
+        "select id, project_id, session_id, query_text, model_profile_id, top_k, response_text, debug_json, created_at
          from retrieval_run where id = $1",
     )
     .bind(id)

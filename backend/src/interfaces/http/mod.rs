@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod authorization;
+pub mod chat;
 pub mod chunks;
 pub mod content;
 pub mod content_support;
@@ -31,6 +32,7 @@ pub fn router() -> Router<crate::app::state::AppState> {
         .merge(ingestion::router())
         .merge(documents::router())
         .merge(content::router())
+        .merge(chat::router())
         .merge(chunks::router())
         .merge(uploads::router())
         .merge(retrieval::router())
