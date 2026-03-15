@@ -17,6 +17,7 @@ dist
 coverage
 playwright-report
 test-results
+frontend/.quasar/
 
 # IDE
 .vscode
