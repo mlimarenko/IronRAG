@@ -14,9 +14,11 @@ const props = withDefaults(
     description?: string
     emptyMessage: string
     references: string[]
+    showRaw?: boolean
   }>(),
   {
     description: undefined,
+    showRaw: false,
   },
 )
 
@@ -61,12 +63,12 @@ const items = computed(() =>
             {{ t('flow.search.diagnostics.referenceChip') }}
           </span>
         </div>
-        <div class="reference-card__body">
-          <span class="reference-card__raw-label">{{
-            t('flow.search.result.referenceRawLabel')
-          }}</span>
+        <details v-if="props.showRaw" class="reference-card__body">
+          <summary class="reference-card__raw-label">
+            {{ t('flow.search.result.referenceRawLabel') }}
+          </summary>
           <code class="reference-card__raw">{{ item.raw }}</code>
-        </div>
+        </details>
       </li>
     </ol>
   </section>

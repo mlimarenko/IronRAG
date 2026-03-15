@@ -120,6 +120,7 @@ const graphSurfaceError = ref<string | null>(null)
 const graphSearchError = ref<string | null>(null)
 const graphDetailError = ref<string | null>(null)
 const selectedGraphItem = ref<GraphSelection | null>(null)
+const showGraphContext = ref(false)
 const showTechnicalGraphDetail = ref(false)
 const showGraphReadinessDetails = ref(false)
 
@@ -1304,15 +1305,18 @@ function formatRelationLine(relation: GraphRelationDetail): string {
             </div>
           </article>
 
-          <article class="rr-panel rr-panel--muted graph-context-panel">
-            <div class="graph-context-panel__header">
+          <details class="rr-panel rr-panel--muted graph-context-panel" :open="showGraphContext">
+            <summary class="graph-context-panel__summary" @click.prevent="showGraphContext = !showGraphContext">
               <div>
                 <p class="rr-kicker">{{ t('flow.search.graph.kicker') }}</p>
                 <h3>{{ t('flow.search.graph.title') }}</h3>
                 <p class="rr-note">{{ t('flow.search.graph.description') }}</p>
               </div>
-              <StatusBadge :status="graphPanelStatus.status" :label="graphPanelStatus.label" />
-            </div>
+              <div class="graph-context-panel__summary-meta">
+                <StatusBadge :status="graphPanelStatus.status" :label="graphPanelStatus.label" />
+                <small class="rr-note">{{ t('flow.search.graph.summaryCta') }}</small>
+              </div>
+            </summary>
 
             <p v-if="graphCoverageWarning" class="rr-banner" data-tone="warning">
               {{ graphCoverageWarning }}
@@ -1320,56 +1324,6 @@ function formatRelationLine(relation: GraphRelationDetail): string {
             <p v-if="graphSurfaceError" class="rr-banner" data-tone="danger">
               {{ graphSurfaceError }}
             </p>
-
-            <div class="graph-context-panel__metrics">
-              <article class="metric-card">
-                <span class="metric-card__label">{{
-                  t('flow.search.graph.metrics.entities')
-                }}</span>
-                <strong>{{
-                  currentGraphCoverage
-                    ? formatCount(currentGraphCoverage.entity_count, 'entity')
-                    : '—'
-                }}</strong>
-              </article>
-              <article class="metric-card">
-                <span class="metric-card__label">{{
-                  t('flow.search.graph.metrics.relations')
-                }}</span>
-                <strong>{{
-                  currentGraphCoverage
-                    ? formatCount(currentGraphCoverage.relation_count, 'relation')
-                    : '—'
-                }}</strong>
-              </article>
-              <article class="metric-card">
-                <span class="metric-card__label">{{ t('flow.search.graph.metrics.runs') }}</span>
-                <strong>{{
-                  currentGraphCoverage
-                    ? formatCount(currentGraphCoverage.extraction_runs, 'run')
-                    : '—'
-                }}</strong>
-              </article>
-            </div>
-
-            <div class="graph-context-panel__search">
-              <label class="rr-field">
-                <span class="rr-field__label">{{ t('flow.search.graph.search.label') }}</span>
-                <input
-                  v-model="graphSearchQuery"
-                  class="rr-control"
-                  type="text"
-                  :disabled="!selectedProjectId || graphApiUnavailable"
-                  :placeholder="t('flow.search.graph.search.placeholder')"
-                />
-              </label>
-              <p v-if="loadingGraphSearch" class="rr-note">
-                {{ t('flow.search.graph.search.loading') }}
-              </p>
-              <p v-if="graphSearchError" class="rr-banner" data-tone="danger">
-                {{ graphSearchError }}
-              </p>
-            </div>
 
             <LoadingSkeletonPanel
               v-if="loadingGraphSurface"
@@ -1392,6 +1346,55 @@ function formatRelationLine(relation: GraphRelationDetail): string {
             />
 
             <div v-else class="graph-context-panel__body">
+              <div class="graph-context-panel__metrics">
+                <article class="metric-card">
+                  <span class="metric-card__label">{{
+                    t('flow.search.graph.metrics.entities')
+                  }}</span>
+                  <strong>{{
+                    currentGraphCoverage
+                      ? formatCount(currentGraphCoverage.entity_count, 'entity')
+                      : '—'
+                  }}</strong>
+                </article>
+                <article class="metric-card">
+                  <span class="metric-card__label">{{
+                    t('flow.search.graph.metrics.relations')
+                  }}</span>
+                  <strong>{{
+                    currentGraphCoverage
+                      ? formatCount(currentGraphCoverage.relation_count, 'relation')
+                      : '—'
+                  }}</strong>
+                </article>
+                <article class="metric-card">
+                  <span class="metric-card__label">{{ t('flow.search.graph.metrics.runs') }}</span>
+                  <strong>{{
+                    currentGraphCoverage
+                      ? formatCount(currentGraphCoverage.extraction_runs, 'run')
+                      : '—'
+                  }}</strong>
+                </article>
+              </div>
+
+              <div class="graph-context-panel__search">
+                <label class="rr-field">
+                  <span class="rr-field__label">{{ t('flow.search.graph.search.label') }}</span>
+                  <input
+                    v-model="graphSearchQuery"
+                    class="rr-control"
+                    type="text"
+                    :disabled="!selectedProjectId || graphApiUnavailable"
+                    :placeholder="t('flow.search.graph.search.placeholder')"
+                  />
+                </label>
+                <p v-if="loadingGraphSearch" class="rr-note">
+                  {{ t('flow.search.graph.search.loading') }}
+                </p>
+                <p v-if="graphSearchError" class="rr-banner" data-tone="danger">
+                  {{ graphSearchError }}
+                </p>
+              </div>
               <div class="graph-results">
                 <h4>{{ t('flow.search.graph.search.resultsTitle') }}</h4>
                 <div v-if="visibleGraphResults.length" class="graph-results__list">
@@ -1698,7 +1701,7 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                 </div>
               </details>
             </div>
-          </article>
+          </details>
         </div>
       </div>
     </PageSection>
@@ -1751,7 +1754,8 @@ function formatRelationLine(relation: GraphRelationDetail): string {
 .session-sidebar__summary,
 .mobile-session-bar,
 .graph-context-panel__header,
-.graph-detail__header {
+.graph-detail__header,
+.graph-context-panel__summary {
   display: flex;
   justify-content: space-between;
   gap: var(--rr-space-5);
@@ -1764,6 +1768,21 @@ function formatRelationLine(relation: GraphRelationDetail): string {
 .mobile-session-bar__copy {
   display: grid;
   gap: 6px;
+}
+
+.graph-context-panel__summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.graph-context-panel__summary::-webkit-details-marker {
+  display: none;
+}
+
+.graph-context-panel__summary-meta {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
 }
 
 .ask-composer {
