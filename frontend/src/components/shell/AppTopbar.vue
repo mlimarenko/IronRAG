@@ -6,6 +6,9 @@ import { useAppLocale } from 'src/composables/useAppLocale'
 
 const { t } = useI18n()
 const { locale, localeOptions, setLocale } = useAppLocale()
+const applyLocale = (nextLocale: (typeof localeOptions)[number]) => {
+  setLocale(nextLocale)
+}
 const localeButtons = computed(() => {
   void locale.value
 
@@ -20,7 +23,7 @@ withDefaults(
   defineProps<{
     sectionLabel?: string
     sectionSummary?: string
-    sectionKey?: 'processing' | 'files' | 'search' | 'graph' | 'api'
+    sectionKey?: 'home' | 'processing' | 'files' | 'search' | 'graph' | 'api'
   }>(),
   {
     sectionLabel: undefined,
@@ -54,7 +57,7 @@ withDefaults(
           :aria-pressed="locale === option.value"
           :aria-label="option.name"
           :title="option.name"
-          @click="setLocale(option.value)"
+          @click="applyLocale(option.value)"
         >
           <span class="app-topbar__locale-code">{{ option.code }}</span>
           <span class="app-topbar__locale-name">{{ option.name }}</span>
