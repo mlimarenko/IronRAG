@@ -5,33 +5,37 @@ export default {
   },
   nav: {
     product: 'Product areas',
+    groups: {
+      flow: 'Core flow',
+      inspect: 'Inspect',
+    },
     items: {
       processing: {
         label: 'Processing',
-        hint: 'Choose the space and library for this session.',
+        hint: 'Choose session scope.',
       },
       files: {
         label: 'Files',
-        hint: 'Add notes and uploads to your library.',
+        hint: 'Add content.',
       },
       search: {
         label: 'Search',
-        hint: 'Ask questions and review grounded answers.',
+        hint: 'Review grounded answers.',
       },
       graph: {
         label: 'Graph',
-        hint: 'Inspect relationship coverage and evidence.',
+        hint: 'Inspect relationships.',
       },
       api: {
         label: 'API',
-        hint: 'Use tokens, examples, and endpoints.',
+        hint: 'Use tokens and examples.',
       },
     },
   },
   topbar: {
-    surface: 'Current surface',
+    surface: 'Current area',
     language: 'Language',
-    languageHint: 'Interface language',
+    languageHint: 'Interface',
   },
   locale: {
     en: 'EN',
@@ -45,23 +49,23 @@ export default {
   pages: {
     processing: {
       title: 'Processing',
-      summary: 'Set the scope that powers files, search, graph, and API.',
+      summary: 'Set the active scope.',
     },
     files: {
       title: 'Files',
-      summary: 'Bring new content into the active library.',
+      summary: 'Add content.',
     },
     search: {
       title: 'Search',
-      summary: 'Find answers grounded in your library.',
+      summary: 'Ask grounded questions.',
     },
     graph: {
       title: 'Graph',
-      summary: 'See what relationships and evidence are visible today.',
+      summary: 'Inspect relations and evidence.',
     },
     api: {
       title: 'API',
-      summary: 'Build against the live RustRAG API surface.',
+      summary: 'Build against the live API.',
     },
   },
 } as const

@@ -19,7 +19,6 @@ const routeMeta = computed(() => {
 
   return {
     sectionLabel: t(`shell.pages.${section}.title`),
-    sectionSummary: t(`shell.pages.${section}.summary`),
   }
 })
 </script>
@@ -33,7 +32,6 @@ const routeMeta = computed(() => {
     <div class="app-shell__main">
       <AppTopbar
         :section-label="routeMeta.sectionLabel"
-        :section-summary="routeMeta.sectionSummary"
       />
 
       <main class="app-shell__content">

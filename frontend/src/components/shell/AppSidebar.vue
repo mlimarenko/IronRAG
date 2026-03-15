@@ -9,14 +9,30 @@ const { t } = useI18n()
 interface NavItem {
   to: string
   key: 'processing' | 'files' | 'search' | 'graph' | 'api'
+  step: string
 }
 
-const navItems = computed<readonly NavItem[]>(() => [
-  { to: '/processing', key: 'processing' },
-  { to: '/files', key: 'files' },
-  { to: '/search', key: 'search' },
-  { to: '/graph', key: 'graph' },
-  { to: '/api', key: 'api' },
+interface NavGroup {
+  key: 'flow' | 'inspect'
+  items: readonly NavItem[]
+}
+
+const navGroups = computed<readonly NavGroup[]>(() => [
+  {
+    key: 'flow',
+    items: [
+      { to: '/processing', key: 'processing', step: '01' },
+      { to: '/files', key: 'files', step: '02' },
+      { to: '/search', key: 'search', step: '03' },
+    ],
+  },
+  {
+    key: 'inspect',
+    items: [
+      { to: '/graph', key: 'graph', step: '04' },
+      { to: '/api', key: 'api', step: '05' },
+    ],
+  },
 ])
 
 const activePath = computed(() => route.path)
@@ -38,25 +54,35 @@ function isActive(item: NavItem) {
       </RouterLink>
     </div>
 
-    <nav class="app-sidebar__nav" :aria-label="t('shell.nav.product')">
-      <RouterLink
-        v-for="item in navItems"
-        :key="item.to"
-        :to="item.to"
-        class="app-sidebar__link"
-        :data-active="isActive(item)"
+    <div class="app-sidebar__sections" :aria-label="t('shell.nav.product')">
+      <section
+        v-for="group in navGroups"
+        :key="group.key"
+        class="app-sidebar__section"
       >
-        <span class="app-sidebar__label">{{ t(`shell.nav.items.${item.key}.label`) }}</span>
-        <span class="app-sidebar__hint">{{ t(`shell.nav.items.${item.key}.hint`) }}</span>
-      </RouterLink>
-    </nav>
+        <p class="app-sidebar__section-label">{{ t(`shell.nav.groups.${group.key}`) }}</p>
+        <nav class="app-sidebar__nav" :aria-label="t(`shell.nav.groups.${group.key}`)">
+          <RouterLink
+            v-for="item in group.items"
+            :key="item.to"
+            :to="item.to"
+            class="app-sidebar__link"
+            :data-active="isActive(item)"
+            :aria-current="isActive(item) ? 'page' : undefined"
+          >
+            <span class="app-sidebar__step">{{ item.step }}</span>
+            <span class="app-sidebar__label">{{ t(`shell.nav.items.${item.key}.label`) }}</span>
+          </RouterLink>
+        </nav>
+      </section>
+    </div>
   </aside>
 </template>
 
 <style scoped>
 .app-sidebar {
   display: grid;
-  gap: var(--rr-space-7);
+  gap: var(--rr-space-6);
   align-content: start;
 }
 
@@ -86,6 +112,25 @@ function isActive(item: NavItem) {
   gap: 2px;
 }
 
+.app-sidebar__sections {
+  display: grid;
+  gap: var(--rr-space-5);
+}
+
+.app-sidebar__section {
+  display: grid;
+  gap: var(--rr-space-3);
+}
+
+.app-sidebar__section-label {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--rr-color-text-muted);
+}
+
 .app-sidebar__brand h1 {
   margin: 0;
   font-family: var(--rr-font-display);
@@ -103,47 +148,96 @@ function isActive(item: NavItem) {
 
 .app-sidebar__nav {
   display: grid;
-  gap: var(--rr-space-3);
+  gap: 10px;
 }
 
 .app-sidebar__link {
-  display: grid;
-  gap: 4px;
-  min-height: 56px;
-  padding: 12px;
-  border: 1px solid transparent;
-  border-radius: calc(var(--rr-radius-sm) + 2px);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 50px;
+  padding: 12px 14px;
+  border: 1px solid rgb(15 23 42 / 0.06);
+  border-radius: calc(var(--rr-radius-md) + 2px);
   color: var(--rr-color-text-secondary);
   text-decoration: none;
-  background: rgb(255 255 255 / 0.38);
+  background: rgb(255 255 255 / 0.54);
+  box-shadow: 0 10px 28px rgb(15 23 42 / 0.03);
   transition:
     border-color var(--rr-motion-base),
     background var(--rr-motion-base),
     color var(--rr-motion-base),
+    box-shadow var(--rr-motion-base),
     transform var(--rr-motion-base);
 }
 
 .app-sidebar__link:hover,
 .app-sidebar__link[data-active='true'] {
-  border-color: rgb(59 130 246 / 0.16);
+  border-color: rgb(59 130 246 / 0.18);
   background: var(--rr-color-bg-surface-strong);
   color: var(--rr-color-text-primary);
   transform: translateX(2px);
+  box-shadow: 0 14px 30px rgb(59 130 246 / 0.08);
 }
 
-.app-sidebar__label {
-  font-size: 0.94rem;
-  font-weight: 650;
+.app-sidebar__link:focus-visible {
+  outline: 2px solid rgb(59 130 246 / 0.45);
+  outline-offset: 2px;
 }
 
-.app-sidebar__hint {
-  font-size: 0.82rem;
-  line-height: 1.4;
+.app-sidebar__step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 38px;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgb(15 23 42 / 0.06);
+  font-size: 0.74rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
   color: var(--rr-color-text-muted);
 }
 
-.app-sidebar__link:hover .app-sidebar__hint,
-.app-sidebar__link[data-active='true'] .app-sidebar__hint {
-  color: var(--rr-color-text-secondary);
+.app-sidebar__link:hover .app-sidebar__step,
+.app-sidebar__link[data-active='true'] .app-sidebar__step {
+  background: rgb(59 130 246 / 0.12);
+  color: var(--rr-color-accent-700);
+}
+
+.app-sidebar__label {
+  font-size: 0.92rem;
+  font-weight: 650;
+}
+
+@media (width <= 1100px) {
+  .app-sidebar__sections {
+    gap: var(--rr-space-4);
+  }
+
+  .app-sidebar__nav {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .app-sidebar__link {
+    min-height: 56px;
+  }
+}
+
+@media (width <= 700px) {
+  .app-sidebar__nav {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .app-sidebar__link {
+    padding: 12px;
+  }
+
+  .app-sidebar__step {
+    min-width: 34px;
+    min-height: 28px;
+    padding: 0 8px;
+  }
 }
 </style>

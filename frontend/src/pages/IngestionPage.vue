@@ -170,8 +170,8 @@ const selectedWorkspace = computed(
 )
 const sourceLabelById = computed(() => new Map(sources.value.map((item) => [item.id, item.label])))
 
-const activeJobsCount = computed(
-  () => recentJobs.value.filter((job) => isActiveJobStatus(job.status)).length,
+const activeJobsCount = computed(() =>
+  recentJobs.value.filter((job) => isActiveJobStatus(job.status)).length,
 )
 const uploadSelection = computed(() =>
   uploadFile.value ? describeUploadSelection(uploadFile.value) : null,
@@ -179,9 +179,9 @@ const uploadSelection = computed(() =>
 const canUploadSelectedFile = computed(() =>
   Boolean(
     selectedProjectId.value &&
-    uploadFile.value &&
-    uploadSelection.value?.supportStatus === 'supported_now' &&
-    submitMode.value !== 'upload',
+      uploadFile.value &&
+      uploadSelection.value?.supportStatus === 'supported_now' &&
+      submitMode.value !== 'upload',
   ),
 )
 const pageStatus = computed(() => {
@@ -215,10 +215,9 @@ const pageStatus = computed(() => {
 
   return { status: 'draft', label: t('flow.library.statusDraft') }
 })
-const highlightedJob = computed(() => {
-  const activeJob = recentJobs.value.find((job) => isActiveJobStatus(job.status))
-  return activeJob ?? recentJobs.value.at(0) ?? null
-})
+const highlightedJob = computed(
+  () => recentJobs.value.find((job) => isActiveJobStatus(job.status)) ?? recentJobs.value[0] ?? null,
+)
 const jobViewModels = computed<JobViewModel[]>(() =>
   recentJobs.value.map((job) => ({
     job,
@@ -245,9 +244,7 @@ const visibleSources = computed(() => sources.value.slice(0, MAX_VISIBLE_QUEUE_I
 const remainingDocumentCount = computed(() =>
   Math.max(0, documents.value.length - MAX_VISIBLE_QUEUE_ITEMS),
 )
-const remainingSourceCount = computed(() =>
-  Math.max(0, sources.value.length - MAX_VISIBLE_QUEUE_ITEMS),
-)
+const remainingSourceCount = computed(() => Math.max(0, sources.value.length - MAX_VISIBLE_QUEUE_ITEMS))
 const processingStatLabel = computed(() => {
   if (activeJobsCount.value > 0) {
     return t('flow.library.stats.processingActive', { count: activeJobsCount.value })
@@ -278,7 +275,7 @@ function slugify(value: string): string {
 
 function buildExternalKey(prefix: string, seed: string): string {
   const base = slugify(seed) || prefix
-  return `${prefix}-${base}-${String(Date.now())}`
+  return `${prefix}-${base}-${Date.now()}`
 }
 
 function setFeedbackState(state: FeedbackState | null) {
@@ -417,20 +414,18 @@ function formatDuration(startedAt?: string | null, finishedAt?: string | null): 
 
   const totalSeconds = Math.round((finished - started) / 1000)
   if (totalSeconds < 60) {
-    return `${String(totalSeconds)}s`
+    return `${totalSeconds}s`
   }
 
   const minutes = Math.floor(totalSeconds / 60)
   const seconds = totalSeconds % 60
   if (minutes < 60) {
-    return seconds > 0 ? `${String(minutes)}m ${String(seconds)}s` : `${String(minutes)}m`
+    return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`
   }
 
   const hours = Math.floor(minutes / 60)
   const remainingMinutes = minutes % 60
-  return remainingMinutes > 0
-    ? `${String(hours)}h ${String(remainingMinutes)}m`
-    : `${String(hours)}h`
+  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`
 }
 
 function formatDocumentStatus(status?: string | null): string {
@@ -438,7 +433,9 @@ function formatDocumentStatus(status?: string | null): string {
     return t('flow.library.lists.documents.indexed')
   }
 
-  return status.replace(/[_-]+/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase())
+  return status
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase())
 }
 
 function sleep(ms: number): Promise<void> {
@@ -480,32 +477,6 @@ watch(
   },
   { immediate: true },
 )
-
-watch(selectedProjectId, async (projectId) => {
-  stopAutoRefresh()
-  documents.value = []
-  sources.value = []
-  recentJobs.value = []
-  feedback.value = null
-
-  if (!projectId) {
-    return
-  }
-
-  try {
-    await loadProjectData(projectId)
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
-    const copy = describeIngestionError(message, t)
-    setFeedbackState({
-      tone: 'danger',
-      title: copy.title,
-      body: copy.body,
-      detail: copy.detail,
-    })
-  }
-})
 
 async function hydrateRecentJobs(jobSummaries: IngestionJobSummary[]) {
   queueLoading.value = true
@@ -553,8 +524,7 @@ async function refreshProcessingState(showConfirmation: boolean) {
       })
     }
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
+    const message = error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
     const copy = describeIngestionError(message, t)
     setFeedbackState({
       tone: 'danger',
@@ -638,8 +608,7 @@ function handleUploadDragLeave(event: DragEvent) {
 
 function handleUploadDrop(event: DragEvent) {
   event.preventDefault()
-  const dataTransfer = event.dataTransfer
-  setUploadFile(dataTransfer ? dataTransfer.files.item(0) : null)
+  setUploadFile(event.dataTransfer?.files?.[0] ?? null)
 }
 
 function getAutoSourceLabel(sourceKind: string): string {
@@ -649,18 +618,13 @@ function getAutoSourceLabel(sourceKind: string): string {
 }
 
 async function ensureSource(sourceKind: string): Promise<string> {
-  const projectId = selectedProjectId.value
-  if (!projectId) {
-    throw new Error(t('flow.library.notices.collectionBody'))
-  }
-
   const existing = sources.value.find((item) => item.source_kind === sourceKind)
   if (existing) {
     return existing.id
   }
 
   const source = await createSource({
-    project_id: projectId,
+    project_id: selectedProjectId.value!,
     source_kind: sourceKind,
     label: getAutoSourceLabel(sourceKind),
   })
@@ -743,8 +707,7 @@ async function ingestCurrentText() {
         t('flow.library.processing.stages.unknown'),
     })
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
+    const message = error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
     const copy = describeIngestionError(message, t)
     setFeedbackState({
       tone: 'danger',
@@ -777,7 +740,7 @@ async function uploadCurrentFile() {
   }
 
   const selection = uploadSelection.value
-  if (selection?.supportStatus !== 'supported_now') {
+  if (!selection || selection.supportStatus !== 'supported_now') {
     const message =
       selection?.message ??
       (isBlockedBinaryUpload(uploadFile.value)
@@ -846,8 +809,7 @@ async function uploadCurrentFile() {
         t('flow.library.processing.stages.unknown'),
     })
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
+    const message = error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
     const copy = describeIngestionError(message, t)
     setFeedbackState({
       tone: 'danger',
@@ -901,8 +863,7 @@ async function retryJob(jobId: string) {
       })
     }
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
+    const message = error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
     const copy = describeIngestionError(message, t)
     setFeedbackState({
       tone: 'danger',
@@ -932,8 +893,7 @@ onMounted(async () => {
       await loadProjectData(selectedProjectId.value)
     }
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
+    const message = error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
     const copy = describeIngestionError(message, t)
     setFeedbackState({
       tone: 'danger',
@@ -952,32 +912,21 @@ onUnmounted(() => {
 <template>
   <section class="rr-page-grid ingestion-page">
     <PageSection
-      :eyebrow="t('flow.library.eyebrow')"
       :title="t('flow.library.title')"
       :description="t('flow.library.description')"
       :status="pageStatus.status"
       :status-label="pageStatus.label"
     >
       <template #actions>
-        <RouterLink
-          v-if="!selectedProjectId"
-          class="rr-button rr-button--secondary"
-          to="/processing"
-        >
-          {{ t('flow.processing.title') }}
-        </RouterLink>
         <button
           type="button"
           class="rr-button rr-button--secondary"
-          :disabled="queueLoading || !selectedProjectId"
+          :disabled="queueLoading"
           @click="refreshProcessingState(true)"
         >
           {{ t('flow.library.processing.refresh') }}
         </button>
-        <RouterLink
-          class="rr-button rr-button--secondary"
-          to="/ask"
-        >
+        <RouterLink class="rr-button rr-button--secondary" to="/ask">
           {{ t('flow.library.action') }}
         </RouterLink>
       </template>
@@ -1236,10 +1185,7 @@ onUnmounted(() => {
               >
 
               <div class="upload-dropzone__body">
-                <StatusBadge
-                  tone="info"
-                  :label="t('flow.library.upload.dropzoneIdleBadge')"
-                />
+                <StatusBadge tone="info" :label="t('flow.library.upload.dropzoneIdleBadge')" />
                 <h4>
                   {{
                     isUploadDragActive
@@ -1286,10 +1232,7 @@ onUnmounted(() => {
                   {{ uploadSelection.fileKindLabel }} · {{ formatFileSize(uploadFile.size) }}
                 </span>
               </div>
-              <StatusBadge
-                :tone="uploadSelection.badgeTone"
-                :label="uploadSelection.badgeLabel"
-              />
+              <StatusBadge :tone="uploadSelection.badgeTone" :label="uploadSelection.badgeLabel" />
             </div>
 
             <p
@@ -1312,15 +1255,6 @@ onUnmounted(() => {
                     ? t('flow.library.upload.actionBusy')
                     : t('flow.library.upload.action')
                 }}
-              </button>
-              <button
-                v-if="uploadFile"
-                type="button"
-                class="rr-button rr-button--secondary"
-                :disabled="submitMode === 'upload'"
-                @click="clearSelectedUpload"
-              >
-                {{ t('flow.common.reset') }}
               </button>
             </div>
           </article>
