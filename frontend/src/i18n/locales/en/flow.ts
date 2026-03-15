@@ -73,6 +73,15 @@ export default {
       createProject: 'Failed to create library',
       selectWorkspaceFirst: 'Select or create a space first.',
     },
+    auth: {
+      title: 'Session auth for setup',
+      description:
+        'Space and library creation are protected backend calls. Save a bearer token here or mint a temporary session token from the backend bootstrap secret.',
+      note:
+        'The saved session token is injected into workspace, library, ingestion, and search requests for this browser session.',
+      createRequired:
+        'Space and library creation require an authorized session token. Save or mint one first.',
+    },
     placeholders: {
       workspaceName: 'Acme support',
       workspaceSlug: 'acme-kb',
@@ -340,6 +349,8 @@ export default {
     statusWeak: 'Needs review',
     statusReady: 'Answered',
     error: 'Search failed',
+    authRequired:
+      'Search requires a bearer token with query access. Save or mint a session token in Processing first.',
     context: {
       workspace: 'Space',
       project: 'Library',

@@ -215,10 +215,10 @@ const pageStatus = computed(() => {
 
   return { status: 'draft', label: t('flow.library.statusDraft') }
 })
-const highlightedJob = computed(
-  () =>
-    recentJobs.value.find((job) => isActiveJobStatus(job.status)) ?? recentJobs.value[0] ?? null,
-)
+const highlightedJob = computed(() => {
+  const activeJob = recentJobs.value.find((job) => isActiveJobStatus(job.status))
+  return activeJob ?? recentJobs.value.at(0) ?? null
+})
 const jobViewModels = computed<JobViewModel[]>(() =>
   recentJobs.value.map((job) => ({
     job,
@@ -278,7 +278,7 @@ function slugify(value: string): string {
 
 function buildExternalKey(prefix: string, seed: string): string {
   const base = slugify(seed) || prefix
-  return `${prefix}-${base}-${Date.now()}`
+  return `${prefix}-${base}-${String(Date.now())}`
 }
 
 function setFeedbackState(state: FeedbackState | null) {
@@ -417,18 +417,20 @@ function formatDuration(startedAt?: string | null, finishedAt?: string | null): 
 
   const totalSeconds = Math.round((finished - started) / 1000)
   if (totalSeconds < 60) {
-    return `${totalSeconds}s`
+    return `${String(totalSeconds)}s`
   }
 
   const minutes = Math.floor(totalSeconds / 60)
   const seconds = totalSeconds % 60
   if (minutes < 60) {
-    return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`
+    return seconds > 0 ? `${String(minutes)}m ${String(seconds)}s` : `${String(minutes)}m`
   }
 
   const hours = Math.floor(minutes / 60)
   const remainingMinutes = minutes % 60
-  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`
+  return remainingMinutes > 0
+    ? `${String(hours)}h ${String(remainingMinutes)}m`
+    : `${String(hours)}h`
 }
 
 function formatDocumentStatus(status?: string | null): string {
@@ -636,7 +638,8 @@ function handleUploadDragLeave(event: DragEvent) {
 
 function handleUploadDrop(event: DragEvent) {
   event.preventDefault()
-  setUploadFile(event.dataTransfer?.files?.[0] ?? null)
+  const dataTransfer = event.dataTransfer
+  setUploadFile(dataTransfer ? dataTransfer.files.item(0) : null)
 }
 
 function getAutoSourceLabel(sourceKind: string): string {
@@ -646,13 +649,18 @@ function getAutoSourceLabel(sourceKind: string): string {
 }
 
 async function ensureSource(sourceKind: string): Promise<string> {
+  const projectId = selectedProjectId.value
+  if (!projectId) {
+    throw new Error(t('flow.library.notices.collectionBody'))
+  }
+
   const existing = sources.value.find((item) => item.source_kind === sourceKind)
   if (existing) {
     return existing.id
   }
 
   const source = await createSource({
-    project_id: selectedProjectId.value!,
+    project_id: projectId,
     source_kind: sourceKind,
     label: getAutoSourceLabel(sourceKind),
   })
@@ -769,7 +777,7 @@ async function uploadCurrentFile() {
   }
 
   const selection = uploadSelection.value
-  if (!selection || selection.supportStatus !== 'supported_now') {
+  if (selection?.supportStatus !== 'supported_now') {
     const message =
       selection?.message ??
       (isBlockedBinaryUpload(uploadFile.value)
@@ -966,7 +974,10 @@ onUnmounted(() => {
         >
           {{ t('flow.library.processing.refresh') }}
         </button>
-        <RouterLink class="rr-button rr-button--secondary" to="/ask">
+        <RouterLink
+          class="rr-button rr-button--secondary"
+          to="/ask"
+        >
           {{ t('flow.library.action') }}
         </RouterLink>
       </template>
@@ -992,10 +1003,17 @@ onUnmounted(() => {
         </article>
       </div>
 
-      <article v-if="feedback" class="feedback-banner" :data-tone="feedback.tone">
+      <article
+        v-if="feedback"
+        class="feedback-banner"
+        :data-tone="feedback.tone"
+      >
         <strong>{{ feedback.title }}</strong>
         <p>{{ feedback.body }}</p>
-        <p v-if="feedback.detail" class="feedback-banner__detail">
+        <p
+          v-if="feedback.detail"
+          class="feedback-banner__detail"
+        >
           {{ feedback.detail }}
         </p>
       </article>
@@ -1038,7 +1056,10 @@ onUnmounted(() => {
               }}
             </p>
 
-            <div v-if="highlightedJobView" class="processing-meta">
+            <div
+              v-if="highlightedJobView"
+              class="processing-meta"
+            >
               <article class="processing-meta__card">
                 <span>{{ t('flow.library.processing.currentSource') }}</span>
                 <strong>{{ highlightedJobView.sourceLabel }}</strong>
@@ -1061,7 +1082,10 @@ onUnmounted(() => {
               </article>
             </div>
 
-            <div v-if="highlightedJobSteps.length" class="processing-steps">
+            <div
+              v-if="highlightedJobSteps.length"
+              class="processing-steps"
+            >
               <article
                 v-for="step in highlightedJobSteps"
                 :key="step.key"
@@ -1076,15 +1100,24 @@ onUnmounted(() => {
               </article>
             </div>
 
-            <article v-if="highlightedJobView?.error" class="processing-error">
+            <article
+              v-if="highlightedJobView?.error"
+              class="processing-error"
+            >
               <strong>{{ highlightedJobView.error.title }}</strong>
               <p>{{ highlightedJobView.error.body }}</p>
-              <p v-if="highlightedJobView.error.detail" class="processing-error__detail">
+              <p
+                v-if="highlightedJobView.error.detail"
+                class="processing-error__detail"
+              >
                 {{ highlightedJobView.error.detail }}
               </p>
             </article>
 
-            <div v-if="highlightedJobView" class="rr-action-row">
+            <div
+              v-if="highlightedJobView"
+              class="rr-action-row"
+            >
               <button
                 type="button"
                 class="rr-button rr-button--secondary"
@@ -1135,7 +1168,7 @@ onUnmounted(() => {
                   class="rr-control"
                   type="text"
                   :placeholder="t('flow.library.form.titlePlaceholder')"
-                />
+                >
                 <p class="rr-field__hint">{{ t('flow.library.form.titleHint') }}</p>
               </label>
               <label class="rr-field">
@@ -1200,10 +1233,13 @@ onUnmounted(() => {
                 type="file"
                 :accept="acceptedUploadTypes"
                 @change="handleUploadFileChange"
-              />
+              >
 
               <div class="upload-dropzone__body">
-                <StatusBadge tone="info" :label="t('flow.library.upload.dropzoneIdleBadge')" />
+                <StatusBadge
+                  tone="info"
+                  :label="t('flow.library.upload.dropzoneIdleBadge')"
+                />
                 <h4>
                   {{
                     isUploadDragActive
@@ -1236,21 +1272,31 @@ onUnmounted(() => {
                 class="rr-control"
                 type="text"
                 :placeholder="t('flow.library.upload.titlePlaceholder')"
-              />
+              >
               <p class="rr-field__hint">{{ t('flow.library.upload.titleHint') }}</p>
             </label>
 
-            <div v-if="uploadFile && uploadSelection" class="upload-selection-card">
+            <div
+              v-if="uploadFile && uploadSelection"
+              class="upload-selection-card"
+            >
               <div class="upload-selection-card__meta">
                 <strong>{{ uploadFile.name }}</strong>
                 <span class="rr-muted">
                   {{ uploadSelection.fileKindLabel }} · {{ formatFileSize(uploadFile.size) }}
                 </span>
               </div>
-              <StatusBadge :tone="uploadSelection.badgeTone" :label="uploadSelection.badgeLabel" />
+              <StatusBadge
+                :tone="uploadSelection.badgeTone"
+                :label="uploadSelection.badgeLabel"
+              />
             </div>
 
-            <p v-if="uploadSelection" class="rr-banner" :data-tone="uploadSelection.bannerTone">
+            <p
+              v-if="uploadSelection"
+              class="rr-banner"
+              :data-tone="uploadSelection.bannerTone"
+            >
               {{ uploadSelection.message }}
             </p>
 
@@ -1305,8 +1351,15 @@ onUnmounted(() => {
               :message="t('flow.library.processing.emptyBody')"
             />
 
-            <ul v-else class="job-queue">
-              <li v-for="item in jobViewModels" :key="item.job.id" class="job-queue__item">
+            <ul
+              v-else
+              class="job-queue"
+            >
+              <li
+                v-for="item in jobViewModels"
+                :key="item.job.id"
+                class="job-queue__item"
+              >
                 <div class="job-queue__header">
                   <div>
                     <strong>{{ item.sourceLabel }}</strong>
@@ -1333,11 +1386,17 @@ onUnmounted(() => {
                   </span>
                 </div>
 
-                <p v-if="item.error" class="job-queue__error">
+                <p
+                  v-if="item.error"
+                  class="job-queue__error"
+                >
                   {{ item.error.body }}
                 </p>
 
-                <div v-if="item.job.retryable" class="job-queue__actions">
+                <div
+                  v-if="item.job.retryable"
+                  class="job-queue__actions"
+                >
                   <button
                     type="button"
                     class="rr-button rr-button--secondary"
@@ -1371,21 +1430,36 @@ onUnmounted(() => {
               />
             </div>
 
-            <p v-if="!documents.length" class="rr-note">
+            <p
+              v-if="!documents.length"
+              class="rr-note"
+            >
               {{ t('flow.library.lists.documents.emptyMessage') }}
             </p>
 
-            <ul v-else class="inventory-list">
-              <li v-for="document in visibleDocuments" :key="document.id">
+            <ul
+              v-else
+              class="inventory-list"
+            >
+              <li
+                v-for="document in visibleDocuments"
+                :key="document.id"
+              >
                 <div>
                   <strong>{{ document.title || document.external_key }}</strong>
                   <p class="rr-muted">{{ document.external_key }}</p>
                 </div>
-                <StatusBadge tone="positive" :label="formatDocumentStatus(document.status)" />
+                <StatusBadge
+                  tone="positive"
+                  :label="formatDocumentStatus(document.status)"
+                />
               </li>
             </ul>
 
-            <p v-if="remainingDocumentCount > 0" class="rr-note">
+            <p
+              v-if="remainingDocumentCount > 0"
+              class="rr-note"
+            >
               {{ t('flow.library.lists.documents.more', { count: remainingDocumentCount }) }}
             </p>
           </article>
@@ -1406,12 +1480,21 @@ onUnmounted(() => {
               />
             </div>
 
-            <p v-if="!sources.length" class="rr-note">
+            <p
+              v-if="!sources.length"
+              class="rr-note"
+            >
               {{ t('flow.library.lists.sources.emptyMessage') }}
             </p>
 
-            <ul v-else class="inventory-list">
-              <li v-for="source in visibleSources" :key="source.id">
+            <ul
+              v-else
+              class="inventory-list"
+            >
+              <li
+                v-for="source in visibleSources"
+                :key="source.id"
+              >
                 <div>
                   <strong>{{ source.label }}</strong>
                   <p class="rr-muted">{{ formatSourceKind(source.source_kind, t) }}</p>
@@ -1420,7 +1503,10 @@ onUnmounted(() => {
               </li>
             </ul>
 
-            <p v-if="remainingSourceCount > 0" class="rr-note">
+            <p
+              v-if="remainingSourceCount > 0"
+              class="rr-note"
+            >
               {{ t('flow.library.lists.sources.more', { count: remainingSourceCount }) }}
             </p>
           </article>

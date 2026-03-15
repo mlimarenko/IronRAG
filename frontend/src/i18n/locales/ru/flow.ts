@@ -73,6 +73,15 @@ export default {
       createProject: 'Не удалось создать библиотеку',
       selectWorkspaceFirst: 'Сначала выберите или создайте пространство.',
     },
+    auth: {
+      title: 'Session auth для setup',
+      description:
+        'Создание пространства и библиотеки вызывает защищённые backend endpoints. Сохраните bearer token здесь или выпустите временный session token через backend bootstrap secret.',
+      note:
+        'Сохранённый session token автоматически подставляется в запросы создания пространств, библиотек, ingestion и search в рамках этой browser session.',
+      createRequired:
+        'Для создания пространства и библиотеки нужен авторизованный session token. Сначала сохраните или выпустите его.',
+    },
     placeholders: {
       workspaceName: 'Поддержка Acme',
       workspaceSlug: 'acme-kb',
@@ -339,6 +348,8 @@ export default {
     statusWeak: 'Нужна проверка',
     statusReady: 'Есть ответ',
     error: 'Поиск не выполнен',
+    authRequired:
+      'Для поиска нужен bearer token с доступом к query. Сначала сохраните или выпустите session token в разделе «Подготовка».',
     context: {
       workspace: 'Пространство',
       project: 'Библиотека',
