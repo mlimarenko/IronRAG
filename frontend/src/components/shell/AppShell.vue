@@ -5,11 +5,10 @@ import { useRoute } from 'vue-router'
 
 import AppSidebar from './AppSidebar.vue'
 import AppTopbar from './AppTopbar.vue'
+import type { ShellSection } from './shellNavigation'
 
 const route = useRoute()
 const { t } = useI18n()
-
-type ShellSection = 'processing' | 'files' | 'search' | 'graph' | 'api'
 
 const routeMeta = computed(() => {
   const meta = route.meta as {
@@ -18,7 +17,9 @@ const routeMeta = computed(() => {
   const section = meta.shellSection ?? 'processing'
 
   return {
+    section,
     sectionLabel: t(`shell.pages.${section}.title`),
+    sectionSummary: t(`shell.pages.${section}.summary`),
   }
 })
 </script>
@@ -32,6 +33,8 @@ const routeMeta = computed(() => {
     <div class="app-shell__main">
       <AppTopbar
         :section-label="routeMeta.sectionLabel"
+        :section-summary="routeMeta.sectionSummary"
+        :section-key="routeMeta.section"
       />
 
       <main class="app-shell__content">

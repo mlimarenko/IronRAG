@@ -17,7 +17,9 @@ import {
 import ReferenceList from 'src/components/chat/ReferenceList.vue'
 import RetrievalDiagnosticsPanel from 'src/components/chat/RetrievalDiagnosticsPanel.vue'
 import StatusPill from 'src/components/chat/StatusPill.vue'
+import CrossSurfaceGuide from 'src/components/shell/CrossSurfaceGuide.vue'
 import PageSection from 'src/components/shell/PageSection.vue'
+import ProductSpine from 'src/components/shell/ProductSpine.vue'
 import EmptyStateCard from 'src/components/state/EmptyStateCard.vue'
 import {
   getSelectedProjectId,
@@ -405,6 +407,9 @@ async function submitQuery() {
           {{ t('flow.search.action') }}
         </RouterLink>
       </template>
+
+      <ProductSpine active-section="search" />
+      <CrossSurfaceGuide active-section="search" />
 
       <article class="rr-panel rr-panel--accent ask-panel">
         <div class="ask-panel__header">

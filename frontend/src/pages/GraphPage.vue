@@ -5,6 +5,8 @@ import { RouterLink } from 'vue-router'
 
 import { fetchProjects, fetchWorkspaces } from 'src/boot/api'
 import PageSection from 'src/components/shell/PageSection.vue'
+import CrossSurfaceGuide from 'src/components/shell/CrossSurfaceGuide.vue'
+import ProductSpine from 'src/components/shell/ProductSpine.vue'
 import StatusBadge from 'src/components/shell/StatusBadge.vue'
 import EmptyStateCard from 'src/components/state/EmptyStateCard.vue'
 import LoadingSkeletonPanel from 'src/components/state/LoadingSkeletonPanel.vue'
@@ -608,6 +610,9 @@ function formatRelationLine(relation: GraphRelationDetail): string {
         {{ t('graph.actions.ingest') }}
       </RouterLink>
     </template>
+
+    <ProductSpine active-section="graph" />
+    <CrossSurfaceGuide active-section="graph" />
 
     <section class="hero card">
       <div class="hero__copy">

@@ -19,9 +19,13 @@ const localeButtons = computed(() => {
 withDefaults(
   defineProps<{
     sectionLabel?: string
+    sectionSummary?: string
+    sectionKey?: 'processing' | 'files' | 'search' | 'graph' | 'api'
   }>(),
   {
     sectionLabel: undefined,
+    sectionSummary: undefined,
+    sectionKey: undefined,
   },
 )
 </script>
@@ -31,6 +35,8 @@ withDefaults(
     <div class="app-topbar__copy">
       <p class="app-topbar__label">{{ t('shell.topbar.surface') }}</p>
       <p class="app-topbar__section">{{ sectionLabel }}</p>
+      <p v-if="sectionSummary" class="app-topbar__summary">{{ sectionSummary }}</p>
+      <p v-if="sectionKey" class="app-topbar__workflow">{{ t(`shell.guide.sections.${sectionKey}.stage`) }}</p>
     </div>
 
     <div
@@ -89,6 +95,21 @@ withDefaults(
   font-size: 1.2rem;
   font-weight: 700;
   color: var(--rr-color-text-primary);
+}
+
+.app-topbar__summary,
+.app-topbar__workflow {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--rr-color-text-secondary);
+}
+
+.app-topbar__workflow {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--rr-color-text-muted);
 }
 
 .app-topbar__locale {

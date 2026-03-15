@@ -1,3 +1,18 @@
+const productAliases = [
+  {
+    path: 'setup',
+    redirect: '/processing',
+  },
+  {
+    path: 'ingest',
+    redirect: '/files',
+  },
+  {
+    path: 'ask',
+    redirect: '/search',
+  },
+]
+
 const routes = [
   {
     path: '/',
@@ -19,10 +34,7 @@ const routes = [
               shellStatus: 'focused',
             },
           },
-          {
-            path: 'setup',
-            redirect: '/processing',
-          },
+          ...productAliases,
           {
             path: 'files',
             component: () => import('src/pages/IngestionPage.vue'),
@@ -32,20 +44,12 @@ const routes = [
             },
           },
           {
-            path: 'ingest',
-            redirect: '/files',
-          },
-          {
             path: 'search',
             component: () => import('src/pages/ChatPage.vue'),
             meta: {
               shellSection: 'search',
               shellStatus: 'healthy',
             },
-          },
-          {
-            path: 'ask',
-            redirect: '/search',
           },
           {
             path: 'graph',

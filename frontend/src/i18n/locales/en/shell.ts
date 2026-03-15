@@ -8,6 +8,7 @@ export default {
     groups: {
       flow: 'Core flow',
       inspect: 'Inspect',
+      extend: 'Integrate',
     },
     items: {
       processing: {
@@ -36,6 +37,49 @@ export default {
     surface: 'Current area',
     language: 'Language',
     languageHint: 'Interface',
+  },
+  spine: {
+    eyebrow: 'Product spine',
+  },
+  guide: {
+    eyebrow: 'How this area fits',
+    previous: 'Comes from',
+    next: 'Leads to',
+    related: 'Also connects to',
+    start: 'This is the start of the product flow.',
+    end: 'This is the furthest surface in the current shell.',
+    sections: {
+      processing: {
+        stage: 'Foundation',
+        why: 'Choose the active workspace and library so every other surface shares the same operating context.',
+        previous: 'Scope the session before you add content or inspect anything else.',
+        next: 'Move into Files once the active library is set.',
+      },
+      files: {
+        stage: 'Ingest',
+        why: 'Bring content into the selected library and keep processing, inventory, and triage in one place.',
+        previous: 'Processing defines which library receives new content.',
+        next: 'Open Search once enough content is indexed.',
+      },
+      search: {
+        stage: 'Operate',
+        why: 'Ask grounded questions against the same library you prepared in Processing and fed in Files.',
+        previous: 'Files determines what is actually searchable right now.',
+        next: 'Use Graph when you need structure-level inspection beyond answer passages.',
+      },
+      graph: {
+        stage: 'Inspect',
+        why: 'Review entity coverage, relation evidence, and graph-readiness without losing the same project scope.',
+        previous: 'Search shows answer-level grounding before you inspect graph structure directly.',
+        next: 'Use API to carry this scoped context into integrations and automation.',
+      },
+      api: {
+        stage: 'Integrate',
+        why: 'Turn the same workspace and project context into repeatable API calls, tokens, and integration examples.',
+        previous: 'Graph and Search clarify what the product is already surfacing before you automate it.',
+        next: 'Use this surface to extend the workflow outside the UI shell.',
+      },
+    },
   },
   locale: {
     en: 'EN',

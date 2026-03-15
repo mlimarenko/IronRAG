@@ -3,42 +3,46 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { RouterLink, useRoute } from 'vue-router'
 
+import ProductSpine from './ProductSpine.vue'
+import { shellNavItems, type ShellNavItem } from './shellNavigation'
+
 const route = useRoute()
 const { t } = useI18n()
 
-interface NavItem {
-  to: string
-  key: 'processing' | 'files' | 'search' | 'graph' | 'api'
-  step: string
-}
-
 interface NavGroup {
-  key: 'flow' | 'inspect'
-  items: readonly NavItem[]
+  key: 'flow' | 'inspect' | 'extend'
+  items: readonly ShellNavItem[]
 }
 
 const navGroups = computed<readonly NavGroup[]>(() => [
   {
     key: 'flow',
-    items: [
-      { to: '/processing', key: 'processing', step: '01' },
-      { to: '/files', key: 'files', step: '02' },
-      { to: '/search', key: 'search', step: '03' },
-    ],
+    items: shellNavItems.filter((item) => item.stage === 'flow'),
   },
   {
     key: 'inspect',
-    items: [
-      { to: '/graph', key: 'graph', step: '04' },
-      { to: '/api', key: 'api', step: '05' },
-    ],
+    items: shellNavItems.filter((item) => item.stage === 'inspect'),
+  },
+  {
+    key: 'extend',
+    items: shellNavItems.filter((item) => item.stage === 'extend'),
   },
 ])
 
 const activePath = computed(() => route.path)
+const activeSection = computed(
+  () =>
+    (route.meta.shellSection as ShellNavItem['key'] | undefined) ??
+    shellNavItems.find((item) => activePath.value === item.to || activePath.value.startsWith(`${item.to}/`))?.key ??
+    'processing',
+)
 
-function isActive(item: NavItem) {
-  return activePath.value === item.to || activePath.value.startsWith(`${item.to}/`)
+function isActive(item: ShellNavItem) {
+  return (
+    activePath.value === item.to ||
+    activePath.value.startsWith(`${item.to}/`) ||
+    Boolean(item.legacyTo && (activePath.value === item.legacyTo || activePath.value.startsWith(`${item.legacyTo}/`)))
+  )
 }
 </script>
 
@@ -53,6 +57,8 @@ function isActive(item: NavItem) {
         </div>
       </RouterLink>
     </div>
+
+    <ProductSpine :active-section="activeSection" compact />
 
     <div class="app-sidebar__sections" :aria-label="t('shell.nav.product')">
       <section

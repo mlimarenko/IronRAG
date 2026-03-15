@@ -19,6 +19,8 @@ import {
   type IngestionJobSummary,
   type SourceSummary,
 } from 'src/boot/api'
+import CrossSurfaceGuide from 'src/components/shell/CrossSurfaceGuide.vue'
+import ProductSpine from 'src/components/shell/ProductSpine.vue'
 import StatusBadge from 'src/components/shell/StatusBadge.vue'
 import PageSection from 'src/components/shell/PageSection.vue'
 import EmptyStateCard from 'src/components/state/EmptyStateCard.vue'
@@ -1088,6 +1090,9 @@ onUnmounted(() => {
           {{ t('flow.library.action') }}
         </RouterLink>
       </template>
+
+      <ProductSpine active-section="files" />
+      <CrossSurfaceGuide active-section="files" />
 
       <div class="rr-stat-strip">
         <article class="rr-stat">
