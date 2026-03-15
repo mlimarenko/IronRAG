@@ -20,7 +20,7 @@ export default {
       },
       advanced: {
         label: 'Advanced',
-        hint: 'Workspace, library, and integration controls when needed.',
+        hint: 'Extra context and integration controls when needed.',
       },
     },
   },
@@ -37,20 +37,19 @@ export default {
     loading: 'Loading your workspace and library…',
     empty: 'A default workspace and library will appear here when available.',
     emptyWorkspaceHint:
-      'No workspace is available yet. Open advanced controls only if the default context did not appear.',
+      'No workspace is available yet. Open Advanced only if the default context did not appear.',
     emptyLibraryHint:
-      'Your workspace is ready, but this library list is still empty. Use advanced controls only if you need to create one manually.',
+      'Your workspace is ready, but no library is available yet. Open Advanced only if you need to add one manually.',
     workspaceOnly: '{workspace} is ready. Pick a library when it appears.',
     ready: '{workspace} · {library}',
     defaultWorkspace: 'Default workspace',
     defaultLibrary: 'Default library',
     advanced: 'Advanced controls',
     advancedHint:
-      'Create, rename, or remove workspaces and libraries only when the default context is not enough.',
-    advancedCreate:
-      'Create a workspace or library only if the default one is not enough for this job.',
-    advancedManage: 'Rename or remove existing items only from this secondary area.',
-    manage: 'Open advanced controls',
+      'Only use these controls when the default context is missing or you need a different workspace or library.',
+    advancedCreate: 'Create another workspace or library only when the default one is not enough.',
+    advancedManage: 'Rename or remove items only from this secondary area.',
+    manage: 'Open Advanced',
     backToDocuments: 'Back to Documents',
     error: 'Could not load workspace and library.',
     errorSummary: 'Workspace and library controls are unavailable right now.',

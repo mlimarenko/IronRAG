@@ -5,16 +5,16 @@ import EmptyStateCard from 'src/components/state/EmptyStateCard.vue'
 
 <template>
   <PageSection
-    eyebrow="Operations"
+    eyebrow="Advanced"
     title="Diagnostics"
-    description="Review failed jobs, degraded dependencies, retrieval anomalies, and the next remediation step for operators."
-    status="Warning"
-    status-label="Awaiting live signals"
+    description="Advanced troubleshooting details stay here when you need to inspect incidents outside the main flow."
+    status="Focused"
+    status-label="Advanced troubleshooting"
   >
     <EmptyStateCard
-      title="No diagnostics events yet"
-      message="RustRAG has not reported any failed jobs, dependency alerts, or remediation tasks for this workspace yet."
-      hint="If something looks wrong, check ingestion job history, provider connectivity, or retrieval traces from the linked pages. This view will surface incidents here as soon as backend diagnostics feeds are available."
+      title="No troubleshooting signals yet"
+      message="RustRAG has not reported any incidents for this workspace yet."
+      hint="If something looks wrong, open this advanced page to inspect incidents as backend troubleshooting feeds become available."
     />
   </PageSection>
 </template>

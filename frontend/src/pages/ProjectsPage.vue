@@ -58,7 +58,7 @@ async function loadReadiness(id: string) {
     const message = extractErrorMessage(error)
     if (isUnauthorizedApiError(error)) {
       infoMessage.value =
-        'Project list is visible, but readiness details require an authorized API token.'
+        'Library list is visible, but readiness details require an authorized API token.'
       readiness.value = null
     } else {
       errorMessage.value = message
@@ -76,15 +76,15 @@ const pageStatus = computed(() => {
   }
 
   if (loading.value) {
-    return { status: 'pending', label: 'Loading project surfaces' }
+    return { status: 'pending', label: 'Loading library details' }
   }
 
   if (projects.value.length === 0) {
-    return { status: 'draft', label: 'No projects yet' }
+    return { status: 'draft', label: 'No libraries yet' }
   }
 
   if (readiness.value?.ready_for_query) {
-    return { status: 'ready', label: 'Query-ready project' }
+    return { status: 'ready', label: 'Library ready for Ask' }
   }
 
   return { status: 'partial', label: 'Inventory loaded' }
@@ -108,7 +108,7 @@ onMounted(async () => {
       projects.value = []
       selectedProjectId.value = ''
       infoMessage.value =
-        'No workspace selected yet. Choose a workspace from the navigation before inspecting libraries.'
+        'No workspace selected yet. Choose one from navigation before inspecting libraries here.'
       return
     }
 
@@ -136,41 +136,41 @@ onMounted(async () => {
 <template>
   <section class="rr-page-grid">
     <PageSection
-      eyebrow="Operations"
-      title="Projects"
-      description="Projects are the primary RAG work surface inside a workspace. This page now sits on shared section, panel, banner, and empty-state patterns instead of one-off local CSS."
+      eyebrow="Advanced"
+      title="Libraries"
+      description="Advanced library inventory and readiness details stay here when you need to inspect or manage context outside the main flow."
       :status="pageStatus.status"
       :status-label="pageStatus.label"
     >
       <ErrorStateCard
         v-if="errorMessage"
-        title="Project surfaces unavailable"
+        title="Library details unavailable"
         :message="errorMessage"
-        detail="Workspace discovery and readiness checks should fail as structured state, not bare text."
+        detail="Context discovery and readiness checks should fail as structured state, not bare text."
       />
 
       <div v-else-if="loading" class="rr-grid rr-grid--two">
-        <LoadingSkeletonPanel title="Loading projects" />
+        <LoadingSkeletonPanel title="Loading libraries" />
         <LoadingSkeletonPanel title="Loading readiness" />
       </div>
 
       <div v-else class="rr-grid rr-grid--two">
         <AppPanel
-          eyebrow="Inventory"
-          title="Projects"
-          description="Inspect available project scopes before touching ingestion or query."
+          eyebrow="Advanced inventory"
+          title="Libraries"
+          description="Inspect available libraries before changing advanced context or checking readiness."
           tone="accent"
           :status="projects.length > 0 ? 'ready' : 'draft'"
-          :status-label="projects.length > 0 ? `${projects.length} loaded` : 'No inventory'"
+          :status-label="projects.length > 0 ? `${projects.length} loaded` : 'No libraries'"
         >
           <EmptyStateCard
             v-if="projects.length === 0"
-            title="No projects found"
+            title="No libraries found"
             :message="
               infoMessage ??
-              'Create a workspace and at least one library from Advanced context before querying readiness.'
+              'Create a workspace and at least one library from Advanced before checking readiness here.'
             "
-            hint="Once projects exist, use the same shared panel layout to inspect indexing posture."
+            hint="Once libraries exist, this panel shows which one to inspect next."
           />
 
           <ul v-else class="rr-list project-list">
@@ -196,7 +196,7 @@ onMounted(async () => {
         <AppPanel
           eyebrow="Health"
           title="Readiness"
-          description="Project readiness stays explicit about indexing state, document inventory, and whether query is safe to enable."
+          description="Readiness stays explicit about indexing state, document inventory, and whether Ask is available."
           :status="readiness?.ready_for_query ? 'ready' : selectedProjectId ? 'partial' : 'draft'"
           :status-label="selectedProject?.name ?? 'No project selected'"
         >
@@ -208,8 +208,8 @@ onMounted(async () => {
 
           <EmptyStateCard
             v-else-if="!selectedProjectId"
-            title="Select a project"
-            message="Readiness details will appear here after you choose a project from the inventory panel."
+            title="Select a library"
+            message="Readiness details will appear here after you choose a library from the inventory panel."
           />
 
           <template v-else-if="readiness">
@@ -240,7 +240,7 @@ onMounted(async () => {
           <EmptyStateCard
             v-else
             title="No readiness data loaded"
-            :message="infoMessage ?? 'Select a project to inspect current indexing posture.'"
+            :message="infoMessage ?? 'Select a library to inspect current readiness.'"
           />
         </AppPanel>
       </div>

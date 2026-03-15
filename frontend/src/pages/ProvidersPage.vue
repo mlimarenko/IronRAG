@@ -36,7 +36,7 @@ onMounted(async () => {
 
     if (!workspaceId.value) {
       infoMessage.value =
-        'No workspace yet. Open Advanced context to create a workspace before configuring provider accounts.'
+        'No workspace yet. Open Advanced context before configuring integrations here.'
       return
     }
 
@@ -46,7 +46,7 @@ onMounted(async () => {
       const message = extractErrorMessage(error)
       if (isUnauthorizedMessage(message)) {
         infoMessage.value =
-          'Provider governance requires an authorized API token. Workspace discovery is working.'
+          'Integration details require an authorized API token. Context discovery is working.'
       } else {
         errorMessage.value = message
       }
@@ -64,7 +64,7 @@ const pageStatus = computed(() => {
   }
 
   if (loading.value) {
-    return { status: 'pending', label: 'Loading provider surfaces' }
+    return { status: 'pending', label: 'Loading integrations' }
   }
 
   if (!workspaceId.value) {
@@ -75,27 +75,27 @@ const pageStatus = computed(() => {
     return { status: 'partial', label: 'Accounts missing' }
   }
 
-  return { status: 'ready', label: 'Provider foundation loaded' }
+  return { status: 'ready', label: 'Integrations loaded' }
 })
 </script>
 
 <template>
   <section class="rr-page-grid">
     <PageSection
-      eyebrow="Operations"
-      title="Providers"
-      description="Configure provider accounts and model profiles on the shared section, panel, banner, and list primitives so governance views stop reinventing their own CSS."
+      eyebrow="Advanced"
+      title="Integrations"
+      description="Advanced integration accounts and model profiles stay here when you need to manage them outside the main flow."
       :status="pageStatus.status"
       :status-label="pageStatus.label"
     >
       <ErrorStateCard
         v-if="errorMessage"
-        title="Provider governance unavailable"
+        title="Integration details unavailable"
         :message="errorMessage"
-        detail="Authorization and discovery failures should land in the same shared error state used across product pages."
+        detail="Authorization and discovery failures should land in the same shared error state used across advanced pages."
       />
 
-      <LoadingSkeletonPanel v-else-if="loading" title="Loading provider surfaces" />
+      <LoadingSkeletonPanel v-else-if="loading" title="Loading integrations" />
 
       <template v-else>
         <StatusBanner v-if="governance?.warning" tone="warning" :message="governance.warning" />
@@ -103,9 +103,9 @@ const pageStatus = computed(() => {
 
         <div class="rr-grid rr-grid--two">
           <AppPanel
-            eyebrow="Accounts"
-            title="Provider accounts"
-            description="Workspace-level provider credentials and health stay visible in one place."
+            eyebrow="Integration accounts"
+            title="Accounts"
+            description="Workspace-level integration accounts and health stay visible in one place."
             tone="accent"
             :status="(governance?.provider_accounts.length ?? 0) > 0 ? 'ready' : 'draft'"
             :status-label="
@@ -116,10 +116,10 @@ const pageStatus = computed(() => {
           >
             <EmptyStateCard
               v-if="!governance || governance.provider_accounts.length === 0"
-              title="No provider accounts yet"
+              title="No accounts yet"
               :message="
                 infoMessage ??
-                'Create a workspace and connect at least one provider account to unlock governance details.'
+                'Create a workspace and connect at least one account to unlock details here.'
               "
             />
 
@@ -138,9 +138,9 @@ const pageStatus = computed(() => {
           </AppPanel>
 
           <AppPanel
-            eyebrow="Profiles"
+            eyebrow="Model profiles"
             title="Model profiles"
-            description="Profiles define the runnable model surface once provider accounts are in place."
+            description="Profiles define which models are available once accounts are in place."
             :status="(governance?.model_profiles.length ?? 0) > 0 ? 'ready' : 'draft'"
             :status-label="
               (governance?.model_profiles.length ?? 0) > 0
@@ -150,8 +150,8 @@ const pageStatus = computed(() => {
           >
             <EmptyStateCard
               v-if="!governance || governance.model_profiles.length === 0"
-              title="No model profiles yet"
-              message="Add model profiles after provider accounts are ready so query and ingestion flows can target a stable model surface."
+              title="No profiles yet"
+              message="Add profiles after accounts are ready so Documents and Ask can use a stable model choice."
             />
 
             <ul v-else class="rr-list provider-list">
