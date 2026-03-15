@@ -3,13 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { RouterLink } from 'vue-router'
 
-import {
-  createProject,
-  createWorkspace,
-  fetchProjects,
-  fetchWorkspaces,
-  isUnauthorizedApiError,
-} from 'src/boot/api'
+import { createProject, createWorkspace, fetchProjects, isUnauthorizedApiError } from 'src/boot/api'
 import AuthSessionPanel from 'src/components/shell/AuthSessionPanel.vue'
 import CrossSurfaceGuide from 'src/components/shell/CrossSurfaceGuide.vue'
 import PageSection from 'src/components/shell/PageSection.vue'
@@ -21,6 +15,7 @@ import {
   setSelectedProjectId,
 } from 'src/stores/flow'
 import { setWorkspaceWithProjectReset, syncWorkspaceProjectScope } from 'src/lib/flowSelection'
+import { hydrateWorkspaceProjectScope } from 'src/lib/productFlow'
 
 interface WorkspaceItem {
   id: string
@@ -85,19 +80,14 @@ watch(selectedWorkspaceId, async (value) => {
 })
 
 async function loadSetupState() {
-  workspaces.value = await fetchWorkspaces()
-  const workspaceId = getSelectedWorkspaceId() || workspaces.value[0]?.id || ''
-
-  if (workspaceId) {
-    if (workspaceId !== getSelectedWorkspaceId()) {
-      setWorkspaceWithProjectReset(workspaceId)
-    }
-    projects.value = await fetchProjects(workspaceId)
-  } else {
-    projects.value = []
-  }
-
-  syncWorkspaceProjectScope(workspaces.value, projects.value)
+  await hydrateWorkspaceProjectScope({
+    setWorkspaces: (items) => {
+      workspaces.value = items
+    },
+    setProjects: (items) => {
+      projects.value = items
+    },
+  })
 }
 
 function formatProtectedCreateError(error: unknown, fallback: string) {

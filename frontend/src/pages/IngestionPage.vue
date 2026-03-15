@@ -8,9 +8,7 @@ import {
   fetchDocuments,
   fetchIngestionJobDetail,
   fetchIngestionJobs,
-  fetchProjects,
   fetchSources,
-  fetchWorkspaces,
   ingestText,
   retryIngestionJob,
   uploadAndIngest,
@@ -40,13 +38,11 @@ import {
   matchesInventoryFilter,
   type FileInventoryFilter,
 } from 'src/pages/support/file-library'
+import { getSelectedProjectId, getSelectedWorkspaceId } from 'src/stores/flow'
 import {
-  getSelectedProjectId,
-  getSelectedWorkspaceId,
-  setSelectedProjectId,
-  setWorkspaceWithProjectReset,
-  syncWorkspaceProjectScope,
-} from 'src/stores/flow'
+  hydrateWorkspaceProjectScope,
+  useRouteSyncedSelection,
+} from 'src/lib/productFlow'
 
 interface WorkspaceItem {
   id: string
@@ -116,7 +112,12 @@ const uploadInputRef = ref<HTMLInputElement | null>(null)
 const uploadInputKey = ref(0)
 const isUploadDragActive = ref(false)
 const libraryFilter = ref<FileInventoryFilter>('all')
-const selectedDocumentId = ref<string | null>(null)
+const selectedDocumentId = useRouteSyncedSelection({
+  route,
+  router,
+  queryKey: 'doc',
+  availableIds: computed(() => filteredFileInventory.value.map((item) => item.id)),
+})
 const librarySearch = ref('')
 const feedback = ref<FeedbackState | null>(null)
 const submitMode = ref<'text' | 'upload' | null>(null)
@@ -579,50 +580,6 @@ function startAutoRefresh() {
 }
 
 watch(
-  () => route.query.doc,
-  (value) => {
-    selectedDocumentId.value = typeof value === 'string' && value.length > 0 ? value : null
-  },
-  { immediate: true },
-)
-
-watch(
-  filteredFileInventory,
-  (records) => {
-    if (!records.length) {
-      selectedDocumentId.value = null
-      if (route.query.doc) {
-        void router.replace({ query: { ...route.query, doc: undefined } })
-      }
-      return
-    }
-
-    const hasSelected = records.some((item) => item.id === selectedDocumentId.value)
-    if (!hasSelected) {
-      selectedDocumentId.value = records[0]?.id || null
-    }
-  },
-  { immediate: true },
-)
-
-watch(
-  selectedDocumentId,
-  (value) => {
-    const current = typeof route.query.doc === 'string' ? route.query.doc : null
-    if ((value ?? null) === current) {
-      return
-    }
-
-    void router.replace({
-      query: {
-        ...route.query,
-        doc: value ?? undefined,
-      },
-    })
-  },
-)
-
-watch(
   activeJobsCount,
   (count) => {
     if (count > 0) {
@@ -1039,22 +996,17 @@ async function retryJob(jobId: string) {
 
 onMounted(async () => {
   try {
-    workspaces.value = await fetchWorkspaces()
-    const workspaceId = getSelectedWorkspaceId() || workspaces.value[0]?.id || ''
+    const scope = await hydrateWorkspaceProjectScope({
+      setWorkspaces: (items) => {
+        workspaces.value = items
+      },
+      setProjects: (items) => {
+        projects.value = items
+      },
+    })
 
-    if (workspaceId) {
-      if (workspaceId !== getSelectedWorkspaceId()) {
-        setWorkspaceWithProjectReset(workspaceId)
-      }
-      projects.value = await fetchProjects(workspaceId)
-      syncWorkspaceProjectScope(workspaces.value, projects.value)
-    } else {
-      projects.value = []
-      setSelectedProjectId('')
-    }
-
-    if (selectedProjectId.value) {
-      await loadProjectData(selectedProjectId.value)
+    if (scope.projectId) {
+      await loadProjectData(scope.projectId)
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
