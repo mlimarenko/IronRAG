@@ -66,6 +66,7 @@ export default {
     active: 'В процессе',
     complete: 'Готово',
     blocked: 'Заблокировано',
+    attention: 'Нужно внимание',
   },
   cards: {
     currentState: 'Текущее состояние настройки',

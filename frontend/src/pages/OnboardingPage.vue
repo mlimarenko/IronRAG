@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 
@@ -13,6 +13,13 @@ import { useDocumentsStore } from 'src/stores/documents'
 import { useProjectsStore } from 'src/stores/projects'
 import { useProvidersStore } from 'src/stores/providers'
 import { useWorkspacesStore } from 'src/stores/workspaces'
+import {
+  getSelectedProjectId,
+  getSelectedWorkspaceId,
+  setSelectedProjectId,
+  setWorkspaceWithProjectReset,
+  syncWorkspaceProjectScope,
+} from 'src/stores/flow'
 
 const { t } = useI18n()
 const router = useRouter()
@@ -26,8 +33,8 @@ const loading = ref(true)
 const refreshError = ref<string | null>(null)
 const flashMessage = ref<string | null>(null)
 const latestResult = ref<string | null>(null)
-const selectedWorkspaceId = ref<string | null>(null)
-const selectedProjectId = ref<string | null>(null)
+const selectedWorkspaceId = ref<string | null>(getSelectedWorkspaceId() || null)
+const selectedProjectId = ref<string | null>(getSelectedProjectId() || null)
 
 const workspaceForm = reactive<CreateWorkspaceRequest>({
   name: 'Default workspace',
@@ -84,7 +91,8 @@ const providerState = computed(() => {
     return null
   }
 
-  return providersStore.governanceByWorkspaceId[workspaceId]?.data ?? null
+  const state = providersStore.governanceByWorkspaceId[workspaceId]
+  return state.data ?? null
 })
 const projectDocumentState = computed(() => {
   const projectId = selectedProjectId.value
@@ -100,12 +108,13 @@ const readiness = computed(() => {
     return null
   }
 
-  return projectsStore.readinessById[projectId]?.data ?? null
+  const state = projectsStore.readinessById[projectId]
+  return state.data ?? null
 })
 
 const checklist = computed(() => {
   const governance = providerState.value
-  const documents = projectDocumentState.value?.documents.data ?? []
+  const documents = projectDocumentState.value ? projectDocumentState.value.documents.data : []
 
   return [
     {
@@ -157,19 +166,13 @@ function extractError(error: unknown): string {
 }
 
 function syncSelectionDefaults() {
-  selectedWorkspaceId.value ??= workspaces.value[0]?.id ?? null
+  const scope = syncWorkspaceProjectScope(workspaces.value, projects.value)
+  selectedWorkspaceId.value = scope.workspaceId || null
+  selectedProjectId.value = scope.projectId || null
 
-  if (selectedWorkspaceId.value) {
-    projectForm.workspace_id = selectedWorkspaceId.value
-    providerForm.workspace_id = selectedWorkspaceId.value
-  }
-
-  selectedProjectId.value ??=
-    projects.value.find((item) => item.workspace_id === selectedWorkspaceId.value)?.id ?? null
-
-  if (selectedProjectId.value) {
-    documentForm.project_id = selectedProjectId.value
-  }
+  projectForm.workspace_id = selectedWorkspaceId.value ?? ''
+  providerForm.workspace_id = selectedWorkspaceId.value ?? ''
+  documentForm.project_id = selectedProjectId.value ?? ''
 }
 
 async function refreshState() {
@@ -177,7 +180,6 @@ async function refreshState() {
 
   try {
     await workspacesStore.fetchList()
-    syncSelectionDefaults()
 
     if (selectedWorkspaceId.value) {
       await Promise.all([
@@ -192,6 +194,15 @@ async function refreshState() {
     }
 
     syncSelectionDefaults()
+
+    if (selectedWorkspaceId.value) {
+      await Promise.all([
+        workspacesStore.fetchGovernance(selectedWorkspaceId.value).catch(() => null),
+        providersStore.fetchGovernance(selectedWorkspaceId.value).catch(() => null),
+        providersStore.fetchAccounts(selectedWorkspaceId.value).catch(() => null),
+        providersStore.fetchModelProfilesForWorkspace(selectedWorkspaceId.value).catch(() => null),
+      ])
+    }
 
     if (selectedProjectId.value) {
       await Promise.all([
@@ -211,6 +222,7 @@ async function submitWorkspace() {
       name: workspaceForm.name.trim(),
       slug: workspaceForm.slug.trim(),
     })
+    setWorkspaceWithProjectReset(created.id)
     selectedWorkspaceId.value = created.id
     selectedProjectId.value = null
     flashMessage.value = t('onboarding.messages.workspaceCreated')
@@ -234,6 +246,7 @@ async function submitProject() {
       description: projectForm.description.trim() || null,
     }
     const created = await projectsStore.createItem(payload)
+    setSelectedProjectId(created.id)
     selectedProjectId.value = created.id
     flashMessage.value = t('onboarding.messages.projectCreated')
     latestResult.value = `${created.name} (${created.slug})`
@@ -310,6 +323,79 @@ async function submitDocument() {
     await refreshState()
   } catch (error) {
     refreshError.value = extractError(error)
+  }
+}
+
+watch(selectedWorkspaceId, async (workspaceId, previousWorkspaceId) => {
+  if (workspaceId === previousWorkspaceId) {
+    return
+  }
+
+  if (!workspaceId) {
+    setWorkspaceWithProjectReset('')
+    selectedProjectId.value = null
+    projectsStore.listState.data = []
+    projectForm.workspace_id = ''
+    providerForm.workspace_id = ''
+    documentForm.project_id = ''
+    return
+  }
+
+  setWorkspaceWithProjectReset(workspaceId)
+  selectedProjectId.value = null
+  projectForm.workspace_id = workspaceId
+  providerForm.workspace_id = workspaceId
+
+  try {
+    await Promise.all([
+      projectsStore.fetchList(workspaceId),
+      workspacesStore.fetchGovernance(workspaceId).catch(() => null),
+      providersStore.fetchGovernance(workspaceId).catch(() => null),
+      providersStore.fetchAccounts(workspaceId).catch(() => null),
+      providersStore.fetchModelProfilesForWorkspace(workspaceId).catch(() => null),
+    ])
+    syncSelectionDefaults()
+  } catch (error) {
+    refreshError.value = extractError(error)
+  }
+})
+
+watch(selectedProjectId, async (projectId, previousProjectId) => {
+  if (projectId === previousProjectId) {
+    return
+  }
+
+  setSelectedProjectId(projectId ?? '')
+  documentForm.project_id = projectId ?? ''
+
+  if (!projectId) {
+    return
+  }
+
+  try {
+    await Promise.all([
+      projectsStore.fetchReadiness(projectId).catch(() => null),
+      documentsStore.fetchProjectDocuments(projectId).catch(() => null),
+      documentsStore.fetchProjectJobs(projectId).catch(() => null),
+    ])
+  } catch (error) {
+    refreshError.value = extractError(error)
+  }
+})
+
+function formatReadinessStatus(indexingState?: string | null): string {
+  switch (indexingState?.trim().toLowerCase()) {
+    case 'indexed':
+      return t('common.status.ready')
+    case 'partial':
+    case 'ingesting':
+      return t('common.status.partial')
+    case 'stale':
+      return t('onboarding.statuses.attention')
+    case 'not_indexed':
+      return t('onboarding.statuses.pending')
+    default:
+      return t('onboarding.statuses.pending')
   }
 }
 
@@ -773,8 +859,8 @@ onMounted(async () => {
               <p>{{ currentProject?.name ?? t('common.notSelectedYet') }}</p>
             </div>
             <StatusBadge
-              :status="readiness?.indexing_state ?? 'Pending'"
-              :label="readiness?.indexing_state ?? t('onboarding.statuses.pending')"
+              :status="readiness?.ready_for_query ? 'Healthy' : selectedProjectId ? 'Pending' : 'Blocked'"
+              :label="formatReadinessStatus(readiness?.indexing_state)"
             />
           </div>
           <EmptyStateCard

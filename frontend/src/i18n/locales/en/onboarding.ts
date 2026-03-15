@@ -63,6 +63,7 @@ export default {
     active: 'In progress',
     complete: 'Complete',
     blocked: 'Blocked',
+    attention: 'Needs attention',
   },
   cards: {
     currentState: 'Current setup state',
