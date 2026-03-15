@@ -33,9 +33,8 @@ import {
   getSelectedProjectId,
   getSelectedWorkspaceId,
   setSelectedProjectId,
-  syncSelectedProjectId,
-  syncSelectedWorkspaceId,
 } from 'src/stores/flow'
+import { setWorkspaceWithProjectReset, syncWorkspaceProjectScope } from 'src/lib/flowSelection'
 
 interface WorkspaceItem {
   id: string
@@ -442,17 +441,20 @@ onBeforeUnmount(() => {
 
 async function loadContext() {
   workspaces.value = await fetchWorkspaces()
-  selectedWorkspaceId.value = syncSelectedWorkspaceId(workspaces.value)
+  const scope = syncWorkspaceProjectScope(workspaces.value, [])
+  selectedWorkspaceId.value = scope.workspaceId
 
   if (!selectedWorkspaceId.value) {
     projects.value = []
     selectedProjectId.value = ''
-    syncSelectedProjectId([])
+    setSelectedProjectId('')
     return
   }
 
   projects.value = await fetchProjects(selectedWorkspaceId.value)
-  selectedProjectId.value = syncSelectedProjectId(projects.value)
+  const refreshedScope = syncWorkspaceProjectScope(workspaces.value, projects.value)
+  selectedWorkspaceId.value = refreshedScope.workspaceId
+  selectedProjectId.value = refreshedScope.projectId
 }
 
 async function loadGraphSurface(projectId: string) {

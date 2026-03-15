@@ -24,9 +24,9 @@ import EmptyStateCard from 'src/components/state/EmptyStateCard.vue'
 import {
   getSelectedProjectId,
   getSelectedWorkspaceId,
-  syncSelectedProjectId,
-  syncSelectedWorkspaceId,
+  setSelectedProjectId,
 } from 'src/stores/flow'
+import { ensureProjectMatchesWorkspace, syncWorkspaceProjectScope } from 'src/lib/flowSelection'
 
 interface WorkspaceItem {
   id: string
@@ -255,30 +255,36 @@ watch(
 )
 
 watch(selectedProjectId, async (projectId) => {
+  const scopedProjectId = ensureProjectMatchesWorkspace(projects.value, projectId)
   result.value = null
   detail.value = null
   errorMessage.value = null
   readiness.value = null
 
-  if (!projectId) {
+  if (!scopedProjectId) {
     return
   }
 
-  await loadReadiness(projectId)
+  if (scopedProjectId !== projectId) {
+    setSelectedProjectId(scopedProjectId)
+  }
+
+  await loadReadiness(scopedProjectId)
 })
 
 onMounted(async () => {
   workspaces.value = await fetchWorkspaces()
-  const workspaceId = syncSelectedWorkspaceId(workspaces.value)
+  const workspaceId = getSelectedWorkspaceId() || workspaces.value[0]?.id || ''
+
   if (workspaceId) {
     projects.value = await fetchProjects(workspaceId)
-    const projectId = syncSelectedProjectId(projects.value)
-    if (projectId) {
-      await loadReadiness(projectId)
+    const scope = syncWorkspaceProjectScope(workspaces.value, projects.value)
+    if (scope.projectId) {
+      await loadReadiness(scope.projectId)
     }
   } else {
     projects.value = []
-    syncSelectedProjectId([])
+    setSelectedProjectId('')
   }
 })
 

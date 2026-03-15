@@ -185,6 +185,11 @@ export default {
       description:
         'This page keeps setup lightweight: connect access, choose a space, create a library, then continue into Files.',
       progressLabel: 'Setup progress',
+      primaryAction: {
+        access: 'Connect access',
+        project: 'Choose or create a library',
+        files: 'Continue to Files',
+      },
       cards: {
         workspace: {
           title: 'Current space',

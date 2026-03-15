@@ -19,10 +19,8 @@ import {
   getSelectedProjectId,
   getSelectedWorkspaceId,
   setSelectedProjectId,
-  setSelectedWorkspaceId,
-  syncSelectedProjectId,
-  syncSelectedWorkspaceId,
 } from 'src/stores/flow'
+import { setWorkspaceWithProjectReset, syncWorkspaceProjectScope } from 'src/lib/flowSelection'
 
 interface WorkspaceItem {
   id: string
@@ -52,7 +50,7 @@ const successMessage = ref<string | null>(null)
 const selectedWorkspaceId = computed({
   get: () => getSelectedWorkspaceId(),
   set: (value: string) => {
-    setSelectedWorkspaceId(value)
+    setWorkspaceWithProjectReset(value)
   },
 })
 
@@ -102,34 +100,32 @@ const progressLabel = computed(() => {
 
   return t('flow.processing.progress.start')
 })
-const heroCards = computed(() => [
-  {
-    key: 'space',
-    title: t('flow.processing.hero.cards.workspace.title'),
-    value: selectedWorkspace.value?.name ?? t('flow.processing.hero.cards.workspace.empty'),
-    hint: selectedWorkspace.value
-      ? t('flow.processing.hero.cards.workspace.ready')
-      : t('flow.processing.hero.cards.workspace.hint'),
-  },
-  {
-    key: 'library',
-    title: t('flow.processing.hero.cards.project.title'),
-    value: selectedProject.value?.name ?? t('flow.processing.hero.cards.project.empty'),
-    hint: selectedProject.value
-      ? t('flow.processing.hero.cards.project.ready')
-      : t('flow.processing.hero.cards.project.hint'),
-  },
-  {
-    key: 'next',
-    title: t('flow.processing.hero.cards.next.title'),
-    value: selectedProject.value
-      ? t('flow.processing.hero.cards.next.files')
-      : selectedWorkspace.value
-        ? t('flow.processing.hero.cards.next.project')
-        : t('flow.processing.hero.cards.next.workspace'),
-    hint: t('flow.processing.hero.cards.next.hint'),
-  },
-])
+const primarySetupAction = computed(() => {
+  if (selectedProject.value) {
+    return {
+      to: '/files',
+      label: t('flow.processing.hero.primaryAction.files'),
+      hint: t('flow.processing.progress.complete'),
+      muted: false,
+    }
+  }
+
+  if (selectedWorkspace.value) {
+    return {
+      to: '#library-form',
+      label: t('flow.processing.hero.primaryAction.project'),
+      hint: t('flow.processing.progress.workspaceReady'),
+      muted: false,
+    }
+  }
+
+  return {
+    to: '#setup-access',
+    label: t('flow.processing.hero.primaryAction.access'),
+    hint: t('flow.processing.progress.start'),
+    muted: true,
+  }
+})
 const setupChecklist = computed(() => [
   {
     key: 'workspace',
@@ -167,19 +163,23 @@ const setupChecklist = computed(() => [
 
 watch(selectedWorkspaceId, async (value) => {
   projects.value = value ? await fetchProjects(value) : []
-  syncSelectedProjectId(projects.value)
+  syncWorkspaceProjectScope(workspaces.value, projects.value)
 })
 
 async function loadSetupState() {
   workspaces.value = await fetchWorkspaces()
-  const workspaceId = syncSelectedWorkspaceId(workspaces.value)
+  const workspaceId = getSelectedWorkspaceId() || workspaces.value[0]?.id || ''
+
   if (workspaceId) {
+    if (workspaceId !== getSelectedWorkspaceId()) {
+      setWorkspaceWithProjectReset(workspaceId)
+    }
     projects.value = await fetchProjects(workspaceId)
-    syncSelectedProjectId(projects.value)
   } else {
     projects.value = []
-    syncSelectedProjectId([])
   }
+
+  syncWorkspaceProjectScope(workspaces.value, projects.value)
 }
 
 function formatProtectedCreateError(error: unknown, fallback: string) {
@@ -204,7 +204,7 @@ async function createWorkspaceItem() {
     })
     workspaces.value = [created, ...workspaces.value.filter((item) => item.id !== created.id)]
     workspaceForm.value = { slug: '', name: '' }
-    setSelectedWorkspaceId(created.id)
+    setWorkspaceWithProjectReset(created.id)
     successMessage.value = `${t('flow.processing.success')}: ${created.name}`
   } catch (error) {
     workspaceError.value = formatProtectedCreateError(error, t('flow.processing.errors.createWorkspace'))
@@ -228,7 +228,7 @@ async function createProjectItem() {
     })
     projects.value = [created, ...projects.value.filter((item) => item.id !== created.id)]
     projectForm.value = { slug: '', name: '', description: '' }
-    syncSelectedProjectId(projects.value)
+    syncWorkspaceProjectScope(workspaces.value, projects.value)
     successMessage.value = `${t('flow.processing.success')}: ${created.name}`
   } catch (error) {
     projectError.value = formatProtectedCreateError(error, t('flow.processing.errors.createProject'))
@@ -256,6 +256,17 @@ async function createProjectItem() {
           <p class="rr-kicker">{{ t('flow.processing.hero.eyebrow') }}</p>
           <h2>{{ t('flow.processing.hero.title') }}</h2>
           <p>{{ t('flow.processing.hero.description') }}</p>
+
+          <div class="setup-hero__selection">
+            <article class="setup-hero__selection-item">
+              <span>{{ t('flow.processing.hero.cards.workspace.title') }}</span>
+              <strong>{{ selectedWorkspace?.name ?? t('flow.processing.hero.cards.workspace.empty') }}</strong>
+            </article>
+            <article class="setup-hero__selection-item">
+              <span>{{ t('flow.processing.hero.cards.project.title') }}</span>
+              <strong>{{ selectedProject?.name ?? t('flow.processing.hero.cards.project.empty') }}</strong>
+            </article>
+          </div>
         </div>
 
         <div class="setup-hero__progress">
@@ -267,16 +278,26 @@ async function createProjectItem() {
             <span :style="{ width: `${progressValue}%` }" />
           </div>
           <p>{{ progressLabel }}</p>
+
+          <RouterLink
+            v-if="primarySetupAction.to.startsWith('/')"
+            class="rr-button setup-hero__action"
+            :class="{ 'rr-button--secondary': primarySetupAction.muted }"
+            :to="primarySetupAction.to"
+          >
+            {{ primarySetupAction.label }}
+          </RouterLink>
+          <a
+            v-else
+            class="rr-button setup-hero__action"
+            :class="{ 'rr-button--secondary': primarySetupAction.muted }"
+            :href="primarySetupAction.to"
+          >
+            {{ primarySetupAction.label }}
+          </a>
+          <small class="setup-hero__action-hint">{{ primarySetupAction.hint }}</small>
         </div>
       </article>
-
-      <div class="setup-hero__cards">
-        <article v-for="card in heroCards" :key="card.key" class="setup-hero-card">
-          <p class="setup-hero-card__label">{{ card.title }}</p>
-          <strong>{{ card.value }}</strong>
-          <small>{{ card.hint }}</small>
-        </article>
-      </div>
 
       <p v-if="successMessage" class="rr-banner" data-tone="success">
         {{ successMessage }}
@@ -284,12 +305,14 @@ async function createProjectItem() {
 
       <div class="setup-layout">
         <div class="setup-layout__main">
-          <AuthSessionPanel
-            :title="t('flow.processing.auth.title')"
-            :description="t('flow.processing.auth.description')"
-            :context-note="t('flow.processing.auth.note')"
-            @updated="void loadSetupState()"
-          />
+          <div id="setup-access">
+            <AuthSessionPanel
+              :title="t('flow.processing.auth.title')"
+              :description="t('flow.processing.auth.description')"
+              :context-note="t('flow.processing.auth.note')"
+              @updated="void loadSetupState()"
+            />
+          </div>
 
           <div class="setup-grid">
             <article class="rr-panel rr-panel--accent setup-panel">
@@ -354,7 +377,7 @@ async function createProjectItem() {
               </p>
             </article>
 
-            <article class="rr-panel setup-panel">
+            <article id="library-form" class="rr-panel setup-panel">
               <div class="setup-panel__heading">
                 <div>
                   <p class="rr-kicker">{{ t('flow.processing.panels.project.kicker') }}</p>
@@ -435,14 +458,14 @@ async function createProjectItem() {
         </div>
 
         <aside class="setup-sidebar">
-          <article class="rr-panel setup-sidebar__panel">
-            <div class="setup-sidebar__heading">
+          <details class="rr-panel setup-sidebar__panel" :open="!selectedProject">
+            <summary class="setup-sidebar__summary">
               <div>
                 <p class="rr-kicker">{{ t('flow.processing.checklist.eyebrow') }}</p>
                 <h3>{{ t('flow.processing.checklist.title') }}</h3>
               </div>
               <StatusBadge :status="setupStatus.status" :label="setupStatus.label" />
-            </div>
+            </summary>
 
             <div class="setup-checklist">
               <article
@@ -458,16 +481,7 @@ async function createProjectItem() {
                 <StatusBadge :status="item.status" :label="item.badge" />
               </article>
             </div>
-          </article>
-
-          <article class="rr-panel setup-sidebar__panel setup-sidebar__panel--next">
-            <p class="rr-kicker">{{ t('flow.processing.sidebar.eyebrow') }}</p>
-            <h3>{{ t('flow.processing.sidebar.title') }}</h3>
-            <p>{{ t('flow.processing.sidebar.description') }}</p>
-            <RouterLink class="rr-button" to="/files" :aria-disabled="!selectedProject">
-              {{ t('flow.processing.sidebar.action') }}
-            </RouterLink>
-          </article>
+          </details>
         </aside>
       </div>
     </PageSection>
@@ -494,28 +508,30 @@ async function createProjectItem() {
 
 .setup-hero__copy,
 .setup-hero__progress,
-.setup-hero-card,
 .setup-sidebar__panel,
 .setup-checklist,
-.setup-checklist__item {
+.setup-checklist__item,
+.setup-hero__selection,
+.setup-hero__selection-item {
   display: grid;
   gap: var(--rr-space-3);
 }
 
 .setup-hero__copy h2,
-.setup-hero-card strong,
+.setup-hero__selection-item strong,
 .setup-panel__heading h3,
-.setup-sidebar__heading h3,
+.setup-sidebar__summary h3,
 .setup-checklist__item h4 {
   margin: 0;
 }
 
 .setup-hero__copy p,
 .setup-hero__progress p,
-.setup-hero-card small,
 .setup-panel__heading p,
 .setup-checklist__item p,
-.setup-sidebar__panel p {
+.setup-sidebar__panel p,
+.setup-hero__selection-item span,
+.setup-hero__action-hint {
   margin: 0;
 }
 
@@ -548,26 +564,34 @@ async function createProjectItem() {
   background: linear-gradient(90deg, var(--rr-color-accent-600), #60a5fa);
 }
 
-.setup-hero__cards {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--rr-space-3);
+.setup-hero__selection {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.setup-hero-card {
-  padding: var(--rr-space-4);
-  border-radius: var(--rr-radius-lg);
-  background: rgb(255 255 255 / 0.9);
+.setup-hero__selection-item {
+  min-width: 0;
+  padding: var(--rr-space-3);
+  border-radius: var(--rr-radius-md);
+  background: rgb(255 255 255 / 0.72);
   border: 1px solid var(--rr-border-default);
 }
 
-.setup-hero-card__label {
-  margin: 0;
+.setup-hero__selection-item span {
   font-size: 0.8rem;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--rr-color-text-muted);
+}
+
+.setup-hero__action {
+  width: 100%;
+  justify-content: center;
+}
+
+.setup-hero__action-hint {
+  display: block;
+  color: var(--rr-color-text-secondary);
 }
 
 .setup-layout {
@@ -590,7 +614,7 @@ async function createProjectItem() {
 }
 
 .setup-panel__heading,
-.setup-sidebar__heading,
+.setup-sidebar__summary,
 .setup-checklist__item {
   display: flex;
   justify-content: space-between;
@@ -615,8 +639,17 @@ async function createProjectItem() {
   background: rgb(234 248 239 / 0.72);
 }
 
-.setup-sidebar__panel--next {
-  background: linear-gradient(180deg, rgb(255 255 255 / 0.96), rgb(243 247 255 / 0.86));
+.setup-sidebar__summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.setup-sidebar__summary::-webkit-details-marker {
+  display: none;
+}
+
+.setup-sidebar__summary + .setup-checklist {
+  margin-top: var(--rr-space-3);
 }
 
 @media (width <= 1180px) {
@@ -631,7 +664,7 @@ async function createProjectItem() {
 
 @media (width <= 980px) {
   .setup-hero,
-  .setup-hero__cards,
+  .setup-hero__selection,
   .setup-grid,
   .setup-sidebar {
     grid-template-columns: 1fr;
@@ -648,7 +681,7 @@ async function createProjectItem() {
   }
 
   .setup-panel__heading,
-  .setup-sidebar__heading,
+  .setup-sidebar__summary,
   .setup-checklist__item {
     flex-direction: column;
   }
