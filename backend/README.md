@@ -56,6 +56,8 @@ Usage / cost:
 ### Local config
 Copy `.env.example` into your local runtime environment and set provider credentials as needed.
 
+For honest local frontend/browser validation of protected flows, also set `RUSTRAG_BOOTSTRAP_TOKEN` (for example `bootstrap-local`) so `POST /v1/auth/bootstrap-token` can mint a temporary local session token.
+
 ### Check build
 ```bash
 cargo fmt --check

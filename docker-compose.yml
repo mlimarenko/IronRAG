@@ -50,6 +50,7 @@ services:
       database_max_connections: 20
       redis_url: redis://redis:6379
       log_filter: info
+      bootstrap_token: ${RUSTRAG_BOOTSTRAP_TOKEN:-bootstrap-local}
       RUST_BACKTRACE: full
     ports:
       - "8080:8080"
