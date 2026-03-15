@@ -2098,4 +2098,25 @@ function formatRelationLine(relation: GraphRelationDetail): string {
     width: 100%;
   }
 }
-</style>
+</style>const shouldAutoExpandGraphContext = computed(() =>
+  Boolean(
+    graphCoverageWarning.value ||
+      graphSurfaceError.value ||
+      graphSearchError.value ||
+      graphDetailError.value ||
+      (selectedGraphCard.value && graphPanelStatus.value.status !== 'unavailable') ||
+      graphPanelStatus.value.status === 'degraded',
+  ),
+)
+
+watch(
+  shouldAutoExpandGraphContext,
+  (value) => {
+    if (value) {
+      showGraphContext.value = true
+    }
+  },
+  { immediate: true },
+)
+
+
