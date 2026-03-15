@@ -55,7 +55,10 @@ function isActive(item: ShellNavItem) {
 <template>
   <aside class="app-sidebar">
     <div class="app-sidebar__brand">
-      <RouterLink to="/" class="app-sidebar__brand-link">
+      <RouterLink
+        to="/"
+        class="app-sidebar__brand-link"
+      >
         <span class="app-sidebar__brand-mark">R</span>
         <div class="app-sidebar__brand-copy">
           <h1>{{ t('shell.brand.title') }}</h1>
@@ -70,12 +73,25 @@ function isActive(item: ShellNavItem) {
       <small>{{ t(`shell.nav.items.${activeSection}.hint`) }}</small>
     </div>
 
-    <AppContextControls class="app-sidebar__context" compact />
+    <AppContextControls
+      class="app-sidebar__context"
+      compact
+    />
 
-    <div class="app-sidebar__sections" :aria-label="t('shell.nav.product')">
-      <section v-for="group in navGroups" :key="group.key" class="app-sidebar__section">
+    <div
+      class="app-sidebar__sections"
+      :aria-label="t('shell.nav.product')"
+    >
+      <section
+        v-for="group in navGroups"
+        :key="group.key"
+        class="app-sidebar__section"
+      >
         <p class="app-sidebar__section-label">{{ t(`shell.nav.groups.${group.key}`) }}</p>
-        <nav class="app-sidebar__nav" :aria-label="t(`shell.nav.groups.${group.key}`)">
+        <nav
+          class="app-sidebar__nav"
+          :aria-label="t(`shell.nav.groups.${group.key}`)"
+        >
           <RouterLink
             v-for="item in group.items"
             :key="item.to"

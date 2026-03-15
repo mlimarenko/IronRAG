@@ -12,7 +12,10 @@ const label = computed(() => formatStatusLabel(props.status))
 </script>
 
 <template>
-  <span class="status-pill" :data-tone="tone">
+  <span
+    class="status-pill"
+    :data-tone="tone"
+  >
     {{ label }}
   </span>
 </template>

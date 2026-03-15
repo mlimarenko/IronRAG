@@ -42,32 +42,62 @@ const hasHeader = computed(
 </script>
 
 <template>
-  <component :is="tag" class="rr-panel" :class="panelClass">
-    <div v-if="hasHeader" class="rr-panel__header">
+  <component
+    :is="tag"
+    class="rr-panel"
+    :class="panelClass"
+  >
+    <div
+      v-if="hasHeader"
+      class="rr-panel__header"
+    >
       <div class="rr-panel__header-copy">
-        <p v-if="eyebrow" class="rr-panel__eyebrow rr-kicker">
+        <p
+          v-if="eyebrow"
+          class="rr-panel__eyebrow rr-kicker"
+        >
           {{ eyebrow }}
         </p>
 
-        <div v-if="title || status || statusLabel" class="rr-panel__title-row">
-          <component :is="titleTag" v-if="title" class="rr-panel__title">
+        <div
+          v-if="title || status || statusLabel"
+          class="rr-panel__title-row"
+        >
+          <component
+            :is="titleTag"
+            v-if="title"
+            class="rr-panel__title"
+          >
             {{ title }}
           </component>
 
-          <StatusBadge v-if="status || statusLabel" :status="status" :label="statusLabel" />
+          <StatusBadge
+            v-if="status || statusLabel"
+            :status="status"
+            :label="statusLabel"
+          />
         </div>
 
-        <p v-if="description" class="rr-panel__description">
+        <p
+          v-if="description"
+          class="rr-panel__description"
+        >
           {{ description }}
         </p>
       </div>
 
-      <div v-if="$slots.actions" class="rr-panel__actions">
+      <div
+        v-if="$slots.actions"
+        class="rr-panel__actions"
+      >
         <slot name="actions" />
       </div>
     </div>
 
-    <div v-if="$slots.default" class="rr-panel__body">
+    <div
+      v-if="$slots.default"
+      class="rr-panel__body"
+    >
       <slot />
     </div>
   </component>

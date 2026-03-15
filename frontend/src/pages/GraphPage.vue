@@ -610,10 +610,16 @@ function formatRelationLine(relation: GraphRelationDetail): string {
     :status-label="pageStatus.label"
   >
     <template #actions>
-      <RouterLink class="rr-button rr-button--secondary" to="/documents">
+      <RouterLink
+        class="rr-button rr-button--secondary"
+        to="/documents"
+      >
         {{ t('graph.actions.ingest') }}
       </RouterLink>
-      <RouterLink class="rr-button rr-button--secondary" to="/search">
+      <RouterLink
+        class="rr-button rr-button--secondary"
+        to="/search"
+      >
         {{ t('graph.actions.processing') }}
       </RouterLink>
     </template>
@@ -639,15 +645,26 @@ function formatRelationLine(relation: GraphRelationDetail): string {
       </div>
 
       <ul class="hero__highlights">
-        <li v-for="highlight in graphSummary.highlights" :key="highlight">
+        <li
+          v-for="highlight in graphSummary.highlights"
+          :key="highlight"
+        >
           {{ highlight }}
         </li>
       </ul>
 
-      <p v-if="coverageWarning" class="rr-banner" data-tone="warning">
+      <p
+        v-if="coverageWarning"
+        class="rr-banner"
+        data-tone="warning"
+      >
         {{ coverageWarning }}
       </p>
-      <p v-if="surfaceError" class="rr-banner" data-tone="danger">
+      <p
+        v-if="surfaceError"
+        class="rr-banner"
+        data-tone="danger"
+      >
         {{ surfaceError }}
       </p>
     </section>
@@ -660,7 +677,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
             <h3>{{ t('graph.panels.summary.title') }}</h3>
             <p class="panel-subtitle">{{ t('graph.panels.summary.description') }}</p>
           </div>
-          <StatusBadge :status="pageStatus.status" :label="pageStatus.label" />
+          <StatusBadge
+            :status="pageStatus.status"
+            :label="pageStatus.label"
+          />
         </div>
 
         <div class="summary-list">
@@ -680,7 +700,11 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                 @change="handleProjectChange"
               >
                 <option value="">{{ t('graph.panels.summary.projectPlaceholder') }}</option>
-                <option v-for="project in projects" :key="project.id" :value="project.id">
+                <option
+                  v-for="project in projects"
+                  :key="project.id"
+                  :value="project.id"
+                >
                   {{ project.name }}
                 </option>
               </select>
@@ -724,7 +748,7 @@ function formatRelationLine(relation: GraphRelationDetail): string {
               type="text"
               :disabled="!selectedProjectId || apiUnavailable"
               :placeholder="t('graph.panels.search.placeholder')"
-            />
+            >
           </label>
         </div>
 
@@ -748,7 +772,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
           :hint="t('graph.panels.search.unavailable.hint')"
         />
 
-        <div v-else-if="visibleResults.length" class="search-results">
+        <div
+          v-else-if="visibleResults.length"
+          class="search-results"
+        >
           <button
             v-for="item in visibleResults"
             :key="`${item.kind}-${item.id}`"
@@ -785,10 +812,17 @@ function formatRelationLine(relation: GraphRelationDetail): string {
           "
         />
 
-        <p v-if="loadingSearch" class="rr-note">
+        <p
+          v-if="loadingSearch"
+          class="rr-note"
+        >
           {{ t('graph.panels.search.searching') }}
         </p>
-        <p v-if="searchError" class="rr-banner" data-tone="danger">
+        <p
+          v-if="searchError"
+          class="rr-banner"
+          data-tone="danger"
+        >
           {{ searchError }}
         </p>
       </article>
@@ -829,36 +863,60 @@ function formatRelationLine(relation: GraphRelationDetail): string {
         <template v-else>
           <div class="diagnostics-block diagnostics-block--primary">
             <h4>{{ t('graph.panels.diagnostics.blockersTitle') }}</h4>
-            <ul v-if="diagnosticsBlockers.length" class="bullet-list">
-              <li v-for="blocker in diagnosticsBlockers" :key="blocker">
+            <ul
+              v-if="diagnosticsBlockers.length"
+              class="bullet-list"
+            >
+              <li
+                v-for="blocker in diagnosticsBlockers"
+                :key="blocker"
+              >
                 {{ blocker }}
               </li>
             </ul>
-            <p v-else class="rr-note">
+            <p
+              v-else
+              class="rr-note"
+            >
               {{ t('graph.panels.diagnostics.noBlockers') }}
             </p>
           </div>
 
           <div class="diagnostics-block diagnostics-block--primary">
             <h4>{{ t('graph.panels.diagnostics.nextStepsTitle') }}</h4>
-            <ul v-if="diagnosticsNextSteps.length" class="bullet-list">
-              <li v-for="step in diagnosticsNextSteps" :key="step">
+            <ul
+              v-if="diagnosticsNextSteps.length"
+              class="bullet-list"
+            >
+              <li
+                v-for="step in diagnosticsNextSteps"
+                :key="step"
+              >
                 {{ step }}
               </li>
             </ul>
-            <p v-else class="rr-note">
+            <p
+              v-else
+              class="rr-note"
+            >
               {{ t('graph.panels.diagnostics.noNextSteps') }}
             </p>
           </div>
 
-          <details class="technical-details" :open="showTechnicalDiagnostics">
+          <details
+            class="technical-details"
+            :open="showTechnicalDiagnostics"
+          >
             <summary @click.prevent="showTechnicalDiagnostics = !showTechnicalDiagnostics">
               <span>{{ t('graph.panels.diagnostics.technicalSummary') }}</span>
               <small>{{ t('graph.panels.diagnostics.technicalHint') }}</small>
             </summary>
 
             <div class="diagnostics-grid">
-              <article class="metric-card" data-tone="default">
+              <article
+                class="metric-card"
+                data-tone="default"
+              >
                 <span class="metric-card__label">{{
                   t('graph.panels.diagnostics.metrics.documents')
                 }}</span>
@@ -868,7 +926,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                     : '—'
                 }}</strong>
               </article>
-              <article class="metric-card" data-tone="default">
+              <article
+                class="metric-card"
+                data-tone="default"
+              >
                 <span class="metric-card__label">{{
                   t('graph.panels.diagnostics.metrics.chunks')
                 }}</span>
@@ -876,7 +937,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                   contentSummary ? formatCount(contentSummary.persisted_chunk_count, 'chunk') : '—'
                 }}</strong>
               </article>
-              <article class="metric-card" data-tone="default">
+              <article
+                class="metric-card"
+                data-tone="default"
+              >
                 <span class="metric-card__label">{{
                   t('graph.panels.diagnostics.metrics.embeddings')
                 }}</span>
@@ -886,7 +950,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                     : '—'
                 }}</strong>
               </article>
-              <article class="metric-card" data-tone="default">
+              <article
+                class="metric-card"
+                data-tone="default"
+              >
                 <span class="metric-card__label">{{
                   t('graph.panels.diagnostics.metrics.retrievalRuns')
                 }}</span>
@@ -894,7 +961,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                   contentSummary ? formatCount(contentSummary.retrieval_run_count, 'run') : '—'
                 }}</strong>
               </article>
-              <article class="metric-card" data-tone="default">
+              <article
+                class="metric-card"
+                data-tone="default"
+              >
                 <span class="metric-card__label">{{
                   t('graph.panels.diagnostics.metrics.entityRefs')
                 }}</span>
@@ -906,7 +976,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                   }}
                 </strong>
               </article>
-              <article class="metric-card" data-tone="default">
+              <article
+                class="metric-card"
+                data-tone="default"
+              >
                 <span class="metric-card__label">{{
                   t('graph.panels.diagnostics.metrics.relationRefs')
                 }}</span>
@@ -931,7 +1004,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
           <h3>{{ t('graph.panels.detail.title') }}</h3>
           <p class="panel-subtitle">{{ t('graph.panels.detail.description') }}</p>
         </div>
-        <details class="technical-details detail-technical" :open="showTechnicalDetail">
+        <details
+          class="technical-details detail-technical"
+          :open="showTechnicalDetail"
+        >
           <summary @click.prevent="showTechnicalDetail = !showTechnicalDetail">
             <span>{{ t('graph.panels.detail.technicalSummary') }}</span>
             <small>{{ t('graph.panels.detail.technicalHint') }}</small>
@@ -973,42 +1049,62 @@ function formatRelationLine(relation: GraphRelationDetail): string {
 
             <div class="token-section">
               <span class="token-section__label">{{ t('graph.panels.detail.aliases') }}</span>
-              <div v-if="entityDetail.aliases.length" class="token-list">
-                <span v-for="alias in entityDetail.aliases" :key="alias" class="token-chip">{{
+              <div
+                v-if="entityDetail.aliases.length"
+                class="token-list"
+              >
+                <span
+                  v-for="alias in entityDetail.aliases"
+                  :key="alias"
+                  class="token-chip"
+                >{{
                   alias
                 }}</span>
               </div>
-              <p v-else class="rr-note">
+              <p
+                v-else
+                class="rr-note"
+              >
                 {{ t('graph.panels.detail.noAliases') }}
               </p>
             </div>
 
             <div class="token-section">
               <span class="token-section__label">{{ t('graph.panels.detail.documents') }}</span>
-              <div v-if="entityDetail.source_document_ids.length" class="token-list">
+              <div
+                v-if="entityDetail.source_document_ids.length"
+                class="token-list"
+              >
                 <span
                   v-for="documentId in entityDetail.source_document_ids"
                   :key="documentId"
                   class="token-chip token-chip--mono"
-                  >{{ documentId }}</span
-                >
+                >{{ documentId }}</span>
               </div>
-              <p v-else class="rr-note">
+              <p
+                v-else
+                class="rr-note"
+              >
                 {{ t('graph.panels.detail.noDocuments') }}
               </p>
             </div>
 
             <div class="token-section">
               <span class="token-section__label">{{ t('graph.panels.detail.chunks') }}</span>
-              <div v-if="entityDetail.source_chunk_ids.length" class="token-list">
+              <div
+                v-if="entityDetail.source_chunk_ids.length"
+                class="token-list"
+              >
                 <span
                   v-for="chunkId in entityDetail.source_chunk_ids"
                   :key="chunkId"
                   class="token-chip token-chip--mono"
-                  >{{ chunkId }}</span
-                >
+                >{{ chunkId }}</span>
               </div>
-              <p v-else class="rr-note">
+              <p
+                v-else
+                class="rr-note"
+              >
                 {{ t('graph.panels.detail.noChunks') }}
               </p>
             </div>
@@ -1036,7 +1132,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
               />
             </div>
 
-            <details class="technical-details detail-technical" :open="showTechnicalDetail">
+            <details
+              class="technical-details detail-technical"
+              :open="showTechnicalDetail"
+            >
               <summary @click.prevent="showTechnicalDetail = !showTechnicalDetail">
                 <span>{{ t('graph.panels.detail.subgraphSummary') }}</span>
                 <small>{{
@@ -1046,7 +1145,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                 }}</small>
               </summary>
 
-              <div v-if="entitySubgraph?.entities.length" class="token-section">
+              <div
+                v-if="entitySubgraph?.entities.length"
+                class="token-section"
+              >
                 <span class="token-section__label">{{
                   t('graph.panels.detail.subgraphEntities')
                 }}</span>
@@ -1060,7 +1162,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                   </span>
                 </div>
               </div>
-              <p v-else class="rr-note">
+              <p
+                v-else
+                class="rr-note"
+              >
                 {{ t('graph.panels.detail.noSubgraphEntities') }}
               </p>
 
@@ -1080,7 +1185,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                       {{ formatRelationLine(relation) }}
                     </li>
                   </ul>
-                  <p v-else class="rr-note">
+                  <p
+                    v-else
+                    class="rr-note"
+                  >
                     {{ t('graph.panels.detail.noOutgoingRelations') }}
                   </p>
                 </div>
@@ -1099,7 +1207,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                       {{ formatRelationLine(relation) }}
                     </li>
                   </ul>
-                  <p v-else class="rr-note">
+                  <p
+                    v-else
+                    class="rr-note"
+                  >
                     {{ t('graph.panels.detail.noIncomingRelations') }}
                   </p>
                 </div>
@@ -1113,11 +1224,17 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                   v-if="entitySubgraph?.relations.length"
                   class="bullet-list bullet-list--compact"
                 >
-                  <li v-for="relation in entitySubgraph.relations" :key="relation.relation.id">
+                  <li
+                    v-for="relation in entitySubgraph.relations"
+                    :key="relation.relation.id"
+                  >
                     {{ formatRelationLine(relation) }}
                   </li>
                 </ul>
-                <p v-else class="rr-note">
+                <p
+                  v-else
+                  class="rr-note"
+                >
                   {{ t('graph.panels.detail.noSubgraphRelations') }}
                 </p>
               </div>
@@ -1125,10 +1242,18 @@ function formatRelationLine(relation: GraphRelationDetail): string {
           </article>
         </div>
 
-        <p v-if="entityDetail.warning" class="rr-banner" data-tone="warning">
+        <p
+          v-if="entityDetail.warning"
+          class="rr-banner"
+          data-tone="warning"
+        >
           {{ entityDetail.warning }}
         </p>
-        <p v-if="entitySubgraph?.warning" class="rr-banner" data-tone="warning">
+        <p
+          v-if="entitySubgraph?.warning"
+          class="rr-banner"
+          data-tone="warning"
+        >
           {{ entitySubgraph.warning }}
         </p>
       </template>
@@ -1141,15 +1266,20 @@ function formatRelationLine(relation: GraphRelationDetail): string {
             <p>{{ selectedRelationCard.summary }}</p>
             <div class="token-section">
               <span class="token-section__label">{{ t('graph.panels.detail.matchReasons') }}</span>
-              <div v-if="selectedRelationCard.matchReasons.length" class="token-list">
+              <div
+                v-if="selectedRelationCard.matchReasons.length"
+                class="token-list"
+              >
                 <span
                   v-for="reason in selectedRelationCard.matchReasons"
                   :key="reason"
                   class="token-chip"
-                  >{{ reason }}</span
-                >
+                >{{ reason }}</span>
               </div>
-              <p v-else class="rr-note">
+              <p
+                v-else
+                class="rr-note"
+              >
                 {{ t('graph.panels.detail.noMatchReasons') }}
               </p>
             </div>

@@ -41,15 +41,25 @@ withDefaults(
       <div class="app-topbar__copy">
         <p class="app-topbar__label">{{ t('shell.topbar.surface') }}</p>
         <p class="app-topbar__section">{{ sectionLabel }}</p>
-        <p v-if="sectionSummary" class="app-topbar__summary">
+        <p
+          v-if="sectionSummary"
+          class="app-topbar__summary"
+        >
           {{ sectionSummary }}
         </p>
       </div>
 
-      <AppContextControls class="app-topbar__context" compact />
+      <AppContextControls
+        class="app-topbar__context"
+        compact
+      />
     </div>
 
-    <div class="app-topbar__locale" role="group" :aria-label="t('shell.topbar.language')">
+    <div
+      class="app-topbar__locale"
+      role="group"
+      :aria-label="t('shell.topbar.language')"
+    >
       <span class="app-topbar__locale-label">{{ t('shell.topbar.languageHint') }}</span>
       <div class="app-topbar__locale-switch">
         <button

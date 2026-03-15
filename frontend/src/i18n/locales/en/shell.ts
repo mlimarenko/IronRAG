@@ -53,6 +53,9 @@ export default {
     backToDocuments: 'Back to Documents',
     error: 'Could not load workspace and library.',
     errorSummary: 'Workspace and library controls are unavailable right now.',
+    authRequiredSummary: 'This backend needs access before the default workspace and library can load.',
+    authRequiredHint:
+      'Open Advanced to add access for this browser session, then come back to Documents or Ask.',
   },
   mobileNav: {
     primary: 'Primary product navigation',

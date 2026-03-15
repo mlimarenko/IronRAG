@@ -45,7 +45,11 @@ const { t } = useI18n()
       </div>
     </div>
 
-    <p v-if="props.detail.warning" class="rr-banner" data-tone="warning">
+    <p
+      v-if="props.detail.warning"
+      class="rr-banner"
+      data-tone="warning"
+    >
       {{ t('flow.search.diagnostics.warning') }}: {{ props.detail.warning }}
     </p>
 

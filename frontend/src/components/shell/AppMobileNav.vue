@@ -35,7 +35,10 @@ function isActive(item: ShellNavItem) {
 </script>
 
 <template>
-  <nav class="app-mobile-nav" :aria-label="t('shell.mobileNav.primary')">
+  <nav
+    class="app-mobile-nav"
+    :aria-label="t('shell.mobileNav.primary')"
+  >
     <RouterLink
       v-for="item in primaryItems"
       :key="item.to"
@@ -53,7 +56,10 @@ function isActive(item: ShellNavItem) {
         <span>{{ t('shell.mobileNav.advanced') }}</span>
       </summary>
       <div class="app-mobile-nav__more-sheet">
-        <AppContextControls class="app-mobile-nav__context" compact />
+        <AppContextControls
+          class="app-mobile-nav__context"
+          compact
+        />
         <RouterLink
           v-for="item in secondaryItems"
           :key="item.to"

@@ -234,7 +234,11 @@ async function mintBootstrapSessionToken() {
             {{ description ?? t('flow.processing.auth.description') }}
           </p>
         </div>
-        <StatusBadge :status="panelStatus.status" :label="panelStatus.label" emphasis="strong" />
+        <StatusBadge
+          :status="panelStatus.status"
+          :label="panelStatus.label"
+          emphasis="strong"
+        />
       </div>
 
       <p class="auth-session-panel__summary">
@@ -246,20 +250,30 @@ async function mintBootstrapSessionToken() {
       </p>
 
       <div class="auth-session-panel__steps">
-        <article v-for="item in stepItems" :key="item.key" class="auth-step-card">
+        <article
+          v-for="item in stepItems"
+          :key="item.key"
+          class="auth-step-card"
+        >
           <div class="auth-step-card__top">
             <div>
               <h4>{{ item.title }}</h4>
               <p>{{ item.body }}</p>
             </div>
-            <StatusBadge :status="item.status" :label="item.label" />
+            <StatusBadge
+              :status="item.status"
+              :label="item.label"
+            />
           </div>
           <small>{{ item.hint }}</small>
         </article>
       </div>
     </div>
 
-    <p v-if="contextNote" class="rr-note auth-session-panel__context">
+    <p
+      v-if="contextNote"
+      class="rr-note auth-session-panel__context"
+    >
       {{ contextNote }}
     </p>
 
@@ -279,7 +293,10 @@ async function mintBootstrapSessionToken() {
       <p class="rr-note">{{ t('flow.processing.auth.secondary.hint') }}</p>
     </div>
 
-    <div v-if="showAdvancedAccess" class="auth-session-panel__grid">
+    <div
+      v-if="showAdvancedAccess"
+      class="auth-session-panel__grid"
+    >
       <section class="auth-session-panel__card auth-session-panel__card--manual">
         <div class="auth-session-panel__card-header">
           <div>
@@ -306,7 +323,7 @@ async function mintBootstrapSessionToken() {
             type="password"
             :placeholder="t('api.session.placeholder')"
             autocomplete="off"
-          />
+          >
         </label>
 
         <div class="rr-action-row auth-session-panel__actions">
@@ -355,7 +372,7 @@ async function mintBootstrapSessionToken() {
             type="password"
             :placeholder="t('api.session.bootstrap.placeholder')"
             autocomplete="off"
-          />
+          >
         </label>
 
         <div class="rr-action-row auth-session-panel__actions">
@@ -385,7 +402,10 @@ async function mintBootstrapSessionToken() {
           <p class="rr-kicker">{{ t('api.session.activeLabel') }}</p>
           <strong>{{ maskedSessionToken ?? t('api.session.activeNone') }}</strong>
         </div>
-        <StatusBadge :status="panelStatus.status" :label="panelStatus.label" />
+        <StatusBadge
+          :status="panelStatus.status"
+          :label="panelStatus.label"
+        />
       </div>
       <p class="rr-note">
         {{

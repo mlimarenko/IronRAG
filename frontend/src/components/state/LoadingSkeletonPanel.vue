@@ -18,7 +18,11 @@ const resolvedTitle = computed(() => props.title ?? t('common.loading'))
 </script>
 
 <template>
-  <article class="rr-panel rr-skeleton-panel" aria-busy="true" aria-live="polite">
+  <article
+    class="rr-panel rr-skeleton-panel"
+    aria-busy="true"
+    aria-live="polite"
+  >
     <div class="rr-skeleton-panel__header">
       <span class="rr-skeleton-panel__badge">{{ resolvedTitle }}</span>
       <div class="rr-skeleton-panel__line rr-skeleton-panel__line--short" />

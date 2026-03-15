@@ -769,7 +769,10 @@ onMounted(async () => {
     :status-label="pageStatusLabel"
   >
     <template #actions>
-      <RouterLink class="rr-button rr-button--secondary" to="/setup">
+      <RouterLink
+        class="rr-button rr-button--secondary"
+        to="/setup"
+      >
         {{ t('api.page.actions.setup') }}
       </RouterLink>
       <button
@@ -782,7 +785,11 @@ onMounted(async () => {
       </button>
     </template>
 
-    <LoadingSkeletonPanel v-if="loading" :title="t('api.page.loadingTitle')" :lines="8" />
+    <LoadingSkeletonPanel
+      v-if="loading"
+      :title="t('api.page.loadingTitle')"
+      :lines="8"
+    />
 
     <ErrorStateCard
       v-else-if="errorMessage"
@@ -807,9 +814,15 @@ onMounted(async () => {
         </div>
 
         <div class="workspace-strip__stack">
-          <StatusBadge :status="authPanelStatus.status" :label="authPanelStatus.label" />
+          <StatusBadge
+            :status="authPanelStatus.status"
+            :label="authPanelStatus.label"
+          />
 
-          <div v-if="workspaces.length > 1" class="workspace-strip__actions">
+          <div
+            v-if="workspaces.length > 1"
+            class="workspace-strip__actions"
+          >
             <button
               v-for="workspace in workspaces"
               :key="workspace.id"
@@ -826,7 +839,11 @@ onMounted(async () => {
       </section>
 
       <div class="summary-grid summary-grid--launchpad">
-        <article v-for="card in launchpadCards" :key="card.label" class="summary-card">
+        <article
+          v-for="card in launchpadCards"
+          :key="card.label"
+          class="summary-card"
+        >
           <span>{{ card.label }}</span>
           <strong class="summary-card__value">{{ card.value }}</strong>
           <small>{{ card.hint }}</small>
@@ -844,10 +861,17 @@ onMounted(async () => {
           </div>
 
           <div class="step-grid">
-            <article v-for="(step, index) in startSteps" :key="step.key" class="step-card">
+            <article
+              v-for="(step, index) in startSteps"
+              :key="step.key"
+              class="step-card"
+            >
               <div class="step-card__header">
                 <span class="step-card__index">{{ index + 1 }}</span>
-                <StatusBadge :status="step.status" :label="step.statusLabel" />
+                <StatusBadge
+                  :status="step.status"
+                  :label="step.statusLabel"
+                />
               </div>
               <h4>{{ step.title }}</h4>
               <p>{{ step.description }}</p>
@@ -856,10 +880,16 @@ onMounted(async () => {
           </div>
 
           <div class="launchpad-actions">
-            <RouterLink class="rr-button rr-button--secondary" to="/setup">
+            <RouterLink
+              class="rr-button rr-button--secondary"
+              to="/setup"
+            >
               {{ t('api.start.actions.setup') }}
             </RouterLink>
-            <RouterLink class="rr-button rr-button--secondary" to="/files">
+            <RouterLink
+              class="rr-button rr-button--secondary"
+              to="/files"
+            >
               {{ t('api.start.actions.ingest') }}
             </RouterLink>
           </div>
@@ -872,7 +902,10 @@ onMounted(async () => {
               <h3>{{ t('api.session.title') }}</h3>
               <p>{{ t('api.session.description') }}</p>
             </div>
-            <StatusBadge :status="authPanelStatus.status" :label="authPanelStatus.label" />
+            <StatusBadge
+              :status="authPanelStatus.status"
+              :label="authPanelStatus.label"
+            />
           </div>
 
           <div class="rr-form-grid">
@@ -884,7 +917,7 @@ onMounted(async () => {
                 type="password"
                 :placeholder="t('api.session.placeholder')"
                 autocomplete="off"
-              />
+              >
             </label>
           </div>
 
@@ -919,18 +952,31 @@ onMounted(async () => {
                 }}
               </p>
             </div>
-            <StatusBadge :status="authPanelStatus.status" :label="authPanelStatus.label" />
+            <StatusBadge
+              :status="authPanelStatus.status"
+              :label="authPanelStatus.label"
+            />
           </article>
 
           <ul class="checklist">
-            <li v-for="item in protectedSurfaceChecklist" :key="item.key" class="checklist__item">
-              <StatusBadge :status="item.status" :label="item.label" />
+            <li
+              v-for="item in protectedSurfaceChecklist"
+              :key="item.key"
+              class="checklist__item"
+            >
+              <StatusBadge
+                :status="item.status"
+                :label="item.label"
+              />
               <span>{{ item.text }}</span>
             </li>
           </ul>
 
           <ul class="session-notes">
-            <li v-for="note in sessionNotes" :key="note">
+            <li
+              v-for="note in sessionNotes"
+              :key="note"
+            >
               {{ note }}
             </li>
           </ul>
@@ -945,18 +991,28 @@ onMounted(async () => {
               <h3>{{ t('api.examples.title') }}</h3>
               <p>{{ t('api.examples.description') }}</p>
             </div>
-            <StatusBadge status="Info" :label="t('api.examples.liveSurface')" />
+            <StatusBadge
+              status="Info"
+              :label="t('api.examples.liveSurface')"
+            />
           </div>
 
           <div class="examples-grid">
-            <article v-for="example in exampleCards" :key="example.key" class="example-card">
+            <article
+              v-for="example in exampleCards"
+              :key="example.key"
+              class="example-card"
+            >
               <div class="example-card__header">
                 <div>
                   <h4>{{ example.title }}</h4>
                   <p>{{ example.description }}</p>
                 </div>
                 <div class="example-card__meta">
-                  <StatusBadge :status="example.accessStatus" :label="example.accessLabel" />
+                  <StatusBadge
+                    :status="example.accessStatus"
+                    :label="example.accessLabel"
+                  />
                   <div class="method-chip">
                     <strong>{{ example.method }}</strong>
                     <small>{{ example.path }}</small>
@@ -967,7 +1023,10 @@ onMounted(async () => {
               <pre><code>{{ example.body }}</code></pre>
 
               <ul class="example-notes">
-                <li v-for="note in example.notes" :key="note">
+                <li
+                  v-for="note in example.notes"
+                  :key="note"
+                >
                   {{ note }}
                 </li>
               </ul>
@@ -1015,11 +1074,17 @@ onMounted(async () => {
             </button>
           </div>
 
-          <div v-if="projectGuidance" class="guidance-card">
+          <div
+            v-if="projectGuidance"
+            class="guidance-card"
+          >
             <h4>{{ projectGuidance.title }}</h4>
             <p>{{ projectGuidance.description }}</p>
             <ul class="guidance-list">
-              <li v-for="bullet in projectGuidance.bullets" :key="bullet">
+              <li
+                v-for="bullet in projectGuidance.bullets"
+                :key="bullet"
+              >
                 {{ bullet }}
               </li>
             </ul>
@@ -1050,21 +1115,32 @@ onMounted(async () => {
           </div>
 
           <div class="summary-grid">
-            <article v-for="card in inventoryCards" :key="card.label" class="summary-card">
+            <article
+              v-for="card in inventoryCards"
+              :key="card.label"
+              class="summary-card"
+            >
               <span>{{ card.label }}</span>
               <strong class="summary-card__value">{{ card.value }}</strong>
               <small>{{ card.hint }}</small>
             </article>
           </div>
 
-          <details class="technical-panel" :open="showTechnicalApiFoundation">
+          <details
+            class="technical-panel"
+            :open="showTechnicalApiFoundation"
+          >
             <summary @click.prevent="showTechnicalApiFoundation = !showTechnicalApiFoundation">
               <span>{{ t('api.inventory.technicalSummary') }}</span>
               <small>{{ t('api.inventory.technicalHint') }}</small>
             </summary>
 
             <ul class="checklist">
-              <li v-for="item in foundationChecklist" :key="item.key" class="checklist__item">
+              <li
+                v-for="item in foundationChecklist"
+                :key="item.key"
+                class="checklist__item"
+              >
                 <StatusBadge
                   :status="item.ready ? 'Healthy' : 'Warning'"
                   :label="item.ready ? t('api.foundation.ready') : t('api.foundation.todo')"
@@ -1073,7 +1149,10 @@ onMounted(async () => {
               </li>
             </ul>
 
-            <p v-if="governanceError" class="panel-note">
+            <p
+              v-if="governanceError"
+              class="panel-note"
+            >
               {{ governanceError }}
             </p>
           </details>
@@ -1086,11 +1165,21 @@ onMounted(async () => {
               <h3>{{ t('api.tokens.title') }}</h3>
               <p>{{ t('api.tokens.description') }}</p>
             </div>
-            <StatusBadge :status="tokenInventoryBadge.status" :label="tokenInventoryBadge.label" />
+            <StatusBadge
+              :status="tokenInventoryBadge.status"
+              :label="tokenInventoryBadge.label"
+            />
           </div>
 
-          <ul v-if="tokenInventoryState === 'ready' && tokens.length > 0" class="token-list">
-            <li v-for="token in tokens" :key="token.id" class="token-card">
+          <ul
+            v-if="tokenInventoryState === 'ready' && tokens.length > 0"
+            class="token-list"
+          >
+            <li
+              v-for="token in tokens"
+              :key="token.id"
+              class="token-card"
+            >
               <div class="token-card__header">
                 <div>
                   <strong>{{ token.label }}</strong>
@@ -1163,17 +1252,27 @@ onMounted(async () => {
           </div>
 
           <div class="groundwork-grid">
-            <article v-for="card in groundworkCards" :key="card.key" class="groundwork-card">
+            <article
+              v-for="card in groundworkCards"
+              :key="card.key"
+              class="groundwork-card"
+            >
               <div class="groundwork-card__header">
                 <div>
                   <h4>{{ card.title }}</h4>
                   <p>{{ card.description }}</p>
                 </div>
-                <StatusBadge :status="card.status" :label="card.statusLabel" />
+                <StatusBadge
+                  :status="card.status"
+                  :label="card.statusLabel"
+                />
               </div>
 
               <ul class="groundwork-notes">
-                <li v-for="note in card.notes" :key="note">
+                <li
+                  v-for="note in card.notes"
+                  :key="note"
+                >
                   {{ note }}
                 </li>
               </ul>
@@ -1199,7 +1298,11 @@ onMounted(async () => {
           </div>
 
           <div class="endpoint-grid">
-            <article v-for="endpoint in endpointCards" :key="endpoint.key" class="endpoint-card">
+            <article
+              v-for="endpoint in endpointCards"
+              :key="endpoint.key"
+              class="endpoint-card"
+            >
               <div class="endpoint-card__header">
                 <div>
                   <h4>{{ endpoint.label }}</h4>
@@ -1212,7 +1315,10 @@ onMounted(async () => {
               </div>
 
               <ul class="endpoint-links">
-                <li v-for="doc in endpoint.docs" :key="doc">
+                <li
+                  v-for="doc in endpoint.docs"
+                  :key="doc"
+                >
                   <code>{{ doc }}</code>
                 </li>
               </ul>

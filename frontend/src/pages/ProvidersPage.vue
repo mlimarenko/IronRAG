@@ -95,11 +95,22 @@ const pageStatus = computed(() => {
         detail="Authorization and discovery failures should land in the same shared error state used across advanced pages."
       />
 
-      <LoadingSkeletonPanel v-else-if="loading" title="Loading integrations" />
+      <LoadingSkeletonPanel
+        v-else-if="loading"
+        title="Loading integrations"
+      />
 
       <template v-else>
-        <StatusBanner v-if="governance?.warning" tone="warning" :message="governance.warning" />
-        <StatusBanner v-else-if="infoMessage" tone="info" :message="infoMessage" />
+        <StatusBanner
+          v-if="governance?.warning"
+          tone="warning"
+          :message="governance.warning"
+        />
+        <StatusBanner
+          v-else-if="infoMessage"
+          tone="info"
+          :message="infoMessage"
+        />
 
         <div class="rr-grid rr-grid--two">
           <AppPanel
@@ -119,12 +130,18 @@ const pageStatus = computed(() => {
               title="No accounts yet"
               :message="
                 infoMessage ??
-                'Create a workspace and connect at least one account to unlock details here.'
+                  'Create a workspace and connect at least one account to unlock details here.'
               "
             />
 
-            <ul v-else class="rr-list provider-list">
-              <li v-for="provider in governance.provider_accounts" :key="provider.id">
+            <ul
+              v-else
+              class="rr-list provider-list"
+            >
+              <li
+                v-for="provider in governance.provider_accounts"
+                :key="provider.id"
+              >
                 <div class="provider-list__row">
                   <div class="provider-list__copy">
                     <strong>{{ provider.label }}</strong>
@@ -154,15 +171,24 @@ const pageStatus = computed(() => {
               message="Add profiles after accounts are ready so Documents and Ask can use a stable model choice."
             />
 
-            <ul v-else class="rr-list provider-list">
-              <li v-for="profile in governance.model_profiles" :key="profile.id">
+            <ul
+              v-else
+              class="rr-list provider-list"
+            >
+              <li
+                v-for="profile in governance.model_profiles"
+                :key="profile.id"
+              >
                 <div class="provider-list__row">
                   <div class="provider-list__copy">
                     <strong>{{ profile.model_name }}</strong>
                     <p>{{ profile.profile_kind }}</p>
                   </div>
 
-                  <StatusBadge status="ready" label="Configured" />
+                  <StatusBadge
+                    status="ready"
+                    label="Configured"
+                  />
                 </div>
               </li>
             </ul>

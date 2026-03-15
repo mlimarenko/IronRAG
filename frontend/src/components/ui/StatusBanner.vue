@@ -14,11 +14,21 @@ withDefaults(
 </script>
 
 <template>
-  <section class="rr-banner" :data-tone="tone" :role="tone === 'danger' ? 'alert' : 'status'">
-    <p v-if="title" class="rr-banner__title">
+  <section
+    class="rr-banner"
+    :data-tone="tone"
+    :role="tone === 'danger' ? 'alert' : 'status'"
+  >
+    <p
+      v-if="title"
+      class="rr-banner__title"
+    >
       {{ title }}
     </p>
-    <p v-if="message" class="rr-banner__message">
+    <p
+      v-if="message"
+      class="rr-banner__message"
+    >
       {{ message }}
     </p>
     <slot />

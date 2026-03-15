@@ -149,12 +149,18 @@ onMounted(async () => {
         detail="Context discovery and readiness checks should fail as structured state, not bare text."
       />
 
-      <div v-else-if="loading" class="rr-grid rr-grid--two">
+      <div
+        v-else-if="loading"
+        class="rr-grid rr-grid--two"
+      >
         <LoadingSkeletonPanel title="Loading libraries" />
         <LoadingSkeletonPanel title="Loading readiness" />
       </div>
 
-      <div v-else class="rr-grid rr-grid--two">
+      <div
+        v-else
+        class="rr-grid rr-grid--two"
+      >
         <AppPanel
           eyebrow="Advanced inventory"
           title="Libraries"
@@ -168,13 +174,19 @@ onMounted(async () => {
             title="No libraries found"
             :message="
               infoMessage ??
-              'Create a workspace and at least one library from Advanced before checking readiness here.'
+                'Create a workspace and at least one library from Advanced before checking readiness here.'
             "
             hint="Once libraries exist, this panel shows which one to inspect next."
           />
 
-          <ul v-else class="rr-list project-list">
-            <li v-for="project in projects" :key="project.id">
+          <ul
+            v-else
+            class="rr-list project-list"
+          >
+            <li
+              v-for="project in projects"
+              :key="project.id"
+            >
               <div class="project-list__row">
                 <div class="project-list__copy">
                   <strong>{{ project.name }}</strong>

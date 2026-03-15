@@ -33,12 +33,18 @@ withDefaults(
       :compact="compactHeader"
       :hide-actions="hideActions"
     >
-      <template v-if="$slots.actions && !hideActions" #actions>
+      <template
+        v-if="$slots.actions && !hideActions"
+        #actions
+      >
         <slot name="actions" />
       </template>
     </AppPageHeader>
 
-    <div v-if="$slots.default" class="rr-section__body rr-page-grid">
+    <div
+      v-if="$slots.default"
+      class="rr-section__body rr-page-grid"
+    >
       <slot />
     </div>
   </section>

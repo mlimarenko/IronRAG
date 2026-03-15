@@ -10,6 +10,7 @@ import {
   type ContextControlsPresentation,
   type ContextControlsState,
 } from 'src/lib/contextControls'
+import { isUnauthorizedApiError } from 'src/boot/api'
 import { getSelectedProjectId, getSelectedWorkspaceId, setSelectedProjectId } from 'src/stores/flow'
 
 const props = withDefaults(
@@ -44,6 +45,10 @@ const summaryCopy = computed(() => {
     return t('shell.context.loading')
   }
 
+  if (presentation.value.authBlocked) {
+    return t('shell.context.authRequiredSummary')
+  }
+
   if (error.value) {
     return t('shell.context.errorSummary')
   }
@@ -75,6 +80,7 @@ async function hydrateContext() {
       projects: [],
       selectedWorkspaceId: '',
       selectedProjectId: '',
+      authBlocked: isUnauthorizedApiError(nextError),
     }
   } finally {
     loading.value = false
@@ -134,19 +140,42 @@ onMounted(() => {
 </script>
 
 <template>
-  <section class="app-context-controls" :data-compact="props.compact">
+  <section
+    class="app-context-controls"
+    :data-compact="props.compact"
+  >
     <div class="app-context-controls__header">
       <div>
         <p class="app-context-controls__eyebrow">{{ t('shell.context.eyebrow') }}</p>
         <p class="app-context-controls__summary">{{ summaryCopy }}</p>
       </div>
 
-      <RouterLink v-if="isAdvancedRoute" to="/documents" class="app-context-controls__back-link">
+      <RouterLink
+        v-if="isAdvancedRoute"
+        to="/documents"
+        class="app-context-controls__back-link"
+      >
         {{ t('shell.context.backToDocuments') }}
       </RouterLink>
     </div>
 
-    <p v-if="error" class="app-context-controls__error">
+    <p
+      v-if="presentation.authBlocked"
+      class="app-context-controls__empty"
+    >
+      {{ t('shell.context.authRequiredHint') }}
+      <RouterLink
+        to="/advanced/context"
+        class="app-context-controls__inline-link"
+      >
+        {{ t('shell.context.manage') }}
+      </RouterLink>
+    </p>
+
+    <p
+      v-else-if="error"
+      class="app-context-controls__error"
+    >
       {{ error }}
     </p>
 
@@ -171,7 +200,11 @@ onMounted(() => {
           @change="void handleWorkspaceChange($event)"
         >
           <option value="">{{ t('shell.context.none') }}</option>
-          <option v-for="workspace in state.workspaces" :key="workspace.id" :value="workspace.id">
+          <option
+            v-for="workspace in state.workspaces"
+            :key="workspace.id"
+            :value="workspace.id"
+          >
             {{ workspace.name }}
           </option>
         </select>
@@ -189,7 +222,11 @@ onMounted(() => {
           @change="handleProjectChange"
         >
           <option value="">{{ t('shell.context.none') }}</option>
-          <option v-for="project in state.projects" :key="project.id" :value="project.id">
+          <option
+            v-for="project in state.projects"
+            :key="project.id"
+            :value="project.id"
+          >
             {{ project.name }}
           </option>
         </select>
@@ -209,7 +246,10 @@ onMounted(() => {
         <li>{{ t('shell.context.advancedCreate') }}</li>
         <li>{{ t('shell.context.advancedManage') }}</li>
       </ul>
-      <RouterLink to="/advanced/context" class="app-context-controls__manage-link">
+      <RouterLink
+        to="/advanced/context"
+        class="app-context-controls__manage-link"
+      >
         {{ t('shell.context.manage') }}
       </RouterLink>
     </details>
@@ -273,6 +313,17 @@ onMounted(() => {
 
 .app-context-controls__empty {
   color: var(--rr-color-text-secondary);
+}
+
+.app-context-controls__inline-link {
+  margin-left: 0.35rem;
+  color: var(--rr-color-accent-700);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.app-context-controls__inline-link:hover {
+  text-decoration: underline;
 }
 
 .app-context-controls__fields {

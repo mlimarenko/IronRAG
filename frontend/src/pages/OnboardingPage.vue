@@ -22,7 +22,11 @@ const router = useRouter()
     />
 
     <div class="onboarding-archive__actions">
-      <button type="button" class="rr-button rr-button--primary" @click="router.push('/documents')">
+      <button
+        type="button"
+        class="rr-button rr-button--primary"
+        @click="router.push('/documents')"
+      >
         Open Documents
       </button>
       <button

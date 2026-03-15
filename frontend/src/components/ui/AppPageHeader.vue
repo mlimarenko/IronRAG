@@ -25,14 +25,23 @@ withDefaults(
 </script>
 
 <template>
-  <header class="rr-page-header" :class="{ 'rr-page-header--compact': compact }">
+  <header
+    class="rr-page-header"
+    :class="{ 'rr-page-header--compact': compact }"
+  >
     <div class="rr-page-header__copy">
-      <p v-if="eyebrow" class="rr-page-header__eyebrow rr-kicker">
+      <p
+        v-if="eyebrow"
+        class="rr-page-header__eyebrow rr-kicker"
+      >
         {{ eyebrow }}
       </p>
 
       <div class="rr-page-header__title-row">
-        <component :is="titleTag" class="rr-page-header__title">
+        <component
+          :is="titleTag"
+          class="rr-page-header__title"
+        >
           {{ title }}
         </component>
 
@@ -44,12 +53,18 @@ withDefaults(
         />
       </div>
 
-      <p v-if="description" class="rr-page-header__description">
+      <p
+        v-if="description"
+        class="rr-page-header__description"
+      >
         {{ description }}
       </p>
     </div>
 
-    <div v-if="$slots.actions && !hideActions" class="rr-page-header__actions">
+    <div
+      v-if="$slots.actions && !hideActions"
+      class="rr-page-header__actions"
+    >
       <slot name="actions" />
     </div>
   </header>

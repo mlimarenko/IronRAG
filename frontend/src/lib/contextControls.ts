@@ -1,6 +1,7 @@
 import {
   fetchProjects,
   fetchWorkspaces,
+  isUnauthorizedApiError,
   type ProjectSummary,
   type WorkspaceSummary,
 } from 'src/boot/api'
@@ -12,9 +13,16 @@ export interface ContextControlsState {
   projects: ProjectSummary[]
   selectedWorkspaceId: string
   selectedProjectId: string
+  authBlocked?: boolean
 }
 
-export type ContextControlsStatus = 'loading' | 'ready' | 'empty' | 'error' | 'workspace_only'
+export type ContextControlsStatus =
+  | 'loading'
+  | 'ready'
+  | 'empty'
+  | 'error'
+  | 'workspace_only'
+  | 'auth_required'
 
 export interface ContextControlsPresentation {
   status: ContextControlsStatus
@@ -26,6 +34,7 @@ export interface ContextControlsPresentation {
   selectedWorkspace: WorkspaceSummary | null
   selectedProject: ProjectSummary | null
   showAdvancedActions: boolean
+  authBlocked: boolean
 }
 
 export function buildContextControlsPresentation(
@@ -38,9 +47,12 @@ export function buildContextControlsPresentation(
   const hasWorkspaces = state.workspaces.length > 0
   const hasProjects = state.projects.length > 0
   const hasContext = Boolean(selectedWorkspace && selectedProject)
+  const authBlocked = Boolean(state.authBlocked)
 
   let status: ContextControlsStatus = 'ready'
-  if (!hasWorkspaces) {
+  if (authBlocked) {
+    status = 'auth_required'
+  } else if (!hasWorkspaces) {
     status = 'empty'
   } else if (!hasProjects || !selectedProject) {
     status = 'workspace_only'
@@ -57,42 +69,61 @@ export function buildContextControlsPresentation(
     hasProjects,
     selectedWorkspace,
     selectedProject,
-    showAdvancedActions: !hasContext || state.workspaces.length > 1 || state.projects.length > 1,
+    showAdvancedActions:
+      authBlocked || !hasContext || state.workspaces.length > 1 || state.projects.length > 1,
+    authBlocked,
   }
 }
 
 export async function hydrateContextControlsState(): Promise<ContextControlsState> {
-  const workspaces = await fetchWorkspaces()
+  try {
+    const workspaces = await fetchWorkspaces()
 
-  const matchingWorkspace = workspaces.find((item) => item.id === getSelectedWorkspaceId())
-  const selectedWorkspaceId = matchingWorkspace?.id ?? workspaces.at(0)?.id ?? ''
+    const matchingWorkspace = workspaces.find((item) => item.id === getSelectedWorkspaceId())
+    const selectedWorkspaceId = matchingWorkspace?.id ?? workspaces.at(0)?.id ?? ''
 
-  if (selectedWorkspaceId !== getSelectedWorkspaceId()) {
-    setWorkspaceWithProjectReset(selectedWorkspaceId)
-  }
+    if (selectedWorkspaceId !== getSelectedWorkspaceId()) {
+      setWorkspaceWithProjectReset(selectedWorkspaceId)
+    }
 
-  if (!selectedWorkspaceId) {
-    setSelectedProjectId('')
+    if (!selectedWorkspaceId) {
+      setSelectedProjectId('')
+      return {
+        workspaces,
+        projects: [],
+        selectedWorkspaceId: '',
+        selectedProjectId: '',
+        authBlocked: false,
+      }
+    }
+
+    const projects = await fetchProjects(selectedWorkspaceId)
+    const storedProjectId = getSelectedProjectId()
+    const matchingProject = projects.find((item) => item.id === storedProjectId)
+    const selectedProjectId = matchingProject ? matchingProject.id : (projects[0]?.id ?? '')
+
+    setSelectedProjectId(selectedProjectId)
+
     return {
       workspaces,
-      projects: [],
-      selectedWorkspaceId: '',
-      selectedProjectId: '',
+      projects,
+      selectedWorkspaceId,
+      selectedProjectId,
+      authBlocked: false,
     }
-  }
+  } catch (error) {
+    if (isUnauthorizedApiError(error)) {
+      setSelectedProjectId('')
+      return {
+        workspaces: [],
+        projects: [],
+        selectedWorkspaceId: '',
+        selectedProjectId: '',
+        authBlocked: true,
+      }
+    }
 
-  const projects = await fetchProjects(selectedWorkspaceId)
-  const storedProjectId = getSelectedProjectId()
-  const matchingProject = projects.find((item) => item.id === storedProjectId)
-  const selectedProjectId = matchingProject ? matchingProject.id : (projects[0]?.id ?? '')
-
-  setSelectedProjectId(selectedProjectId)
-
-  return {
-    workspaces,
-    projects,
-    selectedWorkspaceId,
-    selectedProjectId,
+    throw error
   }
 }
 
@@ -105,12 +136,12 @@ export async function switchContextWorkspace(workspaceId: string): Promise<Conte
       projects: [],
       selectedWorkspaceId: '',
       selectedProjectId: '',
+      authBlocked: false,
     }
   }
 
   const [workspaces, projects] = await Promise.all([fetchWorkspaces(), fetchProjects(workspaceId)])
-  const firstProject = projects[0]
-  const selectedProjectId = firstProject.id
+  const selectedProjectId = projects[0]?.id ?? ''
   setSelectedProjectId(selectedProjectId)
 
   return {
@@ -118,5 +149,6 @@ export async function switchContextWorkspace(workspaceId: string): Promise<Conte
     projects,
     selectedWorkspaceId: workspaceId,
     selectedProjectId,
+    authBlocked: false,
   }
 }

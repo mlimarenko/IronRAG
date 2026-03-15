@@ -1028,7 +1028,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
 </script>
 
 <template>
-  <section class="rr-page-grid chat-page" :class="{ 'chat-page--mobile': isMobile }">
+  <section
+    class="rr-page-grid chat-page"
+    :class="{ 'chat-page--mobile': isMobile }"
+  >
     <PageSection
       :title="t('flow.search.title')"
       :description="isMobile ? t('flow.search.descriptionMobile') : t('flow.search.description')"
@@ -1038,12 +1041,18 @@ function formatRelationLine(relation: GraphRelationDetail): string {
       :hide-actions="isMobile"
     >
       <template #actions>
-        <RouterLink class="rr-button rr-button--secondary" to="/documents">
+        <RouterLink
+          class="rr-button rr-button--secondary"
+          to="/documents"
+        >
           {{ t('flow.search.action') }}
         </RouterLink>
       </template>
 
-      <div class="chat-page__layout" :class="{ 'chat-page__layout--single': isMobile }">
+      <div
+        class="chat-page__layout"
+        :class="{ 'chat-page__layout--single': isMobile }"
+      >
         <div class="chat-page__main">
           <div class="chat-page__conversation">
             <details
@@ -1067,10 +1076,16 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                       : t('flow.search.sessions.description')
                   }}
                 </p>
-                <div v-if="sessionLoading" class="rr-note">
+                <div
+                  v-if="sessionLoading"
+                  class="rr-note"
+                >
                   {{ t('flow.search.sessions.loading') }}
                 </div>
-                <div v-else-if="!sessions.length" class="rr-note">
+                <div
+                  v-else-if="!sessions.length"
+                  class="rr-note"
+                >
                   {{ t('flow.search.sessions.empty') }}
                 </div>
                 <button
@@ -1084,7 +1099,7 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                   <strong>
                     {{
                       session.title ||
-                      t('flow.search.sessions.fallbackTitle', { id: session.id.slice(0, 8) })
+                        t('flow.search.sessions.fallbackTitle', { id: session.id.slice(0, 8) })
                     }}
                   </strong>
                   <span>
@@ -1123,7 +1138,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
               </button>
             </div>
 
-            <article v-if="hasTimeline" class="rr-panel rr-panel--muted timeline-panel">
+            <article
+              v-if="hasTimeline"
+              class="rr-panel rr-panel--muted timeline-panel"
+            >
               <div class="timeline-panel__header">
                 <div>
                   <p class="rr-kicker">{{ t('flow.search.timeline.kicker') }}</p>
@@ -1140,7 +1158,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                 }}</span>
               </div>
 
-              <div ref="timelineListRef" class="timeline-list">
+              <div
+                ref="timelineListRef"
+                class="timeline-list"
+              >
                 <article
                   v-for="message in timeline"
                   :key="message.id"
@@ -1160,11 +1181,18 @@ function formatRelationLine(relation: GraphRelationDetail): string {
               </div>
             </article>
 
-            <p v-if="errorMessage" class="rr-banner" data-tone="danger">
+            <p
+              v-if="errorMessage"
+              class="rr-banner"
+              data-tone="danger"
+            >
               {{ errorMessage }}
             </p>
 
-            <article v-if="result" class="rr-panel answer-panel">
+            <article
+              v-if="result"
+              class="rr-panel answer-panel"
+            >
               <div class="answer-panel__header">
                 <div class="answer-panel__copy">
                   <p class="rr-kicker">{{ t('flow.search.result.kicker') }}</p>
@@ -1173,7 +1201,11 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                 <StatusPill :status="result.answer_status" />
               </div>
 
-              <p v-if="resultNotice" class="rr-banner" :data-tone="resultNotice.tone">
+              <p
+                v-if="resultNotice"
+                class="rr-banner"
+                :data-tone="resultNotice.tone"
+              >
                 {{ resultNotice.message }}
               </p>
 
@@ -1209,7 +1241,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
               :hint="t('flow.search.empty.noProject.hint')"
             >
               <template #actions>
-                <RouterLink class="rr-button rr-button--secondary" to="/advanced/context">
+                <RouterLink
+                  class="rr-button rr-button--secondary"
+                  to="/advanced/context"
+                >
                   {{ t('flow.search.empty.noProject.action') }}
                 </RouterLink>
               </template>
@@ -1225,10 +1260,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
               :message="
                 hasIndexedDocuments || hasIngestionRuns
                   ? t('flow.search.empty.partial.body', {
-                      state: formatIndexingStateLabel(readiness?.indexing_state),
-                      documents: readiness?.documents ?? 0,
-                      jobs: readiness?.ingestion_jobs ?? 0,
-                    })
+                    state: formatIndexingStateLabel(readiness?.indexing_state),
+                    documents: readiness?.documents ?? 0,
+                    jobs: readiness?.ingestion_jobs ?? 0,
+                  })
                   : t('flow.search.empty.noContent.body')
               "
               :hint="
@@ -1238,20 +1273,29 @@ function formatRelationLine(relation: GraphRelationDetail): string {
               "
             >
               <template #actions>
-                <RouterLink class="rr-button rr-button--secondary" to="/documents">
+                <RouterLink
+                  class="rr-button rr-button--secondary"
+                  to="/documents"
+                >
                   {{ t('flow.search.nextActions.openFiles') }}
                 </RouterLink>
               </template>
             </EmptyStateCard>
 
-            <article v-else class="rr-panel rr-panel--muted empty-answer">
+            <article
+              v-else
+              class="rr-panel rr-panel--muted empty-answer"
+            >
               <p class="rr-kicker">{{ t('flow.search.result.waitingKicker') }}</p>
               <h3>{{ t('flow.search.result.waitingTitle') }}</h3>
               <p class="rr-note">{{ t('flow.search.result.waitingBody') }}</p>
             </article>
           </div>
 
-          <article class="rr-panel rr-panel--accent ask-panel ask-composer" :data-sticky="isMobile">
+          <article
+            class="rr-panel rr-panel--accent ask-panel ask-composer"
+            :data-sticky="isMobile"
+          >
             <div class="ask-panel__header">
               <div class="ask-panel__copy">
                 <p class="rr-kicker">{{ t('flow.search.query.kicker') }}</p>
@@ -1259,12 +1303,19 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                 <p class="rr-note">{{ queryHint }}</p>
               </div>
 
-              <RouterLink class="rr-button rr-button--ghost" to="/documents">
+              <RouterLink
+                class="rr-button rr-button--ghost"
+                to="/documents"
+              >
                 {{ t('flow.search.action') }}
               </RouterLink>
             </div>
 
-            <p v-if="readinessNotice" class="rr-banner" :data-tone="readinessNotice.tone">
+            <p
+              v-if="readinessNotice"
+              class="rr-banner"
+              :data-tone="readinessNotice.tone"
+            >
               <strong>{{ readinessNotice.title }}</strong>
               <span>{{ readinessNotice.message }}</span>
             </p>
@@ -1282,7 +1333,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
               />
             </label>
 
-            <div v-if="shouldShowQuestionExamples" class="ask-panel__examples">
+            <div
+              v-if="shouldShowQuestionExamples"
+              class="ask-panel__examples"
+            >
               <p class="rr-note ask-panel__examples-label">
                 {{ t('flow.search.query.examplesLabel') }}
               </p>
@@ -1330,15 +1384,26 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                 <p class="rr-note">{{ t('flow.search.graph.description') }}</p>
               </div>
               <div class="graph-context-panel__summary-meta">
-                <StatusBadge :status="graphPanelStatus.status" :label="graphPanelStatus.label" />
+                <StatusBadge
+                  :status="graphPanelStatus.status"
+                  :label="graphPanelStatus.label"
+                />
                 <small class="rr-note">{{ t('flow.search.graph.summaryCta') }}</small>
               </div>
             </summary>
 
-            <p v-if="graphCoverageWarning" class="rr-banner" data-tone="warning">
+            <p
+              v-if="graphCoverageWarning"
+              class="rr-banner"
+              data-tone="warning"
+            >
               {{ graphCoverageWarning }}
             </p>
-            <p v-if="graphSurfaceError" class="rr-banner" data-tone="danger">
+            <p
+              v-if="graphSurfaceError"
+              class="rr-banner"
+              data-tone="danger"
+            >
               {{ graphSurfaceError }}
             </p>
 
@@ -1362,7 +1427,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
               :hint="t('flow.search.graph.empty.unavailable.hint')"
             />
 
-            <div v-else class="graph-context-panel__body">
+            <div
+              v-else
+              class="graph-context-panel__body"
+            >
               <div class="graph-context-panel__metrics">
                 <article class="metric-card">
                   <span class="metric-card__label">{{
@@ -1403,18 +1471,28 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                     type="text"
                     :disabled="!selectedProjectId || graphApiUnavailable"
                     :placeholder="t('flow.search.graph.search.placeholder')"
-                  />
+                  >
                 </label>
-                <p v-if="loadingGraphSearch" class="rr-note">
+                <p
+                  v-if="loadingGraphSearch"
+                  class="rr-note"
+                >
                   {{ t('flow.search.graph.search.loading') }}
                 </p>
-                <p v-if="graphSearchError" class="rr-banner" data-tone="danger">
+                <p
+                  v-if="graphSearchError"
+                  class="rr-banner"
+                  data-tone="danger"
+                >
                   {{ graphSearchError }}
                 </p>
               </div>
               <div class="graph-results">
                 <h4>{{ t('flow.search.graph.search.resultsTitle') }}</h4>
-                <div v-if="visibleGraphResults.length" class="graph-results__list">
+                <div
+                  v-if="visibleGraphResults.length"
+                  class="graph-results__list"
+                >
                   <button
                     v-for="item in visibleGraphResults"
                     :key="`${item.kind}-${item.id}`"
@@ -1459,7 +1537,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                     <h4>{{ t('flow.search.graph.detail.title') }}</h4>
                     <p class="rr-note">{{ t('flow.search.graph.detail.description') }}</p>
                   </div>
-                  <details class="technical-details" :open="showTechnicalGraphDetail">
+                  <details
+                    class="technical-details"
+                    :open="showTechnicalGraphDetail"
+                  >
                     <summary @click.prevent="showTechnicalGraphDetail = !showTechnicalGraphDetail">
                       <span>{{ t('flow.search.graph.detail.technicalSummary') }}</span>
                       <small>{{ t('flow.search.graph.detail.technicalHint') }}</small>
@@ -1505,30 +1586,42 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                         <span class="token-section__label">{{
                           t('flow.search.graph.detail.aliases')
                         }}</span>
-                        <div v-if="entityDetail.aliases.length" class="token-list">
+                        <div
+                          v-if="entityDetail.aliases.length"
+                          class="token-list"
+                        >
                           <span
                             v-for="alias in entityDetail.aliases"
                             :key="alias"
                             class="token-chip"
-                            >{{ alias }}</span
-                          >
+                          >{{ alias }}</span>
                         </div>
-                        <p v-else class="rr-note">{{ t('flow.search.graph.detail.noAliases') }}</p>
+                        <p
+                          v-else
+                          class="rr-note"
+                        >
+                          {{ t('flow.search.graph.detail.noAliases') }}
+                        </p>
                       </div>
 
                       <div class="token-section">
                         <span class="token-section__label">{{
                           t('flow.search.graph.detail.documents')
                         }}</span>
-                        <div v-if="entityDetail.source_document_ids.length" class="token-list">
+                        <div
+                          v-if="entityDetail.source_document_ids.length"
+                          class="token-list"
+                        >
                           <span
                             v-for="documentId in entityDetail.source_document_ids"
                             :key="documentId"
                             class="token-chip token-chip--mono"
-                            >{{ documentId }}</span
-                          >
+                          >{{ documentId }}</span>
                         </div>
-                        <p v-else class="rr-note">
+                        <p
+                          v-else
+                          class="rr-note"
+                        >
                           {{ t('flow.search.graph.detail.noDocuments') }}
                         </p>
                       </div>
@@ -1567,7 +1660,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                             {{ formatRelationLine(relation) }}
                           </li>
                         </ul>
-                        <p v-else class="rr-note">
+                        <p
+                          v-else
+                          class="rr-note"
+                        >
                           {{ t('flow.search.graph.detail.noOutgoingRelations') }}
                         </p>
                       </div>
@@ -1587,17 +1683,28 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                             {{ formatRelationLine(relation) }}
                           </li>
                         </ul>
-                        <p v-else class="rr-note">
+                        <p
+                          v-else
+                          class="rr-note"
+                        >
                           {{ t('flow.search.graph.detail.noIncomingRelations') }}
                         </p>
                       </div>
                     </article>
                   </div>
 
-                  <p v-if="entityDetail.warning" class="rr-banner" data-tone="warning">
+                  <p
+                    v-if="entityDetail.warning"
+                    class="rr-banner"
+                    data-tone="warning"
+                  >
                     {{ entityDetail.warning }}
                   </p>
-                  <p v-if="entitySubgraph?.warning" class="rr-banner" data-tone="warning">
+                  <p
+                    v-if="entitySubgraph?.warning"
+                    class="rr-banner"
+                    data-tone="warning"
+                  >
                     {{ entitySubgraph.warning }}
                   </p>
                 </template>
@@ -1611,15 +1718,20 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                       <span class="token-section__label">{{
                         t('flow.search.graph.detail.matchReasons')
                       }}</span>
-                      <div v-if="selectedGraphRelationCard.matchReasons.length" class="token-list">
+                      <div
+                        v-if="selectedGraphRelationCard.matchReasons.length"
+                        class="token-list"
+                      >
                         <span
                           v-for="reason in selectedGraphRelationCard.matchReasons"
                           :key="reason"
                           class="token-chip"
-                          >{{ reason }}</span
-                        >
+                        >{{ reason }}</span>
                       </div>
-                      <p v-else class="rr-note">
+                      <p
+                        v-else
+                        class="rr-note"
+                      >
                         {{ t('flow.search.graph.detail.noMatchReasons') }}
                       </p>
                     </div>
@@ -1656,11 +1768,19 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                     v-if="graphDiagnosticsBlockers.length"
                     class="bullet-list bullet-list--compact"
                   >
-                    <li v-for="blocker in graphDiagnosticsBlockers" :key="blocker">
+                    <li
+                      v-for="blocker in graphDiagnosticsBlockers"
+                      :key="blocker"
+                    >
                       {{ blocker }}
                     </li>
                   </ul>
-                  <p v-else class="rr-note">{{ t('flow.search.graph.diagnostics.noBlockers') }}</p>
+                  <p
+                    v-else
+                    class="rr-note"
+                  >
+                    {{ t('flow.search.graph.diagnostics.noBlockers') }}
+                  </p>
                 </div>
 
                 <div class="diagnostics-block">
@@ -1669,9 +1789,19 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                     v-if="graphDiagnosticsNextSteps.length"
                     class="bullet-list bullet-list--compact"
                   >
-                    <li v-for="step in graphDiagnosticsNextSteps" :key="step">{{ step }}</li>
+                    <li
+                      v-for="step in graphDiagnosticsNextSteps"
+                      :key="step"
+                    >
+                      {{ step }}
+                    </li>
                   </ul>
-                  <p v-else class="rr-note">{{ t('flow.search.graph.diagnostics.noNextSteps') }}</p>
+                  <p
+                    v-else
+                    class="rr-note"
+                  >
+                    {{ t('flow.search.graph.diagnostics.noNextSteps') }}
+                  </p>
                 </div>
 
                 <div class="graph-context-panel__metrics graph-context-panel__metrics--diagnostics">
