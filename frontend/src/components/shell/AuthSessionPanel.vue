@@ -48,7 +48,11 @@ const sessionTokenDraft = ref(getApiBearerToken())
 const sessionToken = ref(getApiBearerToken())
 const bootstrapSecret = ref('')
 const loading = ref(false)
-const feedback = ref<{ tone: 'success' | 'warning'; message: string; detail?: string | null } | null>(null)
+const feedback = ref<{
+  tone: 'success' | 'warning'
+  message: string
+  detail?: string | null
+} | null>(null)
 
 const hasSessionToken = computed(() => sessionToken.value.trim().length > 0)
 const maskedSessionToken = computed(() => {
@@ -103,11 +107,7 @@ function refreshSessionDraft() {
   sessionTokenDraft.value = sessionToken.value
 }
 
-function setFeedback(
-  tone: 'success' | 'warning',
-  message: string,
-  detail: string | null = null,
-) {
+function setFeedback(tone: 'success' | 'warning', message: string, detail: string | null = null) {
   feedback.value = {
     tone,
     message,
@@ -238,15 +238,15 @@ async function mintBootstrapSessionToken() {
       </div>
 
       <p class="auth-session-panel__summary">
-        {{ hasSessionToken ? t('flow.processing.auth.summary.ready') : t('flow.processing.auth.summary.pending') }}
+        {{
+          hasSessionToken
+            ? t('flow.processing.auth.summary.ready')
+            : t('flow.processing.auth.summary.pending')
+        }}
       </p>
 
       <div class="auth-session-panel__steps">
-        <article
-          v-for="item in stepItems"
-          :key="item.key"
-          class="auth-step-card"
-        >
+        <article v-for="item in stepItems" :key="item.key" class="auth-step-card">
           <div class="auth-step-card__top">
             <div>
               <h4>{{ item.title }}</h4>
@@ -270,7 +270,11 @@ async function mintBootstrapSessionToken() {
         :aria-expanded="showAdvancedAccess ? 'true' : 'false'"
         @click="toggleAdvancedAccess"
       >
-        {{ showAdvancedAccess ? t('flow.processing.auth.secondary.hide') : t('flow.processing.auth.secondary.show') }}
+        {{
+          showAdvancedAccess
+            ? t('flow.processing.auth.secondary.hide')
+            : t('flow.processing.auth.secondary.show')
+        }}
       </button>
       <p class="rr-note">{{ t('flow.processing.auth.secondary.hint') }}</p>
     </div>
@@ -284,7 +288,11 @@ async function mintBootstrapSessionToken() {
           </div>
           <StatusBadge
             :status="hasSessionToken ? 'Healthy' : 'Info'"
-            :label="hasSessionToken ? t('flow.processing.auth.methods.manual.connected') : t('flow.processing.auth.methods.manual.ready')"
+            :label="
+              hasSessionToken
+                ? t('flow.processing.auth.methods.manual.connected')
+                : t('flow.processing.auth.methods.manual.ready')
+            "
           />
         </div>
 
@@ -298,7 +306,7 @@ async function mintBootstrapSessionToken() {
             type="password"
             :placeholder="t('api.session.placeholder')"
             autocomplete="off"
-          >
+          />
         </label>
 
         <div class="rr-action-row auth-session-panel__actions">
@@ -329,7 +337,11 @@ async function mintBootstrapSessionToken() {
           </div>
           <StatusBadge
             :status="hasBootstrapSecret ? 'Warning' : 'Info'"
-            :label="hasBootstrapSecret ? t('flow.processing.auth.methods.bootstrap.ready') : t('flow.processing.auth.methods.bootstrap.optional')"
+            :label="
+              hasBootstrapSecret
+                ? t('flow.processing.auth.methods.bootstrap.ready')
+                : t('flow.processing.auth.methods.bootstrap.optional')
+            "
           />
         </div>
 
@@ -343,7 +355,7 @@ async function mintBootstrapSessionToken() {
             type="password"
             :placeholder="t('api.session.bootstrap.placeholder')"
             autocomplete="off"
-          >
+          />
         </label>
 
         <div class="rr-action-row auth-session-panel__actions">
@@ -353,7 +365,11 @@ async function mintBootstrapSessionToken() {
             :disabled="loading || !hasBootstrapSecret"
             @click="void mintBootstrapSessionToken()"
           >
-            {{ loading ? t('api.session.bootstrap.actionBusy') : t('flow.processing.auth.methods.bootstrap.action') }}
+            {{
+              loading
+                ? t('api.session.bootstrap.actionBusy')
+                : t('flow.processing.auth.methods.bootstrap.action')
+            }}
           </button>
         </div>
 
