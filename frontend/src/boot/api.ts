@@ -2,6 +2,8 @@ import axios from 'axios'
 
 import { getApiBearerToken } from 'src/lib/apiAuth'
 
+const REQUEST_ID_HEADER = 'x-request-id'
+
 interface FrontendEnv {
   readonly VITE_BACKEND_URL?: string
 }
@@ -380,6 +382,10 @@ api.interceptors.request.use((config) => {
     config.headers.delete('Authorization')
   }
 
+  if (!config.headers.has(REQUEST_ID_HEADER)) {
+    config.headers.set(REQUEST_ID_HEADER, crypto.randomUUID())
+  }
+
   return config
 })
 
@@ -394,10 +400,25 @@ api.interceptors.response.use(
         typeof error.response?.data === 'string'
           ? error.response.data
           : (error.response?.data?.message ?? error.response?.data?.error ?? null)
+      const errorKind =
+        typeof error.response?.data === 'object' && error.response?.data
+          ? (error.response.data.error_kind ?? null)
+          : null
+      const requestId =
+        error.response?.headers?.[REQUEST_ID_HEADER] ??
+        (typeof error.response?.data === 'object' && error.response?.data
+          ? (error.response.data.request_id ?? null)
+          : null)
 
       const detail = body ? `: ${body}` : ''
+      const suffix = [
+        errorKind ? `kind=${String(errorKind)}` : null,
+        requestId ? `request_id=${String(requestId)}` : null,
+      ]
+        .filter(Boolean)
+        .join(', ')
       const normalized = new Error(
-        `${method} ${url} failed with ${status ?? 'network error'}${detail}`,
+        `${method} ${url} failed with ${status ?? 'network error'}${detail}${suffix ? ` [${suffix}]` : ''}`,
       )
       return Promise.reject(normalized)
     }

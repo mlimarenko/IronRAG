@@ -5,14 +5,19 @@ pub mod state;
 use ::http::Response;
 use axum::{
     Router,
+    body::Body,
     extract::MatchedPath,
     http::{Request, header},
+    middleware,
 };
 use std::{net::SocketAddr, time::Duration};
 use tower_http::{classify::ServerErrorsFailureClass, cors::CorsLayer, trace::TraceLayer};
 use tracing::{Span, error, info, warn};
 
-use crate::{interfaces::http, services::ingestion_worker};
+use crate::{
+    interfaces::http::{self, router_support},
+    services::ingestion_worker,
+};
 
 /// Boots the HTTP server and serves the `RustRAG` API.
 ///
@@ -28,6 +33,8 @@ pub async fn run() -> anyhow::Result<()> {
         ingestion_worker::spawn_ingestion_worker(state.clone(), shutdown.subscribe());
     let router = Router::new()
         .nest("/v1", http::router())
+        .layer(middleware::map_request(inject_request_id))
+        .layer(middleware::map_response(propagate_request_id))
         .layer(CorsLayer::permissive())
         .layer(
             TraceLayer::new_for_http()
@@ -36,11 +43,17 @@ pub async fn run() -> anyhow::Result<()> {
                         || "<unmatched>".to_string(),
                         |path| path.as_str().to_string(),
                     );
+                    let request_id = request
+                        .extensions()
+                        .get::<router_support::RequestId>()
+                        .map(|request_id| request_id.0.clone())
+                        .unwrap_or_else(|| "-".to_string());
                     tracing::info_span!(
                         "http_request",
                         method = %request.method(),
                         matched_path,
                         uri = %request.uri(),
+                        request_id,
                     )
                 })
                 .on_request(|request: &Request<_>, _span: &Span| {
@@ -53,23 +66,34 @@ pub async fn run() -> anyhow::Result<()> {
                         .get(header::USER_AGENT)
                         .and_then(|value| value.to_str().ok())
                         .unwrap_or("-");
+                    let request_id = request
+                        .extensions()
+                        .get::<router_support::RequestId>()
+                        .map(|request_id| request_id.0.as_str())
+                        .unwrap_or("-");
                     info!(
                         method = %request.method(),
                         matched_path,
                         uri = %request.uri(),
                         user_agent,
+                        request_id,
                         "http request started",
                     );
                 })
                 .on_response(|response: &Response<_>, latency: Duration, _span: &Span| {
                     let latency_ms = latency.as_millis();
                     let status = response.status();
+                    let request_id = response
+                        .headers()
+                        .get(router_support::REQUEST_ID_HEADER)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("-");
                     if status.is_server_error() {
-                        error!(%status, latency_ms, "http request completed with server error");
+                        error!(%status, latency_ms, request_id, "http request completed with server error");
                     } else if status.is_client_error() {
-                        warn!(%status, latency_ms, "http request completed with client error");
+                        warn!(%status, latency_ms, request_id, "http request completed with client error");
                     } else {
-                        info!(%status, latency_ms, "http request completed");
+                        info!(%status, latency_ms, request_id, "http request completed");
                     }
                 })
                 .on_failure(
@@ -94,4 +118,15 @@ pub async fn run() -> anyhow::Result<()> {
     shutdown.trigger();
     let _ = worker_handle.await;
     Ok(())
+}
+
+async fn inject_request_id(mut request: Request<Body>) -> Request<Body> {
+    let request_id = router_support::ensure_or_generate_request_id(request.headers());
+    router_support::attach_request_id_header(request.headers_mut(), &request_id);
+    request.extensions_mut().insert(router_support::RequestId(request_id));
+    request
+}
+
+async fn propagate_request_id(response: Response<Body>) -> Response<Body> {
+    response
 }

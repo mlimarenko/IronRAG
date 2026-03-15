@@ -1,15 +1,22 @@
 use axum::{
     Json,
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
 use thiserror::Error;
 use tracing::{error, warn};
+use uuid::Uuid;
+
+pub const REQUEST_ID_HEADER: &str = "x-request-id";
 
 #[derive(Debug, Serialize)]
 pub struct ApiErrorBody {
     pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -53,12 +60,14 @@ impl IntoResponse for ApiError {
         let status = self.status_code();
         let error_kind = self.kind();
         let message = self.to_string();
+        let request_id = None::<String>;
 
         if status.is_server_error() {
             error!(
                 %status,
                 error_kind,
                 error_message = %message,
+                request_id = request_id.as_deref().unwrap_or("-"),
                 "http request failed in handler",
             );
         } else {
@@ -66,12 +75,45 @@ impl IntoResponse for ApiError {
                 %status,
                 error_kind,
                 error_message = %message,
+                request_id = request_id.as_deref().unwrap_or("-"),
                 "http request rejected in handler",
             );
         }
 
-        let body = Json(ApiErrorBody { error: message });
+        let mut response = (
+            status,
+            Json(ApiErrorBody {
+                error: message,
+                error_kind: Some(error_kind),
+                request_id: request_id.clone(),
+            }),
+        )
+            .into_response();
 
-        (status, body).into_response()
+        if let Some(request_id) = request_id {
+            attach_request_id_header(response.headers_mut(), &request_id);
+        }
+
+        response
     }
 }
+
+#[must_use]
+pub fn ensure_or_generate_request_id(headers: &HeaderMap) -> String {
+    headers
+        .get(REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(std::string::ToString::to_string)
+        .unwrap_or_else(|| Uuid::now_v7().to_string())
+}
+
+pub fn attach_request_id_header(headers: &mut HeaderMap, request_id: &str) {
+    if let Ok(value) = HeaderValue::from_str(request_id) {
+        headers.insert(header::HeaderName::from_static(REQUEST_ID_HEADER), value);
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RequestId(pub String);
