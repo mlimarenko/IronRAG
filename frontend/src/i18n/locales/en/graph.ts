@@ -1,9 +1,9 @@
 export default {
   page: {
-    eyebrow: 'Knowledge graph',
+    eyebrow: 'Supporting graph context',
     title: 'Graph',
     description:
-      'Inspect graph readiness, search graph concepts, and review what entities or relations are already visible versus still waiting on backend support.',
+      'Use this secondary surface only when Ask needs extra graph coverage, relation search, or readiness context.',
     technicalNote:
       'This is a secondary technical surface for graph coverage and readiness checks. Stay in Search for the primary answer workflow.',
     statusLabel: 'Preview',
@@ -11,8 +11,8 @@ export default {
   hero: {
     status: 'Preview',
     headline:
-      'Use Graph to inspect entity coverage, relation visibility, and retrieval-linked evidence as graph data becomes available.',
-    body: 'This workspace already gives operators a clear map of what graph evidence exists today, what comes from retrieval detail, and which graph records are still waiting on backend support.',
+      'Use Graph only as supporting context when the main Ask workflow needs extra entity or relation evidence.',
+    body: 'This workspace helps operators inspect graph coverage, retrieval-linked evidence, and backend gaps without replacing Ask as the primary question surface.',
     highlights: [
       'Retrieval detail already captures references, matched chunks, and raw debug payloads.',
       'Search and detail panels stay explicit about which graph records are available right now.',

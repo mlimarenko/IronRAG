@@ -407,7 +407,8 @@ export default {
   library: {
     eyebrow: 'Files',
     title: 'Files',
-    description: 'Add text or a file to the active library, then watch it become ready to ask.',
+    description:
+      'Upload files into the active library, see when they become ready, and move straight into Ask.',
     action: 'Open Ask',
     statusBlocked: 'Choose a library in Setup',
     statusProcessing: '{count} active runs',
@@ -432,8 +433,8 @@ export default {
     },
     notices: {
       queuedTitle: 'File added to the queue',
-      queuedBody: 'The worker has accepted the request. Watch the queue below for progress.',
-      queuedDetail: 'Stay here if you want to watch progress, or refresh when you come back.',
+      queuedBody: 'RustRAG accepted the file. Stay here to watch it become ready for Ask.',
+      queuedDetail: 'You can wait here for readiness or come back and refresh in a moment.',
       completedTitle: 'File indexed',
       completedBody: 'The content is ready for search.',
       completedContinueBody:
@@ -445,10 +446,10 @@ export default {
       completedReadyDetail: 'You can move straight into Ask now.',
       openAskAction: 'Open Ask now',
       progressTitle: 'Processing is still running',
-      progressBody: 'The worker has not reached a terminal state yet.',
+      progressBody: 'RustRAG is still preparing this file.',
       retryQueuedTitle: 'Retry queued',
-      retryQueuedBody: 'The failed run was placed back into the processing queue.',
-      retryQueuedDetail: 'Stay on this page to watch the queue, or refresh in a moment.',
+      retryQueuedBody: 'RustRAG queued the file again so it can try to finish indexing.',
+      retryQueuedDetail: 'Stay on this page to watch readiness, or refresh again in a moment.',
       duplicateTitle: 'This content is already queued',
       duplicateBody:
         'Wait for the existing run to finish or change the content before submitting again.',
@@ -503,7 +504,7 @@ export default {
       titlePlaceholder: 'Optional override for the file name',
       titleHint: 'Leave blank to keep the original filename as the document title.',
       helper:
-        'Drop one file into the current library. RustRAG checks support before upload so the page stays honest about what works now, what is still processing, and what still needs attention.',
+        'Drop one file into the current library. RustRAG checks support before upload so this page stays clear about what works now, what is still getting ready, and what needs attention.',
       autoSourceLabel: 'File upload',
       browse: 'Browse files',
       dropzoneIdleBadge: 'Single file',
@@ -535,14 +536,14 @@ export default {
       readinessTitle: 'Library readiness',
       readinessReady: 'Files in this library are indexed and ready for Ask.',
       readinessProcessing:
-        'RustRAG is still preparing some files. You can stay here and refresh, then move into Ask when the library is ready.',
+        'RustRAG is still getting some files ready. Stay here if you want a quick check, then move into Ask once the library is ready.',
       readinessEmpty: 'Upload the first file to make this library searchable.',
       filesReadyHint: 'Indexed and searchable.',
       filesProcessing: 'Still processing',
       filesAttention: 'Need attention',
-      filesAttentionHint: 'Open details only if something looks stuck or failed.',
-      detailsToggle: 'Show processing details',
-      queueActive: '{count} files still processing',
+      filesAttentionHint: 'Open details only if something looks stuck or finished with a problem.',
+      detailsToggle: 'Show file readiness details',
+      queueActive: '{count} files still getting ready',
       activeTitle: 'Current processing run',
       latestTitle: 'Latest processing result',
       emptyTitle: 'No processing runs yet',
@@ -551,8 +552,8 @@ export default {
       queueTitle: 'Processing queue',
       queueCount: '{count} active runs',
       queueLoaded: '{count} recent runs',
-      queueIdle: 'Queue empty',
-      refresh: 'Refresh',
+      queueIdle: 'Nothing else is running',
+      refresh: 'Refresh status',
       retryAction: 'Retry run',
       retryBusy: 'Retrying...',
       runId: 'Run',
@@ -632,7 +633,7 @@ export default {
       kicker: 'Recent files',
       title: 'Recent files',
       helper:
-        'Files are grouped by what you should do next first: fix attention items, wait on processing, or move into Ask once files are ready.',
+        'Files are grouped by the next practical move: fix anything that needs attention, wait on files still getting ready, or move into Ask once files are searchable.',
       emptyBadge: 'No files yet',
       emptyTitle: 'No indexed files yet',
       emptyBody: 'Completed files will appear here as soon as processing finishes.',
@@ -678,10 +679,12 @@ export default {
       },
       fields: {
         externalKey: 'File key',
-        source: 'Source',
+        source: 'Added from',
         kind: 'Source kind',
         mime: 'Type',
-        updated: 'Last processing update',
+        type: 'File type',
+        updated: 'Last readiness update',
+        added: 'Last update',
         checksum: 'Checksum',
       },
       readiness: {
@@ -705,11 +708,11 @@ export default {
     },
     nextActions: {
       kicker: 'Next step',
-      chooseLibrary: 'Choose a library first',
-      chooseLibraryHint: 'Setup is still the first move before files can land anywhere.',
+      chooseLibrary: 'Choose a library in Setup first',
+      chooseLibraryHint: 'Pick the destination library first so RustRAG knows where to put files.',
       uploadFirst: 'Upload the first file',
       uploadFirstHint: 'Once one file finishes indexing, Ask becomes the obvious next step.',
-      waitForReady: 'Wait for files to finish',
+      waitForReady: 'Wait for files to be ready',
       waitForReadyHint:
         'Keep this page simple: refresh when needed, then move into Ask once the library is ready.',
       openAskHint: 'This library has searchable files, so the next move is asking questions.',
@@ -880,7 +883,7 @@ export default {
         title: 'Choose a library before asking',
         body: 'Ask only works inside the active library. Pick the scope in Setup first.',
         hint: 'Once a library is selected, Ask will explain whether it is indexed enough to answer.',
-        action: 'Open Setup',
+        action: 'Open Files',
       },
       noContent: {
         title: 'No indexed content yet',
@@ -985,8 +988,7 @@ export default {
       },
       diagnostics: {
         title: 'Graph readiness',
-        description:
-          'Current blockers and next practical steps for richer graph support in this library.',
+        description: 'Open only when you need technical graph readiness details for this library.',
         blockersTitle: 'Current blockers',
         noBlockers: 'No explicit blockers reported right now.',
         nextStepsTitle: 'Next steps',

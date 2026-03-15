@@ -121,6 +121,7 @@ const graphSearchError = ref<string | null>(null)
 const graphDetailError = ref<string | null>(null)
 const selectedGraphItem = ref<GraphSelection | null>(null)
 const showTechnicalGraphDetail = ref(false)
+const showGraphReadinessDetails = ref(false)
 
 let graphSearchTimer: number | undefined
 let graphSurfaceRequestId = 0
@@ -1033,7 +1034,7 @@ function formatRelationLine(relation: GraphRelationDetail): string {
       :hide-actions="isMobile"
     >
       <template #actions>
-        <RouterLink class="rr-button rr-button--secondary" to="/files">
+        <RouterLink class="rr-button rr-button--secondary" to="/documents">
           {{ t('flow.search.action') }}
         </RouterLink>
       </template>
@@ -1197,7 +1198,7 @@ function formatRelationLine(relation: GraphRelationDetail): string {
               :hint="t('flow.search.empty.noProject.hint')"
             >
               <template #actions>
-                <RouterLink class="rr-button rr-button--secondary" to="/processing">
+                <RouterLink class="rr-button rr-button--secondary" to="/advanced/context">
                   {{ t('flow.search.empty.noProject.action') }}
                 </RouterLink>
               </template>
@@ -1226,7 +1227,7 @@ function formatRelationLine(relation: GraphRelationDetail): string {
               "
             >
               <template #actions>
-                <RouterLink class="rr-button rr-button--secondary" to="/files">
+                <RouterLink class="rr-button rr-button--secondary" to="/documents">
                   {{ t('flow.search.nextActions.openFiles') }}
                 </RouterLink>
               </template>
@@ -1247,7 +1248,7 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                 <p class="rr-note">{{ queryHint }}</p>
               </div>
 
-              <RouterLink class="rr-button rr-button--ghost" to="/files">
+              <RouterLink class="rr-button rr-button--ghost" to="/documents">
                 {{ t('flow.search.action') }}
               </RouterLink>
             </div>
@@ -1620,9 +1621,14 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                 />
               </div>
 
-              <div class="graph-diagnostics">
-                <h4>{{ t('flow.search.graph.diagnostics.title') }}</h4>
-                <p class="rr-note">{{ t('flow.search.graph.diagnostics.description') }}</p>
+              <details
+                class="graph-diagnostics technical-details"
+                :open="showGraphReadinessDetails"
+              >
+                <summary @click.prevent="showGraphReadinessDetails = !showGraphReadinessDetails">
+                  <span>{{ t('flow.search.graph.diagnostics.title') }}</span>
+                  <small>{{ t('flow.search.graph.diagnostics.description') }}</small>
+                </summary>
 
                 <div class="diagnostics-block">
                   <h5>{{ t('flow.search.graph.diagnostics.blockersTitle') }}</h5>
@@ -1690,7 +1696,7 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                     }}</strong>
                   </article>
                 </div>
-              </div>
+              </details>
             </div>
           </article>
         </div>
