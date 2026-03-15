@@ -1,59 +1,51 @@
-export type ShellSection = 'home' | 'processing' | 'files' | 'search' | 'graph' | 'api'
+export type ShellSection = 'files' | 'search' | 'processing' | 'graph' | 'api'
 
 export interface ShellNavItem {
   key: ShellSection
   to: string
   legacyTo?: string
   step: string
-  stage: 'flow' | 'inspect' | 'extend'
+  stage: 'primary' | 'advanced'
   emphasis?: 'primary' | 'secondary'
 }
 
 export const shellNavItems: readonly ShellNavItem[] = [
   {
-    key: 'home',
-    to: '/home',
-    legacyTo: '/dashboard',
-    step: '01',
-    stage: 'flow',
-    emphasis: 'primary',
-  },
-  {
     key: 'files',
     to: '/files',
     legacyTo: '/ingest',
-    step: '02',
-    stage: 'flow',
+    step: '01',
+    stage: 'primary',
     emphasis: 'primary',
   },
   {
     key: 'search',
     to: '/search',
     legacyTo: '/ask',
-    step: '03',
-    stage: 'flow',
+    step: '02',
+    stage: 'primary',
     emphasis: 'primary',
   },
   {
     key: 'processing',
     to: '/processing',
     legacyTo: '/setup',
-    step: '04',
-    stage: 'inspect',
+    step: 'A1',
+    stage: 'advanced',
     emphasis: 'secondary',
   },
   {
     key: 'graph',
     to: '/graph',
-    step: '05',
-    stage: 'inspect',
+    step: 'A2',
+    stage: 'advanced',
     emphasis: 'secondary',
   },
   {
     key: 'api',
     to: '/api',
-    step: '06',
-    stage: 'extend',
+    step: 'A3',
+    stage: 'advanced',
     emphasis: 'secondary',
   },
 ] as const

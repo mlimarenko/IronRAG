@@ -17,7 +17,11 @@ const productAliases = [
   },
   {
     path: 'dashboard',
-    redirect: '/home',
+    redirect: '/files',
+  },
+  {
+    path: 'home',
+    redirect: '/files',
   },
 ]
 
@@ -32,15 +36,7 @@ const routes = [
         children: [
           {
             path: '',
-            redirect: '/home',
-          },
-          {
-            path: 'home',
-            component: () => import('src/pages/HomePage.vue'),
-            meta: {
-              shellSection: 'home',
-              shellStatus: 'focused',
-            },
+            redirect: '/files',
           },
           {
             path: 'processing',
@@ -65,14 +61,6 @@ const routes = [
             meta: {
               shellSection: 'search',
               shellStatus: 'healthy',
-            },
-          },
-          {
-            path: 'graph',
-            component: () => import('src/pages/GraphPage.vue'),
-            meta: {
-              shellSection: 'graph',
-              shellStatus: 'ready',
             },
           },
           {

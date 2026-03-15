@@ -4,7 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { RouterLink } from 'vue-router'
 
 import type { ShellSection } from './shellNavigation'
-import { getShellNavIndex, getShellNavItem, shellNavItems } from './shellNavigation'
+import { getShellNavIndex, shellNavItems } from './shellNavigation'
 
 const props = defineProps<{
   activeSection: ShellSection
@@ -15,11 +15,9 @@ const { t } = useI18n()
 const activeIndex = computed(() => getShellNavIndex(props.activeSection))
 const previousItem = computed(() => shellNavItems[activeIndex.value - 1] ?? null)
 const nextItem = computed(() => shellNavItems[activeIndex.value + 1] ?? null)
-const activeItem = computed(() => getShellNavItem(props.activeSection))
-
 const relatedItems = computed(() =>
   shellNavItems
-    .filter((item) => item.key !== props.activeSection && item.stage !== activeItem.value.stage)
+    .filter((item) => item.key !== props.activeSection && item.stage === 'advanced')
     .slice(0, 2),
 )
 </script>

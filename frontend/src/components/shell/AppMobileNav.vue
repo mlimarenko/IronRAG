@@ -40,7 +40,7 @@ function isActive(item: ShellNavItem) {
 
     <details class="app-mobile-nav__more">
       <summary>
-        <span>{{ t('shell.mobileNav.more') }}</span>
+        <span>{{ t('shell.mobileNav.advanced') }}</span>
       </summary>
       <div class="app-mobile-nav__more-sheet">
         <RouterLink

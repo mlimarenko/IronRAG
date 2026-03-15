@@ -10,22 +10,18 @@ const route = useRoute()
 const { t } = useI18n()
 
 interface NavGroup {
-  key: 'flow' | 'inspect' | 'extend'
+  key: 'primary' | 'advanced'
   items: readonly ShellNavItem[]
 }
 
 const navGroups = computed<readonly NavGroup[]>(() => [
   {
-    key: 'flow',
-    items: shellNavItems.filter((item) => item.stage === 'flow'),
+    key: 'primary',
+    items: shellNavItems.filter((item) => item.stage === 'primary'),
   },
   {
-    key: 'inspect',
-    items: shellNavItems.filter((item) => item.stage === 'inspect'),
-  },
-  {
-    key: 'extend',
-    items: shellNavItems.filter((item) => item.stage === 'extend'),
+    key: 'advanced',
+    items: shellNavItems.filter((item) => item.stage === 'advanced'),
   },
 ])
 
@@ -36,7 +32,7 @@ const activeSection = computed(
     shellNavItems.find(
       (item) => activePath.value === item.to || activePath.value.startsWith(`${item.to}/`),
     )?.key ??
-    'home',
+    'files',
 )
 
 function isActive(item: ShellNavItem) {
