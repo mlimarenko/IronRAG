@@ -267,6 +267,20 @@ const processingStatHint = computed(() => {
   return t('flow.library.stats.processingHint')
 })
 
+function slugify(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48)
+}
+
+function buildExternalKey(prefix: string, seed: string): string {
+  const base = slugify(seed) || prefix
+  return `${prefix}-${base}-${Date.now()}`
+}
+
 function setFeedbackState(state: FeedbackState | null) {
   feedback.value = state
 }
@@ -425,20 +439,6 @@ function formatDocumentStatus(status?: string | null): string {
   return status.replace(/[_-]+/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase())
 }
 
-function slugify(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 48)
-}
-
-function buildExternalKey(prefix: string, seed: string): string {
-  const base = slugify(seed) || prefix
-  return `${prefix}-${base}-${Date.now()}`
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     window.setTimeout(resolve, ms)
@@ -478,6 +478,32 @@ watch(
   },
   { immediate: true },
 )
+
+watch(selectedProjectId, async (projectId) => {
+  stopAutoRefresh()
+  documents.value = []
+  sources.value = []
+  recentJobs.value = []
+  feedback.value = null
+
+  if (!projectId) {
+    return
+  }
+
+  try {
+    await loadProjectData(projectId)
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
+    const copy = describeIngestionError(message, t)
+    setFeedbackState({
+      tone: 'danger',
+      title: copy.title,
+      body: copy.body,
+      detail: copy.detail,
+    })
+  }
+})
 
 async function hydrateRecentJobs(jobSummaries: IngestionJobSummary[]) {
   queueLoading.value = true
@@ -658,10 +684,11 @@ async function ingestCurrentText() {
 
   try {
     const sourceId = await ensureSource(MANUAL_SOURCE_KIND)
+    const externalKey = buildExternalKey('note', title.value || text.value.slice(0, 48))
     const result = await ingestText({
       project_id: selectedProjectId.value,
       source_id: sourceId,
-      external_key: buildExternalKey('note', title.value || text.value.slice(0, 48)),
+      external_key: externalKey,
       title: title.value.trim() || null,
       text: text.value,
     })
@@ -917,16 +944,24 @@ onUnmounted(() => {
 <template>
   <section class="rr-page-grid ingestion-page">
     <PageSection
+      :eyebrow="t('flow.library.eyebrow')"
       :title="t('flow.library.title')"
       :description="t('flow.library.description')"
       :status="pageStatus.status"
       :status-label="pageStatus.label"
     >
       <template #actions>
+        <RouterLink
+          v-if="!selectedProjectId"
+          class="rr-button rr-button--secondary"
+          to="/processing"
+        >
+          {{ t('flow.processing.title') }}
+        </RouterLink>
         <button
           type="button"
           class="rr-button rr-button--secondary"
-          :disabled="queueLoading"
+          :disabled="queueLoading || !selectedProjectId"
           @click="refreshProcessingState(true)"
         >
           {{ t('flow.library.processing.refresh') }}
@@ -1231,6 +1266,15 @@ onUnmounted(() => {
                     ? t('flow.library.upload.actionBusy')
                     : t('flow.library.upload.action')
                 }}
+              </button>
+              <button
+                v-if="uploadFile"
+                type="button"
+                class="rr-button rr-button--secondary"
+                :disabled="submitMode === 'upload'"
+                @click="clearSelectedUpload"
+              >
+                {{ t('flow.common.reset') }}
               </button>
             </div>
           </article>

@@ -3,6 +3,7 @@ export default {
     selected: 'Selected',
     empty: 'None yet',
     open: 'Open',
+    reset: 'Reset',
   },
   overview: {
     eyebrow: 'Processing',
@@ -179,6 +180,7 @@ export default {
       autoSourceLabel: 'Manual paste',
       action: 'Add text',
       actionBusy: 'Adding...',
+      clear: 'Clear',
     },
     upload: {
       kicker: 'Upload',
@@ -214,6 +216,7 @@ export default {
       },
       action: 'Upload file',
       actionBusy: 'Uploading...',
+      clear: 'Remove file',
     },
     processing: {
       kicker: 'Processing',
@@ -237,6 +240,10 @@ export default {
       currentSubmitted: 'Started',
       updating: 'Updating...',
       notStarted: 'Not started',
+      summaryActive: '{count} active',
+      summaryRetryable: '{count} retryable',
+      summaryFailed: '{count} failed',
+      summaryCompleted: '{count} completed',
       triggers: {
         textIngest: 'Manual paste',
         uploadIngest: 'File upload',

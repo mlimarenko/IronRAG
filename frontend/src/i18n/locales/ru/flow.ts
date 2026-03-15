@@ -3,6 +3,7 @@ export default {
     selected: 'Выбрано',
     empty: 'Пока нет',
     open: 'Открыть',
+    reset: 'Сбросить',
   },
   overview: {
     eyebrow: 'Подготовка',
@@ -176,6 +177,7 @@ export default {
       autoSourceLabel: 'Ручная вставка',
       action: 'Добавить текст',
       actionBusy: 'Добавление...',
+      clear: 'Очистить',
     },
     upload: {
       kicker: 'Загрузка',
@@ -211,6 +213,7 @@ export default {
       },
       action: 'Загрузить файл',
       actionBusy: 'Загрузка...',
+      clear: 'Убрать файл',
     },
     processing: {
       kicker: 'Обработка',
@@ -234,6 +237,10 @@ export default {
       currentSubmitted: 'Старт',
       updating: 'Обновляется...',
       notStarted: 'Не начато',
+      summaryActive: 'Активных: {count}',
+      summaryRetryable: 'Можно повторить: {count}',
+      summaryFailed: 'С ошибкой: {count}',
+      summaryCompleted: 'Завершено: {count}',
       triggers: {
         textIngest: 'Ручная вставка',
         uploadIngest: 'Загрузка файла',
