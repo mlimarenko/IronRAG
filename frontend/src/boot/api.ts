@@ -185,6 +185,10 @@ export interface ProjectReadinessSummary {
   documents: number
   ready_for_query: boolean
   indexing_state: string
+  latest_ingestion_status?: string | null
+  active_ingestion_jobs?: number
+  completed_ingestion_jobs?: number
+  failed_ingestion_jobs?: number
 }
 
 export interface DocumentSummary {

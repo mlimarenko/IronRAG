@@ -12,6 +12,7 @@ import {
 import PageSection from 'src/components/shell/PageSection.vue'
 import { getSelectedProjectId, getSelectedWorkspaceId } from 'src/stores/flow'
 import { formatLocaleDateTime } from 'src/lib/formatting'
+import { formatProjectReadiness } from 'src/lib/projectReadiness'
 import { hydrateWorkspaceProjectScope } from 'src/lib/productFlow'
 
 interface WorkspaceItem {
@@ -41,7 +42,7 @@ const selectedProject = computed(
   () => projects.value.find((item) => item.id === getSelectedProjectId()) ?? null,
 )
 const indexedDocuments = computed(() => readiness.value?.documents ?? 0)
-const hasReadyLibrary = computed(() => Boolean(readiness.value?.ready_for_query))
+const readinessPresentation = computed(() => formatProjectReadiness(readiness.value, t))
 const latestSession = computed(() => recentSessions.value.at(0))
 
 const primaryUploadAction = computed(() => ({
@@ -170,16 +171,8 @@ onMounted(async () => {
         </article>
         <article class="rr-stat">
           <p class="rr-stat__label">{{ t('flow.home.stats.readiness') }}</p>
-          <strong>{{
-            hasReadyLibrary ? t('flow.home.stats.ready') : t('flow.home.stats.notReady')
-          }}</strong>
-          <p>
-            {{
-              hasReadyLibrary
-                ? t('flow.home.stats.readinessHintReady')
-                : t('flow.home.stats.readinessHintWaiting')
-            }}
-          </p>
+          <strong>{{ readinessPresentation.askLabel }}</strong>
+          <p>{{ readinessPresentation.askHint }}</p>
         </article>
         <article class="rr-stat">
           <p class="rr-stat__label">{{ t('flow.home.stats.scope') }}</p>

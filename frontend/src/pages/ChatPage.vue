@@ -22,6 +22,7 @@ import StatusPill from 'src/components/chat/StatusPill.vue'
 import PageSection from 'src/components/shell/PageSection.vue'
 import EmptyStateCard from 'src/components/state/EmptyStateCard.vue'
 import { formatLocaleDateTime } from 'src/lib/formatting'
+import { formatProjectReadiness } from 'src/lib/projectReadiness'
 import { hydrateWorkspaceProjectScope } from 'src/lib/productFlow'
 import { getSelectedProjectId, setSelectedProjectId } from 'src/stores/flow'
 import { ensureProjectMatchesWorkspace } from 'src/lib/flowSelection'
@@ -69,14 +70,15 @@ const selectedProjectId = computed(() => getSelectedProjectId())
 const selectedProject = computed(
   () => projects.value.find((item) => item.id === getSelectedProjectId()) ?? null,
 )
-const hasIndexedDocuments = computed(() => (readiness.value?.documents ?? 0) > 0)
+const readinessPresentation = computed(() => formatProjectReadiness(readiness.value, t))
+const hasIndexedDocuments = computed(() => readinessPresentation.value.hasAnyDocuments)
 const hasIngestionRuns = computed(() => (readiness.value?.ingestion_jobs ?? 0) > 0)
 const canSubmit = computed(() =>
   Boolean(
     selectedProjectId.value &&
     queryText.value.trim() &&
     !loading.value &&
-    readiness.value?.ready_for_query,
+    readinessPresentation.value.queryable,
   ),
 )
 const activeSession = computed(
@@ -91,6 +93,19 @@ const shouldShowSessionList = computed(
   () => shouldShowDesktopSidebar.value || showMobileSessions.value,
 )
 const shouldShowTechnicalDetails = computed(() => Boolean(result.value && detail.value))
+const shouldShowQuestionExamples = computed(() =>
+  Boolean(
+    selectedProject.value &&
+    readiness.value?.ready_for_query &&
+    !queryText.value.trim() &&
+    !loading.value,
+  ),
+)
+const questionExamples = computed(() => [
+  t('flow.search.query.examples.summary'),
+  t('flow.search.query.examples.risks'),
+  t('flow.search.query.examples.next'),
+])
 const mobileSessionToggleLabel = computed(() => {
   if (showMobileSessions.value) {
     return t('flow.search.sessions.hideAction')
@@ -118,8 +133,13 @@ const pageStatus = computed(() => {
     return { status: 'draft', label: t('flow.search.statusDraft') }
   }
 
-  if (readiness.value?.ready_for_query) {
-    return { status: 'draft', label: t('flow.search.statusDraft') }
+  if (readinessPresentation.value.queryable) {
+    return {
+      status: readinessPresentation.value.hasFailures ? 'partial' : 'draft',
+      label: readinessPresentation.value.hasFailures
+        ? t('flow.search.statusReadyWithWarnings')
+        : t('flow.search.statusDraft'),
+    }
   }
 
   if (hasIndexedDocuments.value || hasIngestionRuns.value) {
@@ -137,8 +157,8 @@ const queryHint = computed(() => {
     return t('flow.search.query.hintResume')
   }
 
-  if (readiness.value?.ready_for_query) {
-    return t('flow.search.query.hintReady')
+  if (readinessPresentation.value.queryable) {
+    return readinessPresentation.value.askHint
   }
 
   if (hasIndexedDocuments.value || hasIngestionRuns.value) {
@@ -156,7 +176,7 @@ const composerStatus = computed(() => {
     return t('flow.search.query.statusBusy')
   }
 
-  if (!readiness.value?.ready_for_query) {
+  if (!readinessPresentation.value.queryable) {
     return hasIndexedDocuments.value || hasIngestionRuns.value
       ? t('flow.search.query.statusIndexing')
       : t('flow.search.query.statusNoContent')
@@ -206,7 +226,11 @@ const resultNotice = computed<{ tone: BannerTone; message: string } | null>(() =
 })
 const readinessNotice = computed<{ tone: BannerTone; title: string; message: string } | null>(
   () => {
-    if (!selectedProject.value || readiness.value?.ready_for_query) {
+    if (!selectedProject.value) {
+      return null
+    }
+
+    if (readinessPresentation.value.queryable && !readinessPresentation.value.freshnessHint) {
       return null
     }
 
@@ -215,6 +239,14 @@ const readinessNotice = computed<{ tone: BannerTone; title: string; message: str
         tone: 'info',
         title: t('flow.search.readiness.emptyState.title'),
         message: t('flow.search.readiness.emptyState.body'),
+      }
+    }
+
+    if (readinessPresentation.value.queryable) {
+      return {
+        tone: 'warning',
+        title: t('flow.search.readiness.warningState.title'),
+        message: readinessPresentation.value.freshnessHint ?? readinessPresentation.value.askHint,
       }
     }
 
@@ -424,6 +456,14 @@ async function loadMessages(sessionId: string) {
   }
 }
 
+function applyQuestionExample(example: string) {
+  queryText.value = example
+  void nextTick(() => {
+    queryInputRef.value?.focus()
+    queryInputRef.value?.setSelectionRange(example.length, example.length)
+  })
+}
+
 function handleTextareaKeydown(event: KeyboardEvent) {
   if (event.key !== 'Enter' || event.shiftKey || !(event.metaKey || event.ctrlKey)) {
     return
@@ -495,7 +535,7 @@ async function submitQuery() {
       throw new Error(t('flow.search.query.hintBlocked'))
     }
 
-    if (!readiness.value?.ready_for_query) {
+    if (!readinessPresentation.value.queryable) {
       throw new Error(
         hasIndexedDocuments.value || hasIngestionRuns.value
           ? t('flow.search.query.hintIndexing')
@@ -590,16 +630,18 @@ async function submitQuery() {
                   :data-active="session.id === activeSessionId"
                   @click="reopenSession(session.id)"
                 >
-                  <strong>{{
-                    session.title ||
-                    t('flow.search.sessions.fallbackTitle', { id: session.id.slice(0, 8) })
-                  }}</strong>
-                  <span>{{
-                    session.last_message_preview || t('flow.search.sessions.emptyPreview')
-                  }}</span>
-                  <small>{{
-                    t('flow.search.sessions.count', { count: session.message_count })
-                  }}</small>
+                  <strong>
+                    {{
+                      session.title ||
+                      t('flow.search.sessions.fallbackTitle', { id: session.id.slice(0, 8) })
+                    }}
+                  </strong>
+                  <span>
+                    {{ session.last_message_preview || t('flow.search.sessions.emptyPreview') }}
+                  </span>
+                  <small>
+                    {{ t('flow.search.sessions.count', { count: session.message_count }) }}
+                  </small>
                 </button>
               </div>
             </details>
@@ -716,7 +758,7 @@ async function submitQuery() {
             </EmptyStateCard>
 
             <EmptyStateCard
-              v-else-if="!readiness?.ready_for_query"
+              v-else-if="!readinessPresentation.queryable"
               :title="
                 hasIndexedDocuments || hasIngestionRuns
                   ? t('flow.search.empty.partial.title')
@@ -781,6 +823,23 @@ async function submitQuery() {
                 @keydown="handleTextareaKeydown"
               />
             </label>
+
+            <div v-if="shouldShowQuestionExamples" class="ask-panel__examples">
+              <p class="rr-note ask-panel__examples-label">
+                {{ t('flow.search.query.examplesLabel') }}
+              </p>
+              <div class="ask-panel__examples-list">
+                <button
+                  v-for="example in questionExamples"
+                  :key="example"
+                  type="button"
+                  class="rr-button rr-button--ghost ask-panel__example"
+                  @click="applyQuestionExample(example)"
+                >
+                  {{ example }}
+                </button>
+              </div>
+            </div>
 
             <div class="rr-action-row ask-panel__actions">
               <button
@@ -929,6 +988,26 @@ async function submitQuery() {
 .timeline-item p {
   white-space: pre-wrap;
   margin: 0;
+}
+
+.ask-panel__examples {
+  display: grid;
+  gap: var(--rr-space-3);
+}
+
+.ask-panel__examples-label {
+  margin: 0;
+}
+
+.ask-panel__examples-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rr-space-3);
+}
+
+.ask-panel__example {
+  justify-content: flex-start;
+  text-align: left;
 }
 
 .ask-panel__actions {

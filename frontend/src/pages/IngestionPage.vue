@@ -34,6 +34,7 @@ import {
   jobDetailFromSummary,
 } from 'src/pages/support/ingestion-status'
 import { buildFileInventory, matchesInventoryFilter } from 'src/pages/support/file-library'
+import { formatProjectReadiness } from 'src/lib/projectReadiness'
 import { getSelectedProjectId, getSelectedWorkspaceId } from 'src/stores/flow'
 import { formatShortDateTime } from 'src/lib/formatting'
 import { hydrateWorkspaceProjectScope, useRouteSyncedSelection } from 'src/lib/productFlow'
@@ -174,6 +175,7 @@ const selectedWorkspace = computed(
 )
 const sourceLabelById = computed(() => new Map(sources.value.map((item) => [item.id, item.label])))
 
+const readinessPresentation = computed(() => formatProjectReadiness(readiness.value, t))
 const activeJobsCount = computed(
   () => recentJobs.value.filter((job) => isActiveJobStatus(job.status)).length,
 )
@@ -392,18 +394,22 @@ const nextActionHint = computed(() => {
     return t('flow.library.nextActions.chooseLibraryHint')
   }
 
+  if (readinessPresentation.value.queryable) {
+    return readinessPresentation.value.askHint
+  }
+
   if (activeJobsCount.value > 0) {
     return t('flow.library.nextActions.waitForReadyHint')
   }
 
   if (documents.value.length > 0) {
-    return t('flow.library.nextActions.openAskHint')
+    return readinessPresentation.value.libraryHint
   }
 
   return t('flow.library.nextActions.uploadFirstHint')
 })
 const canGoToAsk = computed(() =>
-  Boolean(selectedProjectId.value && documents.value.length > 0 && activeJobsCount.value === 0),
+  Boolean(selectedProjectId.value && readinessPresentation.value.queryable),
 )
 
 function setFeedbackState(state: FeedbackState | null) {
@@ -1145,13 +1151,25 @@ onUnmounted(() => {
                 <h3>{{ t('flow.library.processing.readinessTitle') }}</h3>
               </div>
               <StatusBadge
-                :status="activeJobsCount > 0 ? 'partial' : documents.length ? 'ready' : 'draft'"
+                :status="
+                  readinessPresentation.queryable
+                    ? readinessPresentation.hasFailures
+                      ? 'partial'
+                      : 'ready'
+                    : activeJobsCount > 0
+                      ? 'partial'
+                      : documents.length
+                        ? 'partial'
+                        : 'draft'
+                "
                 :label="
-                  activeJobsCount > 0
-                    ? t('flow.library.processing.queueActive', { count: activeJobsCount })
-                    : documents.length
-                      ? t('flow.library.documentsCount', { count: documents.length })
-                      : t('flow.library.processing.queueIdle')
+                  readinessPresentation.queryable
+                    ? readinessPresentation.askLabel
+                    : activeJobsCount > 0
+                      ? t('flow.library.processing.queueActive', { count: activeJobsCount })
+                      : documents.length
+                        ? readinessPresentation.stateLabel
+                        : t('flow.library.processing.queueIdle')
                 "
                 emphasis="strong"
               />
@@ -1159,12 +1177,17 @@ onUnmounted(() => {
 
             <p class="rr-note">
               {{
-                activeJobsCount > 0
-                  ? t('flow.library.processing.readinessProcessing')
-                  : documents.length
-                    ? t('flow.library.processing.readinessReady')
-                    : t('flow.library.processing.readinessEmpty')
+                readinessPresentation.queryable
+                  ? readinessPresentation.libraryHint
+                  : activeJobsCount > 0
+                    ? t('flow.library.processing.readinessProcessing')
+                    : documents.length
+                      ? readinessPresentation.libraryHint
+                      : t('flow.library.processing.readinessEmpty')
               }}
+            </p>
+            <p v-if="readinessPresentation.freshnessHint" class="rr-banner" data-tone="warning">
+              {{ readinessPresentation.freshnessHint }}
             </p>
 
             <div class="processing-human">

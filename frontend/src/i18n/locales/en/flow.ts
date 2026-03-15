@@ -126,6 +126,56 @@ export default {
       },
     },
   },
+  readiness: {
+    states: {
+      ready: 'Ready',
+      partial: 'Updating',
+      indexedWithWarnings: 'Ready with warnings',
+      stale: 'Needs review',
+      empty: 'No searchable files yet',
+      unknown: 'Unknown',
+    },
+    ask: {
+      available: 'Ask is available',
+      almost: 'Ask is almost ready',
+      availableSoon: 'Searchable content exists',
+      unavailable: 'Ask is not ready yet',
+    },
+    askHints: {
+      chooseLibrary: 'Choose a library in Setup first.',
+      available: 'This library is searchable, so you can ask questions now.',
+      availableWithWarnings: 'Ask still works because searchable files are already indexed.',
+      availableLatestFailed:
+        'Ask still works because searchable files are already indexed, even though the latest processing run failed.',
+      partial: 'Some files are still processing. You can ask once enough indexed content is ready.',
+      documentsPresent:
+        'Searchable files already exist, but the latest processing state still needs a quick review.',
+      empty: 'Add files first so this library has something honest to answer from.',
+    },
+    libraryHints: {
+      unknown: 'Select a library to load its readiness state.',
+      ready: 'Files in this library are indexed and ready for Ask.',
+      indexedWithWarnings:
+        'This library is still searchable, but one or more recent processing runs need attention.',
+      partial: 'Some files are indexed already, while newer processing is still catching up.',
+      stale:
+        'Indexed files may still be searchable, but the latest processing result needs review.',
+      documentsPresent:
+        'Searchable files exist, but RustRAG still has a newer processing state to review.',
+      empty: 'Upload the first file to make this library searchable.',
+    },
+    freshness: {
+      processing: 'RustRAG is still preparing newer files for this library.',
+      hadFailures:
+        'A recent processing run needs attention, but Ask can still use the files already indexed.',
+      latestFailed:
+        'The latest processing run failed, but Ask can still use the files that finished indexing earlier.',
+      stale:
+        'The latest processing result did not finish cleanly. Review it if answers look incomplete.',
+      documentsPresent:
+        'Searchable files exist, but the newest processing state has not fully settled yet.',
+    },
+  },
   processing: {
     eyebrow: 'Setup',
     title: 'Setup',
@@ -692,6 +742,7 @@ export default {
     statusWeak: 'Needs review',
     statusReady: 'Answered',
     statusIndexing: 'Indexing in progress',
+    statusReadyWithWarnings: 'Ready with warnings',
     statusNeedsContent: 'Needs source content',
     error: 'Ask failed',
     authRequired:
@@ -771,6 +822,9 @@ export default {
       partialState: {
         title: 'Ask is waiting for indexing to finish',
         body: 'RustRAG is still preparing this library. Current state: {state}. Indexed files: {documents}. Ingestion runs: {jobs}.',
+      },
+      warningState: {
+        title: 'Ask is available, but recent processing needs review',
       },
     },
     capabilities: {

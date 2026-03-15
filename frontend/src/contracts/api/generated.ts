@@ -1086,6 +1086,10 @@ export interface components {
       ready_for_query: boolean
       /** @example indexed */
       indexing_state: string
+      latest_ingestion_status?: string | null
+      active_ingestion_jobs?: number
+      completed_ingestion_jobs?: number
+      failed_ingestion_jobs?: number
     }
     ProviderAccountSummary: {
       /** Format: uuid */
