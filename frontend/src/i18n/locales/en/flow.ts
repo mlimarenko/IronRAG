@@ -503,8 +503,7 @@ export default {
       titleLabel: 'Title',
       titlePlaceholder: 'Optional override for the file name',
       titleHint: 'Leave blank to keep the original filename as the document title.',
-      helper:
-        'Drop one file into the current library. RustRAG checks support before upload so this page stays clear about what works now, what is still getting ready, and what needs attention.',
+      helper: 'Drop one file into the current library. Text-like files work today.',
       autoSourceLabel: 'File upload',
       browse: 'Browse files',
       dropzoneIdleBadge: 'Single file',
@@ -742,9 +741,9 @@ export default {
     eyebrow: 'Ask',
     title: 'Ask',
     description:
-      'Ask the active library and keep the answer, conversation, and helpful context together.',
+      'Ask the active library and keep the answer front and center. Open extra context only when it helps.',
     descriptionMobile:
-      'Stay in one conversation, reopen the latest session, and keep asking from the same library.',
+      'Ask, read the answer, and reopen recent conversations without leaving the same library.',
     action: 'Open documents',
     statusBlocked: 'Choose a library first',
     statusDraft: 'Ready',
@@ -866,7 +865,7 @@ export default {
       kicker: 'Recent conversations',
       title: 'Recent conversations',
       titleFallback: 'Ask',
-      description: 'Reopen a recent conversation for this library whenever it helps.',
+      description: 'Reopen a recent conversation for this library without leaving Ask.',
       mobileKicker: 'Recent conversation',
       mobileDescription: 'Pick a recent conversation and drop back into the same Ask flow.',
       mobileHint: '{count} recent conversations saved for this library.',
@@ -915,6 +914,7 @@ export default {
       title: 'Answer details',
       run: 'Run {id}',
       action: 'Show technical details',
+      description: 'Open only when an answer needs closer technical inspection.',
       warning: 'The run returned an additional warning',
       summary: {
         topK: 'Passages requested',

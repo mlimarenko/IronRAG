@@ -123,6 +123,7 @@ const selectedGraphItem = ref<GraphSelection | null>(null)
 const showGraphContext = ref(false)
 const showTechnicalGraphDetail = ref(false)
 const showGraphReadinessDetails = ref(false)
+const showTechnicalAnswerDetails = ref(false)
 
 let graphSearchTimer: number | undefined
 let graphSurfaceRequestId = 0
@@ -159,7 +160,7 @@ const shouldShowTechnicalDetails = computed(() => Boolean(result.value && detail
 const shouldShowQuestionExamples = computed(() =>
   Boolean(
     selectedProject.value &&
-    readiness.value?.ready_for_query &&
+    readinessPresentation.value.queryable &&
     !queryText.value.trim() &&
     !loading.value,
   ),
@@ -1189,10 +1190,17 @@ function formatRelationLine(relation: GraphRelationDetail): string {
               />
             </article>
 
-            <RetrievalDiagnosticsPanel
+            <details
               v-if="shouldShowTechnicalDetails && detail"
-              :detail="detail"
-            />
+              class="technical-details answer-technical-details"
+              :open="showTechnicalAnswerDetails"
+            >
+              <summary @click.prevent="showTechnicalAnswerDetails = !showTechnicalAnswerDetails">
+                <span>{{ t('flow.search.diagnostics.action') }}</span>
+                <small>{{ t('flow.search.diagnostics.description') }}</small>
+              </summary>
+              <RetrievalDiagnosticsPanel :detail="detail" />
+            </details>
 
             <EmptyStateCard
               v-else-if="!selectedProject"
@@ -1307,7 +1315,11 @@ function formatRelationLine(relation: GraphRelationDetail): string {
             </div>
           </article>
 
-          <details class="rr-panel rr-panel--muted graph-context-panel" :open="showGraphContext">
+          <details
+            v-if="selectedProject && readinessPresentation.queryable"
+            class="rr-panel rr-panel--muted graph-context-panel"
+            :open="showGraphContext"
+          >
             <summary
               class="graph-context-panel__summary"
               @click.prevent="showGraphContext = !showGraphContext"
@@ -1714,6 +1726,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
 </template>
 
 <style scoped>
+.answer-technical-details :deep(.retrieval-diagnostics) {
+  margin-top: var(--rr-space-4);
+}
+
 .chat-page {
   gap: var(--rr-space-6);
 }
