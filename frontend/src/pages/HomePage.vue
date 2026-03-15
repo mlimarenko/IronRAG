@@ -11,6 +11,7 @@ import {
 } from 'src/boot/api'
 import PageSection from 'src/components/shell/PageSection.vue'
 import { getSelectedProjectId, getSelectedWorkspaceId } from 'src/stores/flow'
+import { formatLocaleDateTime } from 'src/lib/formatting'
 import { hydrateWorkspaceProjectScope } from 'src/lib/productFlow'
 
 interface WorkspaceItem {
@@ -71,10 +72,9 @@ const recentSessionRoute = computed(() => {
   return session ? `/search?session=${encodeURIComponent(session.id)}` : '/search'
 })
 
-const recentSessionUpdatedLabel = computed(() => {
-  const session = latestSession.value
-  return session ? formatDateTime(session.updated_at) : ''
-})
+const recentSessionUpdatedLabel = computed(
+  () => formatLocaleDateTime(latestSession.value?.updated_at) ?? '',
+)
 
 onMounted(async () => {
   const scope = await hydrateWorkspaceProjectScope({
@@ -104,16 +104,6 @@ onMounted(async () => {
     recentSessions.value = []
   }
 })
-
-function formatDateTime(value: string) {
-  const date = new Date(value)
-
-  if (Number.isNaN(date.getTime())) {
-    return value
-  }
-
-  return date.toLocaleString()
-}
 </script>
 
 <template>
@@ -125,16 +115,10 @@ function formatDateTime(value: string) {
       :status-label="t('shell.status.focused')"
     >
       <template #actions>
-        <RouterLink
-          class="rr-button"
-          :to="primaryUploadAction.to"
-        >
+        <RouterLink class="rr-button" :to="primaryUploadAction.to">
           {{ primaryUploadAction.label }}
         </RouterLink>
-        <RouterLink
-          class="rr-button rr-button--secondary"
-          to="/search"
-        >
+        <RouterLink class="rr-button rr-button--secondary" to="/search">
           {{ t('flow.home.hero.actions.ask') }}
         </RouterLink>
       </template>
@@ -147,10 +131,7 @@ function formatDateTime(value: string) {
         </div>
 
         <div class="upload-hero__main-action">
-          <RouterLink
-            class="rr-button"
-            :to="primaryUploadAction.to"
-          >
+          <RouterLink class="rr-button" :to="primaryUploadAction.to">
             {{ primaryUploadAction.label }}
           </RouterLink>
           <p class="rr-note">{{ primaryUploadAction.hint }}</p>
@@ -222,10 +203,7 @@ function formatDateTime(value: string) {
           <article class="session-card">
             <h4>{{ latestSession?.title || t('flow.home.sessions.fallbackTitle') }}</h4>
             <p>{{ latestSession?.last_message_preview || t('flow.home.sessions.emptyBody') }}</p>
-            <dl
-              v-if="latestSession"
-              class="session-meta"
-            >
+            <dl v-if="latestSession" class="session-meta">
               <div>
                 <dt>{{ t('flow.home.sessions.fields.updated') }}</dt>
                 <dd>{{ recentSessionUpdatedLabel }}</dd>
@@ -236,16 +214,10 @@ function formatDateTime(value: string) {
               </div>
             </dl>
             <div class="rr-action-row">
-              <RouterLink
-                class="rr-button rr-button--secondary"
-                :to="recentSessionRoute"
-              >
+              <RouterLink class="rr-button rr-button--secondary" :to="recentSessionRoute">
                 {{ latestSession ? t('flow.home.sessions.resume') : t('flow.home.sessions.start') }}
               </RouterLink>
-              <RouterLink
-                class="rr-button rr-button--ghost"
-                to="/search"
-              >
+              <RouterLink class="rr-button rr-button--ghost" to="/search">
                 {{ t('flow.home.sessions.openAsk') }}
               </RouterLink>
             </div>

@@ -39,6 +39,7 @@ import {
   type FileInventoryFilter,
 } from 'src/pages/support/file-library'
 import { getSelectedProjectId, getSelectedWorkspaceId } from 'src/stores/flow'
+import { formatShortDateTime } from 'src/lib/formatting'
 import {
   hydrateWorkspaceProjectScope,
   useRouteSyncedSelection,
@@ -242,8 +243,8 @@ const jobViewModels = computed<JobViewModel[]>(() =>
     shortId: shortJobId(job.id),
     presentation: describeIngestionJob(job, t),
     error: job.error_message ? describeIngestionError(job.error_message, t) : null,
-    startedLabel: formatDateTime(job.started_at),
-    updatedLabel: formatDateTime(job.finished_at ?? job.started_at),
+    startedLabel: formatShortDateTime(job.started_at),
+    updatedLabel: formatShortDateTime(job.finished_at ?? job.started_at),
     durationLabel: formatDuration(job.started_at, job.finished_at),
   })),
 )
@@ -273,13 +274,62 @@ const processingStatHint = computed(() => {
 
   return t('flow.library.stats.processingHint')
 })
-const inventoryFilterOptions = computed(() => [
-  { value: 'all' as const, label: t('flow.library.inventory.filters.all') },
-  { value: 'recent' as const, label: t('flow.library.inventory.filters.recent') },
-  { value: 'attention' as const, label: t('flow.library.inventory.filters.attention') },
-  { value: 'manual' as const, label: t('flow.library.inventory.filters.manual') },
-  { value: 'upload' as const, label: t('flow.library.inventory.filters.upload') },
-])
+const filesReadyCount = computed(() =>
+  fileInventory.value.filter((record) => record.statusTone === 'positive').length,
+)
+const filesAttentionCount = computed(() =>
+  fileInventory.value.filter((record) => record.attention).length,
+)
+const filesProcessingCount = computed(() =>
+  fileInventory.value.filter((record) => record.statusTone === 'info').length,
+)
+const recentFileRecords = computed(() => filteredFileInventory.value.slice(0, MAX_VISIBLE_QUEUE_ITEMS))
+const nextActionRoute = computed(() => {
+  if (!selectedProjectId.value) {
+    return '/setup'
+  }
+
+  if (activeJobsCount.value > 0) {
+    return '/search'
+  }
+
+  if (documents.value.length > 0) {
+    return '/search'
+  }
+
+  return '/setup'
+})
+const nextActionLabel = computed(() => {
+  if (!selectedProjectId.value) {
+    return t('flow.library.nextActions.chooseLibrary')
+  }
+
+  if (activeJobsCount.value > 0) {
+    return t('flow.library.nextActions.waitForReady')
+  }
+
+  if (documents.value.length > 0) {
+    return t('flow.library.action')
+  }
+
+  return t('flow.library.nextActions.uploadFirst')
+})
+const nextActionHint = computed(() => {
+  if (!selectedProjectId.value) {
+    return t('flow.library.nextActions.chooseLibraryHint')
+  }
+
+  if (activeJobsCount.value > 0) {
+    return t('flow.library.nextActions.waitForReadyHint')
+  }
+
+  if (documents.value.length > 0) {
+    return t('flow.library.nextActions.openAskHint')
+  }
+
+  return t('flow.library.nextActions.uploadFirstHint')
+})
+const canGoToAsk = computed(() => Boolean(selectedProjectId.value && documents.value.length > 0 && activeJobsCount.value === 0))
 const fileInventory = computed(() =>
   buildFileInventory(documents.value, sources.value, recentJobs.value, {
     unknownSourceLabel: t('flow.library.inventory.unknownSource'),
@@ -333,17 +383,6 @@ const selectedInventoryRecord = computed(() => {
 
   return filteredFileInventory.value[0] || fileInventory.value[0] || null
 })
-const selectedDocument = computed(() => {
-  const selectedId = selectedInventoryRecord.value?.id
-  return selectedId ? documents.value.find((item) => item.id === selectedId) ?? null : null
-})
-const selectedDocumentRelatedJob = computed(() => {
-  const sourceId = selectedDocument.value?.source_id
-  return sourceId ? recentJobs.value.find((job) => job.source_id === sourceId) ?? null : null
-})
-const selectedDocumentProcessingPresentation = computed(() =>
-  selectedDocumentRelatedJob.value ? describeIngestionJob(selectedDocumentRelatedJob.value, t) : null,
-)
 const inventorySummary = computed(() => {
   const total = filteredFileInventory.value.length
   if (total === 0) {
@@ -474,24 +513,6 @@ function formatFileSize(bytes: number): string {
 
   const precision = unitIndex === 0 ? 0 : 1
   return `${value.toFixed(precision)} ${units[unitIndex] ?? 'B'}`
-}
-
-function formatDateTime(value?: string | null): string | null {
-  if (!value) {
-    return null
-  }
-
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) {
-    return null
-  }
-
-  return new Intl.DateTimeFormat(undefined, {
-    day: 'numeric',
-    month: 'short',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(date)
 }
 
 function formatDuration(startedAt?: string | null, finishedAt?: string | null): string | null {
@@ -1177,348 +1198,109 @@ onUnmounted(() => {
             <div class="ingestion-panel__heading">
               <div class="rr-stack rr-stack--tight">
                 <p class="rr-kicker">{{ t('flow.library.processing.kicker') }}</p>
-                <h3>
-                  {{ activeJobsCount > 0 ? t('flow.library.processing.activeTitle') : highlightedJobView ? t('flow.library.processing.latestTitle') : t('flow.library.processing.emptyTitle') }}
-                </h3>
+                <h3>{{ t('flow.library.processing.readinessTitle') }}</h3>
               </div>
               <StatusBadge
-                v-if="highlightedJobView"
-                :tone="highlightedJobView.presentation.tone"
-                :label="highlightedJobView.presentation.statusLabel"
+                :status="activeJobsCount > 0 ? 'partial' : documents.length ? 'ready' : 'draft'"
+                :label="activeJobsCount > 0 ? t('flow.library.processing.queueActive', { count: activeJobsCount }) : documents.length ? t('flow.library.documentsCount', { count: documents.length }) : t('flow.library.processing.queueIdle')"
                 emphasis="strong"
               />
-              <StatusBadge v-else tone="info" :label="t('flow.library.processing.queueIdle')" emphasis="strong" />
             </div>
 
             <p class="rr-note">
-              {{ highlightedJobView ? highlightedJobView.presentation.summary : t('flow.library.processing.emptyBody') }}
+              {{ activeJobsCount > 0 ? t('flow.library.processing.readinessProcessing') : documents.length ? t('flow.library.processing.readinessReady') : t('flow.library.processing.readinessEmpty') }}
             </p>
 
-            <div v-if="highlightedJobView" class="processing-human">
+            <div class="processing-human">
               <article class="processing-human__card">
-                <span>{{ t('flow.library.processing.currentSource') }}</span>
-                <strong>{{ highlightedJobView.sourceLabel }}</strong>
-              </article>
-              <article class="processing-human__card">
-                <span>{{ t('flow.library.processing.currentTrigger') }}</span>
-                <strong>{{ highlightedJobView.triggerLabel }}</strong>
+                <span>{{ t('flow.library.stats.documents') }}</span>
+                <strong>{{ filesReadyCount }}</strong>
+                <small>{{ t('flow.library.processing.filesReadyHint') }}</small>
               </article>
               <article class="processing-human__card">
-                <span>{{ t('flow.library.processing.currentUpdated') }}</span>
-                <strong>{{ highlightedJobView.updatedLabel ?? t('flow.library.processing.updating') }}</strong>
+                <span>{{ t('flow.library.processing.filesProcessing') }}</span>
+                <strong>{{ filesProcessingCount }}</strong>
+                <small>{{ processingStatHint }}</small>
               </article>
               <article class="processing-human__card">
-                <span>{{ t('flow.library.processing.currentDuration') }}</span>
-                <strong>{{ highlightedJobView.durationLabel ?? t('flow.library.processing.notStarted') }}</strong>
+                <span>{{ t('flow.library.processing.filesAttention') }}</span>
+                <strong>{{ filesAttentionCount }}</strong>
+                <small>{{ t('flow.library.processing.filesAttentionHint') }}</small>
               </article>
             </div>
 
-            <div v-if="highlightedJobSteps.length" class="processing-steps processing-steps--compact">
-              <article
-                v-for="step in highlightedJobSteps"
-                :key="step.key"
-                class="processing-step"
-                :data-state="step.state"
-              >
-                <div class="processing-step__dot" />
-                <div class="processing-step__copy">
-                  <strong>{{ step.label }}</strong>
-                  <p>{{ step.description }}</p>
-                </div>
-              </article>
-            </div>
-
-            <article v-if="highlightedJobView?.error" class="processing-error">
-              <strong>{{ highlightedJobView.error.title }}</strong>
-              <p>{{ highlightedJobView.error.body }}</p>
-              <p v-if="highlightedJobView.error.detail" class="processing-error__detail">{{ highlightedJobView.error.detail }}</p>
-            </article>
-
-            <div v-if="highlightedJobView" class="rr-action-row">
-              <button type="button" class="rr-button rr-button--secondary" :disabled="queueLoading" @click="refreshProcessingState(true)">
-                {{ t('flow.library.processing.refresh') }}
-              </button>
-              <button
-                v-if="highlightedJobView.job.retryable"
-                type="button"
-                class="rr-button"
-                :disabled="retryingJobId === highlightedJobView.job.id"
-                @click="retryJob(highlightedJobView.job.id)"
-              >
-                {{ retryingJobId === highlightedJobView.job.id ? t('flow.library.processing.retryBusy') : t('flow.library.processing.retryAction') }}
-              </button>
-              <RouterLink class="rr-button" to="/search" :aria-disabled="activeJobsCount > 0 || !documents.length">
-                {{ t('flow.library.action') }}
-              </RouterLink>
-            </div>
-          </article>
-        </div>
-
-        <article class="rr-panel rr-stack file-library-panel" v-if="documents.length || recentJobs.length">
-          <div class="ingestion-panel__heading">
-            <div class="rr-stack rr-stack--tight">
-              <p class="rr-kicker">{{ t('flow.library.inventory.kicker') }}</p>
-              <h3>{{ t('flow.library.inventory.title') }}</h3>
-            </div>
-            <StatusBadge
-              :status="documents.length ? 'ready' : activeJobsCount > 0 ? 'partial' : 'draft'"
-              :label="documents.length ? inventorySummary : t('flow.library.inventory.emptyBadge')"
-            />
-          </div>
-
-          <p class="rr-note">{{ t('flow.library.inventory.helper') }}</p>
-
-          <div v-if="documents.length" class="file-library-toolbar">
-            <label class="rr-field file-library-toolbar__search">
-              <span class="rr-field__label">{{ t('flow.library.inventory.searchLabel') }}</span>
-              <input v-model="librarySearch" class="rr-control" type="search" :placeholder="t('flow.library.inventory.searchPlaceholder')">
-            </label>
-
-            <div class="file-library-toolbar__filters">
-              <button
-                v-for="option in inventoryFilterOptions"
-                :key="option.value"
-                type="button"
-                class="rr-button rr-button--secondary"
-                :data-active="libraryFilter === option.value"
-                @click="libraryFilter = option.value"
-              >
-                {{ option.label }}
-              </button>
-            </div>
-          </div>
-
-          <EmptyStateCard v-if="!documents.length" :title="t('flow.library.inventory.emptyTitle')" :message="t('flow.library.inventory.emptyBody')" />
-
-          <div v-else class="file-library-grid">
-            <div class="file-library-list">
-              <button
-                v-for="record in filteredFileInventory"
-                :key="record.id"
-                type="button"
-                class="file-library-row"
-                :data-active="selectedInventoryRecord?.id === record.id"
-                @click="selectDocument(record.id)"
-              >
-                <div class="file-library-row__copy">
-                  <div class="file-library-row__title-line">
-                    <strong>{{ record.title }}</strong>
-                    <StatusBadge :tone="record.statusTone" :label="record.statusLabel" />
-                  </div>
-                  <p class="rr-muted">{{ record.subtitle }}</p>
-                  <p class="file-library-row__summary">{{ record.summaryLabel }}</p>
-                </div>
-                <div class="file-library-row__meta">
-                  <span>{{ record.sourceKindLabel }}</span>
-                  <span>{{ record.mimeLabel }}</span>
-                </div>
-              </button>
-
-              <EmptyStateCard v-if="!filteredFileInventory.length" :title="t('flow.library.inventory.filteredEmptyTitle')" :message="t('flow.library.inventory.filteredEmptyBody')" />
-            </div>
-
-            <article v-if="selectedInventoryRecord" class="file-library-detail">
-              <div class="file-library-detail__header">
-                <div class="rr-stack rr-stack--tight">
-                  <p class="rr-kicker">{{ t('flow.library.inventory.detailKicker') }}</p>
-                  <h4>{{ selectedInventoryRecord.title }}</h4>
-                </div>
-                <StatusBadge :tone="selectedInventoryRecord.statusTone" :label="selectedInventoryRecord.statusLabel" emphasis="strong" />
+            <div class="next-action-card">
+              <div class="rr-stack rr-stack--tight">
+                <p class="rr-kicker">{{ t('flow.library.nextActions.kicker') }}</p>
+                <strong>{{ nextActionLabel }}</strong>
+                <p class="rr-note">{{ nextActionHint }}</p>
               </div>
-
-              <dl class="file-library-detail__facts">
-                <div>
-                  <dt>{{ t('flow.library.inventory.fields.externalKey') }}</dt>
-                  <dd>{{ selectedInventoryRecord.subtitle }}</dd>
-                </div>
-                <div>
-                  <dt>{{ t('flow.library.inventory.fields.source') }}</dt>
-                  <dd>{{ selectedInventoryRecord.sourceLabel }}</dd>
-                </div>
-                <div>
-                  <dt>{{ t('flow.library.inventory.fields.kind') }}</dt>
-                  <dd>{{ selectedInventoryRecord.sourceKindLabel }}</dd>
-                </div>
-                <div>
-                  <dt>{{ t('flow.library.inventory.fields.mime') }}</dt>
-                  <dd>{{ selectedInventoryRecord.mimeLabel }}</dd>
-                </div>
-                <div v-if="selectedInventoryRecord.updatedAt">
-                  <dt>{{ t('flow.library.inventory.fields.updated') }}</dt>
-                  <dd>{{ selectedInventoryRecord.updatedAt }}</dd>
-                </div>
-                <div v-if="selectedInventoryRecord.checksumShort">
-                  <dt>{{ t('flow.library.inventory.fields.checksum') }}</dt>
-                  <dd>{{ selectedInventoryRecord.checksumShort }}</dd>
-                </div>
-              </dl>
-
-              <p class="rr-note">{{ selectedInventoryRecord.summaryLabel }}</p>
-
-              <article v-if="selectedDocumentRelatedJob" class="file-library-detail__processing">
-                <div class="file-library-detail__processing-head">
-                  <strong>{{ t('flow.library.inventory.processingTitle') }}</strong>
-                  <StatusBadge :tone="selectedDocumentProcessingPresentation?.tone" :label="selectedDocumentProcessingPresentation?.statusLabel" />
-                </div>
-                <p>{{ selectedDocumentProcessingPresentation?.summary }}</p>
-              </article>
-
               <div class="rr-action-row">
-                <button type="button" class="rr-button" @click="useDocumentTitleForSearch">
-                  {{ t('flow.library.inventory.searchAction') }}
-                </button>
+                <RouterLink class="rr-button" :to="nextActionRoute">
+                  {{ nextActionLabel }}
+                </RouterLink>
                 <button type="button" class="rr-button rr-button--secondary" :disabled="queueLoading" @click="refreshProcessingState(true)">
                   {{ t('flow.library.processing.refresh') }}
                 </button>
               </div>
-            </article>
-          </div>
-        </article>
-      </article>
+            </div>
 
-      <CrossSurfaceGuide active-section="files" />
-      <ProductSpine active-section="files" />
-    </PageSection>
-  </section>
-</template>
+            <details v-if="highlightedJobView" class="secondary-disclosure">
+              <summary>{{ t('flow.library.processing.detailsToggle') }}</summary>
 
-<style scoped>
-.ingestion-page {
-  gap: 1.5rem;
-}
+              <p class="rr-note">{{ highlightedJobView.presentation.summary }}</p>
 
-.flow-reset,
-.flow-reset__scope-card,
-.flow-reset__scope,
-.flow-reset__layout,
-.processing-human,
-.processing-human__card {
-  display: grid;
-  gap: 1rem;
-}
+              <div class="processing-human">
+                <article class="processing-human__card">
+                  <span>{{ t('flow.library.processing.currentSource') }}</span>
+                  <strong>{{ highlightedJobView.sourceLabel }}</strong>
+                </article>
+                <article class="processing-human__card">
+                  <span>{{ t('flow.library.processing.currentTrigger') }}</span>
+                  <strong>{{ highlightedJobView.triggerLabel }}</strong>
+                </article>
+                <article class="processing-human__card">
+                  <span>{{ t('flow.library.processing.currentUpdated') }}</span>
+                  <strong>{{ highlightedJobView.updatedLabel ?? t('flow.library.processing.updating') }}</strong>
+                </article>
+                <article class="processing-human__card">
+                  <span>{{ t('flow.library.processing.currentDuration') }}</span>
+                  <strong>{{ highlightedJobView.durationLabel ?? t('flow.library.processing.notStarted') }}</strong>
+                </article>
+              </div>
 
-.flow-reset__hero,
-.ingestion-panel__heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-}
+              <div v-if="highlightedJobSteps.length" class="processing-steps processing-steps--compact">
+                <article
+                  v-for="step in highlightedJobSteps"
+                  :key="step.key"
+                  class="processing-step"
+                  :data-state="step.state"
+                >
+                  <div class="processing-step__dot" />
+                  <div class="processing-step__copy">
+                    <strong>{{ step.label }}</strong>
+                    <p>{{ step.description }}</p>
+                  </div>
+                </article>
+              </div>
 
-.flow-reset__hero h2,
-.flow-reset__scope-card strong,
-.ingestion-panel__heading h3,
-.file-library-detail__header h4 {
-  margin: 0;
-  color: var(--rr-ink-strong);
-}
+              <article v-if="highlightedJobView.error" class="processing-error">
+                <strong>{{ highlightedJobView.error.title }}</strong>
+                <p>{{ highlightedJobView.error.body }}</p>
+                <p v-if="highlightedJobView.error.detail" class="processing-error__detail">{{ highlightedJobView.error.detail }}</p>
+              </article>
 
-.flow-reset__hero p,
-.flow-reset__scope-card span,
-.flow-reset__scope-card small,
-.ingestion-panel__heading p {
-  margin: 0;
-  color: var(--rr-ink-muted);
-}
+              <div class="rr-action-row">
+                <button
+                  v-if="highlightedJobView.job.retryable"
+                  type="button"
+                  class="rr-button"
+                  :disabled="retryingJobId === highlightedJobView.job.id"
+                  @click="retryJob(highlightedJobView.job.id)"
+                >
+                  {{ retryingJobId === highlightedJobView.job.id ? t('flow.library.processing.retryBusy') : t('flow.library.processing.retryAction') }}
+                </button>
+              </div>
+            </details>
+          </article>
 
-.flow-reset__scope {
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-}
-
-.flow-reset__scope-card,
-.processing-human__card {
-  padding: 1rem;
-  border-radius: 1rem;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.flow-reset__layout {
-  grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr);
-  align-items: start;
-}
-
-.processing-human {
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-}
-
-.processing-steps--compact {
-  gap: 0.75rem;
-}
-
-.upload-focus {
-  position: sticky;
-  top: 1rem;
-}
-
-.file-library-panel {
-  margin-top: 1rem;
-}
-
-.file-library-detail__processing,
-.file-library-detail,
-.file-library-row,
-.file-library-grid,
-.file-library-list,
-.file-library-toolbar,
-.file-library-row__title-line,
-.file-library-detail__header,
-.file-library-detail__processing-head,
-.file-library-row__meta {
-  display: grid;
-  gap: 0.75rem;
-}
-
-.file-library-toolbar__filters {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-}
-
-.file-library-row {
-  width: 100%;
-  text-align: left;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 1rem;
-  padding: 1rem;
-  background: rgba(255, 255, 255, 0.02);
-}
-
-.file-library-row[data-active='true'] {
-  border-color: rgba(114, 137, 255, 0.6);
-  background: rgba(114, 137, 255, 0.08);
-}
-
-.file-library-grid {
-  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
-}
-
-.file-library-detail__facts {
-  display: grid;
-  gap: 0.75rem;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-}
-
-.file-library-detail__facts dt,
-.file-library-detail__facts dd {
-  margin: 0;
-}
-
-@media (max-width: 960px) {
-  .flow-reset__layout,
-  .file-library-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .upload-focus {
-    position: static;
-  }
-}
-
-@media (max-width: 720px) {
-  .flow-reset__hero,
-  .ingestion-panel__heading {
-    flex-direction: column;
-  }
-}
-</style>
