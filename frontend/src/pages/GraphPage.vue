@@ -76,7 +76,8 @@ interface GraphSelection {
   kind: 'entity' | 'relation'
 }
 
-const { t, tm } = useI18n()
+const i18n = useI18n()
+const { t } = i18n
 const workspaces = ref<WorkspaceItem[]>([])
 const projects = ref<ProjectItem[]>([])
 
@@ -132,6 +133,8 @@ const contentSummary = computed(() => projectDiagnostics.value?.content ?? null)
 const provenanceSummary = computed(() => projectDiagnostics.value?.provenance ?? null)
 const diagnosticsBlockers = computed(() => readinessSummary.value?.blockers ?? [])
 const diagnosticsNextSteps = computed(() => readinessSummary.value?.next_steps ?? [])
+const showTechnicalDiagnostics = ref(false)
+const showTechnicalDetail = ref(false)
 const canLoadSubgraph = computed(() =>
   Boolean(selectedProjectId.value && selectedCard.value?.kind === 'entity' && !apiUnavailable.value),
 )
@@ -163,7 +166,7 @@ const pageStatus = computed(() => {
 })
 
 const translateList = (key: string): string[] => {
-  const value = tm(key)
+  const value = i18n.tm(key)
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
 }
 
@@ -619,6 +622,7 @@ function formatRelationLine(relation: GraphRelationDetail): string {
         <p class="hero__eyebrow rr-kicker">{{ graphSummary.status }}</p>
         <h2>{{ graphSummary.headline }}</h2>
         <p>{{ graphSummary.body }}</p>
+        <p class="hero__note rr-note">{{ t('graph.page.technicalNote') }}</p>
       </div>
 
       <div class="hero__metrics">
@@ -814,38 +818,7 @@ function formatRelationLine(relation: GraphRelationDetail): string {
         />
 
         <template v-else>
-          <div class="diagnostics-grid">
-            <article class="metric-card" data-tone="default">
-              <span class="metric-card__label">{{ t('graph.panels.diagnostics.metrics.documents') }}</span>
-              <strong>{{ contentSummary ? formatCount(contentSummary.persisted_document_count, 'document') : '—' }}</strong>
-            </article>
-            <article class="metric-card" data-tone="default">
-              <span class="metric-card__label">{{ t('graph.panels.diagnostics.metrics.chunks') }}</span>
-              <strong>{{ contentSummary ? formatCount(contentSummary.persisted_chunk_count, 'chunk') : '—' }}</strong>
-            </article>
-            <article class="metric-card" data-tone="default">
-              <span class="metric-card__label">{{ t('graph.panels.diagnostics.metrics.embeddings') }}</span>
-              <strong>{{ contentSummary ? formatCount(contentSummary.embedded_chunk_count, 'embedding') : '—' }}</strong>
-            </article>
-            <article class="metric-card" data-tone="default">
-              <span class="metric-card__label">{{ t('graph.panels.diagnostics.metrics.retrievalRuns') }}</span>
-              <strong>{{ contentSummary ? formatCount(contentSummary.retrieval_run_count, 'run') : '—' }}</strong>
-            </article>
-            <article class="metric-card" data-tone="default">
-              <span class="metric-card__label">{{ t('graph.panels.diagnostics.metrics.entityRefs') }}</span>
-              <strong>
-                {{ provenanceSummary ? formatCount(provenanceSummary.entities_with_chunk_refs, 'entity') : '—' }}
-              </strong>
-            </article>
-            <article class="metric-card" data-tone="default">
-              <span class="metric-card__label">{{ t('graph.panels.diagnostics.metrics.relationRefs') }}</span>
-              <strong>
-                {{ provenanceSummary ? formatCount(provenanceSummary.relations_with_chunk_refs, 'relation') : '—' }}
-              </strong>
-            </article>
-          </div>
-
-          <div class="diagnostics-block">
+          <div class="diagnostics-block diagnostics-block--primary">
             <h4>{{ t('graph.panels.diagnostics.blockersTitle') }}</h4>
             <ul v-if="diagnosticsBlockers.length" class="bullet-list">
               <li v-for="blocker in diagnosticsBlockers" :key="blocker">{{ blocker }}</li>
@@ -853,37 +826,81 @@ function formatRelationLine(relation: GraphRelationDetail): string {
             <p v-else class="rr-note">{{ t('graph.panels.diagnostics.noBlockers') }}</p>
           </div>
 
-          <div class="diagnostics-block">
+          <div class="diagnostics-block diagnostics-block--primary">
             <h4>{{ t('graph.panels.diagnostics.nextStepsTitle') }}</h4>
             <ul v-if="diagnosticsNextSteps.length" class="bullet-list">
               <li v-for="step in diagnosticsNextSteps" :key="step">{{ step }}</li>
             </ul>
             <p v-else class="rr-note">{{ t('graph.panels.diagnostics.noNextSteps') }}</p>
           </div>
+
+          <details class="technical-details" :open="showTechnicalDiagnostics">
+            <summary @click.prevent="showTechnicalDiagnostics = !showTechnicalDiagnostics">
+              <span>{{ t('graph.panels.diagnostics.technicalSummary') }}</span>
+              <small>{{ t('graph.panels.diagnostics.technicalHint') }}</small>
+            </summary>
+
+            <div class="diagnostics-grid">
+              <article class="metric-card" data-tone="default">
+                <span class="metric-card__label">{{ t('graph.panels.diagnostics.metrics.documents') }}</span>
+                <strong>{{ contentSummary ? formatCount(contentSummary.persisted_document_count, 'document') : '—' }}</strong>
+              </article>
+              <article class="metric-card" data-tone="default">
+                <span class="metric-card__label">{{ t('graph.panels.diagnostics.metrics.chunks') }}</span>
+                <strong>{{ contentSummary ? formatCount(contentSummary.persisted_chunk_count, 'chunk') : '—' }}</strong>
+              </article>
+              <article class="metric-card" data-tone="default">
+                <span class="metric-card__label">{{ t('graph.panels.diagnostics.metrics.embeddings') }}</span>
+                <strong>{{ contentSummary ? formatCount(contentSummary.embedded_chunk_count, 'embedding') : '—' }}</strong>
+              </article>
+              <article class="metric-card" data-tone="default">
+                <span class="metric-card__label">{{ t('graph.panels.diagnostics.metrics.retrievalRuns') }}</span>
+                <strong>{{ contentSummary ? formatCount(contentSummary.retrieval_run_count, 'run') : '—' }}</strong>
+              </article>
+              <article class="metric-card" data-tone="default">
+                <span class="metric-card__label">{{ t('graph.panels.diagnostics.metrics.entityRefs') }}</span>
+                <strong>
+                  {{ provenanceSummary ? formatCount(provenanceSummary.entities_with_chunk_refs, 'entity') : '—' }}
+                </strong>
+              </article>
+              <article class="metric-card" data-tone="default">
+                <span class="metric-card__label">{{ t('graph.panels.diagnostics.metrics.relationRefs') }}</span>
+                <strong>
+                  {{ provenanceSummary ? formatCount(provenanceSummary.relations_with_chunk_refs, 'relation') : '—' }}
+                </strong>
+              </article>
+            </div>
+          </details>
         </template>
       </article>
     </div>
 
     <article class="card workspace-panel detail-panel">
-      <div class="panel-header">
+      <div class="panel-header panel-header--stacked">
         <div>
           <p class="rr-kicker">{{ t('graph.panels.detail.eyebrow') }}</p>
           <h3>{{ t('graph.panels.detail.title') }}</h3>
           <p class="panel-subtitle">{{ t('graph.panels.detail.description') }}</p>
         </div>
-        <label class="subgraph-depth-field">
-          <span class="search-field__label">{{ t('graph.panels.detail.subgraphDepth') }}</span>
-          <select
-            class="rr-control"
-            :value="String(subgraphDepth)"
-            :disabled="!canLoadSubgraph"
-            @change="handleSubgraphDepthChange"
-          >
-            <option value="1">1 hop</option>
-            <option value="2">2 hops</option>
-            <option value="3">3 hops</option>
-          </select>
-        </label>
+        <details class="technical-details detail-technical" :open="showTechnicalDetail">
+          <summary @click.prevent="showTechnicalDetail = !showTechnicalDetail">
+            <span>{{ t('graph.panels.detail.technicalSummary') }}</span>
+            <small>{{ t('graph.panels.detail.technicalHint') }}</small>
+          </summary>
+          <label class="subgraph-depth-field">
+            <span class="search-field__label">{{ t('graph.panels.detail.subgraphDepth') }}</span>
+            <select
+              class="rr-control"
+              :value="String(subgraphDepth)"
+              :disabled="!canLoadSubgraph"
+              @change="handleSubgraphDepthChange"
+            >
+              <option value="1">1 hop</option>
+              <option value="2">2 hops</option>
+              <option value="3">3 hops</option>
+            </select>
+          </label>
+        </details>
       </div>
 
       <LoadingSkeletonPanel
@@ -937,48 +954,53 @@ function formatRelationLine(relation: GraphRelationDetail): string {
               />
             </div>
 
-            <p class="rr-note">{{ t('graph.panels.detail.subgraphHint', { depth: entitySubgraph?.depth ?? subgraphDepth }) }}</p>
+            <details class="technical-details detail-technical" :open="showTechnicalDetail">
+              <summary @click.prevent="showTechnicalDetail = !showTechnicalDetail">
+                <span>{{ t('graph.panels.detail.subgraphSummary') }}</span>
+                <small>{{ t('graph.panels.detail.subgraphHint', { depth: entitySubgraph?.depth ?? subgraphDepth }) }}</small>
+              </summary>
 
-            <div v-if="entitySubgraph?.entities.length" class="token-section">
-              <span class="token-section__label">{{ t('graph.panels.detail.subgraphEntities') }}</span>
-              <div class="token-list">
-                <span v-for="entity in entitySubgraph.entities" :key="entity.id" class="token-chip">
-                  {{ entity.canonical_name }}
-                </span>
+              <div v-if="entitySubgraph?.entities.length" class="token-section">
+                <span class="token-section__label">{{ t('graph.panels.detail.subgraphEntities') }}</span>
+                <div class="token-list">
+                  <span v-for="entity in entitySubgraph.entities" :key="entity.id" class="token-chip">
+                    {{ entity.canonical_name }}
+                  </span>
+                </div>
               </div>
-            </div>
-            <p v-else class="rr-note">{{ t('graph.panels.detail.noSubgraphEntities') }}</p>
+              <p v-else class="rr-note">{{ t('graph.panels.detail.noSubgraphEntities') }}</p>
 
-            <div class="relation-columns">
-              <div>
-                <span class="token-section__label">{{ t('graph.panels.detail.outgoingRelations') }}</span>
-                <ul v-if="entityDetail.outgoing_relations.length" class="bullet-list bullet-list--compact">
-                  <li v-for="relation in entityDetail.outgoing_relations" :key="relation.relation.id">
+              <div class="relation-columns">
+                <div>
+                  <span class="token-section__label">{{ t('graph.panels.detail.outgoingRelations') }}</span>
+                  <ul v-if="entityDetail.outgoing_relations.length" class="bullet-list bullet-list--compact">
+                    <li v-for="relation in entityDetail.outgoing_relations" :key="relation.relation.id">
+                      {{ formatRelationLine(relation) }}
+                    </li>
+                  </ul>
+                  <p v-else class="rr-note">{{ t('graph.panels.detail.noOutgoingRelations') }}</p>
+                </div>
+                <div>
+                  <span class="token-section__label">{{ t('graph.panels.detail.incomingRelations') }}</span>
+                  <ul v-if="entityDetail.incoming_relations.length" class="bullet-list bullet-list--compact">
+                    <li v-for="relation in entityDetail.incoming_relations" :key="relation.relation.id">
+                      {{ formatRelationLine(relation) }}
+                    </li>
+                  </ul>
+                  <p v-else class="rr-note">{{ t('graph.panels.detail.noIncomingRelations') }}</p>
+                </div>
+              </div>
+
+              <div class="token-section">
+                <span class="token-section__label">{{ t('graph.panels.detail.subgraphRelations') }}</span>
+                <ul v-if="entitySubgraph?.relations.length" class="bullet-list bullet-list--compact">
+                  <li v-for="relation in entitySubgraph.relations" :key="relation.relation.id">
                     {{ formatRelationLine(relation) }}
                   </li>
                 </ul>
-                <p v-else class="rr-note">{{ t('graph.panels.detail.noOutgoingRelations') }}</p>
+                <p v-else class="rr-note">{{ t('graph.panels.detail.noSubgraphRelations') }}</p>
               </div>
-              <div>
-                <span class="token-section__label">{{ t('graph.panels.detail.incomingRelations') }}</span>
-                <ul v-if="entityDetail.incoming_relations.length" class="bullet-list bullet-list--compact">
-                  <li v-for="relation in entityDetail.incoming_relations" :key="relation.relation.id">
-                    {{ formatRelationLine(relation) }}
-                  </li>
-                </ul>
-                <p v-else class="rr-note">{{ t('graph.panels.detail.noIncomingRelations') }}</p>
-              </div>
-            </div>
-
-            <div class="token-section">
-              <span class="token-section__label">{{ t('graph.panels.detail.subgraphRelations') }}</span>
-              <ul v-if="entitySubgraph?.relations.length" class="bullet-list bullet-list--compact">
-                <li v-for="relation in entitySubgraph.relations" :key="relation.relation.id">
-                  {{ formatRelationLine(relation) }}
-                </li>
-              </ul>
-              <p v-else class="rr-note">{{ t('graph.panels.detail.noSubgraphRelations') }}</p>
-            </div>
+            </details>
           </article>
         </div>
 
@@ -1063,6 +1085,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
   color: var(--rr-text-muted);
 }
 
+.hero__note {
+  max-width: 48rem;
+}
+
 .summary-list,
 .search-results,
 .detail-grid,
@@ -1070,6 +1096,40 @@ function formatRelationLine(relation: GraphRelationDetail): string {
 .diagnostics-grid {
   display: grid;
   gap: 1rem;
+}
+
+.technical-details {
+  padding: 0.875rem 1rem;
+  border: 1px dashed var(--rr-color-border-subtle, rgb(148 163 184 / 0.4));
+  border-radius: var(--rr-radius-md, 16px);
+  background: rgb(248 250 252 / 0.7);
+}
+
+.technical-details summary {
+  display: grid;
+  gap: 0.25rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.technical-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.technical-details[open] {
+  gap: 1rem;
+}
+
+.diagnostics-block--primary {
+  padding: 1rem;
+  border: 1px solid rgb(15 23 42 / 0.06);
+  border-radius: 1rem;
+  background: rgb(255 255 255 / 0.72);
+}
+
+.detail-technical {
+  display: grid;
+  gap: 0.875rem;
 }
 
 .summary-row {

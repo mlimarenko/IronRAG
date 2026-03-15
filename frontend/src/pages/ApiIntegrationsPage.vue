@@ -103,6 +103,9 @@ const maskedSessionToken = computed(() =>
   hasSessionToken.value ? maskApiBearerToken(sessionToken.value) : null,
 )
 
+const showTechnicalApiInventory = ref(false)
+const showTechnicalApiFoundation = ref(false)
+
 const tokenScopeCounts = computed(() => {
   const counts = new Map<string, number>()
   tokens.value.forEach((token) => {
@@ -806,6 +809,7 @@ onMounted(async () => {
           <p class="workspace-strip__eyebrow">{{ t('api.workspace.eyebrow') }}</p>
           <h2>{{ selectedWorkspace.name }}</h2>
           <p>{{ t('api.workspace.description', { slug: selectedWorkspace.slug }) }}</p>
+          <p class="workspace-strip__note">{{ t('api.page.technicalNote') }}</p>
         </div>
 
         <div class="workspace-strip__stack">
@@ -1107,26 +1111,33 @@ onMounted(async () => {
             </article>
           </div>
 
-          <ul class="checklist">
-            <li
-              v-for="item in foundationChecklist"
-              :key="item.key"
-              class="checklist__item"
-            >
-              <StatusBadge
-                :status="item.ready ? 'Healthy' : 'Warning'"
-                :label="item.ready ? t('api.foundation.ready') : t('api.foundation.todo')"
-              />
-              <span>{{ item.label }}</span>
-            </li>
-          </ul>
+          <details class="technical-panel" :open="showTechnicalApiFoundation">
+            <summary @click.prevent="showTechnicalApiFoundation = !showTechnicalApiFoundation">
+              <span>{{ t('api.inventory.technicalSummary') }}</span>
+              <small>{{ t('api.inventory.technicalHint') }}</small>
+            </summary>
 
-          <p
-            v-if="governanceError"
-            class="panel-note"
-          >
-            {{ governanceError }}
-          </p>
+            <ul class="checklist">
+              <li
+                v-for="item in foundationChecklist"
+                :key="item.key"
+                class="checklist__item"
+              >
+                <StatusBadge
+                  :status="item.ready ? 'Healthy' : 'Warning'"
+                  :label="item.ready ? t('api.foundation.ready') : t('api.foundation.todo')"
+                />
+                <span>{{ item.label }}</span>
+              </li>
+            </ul>
+
+            <p
+              v-if="governanceError"
+              class="panel-note"
+            >
+              {{ governanceError }}
+            </p>
+          </details>
         </article>
 
         <article class="panel">
@@ -1191,14 +1202,15 @@ onMounted(async () => {
             :hint="tokenInventoryEmptyState.hint"
           />
 
-          <div
+          <details
             v-if="tokenScopeCounts.length > 0"
-            class="scope-inventory"
+            class="technical-panel scope-inventory"
+            :open="showTechnicalApiInventory"
           >
-            <div class="scope-inventory__header">
-              <h4>{{ t('api.tokens.scopeInventoryTitle') }}</h4>
+            <summary @click.prevent="showTechnicalApiInventory = !showTechnicalApiInventory">
+              <span>{{ t('api.tokens.scopeInventoryTitle') }}</span>
               <small>{{ t('api.tokens.scopeInventoryDescription') }}</small>
-            </div>
+            </summary>
             <div class="scope-cloud">
               <span
                 v-for="item in tokenScopeCounts"
@@ -1209,7 +1221,7 @@ onMounted(async () => {
                 <strong>{{ item.count }}</strong>
               </span>
             </div>
-          </div>
+          </details>
         </article>
       </div>
 
@@ -1329,6 +1341,26 @@ onMounted(async () => {
   background: var(--rr-color-bg-surface);
 }
 
+.technical-panel {
+  display: grid;
+  gap: var(--rr-space-3);
+  padding: var(--rr-space-4);
+  border: 1px dashed var(--rr-color-border-subtle);
+  border-radius: var(--rr-radius-md);
+  background: rgb(248 250 252 / 0.7);
+}
+
+.technical-panel summary {
+  display: grid;
+  gap: 0.25rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.technical-panel summary::-webkit-details-marker {
+  display: none;
+}
+
 .panel--start,
 .panel--examples {
   min-height: 100%;
@@ -1375,6 +1407,12 @@ onMounted(async () => {
   display: grid;
   justify-items: end;
   gap: var(--rr-space-3);
+}
+
+.workspace-strip__note {
+  max-width: 48rem;
+  margin-top: var(--rr-space-2);
+  color: var(--rr-color-text-secondary);
 }
 
 .workspace-strip__actions,

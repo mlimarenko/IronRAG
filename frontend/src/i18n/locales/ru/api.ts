@@ -4,6 +4,8 @@ export default {
     title: 'API Start',
     description:
       'Понятная точка входа в текущий API surface RustRAG: публичные routes, настройка bearer token, scoped examples и groundwork для будущей документации.',
+    technicalNote:
+      'Это вторичная developer-поверхность для интеграций и автоматизации. Основной продуктовый путь по-прежнему живёт в Подготовке, Файлах и Поиске.',
     loadingTitle: 'Загрузка API launchpad',
     actions: {
       setup: 'Открыть setup',
@@ -163,6 +165,8 @@ export default {
       'Публичные и auth-required surfaces разделены, поэтому страница остаётся полезной ещё до полного auth flow.',
     ready: 'Protected surface виден',
     needsToken: 'Режим только public',
+    technicalSummary: 'Показать технический readiness checklist',
+    technicalHint: 'Foundation-checks и governance errors остаются доступны здесь, но больше не доминируют на странице.',
     cards: {
       workspaces: 'Workspaces',
       workspacesHint: 'Публичный список из /v1/workspaces.',

@@ -4,6 +4,8 @@ export default {
     title: 'Graph',
     description:
       'Inspect graph readiness, search graph concepts, and review what entities or relations are already visible versus still waiting on backend support.',
+    technicalNote:
+      'This is a secondary technical surface for graph coverage and readiness checks. Stay in Search for the primary answer workflow.',
     statusLabel: 'Preview',
   },
   hero: {
@@ -247,6 +249,9 @@ export default {
         message: 'Pick an entity or relation from the search panel to inspect live graph coverage.',
         hint: 'The detail panel only renders persisted graph data and explicit blockers.',
       },
+      technicalSummary: 'Show technical graph controls',
+      technicalHint: 'Adjust subgraph depth and inspect bounded graph structure only when needed.',
+      subgraphSummary: 'Show bounded subgraph and relation structure',
       subgraphDepth: 'Subgraph depth',
       entitySummary: '{count} observed relations connected to this entity.',
       aliases: 'Aliases',
@@ -299,6 +304,8 @@ export default {
       noBlockers: 'No explicit blockers were returned.',
       nextStepsTitle: 'Next steps',
       noNextSteps: 'No next steps were returned.',
+      technicalSummary: 'Show technical coverage metrics',
+      technicalHint: 'Document, chunk, embedding, and provenance counts stay available here as secondary diagnostics.',
     },
   },
   common: {
