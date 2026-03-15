@@ -81,6 +81,36 @@ pub async fn create_workspace(
     .await
 }
 
+/// Database repository helper: `find_or_create_default_workspace`.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while executing the underlying database query.
+pub async fn find_or_create_default_workspace(pool: &PgPool) -> Result<WorkspaceRow, sqlx::Error> {
+    if let Some(existing) = sqlx::query_as::<_, WorkspaceRow>(
+        "select id, slug, name, status, created_at, updated_at
+         from workspace
+         order by created_at asc
+         limit 1",
+    )
+    .fetch_optional(pool)
+    .await?
+    {
+        return Ok(existing);
+    }
+
+    sqlx::query_as::<_, WorkspaceRow>(
+        "insert into workspace (id, slug, name)
+         values ($1, $2, $3)
+         on conflict (slug) do update set name = workspace.name
+         returning id, slug, name, status, created_at, updated_at",
+    )
+    .bind(Uuid::now_v7())
+    .bind("default")
+    .bind("Default workspace")
+    .fetch_one(pool)
+    .await
+}
+
 /// Database repository helper: `list_projects`.
 ///
 /// # Errors
@@ -130,6 +160,43 @@ pub async fn create_project(
     .bind(slug)
     .bind(name)
     .bind(description)
+    .fetch_one(pool)
+    .await
+}
+
+/// Database repository helper: `find_or_create_default_project`.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while executing the underlying database query.
+pub async fn find_or_create_default_project(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<ProjectRow, sqlx::Error> {
+    if let Some(existing) = sqlx::query_as::<_, ProjectRow>(
+        "select id, workspace_id, slug, name, description, created_at, updated_at
+         from project
+         where workspace_id = $1
+         order by created_at asc
+         limit 1",
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await?
+    {
+        return Ok(existing);
+    }
+
+    sqlx::query_as::<_, ProjectRow>(
+        "insert into project (id, workspace_id, slug, name, description)
+         values ($1, $2, $3, $4, $5)
+         on conflict (workspace_id, slug) do update set name = project.name
+         returning id, workspace_id, slug, name, description, created_at, updated_at",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind("default-library")
+    .bind("Default library")
+    .bind(Some("Backstage default library for the primary documents and ask flow"))
     .fetch_one(pool)
     .await
 }

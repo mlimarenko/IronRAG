@@ -58,23 +58,56 @@ pub fn router() -> Router<crate::app::state::AppState> {
 }
 
 async fn list_projects(
+    auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<ListProjectsQuery>,
 ) -> Result<Json<Vec<ProjectSummary>>, ApiError> {
-    let items = repositories::list_projects(&state.persistence.postgres, query.workspace_id)
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .into_iter()
-        .map(|row| ProjectSummary {
-            id: row.id,
-            workspace_id: row.workspace_id,
-            slug: row.slug,
-            name: row.name,
-            description: row.description,
-        })
-        .collect();
+    let workspace_filter = match query.workspace_id {
+        Some(workspace_id) => {
+            auth.require_workspace_access(workspace_id)?;
+            Some(workspace_id)
+        }
+        None if auth.token_kind == "instance_admin" => {
+            let workspace =
+                repositories::find_or_create_default_workspace(&state.persistence.postgres)
+                    .await
+                    .map_err(|_| ApiError::Internal)?;
+            Some(workspace.id)
+        }
+        None => auth.workspace_id,
+    };
 
-    Ok(Json(items))
+    if let Some(workspace_id) = workspace_filter {
+        let mut rows = repositories::list_projects(&state.persistence.postgres, Some(workspace_id))
+            .await
+            .map_err(|_| ApiError::Internal)?;
+
+        if rows.is_empty() {
+            rows.push(
+                repositories::find_or_create_default_project(
+                    &state.persistence.postgres,
+                    workspace_id,
+                )
+                .await
+                .map_err(|_| ApiError::Internal)?,
+            );
+        }
+
+        let items = rows
+            .into_iter()
+            .map(|row| ProjectSummary {
+                id: row.id,
+                workspace_id: row.workspace_id,
+                slug: row.slug,
+                name: row.name,
+                description: row.description,
+            })
+            .collect();
+
+        return Ok(Json(items));
+    }
+
+    Ok(Json(Vec::new()))
 }
 
 async fn create_project(
@@ -149,7 +182,7 @@ fn summarize_readiness(
         .filter(|job| matches!(job.status.as_str(), "retryable_failed" | "failed" | "canceled"))
         .count();
 
-    let ready_for_query = documents > 0 && active_ingestion_jobs == 0;
+    let ready_for_query = documents > 0;
     let indexing_state = if documents == 0 {
         if active_ingestion_jobs > 0 { "ingesting" } else { "not_indexed" }
     } else if active_ingestion_jobs > 0 {
@@ -265,9 +298,19 @@ mod tests {
             ],
         );
 
-        assert!(!summary.ready_for_query);
+        assert!(summary.ready_for_query);
         assert_eq!(summary.indexing_state, "partially_indexed");
         assert_eq!(summary.active_ingestion_jobs, 1);
+        assert_eq!(summary.completed_ingestion_jobs, 1);
+    }
+
+    #[test]
+    fn readiness_stays_unqueryable_without_documents_even_with_completed_jobs() {
+        let summary =
+            summarize_readiness(project(), 1, 0, vec![ingestion_job("completed", Utc::now())]);
+
+        assert!(!summary.ready_for_query);
+        assert_eq!(summary.indexing_state, "not_indexed");
         assert_eq!(summary.completed_ingestion_jobs, 1);
     }
 }

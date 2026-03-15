@@ -1748,6 +1748,17 @@ components:
         indexing_state:
           type: string
           example: indexed
+        latest_ingestion_status:
+          type: [string, "null"]
+        active_ingestion_jobs:
+          type: integer
+          minimum: 0
+        completed_ingestion_jobs:
+          type: integer
+          minimum: 0
+        failed_ingestion_jobs:
+          type: integer
+          minimum: 0
 
     ProviderAccountSummary:
       type: object

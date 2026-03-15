@@ -52,9 +52,19 @@ async fn list_workspaces(
     auth: AuthContext,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<WorkspaceSummary>>, ApiError> {
-    let items = repositories::list_workspaces(&state.persistence.postgres)
+    let mut rows = repositories::list_workspaces(&state.persistence.postgres)
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|_| ApiError::Internal)?;
+
+    if rows.is_empty() && auth.token_kind == "instance_admin" {
+        rows.push(
+            repositories::find_or_create_default_workspace(&state.persistence.postgres)
+                .await
+                .map_err(|_| ApiError::Internal)?,
+        );
+    }
+
+    let items = rows
         .into_iter()
         .filter(|row| auth.can_access_workspace(row.id))
         .map(|row| WorkspaceSummary {
