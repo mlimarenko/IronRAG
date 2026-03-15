@@ -12,7 +12,6 @@ import {
   type ProjectReadinessSummary,
 } from 'src/boot/api'
 import PageSection from 'src/components/shell/PageSection.vue'
-import AppPanel from 'src/components/ui/AppPanel.vue'
 import {
   getSelectedProjectId,
   getSelectedWorkspaceId,
@@ -50,88 +49,71 @@ const selectedProject = computed(
 const indexedDocuments = computed(() => readiness.value?.documents ?? 0)
 const hasReadyLibrary = computed(() => Boolean(readiness.value?.ready_for_query))
 const latestSession = computed(() => recentSessions.value.at(0))
-const nextAction = computed(() => {
-  if (!hasWorkspace.value) {
-    return t('flow.home.next.setup')
-  }
 
-  if (!hasProject.value) {
-    return t('flow.home.next.project')
-  }
+const primaryUploadAction = computed(() => ({
+  to: hasProject.value ? '/files' : '/processing',
+  label: hasProject.value
+    ? t('flow.home.hero.actions.upload')
+    : t('flow.home.hero.actions.prepareUpload'),
+  hint: hasProject.value
+    ? t('flow.home.hero.hints.uploadReady')
+    : t('flow.home.hero.hints.uploadBlocked'),
+}))
 
-  if (hasReadyLibrary.value) {
-    return t('flow.home.next.ask')
-  }
-
-  if (indexedDocuments.value > 0) {
-    return t('flow.home.next.finishIndexing')
-  }
-
-  return t('flow.home.next.files')
-})
-const heroAction = computed(() => {
+const nextStepCard = computed(() => {
   if (!hasWorkspace.value || !hasProject.value) {
     return {
+      title: t('flow.home.nextSteps.prepare.title'),
+      body: t('flow.home.nextSteps.prepare.body'),
+      status: t('flow.home.nextSteps.prepare.status'),
       to: '/processing',
-      label: t('flow.home.hero.actions.setup'),
-      secondaryTo: '/files',
-      secondaryLabel: t('flow.home.hero.actions.filesSecondary'),
+      action: t('flow.home.nextSteps.prepare.action'),
     }
   }
 
   if (hasReadyLibrary.value) {
     return {
+      title: t('flow.home.nextSteps.ask.title'),
+      body: t('flow.home.nextSteps.ask.body'),
+      status: t('flow.home.nextSteps.ask.status'),
       to: '/search',
-      label: t('flow.home.hero.actions.ask'),
-      secondaryTo: '/files',
-      secondaryLabel: t('flow.home.hero.actions.filesSecondary'),
+      action: t('flow.home.nextSteps.ask.action'),
     }
   }
 
   return {
+    title: t('flow.home.nextSteps.processing.title'),
+    body: t('flow.home.nextSteps.processing.body'),
+    status:
+      indexedDocuments.value > 0
+        ? t('flow.home.nextSteps.processing.statusWorking')
+        : t('flow.home.nextSteps.processing.statusWaiting'),
     to: '/files',
-    label: t('flow.home.hero.actions.files'),
-    secondaryTo: '/processing',
-    secondaryLabel: t('flow.home.hero.actions.setupSecondary'),
+    action: t('flow.home.nextSteps.processing.action'),
   }
 })
-const productCards = computed(() => [
+
+const uploadChecklist = computed(() => [
   {
-    title: t('flow.home.cards.home.title'),
-    body: t('flow.home.cards.home.body'),
-    status: nextAction.value,
-    to: '/home',
-    action: t('flow.home.cards.home.action'),
+    key: 'upload',
+    title: t('flow.home.checklist.upload.title'),
+    body: t('flow.home.checklist.upload.body'),
+    done: hasProject.value && indexedDocuments.value > 0,
   },
   {
-    title: t('flow.home.cards.files.title'),
-    body: t('flow.home.cards.files.body'),
-    status: hasProject.value ? t('flow.home.cards.files.ready') : t('flow.home.cards.files.blocked'),
-    to: '/files',
-    action: t('flow.home.cards.files.action'),
+    key: 'processing',
+    title: t('flow.home.checklist.processing.title'),
+    body: t('flow.home.checklist.processing.body'),
+    done: hasReadyLibrary.value,
   },
   {
-    title: t('flow.home.cards.ask.title'),
-    body: t('flow.home.cards.ask.body'),
-    status: hasReadyLibrary.value ? t('flow.home.cards.ask.ready') : t('flow.home.cards.ask.blocked'),
-    to: '/search',
-    action: t('flow.home.cards.ask.action'),
+    key: 'ask',
+    title: t('flow.home.checklist.ask.title'),
+    body: t('flow.home.checklist.ask.body'),
+    done: hasReadyLibrary.value && Boolean(latestSession.value),
   },
 ])
-const secondaryCards = computed(() => [
-  {
-    title: t('flow.home.secondary.graph.title'),
-    body: t('flow.home.secondary.graph.body'),
-    to: '/graph',
-    action: t('flow.home.secondary.graph.action'),
-  },
-  {
-    title: t('flow.home.secondary.api.title'),
-    body: t('flow.home.secondary.api.body'),
-    to: '/api',
-    action: t('flow.home.secondary.api.action'),
-  },
-])
+
 const recentSessionStatus = computed(() => {
   if (!selectedProject.value) {
     return t('flow.home.sessions.blocked')
@@ -144,10 +126,12 @@ const recentSessionStatus = computed(() => {
 
   return t('flow.home.sessions.ready', { count: session.message_count })
 })
+
 const recentSessionRoute = computed(() => {
   const session = latestSession.value
   return session ? `/search?session=${encodeURIComponent(session.id)}` : '/search'
 })
+
 const recentSessionUpdatedLabel = computed(() => {
   const session = latestSession.value
   return session ? formatDateTime(session.updated_at) : ''
@@ -207,76 +191,135 @@ function formatDateTime(value: string) {
       :status-label="t('shell.status.focused')"
     >
       <template #actions>
-        <RouterLink class="rr-button" :to="heroAction.to">
-          {{ heroAction.label }}
+        <RouterLink class="rr-button" :to="primaryUploadAction.to">
+          {{ primaryUploadAction.label }}
         </RouterLink>
-        <RouterLink class="rr-button rr-button--secondary" :to="heroAction.secondaryTo">
-          {{ heroAction.secondaryLabel }}
+        <RouterLink class="rr-button rr-button--secondary" to="/search">
+          {{ t('flow.home.hero.actions.ask') }}
         </RouterLink>
       </template>
 
-      <article class="rr-panel rr-panel--accent home-hero">
-        <div class="home-hero__copy">
+      <article class="rr-panel rr-panel--accent upload-hero">
+        <div class="upload-hero__copy">
           <p class="rr-kicker">{{ t('flow.home.hero.eyebrow') }}</p>
           <h2>{{ t('flow.home.hero.title') }}</h2>
           <p class="rr-note">{{ t('flow.home.hero.description') }}</p>
         </div>
 
-        <div class="home-hero__stats rr-stat-strip">
-          <article class="rr-stat">
-            <p class="rr-stat__label">{{ t('flow.home.stats.workspace') }}</p>
-            <strong>{{ selectedWorkspace?.name ?? t('flow.common.empty') }}</strong>
+        <div class="upload-hero__main-action">
+          <RouterLink class="rr-button" :to="primaryUploadAction.to">
+            {{ primaryUploadAction.label }}
+          </RouterLink>
+          <p class="rr-note">{{ primaryUploadAction.hint }}</p>
+        </div>
+
+        <div class="upload-hero__steps">
+          <article class="upload-step-card">
+            <span>1</span>
+            <div>
+              <strong>{{ t('flow.home.hero.steps.upload.title') }}</strong>
+              <p>{{ t('flow.home.hero.steps.upload.body') }}</p>
+            </div>
           </article>
-          <article class="rr-stat">
-            <p class="rr-stat__label">{{ t('flow.home.stats.project') }}</p>
-            <strong>{{ selectedProject?.name ?? t('flow.common.empty') }}</strong>
+          <article class="upload-step-card">
+            <span>2</span>
+            <div>
+              <strong>{{ t('flow.home.hero.steps.processing.title') }}</strong>
+              <p>{{ t('flow.home.hero.steps.processing.body') }}</p>
+            </div>
           </article>
-          <article class="rr-stat">
-            <p class="rr-stat__label">{{ t('flow.home.stats.documents') }}</p>
-            <strong>{{ indexedDocuments }}</strong>
-          </article>
-          <article class="rr-stat">
-            <p class="rr-stat__label">{{ t('flow.home.stats.next') }}</p>
-            <strong>{{ nextAction }}</strong>
+          <article class="upload-step-card">
+            <span>3</span>
+            <div>
+              <strong>{{ t('flow.home.hero.steps.ask.title') }}</strong>
+              <p>{{ t('flow.home.hero.steps.ask.body') }}</p>
+            </div>
           </article>
         </div>
       </article>
 
-      <div class="home-primary-grid">
-        <AppPanel
-          v-for="card in productCards"
-          :key="card.to"
-          class="home-card"
-          tone="muted"
-          :eyebrow="t('flow.home.primaryEyebrow')"
-          :title="card.title"
-        >
-          <p class="home-card__body">{{ card.body }}</p>
-          <p class="home-card__status">{{ card.status }}</p>
-          <RouterLink class="rr-button rr-button--secondary" :to="card.to">
-            {{ card.action }}
-          </RouterLink>
-        </AppPanel>
+      <div class="rr-stat-strip upload-status-strip">
+        <article class="rr-stat">
+          <p class="rr-stat__label">{{ t('flow.home.stats.documents') }}</p>
+          <strong>{{ indexedDocuments }}</strong>
+          <p>{{ t('flow.home.stats.documentsHint') }}</p>
+        </article>
+        <article class="rr-stat">
+          <p class="rr-stat__label">{{ t('flow.home.stats.readiness') }}</p>
+          <strong>{{
+            hasReadyLibrary ? t('flow.home.stats.ready') : t('flow.home.stats.notReady')
+          }}</strong>
+          <p>
+            {{
+              hasReadyLibrary
+                ? t('flow.home.stats.readinessHintReady')
+                : t('flow.home.stats.readinessHintWaiting')
+            }}
+          </p>
+        </article>
+        <article class="rr-stat">
+          <p class="rr-stat__label">{{ t('flow.home.stats.scope') }}</p>
+          <strong>{{ selectedProject?.name ?? t('flow.common.empty') }}</strong>
+          <p>{{ selectedWorkspace?.name ?? t('flow.common.empty') }}</p>
+        </article>
       </div>
 
-      <AppPanel
-        class="home-session-panel"
-        tone="muted"
-        :eyebrow="t('flow.home.sessions.eyebrow')"
-        :title="t('flow.home.sessions.title')"
-      >
-        <p class="rr-note">{{ t('flow.home.sessions.description') }}</p>
+      <div class="home-core-grid">
+        <article class="rr-panel rr-stack next-step-panel">
+          <div class="next-step-panel__header">
+            <div>
+              <p class="rr-kicker">{{ t('flow.home.nextSteps.eyebrow') }}</p>
+              <h3>{{ nextStepCard.title }}</h3>
+            </div>
+            <p class="next-step-panel__status">{{ nextStepCard.status }}</p>
+          </div>
 
-        <div class="home-session-grid">
-          <article class="home-session-card">
-            <p class="home-card__status">{{ recentSessionStatus }}</p>
-            <h3>
-              {{ latestSession?.title || t('flow.home.sessions.fallbackTitle') }}
-            </h3>
-            <p class="home-session-card__preview">
-              {{ latestSession?.last_message_preview || t('flow.home.sessions.emptyBody') }}
-            </p>
-            <dl v-if="latestSession" class="home-session-meta">
+          <p class="rr-note">{{ nextStepCard.body }}</p>
+
+          <RouterLink class="rr-button" :to="nextStepCard.to">
+            {{ nextStepCard.action }}
+          </RouterLink>
+        </article>
+
+        <article class="rr-panel rr-panel--muted rr-stack checklist-panel">
+          <div>
+            <p class="rr-kicker">{{ t('flow.home.checklist.eyebrow') }}</p>
+            <h3>{{ t('flow.home.checklist.title') }}</h3>
+          </div>
+
+          <div class="checklist-items">
+            <article
+              v-for="item in uploadChecklist"
+              :key="item.key"
+              class="checklist-item"
+              :data-done="item.done"
+            >
+              <div class="checklist-item__marker">{{ item.done ? '✓' : '•' }}</div>
+              <div>
+                <strong>{{ item.title }}</strong>
+                <p>{{ item.body }}</p>
+              </div>
+            </article>
+          </div>
+        </article>
+      </div>
+
+      <div class="home-secondary-grid">
+        <article class="rr-panel rr-panel--muted rr-stack session-panel">
+          <div class="session-panel__header">
+            <div>
+              <p class="rr-kicker">{{ t('flow.home.sessions.eyebrow') }}</p>
+              <h3>{{ t('flow.home.sessions.title') }}</h3>
+            </div>
+            <p class="session-panel__status">{{ recentSessionStatus }}</p>
+          </div>
+
+          <p class="rr-note">{{ t('flow.home.sessions.description') }}</p>
+
+          <article class="session-card">
+            <h4>{{ latestSession?.title || t('flow.home.sessions.fallbackTitle') }}</h4>
+            <p>{{ latestSession?.last_message_preview || t('flow.home.sessions.emptyBody') }}</p>
+            <dl v-if="latestSession" class="session-meta">
               <div>
                 <dt>{{ t('flow.home.sessions.fields.updated') }}</dt>
                 <dd>{{ recentSessionUpdatedLabel }}</dd>
@@ -290,156 +333,207 @@ function formatDateTime(value: string) {
               <RouterLink class="rr-button rr-button--secondary" :to="recentSessionRoute">
                 {{ latestSession ? t('flow.home.sessions.resume') : t('flow.home.sessions.start') }}
               </RouterLink>
-              <RouterLink v-if="selectedProject" class="rr-button rr-button--ghost" to="/search">
+              <RouterLink class="rr-button rr-button--ghost" to="/search">
                 {{ t('flow.home.sessions.openAsk') }}
               </RouterLink>
             </div>
           </article>
+        </article>
 
-          <div v-if="recentSessions.length > 1" class="home-session-list">
-            <article
-              v-for="session in recentSessions.slice(1)"
-              :key="session.id"
-              class="home-session-list__item"
-            >
-              <div>
-                <strong>{{ session.title || t('flow.home.sessions.fallbackTitle') }}</strong>
-                <p>{{ session.last_message_preview || t('flow.home.sessions.emptyBody') }}</p>
-              </div>
-              <RouterLink
-                class="rr-button rr-button--secondary"
-                :to="`/search?session=${encodeURIComponent(session.id)}`"
-              >
-                {{ t('flow.home.sessions.resume') }}
-              </RouterLink>
-            </article>
-          </div>
-        </div>
-      </AppPanel>
-
-      <AppPanel
-        class="home-secondary-panel"
-        tone="muted"
-        :eyebrow="t('flow.home.secondaryEyebrow')"
-        :title="t('flow.home.secondaryTitle')"
-      >
-        <p class="rr-note">{{ t('flow.home.secondaryDescription') }}</p>
-
-        <div class="home-secondary-grid">
-          <article v-for="card in secondaryCards" :key="card.to" class="home-secondary-card">
+        <details class="rr-panel rr-panel--muted rr-stack admin-surfaces-panel">
+          <summary class="admin-surfaces-panel__summary">
             <div>
-              <h3>{{ card.title }}</h3>
-              <p>{{ card.body }}</p>
+              <p class="rr-kicker">{{ t('flow.home.secondaryEyebrow') }}</p>
+              <h3>{{ t('flow.home.secondaryTitle') }}</h3>
             </div>
-            <RouterLink class="rr-button rr-button--secondary" :to="card.to">
-              {{ card.action }}
+            <span>{{ t('flow.home.secondaryToggle') }}</span>
+          </summary>
+
+          <p class="rr-note">{{ t('flow.home.secondaryDescription') }}</p>
+
+          <div class="admin-links">
+            <RouterLink class="admin-link-card" to="/processing">
+              <div>
+                <strong>{{ t('flow.home.secondary.setup.title') }}</strong>
+                <p>{{ t('flow.home.secondary.setup.body') }}</p>
+              </div>
+              <span>{{ t('flow.home.secondary.setup.action') }}</span>
             </RouterLink>
-          </article>
-        </div>
-      </AppPanel>
+            <RouterLink class="admin-link-card" to="/graph">
+              <div>
+                <strong>{{ t('flow.home.secondary.graph.title') }}</strong>
+                <p>{{ t('flow.home.secondary.graph.body') }}</p>
+              </div>
+              <span>{{ t('flow.home.secondary.graph.action') }}</span>
+            </RouterLink>
+            <RouterLink class="admin-link-card" to="/api">
+              <div>
+                <strong>{{ t('flow.home.secondary.api.title') }}</strong>
+                <p>{{ t('flow.home.secondary.api.body') }}</p>
+              </div>
+              <span>{{ t('flow.home.secondary.api.action') }}</span>
+            </RouterLink>
+          </div>
+        </details>
+      </div>
     </PageSection>
   </section>
 </template>
 
 <style scoped>
 .home-page,
-.home-primary-grid,
+.upload-hero,
+.upload-hero__copy,
+.upload-hero__steps,
+.home-core-grid,
 .home-secondary-grid,
-.home-secondary-card,
-.home-card,
-.home-hero,
-.home-session-grid,
-.home-session-card,
-.home-session-list {
+.checklist-items,
+.session-card,
+.session-meta,
+.admin-links {
+  display: grid;
   gap: var(--rr-space-4);
 }
 
-.home-hero__copy,
-.home-session-meta,
-.home-session-list__item {
+.upload-hero {
+  align-items: start;
+}
+
+.upload-hero__copy h2,
+.next-step-panel__header h3,
+.session-panel__header h3,
+.admin-surfaces-panel__summary h3,
+.session-card h4 {
+  margin: 0;
+}
+
+.upload-hero__main-action,
+.next-step-panel__header,
+.session-panel__header,
+.admin-surfaces-panel__summary,
+.admin-link-card,
+.checklist-item {
+  display: flex;
+  gap: var(--rr-space-3);
+}
+
+.upload-hero__main-action,
+.next-step-panel__header,
+.session-panel__header,
+.admin-surfaces-panel__summary,
+.admin-link-card {
+  align-items: center;
+  justify-content: space-between;
+}
+
+.upload-step-card,
+.session-card,
+.admin-link-card,
+.checklist-item {
+  padding: var(--rr-space-4);
+  border: 1px solid var(--rr-color-border-subtle);
+  border-radius: var(--rr-radius-lg);
+  background: rgb(255 255 255 / 0.72);
+}
+
+.upload-hero__steps {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.upload-step-card {
   display: grid;
-  gap: 0.45rem;
+  gap: var(--rr-space-3);
 }
 
-.home-hero__copy h2,
-.home-secondary-card h3,
-.home-session-card h3 {
+.upload-step-card span,
+.checklist-item__marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 999px;
+  background: rgb(29 78 216 / 0.12);
+  color: var(--rr-color-accent-700);
+  font-weight: 700;
+}
+
+.upload-step-card p,
+.checklist-item p,
+.session-card p,
+.admin-link-card p,
+.session-meta dt,
+.upload-status-strip p {
   margin: 0;
-}
-
-.home-card__body,
-.home-card__status,
-.home-secondary-card p,
-.home-session-card__preview,
-.home-session-list__item p {
-  margin: 0;
-}
-
-.home-card__body,
-.home-secondary-card p,
-.home-session-card__preview,
-.home-session-list__item p,
-.home-session-meta dt {
   color: var(--rr-color-text-secondary);
 }
 
-.home-card__status {
+.upload-status-strip {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.home-core-grid,
+.home-secondary-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.next-step-panel__status,
+.session-panel__status {
+  margin: 0;
   font-size: 0.88rem;
   font-weight: 700;
   color: var(--rr-color-accent-700);
 }
 
-.home-primary-grid,
-.home-session-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+.checklist-item[data-done='true'] {
+  border-color: rgb(21 128 61 / 0.28);
+  background: rgb(240 253 244 / 0.8);
 }
 
-.home-session-card {
-  grid-column: span 2;
-}
-
-.home-session-card,
-.home-session-list__item,
-.home-secondary-card {
-  padding: var(--rr-space-4);
-  border: 1px solid var(--rr-color-border-subtle);
-  border-radius: var(--rr-radius-lg);
-  background: rgb(255 255 255 / 0.7);
-}
-
-.home-session-meta {
+.session-meta {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.home-session-meta dt,
-.home-session-meta dd {
+.session-meta dt,
+.session-meta dd {
   margin: 0;
 }
 
-.home-session-list {
-  display: grid;
+.admin-surfaces-panel__summary {
+  cursor: pointer;
+  list-style: none;
 }
 
-.home-session-list__item {
-  align-content: space-between;
+.admin-surfaces-panel__summary::-webkit-details-marker {
+  display: none;
 }
 
-.home-secondary-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+.admin-link-card {
+  text-decoration: none;
+  color: inherit;
+}
+
+.admin-link-card span {
+  font-weight: 700;
+  color: var(--rr-color-accent-700);
 }
 
 @media (width <= 900px) {
-  .home-primary-grid,
+  .upload-hero__steps,
+  .upload-status-strip,
+  .home-core-grid,
   .home-secondary-grid,
-  .home-session-grid,
-  .home-session-meta {
+  .session-meta {
     grid-template-columns: 1fr;
   }
 
-  .home-session-card {
-    grid-column: span 1;
+  .upload-hero__main-action,
+  .next-step-panel__header,
+  .session-panel__header,
+  .admin-surfaces-panel__summary,
+  .admin-link-card {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }
 </style>

@@ -7,66 +7,121 @@ export default {
   },
   home: {
     title: 'Home',
-    description: 'Start from the product path: choose your library, add files, then ask grounded questions.',
-    primaryEyebrow: 'Primary flow',
-    secondaryEyebrow: 'Secondary surfaces',
-    secondaryTitle: 'Technical and integration surfaces stay available',
-    secondaryDescription: 'Graph and API are still here when you need them, but they no longer compete with the main product journey on mobile.',
+    description:
+      'Start by adding documents. Once RustRAG finishes processing them, the next move into Ask stays obvious.',
+    secondaryEyebrow: 'More surfaces',
+    secondaryTitle: 'Setup and technical tools',
+    secondaryDescription:
+      'These routes still exist, but they stay behind the main upload-first path instead of owning the first screen.',
+    secondaryToggle: 'Show more',
     stats: {
-      workspace: 'Space',
-      project: 'Library',
-      documents: 'Indexed files',
-      next: 'Next move',
-    },
-    next: {
-      setup: 'Choose a space',
-      project: 'Create or choose a library',
-      files: 'Add files',
-      finishIndexing: 'Finish indexing',
-      ask: 'Ask questions',
+      documents: 'Indexed documents',
+      documentsHint: 'Ready in the active collection.',
+      readiness: 'Ask readiness',
+      ready: 'Ready to ask',
+      notReady: 'Waiting for documents',
+      readinessHintReady: 'You can move straight into Ask.',
+      readinessHintWaiting: 'Upload first, then wait for processing.',
+      scope: 'Current collection',
     },
     hero: {
-      eyebrow: 'Product home',
-      title: 'The main RustRAG path now starts here',
-      description: 'Use Home for the everyday product path. Setup is still available, but Files and Ask are now treated as the primary experience.',
+      eyebrow: 'Upload-first home',
+      title: 'Add documents first',
+      description:
+        'The main path starts with one clear action: upload documents. RustRAG will process them, then you can ask questions against the finished collection.',
       actions: {
-        setup: 'Open Setup',
-        files: 'Open Files',
+        upload: 'Upload documents',
+        prepareUpload: 'Choose where uploads go',
         ask: 'Open Ask',
-        filesSecondary: 'Go to Files',
-        setupSecondary: 'Adjust Setup',
+      },
+      hints: {
+        uploadReady: 'Open the upload flow for the current collection.',
+        uploadBlocked: 'Choose a collection first so RustRAG knows where to put your documents.',
+      },
+      steps: {
+        upload: {
+          title: 'Upload documents',
+          body: 'Drop a text-like file or paste text into the current collection.',
+        },
+        processing: {
+          title: 'Wait for processing',
+          body: 'RustRAG queues the document and makes progress visible while it prepares search.',
+        },
+        ask: {
+          title: 'Ask clear questions',
+          body: 'When processing finishes, move straight into Ask with grounded answers.',
+        },
       },
     },
-    cards: {
-      home: {
-        title: 'Home',
-        body: 'See the active space, library, and next practical move without dropping into operator-heavy screens.',
-        action: 'Stay on Home',
+    nextSteps: {
+      eyebrow: 'Next step',
+      prepare: {
+        title: 'Choose a collection for uploads',
+        body: 'Before you can add documents, RustRAG needs one destination collection selected for this session.',
+        status: 'Required before upload',
+        action: 'Open setup',
       },
-      files: {
-        title: 'Files',
-        body: 'Add source content and watch it become searchable in the active library.',
-        action: 'Open Files',
-        ready: 'Ready for content',
-        blocked: 'Choose a library first',
+      processing: {
+        title: 'Keep going with upload',
+        body: 'Your next practical move is still document ingestion. Add the first file or check processing progress for the current collection.',
+        statusWorking: 'Processing is underway',
+        statusWaiting: 'Ready for the first upload',
+        action: 'Open uploads',
       },
       ask: {
-        title: 'Ask',
-        body: 'Ask questions against the active library and review the supporting passages.',
+        title: 'Documents are ready — ask questions next',
+        body: 'RustRAG has enough indexed material to support answers for this collection.',
+        status: 'Ready for Ask',
         action: 'Open Ask',
-        ready: 'Ready to ask',
-        blocked: 'Needs indexed content',
       },
     },
+    checklist: {
+      eyebrow: 'What happens next',
+      title: 'Human-readable path',
+      upload: {
+        title: 'Add documents',
+        body: 'Start with document upload or paste.',
+      },
+      processing: {
+        title: 'Let RustRAG process them',
+        body: 'Watch the queue until the collection is ready.',
+      },
+      ask: {
+        title: 'Ask questions from the collection',
+        body: 'Use Ask once the uploaded content is searchable.',
+      },
+    },
+    sessions: {
+      eyebrow: 'Recent Ask activity',
+      title: 'Continue from the latest conversation',
+      description: 'If you already asked something about this collection, jump back in here.',
+      blocked: 'Choose a collection first',
+      empty: 'No Ask history yet',
+      ready: '{count} messages in the latest conversation',
+      fallbackTitle: 'Latest Ask session',
+      emptyBody: 'Your first question will create a conversation here.',
+      fields: {
+        updated: 'Updated',
+        messages: 'Messages',
+      },
+      resume: 'Resume conversation',
+      start: 'Start asking',
+      openAsk: 'Open Ask',
+    },
     secondary: {
+      setup: {
+        title: 'Setup',
+        body: 'Choose the destination collection when uploads are not ready yet.',
+        action: 'Open Setup',
+      },
       graph: {
-        title: 'Technical graph',
-        body: 'Inspect graph coverage, entities, and relations when answer-level UX is not enough.',
+        title: 'Graph',
+        body: 'Inspect entities, relations, and coverage only when you need technical depth.',
         action: 'Open Graph',
       },
       api: {
-        title: 'Developer API',
-        body: 'Use tokens, examples, and integration routes only when you need automation or deeper diagnostics.',
+        title: 'API',
+        body: 'Use developer-facing integration tools and tokens outside the normal document path.',
         action: 'Open API',
       },
     },
@@ -93,25 +148,25 @@ export default {
     },
     auth: {
       eyebrow: 'Access',
-      title: 'Unlock setup in one short step',
+      title: 'Keep setup moving',
       description:
-        'Create your space and library with a real session token, then move straight into files. You can paste a token you already have or use a bootstrap secret if this backend supports it.',
-      note:
-        'The saved session token is reused only in this browser session for setup, files, and search requests.',
-      createRequired:
-        'Setup needs an authorized session token before RustRAG can create a space or library.',
+        'Create your space and library, then move straight into Files. If this backend asks for access, you can add it here without leaving setup.',
+      note: 'Any saved access stays only in this browser session for setup, files, and Ask.',
+      createRequired: 'This backend requires access before setup can create a space or library.',
       summary: {
-        ready: 'You are connected. The next practical move is choosing or creating your space, then opening Files.',
-        pending: 'Start by connecting access. Then choose a space and create the library you want to fill next.',
+        ready:
+          'Setup is unblocked. The next practical move is choosing or creating your space, then opening Files.',
+        pending:
+          'Choose or create the space you want. If this backend asks for access, open the advanced access panel and continue.',
       },
       cards: {
         auth: {
-          title: '1. Connect access',
-          body: 'Add a session token so setup can create your space and library.',
+          title: '1. Prepare access only if needed',
+          body: 'Some backends let setup work immediately. If yours is protected, add access and continue.',
           hintReady: 'Connected with {token}.',
-          hintPending: 'Use either of the methods below to continue.',
+          hintPending: 'Open advanced access only if this backend asks for it.',
           ready: 'Connected',
-          pending: 'Needed first',
+          pending: 'Maybe needed',
         },
         setup: {
           title: '2. Create your space and library',
@@ -130,27 +185,27 @@ export default {
       },
       methods: {
         manual: {
-          eyebrow: 'Bring your own token',
-          title: 'Paste an existing session token',
-          description: 'Best when you already have a bearer token from an operator or another auth flow.',
-          action: 'Use this token',
+          eyebrow: 'Existing access',
+          title: 'Paste an existing access token',
+          description: 'Best when someone already gave you the access value for this backend.',
+          action: 'Save access',
           ready: 'Ready to save',
-          connected: 'Token active',
+          connected: 'Access ready',
         },
         bootstrap: {
-          eyebrow: 'First-time setup',
-          title: 'Mint a session token from bootstrap secret',
-          description: 'Use this only for initial setup on backends that expose the bootstrap endpoint.',
-          action: 'Mint and continue',
+          eyebrow: 'Advanced setup',
+          title: 'Use the backend setup secret',
+          description: 'Use this only when the backend exposes a one-time setup route.',
+          action: 'Use setup secret',
           ready: 'Secret added',
-          optional: 'Optional path',
-          hint:
-            'If bootstrap minting works here, RustRAG will save the returned token for this browser session and use it for setup, files, and search.',
+          optional: 'Advanced option',
+          hint: 'If this route works here, RustRAG will save the returned access for this browser session and keep setup, Files, and Ask moving.',
         },
       },
       activeDescription: {
-        ready: 'This session is ready for protected setup and the path into Files stays open.',
-        pending: 'No token is active yet, so creation stays safely blocked until access is connected.',
+        ready: 'This session has the access it needs, and the path into Files stays open.',
+        pending:
+          'No extra access is stored right now. If setup is blocked, open advanced access and continue.',
       },
       states: {
         tokenSaved: {
@@ -297,8 +352,7 @@ export default {
   library: {
     eyebrow: 'Files',
     title: 'Files',
-    description:
-      'Add text or a file to the active library, then watch it become ready to ask.',
+    description: 'Add text or a file to the active library, then watch it become ready to ask.',
     action: 'Open Ask',
     statusBlocked: 'Choose a library in Setup',
     statusProcessing: '{count} active runs',
@@ -501,7 +555,8 @@ export default {
     inventory: {
       kicker: 'Library inventory',
       title: 'Browse files',
-      helper: 'See what is already in this library, check what is ready, and jump straight into Ask from a selected file.',
+      helper:
+        'See what is already in this library, check what is ready, and jump straight into Ask from a selected file.',
       emptyBadge: 'No files yet',
       emptyTitle: 'No indexed files yet',
       emptyBody: 'Completed files will appear here as soon as processing finishes.',
@@ -583,8 +638,10 @@ export default {
       hintReady: 'Your answer will stay focused on the active library.',
       hintResume: 'Continue the active session · Session {id}',
       hintBlocked: 'Choose a library in Setup before asking.',
-      hintIndexing: 'Indexing is still in progress. Ask stays blocked until RustRAG has enough content to answer reliably.',
-      hintNoContent: 'Add and index source files first. Ask cannot answer until this library has searchable content.',
+      hintIndexing:
+        'Indexing is still in progress. Ask stays blocked until RustRAG has enough content to answer reliably.',
+      hintNoContent:
+        'Add and index source files first. Ask cannot answer until this library has searchable content.',
       shortcut: 'Press Ctrl+Enter or Cmd+Enter to ask.',
       examplesLabel: 'Try one',
       examples: {
