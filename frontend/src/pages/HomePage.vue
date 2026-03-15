@@ -5,19 +5,13 @@ import { RouterLink } from 'vue-router'
 
 import {
   fetchChatSessions,
-  fetchProjects,
   fetchProjectReadiness,
-  fetchWorkspaces,
   type ChatSessionSurface,
   type ProjectReadinessSummary,
 } from 'src/boot/api'
 import PageSection from 'src/components/shell/PageSection.vue'
-import {
-  getSelectedProjectId,
-  getSelectedWorkspaceId,
-  syncSelectedProjectId,
-  syncSelectedWorkspaceId,
-} from 'src/stores/flow'
+import { getSelectedProjectId, getSelectedWorkspaceId } from 'src/stores/flow'
+import { hydrateWorkspaceProjectScope } from 'src/lib/productFlow'
 
 interface WorkspaceItem {
   id: string
@@ -138,21 +132,16 @@ const recentSessionUpdatedLabel = computed(() => {
 })
 
 onMounted(async () => {
-  workspaces.value = await fetchWorkspaces()
-  const activeWorkspaceId = syncSelectedWorkspaceId(workspaces.value)
+  const scope = await hydrateWorkspaceProjectScope({
+    setWorkspaces: (items) => {
+      workspaces.value = items
+    },
+    setProjects: (items) => {
+      projects.value = items
+    },
+  })
 
-  if (!activeWorkspaceId) {
-    projects.value = []
-    readiness.value = null
-    recentSessions.value = []
-    syncSelectedProjectId([])
-    return
-  }
-
-  projects.value = await fetchProjects(activeWorkspaceId)
-  const activeProjectId = syncSelectedProjectId(projects.value)
-
-  if (!activeProjectId) {
+  if (!scope.workspaceId || !scope.projectId) {
     readiness.value = null
     recentSessions.value = []
     return
@@ -160,8 +149,8 @@ onMounted(async () => {
 
   try {
     const [nextReadiness, nextSessions] = await Promise.all([
-      fetchProjectReadiness(activeProjectId),
-      fetchChatSessions(activeProjectId),
+      fetchProjectReadiness(scope.projectId),
+      fetchChatSessions(scope.projectId),
     ])
     readiness.value = nextReadiness
     recentSessions.value = nextSessions.slice(0, 3)
@@ -264,47 +253,7 @@ function formatDateTime(value: string) {
         </article>
       </div>
 
-      <div class="home-core-grid">
-        <article class="rr-panel rr-stack next-step-panel">
-          <div class="next-step-panel__header">
-            <div>
-              <p class="rr-kicker">{{ t('flow.home.nextSteps.eyebrow') }}</p>
-              <h3>{{ nextStepCard.title }}</h3>
-            </div>
-            <p class="next-step-panel__status">{{ nextStepCard.status }}</p>
-          </div>
-
-          <p class="rr-note">{{ nextStepCard.body }}</p>
-
-          <RouterLink class="rr-button" :to="nextStepCard.to">
-            {{ nextStepCard.action }}
-          </RouterLink>
-        </article>
-
-        <article class="rr-panel rr-panel--muted rr-stack checklist-panel">
-          <div>
-            <p class="rr-kicker">{{ t('flow.home.checklist.eyebrow') }}</p>
-            <h3>{{ t('flow.home.checklist.title') }}</h3>
-          </div>
-
-          <div class="checklist-items">
-            <article
-              v-for="item in uploadChecklist"
-              :key="item.key"
-              class="checklist-item"
-              :data-done="item.done"
-            >
-              <div class="checklist-item__marker">{{ item.done ? '✓' : '•' }}</div>
-              <div>
-                <strong>{{ item.title }}</strong>
-                <p>{{ item.body }}</p>
-              </div>
-            </article>
-          </div>
-        </article>
-      </div>
-
-      <div class="home-secondary-grid">
+      <div class="home-secondary-grid home-secondary-grid--single">
         <article class="rr-panel rr-panel--muted rr-stack session-panel">
           <div class="session-panel__header">
             <div>
@@ -340,41 +289,6 @@ function formatDateTime(value: string) {
           </article>
         </article>
 
-        <details class="rr-panel rr-panel--muted rr-stack admin-surfaces-panel">
-          <summary class="admin-surfaces-panel__summary">
-            <div>
-              <p class="rr-kicker">{{ t('flow.home.secondaryEyebrow') }}</p>
-              <h3>{{ t('flow.home.secondaryTitle') }}</h3>
-            </div>
-            <span>{{ t('flow.home.secondaryToggle') }}</span>
-          </summary>
-
-          <p class="rr-note">{{ t('flow.home.secondaryDescription') }}</p>
-
-          <div class="admin-links">
-            <RouterLink class="admin-link-card" to="/processing">
-              <div>
-                <strong>{{ t('flow.home.secondary.setup.title') }}</strong>
-                <p>{{ t('flow.home.secondary.setup.body') }}</p>
-              </div>
-              <span>{{ t('flow.home.secondary.setup.action') }}</span>
-            </RouterLink>
-            <RouterLink class="admin-link-card" to="/graph">
-              <div>
-                <strong>{{ t('flow.home.secondary.graph.title') }}</strong>
-                <p>{{ t('flow.home.secondary.graph.body') }}</p>
-              </div>
-              <span>{{ t('flow.home.secondary.graph.action') }}</span>
-            </RouterLink>
-            <RouterLink class="admin-link-card" to="/api">
-              <div>
-                <strong>{{ t('flow.home.secondary.api.title') }}</strong>
-                <p>{{ t('flow.home.secondary.api.body') }}</p>
-              </div>
-              <span>{{ t('flow.home.secondary.api.action') }}</span>
-            </RouterLink>
-          </div>
-        </details>
       </div>
     </PageSection>
   </section>
