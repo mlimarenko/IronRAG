@@ -16,7 +16,10 @@ function isActive(item: ShellNavItem) {
   return (
     activePath.value === item.to ||
     activePath.value.startsWith(`${item.to}/`) ||
-    Boolean(item.legacyTo && (activePath.value === item.legacyTo || activePath.value.startsWith(`${item.legacyTo}/`)))
+    Boolean(
+      item.legacyTo &&
+      (activePath.value === item.legacyTo || activePath.value.startsWith(`${item.legacyTo}/`)),
+    )
   )
 }
 </script>

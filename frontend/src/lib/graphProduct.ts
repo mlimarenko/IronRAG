@@ -144,7 +144,9 @@ export async function fetchGraphProductSnapshot(projectId: string): Promise<Grap
 export async function fetchGraphProjectSummary(
   projectId: string,
 ): Promise<GraphProjectSummaryResponse> {
-  const { data } = await api.get<GraphProjectSummaryResponse>(`/graph-products/${projectId}/summary`)
+  const { data } = await api.get<GraphProjectSummaryResponse>(
+    `/graph-products/${projectId}/summary`,
+  )
   return data
 }
 

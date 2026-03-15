@@ -15,21 +15,11 @@ const debugEntries = computed(() => formatDebugEntries(props.debugJson))
 <template>
   <details class="debug-block">
     <summary>{{ summaryLabel }} ({{ debugEntries.length }})</summary>
-    <p
-      v-if="!debugEntries.length"
-      class="muted"
-    >
+    <p v-if="!debugEntries.length" class="muted">
       {{ emptyMessage }}
     </p>
-    <dl
-      v-else
-      class="debug-list"
-    >
-      <div
-        v-for="entry in debugEntries"
-        :key="entry.key"
-        class="debug-list__row"
-      >
+    <dl v-else class="debug-list">
+      <div v-for="entry in debugEntries" :key="entry.key" class="debug-list__row">
         <dt>{{ entry.key }}</dt>
         <dd>
           <pre>{{ entry.preview }}</pre>

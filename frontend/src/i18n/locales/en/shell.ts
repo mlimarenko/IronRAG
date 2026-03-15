@@ -60,7 +60,8 @@ export default {
       home: {
         stage: 'Start',
         why: 'Home keeps the main product path visible first so setup, files, and asking stay easy to reach from mobile and desktop alike.',
-        previous: 'This is the landing point for the product flow before you decide whether to set up, add files, or ask.',
+        previous:
+          'This is the landing point for the product flow before you decide whether to set up, add files, or ask.',
         next: 'Move into Files when the active library is ready, or open Setup when you still need to pick the scope.',
       },
       processing: {
@@ -84,13 +85,15 @@ export default {
       graph: {
         stage: 'Inspect',
         why: 'Use this technical view only when you need graph coverage, relation evidence, or readiness details beyond the main search workflow.',
-        previous: 'Search stays the primary product path; Graph is a secondary inspection surface when answer-level grounding is not enough.',
+        previous:
+          'Search stays the primary product path; Graph is a secondary inspection surface when answer-level grounding is not enough.',
         next: 'Move into the API surface only when you need deeper diagnostics, automation, or integration work.',
       },
       api: {
         stage: 'Integrate',
         why: 'Use this developer-facing area for tokens, examples, and automation once the main product flow is already working.',
-        previous: 'Search and Files cover the core user journey first; API extends it for operators and developers.',
+        previous:
+          'Search and Files cover the core user journey first; API extends it for operators and developers.',
         next: 'Use this surface to extend the workflow outside the UI shell without crowding the primary product experience.',
       },
     },

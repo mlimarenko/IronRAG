@@ -23,8 +23,7 @@ export default {
     },
     empty: {
       noWorkspaceTitle: 'No workspace selected',
-      noWorkspaceMessage:
-        'Create or choose a workspace before rendering scoped API guidance.',
+      noWorkspaceMessage: 'Create or choose a workspace before rendering scoped API guidance.',
       noWorkspaceHint:
         'The API launchpad is workspace-first because projects, governance, and token visibility already pivot around workspace IDs.',
     },
@@ -80,7 +79,8 @@ export default {
         description:
           'The UI can reuse an existing token in browser session storage, but it does not fake or mint one for you.',
         hintReady: 'Session token {token} is ready for protected reads.',
-        hintMissing: 'Bring a token from your operator/bootstrap path before trying protected routes.',
+        hintMissing:
+          'Bring a token from your operator/bootstrap path before trying protected routes.',
       },
       scope: {
         title: 'Pick workspace and project scope',
@@ -108,8 +108,10 @@ export default {
     placeholder: 'rtrg_xxx_replace_me',
     activeLabel: 'Active session token',
     activeNone: 'No token saved',
-    activeDescription: 'Protected API reads can use the saved bearer token until this browser session ends.',
-    missingDescription: 'Public routes still work. Protected routes stay intentionally gated until a token is provided.',
+    activeDescription:
+      'Protected API reads can use the saved bearer token until this browser session ends.',
+    missingDescription:
+      'Public routes still work. Protected routes stay intentionally gated until a token is provided.',
     actions: {
       save: 'Save token',
       clear: 'Clear token',
@@ -123,8 +125,7 @@ export default {
       placeholder: 'RUSTRAG_BOOTSTRAP_TOKEN',
       action: 'Mint session token',
       actionBusy: 'Minting...',
-      hint:
-        'Use the backend bootstrap secret only for initial setup. This mints an instance-admin session token and saves it locally for workspace, project, ingestion, and query calls.',
+      hint: 'Use the backend bootstrap secret only for initial setup. This mints an instance-admin session token and saves it locally for workspace, project, ingestion, and query calls.',
       missingSecret: 'Paste the backend bootstrap secret before minting a session token.',
       success: 'Session token minted and saved for this browser session.',
       rejected: 'Bootstrap secret was rejected by the backend.',
@@ -146,7 +147,8 @@ export default {
       error: 'Check failed',
     },
     notes: {
-      sessionOnly: 'Token storage here is session-scoped and should be treated as a local testing convenience.',
+      sessionOnly:
+        'Token storage here is session-scoped and should be treated as a local testing convenience.',
       mintingOutsideUi:
         'Bootstrap minting is available when the backend exposes a bootstrap secret, but ongoing token lifecycle and secret distribution remain an operator concern.',
       plaintextOnce:
@@ -161,7 +163,8 @@ export default {
     ready: 'Protected surface visible',
     needsToken: 'Public-only mode',
     technicalSummary: 'Show technical readiness checklist',
-    technicalHint: 'Foundation checks and governance errors stay available here without dominating the page.',
+    technicalHint:
+      'Foundation checks and governance errors stay available here without dominating the page.',
     cards: {
       workspaces: 'Workspaces',
       workspacesHint: 'Public list from /v1/workspaces.',
@@ -302,12 +305,14 @@ export default {
       },
       examples: {
         title: 'Scoped example structure',
-        description: 'This page now renders examples from live workspace and project context instead of static placeholder docs.',
+        description:
+          'This page now renders examples from live workspace and project context instead of static placeholder docs.',
         note: 'That keeps future snippets grounded in real IDs, scopes, and backend URLs.',
       },
       next: {
         title: 'Missing docs layer',
-        description: 'Published docs, SDK examples, and a full bootstrap auth walkthrough are still not productized.',
+        description:
+          'Published docs, SDK examples, and a full bootstrap auth walkthrough are still not productized.',
         note: 'Those pieces should be added on top of the contract pipeline and this launchpad, not faked inside it.',
       },
     },

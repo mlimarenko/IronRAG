@@ -3,7 +3,13 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 
-import type { CreateModelProfileRequest, CreateProviderAccountRequest, CreateProjectRequest, CreateSourceRequest, CreateWorkspaceRequest } from 'src/boot/api'
+import type {
+  CreateModelProfileRequest,
+  CreateProviderAccountRequest,
+  CreateProjectRequest,
+  CreateSourceRequest,
+  CreateWorkspaceRequest,
+} from 'src/boot/api'
 import PageSection from 'src/components/shell/PageSection.vue'
 import StatusBadge from 'src/components/shell/StatusBadge.vue'
 import EmptyStateCard from 'src/components/state/EmptyStateCard.vue'
@@ -147,7 +153,9 @@ const checklist = computed(() => {
 })
 
 const completedSteps = computed(() => checklist.value.filter((step) => step.complete).length)
-const progressPercent = computed(() => Math.round((completedSteps.value / checklist.value.length) * 100))
+const progressPercent = computed(() =>
+  Math.round((completedSteps.value / checklist.value.length) * 100),
+)
 const surfaceStatus = computed(() => {
   if (refreshError.value) {
     return 'Failed'
@@ -440,11 +448,7 @@ onMounted(async () => {
       />
     </template>
 
-    <LoadingSkeletonPanel
-      v-if="loading"
-      :title="t('common.loading')"
-      :lines="7"
-    />
+    <LoadingSkeletonPanel v-if="loading" :title="t('common.loading')" :lines="7" />
 
     <template v-else>
       <ErrorStateCard
@@ -458,10 +462,7 @@ onMounted(async () => {
           <p class="onboarding-hero__eyebrow">{{ t('onboarding.progressLabel') }}</p>
           <h2>{{ completedSteps }}/{{ checklist.length }}</h2>
           <p>{{ t('onboarding.setupChecklistHint') }}</p>
-          <div
-            v-if="flashMessage || latestResult"
-            class="result-chip"
-          >
+          <div v-if="flashMessage || latestResult" class="result-chip">
             <strong>{{ flashMessage }}</strong>
             <span v-if="latestResult">{{ latestResult }}</span>
           </div>
@@ -489,18 +490,11 @@ onMounted(async () => {
               <h3>{{ t('onboarding.setupChecklistTitle') }}</h3>
               <p>{{ t('onboarding.setupChecklistHint') }}</p>
             </div>
-            <StatusBadge
-              :status="surfaceStatus"
-              :label="`${completedSteps}/${checklist.length}`"
-            />
+            <StatusBadge :status="surfaceStatus" :label="`${completedSteps}/${checklist.length}`" />
           </div>
 
           <ol class="checklist">
-            <li
-              v-for="step in checklist"
-              :key="step.key"
-              :data-complete="step.complete"
-            >
+            <li v-for="step in checklist" :key="step.key" :data-complete="step.complete">
               <div class="checklist__icon">
                 <q-icon
                   :name="step.complete ? 'check_circle' : 'radio_button_unchecked'"
@@ -570,10 +564,7 @@ onMounted(async () => {
               "
             />
           </div>
-          <q-form
-            class="form-stack"
-            @submit.prevent="submitWorkspace"
-          >
+          <q-form class="form-stack" @submit.prevent="submitWorkspace">
             <q-input
               v-model="workspaceForm.name"
               outlined
@@ -601,7 +592,9 @@ onMounted(async () => {
               <p>{{ t('onboarding.steps.project.summary') }}</p>
             </div>
             <StatusBadge
-              :status="projects.length > 0 ? 'Healthy' : selectedWorkspaceId ? 'Pending' : 'Blocked'"
+              :status="
+                projects.length > 0 ? 'Healthy' : selectedWorkspaceId ? 'Pending' : 'Blocked'
+              "
               :label="
                 projects.length > 0
                   ? t('onboarding.steps.project.complete')
@@ -611,10 +604,7 @@ onMounted(async () => {
               "
             />
           </div>
-          <q-form
-            class="form-stack"
-            @submit.prevent="submitProject"
-          >
+          <q-form class="form-stack" @submit.prevent="submitProject">
             <q-select
               v-model="selectedWorkspaceId"
               outlined
@@ -670,8 +660,8 @@ onMounted(async () => {
             <StatusBadge
               :status="
                 providerState &&
-                  providerState.provider_accounts.length > 0 &&
-                  providerState.model_profiles.length > 0
+                providerState.provider_accounts.length > 0 &&
+                providerState.model_profiles.length > 0
                   ? 'Healthy'
                   : selectedWorkspaceId
                     ? 'Pending'
@@ -679,8 +669,8 @@ onMounted(async () => {
               "
               :label="
                 providerState &&
-                  providerState.provider_accounts.length > 0 &&
-                  providerState.model_profiles.length > 0
+                providerState.provider_accounts.length > 0 &&
+                providerState.model_profiles.length > 0
                   ? t('onboarding.steps.provider.complete')
                   : selectedWorkspaceId
                     ? t('onboarding.statuses.pending')
@@ -688,10 +678,7 @@ onMounted(async () => {
               "
             />
           </div>
-          <q-form
-            class="form-stack"
-            @submit.prevent="submitProvider"
-          >
+          <q-form class="form-stack" @submit.prevent="submitProvider">
             <q-select
               v-model="selectedWorkspaceId"
               outlined
@@ -743,7 +730,7 @@ onMounted(async () => {
               :label="t('onboarding.steps.provider.action')"
               :loading="
                 providersStore.createAccountState.status === 'loading' ||
-                  providersStore.createModelProfileState.status === 'loading'
+                providersStore.createModelProfileState.status === 'loading'
               "
             />
           </q-form>
@@ -777,10 +764,7 @@ onMounted(async () => {
               "
             />
           </div>
-          <q-form
-            class="form-stack"
-            @submit.prevent="submitDocument"
-          >
+          <q-form class="form-stack" @submit.prevent="submitDocument">
             <q-select
               v-model="selectedProjectId"
               outlined
@@ -838,8 +822,8 @@ onMounted(async () => {
               :label="t('onboarding.steps.document.action')"
               :loading="
                 documentsStore.ingestState.status === 'loading' ||
-                  documentsStore.createSourceState.status === 'loading' ||
-                  documentsStore.createJobState.status === 'loading'
+                documentsStore.createSourceState.status === 'loading' ||
+                documentsStore.createJobState.status === 'loading'
               "
             />
           </q-form>
@@ -859,7 +843,9 @@ onMounted(async () => {
               <p>{{ currentProject?.name ?? t('common.notSelectedYet') }}</p>
             </div>
             <StatusBadge
-              :status="readiness?.ready_for_query ? 'Healthy' : selectedProjectId ? 'Pending' : 'Blocked'"
+              :status="
+                readiness?.ready_for_query ? 'Healthy' : selectedProjectId ? 'Pending' : 'Blocked'
+              "
               :label="formatReadinessStatus(readiness?.indexing_state)"
             />
           </div>
@@ -868,10 +854,7 @@ onMounted(async () => {
             :title="t('onboarding.cards.readiness')"
             :message="t('onboarding.empty.noProject')"
           />
-          <div
-            v-else
-            class="metric-grid"
-          >
+          <div v-else class="metric-grid">
             <div>
               <span>{{ t('onboarding.metrics.readiness') }}</span>
               <strong>{{ readiness.ready_for_query ? t('common.yes') : t('common.no') }}</strong>
@@ -899,20 +882,16 @@ onMounted(async () => {
             </div>
             <StatusBadge
               :status="providerState ? 'Healthy' : 'Pending'"
-              :label="providerState ? t('onboarding.statuses.active') : t('onboarding.statuses.pending')"
+              :label="
+                providerState ? t('onboarding.statuses.active') : t('onboarding.statuses.pending')
+              "
             />
           </div>
           <div class="resource-columns">
             <div>
               <h4>{{ t('providers.providerAccounts') }}</h4>
-              <ul
-                v-if="providerState?.provider_accounts.length"
-                class="resource-list"
-              >
-                <li
-                  v-for="account in providerState.provider_accounts"
-                  :key="account.id"
-                >
+              <ul v-if="providerState?.provider_accounts.length" class="resource-list">
+                <li v-for="account in providerState.provider_accounts" :key="account.id">
                   <span>{{ account.label }}</span>
                   <small>{{ account.provider_kind }}</small>
                 </li>
@@ -925,14 +904,8 @@ onMounted(async () => {
             </div>
             <div>
               <h4>{{ t('documents.title') }}</h4>
-              <ul
-                v-if="projectDocumentState?.documents.data.length"
-                class="resource-list"
-              >
-                <li
-                  v-for="document in projectDocumentState.documents.data"
-                  :key="document.id"
-                >
+              <ul v-if="projectDocumentState?.documents.data.length" class="resource-list">
+                <li v-for="document in projectDocumentState.documents.data" :key="document.id">
                   <span>{{ document.title || document.external_key }}</span>
                   <small>{{ document.id }}</small>
                 </li>

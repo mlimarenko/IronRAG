@@ -13,9 +13,7 @@ withDefaults(
 
 <template>
   <article class="rr-empty-state">
-    <div class="rr-empty-state__icon" aria-hidden="true">
-      ○
-    </div>
+    <div class="rr-empty-state__icon" aria-hidden="true">○</div>
     <div class="rr-empty-state__copy">
       <h3>{{ title }}</h3>
       <p>{{ message }}</p>

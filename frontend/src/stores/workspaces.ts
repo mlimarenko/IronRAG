@@ -18,7 +18,9 @@ export interface WorkspaceListItem extends WorkspaceSummary {
 export const useWorkspacesStore = defineStore('workspaces', () => {
   const listState = ref<AsyncState<WorkspaceListItem[]>>(createAsyncState<WorkspaceListItem[]>([]))
   const governanceById = ref<Record<string, AsyncState<WorkspaceGovernanceSummary | null>>>({})
-  const createState = ref<AsyncState<WorkspaceListItem | null>>(createAsyncState<WorkspaceListItem | null>(null))
+  const createState = ref<AsyncState<WorkspaceListItem | null>>(
+    createAsyncState<WorkspaceListItem | null>(null),
+  )
 
   const items = computed(() => listState.value.data)
 
@@ -60,7 +62,10 @@ export const useWorkspacesStore = defineStore('workspaces', () => {
     createState.value.error = null
     try {
       const created = normalizeWorkspace(await createWorkspace(payload))
-      listState.value.data = [created, ...listState.value.data.filter((item) => item.id !== created.id)]
+      listState.value.data = [
+        created,
+        ...listState.value.data.filter((item) => item.id !== created.id),
+      ]
       listState.value.status = 'success'
       listState.value.lastLoadedAt = new Date().toISOString()
       createState.value.data = created
@@ -69,7 +74,8 @@ export const useWorkspacesStore = defineStore('workspaces', () => {
       return created
     } catch (error) {
       createState.value.status = 'error'
-      createState.value.error = error instanceof Error ? error.message : 'Unknown workspace creation error'
+      createState.value.error =
+        error instanceof Error ? error.message : 'Unknown workspace creation error'
       throw error
     }
   }

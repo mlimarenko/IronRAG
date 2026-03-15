@@ -41,8 +41,7 @@ export default {
       authConnected: 'Bearer token сохранён',
       authMissing: 'Bearer token отсутствует',
       authHintReady: 'Хранится в browser session как {token}.',
-      authHintMissing:
-        'Вставьте token ниже, чтобы открыть auth-required examples и inventory.',
+      authHintMissing: 'Вставьте token ниже, чтобы открыть auth-required examples и inventory.',
       workspace: 'Workspace scope',
       workspaceMissing: 'Workspace не выбран',
       workspaceHintReady: 'Текущие examples уже завязаны на {workspace}.',
@@ -127,8 +126,7 @@ export default {
       placeholder: 'RUSTRAG_BOOTSTRAP_TOKEN',
       action: 'Выпустить session token',
       actionBusy: 'Выпускаем...',
-      hint:
-        'Используйте backend bootstrap secret только для первичного setup. Он выпускает instance-admin session token и сохраняет его локально для workspace, project, ingestion и query вызовов.',
+      hint: 'Используйте backend bootstrap secret только для первичного setup. Он выпускает instance-admin session token и сохраняет его локально для workspace, project, ingestion и query вызовов.',
       missingSecret: 'Сначала вставьте backend bootstrap secret.',
       success: 'Session token выпущен и сохранён для этой browser session.',
       rejected: 'Backend отклонил bootstrap secret.',
@@ -166,7 +164,8 @@ export default {
     ready: 'Protected surface виден',
     needsToken: 'Режим только public',
     technicalSummary: 'Показать технический readiness checklist',
-    technicalHint: 'Foundation-checks и governance errors остаются доступны здесь, но больше не доминируют на странице.',
+    technicalHint:
+      'Foundation-checks и governance errors остаются доступны здесь, но больше не доминируют на странице.',
     cards: {
       workspaces: 'Workspaces',
       workspacesHint: 'Публичный список из /v1/workspaces.',
@@ -244,8 +243,7 @@ export default {
       },
       projects: {
         title: 'Получить список проектов workspace',
-        description:
-          'Найдите проекты выбранного workspace до того, как выбирать query target.',
+        description: 'Найдите проекты выбранного workspace до того, как выбирать query target.',
         note: 'Хороший первый вызов, когда известен только workspace ID.',
       },
       workspaceGovernance: {
@@ -256,8 +254,7 @@ export default {
       },
       runQuery: {
         title: 'Запустить grounded query',
-        description:
-          'Потрогать основной retrieval-and-answer path по выбранному проекту.',
+        description: 'Потрогать основной retrieval-and-answer path по выбранному проекту.',
         note: 'Это первый реалистичный product-facing API example после discovery.',
       },
     },

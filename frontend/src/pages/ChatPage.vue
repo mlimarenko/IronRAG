@@ -260,29 +260,31 @@ watch(
   { immediate: true },
 )
 
-watch(() => selectedProjectId.value, async (projectId) => {
-  const scopedProjectId = ensureProjectMatchesWorkspace(projects.value, projectId)
-  result.value = null
-  detail.value = null
-  errorMessage.value = null
-  readiness.value = null
-  sessions.value = []
-  messages.value = []
-  activeSessionId.value = ''
-  showMobileSessions.value = false
+watch(
+  () => selectedProjectId.value,
+  async (projectId) => {
+    const scopedProjectId = ensureProjectMatchesWorkspace(projects.value, projectId)
+    result.value = null
+    detail.value = null
+    errorMessage.value = null
+    readiness.value = null
+    sessions.value = []
+    messages.value = []
+    activeSessionId.value = ''
+    showMobileSessions.value = false
 
-  if (!scopedProjectId) {
-    return
-  }
+    if (!scopedProjectId) {
+      return
+    }
 
-  if (scopedProjectId !== projectId) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
-    setSelectedProjectId(scopedProjectId)
-  }
+    if (scopedProjectId !== projectId) {
+      setSelectedProjectId(scopedProjectId)
+    }
 
-  await loadReadiness(scopedProjectId)
-  await loadSessions(scopedProjectId)
-})
+    await loadReadiness(scopedProjectId)
+    await loadSessions(scopedProjectId)
+  },
+)
 
 watch(activeSessionId, async (sessionId, previousSessionId) => {
   if (!sessionId || sessionId === previousSessionId) {

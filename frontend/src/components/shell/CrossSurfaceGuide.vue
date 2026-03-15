@@ -18,7 +18,9 @@ const nextItem = computed(() => shellNavItems[activeIndex.value + 1] ?? null)
 const activeItem = computed(() => getShellNavItem(props.activeSection))
 
 const relatedItems = computed(() =>
-  shellNavItems.filter((item) => item.key !== props.activeSection && item.stage !== activeItem.value.stage).slice(0, 2),
+  shellNavItems
+    .filter((item) => item.key !== props.activeSection && item.stage !== activeItem.value.stage)
+    .slice(0, 2),
 )
 </script>
 
@@ -30,7 +32,9 @@ const relatedItems = computed(() =>
         <h3>{{ t(`shell.pages.${activeSection}.title`) }}</h3>
         <p class="rr-note">{{ t(`shell.guide.sections.${activeSection}.why`) }}</p>
       </div>
-      <span class="cross-surface-guide__stage">{{ t(`shell.guide.sections.${activeSection}.stage`) }}</span>
+      <span class="cross-surface-guide__stage">{{
+        t(`shell.guide.sections.${activeSection}.stage`)
+      }}</span>
     </div>
 
     <div class="cross-surface-guide__grid">
@@ -40,7 +44,9 @@ const relatedItems = computed(() =>
           <strong>{{ t(`shell.nav.items.${previousItem.key}.label`) }}</strong>
           <small>{{ t(`shell.guide.sections.${activeSection}.previous`) }}</small>
         </RouterLink>
-        <p v-else class="cross-surface-guide__empty">{{ t('shell.guide.start') }}</p>
+        <p v-else class="cross-surface-guide__empty">
+          {{ t('shell.guide.start') }}
+        </p>
       </section>
 
       <section class="cross-surface-guide__block">
@@ -49,7 +55,9 @@ const relatedItems = computed(() =>
           <strong>{{ t(`shell.nav.items.${nextItem.key}.label`) }}</strong>
           <small>{{ t(`shell.guide.sections.${activeSection}.next`) }}</small>
         </RouterLink>
-        <p v-else class="cross-surface-guide__empty">{{ t('shell.guide.end') }}</p>
+        <p v-else class="cross-surface-guide__empty">
+          {{ t('shell.guide.end') }}
+        </p>
       </section>
 
       <section class="cross-surface-guide__block cross-surface-guide__block--related">

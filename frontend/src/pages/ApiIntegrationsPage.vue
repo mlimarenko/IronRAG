@@ -29,10 +29,7 @@ import {
   maskApiBearerToken,
   setApiBearerToken,
 } from 'src/lib/apiAuth'
-import {
-  setWorkspaceWithProjectReset,
-  syncWorkspaceProjectScope,
-} from 'src/stores/flow'
+import { setWorkspaceWithProjectReset, syncWorkspaceProjectScope } from 'src/stores/flow'
 import { useIntegrationsStore } from 'src/stores/integrations'
 
 interface TokenSummary {
@@ -136,7 +133,10 @@ const pageStatus = computed(() => {
     return 'Warning'
   }
 
-  if (hasSessionToken.value && (governanceState.value === 'ready' || tokenInventoryState.value === 'ready')) {
+  if (
+    hasSessionToken.value &&
+    (governanceState.value === 'ready' || tokenInventoryState.value === 'ready')
+  ) {
     return 'Healthy'
   }
 
@@ -156,7 +156,10 @@ const pageStatusLabel = computed(() => {
     return t('api.page.states.foundation')
   }
 
-  if (hasSessionToken.value && (governanceState.value === 'ready' || tokenInventoryState.value === 'ready')) {
+  if (
+    hasSessionToken.value &&
+    (governanceState.value === 'ready' || tokenInventoryState.value === 'ready')
+  ) {
     return t('api.page.states.ready')
   }
 
@@ -185,10 +188,7 @@ const authPanelStatus = computed(() => {
     }
   }
 
-  if (
-    governanceState.value === 'unauthorized' ||
-    tokenInventoryState.value === 'unauthorized'
-  ) {
+  if (governanceState.value === 'unauthorized' || tokenInventoryState.value === 'unauthorized') {
     return {
       status: 'Warning',
       label: t('api.session.status.limited'),
@@ -333,7 +333,8 @@ const inventoryCards = computed(() => [
   },
   {
     label: t('api.inventory.cards.providerAccounts'),
-    value: governanceState.value === 'ready' ? String(governance.value?.provider_accounts ?? 0) : '—',
+    value:
+      governanceState.value === 'ready' ? String(governance.value?.provider_accounts ?? 0) : '—',
     hint:
       governanceState.value === 'ready'
         ? t('api.inventory.cards.providerAccountsHint')
@@ -379,9 +380,12 @@ const projectGuidance = computed(() => {
 
   const workspaceSlug = selectedWorkspace.value.slug
   const projectSlug = selectedProject.value?.slug ?? 'your-project'
-  const workspaceTokenLabel = tokens.value.find((token) => token.workspace_id === selectedWorkspace.value?.id)?.label
+  const workspaceTokenLabel = tokens.value.find(
+    (token) => token.workspace_id === selectedWorkspace.value?.id,
+  )?.label
   const workspaceScopedToken = tokens.value.find(
-    (token) => token.workspace_id === selectedWorkspace.value?.id && token.token_kind !== 'instance_admin',
+    (token) =>
+      token.workspace_id === selectedWorkspace.value?.id && token.token_kind !== 'instance_admin',
   )
 
   return {
@@ -468,10 +472,7 @@ curl -s ${backendUrl}/v1/query \\
     "query_text": "What changed in the onboarding flow?",
     "top_k": 5
   }'`,
-      notes: [
-        t('api.examples.cards.runQuery.note'),
-        t('api.examples.shared.workspaceScopeNote'),
-      ],
+      notes: [t('api.examples.cards.runQuery.note'), t('api.examples.shared.workspaceScopeNote')],
     },
   ]
 })
@@ -483,10 +484,7 @@ const groundworkCards = computed<GroundworkCard[]>(() => [
     description: t('api.groundwork.cards.contract.description'),
     status: 'Ready',
     statusLabel: t('api.groundwork.status.ready'),
-    notes: [
-      'backend/contracts/rustrag.openapi.yaml',
-      t('api.groundwork.cards.contract.note'),
-    ],
+    notes: ['backend/contracts/rustrag.openapi.yaml', t('api.groundwork.cards.contract.note')],
   },
   {
     key: 'types',
@@ -494,10 +492,7 @@ const groundworkCards = computed<GroundworkCard[]>(() => [
     description: t('api.groundwork.cards.types.description'),
     status: 'Ready',
     statusLabel: t('api.groundwork.status.ready'),
-    notes: [
-      'frontend/src/contracts/api/generated.ts',
-      'npm run api:generate',
-    ],
+    notes: ['frontend/src/contracts/api/generated.ts', 'npm run api:generate'],
   },
   {
     key: 'examples',
@@ -677,7 +672,8 @@ async function loadTokens(workspaceId: string) {
     }
 
     tokenInventoryState.value = 'error'
-    tokenInventoryError.value = error instanceof Error ? error.message : t('api.page.errors.unknown')
+    tokenInventoryError.value =
+      error instanceof Error ? error.message : t('api.page.errors.unknown')
   }
 }
 
@@ -695,7 +691,10 @@ async function refreshProtectedSurface() {
     return
   }
 
-  await Promise.all([loadGovernance(selectedWorkspaceId.value), loadTokens(selectedWorkspaceId.value)])
+  await Promise.all([
+    loadGovernance(selectedWorkspaceId.value),
+    loadTokens(selectedWorkspaceId.value),
+  ])
 }
 
 async function refreshPage() {
@@ -788,11 +787,7 @@ onMounted(async () => {
     <ProductSpine active-section="api" />
     <CrossSurfaceGuide active-section="api" />
 
-    <LoadingSkeletonPanel
-      v-if="loading"
-      :title="t('api.page.loadingTitle')"
-      :lines="8"
-    />
+    <LoadingSkeletonPanel v-if="loading" :title="t('api.page.loadingTitle')" :lines="8" />
 
     <ErrorStateCard
       v-else-if="errorMessage"
@@ -817,15 +812,9 @@ onMounted(async () => {
         </div>
 
         <div class="workspace-strip__stack">
-          <StatusBadge
-            :status="authPanelStatus.status"
-            :label="authPanelStatus.label"
-          />
+          <StatusBadge :status="authPanelStatus.status" :label="authPanelStatus.label" />
 
-          <div
-            v-if="workspaces.length > 1"
-            class="workspace-strip__actions"
-          >
+          <div v-if="workspaces.length > 1" class="workspace-strip__actions">
             <button
               v-for="workspace in workspaces"
               :key="workspace.id"
@@ -842,11 +831,7 @@ onMounted(async () => {
       </section>
 
       <div class="summary-grid summary-grid--launchpad">
-        <article
-          v-for="card in launchpadCards"
-          :key="card.label"
-          class="summary-card"
-        >
+        <article v-for="card in launchpadCards" :key="card.label" class="summary-card">
           <span>{{ card.label }}</span>
           <strong class="summary-card__value">{{ card.value }}</strong>
           <small>{{ card.hint }}</small>
@@ -864,17 +849,10 @@ onMounted(async () => {
           </div>
 
           <div class="step-grid">
-            <article
-              v-for="(step, index) in startSteps"
-              :key="step.key"
-              class="step-card"
-            >
+            <article v-for="(step, index) in startSteps" :key="step.key" class="step-card">
               <div class="step-card__header">
                 <span class="step-card__index">{{ index + 1 }}</span>
-                <StatusBadge
-                  :status="step.status"
-                  :label="step.statusLabel"
-                />
+                <StatusBadge :status="step.status" :label="step.statusLabel" />
               </div>
               <h4>{{ step.title }}</h4>
               <p>{{ step.description }}</p>
@@ -899,10 +877,7 @@ onMounted(async () => {
               <h3>{{ t('api.session.title') }}</h3>
               <p>{{ t('api.session.description') }}</p>
             </div>
-            <StatusBadge
-              :status="authPanelStatus.status"
-              :label="authPanelStatus.label"
-            />
+            <StatusBadge :status="authPanelStatus.status" :label="authPanelStatus.label" />
           </div>
 
           <div class="rr-form-grid">
@@ -914,7 +889,7 @@ onMounted(async () => {
                 type="password"
                 :placeholder="t('api.session.placeholder')"
                 autocomplete="off"
-              >
+              />
             </label>
           </div>
 
@@ -949,31 +924,18 @@ onMounted(async () => {
                 }}
               </p>
             </div>
-            <StatusBadge
-              :status="authPanelStatus.status"
-              :label="authPanelStatus.label"
-            />
+            <StatusBadge :status="authPanelStatus.status" :label="authPanelStatus.label" />
           </article>
 
           <ul class="checklist">
-            <li
-              v-for="item in protectedSurfaceChecklist"
-              :key="item.key"
-              class="checklist__item"
-            >
-              <StatusBadge
-                :status="item.status"
-                :label="item.label"
-              />
+            <li v-for="item in protectedSurfaceChecklist" :key="item.key" class="checklist__item">
+              <StatusBadge :status="item.status" :label="item.label" />
               <span>{{ item.text }}</span>
             </li>
           </ul>
 
           <ul class="session-notes">
-            <li
-              v-for="note in sessionNotes"
-              :key="note"
-            >
+            <li v-for="note in sessionNotes" :key="note">
               {{ note }}
             </li>
           </ul>
@@ -988,28 +950,18 @@ onMounted(async () => {
               <h3>{{ t('api.examples.title') }}</h3>
               <p>{{ t('api.examples.description') }}</p>
             </div>
-            <StatusBadge
-              status="Info"
-              :label="t('api.examples.liveSurface')"
-            />
+            <StatusBadge status="Info" :label="t('api.examples.liveSurface')" />
           </div>
 
           <div class="examples-grid">
-            <article
-              v-for="example in exampleCards"
-              :key="example.key"
-              class="example-card"
-            >
+            <article v-for="example in exampleCards" :key="example.key" class="example-card">
               <div class="example-card__header">
                 <div>
                   <h4>{{ example.title }}</h4>
                   <p>{{ example.description }}</p>
                 </div>
                 <div class="example-card__meta">
-                  <StatusBadge
-                    :status="example.accessStatus"
-                    :label="example.accessLabel"
-                  />
+                  <StatusBadge :status="example.accessStatus" :label="example.accessLabel" />
                   <div class="method-chip">
                     <strong>{{ example.method }}</strong>
                     <small>{{ example.path }}</small>
@@ -1020,10 +972,7 @@ onMounted(async () => {
               <pre><code>{{ example.body }}</code></pre>
 
               <ul class="example-notes">
-                <li
-                  v-for="note in example.notes"
-                  :key="note"
-                >
+                <li v-for="note in example.notes" :key="note">
                   {{ note }}
                 </li>
               </ul>
@@ -1040,7 +989,11 @@ onMounted(async () => {
             </div>
             <StatusBadge
               :status="selectedProject ? 'Healthy' : 'Info'"
-              :label="selectedProject ? t('api.guidance.projectScoped') : t('api.guidance.workspaceScoped')"
+              :label="
+                selectedProject
+                  ? t('api.guidance.projectScoped')
+                  : t('api.guidance.workspaceScoped')
+              "
             />
           </div>
 
@@ -1067,17 +1020,11 @@ onMounted(async () => {
             </button>
           </div>
 
-          <div
-            v-if="projectGuidance"
-            class="guidance-card"
-          >
+          <div v-if="projectGuidance" class="guidance-card">
             <h4>{{ projectGuidance.title }}</h4>
             <p>{{ projectGuidance.description }}</p>
             <ul class="guidance-list">
-              <li
-                v-for="bullet in projectGuidance.bullets"
-                :key="bullet"
-              >
+              <li v-for="bullet in projectGuidance.bullets" :key="bullet">
                 {{ bullet }}
               </li>
             </ul>
@@ -1094,7 +1041,11 @@ onMounted(async () => {
               <p>{{ t('api.inventory.description') }}</p>
             </div>
             <StatusBadge
-              :status="governanceState === 'ready' || tokenInventoryState === 'ready' ? 'Healthy' : 'Warning'"
+              :status="
+                governanceState === 'ready' || tokenInventoryState === 'ready'
+                  ? 'Healthy'
+                  : 'Warning'
+              "
               :label="
                 governanceState === 'ready' || tokenInventoryState === 'ready'
                   ? t('api.inventory.ready')
@@ -1104,11 +1055,7 @@ onMounted(async () => {
           </div>
 
           <div class="summary-grid">
-            <article
-              v-for="card in inventoryCards"
-              :key="card.label"
-              class="summary-card"
-            >
+            <article v-for="card in inventoryCards" :key="card.label" class="summary-card">
               <span>{{ card.label }}</span>
               <strong class="summary-card__value">{{ card.value }}</strong>
               <small>{{ card.hint }}</small>
@@ -1122,11 +1069,7 @@ onMounted(async () => {
             </summary>
 
             <ul class="checklist">
-              <li
-                v-for="item in foundationChecklist"
-                :key="item.key"
-                class="checklist__item"
-              >
+              <li v-for="item in foundationChecklist" :key="item.key" class="checklist__item">
                 <StatusBadge
                   :status="item.ready ? 'Healthy' : 'Warning'"
                   :label="item.ready ? t('api.foundation.ready') : t('api.foundation.todo')"
@@ -1135,10 +1078,7 @@ onMounted(async () => {
               </li>
             </ul>
 
-            <p
-              v-if="governanceError"
-              class="panel-note"
-            >
+            <p v-if="governanceError" class="panel-note">
               {{ governanceError }}
             </p>
           </details>
@@ -1151,29 +1091,17 @@ onMounted(async () => {
               <h3>{{ t('api.tokens.title') }}</h3>
               <p>{{ t('api.tokens.description') }}</p>
             </div>
-            <StatusBadge
-              :status="tokenInventoryBadge.status"
-              :label="tokenInventoryBadge.label"
-            />
+            <StatusBadge :status="tokenInventoryBadge.status" :label="tokenInventoryBadge.label" />
           </div>
 
-          <ul
-            v-if="tokenInventoryState === 'ready' && tokens.length > 0"
-            class="token-list"
-          >
-            <li
-              v-for="token in tokens"
-              :key="token.id"
-              class="token-card"
-            >
+          <ul v-if="tokenInventoryState === 'ready' && tokens.length > 0" class="token-list">
+            <li v-for="token in tokens" :key="token.id" class="token-card">
               <div class="token-card__header">
                 <div>
                   <strong>{{ token.label }}</strong>
                   <p>{{ token.token_kind }} · {{ token.id.slice(0, 8) }}</p>
                 </div>
-                <StatusBadge
-                  :status="token.status"
-                />
+                <StatusBadge :status="token.status" />
               </div>
 
               <div class="token-card__meta">
@@ -1240,27 +1168,17 @@ onMounted(async () => {
           </div>
 
           <div class="groundwork-grid">
-            <article
-              v-for="card in groundworkCards"
-              :key="card.key"
-              class="groundwork-card"
-            >
+            <article v-for="card in groundworkCards" :key="card.key" class="groundwork-card">
               <div class="groundwork-card__header">
                 <div>
                   <h4>{{ card.title }}</h4>
                   <p>{{ card.description }}</p>
                 </div>
-                <StatusBadge
-                  :status="card.status"
-                  :label="card.statusLabel"
-                />
+                <StatusBadge :status="card.status" :label="card.statusLabel" />
               </div>
 
               <ul class="groundwork-notes">
-                <li
-                  v-for="note in card.notes"
-                  :key="note"
-                >
+                <li v-for="note in card.notes" :key="note">
                   {{ note }}
                 </li>
               </ul>
@@ -1286,27 +1204,20 @@ onMounted(async () => {
           </div>
 
           <div class="endpoint-grid">
-            <article
-              v-for="endpoint in endpointCards"
-              :key="endpoint.key"
-              class="endpoint-card"
-            >
+            <article v-for="endpoint in endpointCards" :key="endpoint.key" class="endpoint-card">
               <div class="endpoint-card__header">
                 <div>
                   <h4>{{ endpoint.label }}</h4>
                   <p>{{ endpoint.baseUrl }}</p>
                 </div>
-              <StatusBadge
-                :status="endpoint.status === 'configured' ? 'Healthy' : 'Warning'"
-                :label="t(`common.status.${endpoint.status}`)"
-              />
+                <StatusBadge
+                  :status="endpoint.status === 'configured' ? 'Healthy' : 'Warning'"
+                  :label="t(`common.status.${endpoint.status}`)"
+                />
               </div>
 
               <ul class="endpoint-links">
-                <li
-                  v-for="doc in endpoint.docs"
-                  :key="doc"
-                >
+                <li v-for="doc in endpoint.docs" :key="doc">
                   <code>{{ doc }}</code>
                 </li>
               </ul>

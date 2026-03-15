@@ -919,11 +919,7 @@ onUnmounted(() => {
         >
           {{ t('flow.library.processing.refresh') }}
         </button>
-        <RouterLink
-          class="rr-button"
-          to="/search"
-          :aria-disabled="!canGoToAsk"
-        >
+        <RouterLink class="rr-button" to="/search" :aria-disabled="!canGoToAsk">
           {{ t('flow.library.action') }}
         </RouterLink>
       </template>
@@ -935,11 +931,7 @@ onUnmounted(() => {
             <h2>{{ t('flow.library.title') }}</h2>
             <p>{{ t('flow.library.description') }}</p>
           </div>
-          <StatusBadge
-            :status="pageStatus.status"
-            :label="pageStatus.label"
-            emphasis="strong"
-          />
+          <StatusBadge :status="pageStatus.status" :label="pageStatus.label" emphasis="strong" />
         </div>
 
         <div class="flow-reset__scope">
@@ -958,17 +950,10 @@ onUnmounted(() => {
           </article>
         </div>
 
-        <article
-          v-if="feedback"
-          class="feedback-banner"
-          :data-tone="feedback.tone"
-        >
+        <article v-if="feedback" class="feedback-banner" :data-tone="feedback.tone">
           <strong>{{ feedback.title }}</strong>
           <p>{{ feedback.body }}</p>
-          <p
-            v-if="feedback.detail"
-            class="feedback-banner__detail"
-          >
+          <p v-if="feedback.detail" class="feedback-banner__detail">
             {{ feedback.detail }}
           </p>
         </article>
@@ -1008,13 +993,10 @@ onUnmounted(() => {
                 type="file"
                 :accept="acceptedUploadTypes"
                 @change="handleUploadFileChange"
-              >
+              />
 
               <div class="upload-dropzone__body">
-                <StatusBadge
-                  tone="info"
-                  :label="t('flow.library.upload.dropzoneIdleBadge')"
-                />
+                <StatusBadge tone="info" :label="t('flow.library.upload.dropzoneIdleBadge')" />
                 <h4>
                   {{
                     isUploadDragActive
@@ -1047,31 +1029,21 @@ onUnmounted(() => {
                 class="rr-control"
                 type="text"
                 :placeholder="t('flow.library.upload.titlePlaceholder')"
-              >
+              />
               <p class="rr-field__hint">{{ t('flow.library.upload.titleHint') }}</p>
             </label>
 
-            <div
-              v-if="uploadFile && uploadSelection"
-              class="upload-selection-card"
-            >
+            <div v-if="uploadFile && uploadSelection" class="upload-selection-card">
               <div class="upload-selection-card__meta">
                 <strong>{{ uploadFile.name }}</strong>
                 <span class="rr-muted">
                   {{ uploadSelection.fileKindLabel }} · {{ formatFileSize(uploadFile.size) }}
                 </span>
               </div>
-              <StatusBadge
-                :tone="uploadSelection.badgeTone"
-                :label="uploadSelection.badgeLabel"
-              />
+              <StatusBadge :tone="uploadSelection.badgeTone" :label="uploadSelection.badgeLabel" />
             </div>
 
-            <p
-              v-if="uploadSelection"
-              class="rr-banner"
-              :data-tone="uploadSelection.bannerTone"
-            >
+            <p v-if="uploadSelection" class="rr-banner" :data-tone="uploadSelection.bannerTone">
               {{ uploadSelection.message }}
             </p>
 
@@ -1170,10 +1142,7 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <details
-              v-if="highlightedJobView"
-              class="secondary-disclosure"
-            >
+            <details v-if="highlightedJobView" class="secondary-disclosure">
               <summary>{{ t('flow.library.processing.detailsToggle') }}</summary>
 
               <p class="rr-note">{{ highlightedJobView.presentation.summary }}</p>
@@ -1219,16 +1188,10 @@ onUnmounted(() => {
                 </article>
               </div>
 
-              <article
-                v-if="highlightedJobView.error"
-                class="processing-error"
-              >
+              <article v-if="highlightedJobView.error" class="processing-error">
                 <strong>{{ highlightedJobView.error.title }}</strong>
                 <p>{{ highlightedJobView.error.body }}</p>
-                <p
-                  v-if="highlightedJobView.error.detail"
-                  class="processing-error__detail"
-                >
+                <p v-if="highlightedJobView.error.detail" class="processing-error__detail">
                   {{ highlightedJobView.error.detail }}
                 </p>
               </article>
@@ -1273,10 +1236,7 @@ onUnmounted(() => {
 
           <p class="rr-note">{{ t('flow.library.inventory.helper') }}</p>
 
-          <div
-            v-if="documents.length"
-            class="file-library-toolbar"
-          >
+          <div v-if="documents.length" class="file-library-toolbar">
             <label class="rr-field file-library-toolbar__search">
               <span class="rr-field__label">{{ t('flow.library.inventory.searchLabel') }}</span>
               <input
@@ -1284,7 +1244,7 @@ onUnmounted(() => {
                 class="rr-control"
                 type="search"
                 :placeholder="t('flow.library.inventory.searchPlaceholder')"
-              >
+              />
             </label>
           </div>
 
@@ -1294,10 +1254,7 @@ onUnmounted(() => {
             :message="t('flow.library.inventory.emptyBody')"
           />
 
-          <div
-            v-else
-            class="file-library-list recent-files-list"
-          >
+          <div v-else class="file-library-list recent-files-list">
             <button
               v-for="record in recentFileRecords"
               :key="record.id"
@@ -1309,10 +1266,7 @@ onUnmounted(() => {
               <div class="file-library-row__copy">
                 <div class="file-library-row__title-line">
                   <strong>{{ record.title }}</strong>
-                  <StatusBadge
-                    :tone="record.statusTone"
-                    :label="record.statusLabel"
-                  />
+                  <StatusBadge :tone="record.statusTone" :label="record.statusLabel" />
                 </div>
                 <p class="rr-muted">{{ record.summaryLabel }}</p>
               </div>

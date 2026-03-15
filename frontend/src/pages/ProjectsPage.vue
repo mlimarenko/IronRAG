@@ -57,7 +57,8 @@ async function loadReadiness(id: string) {
   } catch (error) {
     const message = extractErrorMessage(error)
     if (isUnauthorizedApiError(error)) {
-      infoMessage.value = 'Project list is visible, but readiness details require an authorized API token.'
+      infoMessage.value =
+        'Project list is visible, but readiness details require an authorized API token.'
       readiness.value = null
     } else {
       errorMessage.value = message
@@ -100,12 +101,14 @@ watch(selectedProjectId, async (value, previousValue) => {
 onMounted(async () => {
   try {
     workspaces.value = await fetchWorkspaces()
-    const workspaceId = getSelectedWorkspaceId() || syncWorkspaceProjectScope(workspaces.value, []).workspaceId
+    const workspaceId =
+      getSelectedWorkspaceId() || syncWorkspaceProjectScope(workspaces.value, []).workspaceId
 
     if (!workspaceId) {
       projects.value = []
       selectedProjectId.value = ''
-      infoMessage.value = 'No workspace selected yet. Open Setup to choose a workspace before inspecting projects.'
+      infoMessage.value =
+        'No workspace selected yet. Open Setup to choose a workspace before inspecting projects.'
       return
     }
 
@@ -114,7 +117,8 @@ onMounted(async () => {
     selectedProjectId.value = scope.projectId
 
     if (projects.value.length === 0) {
-      infoMessage.value = 'No projects created yet in this workspace. Create one in Setup to start ingestion and retrieval.'
+      infoMessage.value =
+        'No projects created yet in this workspace. Create one in Setup to start ingestion and retrieval.'
       return
     }
 
@@ -162,7 +166,10 @@ onMounted(async () => {
           <EmptyStateCard
             v-if="projects.length === 0"
             title="No projects found"
-            :message="infoMessage ?? 'Create a workspace and at least one project before querying readiness.'"
+            :message="
+              infoMessage ??
+              'Create a workspace and at least one project before querying readiness.'
+            "
             hint="Once projects exist, use the same shared panel layout to inspect indexing posture."
           />
 
@@ -174,7 +181,11 @@ onMounted(async () => {
                   <p>{{ project.slug }}</p>
                 </div>
 
-                <button type="button" class="rr-button rr-button--secondary" @click="loadReadiness(project.id)">
+                <button
+                  type="button"
+                  class="rr-button rr-button--secondary"
+                  @click="loadReadiness(project.id)"
+                >
                   Inspect readiness
                 </button>
               </div>

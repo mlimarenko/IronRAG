@@ -8,10 +8,7 @@ import {
   type WorkspaceSummary,
 } from 'src/boot/api'
 import { getSelectedWorkspaceId, setSelectedProjectId } from 'src/stores/flow'
-import {
-  setWorkspaceWithProjectReset,
-  syncWorkspaceProjectScope,
-} from 'src/lib/flowSelection'
+import { setWorkspaceWithProjectReset, syncWorkspaceProjectScope } from 'src/lib/flowSelection'
 
 export type ProductFlowWorkspace = WorkspaceSummary
 
@@ -36,7 +33,7 @@ export async function hydrateWorkspaceProjectScope(options: {
     setWorkspaceWithProjectReset(workspaceId)
   }
 
-  const projects = (await fetchProjects(workspaceId))
+  const projects = await fetchProjects(workspaceId)
   options.setProjects(projects)
 
   return syncWorkspaceProjectScope(workspaces, projects)

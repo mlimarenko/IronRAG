@@ -52,11 +52,7 @@ import {
       <AppPanel tone="muted" eyebrow="Spacing" title="Spacing rhythm">
         <p class="rr-kicker">Spacing rhythm</p>
         <div class="token-chip-row">
-          <span
-            v-for="token in spacingTokens"
-            :key="token"
-            class="token-chip"
-          >
+          <span v-for="token in spacingTokens" :key="token" class="token-chip">
             {{ token }}
           </span>
         </div>
@@ -78,15 +74,9 @@ import {
           status-label="Reusable now"
         >
           <div class="rr-action-row">
-            <button type="button" class="rr-button">
-              Primary action
-            </button>
-            <button type="button" class="rr-button rr-button--secondary">
-              Secondary action
-            </button>
-            <button type="button" class="rr-button rr-button--ghost">
-              Ghost action
-            </button>
+            <button type="button" class="rr-button">Primary action</button>
+            <button type="button" class="rr-button rr-button--secondary">Secondary action</button>
+            <button type="button" class="rr-button rr-button--ghost">Ghost action</button>
           </div>
 
           <StatusBanner
@@ -104,18 +94,20 @@ import {
           <div class="rr-form-row rr-form-row--two">
             <label class="rr-field">
               <span class="rr-field__label">Workspace name</span>
-              <input type="text" class="rr-control" value="Acme knowledge base">
+              <input type="text" class="rr-control" value="Acme knowledge base" />
             </label>
 
             <label class="rr-field">
               <span class="rr-field__label">Workspace slug</span>
-              <input type="text" class="rr-control" value="acme-kb">
+              <input type="text" class="rr-control" value="acme-kb" />
             </label>
           </div>
 
           <label class="rr-field">
             <span class="rr-field__label">Operator note</span>
-            <textarea class="rr-control" rows="3">Foundation should keep future product pages aligned.</textarea>
+            <textarea class="rr-control" rows="3">
+Foundation should keep future product pages aligned.</textarea
+            >
             <span class="rr-field__hint">Hint text belongs to the shared field primitive too.</span>
           </label>
         </AppPanel>

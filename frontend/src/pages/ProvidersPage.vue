@@ -22,7 +22,11 @@ function extractErrorMessage(error: unknown): string {
 
 function isUnauthorizedMessage(message: string): boolean {
   const normalized = message.toLowerCase()
-  return normalized.includes('401') || normalized.includes('unauthorized') || normalized.includes('authorization')
+  return (
+    normalized.includes('401') ||
+    normalized.includes('unauthorized') ||
+    normalized.includes('authorization')
+  )
 }
 
 onMounted(async () => {
@@ -31,7 +35,8 @@ onMounted(async () => {
     workspaceId.value = data[0]?.id ?? null
 
     if (!workspaceId.value) {
-      infoMessage.value = 'No workspace yet. Create a workspace before configuring provider accounts.'
+      infoMessage.value =
+        'No workspace yet. Create a workspace before configuring provider accounts.'
       return
     }
 
@@ -40,7 +45,8 @@ onMounted(async () => {
     } catch (error) {
       const message = extractErrorMessage(error)
       if (isUnauthorizedMessage(message)) {
-        infoMessage.value = 'Provider governance requires an authorized API token. Workspace discovery is working.'
+        infoMessage.value =
+          'Provider governance requires an authorized API token. Workspace discovery is working.'
       } else {
         errorMessage.value = message
       }
@@ -111,7 +117,10 @@ const pageStatus = computed(() => {
             <EmptyStateCard
               v-if="!governance || governance.provider_accounts.length === 0"
               title="No provider accounts yet"
-              :message="infoMessage ?? 'Create a workspace and connect at least one provider account to unlock governance details.'"
+              :message="
+                infoMessage ??
+                'Create a workspace and connect at least one provider account to unlock governance details.'
+              "
             />
 
             <ul v-else class="rr-list provider-list">

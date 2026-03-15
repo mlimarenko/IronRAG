@@ -16,7 +16,9 @@ export type ProjectListItem = ProjectSummary
 export const useProjectsStore = defineStore('projects', () => {
   const listState = ref<AsyncState<ProjectListItem[]>>(createAsyncState<ProjectListItem[]>([]))
   const readinessById = ref<Record<string, AsyncState<ProjectReadinessSummary | null>>>({})
-  const createState = ref<AsyncState<ProjectListItem | null>>(createAsyncState<ProjectListItem | null>(null))
+  const createState = ref<AsyncState<ProjectListItem | null>>(
+    createAsyncState<ProjectListItem | null>(null),
+  )
 
   const items = computed(() => listState.value.data)
 
@@ -50,7 +52,10 @@ export const useProjectsStore = defineStore('projects', () => {
     createState.value.error = null
     try {
       const created = await createProject(payload)
-      listState.value.data = [created, ...listState.value.data.filter((item) => item.id !== created.id)]
+      listState.value.data = [
+        created,
+        ...listState.value.data.filter((item) => item.id !== created.id),
+      ]
       listState.value.status = 'success'
       listState.value.lastLoadedAt = new Date().toISOString()
       createState.value.data = created
@@ -59,7 +64,8 @@ export const useProjectsStore = defineStore('projects', () => {
       return created
     } catch (error) {
       createState.value.status = 'error'
-      createState.value.error = error instanceof Error ? error.message : 'Unknown project creation error'
+      createState.value.error =
+        error instanceof Error ? error.message : 'Unknown project creation error'
       throw error
     }
   }

@@ -59,11 +59,7 @@ const resolvedLabel = computed(() => props.label ?? translateStatusLabel(props.s
 </script>
 
 <template>
-  <span
-    class="status-badge"
-    :data-tone="resolvedTone"
-    :data-emphasis="emphasis"
-  >
+  <span class="status-badge" :data-tone="resolvedTone" :data-emphasis="emphasis">
     {{ resolvedLabel }}
   </span>
 </template>

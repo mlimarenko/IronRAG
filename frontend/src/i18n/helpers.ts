@@ -1,13 +1,16 @@
 import { i18n } from 'src/boot/i18n'
 
 function humanizeStatus(value: string): string {
-  return value
-    .replace(/[_-]+/g, ' ')
-    .replace(/\b\w/g, (char) => char.toUpperCase())
+  return value.replace(/[_-]+/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase())
 }
 
 function normalizeStatusKey(value?: string | null): string {
-  return value?.trim().toLowerCase().replace(/[\s-]+/g, '_') ?? ''
+  return (
+    value
+      ?.trim()
+      .toLowerCase()
+      .replace(/[\s-]+/g, '_') ?? ''
+  )
 }
 
 export function translateStatusLabel(value?: string | null): string {

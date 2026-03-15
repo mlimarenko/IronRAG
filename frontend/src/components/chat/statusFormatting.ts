@@ -1,8 +1,5 @@
 import { i18n } from 'src/boot/i18n'
-import {
-  formatDebugValue as formatDebugValueLabel,
-  translateStatusLabel,
-} from 'src/i18n/helpers'
+import { formatDebugValue as formatDebugValueLabel, translateStatusLabel } from 'src/i18n/helpers'
 
 export function getStatusTone(status?: string): 'positive' | 'warning' | 'negative' | 'neutral' {
   const normalized = status?.toLowerCase() ?? ''
@@ -12,9 +9,7 @@ export function getStatusTone(status?: string): 'positive' | 'warning' | 'negati
   }
 
   if (
-    ['partial', 'weakly_grounded', 'weak', 'degraded', 'warning', 'fallback'].includes(
-      normalized,
-    )
+    ['partial', 'weakly_grounded', 'weak', 'degraded', 'warning', 'fallback'].includes(normalized)
   ) {
     return 'warning'
   }

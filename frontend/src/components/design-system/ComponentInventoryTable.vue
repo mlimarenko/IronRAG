@@ -23,10 +23,7 @@ defineProps<{
         </tr>
       </thead>
       <tbody>
-        <tr
-          v-for="row in rows"
-          :key="row.primitive"
-        >
+        <tr v-for="row in rows" :key="row.primitive">
           <th scope="row">{{ row.primitive }}</th>
           <td>{{ row.purpose }}</td>
           <td>{{ row.states }}</td>

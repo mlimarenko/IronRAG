@@ -105,7 +105,8 @@ export default {
     },
     emptySelection: {
       title: 'No graph detail selected',
-      message: 'Pick a graph concept from search to review available evidence and current backend coverage.',
+      message:
+        'Pick a graph concept from search to review available evidence and current backend coverage.',
       hint: 'This keeps the page actionable without inventing entities or relations that do not exist yet.',
     },
     relations: {
@@ -151,7 +152,8 @@ export default {
     },
     unavailable: {
       status: 'Entry point ready',
-      headline: 'Graph UI is wired, but this backend build does not expose graph runtime routes yet.',
+      headline:
+        'Graph UI is wired, but this backend build does not expose graph runtime routes yet.',
       body: 'The product surface is project-scoped and ready for real graph data, but `/graph-products/*` still needs backend wiring in the running environment.',
       highlights: [
         'No fake entities or relations are rendered when the route is unavailable.',
@@ -161,7 +163,8 @@ export default {
     },
     live: {
       status: 'Live graph rows',
-      headline: 'Inspect persisted entities, relation coverage, and search results for the selected project.',
+      headline:
+        'Inspect persisted entities, relation coverage, and search results for the selected project.',
       body: 'This view is reading real graph rows. Relation search and entity detail are live where the backend has persisted records.',
       highlights: [
         'Search results come from persisted entities and relation rows, not placeholder text.',
@@ -203,7 +206,8 @@ export default {
       currentBlocker: 'Current blocker',
       blockerApiUnavailable: 'Backend route is not wired in this runtime build yet.',
       blockerPartial: 'Extraction tracking and provenance depth remain partial.',
-      blockerNoRows: 'Runtime extraction has not written entity and relation rows for this project yet.',
+      blockerNoRows:
+        'Runtime extraction has not written entity and relation rows for this project yet.',
     },
     search: {
       eyebrow: 'Discovery',
@@ -215,12 +219,14 @@ export default {
       loading: 'Loading graph',
       noProject: {
         title: 'Select a project first',
-        message: 'Graph is scoped per project. Choose a project to inspect entity and relation coverage.',
+        message:
+          'Graph is scoped per project. Choose a project to inspect entity and relation coverage.',
         hint: 'The selector in this panel uses the same session scope as the rest of the operator shell.',
       },
       unavailable: {
         title: 'Graph backend route is not available',
-        message: 'This product surface is ready, but the running backend does not expose `/graph-products/*` yet.',
+        message:
+          'This product surface is ready, but the running backend does not expose `/graph-products/*` yet.',
         hint: 'Backend wiring is the remaining blocker before live entity and relation data can appear here.',
       },
       noMatches: {
@@ -273,7 +279,8 @@ export default {
       incomingRelations: 'Incoming relations',
       noIncomingRelations: 'This entity currently has no incoming persisted relations.',
       matchReasons: 'Match reasons',
-      noMatchReasons: 'This record came from the live summary rather than a query-specific search match.',
+      noMatchReasons:
+        'This record came from the live summary rather than a query-specific search match.',
     },
     diagnostics: {
       eyebrow: 'Diagnostics',
@@ -284,7 +291,8 @@ export default {
       loading: 'Loading diagnostics',
       noProject: {
         title: 'Select a project first',
-        message: 'Diagnostics are scoped per project. Choose one to inspect graph readiness and blockers.',
+        message:
+          'Diagnostics are scoped per project. Choose one to inspect graph readiness and blockers.',
         hint: 'The same selected project drives graph search, detail, and diagnostics.',
       },
       unavailable: {
@@ -305,7 +313,8 @@ export default {
       nextStepsTitle: 'Next steps',
       noNextSteps: 'No next steps were returned.',
       technicalSummary: 'Show technical coverage metrics',
-      technicalHint: 'Document, chunk, embedding, and provenance counts stay available here as secondary diagnostics.',
+      technicalHint:
+        'Document, chunk, embedding, and provenance counts stay available here as secondary diagnostics.',
     },
   },
   common: {

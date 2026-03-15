@@ -9,20 +9,11 @@ defineProps<{
 <template>
   <div class="section-block rr-panel rr-panel--muted">
     <h4>{{ title }}</h4>
-    <p
-      v-if="!items.length"
-      class="muted"
-    >
+    <p v-if="!items.length" class="muted">
       {{ emptyMessage }}
     </p>
-    <ul
-      v-else
-      class="token-list"
-    >
-      <li
-        v-for="item in items"
-        :key="item"
-      >
+    <ul v-else class="token-list">
+      <li v-for="item in items" :key="item">
         <code>{{ item }}</code>
       </li>
     </ul>

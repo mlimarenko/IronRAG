@@ -20,9 +20,7 @@ const resolvedTitle = computed(() => props.title ?? t('errors.somethingBroke'))
 
 <template>
   <article class="rr-empty-state rr-empty-state--danger" role="alert">
-    <div class="rr-empty-state__icon" aria-hidden="true">
-      !
-    </div>
+    <div class="rr-empty-state__icon" aria-hidden="true">!</div>
     <div class="rr-empty-state__copy">
       <h3>{{ resolvedTitle }}</h3>
       <p>{{ props.message }}</p>

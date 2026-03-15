@@ -37,46 +37,27 @@ const items = computed(() =>
     <div class="reference-section__header">
       <div class="reference-section__copy">
         <h4>{{ title }}</h4>
-        <p
-          v-if="description"
-          class="rr-note"
-        >
+        <p v-if="description" class="rr-note">
           {{ description }}
         </p>
       </div>
-      <span
-        v-if="items.length"
-        class="reference-section__count"
-      >
+      <span v-if="items.length" class="reference-section__count">
         {{ items.length }}
       </span>
     </div>
 
-    <p
-      v-if="!items.length"
-      class="rr-note"
-    >
+    <p v-if="!items.length" class="rr-note">
       {{ emptyMessage }}
     </p>
 
-    <ol
-      v-else
-      class="reference-list"
-    >
-      <li
-        v-for="item in items"
-        :key="item.id"
-        class="reference-card"
-      >
+    <ol v-else class="reference-list">
+      <li v-for="item in items" :key="item.id" class="reference-card">
         <div class="reference-card__header">
           <div class="reference-card__title-block">
             <strong>{{ item.title }}</strong>
             <p class="reference-card__meta">{{ item.meta }}</p>
           </div>
-          <span
-            v-if="item.isChunkScoped"
-            class="reference-card__chip"
-          >
+          <span v-if="item.isChunkScoped" class="reference-card__chip">
             {{ t('flow.search.diagnostics.referenceChip') }}
           </span>
         </div>

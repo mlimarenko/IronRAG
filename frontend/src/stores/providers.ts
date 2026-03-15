@@ -31,7 +31,9 @@ export const useProvidersStore = defineStore('providers', () => {
   function ensureGovernanceState(
     workspaceId: string,
   ): AsyncState<ProviderGovernanceSummary | null> {
-    const state = governanceByWorkspaceId.value[workspaceId] ?? createAsyncState<ProviderGovernanceSummary | null>(null)
+    const state =
+      governanceByWorkspaceId.value[workspaceId] ??
+      createAsyncState<ProviderGovernanceSummary | null>(null)
     governanceByWorkspaceId.value = {
       ...governanceByWorkspaceId.value,
       [workspaceId]: state,
@@ -40,7 +42,8 @@ export const useProvidersStore = defineStore('providers', () => {
   }
 
   function ensureAccountsState(workspaceId: string): AsyncState<ProviderAccountSummary[]> {
-    const state = accountsByWorkspaceId.value[workspaceId] ?? createAsyncState<ProviderAccountSummary[]>([])
+    const state =
+      accountsByWorkspaceId.value[workspaceId] ?? createAsyncState<ProviderAccountSummary[]>([])
     accountsByWorkspaceId.value = {
       ...accountsByWorkspaceId.value,
       [workspaceId]: state,
@@ -49,7 +52,8 @@ export const useProvidersStore = defineStore('providers', () => {
   }
 
   function ensureModelProfilesState(workspaceId: string): AsyncState<ModelProfileSummary[]> {
-    const state = modelProfilesByWorkspaceId.value[workspaceId] ?? createAsyncState<ModelProfileSummary[]>([])
+    const state =
+      modelProfilesByWorkspaceId.value[workspaceId] ?? createAsyncState<ModelProfileSummary[]>([])
     modelProfilesByWorkspaceId.value = {
       ...modelProfilesByWorkspaceId.value,
       [workspaceId]: state,
@@ -91,7 +95,9 @@ export const useProvidersStore = defineStore('providers', () => {
     }
   }
 
-  async function fetchModelProfilesForWorkspace(workspaceId: string): Promise<ModelProfileSummary[]> {
+  async function fetchModelProfilesForWorkspace(
+    workspaceId: string,
+  ): Promise<ModelProfileSummary[]> {
     const state = ensureModelProfilesState(workspaceId)
     state.status = 'loading'
     state.error = null
@@ -108,7 +114,9 @@ export const useProvidersStore = defineStore('providers', () => {
     }
   }
 
-  async function createAccount(payload: CreateProviderAccountRequest): Promise<ProviderAccountSummary> {
+  async function createAccount(
+    payload: CreateProviderAccountRequest,
+  ): Promise<ProviderAccountSummary> {
     createAccountState.value.status = 'loading'
     createAccountState.value.error = null
     try {
@@ -123,7 +131,8 @@ export const useProvidersStore = defineStore('providers', () => {
       return created
     } catch (error) {
       createAccountState.value.status = 'error'
-      createAccountState.value.error = error instanceof Error ? error.message : 'Unknown provider account creation error'
+      createAccountState.value.error =
+        error instanceof Error ? error.message : 'Unknown provider account creation error'
       throw error
     }
   }
@@ -143,7 +152,8 @@ export const useProvidersStore = defineStore('providers', () => {
       return created
     } catch (error) {
       createModelProfileState.value.status = 'error'
-      createModelProfileState.value.error = error instanceof Error ? error.message : 'Unknown model profile creation error'
+      createModelProfileState.value.error =
+        error instanceof Error ? error.message : 'Unknown model profile creation error'
       throw error
     }
   }

@@ -21,7 +21,9 @@ const { t } = useI18n()
       <div>
         <p class="rr-kicker">{{ t('flow.search.diagnostics.kicker') }}</p>
         <h3>{{ t('flow.search.diagnostics.title') }}</h3>
-        <p class="panel-subtitle">{{ t('flow.search.diagnostics.run', { id: props.detail.id }) }}</p>
+        <p class="panel-subtitle">
+          {{ t('flow.search.diagnostics.run', { id: props.detail.id }) }}
+        </p>
       </div>
       <StatusPill :status="props.detail.answer_status" />
     </div>
@@ -36,16 +38,14 @@ const { t } = useI18n()
         <strong>{{ props.detail.matched_chunk_ids.length }}</strong>
       </div>
       <div class="summary-item">
-        <span class="summary-item__label">{{ t('flow.search.diagnostics.summary.references') }}</span>
+        <span class="summary-item__label">{{
+          t('flow.search.diagnostics.summary.references')
+        }}</span>
         <strong>{{ props.detail.references.length }}</strong>
       </div>
     </div>
 
-    <p
-      v-if="props.detail.warning"
-      class="rr-banner"
-      data-tone="warning"
-    >
+    <p v-if="props.detail.warning" class="rr-banner" data-tone="warning">
       {{ t('flow.search.diagnostics.warning') }}: {{ props.detail.warning }}
     </p>
 

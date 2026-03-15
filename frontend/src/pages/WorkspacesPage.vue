@@ -269,7 +269,9 @@ async function createProjectItem() {
             </label>
           </div>
 
-          <p v-if="workspaceError" class="rr-banner" data-tone="danger">{{ workspaceError }}</p>
+          <p v-if="workspaceError" class="rr-banner" data-tone="danger">
+            {{ workspaceError }}
+          </p>
 
           <div class="rr-action-row">
             <button
@@ -357,7 +359,9 @@ async function createProjectItem() {
             </template>
           </div>
 
-          <p v-if="projectError" class="rr-banner" data-tone="danger">{{ projectError }}</p>
+          <p v-if="projectError" class="rr-banner" data-tone="danger">
+            {{ projectError }}
+          </p>
 
           <div class="rr-action-row">
             <button

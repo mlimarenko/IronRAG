@@ -33,7 +33,9 @@ const activePath = computed(() => route.path)
 const activeSection = computed(
   () =>
     (route.meta.shellSection as ShellNavItem['key'] | undefined) ??
-    shellNavItems.find((item) => activePath.value === item.to || activePath.value.startsWith(`${item.to}/`))?.key ??
+    shellNavItems.find(
+      (item) => activePath.value === item.to || activePath.value.startsWith(`${item.to}/`),
+    )?.key ??
     'home',
 )
 
@@ -41,7 +43,10 @@ function isActive(item: ShellNavItem) {
   return (
     activePath.value === item.to ||
     activePath.value.startsWith(`${item.to}/`) ||
-    Boolean(item.legacyTo && (activePath.value === item.legacyTo || activePath.value.startsWith(`${item.legacyTo}/`)))
+    Boolean(
+      item.legacyTo &&
+      (activePath.value === item.legacyTo || activePath.value.startsWith(`${item.legacyTo}/`)),
+    )
   )
 }
 </script>
@@ -67,11 +72,7 @@ function isActive(item: ShellNavItem) {
     <ProductSpine :active-section="activeSection" compact />
 
     <div class="app-sidebar__sections" :aria-label="t('shell.nav.product')">
-      <section
-        v-for="group in navGroups"
-        :key="group.key"
-        class="app-sidebar__section"
-      >
+      <section v-for="group in navGroups" :key="group.key" class="app-sidebar__section">
         <p class="app-sidebar__section-label">{{ t(`shell.nav.groups.${group.key}`) }}</p>
         <nav class="app-sidebar__nav" :aria-label="t(`shell.nav.groups.${group.key}`)">
           <RouterLink

@@ -49,9 +49,11 @@ export const inventoryRows: InventoryRow[] = [
   },
   {
     primitive: 'Page header + section container',
-    purpose: 'Shared page header and body framing for title, eyebrow, description, actions, and status.',
+    purpose:
+      'Shared page header and body framing for title, eyebrow, description, actions, and status.',
     states: 'default, with actions, status badge, long description, stacked mobile layout',
-    nextStep: 'Keep top-level pages on the same component instead of reintroducing scoped header CSS.',
+    nextStep:
+      'Keep top-level pages on the same component instead of reintroducing scoped header CSS.',
   },
   {
     primitive: 'Status badge',
@@ -63,7 +65,8 @@ export const inventoryRows: InventoryRow[] = [
     primitive: 'State cards + status banner',
     purpose: 'Consistent empty, loading, and error communication.',
     states: 'empty, loading, error, warning banner, info banner, retry action, secondary hint',
-    nextStep: 'Use in all async pages before adding more bespoke placeholders or inline status text.',
+    nextStep:
+      'Use in all async pages before adding more bespoke placeholders or inline status text.',
   },
   {
     primitive: 'Panel/card',

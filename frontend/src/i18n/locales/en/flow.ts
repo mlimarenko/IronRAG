@@ -474,7 +474,8 @@ export default {
       kicker: 'Readiness',
       readinessTitle: 'Library readiness',
       readinessReady: 'Files in this library are indexed and ready for Ask.',
-      readinessProcessing: 'RustRAG is still preparing some files. You can stay here and refresh, then move into Ask when the library is ready.',
+      readinessProcessing:
+        'RustRAG is still preparing some files. You can stay here and refresh, then move into Ask when the library is ready.',
       readinessEmpty: 'Upload the first file to make this library searchable.',
       filesReadyHint: 'Indexed and searchable.',
       filesProcessing: 'Still processing',
@@ -614,7 +615,8 @@ export default {
       uploadFirst: 'Upload the first file',
       uploadFirstHint: 'Once one file finishes indexing, Ask becomes the obvious next step.',
       waitForReady: 'Wait for files to finish',
-      waitForReadyHint: 'Keep this page simple: refresh when needed, then move into Ask once the library is ready.',
+      waitForReadyHint:
+        'Keep this page simple: refresh when needed, then move into Ask once the library is ready.',
       openAskHint: 'This library has searchable files, so the next move is asking questions.',
     },
     lists: {
