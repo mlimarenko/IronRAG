@@ -398,6 +398,7 @@ export default {
       progressBody: 'The worker has not reached a terminal state yet.',
       retryQueuedTitle: 'Retry queued',
       retryQueuedBody: 'The failed run was placed back into the processing queue.',
+      retryQueuedDetail: 'Stay on this page to watch the queue, or refresh in a moment.',
       duplicateTitle: 'This content is already queued',
       duplicateBody:
         'Wait for the existing run to finish or change the content before submitting again.',

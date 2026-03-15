@@ -1393,7 +1393,19 @@ onUnmounted(() => {
                 </div>
               </dl>
 
-              <p class="rr-note">{{ selectedInventoryRecord.summaryLabel }}</p>
+              <article
+                class="rr-banner file-library-detail__readiness"
+                :data-tone="
+                  selectedInventoryRecord.statusTone === 'warning'
+                    ? 'warning'
+                    : selectedInventoryRecord.statusTone === 'info'
+                      ? 'info'
+                      : 'success'
+                "
+              >
+                <strong>{{ selectedInventoryRecord.statusLabel }}</strong>
+                <p>{{ selectedInventoryRecord.summaryLabel }}</p>
+              </article>
 
               <div class="rr-action-row">
                 <button
@@ -1581,5 +1593,9 @@ onUnmounted(() => {
 
 .inventory-group__header {
   align-items: start;
+}
+
+.file-library-detail__readiness {
+  margin: 0;
 }
 </style>
