@@ -639,11 +639,11 @@ export default {
         hint: '{hint}',
       },
       provenance: {
-        label: 'Stored provenance',
+        label: 'Saved source details',
         hintWithChecksum:
-          'Saved from {source} ({kind}), type {mime}, checksum {checksum}. Use this to confirm where the indexed file came from.',
+          'Saved from {source} ({kind}), type {mime}, checksum {checksum}. Use this to confirm where this file came from.',
         hintWithoutChecksum:
-          'Saved from {source} ({kind}), type {mime}. Use this to confirm where the indexed file came from.',
+          'Saved from {source} ({kind}), type {mime}. Use this to confirm where this file came from.',
       },
       nextStepLabel: 'Suggested next step',
       nextSteps: {
@@ -745,7 +745,7 @@ export default {
       referencesTitle: 'Supporting passages',
       referencesDescription: 'Use these passages to verify the answer.',
       referencesEmpty: 'No supporting passages were returned for this answer.',
-      referenceRawLabel: 'Stored reference',
+      referenceRawLabel: 'Saved reference',
       grounding: 'Grounding',
       groundingStrong: 'Backed by retrieved passages',
       groundingWeak: 'Weak or incomplete support',
@@ -786,7 +786,7 @@ export default {
         next: 'Point back to Files to finish ingestion before retrying the question.',
       },
       empty: {
-        answer: 'Explain that there is no searchable source content yet.',
+        answer: 'Explain that there are no answerable files yet.',
         verify: 'Show the active scope so you know which library still needs files.',
         next: 'Send you to Files to ingest content instead of pretending to answer.',
       },
@@ -830,7 +830,7 @@ export default {
       },
       noContent: {
         title: 'No indexed content yet',
-        body: 'This library does not have searchable files yet, so Ask cannot answer honestly.',
+        body: 'This library does not have answerable files yet, so Ask cannot answer honestly.',
         hint: 'Add files in Files, wait for indexing to complete, then ask again.',
       },
       partial: {
