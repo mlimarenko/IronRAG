@@ -45,16 +45,16 @@ export function formatReferenceTitle(reference: string, index: number): string {
   const parsed = parseReference(reference)
 
   if (parsed.chunkId) {
-    return i18n.global.t('flow.search.diagnostics.referenceTitles.passage', { index: index + 1 }) as string
+    return i18n.global.t('flow.search.diagnostics.referenceTitles.passage', { index: index + 1 })
   }
 
   if (parsed.documentId) {
-    return i18n.global.t('flow.search.diagnostics.referenceTitles.document', { index: index + 1 }) as string
+    return i18n.global.t('flow.search.diagnostics.referenceTitles.document', { index: index + 1 })
   }
 
   return i18n.global.t('flow.search.diagnostics.referenceTitles.reference', {
     index: index + 1,
-  }) as string
+  })
 }
 
 export function formatReferenceMeta(reference: string): string {
@@ -64,16 +64,16 @@ export function formatReferenceMeta(reference: string): string {
     return i18n.global.t('flow.search.diagnostics.referenceMeta.documentChunk', {
       documentId: shortenId(parsed.documentId),
       chunkId: parsed.chunkId,
-    }) as string
+    })
   }
 
   if (parsed.documentId) {
     return i18n.global.t('flow.search.diagnostics.referenceMeta.document', {
       documentId: shortenId(parsed.documentId),
-    }) as string
+    })
   }
 
-  return i18n.global.t('flow.search.diagnostics.referenceMeta.stored') as string
+  return i18n.global.t('flow.search.diagnostics.referenceMeta.stored')
 }
 
 export function isChunkScopedReference(reference: string): boolean {

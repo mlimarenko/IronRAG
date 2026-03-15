@@ -21,7 +21,7 @@ export async function hydrateWorkspaceProjectScope(options: {
   setWorkspaces: (items: ProductFlowWorkspace[]) => void
   setProjects: (items: ProductFlowProject[]) => void
 }): Promise<{ workspaceId: string; projectId: string }> {
-  const workspaces = (await fetchWorkspaces()) as ProductFlowWorkspace[]
+  const workspaces = await fetchWorkspaces()
   options.setWorkspaces(workspaces)
 
   const workspaceId = getSelectedWorkspaceId() || workspaces[0]?.id || ''
@@ -36,7 +36,7 @@ export async function hydrateWorkspaceProjectScope(options: {
     setWorkspaceWithProjectReset(workspaceId)
   }
 
-  const projects = (await fetchProjects(workspaceId)) as ProductFlowProject[]
+  const projects = (await fetchProjects(workspaceId))
   options.setProjects(projects)
 
   return syncWorkspaceProjectScope(workspaces, projects)

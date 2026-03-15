@@ -10,7 +10,7 @@ declare global {
   }
 }
 
-export default async () => {
+export default () => {
   let reloadScheduled = false
 
   function scheduleReload(reason: string) {

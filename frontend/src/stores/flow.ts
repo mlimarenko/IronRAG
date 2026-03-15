@@ -60,9 +60,9 @@ export function syncSelectedProjectId(items: readonly SelectableItem[]): string 
   return syncSelectedId(items, getSelectedProjectId, setSelectedProjectId)
 }
 
-export function syncWorkspaceProjectScope<TWorkspace extends SelectableItem, TProject extends WorkspaceScopedItem>(
-  workspaces: readonly TWorkspace[],
-  projects: readonly TProject[],
+export function syncWorkspaceProjectScope(
+  workspaces: readonly SelectableItem[],
+  projects: readonly WorkspaceScopedItem[],
 ): { workspaceId: string; projectId: string } {
   const workspaceId = syncSelectedWorkspaceId(workspaces)
 
@@ -82,8 +82,8 @@ export function syncWorkspaceProjectScope<TWorkspace extends SelectableItem, TPr
   return { workspaceId, projectId }
 }
 
-export function ensureProjectMatchesWorkspace<TProject extends WorkspaceScopedItem>(
-  projects: readonly TProject[],
+export function ensureProjectMatchesWorkspace(
+  projects: readonly WorkspaceScopedItem[],
   projectId: string,
 ): string {
   const workspaceId = getSelectedWorkspaceId()

@@ -342,8 +342,8 @@ export interface GraphProductSnapshot {
 export interface GraphProjectSummaryResponse {
   project_id: string
   coverage: GraphCoverageSummary
-  entity_kinds: Array<{ name: string; count: number }>
-  relation_kinds: Array<{ name: string; count: number }>
+  entity_kinds: { name: string; count: number }[]
+  relation_kinds: { name: string; count: number }[]
   top_entities: GraphEntitySummary[]
   sample_relations: GraphRelationSummary[]
   generated_at: string
@@ -392,10 +392,10 @@ export interface GraphEntityDetailResponse {
 }
 
 const env = import.meta.env as ImportMetaEnv & FrontendEnv
-export const backendUrl: string = env.VITE_BACKEND_URL?.trim() || window.location.origin
+export const backendUrl: string = env.VITE_BACKEND_URL?.trim() ?? window.location.origin
 
 export const api = axios.create({
-  baseURL: env.VITE_BACKEND_URL?.trim() || '/v1',
+  baseURL: env.VITE_BACKEND_URL?.trim() ?? '/v1',
 })
 
 api.interceptors.request.use((config) => {
@@ -420,34 +420,43 @@ api.interceptors.response.use(
       const status = error.response?.status
       const method = error.config?.method?.toUpperCase() ?? 'REQUEST'
       const url = error.config?.url ?? 'unknown-url'
-      const body =
-        typeof error.response?.data === 'string'
-          ? error.response.data
-          : (error.response?.data?.message ?? error.response?.data?.error ?? null)
-      const errorKind =
-        typeof error.response?.data === 'object' && error.response?.data
-          ? (error.response.data.error_kind ?? null)
+      const responseData: unknown = error.response?.data
+      const dataRecord =
+        typeof responseData === 'object' && responseData !== null
+          ? (responseData as Record<string, unknown>)
           : null
+      const body =
+        typeof responseData === 'string'
+          ? responseData
+          : typeof dataRecord?.message === 'string'
+            ? dataRecord.message
+            : typeof dataRecord?.error === 'string'
+              ? dataRecord.error
+              : null
+      const errorKind = typeof dataRecord?.error_kind === 'string' ? dataRecord.error_kind : null
+      const requestIdHeader: unknown = error.response?.headers[REQUEST_ID_HEADER]
       const requestId =
-        error.response?.headers?.[REQUEST_ID_HEADER] ??
-        (typeof error.response?.data === 'object' && error.response?.data
-          ? (error.response.data.request_id ?? null)
-          : null)
+        typeof requestIdHeader === 'string'
+          ? requestIdHeader
+          : typeof dataRecord?.request_id === 'string'
+            ? dataRecord.request_id
+            : null
 
       const detail = body ? `: ${body}` : ''
       const suffix = [
-        errorKind ? `kind=${String(errorKind)}` : null,
-        requestId ? `request_id=${String(requestId)}` : null,
+        errorKind ? `kind=${errorKind}` : null,
+        requestId ? `request_id=${requestId}` : null,
       ]
         .filter(Boolean)
         .join(', ')
+      const statusLabel = typeof status === 'number' ? String(status) : 'network error'
       const normalized = new Error(
-        `${method} ${url} failed with ${status ?? 'network error'}${detail}${suffix ? ` [${suffix}]` : ''}`,
+        `${method} ${url} failed with ${statusLabel}${detail}${suffix ? ` [${suffix}]` : ''}`,
       )
       return Promise.reject(normalized)
     }
 
-    return Promise.reject(error)
+    return Promise.reject(error instanceof Error ? error : new Error('Unknown API error'))
   },
 )
 
@@ -463,11 +472,16 @@ export function isUnauthorizedApiError(error: unknown): boolean {
 }
 
 export function isMissingAuthorizationHeaderError(error: unknown): boolean {
-  return error instanceof Error && error.message.toLowerCase().includes('missing authorization header')
+  return (
+    error instanceof Error && error.message.toLowerCase().includes('missing authorization header')
+  )
 }
 
 export function isBootstrapNotConfiguredApiError(error: unknown): boolean {
-  return error instanceof Error && error.message.toLowerCase().includes('bootstrap token is not configured')
+  return (
+    error instanceof Error &&
+    error.message.toLowerCase().includes('bootstrap token is not configured')
+  )
 }
 
 export async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {

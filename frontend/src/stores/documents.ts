@@ -2,7 +2,6 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 
 import {
-  api,
   createIngestionJob,
   createSource,
   fetchChunks,

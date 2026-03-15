@@ -17,9 +17,13 @@ interface SelectedFlowScope {
   projectId: string
 }
 
-export function syncWorkspaceProjectScope<TWorkspace extends { id: string }, TProject extends WorkspaceScopedItem>(
-  workspaces: readonly TWorkspace[],
-  projects: readonly TProject[],
+interface SelectableItem {
+  id: string
+}
+
+export function syncWorkspaceProjectScope(
+  workspaces: readonly SelectableItem[],
+  projects: readonly WorkspaceScopedItem[],
 ): SelectedFlowScope {
   const workspaceId = syncSelectedWorkspaceId(workspaces)
 
@@ -39,8 +43,8 @@ export function syncWorkspaceProjectScope<TWorkspace extends { id: string }, TPr
   return { workspaceId, projectId }
 }
 
-export function ensureProjectMatchesWorkspace<TProject extends WorkspaceScopedItem>(
-  projects: readonly TProject[],
+export function ensureProjectMatchesWorkspace(
+  projects: readonly WorkspaceScopedItem[],
   projectId: string,
 ): string {
   const workspaceId = getSelectedWorkspaceId()

@@ -9,7 +9,6 @@ import {
   fetchIngestionJobDetail,
   fetchIngestionJobs,
   fetchSources,
-  ingestText,
   retryIngestionJob,
   uploadAndIngest,
   type DocumentSummary,
@@ -33,17 +32,10 @@ import {
   jobDetailFromSummary,
   shortJobId,
 } from 'src/pages/support/ingestion-status'
-import {
-  buildFileInventory,
-  matchesInventoryFilter,
-  type FileInventoryFilter,
-} from 'src/pages/support/file-library'
+import { buildFileInventory, matchesInventoryFilter } from 'src/pages/support/file-library'
 import { getSelectedProjectId, getSelectedWorkspaceId } from 'src/stores/flow'
 import { formatShortDateTime } from 'src/lib/formatting'
-import {
-  hydrateWorkspaceProjectScope,
-  useRouteSyncedSelection,
-} from 'src/lib/productFlow'
+import { hydrateWorkspaceProjectScope, useRouteSyncedSelection } from 'src/lib/productFlow'
 
 interface WorkspaceItem {
   id: string
@@ -82,10 +74,8 @@ interface JobViewModel {
   job: IngestionJobDetail
   sourceLabel: string
   triggerLabel: string
-  shortId: string
   presentation: ReturnType<typeof describeIngestionJob>
   error: ReturnType<typeof describeIngestionError> | null
-  startedLabel: string | null
   updatedLabel: string | null
   durationLabel: string | null
 }
@@ -94,7 +84,6 @@ const MAX_VISIBLE_QUEUE_ITEMS = 6
 const POLL_INTERVAL_MS = 900
 const MAX_POLL_ATTEMPTS = 12
 const AUTO_REFRESH_INTERVAL_MS = 3000
-const MANUAL_SOURCE_KIND = 'text'
 const FILE_SOURCE_KIND = 'upload'
 
 const { t } = useI18n()
@@ -105,14 +94,11 @@ const workspaces = ref<WorkspaceItem[]>([])
 const projects = ref<ProjectItem[]>([])
 const documents = ref<DocumentSummary[]>([])
 const sources = ref<SourceSummary[]>([])
-const title = ref('')
-const text = ref('')
 const uploadTitle = ref('')
 const uploadFile = ref<File | null>(null)
 const uploadInputRef = ref<HTMLInputElement | null>(null)
 const uploadInputKey = ref(0)
 const isUploadDragActive = ref(false)
-const libraryFilter = ref<FileInventoryFilter>('all')
 const selectedDocumentId = useRouteSyncedSelection({
   route,
   router,
@@ -121,7 +107,7 @@ const selectedDocumentId = useRouteSyncedSelection({
 })
 const librarySearch = ref('')
 const feedback = ref<FeedbackState | null>(null)
-const submitMode = ref<'text' | 'upload' | null>(null)
+const submitMode = ref<'upload' | null>(null)
 const retryingJobId = ref<string | null>(null)
 const recentJobs = ref<IngestionJobDetail[]>([])
 const queueLoading = ref(false)
@@ -185,8 +171,8 @@ const selectedWorkspace = computed(
 )
 const sourceLabelById = computed(() => new Map(sources.value.map((item) => [item.id, item.label])))
 
-const activeJobsCount = computed(() =>
-  recentJobs.value.filter((job) => isActiveJobStatus(job.status)).length,
+const activeJobsCount = computed(
+  () => recentJobs.value.filter((job) => isActiveJobStatus(job.status)).length,
 )
 const uploadSelection = computed(() =>
   uploadFile.value ? describeUploadSelection(uploadFile.value) : null,
@@ -194,9 +180,9 @@ const uploadSelection = computed(() =>
 const canUploadSelectedFile = computed(() =>
   Boolean(
     selectedProjectId.value &&
-      uploadFile.value &&
-      uploadSelection.value?.supportStatus === 'supported_now' &&
-      submitMode.value !== 'upload',
+    uploadFile.value &&
+    uploadSelection.value?.supportStatus === 'supported_now' &&
+    submitMode.value !== 'upload',
   ),
 )
 const pageStatus = computed(() => {
@@ -211,16 +197,6 @@ const pageStatus = computed(() => {
     }
   }
 
-  if (
-    recentJobs.value[0] &&
-    ['failed', 'retryable_failed', 'canceled'].includes(recentJobs.value[0].status)
-  ) {
-    return {
-      status: 'warning',
-      label: t('flow.library.statusAttention'),
-    }
-  }
-
   if (documents.value.length > 0) {
     return {
       status: 'ready',
@@ -230,42 +206,42 @@ const pageStatus = computed(() => {
 
   return { status: 'draft', label: t('flow.library.statusDraft') }
 })
-const highlightedJob = computed(
-  () => recentJobs.value.find((job) => isActiveJobStatus(job.status)) ?? recentJobs.value[0] ?? null,
-)
+const highlightedJob = computed<IngestionJobDetail | null>(() => {
+  const activeJob = recentJobs.value.find((job) => isActiveJobStatus(job.status))
+  if (activeJob) {
+    return activeJob
+  }
+
+  return recentJobs.value[0] ?? null
+})
 const jobViewModels = computed<JobViewModel[]>(() =>
   recentJobs.value.map((job) => ({
     job,
-    sourceLabel:
-      (job.source_id ? sourceLabelById.value.get(job.source_id) : null) ??
-      formatTriggerKind(job.trigger_kind, t),
+    sourceLabel: job.source_id
+      ? (sourceLabelById.value.get(job.source_id) ?? formatTriggerKind(job.trigger_kind, t))
+      : formatTriggerKind(job.trigger_kind, t),
     triggerLabel: formatTriggerKind(job.trigger_kind, t),
-    shortId: shortJobId(job.id),
     presentation: describeIngestionJob(job, t),
     error: job.error_message ? describeIngestionError(job.error_message, t) : null,
-    startedLabel: formatShortDateTime(job.started_at),
     updatedLabel: formatShortDateTime(job.finished_at ?? job.started_at),
     durationLabel: formatDuration(job.started_at, job.finished_at),
   })),
 )
-const highlightedJobView = computed(
-  () => jobViewModels.value.find((item) => item.job.id === highlightedJob.value?.id) ?? null,
-)
-const highlightedJobSteps = computed(() =>
-  highlightedJob.value ? buildJobSteps(highlightedJob.value, t) : [],
-)
-const visibleSources = computed(() => sources.value.slice(0, MAX_VISIBLE_QUEUE_ITEMS))
-const remainingSourceCount = computed(() => Math.max(0, sources.value.length - MAX_VISIBLE_QUEUE_ITEMS))
-const processingStatLabel = computed(() => {
-  if (activeJobsCount.value > 0) {
-    return t('flow.library.stats.processingActive', { count: activeJobsCount.value })
+const highlightedJobView = computed(() => {
+  const job = highlightedJob.value
+  if (job == null) {
+    return null
   }
 
-  if (highlightedJobView.value) {
-    return highlightedJobView.value.presentation.statusLabel
+  return jobViewModels.value.find((item) => item.job.id === job.id) ?? null
+})
+const highlightedJobSteps = computed(() => {
+  const job = highlightedJob.value
+  if (job == null) {
+    return []
   }
 
-  return t('flow.library.stats.processingIdle')
+  return buildJobSteps(job, t)
 })
 const processingStatHint = computed(() => {
   if (highlightedJobView.value) {
@@ -274,30 +250,83 @@ const processingStatHint = computed(() => {
 
   return t('flow.library.stats.processingHint')
 })
-const filesReadyCount = computed(() =>
-  fileInventory.value.filter((record) => record.statusTone === 'positive').length,
+const fileInventory = computed(() =>
+  buildFileInventory(documents.value, sources.value, recentJobs.value, {
+    unknownSourceLabel: t('flow.library.inventory.unknownSource'),
+    sourceKindFormatter: (value: string) => formatSourceKind(value, t),
+    statusFormatter: () => '',
+    untitledLabel: t('flow.library.inventory.untitled'),
+    recentLabel: t('flow.library.inventory.updatedPrefix'),
+    checksumLabel: t('flow.library.inventory.checksum'),
+    mimeFallback: t('flow.library.inventory.mimeFallback'),
+  }),
 )
-const filesAttentionCount = computed(() =>
-  fileInventory.value.filter((record) => record.attention).length,
+const normalizedLibrarySearch = computed(() => librarySearch.value.trim().toLowerCase())
+const filteredFileInventory = computed(() =>
+  fileInventory.value
+    .filter((record) => matchesInventoryFilter(record, 'all'))
+    .filter((record) => {
+      if (!normalizedLibrarySearch.value) {
+        return true
+      }
+
+      const haystack = [
+        record.title,
+        record.subtitle,
+        record.sourceLabel,
+        record.sourceKindLabel,
+        record.mimeLabel,
+      ]
+        .join(' ')
+        .toLowerCase()
+
+      return haystack.includes(normalizedLibrarySearch.value)
+    })
+    .sort((left, right) => {
+      if (right.updatedSortValue !== left.updatedSortValue) {
+        return right.updatedSortValue - left.updatedSortValue
+      }
+
+      return left.title.localeCompare(right.title)
+    }),
 )
-const filesProcessingCount = computed(() =>
-  fileInventory.value.filter((record) => record.statusTone === 'info').length,
+const selectedInventoryRecord = computed(() => {
+  const selectedFromFiltered = filteredFileInventory.value.find(
+    (item) => item.id === selectedDocumentId.value,
+  )
+  if (selectedFromFiltered) {
+    return selectedFromFiltered
+  }
+
+  const selectedFromAll = fileInventory.value.find((item) => item.id === selectedDocumentId.value)
+  if (selectedFromAll) {
+    return selectedFromAll
+  }
+
+  return filteredFileInventory.value[0] || fileInventory.value[0] || null
+})
+const filesReadyCount = computed(
+  () => fileInventory.value.filter((record) => record.statusTone === 'positive').length,
 )
-const recentFileRecords = computed(() => filteredFileInventory.value.slice(0, MAX_VISIBLE_QUEUE_ITEMS))
+const filesAttentionCount = computed(
+  () => fileInventory.value.filter((record) => record.attention).length,
+)
+const filesProcessingCount = computed(
+  () => fileInventory.value.filter((record) => record.statusTone === 'info').length,
+)
+const recentFileRecords = computed(() =>
+  filteredFileInventory.value.slice(0, MAX_VISIBLE_QUEUE_ITEMS),
+)
 const nextActionRoute = computed(() => {
   if (!selectedProjectId.value) {
     return '/setup'
   }
 
-  if (activeJobsCount.value > 0) {
+  if (documents.value.length > 0 && activeJobsCount.value === 0) {
     return '/search'
   }
 
-  if (documents.value.length > 0) {
-    return '/search'
-  }
-
-  return '/setup'
+  return '/files'
 })
 const nextActionLabel = computed(() => {
   if (!selectedProjectId.value) {
@@ -329,87 +358,9 @@ const nextActionHint = computed(() => {
 
   return t('flow.library.nextActions.uploadFirstHint')
 })
-const canGoToAsk = computed(() => Boolean(selectedProjectId.value && documents.value.length > 0 && activeJobsCount.value === 0))
-const fileInventory = computed(() =>
-  buildFileInventory(documents.value, sources.value, recentJobs.value, {
-    unknownSourceLabel: t('flow.library.inventory.unknownSource'),
-    sourceKindFormatter: (value: string) => formatSourceKind(value, t),
-    statusFormatter: (value?: string | null) => formatDocumentStatus(value),
-    untitledLabel: t('flow.library.inventory.untitled'),
-    recentLabel: t('flow.library.inventory.updatedPrefix'),
-    checksumLabel: t('flow.library.inventory.checksum'),
-    mimeFallback: t('flow.library.inventory.mimeFallback'),
-  }),
+const canGoToAsk = computed(() =>
+  Boolean(selectedProjectId.value && documents.value.length > 0 && activeJobsCount.value === 0),
 )
-const normalizedLibrarySearch = computed(() => librarySearch.value.trim().toLowerCase())
-const filteredFileInventory = computed(() =>
-  fileInventory.value
-    .filter((record) => matchesInventoryFilter(record, libraryFilter.value))
-    .filter((record) => {
-      if (!normalizedLibrarySearch.value) {
-        return true
-      }
-
-      const haystack = [
-        record.title,
-        record.subtitle,
-        record.sourceLabel,
-        record.sourceKindLabel,
-        record.mimeLabel,
-      ]
-        .join(' ')
-        .toLowerCase()
-
-      return haystack.includes(normalizedLibrarySearch.value)
-    })
-    .sort((left, right) => {
-      if (right.updatedSortValue !== left.updatedSortValue) {
-        return right.updatedSortValue - left.updatedSortValue
-      }
-
-      return left.title.localeCompare(right.title)
-    }),
-)
-const selectedInventoryRecord = computed(() => {
-  const selectedFromFiltered = filteredFileInventory.value.find((item) => item.id === selectedDocumentId.value)
-  if (selectedFromFiltered) {
-    return selectedFromFiltered
-  }
-
-  const selectedFromAll = fileInventory.value.find((item) => item.id === selectedDocumentId.value)
-  if (selectedFromAll) {
-    return selectedFromAll
-  }
-
-  return filteredFileInventory.value[0] || fileInventory.value[0] || null
-})
-const inventorySummary = computed(() => {
-  const total = filteredFileInventory.value.length
-  if (total === 0) {
-    return t('flow.library.inventory.summaryEmpty')
-  }
-
-  const attention = filteredFileInventory.value.filter((item) => item.attention).length
-  if (attention > 0) {
-    return t('flow.library.inventory.summaryAttention', { count: attention, total })
-  }
-
-  return t('flow.library.inventory.summaryReady', { count: total })
-})
-
-function slugify(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 48)
-}
-
-function buildExternalKey(prefix: string, seed: string): string {
-  const base = slugify(seed) || prefix
-  return [prefix, base, String(Date.now())].join('-')
-}
 
 function setFeedbackState(state: FeedbackState | null) {
   feedback.value = state
@@ -529,18 +480,20 @@ function formatDuration(startedAt?: string | null, finishedAt?: string | null): 
 
   const totalSeconds = Math.round((finished - started) / 1000)
   if (totalSeconds < 60) {
-    return `${totalSeconds}s`
+    return `${String(totalSeconds)}s`
   }
 
   const minutes = Math.floor(totalSeconds / 60)
   const seconds = totalSeconds % 60
   if (minutes < 60) {
-    return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`
+    return seconds > 0 ? `${String(minutes)}m ${String(seconds)}s` : `${String(minutes)}m`
   }
 
   const hours = Math.floor(minutes / 60)
   const remainingMinutes = minutes % 60
-  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`
+  return remainingMinutes > 0
+    ? `${String(hours)}h ${String(remainingMinutes)}m`
+    : `${String(hours)}h`
 }
 
 function selectDocument(documentId: string) {
@@ -548,29 +501,17 @@ function selectDocument(documentId: string) {
 }
 
 function useDocumentTitleForSearch() {
-  if (!selectedInventoryRecord.value) {
-    return
-  }
+  const selectedRecord = selectedInventoryRecord.value
 
   const nextQuery =
-    selectedInventoryRecord.value.title === t('flow.library.inventory.untitled')
-      ? selectedInventoryRecord.value.subtitle
-      : selectedInventoryRecord.value.title
+    selectedRecord.title === t('flow.library.inventory.untitled')
+      ? selectedRecord.subtitle
+      : selectedRecord.title
 
   void router.push({
     path: '/search',
     query: { q: nextQuery },
   })
-}
-
-function formatDocumentStatus(status?: string | null): string {
-  if (!status) {
-    return t('flow.library.lists.documents.indexed')
-  }
-
-  return status
-    .replace(/[_-]+/g, ' ')
-    .replace(/\b\w/g, (char) => char.toUpperCase())
 }
 
 function sleep(ms: number): Promise<void> {
@@ -659,7 +600,8 @@ async function refreshProcessingState(showConfirmation: boolean) {
       })
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
+    const message =
+      error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
     const copy = describeIngestionError(message, t)
     setFeedbackState({
       tone: 'danger',
@@ -726,8 +668,9 @@ function handleUploadDragEnter() {
 function handleUploadDragOver(event: DragEvent) {
   event.preventDefault()
   isUploadDragActive.value = true
-  if (event.dataTransfer) {
-    event.dataTransfer.dropEffect = 'copy'
+  const dataTransfer = event.dataTransfer
+  if (dataTransfer) {
+    dataTransfer.dropEffect = 'copy'
   }
 }
 
@@ -743,18 +686,16 @@ function handleUploadDragLeave(event: DragEvent) {
 
 function handleUploadDrop(event: DragEvent) {
   event.preventDefault()
-  setUploadFile(event.dataTransfer?.files?.[0] ?? null)
+  setUploadFile(event.dataTransfer?.files[0] ?? null)
 }
 
-function getAutoSourceLabel(sourceKind: string): string {
-  return sourceKind === FILE_SOURCE_KIND
-    ? t('flow.library.upload.autoSourceLabel')
-    : t('flow.library.form.autoSourceLabel')
+function getAutoSourceLabel(): string {
+  return t('flow.library.upload.autoSourceLabel')
 }
 
-async function ensureSource(sourceKind: string): Promise<string> {
-  const existing = sources.value.find((item) => item.source_kind === sourceKind)
-  if (existing) {
+async function ensureUploadSource(): Promise<string> {
+  const existing = sources.value.find((item) => item.source_kind === FILE_SOURCE_KIND)
+  if (existing?.id) {
     return existing.id
   }
 
@@ -764,99 +705,11 @@ async function ensureSource(sourceKind: string): Promise<string> {
 
   const source = await createSource({
     project_id: selectedProjectId.value,
-    source_kind: sourceKind,
-    label: getAutoSourceLabel(sourceKind),
+    source_kind: FILE_SOURCE_KIND,
+    label: getAutoSourceLabel(),
   })
   sources.value = [source, ...sources.value.filter((item) => item.id !== source.id)]
   return source.id
-}
-
-async function ingestCurrentText() {
-  if (!selectedProjectId.value) {
-    setFeedbackState({
-      tone: 'danger',
-      title: t('flow.library.notices.collectionTitle'),
-      body: t('flow.library.notices.collectionBody'),
-    })
-    return
-  }
-
-  if (!text.value.trim()) {
-    setFeedbackState({
-      tone: 'danger',
-      title: t('flow.library.notices.emptyTitle'),
-      body: t('flow.library.notices.emptyBody'),
-    })
-    return
-  }
-
-  submitMode.value = 'text'
-  setFeedbackState(null)
-
-  try {
-    const sourceId = await ensureSource(MANUAL_SOURCE_KIND)
-    const externalKey = buildExternalKey('note', title.value || text.value.slice(0, 48))
-    const result = await ingestText({
-      project_id: selectedProjectId.value,
-      source_id: sourceId,
-      external_key: externalKey,
-      title: title.value.trim() || null,
-      text: text.value,
-    })
-
-    setFeedbackState({
-      tone: 'info',
-      title: t('flow.library.notices.queuedTitle'),
-      body: t('flow.library.notices.queuedBody'),
-      detail: `${t('flow.library.processing.runId')}: ${shortJobId(result.ingestion_job_id)}`,
-    })
-
-    const jobDetail = await waitForIngestionJob(result.ingestion_job_id)
-    await loadProjectData(selectedProjectId.value)
-
-    if (jobDetail?.status === 'completed') {
-      setFeedbackState({
-        tone: 'success',
-        title: t('flow.library.notices.completedTitle'),
-        body: t('flow.library.notices.completedBody'),
-        detail: `${t('flow.library.processing.runId')}: ${shortJobId(jobDetail.id)}`,
-      })
-      title.value = ''
-      text.value = ''
-      return
-    }
-
-    if (jobDetail?.error_message) {
-      const copy = describeIngestionError(jobDetail.error_message, t)
-      setFeedbackState({
-        tone: 'danger',
-        title: copy.title,
-        body: copy.body,
-        detail: copy.detail,
-      })
-      return
-    }
-
-    setFeedbackState({
-      tone: 'warning',
-      title: t('flow.library.notices.progressTitle'),
-      body: t('flow.library.notices.progressBody'),
-      detail:
-        highlightedJobView.value?.presentation.stageLabel ??
-        t('flow.library.processing.stages.unknown'),
-    })
-  } catch (error) {
-    const message = error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
-    const copy = describeIngestionError(message, t)
-    setFeedbackState({
-      tone: 'danger',
-      title: copy.title,
-      body: copy.body,
-      detail: copy.detail,
-    })
-  } finally {
-    submitMode.value = null
-  }
 }
 
 async function uploadCurrentFile() {
@@ -879,7 +732,7 @@ async function uploadCurrentFile() {
   }
 
   const selection = uploadSelection.value
-  if (!selection || selection.supportStatus !== 'supported_now') {
+  if (selection?.supportStatus !== 'supported_now') {
     const message =
       selection?.message ??
       (isBlockedBinaryUpload(uploadFile.value)
@@ -899,7 +752,7 @@ async function uploadCurrentFile() {
   setFeedbackState(null)
 
   try {
-    const sourceId = await ensureSource(FILE_SOURCE_KIND)
+    const sourceId = await ensureUploadSource()
     const result = await uploadAndIngest({
       project_id: selectedProjectId.value,
       source_id: sourceId,
@@ -948,7 +801,8 @@ async function uploadCurrentFile() {
         t('flow.library.processing.stages.unknown'),
     })
   } catch (error) {
-    const message = error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
+    const message =
+      error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
     const copy = describeIngestionError(message, t)
     setFeedbackState({
       tone: 'danger',
@@ -1002,7 +856,8 @@ async function retryJob(jobId: string) {
       })
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
+    const message =
+      error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
     const copy = describeIngestionError(message, t)
     setFeedbackState({
       tone: 'danger',
@@ -1030,7 +885,8 @@ onMounted(async () => {
       await loadProjectData(scope.projectId)
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
+    const message =
+      error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
     const copy = describeIngestionError(message, t)
     setFeedbackState({
       tone: 'danger',
@@ -1063,7 +919,11 @@ onUnmounted(() => {
         >
           {{ t('flow.library.processing.refresh') }}
         </button>
-        <RouterLink class="rr-button" to="/search" :aria-disabled="!selectedProjectId || activeJobsCount > 0">
+        <RouterLink
+          class="rr-button"
+          to="/search"
+          :aria-disabled="!canGoToAsk"
+        >
           {{ t('flow.library.action') }}
         </RouterLink>
       </template>
@@ -1075,7 +935,11 @@ onUnmounted(() => {
             <h2>{{ t('flow.library.title') }}</h2>
             <p>{{ t('flow.library.description') }}</p>
           </div>
-          <StatusBadge :status="pageStatus.status" :label="pageStatus.label" emphasis="strong" />
+          <StatusBadge
+            :status="pageStatus.status"
+            :label="pageStatus.label"
+            emphasis="strong"
+          />
         </div>
 
         <div class="flow-reset__scope">
@@ -1101,7 +965,12 @@ onUnmounted(() => {
         >
           <strong>{{ feedback.title }}</strong>
           <p>{{ feedback.body }}</p>
-          <p v-if="feedback.detail" class="feedback-banner__detail">{{ feedback.detail }}</p>
+          <p
+            v-if="feedback.detail"
+            class="feedback-banner__detail"
+          >
+            {{ feedback.detail }}
+          </p>
         </article>
 
         <div class="flow-reset__layout">
@@ -1113,7 +982,11 @@ onUnmounted(() => {
               </div>
               <StatusBadge
                 :status="selectedProjectId ? 'ready' : 'blocked'"
-                :label="selectedProjectId ? t('flow.library.upload.ready') : t('flow.library.upload.needsSetup')"
+                :label="
+                  selectedProjectId
+                    ? t('flow.library.upload.ready')
+                    : t('flow.library.upload.needsSetup')
+                "
               />
             </div>
 
@@ -1138,12 +1011,23 @@ onUnmounted(() => {
               >
 
               <div class="upload-dropzone__body">
-                <StatusBadge tone="info" :label="t('flow.library.upload.dropzoneIdleBadge')" />
+                <StatusBadge
+                  tone="info"
+                  :label="t('flow.library.upload.dropzoneIdleBadge')"
+                />
                 <h4>
-                  {{ isUploadDragActive ? t('flow.library.upload.dropzoneActiveTitle') : t('flow.library.upload.dropzoneTitle') }}
+                  {{
+                    isUploadDragActive
+                      ? t('flow.library.upload.dropzoneActiveTitle')
+                      : t('flow.library.upload.dropzoneTitle')
+                  }}
                 </h4>
                 <p>
-                  {{ isUploadDragActive ? t('flow.library.upload.dropzoneActiveBody') : t('flow.library.upload.dropzoneBody') }}
+                  {{
+                    isUploadDragActive
+                      ? t('flow.library.upload.dropzoneActiveBody')
+                      : t('flow.library.upload.dropzoneBody')
+                  }}
                 </p>
                 <button
                   type="button"
@@ -1167,15 +1051,27 @@ onUnmounted(() => {
               <p class="rr-field__hint">{{ t('flow.library.upload.titleHint') }}</p>
             </label>
 
-            <div v-if="uploadFile && uploadSelection" class="upload-selection-card">
+            <div
+              v-if="uploadFile && uploadSelection"
+              class="upload-selection-card"
+            >
               <div class="upload-selection-card__meta">
                 <strong>{{ uploadFile.name }}</strong>
-                <span class="rr-muted">{{ uploadSelection.fileKindLabel }} · {{ formatFileSize(uploadFile.size) }}</span>
+                <span class="rr-muted">
+                  {{ uploadSelection.fileKindLabel }} · {{ formatFileSize(uploadFile.size) }}
+                </span>
               </div>
-              <StatusBadge :tone="uploadSelection.badgeTone" :label="uploadSelection.badgeLabel" />
+              <StatusBadge
+                :tone="uploadSelection.badgeTone"
+                :label="uploadSelection.badgeLabel"
+              />
             </div>
 
-            <p v-if="uploadSelection" class="rr-banner" :data-tone="uploadSelection.bannerTone">
+            <p
+              v-if="uploadSelection"
+              class="rr-banner"
+              :data-tone="uploadSelection.bannerTone"
+            >
               {{ uploadSelection.message }}
             </p>
 
@@ -1186,9 +1082,17 @@ onUnmounted(() => {
                 :disabled="!canUploadSelectedFile"
                 @click="uploadCurrentFile"
               >
-                {{ submitMode === 'upload' ? t('flow.library.upload.actionBusy') : t('flow.library.upload.action') }}
+                {{
+                  submitMode === 'upload'
+                    ? t('flow.library.upload.actionBusy')
+                    : t('flow.library.upload.action')
+                }}
               </button>
-              <RouterLink class="rr-button rr-button--secondary" to="/processing" v-if="!selectedProjectId">
+              <RouterLink
+                v-if="!selectedProjectId"
+                class="rr-button rr-button--secondary"
+                to="/processing"
+              >
                 {{ t('flow.processing.title') }}
               </RouterLink>
             </div>
@@ -1202,13 +1106,25 @@ onUnmounted(() => {
               </div>
               <StatusBadge
                 :status="activeJobsCount > 0 ? 'partial' : documents.length ? 'ready' : 'draft'"
-                :label="activeJobsCount > 0 ? t('flow.library.processing.queueActive', { count: activeJobsCount }) : documents.length ? t('flow.library.documentsCount', { count: documents.length }) : t('flow.library.processing.queueIdle')"
+                :label="
+                  activeJobsCount > 0
+                    ? t('flow.library.processing.queueActive', { count: activeJobsCount })
+                    : documents.length
+                      ? t('flow.library.documentsCount', { count: documents.length })
+                      : t('flow.library.processing.queueIdle')
+                "
                 emphasis="strong"
               />
             </div>
 
             <p class="rr-note">
-              {{ activeJobsCount > 0 ? t('flow.library.processing.readinessProcessing') : documents.length ? t('flow.library.processing.readinessReady') : t('flow.library.processing.readinessEmpty') }}
+              {{
+                activeJobsCount > 0
+                  ? t('flow.library.processing.readinessProcessing')
+                  : documents.length
+                    ? t('flow.library.processing.readinessReady')
+                    : t('flow.library.processing.readinessEmpty')
+              }}
             </p>
 
             <div class="processing-human">
@@ -1236,16 +1152,28 @@ onUnmounted(() => {
                 <p class="rr-note">{{ nextActionHint }}</p>
               </div>
               <div class="rr-action-row">
-                <RouterLink class="rr-button" :to="nextActionRoute">
+                <RouterLink
+                  class="rr-button"
+                  :to="nextActionRoute"
+                  :aria-disabled="nextActionLabel === t('flow.library.nextActions.waitForReady')"
+                >
                   {{ nextActionLabel }}
                 </RouterLink>
-                <button type="button" class="rr-button rr-button--secondary" :disabled="queueLoading" @click="refreshProcessingState(true)">
+                <button
+                  type="button"
+                  class="rr-button rr-button--secondary"
+                  :disabled="queueLoading"
+                  @click="refreshProcessingState(true)"
+                >
                   {{ t('flow.library.processing.refresh') }}
                 </button>
               </div>
             </div>
 
-            <details v-if="highlightedJobView" class="secondary-disclosure">
+            <details
+              v-if="highlightedJobView"
+              class="secondary-disclosure"
+            >
               <summary>{{ t('flow.library.processing.detailsToggle') }}</summary>
 
               <p class="rr-note">{{ highlightedJobView.presentation.summary }}</p>
@@ -1261,15 +1189,22 @@ onUnmounted(() => {
                 </article>
                 <article class="processing-human__card">
                   <span>{{ t('flow.library.processing.currentUpdated') }}</span>
-                  <strong>{{ highlightedJobView.updatedLabel ?? t('flow.library.processing.updating') }}</strong>
+                  <strong>{{
+                    highlightedJobView.updatedLabel ?? t('flow.library.processing.updating')
+                  }}</strong>
                 </article>
                 <article class="processing-human__card">
                   <span>{{ t('flow.library.processing.currentDuration') }}</span>
-                  <strong>{{ highlightedJobView.durationLabel ?? t('flow.library.processing.notStarted') }}</strong>
+                  <strong>{{
+                    highlightedJobView.durationLabel ?? t('flow.library.processing.notStarted')
+                  }}</strong>
                 </article>
               </div>
 
-              <div v-if="highlightedJobSteps.length" class="processing-steps processing-steps--compact">
+              <div
+                v-if="highlightedJobSteps.length"
+                class="processing-steps processing-steps--compact"
+              >
                 <article
                   v-for="step in highlightedJobSteps"
                   :key="step.key"
@@ -1284,10 +1219,18 @@ onUnmounted(() => {
                 </article>
               </div>
 
-              <article v-if="highlightedJobView.error" class="processing-error">
+              <article
+                v-if="highlightedJobView.error"
+                class="processing-error"
+              >
                 <strong>{{ highlightedJobView.error.title }}</strong>
                 <p>{{ highlightedJobView.error.body }}</p>
-                <p v-if="highlightedJobView.error.detail" class="processing-error__detail">{{ highlightedJobView.error.detail }}</p>
+                <p
+                  v-if="highlightedJobView.error.detail"
+                  class="processing-error__detail"
+                >
+                  {{ highlightedJobView.error.detail }}
+                </p>
               </article>
 
               <div class="rr-action-row">
@@ -1298,9 +1241,317 @@ onUnmounted(() => {
                   :disabled="retryingJobId === highlightedJobView.job.id"
                   @click="retryJob(highlightedJobView.job.id)"
                 >
-                  {{ retryingJobId === highlightedJobView.job.id ? t('flow.library.processing.retryBusy') : t('flow.library.processing.retryAction') }}
+                  {{
+                    retryingJobId === highlightedJobView.job.id
+                      ? t('flow.library.processing.retryBusy')
+                      : t('flow.library.processing.retryAction')
+                  }}
                 </button>
               </div>
             </details>
           </article>
+        </div>
 
+        <article
+          v-if="documents.length || recentJobs.length"
+          class="rr-panel rr-stack file-library-panel"
+        >
+          <div class="ingestion-panel__heading">
+            <div class="rr-stack rr-stack--tight">
+              <p class="rr-kicker">{{ t('flow.library.inventory.kicker') }}</p>
+              <h3>{{ t('flow.library.inventory.title') }}</h3>
+            </div>
+            <StatusBadge
+              :status="documents.length ? 'ready' : activeJobsCount > 0 ? 'partial' : 'draft'"
+              :label="
+                documents.length
+                  ? t('flow.library.inventory.summaryReady', { count: recentFileRecords.length })
+                  : t('flow.library.inventory.emptyBadge')
+              "
+            />
+          </div>
+
+          <p class="rr-note">{{ t('flow.library.inventory.helper') }}</p>
+
+          <div
+            v-if="documents.length"
+            class="file-library-toolbar"
+          >
+            <label class="rr-field file-library-toolbar__search">
+              <span class="rr-field__label">{{ t('flow.library.inventory.searchLabel') }}</span>
+              <input
+                v-model="librarySearch"
+                class="rr-control"
+                type="search"
+                :placeholder="t('flow.library.inventory.searchPlaceholder')"
+              >
+            </label>
+          </div>
+
+          <EmptyStateCard
+            v-if="!documents.length"
+            :title="t('flow.library.inventory.emptyTitle')"
+            :message="t('flow.library.inventory.emptyBody')"
+          />
+
+          <div
+            v-else
+            class="file-library-list recent-files-list"
+          >
+            <button
+              v-for="record in recentFileRecords"
+              :key="record.id"
+              type="button"
+              class="file-library-row"
+              :data-active="selectedInventoryRecord?.id === record.id"
+              @click="selectDocument(record.id)"
+            >
+              <div class="file-library-row__copy">
+                <div class="file-library-row__title-line">
+                  <strong>{{ record.title }}</strong>
+                  <StatusBadge
+                    :tone="record.statusTone"
+                    :label="record.statusLabel"
+                  />
+                </div>
+                <p class="rr-muted">{{ record.summaryLabel }}</p>
+              </div>
+              <div class="file-library-row__meta">
+                <span v-if="record.updatedAt">{{ record.updatedAt }}</span>
+                <span>{{ record.mimeLabel }}</span>
+              </div>
+            </button>
+
+            <EmptyStateCard
+              v-if="!recentFileRecords.length"
+              :title="t('flow.library.inventory.filteredEmptyTitle')"
+              :message="t('flow.library.inventory.filteredEmptyBody')"
+            />
+          </div>
+
+          <details
+            v-if="selectedInventoryRecord"
+            class="secondary-disclosure file-detail-disclosure"
+          >
+            <summary>
+              {{
+                t('flow.library.inventory.detailToggle', { title: selectedInventoryRecord.title })
+              }}
+            </summary>
+
+            <article class="file-library-detail">
+              <div class="file-library-detail__header">
+                <div class="rr-stack rr-stack--tight">
+                  <p class="rr-kicker">{{ t('flow.library.inventory.detailKicker') }}</p>
+                  <h4>{{ selectedInventoryRecord.title }}</h4>
+                </div>
+                <StatusBadge
+                  :tone="selectedInventoryRecord.statusTone"
+                  :label="selectedInventoryRecord.statusLabel"
+                  emphasis="strong"
+                />
+              </div>
+
+              <dl class="file-library-detail__facts">
+                <div>
+                  <dt>{{ t('flow.library.inventory.fields.externalKey') }}</dt>
+                  <dd>{{ selectedInventoryRecord.subtitle }}</dd>
+                </div>
+                <div>
+                  <dt>{{ t('flow.library.inventory.fields.source') }}</dt>
+                  <dd>{{ selectedInventoryRecord.sourceLabel }}</dd>
+                </div>
+                <div>
+                  <dt>{{ t('flow.library.inventory.fields.kind') }}</dt>
+                  <dd>{{ selectedInventoryRecord.sourceKindLabel }}</dd>
+                </div>
+                <div>
+                  <dt>{{ t('flow.library.inventory.fields.mime') }}</dt>
+                  <dd>{{ selectedInventoryRecord.mimeLabel }}</dd>
+                </div>
+                <div v-if="selectedInventoryRecord.updatedAt">
+                  <dt>{{ t('flow.library.inventory.fields.updated') }}</dt>
+                  <dd>{{ selectedInventoryRecord.updatedAt }}</dd>
+                </div>
+                <div v-if="selectedInventoryRecord.checksumShort">
+                  <dt>{{ t('flow.library.inventory.fields.checksum') }}</dt>
+                  <dd>{{ selectedInventoryRecord.checksumShort }}</dd>
+                </div>
+              </dl>
+
+              <p class="rr-note">{{ selectedInventoryRecord.summaryLabel }}</p>
+
+              <div class="rr-action-row">
+                <button
+                  type="button"
+                  class="rr-button"
+                  :disabled="!canGoToAsk"
+                  @click="useDocumentTitleForSearch"
+                >
+                  {{ t('flow.library.inventory.searchAction') }}
+                </button>
+              </div>
+            </article>
+          </details>
+        </article>
+      </article>
+
+      <CrossSurfaceGuide active-section="files" />
+      <ProductSpine active-section="files" />
+    </PageSection>
+  </section>
+</template>
+
+<style scoped>
+.ingestion-page {
+  gap: 1.5rem;
+}
+
+.flow-reset,
+.flow-reset__scope-card,
+.flow-reset__scope,
+.flow-reset__layout,
+.processing-human,
+.processing-human__card {
+  display: grid;
+  gap: 1rem;
+}
+
+.flow-reset__hero,
+.ingestion-panel__heading,
+.file-library-row,
+.file-library-row__title-line,
+.file-library-detail__header,
+.rr-action-row,
+.upload-selection-card,
+.upload-selection-card__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.flow-reset__scope {
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+}
+
+.flow-reset__scope-card,
+.processing-human__card,
+.file-library-row,
+.file-library-detail,
+.next-action-card,
+.secondary-disclosure {
+  border: 1px solid var(--rr-border, rgba(255, 255, 255, 0.08));
+  border-radius: 1rem;
+  padding: 1rem;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.flow-reset__layout {
+  grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+}
+
+.upload-dropzone {
+  position: relative;
+  border: 1px dashed var(--rr-border, rgba(255, 255, 255, 0.16));
+  border-radius: 1rem;
+  padding: 1.25rem;
+  cursor: pointer;
+}
+
+.upload-dropzone.is-active {
+  border-color: var(--rr-accent, #6ea8fe);
+}
+
+.upload-dropzone__input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.upload-dropzone__body,
+.file-library-panel,
+.file-library-list,
+.file-library-detail,
+.file-library-detail__facts,
+.processing-steps,
+.processing-step,
+.processing-step__copy {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.processing-human {
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+}
+
+.secondary-disclosure > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.secondary-disclosure[open] > summary {
+  margin-bottom: 1rem;
+}
+
+.file-library-row {
+  width: 100%;
+  text-align: left;
+}
+
+.file-library-row__meta,
+.file-library-detail__facts dt,
+.processing-human__card span,
+.processing-human__card small {
+  color: var(--rr-muted, rgba(255, 255, 255, 0.68));
+}
+
+.file-library-detail__facts {
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+}
+
+.file-library-detail__facts div {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.processing-step {
+  grid-template-columns: auto 1fr;
+  align-items: start;
+}
+
+.processing-step__dot {
+  width: 0.65rem;
+  height: 0.65rem;
+  margin-top: 0.3rem;
+  border-radius: 999px;
+  background: var(--rr-accent, #6ea8fe);
+}
+
+.processing-error {
+  border-left: 3px solid #ff9b9b;
+  padding-left: 1rem;
+}
+
+.feedback-banner {
+  border-radius: 1rem;
+  padding: 1rem;
+}
+
+.feedback-banner[data-tone='success'] {
+  background: rgba(73, 204, 144, 0.14);
+}
+
+.feedback-banner[data-tone='warning'] {
+  background: rgba(255, 184, 77, 0.14);
+}
+
+.feedback-banner[data-tone='danger'] {
+  background: rgba(255, 107, 107, 0.14);
+}
+
+.feedback-banner[data-tone='info'] {
+  background: rgba(110, 168, 254, 0.14);
+}
+</style>

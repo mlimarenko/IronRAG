@@ -23,7 +23,7 @@ const props = withDefaults(
 const { t } = useI18n()
 const items = computed(() =>
   props.references.map((reference, index) => ({
-    id: `${reference}-${index}`,
+    id: `${reference}-${String(index)}`,
     title: formatReferenceTitle(reference, index),
     meta: formatReferenceMeta(reference),
     raw: reference,
@@ -81,7 +81,9 @@ const items = computed(() =>
           </span>
         </div>
         <div class="reference-card__body">
-          <span class="reference-card__raw-label">{{ t('flow.search.result.referenceRawLabel') }}</span>
+          <span class="reference-card__raw-label">{{
+            t('flow.search.result.referenceRawLabel')
+          }}</span>
           <code class="reference-card__raw">{{ item.raw }}</code>
         </div>
       </li>

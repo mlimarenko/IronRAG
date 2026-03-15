@@ -2,7 +2,7 @@ import { watch } from 'vue'
 import type { App as VueApp } from 'vue'
 import { createI18n } from 'vue-i18n'
 
-import { messages, defaultLocale, type AppLocale } from 'src/i18n/messages'
+import { messages, defaultLocale } from 'src/i18n/messages'
 import { resolveInitialLocale, syncDocumentLocale } from 'src/i18n/runtime'
 
 const initialLocale = resolveInitialLocale()
@@ -17,7 +17,7 @@ export const i18n = createI18n({
 watch(
   () => i18n.global.locale.value,
   (locale) => {
-    syncDocumentLocale(locale as AppLocale)
+    syncDocumentLocale(locale)
   },
   { immediate: true },
 )

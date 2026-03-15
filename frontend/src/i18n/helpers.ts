@@ -13,12 +13,12 @@ function normalizeStatusKey(value?: string | null): string {
 export function translateStatusLabel(value?: string | null): string {
   const key = normalizeStatusKey(value)
   if (!key) {
-    return i18n.global.t('common.status.unknown') as string
+    return i18n.global.t('common.status.unknown')
   }
 
   const path = `common.status.${key}`
   if (i18n.global.te(path)) {
-    return i18n.global.t(path) as string
+    return i18n.global.t(path)
   }
 
   return humanizeStatus(value ?? '')
@@ -26,7 +26,7 @@ export function translateStatusLabel(value?: string | null): string {
 
 export function formatDebugValue(value: unknown): string {
   if (value == null) {
-    return i18n.global.t('common.debug.nullValue') as string
+    return i18n.global.t('common.debug.nullValue')
   }
 
   if (typeof value === 'string') {
@@ -40,6 +40,6 @@ export function formatDebugValue(value: unknown): string {
   try {
     return JSON.stringify(value, null, 2)
   } catch {
-    return i18n.global.t('common.debug.unserializableValue') as string
+    return i18n.global.t('common.debug.unserializableValue')
   }
 }
