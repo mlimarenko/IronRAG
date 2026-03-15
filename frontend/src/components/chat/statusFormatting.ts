@@ -56,19 +56,19 @@ export function formatReferenceMeta(reference: string): string {
   const parsed = parseReference(reference)
 
   if (parsed.documentId && parsed.chunkId) {
-    return i18n.global.t('flow.search.diagnostics.referenceMeta.documentChunk', {
+    return i18n.global.t('flow.search.result.referenceMeta.documentChunk', {
       documentId: shortenId(parsed.documentId),
       chunkId: parsed.chunkId,
     })
   }
 
   if (parsed.documentId) {
-    return i18n.global.t('flow.search.diagnostics.referenceMeta.document', {
+    return i18n.global.t('flow.search.result.referenceMeta.document', {
       documentId: shortenId(parsed.documentId),
     })
   }
 
-  return i18n.global.t('flow.search.diagnostics.referenceMeta.stored')
+  return i18n.global.t('flow.search.result.referenceMeta.saved')
 }
 
 export function isChunkScopedReference(reference: string): boolean {

@@ -60,7 +60,7 @@ const items = computed(() =>
             <p class="reference-card__meta">{{ item.meta }}</p>
           </div>
           <span v-if="item.isChunkScoped" class="reference-card__chip">
-            {{ t('flow.search.diagnostics.referenceChip') }}
+            {{ t('flow.search.result.referenceChip') }}
           </span>
         </div>
         <details v-if="props.showRaw" class="reference-card__body">
