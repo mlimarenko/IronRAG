@@ -101,7 +101,7 @@ export default {
     eyebrow: 'Session auth',
     title: 'Session bearer token',
     description:
-      'Store a token only for this browser session so the launchpad can probe protected surfaces without pretending a full auth UX already exists.',
+      'Store a token only for this browser session so protected product flows can use a real bearer token without pretending auth is fully productized yet.',
     label: 'Bearer token',
     placeholder: 'rtrg_xxx_replace_me',
     activeLabel: 'Active session token',
@@ -111,6 +111,22 @@ export default {
     actions: {
       save: 'Save token',
       clear: 'Clear token',
+    },
+    feedback: {
+      saved: 'Session token saved for this browser session.',
+      cleared: 'Session token removed from this browser session.',
+    },
+    bootstrap: {
+      label: 'Bootstrap secret',
+      placeholder: 'RUSTRAG_BOOTSTRAP_TOKEN',
+      action: 'Mint session token',
+      actionBusy: 'Minting...',
+      hint:
+        'Use the backend bootstrap secret only for initial setup. This mints an instance-admin session token and saves it locally for workspace, project, ingestion, and query calls.',
+      missingSecret: 'Paste the backend bootstrap secret before minting a session token.',
+      success: 'Session token minted and saved for this browser session.',
+      rejected: 'Bootstrap secret was rejected by the backend.',
+      notConfigured: 'This backend does not have bootstrap token minting configured.',
     },
     status: {
       needsToken: 'Needs token',
@@ -130,7 +146,7 @@ export default {
     notes: {
       sessionOnly: 'Token storage here is session-scoped and should be treated as a local testing convenience.',
       mintingOutsideUi:
-        'Token creation, bootstrap flows, and secret distribution are still external to this page.',
+        'Bootstrap minting is available when the backend exposes a bootstrap secret, but ongoing token lifecycle and secret distribution remain an operator concern.',
       plaintextOnce:
         'Plaintext tokens are returned once at mint time and should not be expected to reappear here.',
     },

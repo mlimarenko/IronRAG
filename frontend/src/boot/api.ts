@@ -18,6 +18,26 @@ export interface CreateWorkspaceRequest {
   name: string
 }
 
+export interface CreateTokenRequest {
+  workspace_id?: string | null
+  token_kind: string
+  label: string
+  scopes: string[]
+}
+
+export interface BootstrapTokenRequest extends CreateTokenRequest {
+  bootstrap_secret?: string | null
+}
+
+export interface TokenCreateResponse {
+  id: string
+  workspace_id?: string | null
+  token_kind: string
+  label: string
+  token: string
+  scopes: string[]
+}
+
 export interface WorkspaceGovernanceSummary {
   id: string
   slug: string
@@ -397,8 +417,23 @@ export function isUnauthorizedApiError(error: unknown): boolean {
   )
 }
 
+export function isMissingAuthorizationHeaderError(error: unknown): boolean {
+  return error instanceof Error && error.message.toLowerCase().includes('missing authorization header')
+}
+
+export function isBootstrapNotConfiguredApiError(error: unknown): boolean {
+  return error instanceof Error && error.message.toLowerCase().includes('bootstrap token is not configured')
+}
+
 export async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
   const { data } = await api.get<WorkspaceSummary[]>('/workspaces')
+  return data
+}
+
+export async function createBootstrapToken(
+  payload: BootstrapTokenRequest,
+): Promise<TokenCreateResponse> {
+  const { data } = await api.post<TokenCreateResponse>('/auth/bootstrap-token', payload)
   return data
 }
 

@@ -88,6 +88,15 @@ pub struct CreateTokenRequest {
 }
 
 #[derive(Deserialize)]
+pub struct BootstrapTokenRequest {
+    pub workspace_id: Option<Uuid>,
+    pub token_kind: String,
+    pub label: String,
+    pub scopes: Vec<String>,
+    pub bootstrap_secret: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub struct ListTokensQuery {
     pub workspace_id: Option<Uuid>,
 }
@@ -95,6 +104,7 @@ pub struct ListTokensQuery {
 pub fn router() -> Router<crate::app::state::AppState> {
     Router::new()
         .route("/auth/tokens", axum::routing::post(create_token).get(list_tokens))
+        .route("/auth/bootstrap-token", axum::routing::post(create_bootstrap_token))
         .route("/auth/tokens/{id}", axum::routing::get(get_token).delete(revoke_token))
 }
 
@@ -116,80 +126,75 @@ pub fn mint_plaintext_token() -> String {
 /// Returns [`ApiError::BadRequest`] for invalid payloads and [`ApiError::Internal`]
 /// when token persistence or scope serialization fails.
 pub async fn create_token(
+    auth: AuthContext,
     State(state): State<AppState>,
     Json(payload): Json<CreateTokenRequest>,
 ) -> Result<Json<TokenCreateResponse>, ApiError> {
-    if payload.token_kind.trim().is_empty() || payload.label.trim().is_empty() {
+    validate_create_token_request(
+        payload.workspace_id,
+        &payload.token_kind,
+        &payload.label,
+        &payload.scopes,
+    )?;
+    authorize_token_creation(&auth, payload.workspace_id)?;
+
+    mint_token_response(
+        &state,
+        payload.workspace_id,
+        &payload.token_kind,
+        &payload.label,
+        payload.scopes,
+    )
+    .await
+    .map(Json)
+}
+
+/// Creates an API token using the bootstrap secret for initial setup.
+///
+/// # Errors
+/// Returns [`ApiError::Unauthorized`] when the provided secret is missing or invalid,
+/// [`ApiError::BadRequest`] when bootstrap minting is not configured, and
+/// [`ApiError::Internal`] when token persistence fails.
+pub async fn create_bootstrap_token(
+    State(state): State<AppState>,
+    Json(payload): Json<BootstrapTokenRequest>,
+) -> Result<Json<TokenCreateResponse>, ApiError> {
+    validate_create_token_request(
+        payload.workspace_id,
+        &payload.token_kind,
+        &payload.label,
+        &payload.scopes,
+    )?;
+
+    let configured_secret = state.settings.resolved_bootstrap_token().ok_or_else(|| {
+        ApiError::BadRequest("bootstrap token is not configured on backend".into())
+    })?;
+    let provided_secret = payload
+        .bootstrap_secret
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or(ApiError::Unauthorized)?;
+
+    if provided_secret != configured_secret {
         warn!(
             workspace_id = ?payload.workspace_id,
             token_kind = %payload.token_kind,
             label = %payload.label,
-            scope_count = payload.scopes.len(),
-            "rejecting token creation request with empty identity fields",
+            "rejecting bootstrap token creation request with invalid secret",
         );
-        return Err(ApiError::BadRequest("token_kind and label must not be empty".into()));
+        return Err(ApiError::Unauthorized);
     }
 
-    let plaintext = mint_plaintext_token();
-    let token_hash = hash_token(&plaintext);
-    let scope_json = serde_json::to_value(&payload.scopes).map_err(|error| {
-        error!(
-            workspace_id = ?payload.workspace_id,
-            token_kind = %payload.token_kind,
-            label = %payload.label,
-            scope_count = payload.scopes.len(),
-            ?error,
-            "failed to serialize token scopes",
-        );
-        ApiError::Internal
-    })?;
-
-    info!(
-        workspace_id = ?payload.workspace_id,
-        token_kind = %payload.token_kind,
-        label = %payload.label,
-        scope_count = payload.scopes.len(),
-        "accepted token creation request",
-    );
-
-    let row = repositories::create_api_token(
-        &state.persistence.postgres,
+    mint_token_response(
+        &state,
         payload.workspace_id,
         &payload.token_kind,
         &payload.label,
-        &token_hash,
-        scope_json,
+        payload.scopes,
     )
     .await
-    .map_err(|error| {
-        error!(
-            workspace_id = ?payload.workspace_id,
-            token_kind = %payload.token_kind,
-            label = %payload.label,
-            scope_count = payload.scopes.len(),
-            ?error,
-            "failed to persist api token",
-        );
-        ApiError::Internal
-    })?;
-
-    info!(
-        workspace_id = ?row.workspace_id,
-        api_token_id = %row.id,
-        token_kind = %row.token_kind,
-        label = %row.label,
-        scope_count = payload.scopes.len(),
-        "created api token",
-    );
-
-    Ok(Json(TokenCreateResponse {
-        id: row.id,
-        workspace_id: row.workspace_id,
-        token_kind: row.token_kind,
-        label: row.label,
-        token: plaintext,
-        scopes: payload.scopes,
-    }))
+    .map(Json)
 }
 
 /// Lists API tokens visible to a workspace administrator.
@@ -203,14 +208,25 @@ pub async fn list_tokens(
     Query(query): Query<ListTokensQuery>,
 ) -> Result<Json<Vec<TokenSummary>>, ApiError> {
     auth.require_any_scope(&["workspace:admin"])?;
+    let workspace_filter = if auth.token_kind == "instance_admin" {
+        query.workspace_id
+    } else {
+        match query.workspace_id {
+            Some(workspace_id) => {
+                auth.require_workspace_access(workspace_id)?;
+                Some(workspace_id)
+            }
+            None => Some(auth.workspace_id.ok_or(ApiError::Unauthorized)?),
+        }
+    };
 
     let items: Vec<TokenSummary> =
-        repositories::list_api_tokens(&state.persistence.postgres, query.workspace_id)
+        repositories::list_api_tokens(&state.persistence.postgres, workspace_filter)
             .await
             .map_err(|error| {
                 error!(
                     auth_token_id = %auth.token_id,
-                    workspace_id = ?query.workspace_id,
+                    workspace_id = ?workspace_filter,
                     ?error,
                     "failed to list api tokens",
                 );
@@ -222,7 +238,7 @@ pub async fn list_tokens(
 
     info!(
         auth_token_id = %auth.token_id,
-        requested_workspace_id = ?query.workspace_id,
+        requested_workspace_id = ?workspace_filter,
         token_count = items.len(),
         "listed api tokens",
     );
@@ -255,6 +271,17 @@ pub async fn get_token(
             ApiError::Internal
         })?
         .ok_or_else(|| ApiError::NotFound(format!("api_token {id} not found")))?;
+
+    if let Some(workspace_id) = row.workspace_id {
+        auth.require_workspace_access(workspace_id)?;
+    } else if auth.token_kind != "instance_admin" {
+        warn!(
+            auth_token_id = %auth.token_id,
+            api_token_id = %id,
+            "rejecting api token read outside instance admin scope",
+        );
+        return Err(ApiError::Unauthorized);
+    }
 
     info!(
         auth_token_id = %auth.token_id,
@@ -353,6 +380,122 @@ fn map_token_summary(row: repositories::ApiTokenRow) -> TokenSummary {
         created_at: row.created_at,
         updated_at: row.updated_at,
     }
+}
+
+fn validate_create_token_request(
+    workspace_id: Option<Uuid>,
+    token_kind: &str,
+    label: &str,
+    scopes: &[String],
+) -> Result<(), ApiError> {
+    if token_kind.trim().is_empty() || label.trim().is_empty() {
+        warn!(
+            workspace_id = ?workspace_id,
+            token_kind,
+            label,
+            scope_count = scopes.len(),
+            "rejecting token creation request with empty identity fields",
+        );
+        return Err(ApiError::BadRequest("token_kind and label must not be empty".into()));
+    }
+
+    let normalized_kind = token_kind.trim();
+    if normalized_kind == "instance_admin" && workspace_id.is_some() {
+        return Err(ApiError::BadRequest(
+            "instance_admin tokens must not target a specific workspace".into(),
+        ));
+    }
+    if normalized_kind != "instance_admin" && workspace_id.is_none() {
+        return Err(ApiError::BadRequest(
+            "workspace-scoped tokens must include workspace_id".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn authorize_token_creation(
+    auth: &AuthContext,
+    workspace_id: Option<Uuid>,
+) -> Result<(), ApiError> {
+    auth.require_any_scope(&["workspace:admin"])?;
+
+    match workspace_id {
+        Some(workspace_id) => auth.require_workspace_access(workspace_id),
+        None if auth.token_kind == "instance_admin" => Ok(()),
+        None => Err(ApiError::Unauthorized),
+    }
+}
+
+async fn mint_token_response(
+    state: &AppState,
+    workspace_id: Option<Uuid>,
+    token_kind: &str,
+    label: &str,
+    scopes: Vec<String>,
+) -> Result<TokenCreateResponse, ApiError> {
+    let normalized_token_kind = token_kind.trim();
+    let normalized_label = label.trim();
+    let plaintext = mint_plaintext_token();
+    let token_hash = hash_token(&plaintext);
+    let scope_json = serde_json::to_value(&scopes).map_err(|error| {
+        error!(
+            workspace_id = ?workspace_id,
+            token_kind = normalized_token_kind,
+            label = normalized_label,
+            scope_count = scopes.len(),
+            ?error,
+            "failed to serialize token scopes",
+        );
+        ApiError::Internal
+    })?;
+
+    info!(
+        workspace_id = ?workspace_id,
+        token_kind = normalized_token_kind,
+        label = normalized_label,
+        scope_count = scopes.len(),
+        "accepted token creation request",
+    );
+
+    let row = repositories::create_api_token(
+        &state.persistence.postgres,
+        workspace_id,
+        normalized_token_kind,
+        normalized_label,
+        &token_hash,
+        scope_json,
+    )
+    .await
+    .map_err(|error| {
+        error!(
+            workspace_id = ?workspace_id,
+            token_kind = normalized_token_kind,
+            label = normalized_label,
+            scope_count = scopes.len(),
+            ?error,
+            "failed to persist api token",
+        );
+        ApiError::Internal
+    })?;
+
+    info!(
+        workspace_id = ?row.workspace_id,
+        api_token_id = %row.id,
+        token_kind = %row.token_kind,
+        label = %row.label,
+        scope_count = scopes.len(),
+        "created api token",
+    );
+
+    Ok(TokenCreateResponse {
+        id: row.id,
+        workspace_id: row.workspace_id,
+        token_kind: row.token_kind,
+        label: row.label,
+        token: plaintext,
+        scopes,
+    })
 }
 
 #[cfg(test)]
@@ -478,6 +621,28 @@ mod tests {
         assert!(summary.scopes.is_empty());
         assert_eq!(summary.status, "active");
         assert_eq!(summary.label, "ops");
+    }
+
+    #[test]
+    fn validate_create_token_request_rejects_workspace_less_non_admin_token() {
+        let result = validate_create_token_request(None, "workspace_token", "ops", &[]);
+
+        assert!(matches!(result, Err(ApiError::BadRequest(_))));
+    }
+
+    #[test]
+    fn authorize_token_creation_rejects_global_token_mint_for_workspace_admin() {
+        let auth = workspace_token(Some(Uuid::now_v7()));
+
+        assert!(matches!(authorize_token_creation(&auth, None), Err(ApiError::Unauthorized)));
+    }
+
+    #[test]
+    fn authorize_token_creation_allows_matching_workspace_token_mint() {
+        let workspace_id = Uuid::now_v7();
+        let auth = workspace_token(Some(workspace_id));
+
+        assert!(authorize_token_creation(&auth, Some(workspace_id)).is_ok());
     }
 }
 

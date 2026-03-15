@@ -11,6 +11,7 @@ pub struct Settings {
     pub log_filter: String,
     pub openai_api_key: Option<String>,
     pub deepseek_api_key: Option<String>,
+    pub bootstrap_token: Option<String>,
     pub openai_input_price_per_1m: f64,
     pub openai_output_price_per_1m: f64,
     pub deepseek_input_price_per_1m: f64,
@@ -42,6 +43,21 @@ impl Settings {
 
         cfg.try_deserialize()
     }
+
+    #[must_use]
+    pub fn resolved_bootstrap_token(&self) -> Option<String> {
+        self.bootstrap_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(std::string::ToString::to_string)
+            .or_else(|| {
+                std::env::var("RJUSTRAG_BOOTSTRAP_TOKEN")
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            })
+    }
 }
 
 #[cfg(test)]
@@ -65,5 +81,27 @@ mod tests {
         let settings = Settings::from_env().expect("settings should load with defaults");
 
         assert_eq!(settings.database_url, "postgres://postgres:postgres@127.0.0.1:5432/rustrag");
+    }
+
+    #[test]
+    fn resolved_bootstrap_token_uses_configured_value() {
+        let settings = Settings {
+            bind_addr: "0.0.0.0:8080".into(),
+            database_url: "postgres://postgres:postgres@127.0.0.1:5432/rustrag".into(),
+            database_max_connections: 20,
+            redis_url: "redis://127.0.0.1:6379".into(),
+            service_name: "rustrag-backend".into(),
+            environment: "local".into(),
+            log_filter: "info".into(),
+            openai_api_key: None,
+            deepseek_api_key: None,
+            bootstrap_token: Some(" bootstrap-secret ".into()),
+            openai_input_price_per_1m: 0.25,
+            openai_output_price_per_1m: 2.0,
+            deepseek_input_price_per_1m: 0.27,
+            deepseek_output_price_per_1m: 1.10,
+        };
+
+        assert_eq!(settings.resolved_bootstrap_token().as_deref(), Some("bootstrap-secret"));
     }
 }

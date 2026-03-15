@@ -68,7 +68,10 @@ export interface paths {
      */
     get: operations['listTokens']
     put?: never
-    /** Mint an API token */
+    /**
+     * Mint an API token
+     * @description Requires `workspace:admin` scope or an `instance_admin` token. Workspace-scoped tokens may mint tokens only for their own workspace. Global tokens without `workspace_id` require an `instance_admin` caller.
+     */
     post: operations['createToken']
     delete?: never
     options?: never
@@ -804,6 +807,26 @@ export interface paths {
      * @description Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
      */
     get: operations['getGraphSummary']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/graph-products/{project_id}/diagnostics': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * Get graph project diagnostics
+     * @description Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Returns persisted content counts, graph provenance coverage, and concrete readiness blockers/next steps without mutating runtime state.
+     */
+    get: operations['getGraphDiagnostics']
     put?: never
     post?: never
     delete?: never
@@ -1642,6 +1665,38 @@ export interface components {
       relation_kinds: components['schemas']['GraphKindCount'][]
       top_entities: components['schemas']['GraphEntitySummary'][]
       sample_relations: components['schemas']['GraphRelationSummary'][]
+      /** Format: date-time */
+      generated_at: string
+    }
+    GraphContentSummary: {
+      persisted_document_count: number
+      persisted_chunk_count: number
+      embedded_chunk_count: number
+      retrieval_run_count: number
+      referenced_document_count: number
+      referenced_chunk_count: number
+    }
+    GraphProvenanceSummary: {
+      entities_with_document_refs: number
+      entities_with_chunk_refs: number
+      entities_without_chunk_refs: number
+      relations_with_document_refs: number
+      relations_with_chunk_refs: number
+      relations_without_chunk_refs: number
+    }
+    GraphReadinessSummary: {
+      /** @example awaiting_graph_rows */
+      status: string
+      blockers: string[]
+      next_steps: string[]
+    }
+    GraphProjectDiagnosticsResponse: {
+      /** Format: uuid */
+      project_id: string
+      coverage: components['schemas']['GraphCoverageSummary']
+      content: components['schemas']['GraphContentSummary']
+      provenance: components['schemas']['GraphProvenanceSummary']
+      readiness: components['schemas']['GraphReadinessSummary']
       /** Format: date-time */
       generated_at: string
     }
@@ -3031,6 +3086,31 @@ export interface operations {
         }
         content: {
           'application/json': components['schemas']['GraphProjectSummaryResponse']
+        }
+      }
+      401: components['responses']['Unauthorized']
+      404: components['responses']['NotFound']
+      500: components['responses']['InternalError']
+    }
+  }
+  getGraphDiagnostics: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        project_id: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Graph diagnostics */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['GraphProjectDiagnosticsResponse']
         }
       }
       401: components['responses']['Unauthorized']

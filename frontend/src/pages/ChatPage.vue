@@ -7,6 +7,7 @@ import {
   fetchProjects,
   fetchRetrievalRunDetail,
   fetchWorkspaces,
+  isUnauthorizedApiError,
   runQuery,
   type QueryResponseSurface,
   type RetrievalRunDetail,
@@ -209,7 +210,11 @@ async function submitQuery() {
       detail.value = null
     }
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : t('flow.search.error')
+    errorMessage.value = isUnauthorizedApiError(error)
+      ? t('flow.search.authRequired')
+      : error instanceof Error
+        ? error.message
+        : t('flow.search.error')
   } finally {
     loading.value = false
   }

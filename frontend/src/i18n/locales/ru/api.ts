@@ -103,7 +103,7 @@ export default {
     eyebrow: 'Session auth',
     title: 'Session bearer token',
     description:
-      'Сохраните token только на время этой browser session, чтобы launchpad мог проверить protected surfaces без фейкового полноценного auth UX.',
+      'Сохраните token только на время этой browser session, чтобы protected product flows работали с реальным bearer token без притворства, что auth уже полноценно продуктован.',
     label: 'Bearer token',
     placeholder: 'rtrg_xxx_replace_me',
     activeLabel: 'Активный session token',
@@ -115,6 +115,22 @@ export default {
     actions: {
       save: 'Сохранить token',
       clear: 'Очистить token',
+    },
+    feedback: {
+      saved: 'Session token сохранён для этой browser session.',
+      cleared: 'Session token удалён из этой browser session.',
+    },
+    bootstrap: {
+      label: 'Bootstrap secret',
+      placeholder: 'RUSTRAG_BOOTSTRAP_TOKEN',
+      action: 'Выпустить session token',
+      actionBusy: 'Выпускаем...',
+      hint:
+        'Используйте backend bootstrap secret только для первичного setup. Он выпускает instance-admin session token и сохраняет его локально для workspace, project, ingestion и query вызовов.',
+      missingSecret: 'Сначала вставьте backend bootstrap secret.',
+      success: 'Session token выпущен и сохранён для этой browser session.',
+      rejected: 'Backend отклонил bootstrap secret.',
+      notConfigured: 'На этом backend bootstrap token minting не настроен.',
     },
     status: {
       needsToken: 'Нужен token',
@@ -135,7 +151,7 @@ export default {
       sessionOnly:
         'Хранение token здесь ограничено одной browser session и подходит только как локальное testing convenience.',
       mintingOutsideUi:
-        'Выпуск token, bootstrap flows и раздача секретов пока остаются вне этой страницы.',
+        'Bootstrap minting доступен, если backend отдает bootstrap secret flow, но дальнейший lifecycle token и раздача секретов всё ещё остаются задачей оператора.',
       plaintextOnce:
         'Plaintext token возвращается только в момент minting и не должен появляться здесь повторно.',
     },

@@ -3,7 +3,14 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { RouterLink } from 'vue-router'
 
-import { createProject, createWorkspace, fetchProjects, fetchWorkspaces } from 'src/boot/api'
+import {
+  createProject,
+  createWorkspace,
+  fetchProjects,
+  fetchWorkspaces,
+  isUnauthorizedApiError,
+} from 'src/boot/api'
+import AuthSessionPanel from 'src/components/shell/AuthSessionPanel.vue'
 import PageSection from 'src/components/shell/PageSection.vue'
 import StatusBadge from 'src/components/shell/StatusBadge.vue'
 import {
@@ -77,7 +84,7 @@ watch(selectedWorkspaceId, async (value) => {
   syncSelectedProjectId(projects.value)
 })
 
-onMounted(async () => {
+async function loadSetupState() {
   workspaces.value = await fetchWorkspaces()
   const workspaceId = syncSelectedWorkspaceId(workspaces.value)
   if (workspaceId) {
@@ -87,6 +94,18 @@ onMounted(async () => {
     projects.value = []
     syncSelectedProjectId([])
   }
+}
+
+function formatProtectedCreateError(error: unknown, fallback: string) {
+  if (isUnauthorizedApiError(error)) {
+    return t('flow.processing.auth.createRequired')
+  }
+
+  return error instanceof Error ? error.message : fallback
+}
+
+onMounted(async () => {
+  await loadSetupState()
 })
 
 async function createWorkspaceItem() {
@@ -102,8 +121,7 @@ async function createWorkspaceItem() {
     setSelectedWorkspaceId(created.id)
     successMessage.value = `${t('flow.processing.success')}: ${created.name}`
   } catch (error) {
-    workspaceError.value =
-      error instanceof Error ? error.message : t('flow.processing.errors.createWorkspace')
+    workspaceError.value = formatProtectedCreateError(error, t('flow.processing.errors.createWorkspace'))
   }
 }
 
@@ -124,11 +142,10 @@ async function createProjectItem() {
     })
     projects.value = [created, ...projects.value.filter((item) => item.id !== created.id)]
     projectForm.value = { slug: '', name: '', description: '' }
-    syncSelectedProjectId([created, ...projects.value.filter((item) => item.id !== created.id)])
+    syncSelectedProjectId(projects.value)
     successMessage.value = `${t('flow.processing.success')}: ${created.name}`
   } catch (error) {
-    projectError.value =
-      error instanceof Error ? error.message : t('flow.processing.errors.createProject')
+    projectError.value = formatProtectedCreateError(error, t('flow.processing.errors.createProject'))
   }
 }
 </script>
@@ -166,6 +183,13 @@ async function createProjectItem() {
       <p v-if="successMessage" class="rr-banner" data-tone="success">
         {{ successMessage }}
       </p>
+
+      <AuthSessionPanel
+        :title="t('flow.processing.auth.title')"
+        :description="t('flow.processing.auth.description')"
+        :context-note="t('flow.processing.auth.note')"
+        @updated="void loadSetupState()"
+      />
 
       <div class="setup-grid">
         <article class="rr-panel rr-panel--accent setup-panel">
