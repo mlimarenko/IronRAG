@@ -4,12 +4,12 @@ import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
 
 import {
-  fetchProjects,
-  fetchWorkspaces,
-  type ProjectSummary,
-  type WorkspaceSummary,
-} from 'src/boot/api'
-import { setWorkspaceWithProjectReset } from 'src/lib/flowSelection'
+  buildContextControlsPresentation,
+  hydrateContextControlsState,
+  switchContextWorkspace,
+  type ContextControlsPresentation,
+  type ContextControlsState,
+} from 'src/lib/contextControls'
 import { getSelectedProjectId, getSelectedWorkspaceId, setSelectedProjectId } from 'src/stores/flow'
 
 const props = withDefaults(
@@ -26,81 +26,56 @@ const route = useRoute()
 
 const loading = ref(false)
 const error = ref<string | null>(null)
-const workspaces = ref<WorkspaceSummary[]>([])
-const projects = ref<ProjectSummary[]>([])
+const state = ref<ContextControlsState>({
+  workspaces: [],
+  projects: [],
+  selectedWorkspaceId: '',
+  selectedProjectId: '',
+})
 
-const selectedWorkspaceId = ref('')
-const selectedProjectId = ref('')
-
-const selectedWorkspace = computed(
-  () => workspaces.value.find((item) => item.id === selectedWorkspaceId.value) ?? null,
+const presentation = computed<ContextControlsPresentation>(() =>
+  buildContextControlsPresentation(state.value),
 )
-const selectedProject = computed(
-  () => projects.value.find((item) => item.id === selectedProjectId.value) ?? null,
-)
-const hasContext = computed(() => Boolean(selectedWorkspace.value && selectedProject.value))
-const hasWorkspaceChoices = computed(() => workspaces.value.length > 1)
-const hasProjectChoices = computed(() => projects.value.length > 1)
 const isAdvancedRoute = computed(() => route.meta.shellSection === 'advanced')
-
-async function loadProjects(workspaceId: string, preserveProjectId = true) {
-  if (!workspaceId) {
-    projects.value = []
-    selectedProjectId.value = ''
-    setSelectedProjectId('')
-    return
+const selectedWorkspace = computed(() => presentation.value.selectedWorkspace)
+const selectedProject = computed(() => presentation.value.selectedProject)
+const summaryCopy = computed(() => {
+  if (loading.value) {
+    return t('shell.context.loading')
   }
 
-  const items = await fetchProjects(workspaceId)
-  projects.value = items
-
-  const storedProjectId = preserveProjectId ? getSelectedProjectId() : ''
-  const matchingStoredProject = items.find((item) => item.id === storedProjectId)
-  const matchingCurrentProject = items.find((item) => item.id === selectedProjectId.value)
-  let nextProjectId = ''
-
-  if (matchingStoredProject) {
-    nextProjectId = matchingStoredProject.id
-  } else if (matchingCurrentProject) {
-    nextProjectId = matchingCurrentProject.id
-  } else if (items[0]) {
-    nextProjectId = items[0].id
+  if (error.value) {
+    return t('shell.context.errorSummary')
   }
 
-  selectedProjectId.value = nextProjectId
-  setSelectedProjectId(nextProjectId)
-}
+  if (presentation.value.status === 'workspace_only' && selectedWorkspace.value) {
+    return t('shell.context.workspaceOnly', { workspace: selectedWorkspace.value.name })
+  }
+
+  if (presentation.value.hasContext) {
+    return t('shell.context.ready', {
+      workspace: selectedWorkspace.value?.name ?? t('shell.context.none'),
+      library: selectedProject.value?.name ?? t('shell.context.none'),
+    })
+  }
+
+  return t('shell.context.empty')
+})
 
 async function hydrateContext() {
   loading.value = true
   error.value = null
 
   try {
-    const workspaceItems = await fetchWorkspaces()
-    workspaces.value = workspaceItems
-
-    const matchingWorkspace = workspaceItems.find((item) => item.id === getSelectedWorkspaceId())
-    let nextWorkspaceId = ''
-
-    if (matchingWorkspace) {
-      nextWorkspaceId = matchingWorkspace.id
-    } else if (workspaceItems[0]) {
-      nextWorkspaceId = workspaceItems[0].id
-    }
-
-    selectedWorkspaceId.value = nextWorkspaceId
-
-    if (nextWorkspaceId && nextWorkspaceId !== getSelectedWorkspaceId()) {
-      setWorkspaceWithProjectReset(nextWorkspaceId)
-    }
-
-    await loadProjects(nextWorkspaceId)
+    state.value = await hydrateContextControlsState()
   } catch (nextError) {
     error.value = nextError instanceof Error ? nextError.message : t('shell.context.error')
-    workspaces.value = []
-    projects.value = []
-    selectedWorkspaceId.value = ''
-    selectedProjectId.value = ''
+    state.value = {
+      workspaces: [],
+      projects: [],
+      selectedWorkspaceId: '',
+      selectedProjectId: '',
+    }
   } finally {
     loading.value = false
   }
@@ -108,35 +83,47 @@ async function hydrateContext() {
 
 async function handleWorkspaceChange(event: Event) {
   const value = (event.target as HTMLSelectElement).value
-  selectedWorkspaceId.value = value
-  setWorkspaceWithProjectReset(value)
-  await loadProjects(value, false)
+  loading.value = true
+  error.value = null
+
+  try {
+    state.value = await switchContextWorkspace(value)
+  } catch (nextError) {
+    error.value = nextError instanceof Error ? nextError.message : t('shell.context.error')
+  } finally {
+    loading.value = false
+  }
 }
 
 function handleProjectChange(event: Event) {
   const value = (event.target as HTMLSelectElement).value
-  selectedProjectId.value = value
+  state.value = {
+    ...state.value,
+    selectedProjectId: value,
+  }
   setSelectedProjectId(value)
 }
 
 watch(
   () => route.fullPath,
   () => {
-    if (!workspaces.value.length || loading.value) {
+    if (loading.value) {
       return
     }
 
     const workspaceId = getSelectedWorkspaceId()
     const projectId = getSelectedProjectId()
 
-    if (workspaceId && workspaceId !== selectedWorkspaceId.value) {
-      selectedWorkspaceId.value = workspaceId
-      void loadProjects(workspaceId)
+    if (workspaceId && workspaceId !== state.value.selectedWorkspaceId) {
+      void hydrateContext()
       return
     }
 
-    if (projectId && projectId !== selectedProjectId.value) {
-      selectedProjectId.value = projectId
+    if (projectId && projectId !== state.value.selectedProjectId) {
+      state.value = {
+        ...state.value,
+        selectedProjectId: projectId,
+      }
     }
   },
 )
@@ -151,18 +138,7 @@ onMounted(() => {
     <div class="app-context-controls__header">
       <div>
         <p class="app-context-controls__eyebrow">{{ t('shell.context.eyebrow') }}</p>
-        <p class="app-context-controls__summary">
-          {{
-            loading
-              ? t('shell.context.loading')
-              : hasContext
-                ? t('shell.context.ready', {
-                    workspace: selectedWorkspace?.name ?? t('shell.context.none'),
-                    library: selectedProject?.name ?? t('shell.context.none'),
-                  })
-                : t('shell.context.empty')
-          }}
-        </p>
+        <p class="app-context-controls__summary">{{ summaryCopy }}</p>
       </div>
 
       <RouterLink v-if="isAdvancedRoute" to="/documents" class="app-context-controls__back-link">
@@ -174,21 +150,32 @@ onMounted(() => {
       {{ error }}
     </p>
 
+    <p
+      v-else-if="!presentation.hasWorkspaces || presentation.status === 'workspace_only'"
+      class="app-context-controls__empty"
+    >
+      {{
+        presentation.hasWorkspaces
+          ? t('shell.context.emptyLibraryHint')
+          : t('shell.context.emptyWorkspaceHint')
+      }}
+    </p>
+
     <div class="app-context-controls__fields">
       <label class="app-context-controls__field">
         <span>{{ t('shell.context.workspace') }}</span>
         <select
           class="app-context-controls__select"
-          :value="selectedWorkspaceId"
-          :disabled="loading || !workspaces.length"
+          :value="state.selectedWorkspaceId"
+          :disabled="loading || !state.workspaces.length"
           @change="void handleWorkspaceChange($event)"
         >
           <option value="">{{ t('shell.context.none') }}</option>
-          <option v-for="workspace in workspaces" :key="workspace.id" :value="workspace.id">
+          <option v-for="workspace in state.workspaces" :key="workspace.id" :value="workspace.id">
             {{ workspace.name }}
           </option>
         </select>
-        <small v-if="!hasWorkspaceChoices && selectedWorkspace">{{
+        <small v-if="!presentation.hasWorkspaceChoices && selectedWorkspace">{{
           t('shell.context.defaultWorkspace')
         }}</small>
       </label>
@@ -197,24 +184,31 @@ onMounted(() => {
         <span>{{ t('shell.context.library') }}</span>
         <select
           class="app-context-controls__select"
-          :value="selectedProjectId"
-          :disabled="loading || !projects.length"
+          :value="state.selectedProjectId"
+          :disabled="loading || !state.projects.length"
           @change="handleProjectChange"
         >
           <option value="">{{ t('shell.context.none') }}</option>
-          <option v-for="project in projects" :key="project.id" :value="project.id">
+          <option v-for="project in state.projects" :key="project.id" :value="project.id">
             {{ project.name }}
           </option>
         </select>
-        <small v-if="!hasProjectChoices && selectedProject">{{
+        <small v-if="!presentation.hasProjectChoices && selectedProject">{{
           t('shell.context.defaultLibrary')
         }}</small>
       </label>
     </div>
 
-    <details class="app-context-controls__advanced">
+    <details
+      v-if="presentation.showAdvancedActions || isAdvancedRoute"
+      class="app-context-controls__advanced"
+    >
       <summary>{{ t('shell.context.advanced') }}</summary>
       <p>{{ t('shell.context.advancedHint') }}</p>
+      <ul class="app-context-controls__advanced-list">
+        <li>{{ t('shell.context.advancedCreate') }}</li>
+        <li>{{ t('shell.context.advancedManage') }}</li>
+      </ul>
       <RouterLink to="/advanced/context" class="app-context-controls__manage-link">
         {{ t('shell.context.manage') }}
       </RouterLink>
@@ -267,10 +261,18 @@ onMounted(() => {
   font-weight: 650;
 }
 
-.app-context-controls__error {
+.app-context-controls__error,
+.app-context-controls__empty {
   margin: 0;
-  color: var(--rr-color-danger-700, #b42318);
   font-size: 0.84rem;
+}
+
+.app-context-controls__error {
+  color: var(--rr-color-danger-700, #b42318);
+}
+
+.app-context-controls__empty {
+  color: var(--rr-color-text-secondary);
 }
 
 .app-context-controls__fields {
@@ -287,7 +289,8 @@ onMounted(() => {
 .app-context-controls__field span,
 .app-context-controls__field small,
 .app-context-controls__advanced,
-.app-context-controls__advanced p {
+.app-context-controls__advanced p,
+.app-context-controls__advanced-list {
   color: var(--rr-color-text-secondary);
 }
 
@@ -297,7 +300,8 @@ onMounted(() => {
 }
 
 .app-context-controls__field small,
-.app-context-controls__advanced p {
+.app-context-controls__advanced p,
+.app-context-controls__advanced-list {
   font-size: 0.78rem;
 }
 
@@ -318,6 +322,11 @@ onMounted(() => {
 
 .app-context-controls__advanced p {
   margin: 8px 0 10px;
+}
+
+.app-context-controls__advanced-list {
+  margin: 0 0 10px;
+  padding-left: 18px;
 }
 
 @media (width <= 720px) {

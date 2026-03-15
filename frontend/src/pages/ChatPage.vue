@@ -355,7 +355,9 @@ const graphDefaultResultCards = computed<GraphResultCard[]>(() => {
     kind: 'entity' as const,
     title: entity.canonical_name,
     subtitle: t('flow.search.graph.labels.entity'),
-    summary: t('flow.search.graph.entitySummary', { count: formatCount(entity.source_chunk_count, 'supporting passage') }),
+    summary: t('flow.search.graph.entitySummary', {
+      count: formatCount(entity.source_chunk_count, 'supporting passage'),
+    }),
     badge: t('flow.search.graph.labels.entity'),
     sourceChunkCount: entity.source_chunk_count,
     matchReasons: [],
@@ -1306,7 +1308,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
           </article>
 
           <details class="rr-panel rr-panel--muted graph-context-panel" :open="showGraphContext">
-            <summary class="graph-context-panel__summary" @click.prevent="showGraphContext = !showGraphContext">
+            <summary
+              class="graph-context-panel__summary"
+              @click.prevent="showGraphContext = !showGraphContext"
+            >
               <div>
                 <p class="rr-kicker">{{ t('flow.search.graph.kicker') }}</p>
                 <h3>{{ t('flow.search.graph.title') }}</h3>
@@ -2098,25 +2103,9 @@ function formatRelationLine(relation: GraphRelationDetail): string {
     width: 100%;
   }
 }
-</style>const shouldAutoExpandGraphContext = computed(() =>
-  Boolean(
-    graphCoverageWarning.value ||
-      graphSurfaceError.value ||
-      graphSearchError.value ||
-      graphDetailError.value ||
-      (selectedGraphCard.value && graphPanelStatus.value.status !== 'unavailable') ||
-      graphPanelStatus.value.status === 'degraded',
-  ),
-)
-
-watch(
-  shouldAutoExpandGraphContext,
-  (value) => {
-    if (value) {
-      showGraphContext.value = true
-    }
-  },
-  { immediate: true },
-)
-
-
+</style>
+const shouldAutoExpandGraphContext = computed(() => Boolean( graphCoverageWarning.value ||
+graphSurfaceError.value || graphSearchError.value || graphDetailError.value ||
+(selectedGraphCard.value && graphPanelStatus.value.status !== 'unavailable') ||
+graphPanelStatus.value.status === 'degraded', ), ) watch( shouldAutoExpandGraphContext, (value) => {
+if (value) { showGraphContext.value = true } }, { immediate: true }, )

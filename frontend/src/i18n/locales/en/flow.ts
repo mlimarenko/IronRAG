@@ -703,6 +703,8 @@ export default {
         retry: 'Review processing and retry if needed',
         wait: 'Wait for indexing to finish',
         ask: 'Open Ask with this file in mind',
+        askWithAttention:
+          'Ask can continue, but review the latest failed run if coverage looks incomplete',
         addMore: 'Add another file while this library keeps building toward Ask',
       },
     },
@@ -715,6 +717,9 @@ export default {
       waitForReady: 'Wait for files to be ready',
       waitForReadyHint:
         'Keep this page simple: refresh when needed, then move into Ask once the library is ready.',
+      reviewAttention: 'Review the latest processing issue',
+      reviewAttentionHint:
+        'This library still needs attention before Ask should become the next step everywhere.',
       openAskHint: 'This library has searchable files, so the next move is asking questions.',
     },
     lists: {
@@ -736,7 +741,8 @@ export default {
   search: {
     eyebrow: 'Ask',
     title: 'Ask',
-    description: 'Ask the active library and keep the answer, conversation, and helpful context together.',
+    description:
+      'Ask the active library and keep the answer, conversation, and helpful context together.',
     descriptionMobile:
       'Stay in one conversation, reopen the latest session, and keep asking from the same library.',
     action: 'Open documents',
@@ -811,7 +817,8 @@ export default {
       groundingWeak: 'Support is limited or incomplete',
       waitingKicker: 'Ready when you are',
       waitingTitle: 'Ask your first question',
-      waitingBody: 'Your answer, supporting passages, and related context appear here after the first question.',
+      waitingBody:
+        'Your answer, supporting passages, and related context appear here after the first question.',
       warningWeak:
         'This answer may be missing some support from your documents. Review the passages before relying on it.',
       warningNoReferences: 'This answer came back without supporting passages.',
@@ -844,7 +851,8 @@ export default {
         followUp: 'Open technical details only when an answer needs closer inspection.',
       },
       partial: {
-        answer: 'Explain that newer documents are still processing while keeping expectations honest.',
+        answer:
+          'Explain that newer documents are still processing while keeping expectations honest.',
         verify: 'Show how much content is ready so you know what is already usable.',
         next: 'Point back to Documents when you want to check upload progress.',
       },
@@ -999,7 +1007,8 @@ export default {
       },
       diagnostics: {
         title: 'Technical details',
-        description: 'Open only when you need a deeper technical view of related context for this library.',
+        description:
+          'Open only when you need a deeper technical view of related context for this library.',
         blockersTitle: 'Current blockers',
         noBlockers: 'No explicit blockers reported right now.',
         nextStepsTitle: 'Next steps',

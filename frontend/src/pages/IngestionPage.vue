@@ -285,7 +285,9 @@ const fileInventory = computed(() =>
     }),
     nextStepFormatter: (health) => {
       if (health.tone === 'warning') {
-        return t('flow.library.inventory.nextSteps.retry')
+        return canGoToAsk.value
+          ? t('flow.library.inventory.nextSteps.askWithAttention')
+          : t('flow.library.inventory.nextSteps.retry')
       }
 
       if (health.tone === 'info') {
@@ -345,17 +347,27 @@ const selectedInventoryRecord = computed(() => {
 const filesReadyCount = computed(
   () => fileInventory.value.filter((record) => record.statusTone === 'positive').length,
 )
-const filesAttentionCount = computed(
-  () => fileInventory.value.filter((record) => record.attention).length,
-)
+const filesAttentionCount = computed(() => {
+  if (readinessPresentation.value.queryable) {
+    return 0
+  }
+
+  return fileInventory.value.filter((record) => record.attention).length
+})
 const filesProcessingCount = computed(
   () => fileInventory.value.filter((record) => record.statusTone === 'info').length,
 )
 const inventoryGroups = computed(() => {
   const groups = {
-    attention: filteredFileInventory.value.filter((record) => record.attention),
+    attention: filteredFileInventory.value.filter(
+      (record) => record.attention && !readinessPresentation.value.queryable,
+    ),
     processing: filteredFileInventory.value.filter((record) => record.statusTone === 'info'),
-    ready: filteredFileInventory.value.filter((record) => record.statusTone === 'positive'),
+    ready: filteredFileInventory.value.filter(
+      (record) =>
+        record.statusTone === 'positive' ||
+        (readinessPresentation.value.queryable && record.attention),
+    ),
   }
 
   return FILE_GROUP_ORDER.map((key) => ({
@@ -364,6 +376,9 @@ const inventoryGroups = computed(() => {
     total: groups[key].length,
   })).filter((group) => group.total > 0)
 })
+const canGoToAsk = computed(() =>
+  Boolean(selectedProjectId.value && readinessPresentation.value.queryable),
+)
 const nextActionRoute = computed(() => {
   if (canGoToAsk.value) {
     return '/search'
@@ -372,34 +387,43 @@ const nextActionRoute = computed(() => {
   return '/documents'
 })
 const nextActionLabel = computed(() => {
-  if (activeJobsCount.value > 0) {
+  if (!selectedProjectId.value) {
+    return t('flow.library.nextActions.chooseLibrary')
+  }
+
+  if (readinessPresentation.value.queryable) {
+    return t('flow.library.action')
+  }
+
+  if (readinessPresentation.value.hasActiveJobs) {
     return t('flow.library.nextActions.waitForReady')
   }
 
-  if (documents.value.length > 0) {
-    return t('flow.library.action')
+  if (readinessPresentation.value.hasFailures) {
+    return t('flow.library.nextActions.reviewAttention')
   }
 
   return t('flow.library.nextActions.uploadFirst')
 })
 const nextActionHint = computed(() => {
-  if (readinessPresentation.value.queryable) {
-    return readinessPresentation.value.askHint
+  if (!selectedProjectId.value) {
+    return t('flow.library.nextActions.chooseLibraryHint')
   }
 
-  if (activeJobsCount.value > 0) {
+  if (readinessPresentation.value.queryable) {
+    return t('flow.library.nextActions.openAskHint')
+  }
+
+  if (readinessPresentation.value.hasActiveJobs) {
     return t('flow.library.nextActions.waitForReadyHint')
   }
 
-  if (documents.value.length > 0) {
-    return readinessPresentation.value.libraryHint
+  if (readinessPresentation.value.hasFailures) {
+    return t('flow.library.nextActions.reviewAttentionHint')
   }
 
   return t('flow.library.nextActions.uploadFirstHint')
 })
-const canGoToAsk = computed(() =>
-  Boolean(selectedProjectId.value && readinessPresentation.value.queryable),
-)
 
 const latestSession = computed(() => recentSessions.value.at(0) ?? null)
 const latestSessionRoute = computed(() =>

@@ -35,16 +35,25 @@ export default {
     library: 'Library',
     none: 'Не выбрано',
     loading: 'Загружаем workspace и library…',
-    empty: 'Выберите workspace и library для работы.',
+    empty: 'Здесь появятся workspace и library по умолчанию, когда они будут доступны.',
+    emptyWorkspaceHint:
+      'Пока нет доступного workspace. Открывайте дополнительные действия только если контекст по умолчанию так и не появился.',
+    emptyLibraryHint:
+      'Workspace уже готов, но список library пока пуст. Создавайте library вручную только при реальной необходимости.',
+    workspaceOnly: '{workspace} готов. Выберите library, когда он появится.',
     ready: '{workspace} · {library}',
     defaultWorkspace: 'Workspace по умолчанию',
     defaultLibrary: 'Library по умолчанию',
     advanced: 'Дополнительные действия',
     advancedHint:
-      'Создавайте и меняйте workspace или library только когда это действительно нужно.',
+      'Создавайте, переименовывайте или удаляйте workspace и library только когда контекста по умолчанию недостаточно.',
+    advancedCreate:
+      'Создавайте новый workspace или library только если значения по умолчанию не подходят для этой задачи.',
+    advancedManage: 'Переименование и удаление доступны только в этой вторичной зоне.',
     manage: 'Открыть дополнительные настройки',
     backToDocuments: 'Вернуться в Документы',
     error: 'Не удалось загрузить workspace и library.',
+    errorSummary: 'Сейчас элементы выбора workspace и library недоступны.',
   },
   mobileNav: {
     primary: 'Основная навигация продукта',

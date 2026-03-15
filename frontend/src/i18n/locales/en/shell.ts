@@ -35,15 +35,25 @@ export default {
     library: 'Library',
     none: 'Not selected',
     loading: 'Loading your workspace and library…',
-    empty: 'Choose the workspace and library you want to use.',
+    empty: 'A default workspace and library will appear here when available.',
+    emptyWorkspaceHint:
+      'No workspace is available yet. Open advanced controls only if the default context did not appear.',
+    emptyLibraryHint:
+      'Your workspace is ready, but this library list is still empty. Use advanced controls only if you need to create one manually.',
+    workspaceOnly: '{workspace} is ready. Pick a library when it appears.',
     ready: '{workspace} · {library}',
     defaultWorkspace: 'Default workspace',
     defaultLibrary: 'Default library',
     advanced: 'Advanced controls',
-    advancedHint: 'Create or manage workspaces and libraries only when needed.',
+    advancedHint:
+      'Create, rename, or remove workspaces and libraries only when the default context is not enough.',
+    advancedCreate:
+      'Create a workspace or library only if the default one is not enough for this job.',
+    advancedManage: 'Rename or remove existing items only from this secondary area.',
     manage: 'Open advanced controls',
     backToDocuments: 'Back to Documents',
     error: 'Could not load workspace and library.',
+    errorSummary: 'Workspace and library controls are unavailable right now.',
   },
   mobileNav: {
     primary: 'Primary product navigation',
