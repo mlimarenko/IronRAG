@@ -1,24 +1,26 @@
 # RustRAG Operator Console Roadmap
 
-RustRAG frontend must evolve from a shell into a real operator console.
+RustRAG frontend is already a routed operator surface. The near-term product trajectory is to make that surface coherent before widening the scope.
 
-## Required route qualities
+## Product Direction
 
-Every major route must show:
+- keep the product spine focused on `dashboard -> setup -> ingest -> ask`
+- treat `/graph` and `/api` as supporting surfaces, not the main story
+- standardize shared shell, status, and state patterns before adding more top-level destinations
+- keep ingest messaging text-first and honest
 
-- current workspace/project context
-- loading state
-- empty state
-- success state
-- degraded/warning state
-- error/blocker state
+## Required Route Qualities
 
-## Scope-2 route goals
+Every primary route must show:
 
-- dashboard: summarize system/workspace/project posture
-- workspaces: governance, defaults, warnings
-- projects: readiness, indexing freshness, scope context
-- providers: provider/model status and misconfiguration visibility
-- ingestion: jobs, stages, retries, provenance
-- chat: answers, references, weak-grounding signals
-- diagnostics: failed jobs, degraded dependencies, remediation hints
+- active workspace/project context
+- loading, empty, success, warning, and blocker states
+- one obvious primary action
+- one honest next-step hint
+
+## Expansion Order
+
+1. Stabilize text-first ingestion and grounded query UX across `/setup`, `/ingest`, and `/ask`.
+2. Tighten shell consistency: shared page headers, status badges, panels, and state cards everywhere.
+3. Add richer file extraction support for PDF and images only after the backend adapters and provenance story are real.
+4. Revisit container sources such as archives or folders only after file-level extraction and operator visibility are solved.

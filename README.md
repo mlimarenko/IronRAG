@@ -53,4 +53,21 @@ The backend already includes a substantial foundation slice:
 - usage/cost persistence
 - OpenAI/DeepSeek gateway baseline
 
-The frontend is still a shell and will catch up to the backend contracts incrementally.
+The frontend is now a small routed operator surface built around a text-first product loop:
+- `/` for posture and next action
+- `/setup` for workspace/project context
+- `/ingest` for text and supported upload intake
+- `/ask` for grounded query + diagnostics
+- `/graph` and `/api` as secondary support surfaces
+
+Current ingest scope is intentionally narrow:
+- plain text works now
+- UTF-8 text-like single-file upload works now
+- PDF and image upload are planned but still blocked until extraction support lands
+- archive and folder ingest are not part of the current contract
+
+Reference docs:
+- `frontend/docs/architecture/frontend-shell.md`
+- `frontend/docs/architecture/minimal-flow-ui.md`
+- `frontend/docs/architecture/operator-console-roadmap.md`
+- `docs/ingest-support-matrix.md`
