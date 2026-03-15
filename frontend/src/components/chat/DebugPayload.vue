@@ -5,6 +5,8 @@ import { formatDebugEntries } from './statusFormatting'
 
 const props = defineProps<{
   debugJson: Record<string, unknown>
+  summaryLabel: string
+  emptyMessage: string
 }>()
 
 const debugEntries = computed(() => formatDebugEntries(props.debugJson))
@@ -12,12 +14,12 @@ const debugEntries = computed(() => formatDebugEntries(props.debugJson))
 
 <template>
   <details class="debug-block">
-    <summary>Raw debug payload ({{ debugEntries.length }} entries)</summary>
+    <summary>{{ summaryLabel }} ({{ debugEntries.length }})</summary>
     <p
       v-if="!debugEntries.length"
       class="muted"
     >
-      No debug payload was returned.
+      {{ emptyMessage }}
     </p>
     <dl
       v-else

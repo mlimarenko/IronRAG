@@ -1,3 +1,9 @@
+import { i18n } from 'src/boot/i18n'
+import {
+  formatDebugValue as formatDebugValueLabel,
+  translateStatusLabel,
+} from 'src/i18n/helpers'
+
 export function getStatusTone(status?: string): 'positive' | 'warning' | 'negative' | 'neutral' {
   const normalized = status?.toLowerCase() ?? ''
 
@@ -21,15 +27,7 @@ export function getStatusTone(status?: string): 'positive' | 'warning' | 'negati
 }
 
 export function formatStatusLabel(status?: string): string {
-  if (!status) {
-    return 'Unknown'
-  }
-
-  return status
-    .split(/[_-]/g)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ')
+  return translateStatusLabel(status)
 }
 
 export function formatDebugEntries(debugJson: Record<string, unknown>) {
@@ -40,21 +38,61 @@ export function formatDebugEntries(debugJson: Record<string, unknown>) {
 }
 
 function formatDebugValue(value: unknown): string {
-  if (value == null) {
-    return 'null'
+  return formatDebugValueLabel(value)
+}
+
+export function formatReferenceTitle(reference: string, index: number): string {
+  const parsed = parseReference(reference)
+
+  if (parsed.chunkId) {
+    return i18n.global.t('flow.search.diagnostics.referenceTitles.passage', { index: index + 1 }) as string
   }
 
-  if (typeof value === 'string') {
-    return value
+  if (parsed.documentId) {
+    return i18n.global.t('flow.search.diagnostics.referenceTitles.document', { index: index + 1 }) as string
   }
 
-  if (typeof value === 'number' || typeof value === 'boolean') {
-    return String(value)
+  return i18n.global.t('flow.search.diagnostics.referenceTitles.reference', {
+    index: index + 1,
+  }) as string
+}
+
+export function formatReferenceMeta(reference: string): string {
+  const parsed = parseReference(reference)
+
+  if (parsed.documentId && parsed.chunkId) {
+    return i18n.global.t('flow.search.diagnostics.referenceMeta.documentChunk', {
+      documentId: shortenId(parsed.documentId),
+      chunkId: parsed.chunkId,
+    }) as string
   }
 
-  try {
-    return JSON.stringify(value, null, 2)
-  } catch {
-    return '[unserializable value]'
+  if (parsed.documentId) {
+    return i18n.global.t('flow.search.diagnostics.referenceMeta.document', {
+      documentId: shortenId(parsed.documentId),
+    }) as string
   }
+
+  return i18n.global.t('flow.search.diagnostics.referenceMeta.stored') as string
+}
+
+export function isChunkScopedReference(reference: string): boolean {
+  return Boolean(parseReference(reference).chunkId)
+}
+
+function parseReference(reference: string) {
+  const segments = reference.split(':')
+
+  if (segments[0] !== 'document') {
+    return { documentId: null, chunkId: null }
+  }
+
+  return {
+    documentId: segments[1] ?? null,
+    chunkId: segments[2] === 'chunk' ? (segments[3] ?? null) : null,
+  }
+}
+
+function shortenId(value: string) {
+  return value.length > 8 ? value.slice(0, 8) : value
 }
