@@ -45,6 +45,10 @@ pub struct ProjectReadinessSummary {
     pub documents: usize,
     pub ready_for_query: bool,
     pub indexing_state: String,
+    pub latest_ingestion_status: Option<String>,
+    pub active_ingestion_jobs: usize,
+    pub completed_ingestion_jobs: usize,
+    pub failed_ingestion_jobs: usize,
 }
 
 pub fn router() -> Router<crate::app::state::AppState> {
@@ -123,32 +127,54 @@ async fn get_project_readiness(
         .await
         .map_err(|_| ApiError::Internal)?;
 
+    Ok(Json(summarize_readiness(project, sources.len(), documents.len(), ingestion_jobs)))
+}
+
+fn summarize_readiness(
+    project: repositories::ProjectRow,
+    sources: usize,
+    documents: usize,
+    ingestion_jobs: Vec<repositories::IngestionJobRow>,
+) -> ProjectReadinessSummary {
     let latest_job = ingestion_jobs.iter().max_by_key(|job| job.created_at);
-    let latest_status = latest_job.map(|job| job.status.as_str());
-    let ready_for_query = !documents.is_empty() && matches!(latest_status, Some("completed"));
-    let indexing_state = if documents.is_empty() {
-        "not_indexed"
+    let latest_ingestion_status = latest_job.map(|job| job.status.clone());
+    let active_ingestion_jobs = ingestion_jobs
+        .iter()
+        .filter(|job| matches!(job.status.as_str(), "queued" | "running" | "validating"))
+        .count();
+    let completed_ingestion_jobs =
+        ingestion_jobs.iter().filter(|job| job.status == "completed").count();
+    let failed_ingestion_jobs = ingestion_jobs
+        .iter()
+        .filter(|job| matches!(job.status.as_str(), "retryable_failed" | "failed" | "canceled"))
+        .count();
+
+    let ready_for_query = documents > 0 && active_ingestion_jobs == 0;
+    let indexing_state = if documents == 0 {
+        if active_ingestion_jobs > 0 { "ingesting" } else { "not_indexed" }
+    } else if active_ingestion_jobs > 0 {
+        if completed_ingestion_jobs > 0 { "partially_indexed" } else { "ingesting" }
+    } else if failed_ingestion_jobs > 0 {
+        if completed_ingestion_jobs > 0 { "indexed_with_failures" } else { "stale" }
     } else {
-        match latest_status {
-            Some("completed") => "indexed",
-            Some("partial") => "partial",
-            Some("queued" | "running" | "validating") => "ingesting",
-            Some("retryable_failed" | "failed" | "canceled") => "stale",
-            Some(_) | None => "ingesting",
-        }
+        "indexed"
     };
 
-    Ok(Json(ProjectReadinessSummary {
+    ProjectReadinessSummary {
         id: project.id,
         workspace_id: project.workspace_id,
         slug: project.slug,
         name: project.name,
         ingestion_jobs: ingestion_jobs.len(),
-        sources: sources.len(),
-        documents: documents.len(),
+        sources,
+        documents,
         ready_for_query,
-        indexing_state: indexing_state.to_string(),
-    }))
+        indexing_state: indexing_state.into(),
+        latest_ingestion_status,
+        active_ingestion_jobs,
+        completed_ingestion_jobs,
+        failed_ingestion_jobs,
+    }
 }
 
 #[cfg(test)]
@@ -196,42 +222,8 @@ mod tests {
         }
     }
 
-    fn summarize_readiness(
-        project: repositories::ProjectRow,
-        sources: usize,
-        documents: usize,
-        ingestion_jobs: Vec<repositories::IngestionJobRow>,
-    ) -> ProjectReadinessSummary {
-        let latest_job = ingestion_jobs.iter().max_by_key(|job| job.created_at);
-        let latest_status = latest_job.map(|job| job.status.as_str());
-        let ready_for_query = documents > 0 && matches!(latest_status, Some("completed"));
-        let indexing_state = if documents == 0 {
-            "not_indexed"
-        } else {
-            match latest_status {
-                Some("completed") => "indexed",
-                Some("partial") => "partial",
-                Some("queued" | "running" | "validating") => "ingesting",
-                Some("retryable_failed" | "failed" | "canceled") => "stale",
-                Some(_) | None => "ingesting",
-            }
-        };
-
-        ProjectReadinessSummary {
-            id: project.id,
-            workspace_id: project.workspace_id,
-            slug: project.slug,
-            name: project.name,
-            ingestion_jobs: ingestion_jobs.len(),
-            sources,
-            documents,
-            ready_for_query,
-            indexing_state: indexing_state.into(),
-        }
-    }
-
     #[test]
-    fn readiness_uses_latest_ingestion_job_status() {
+    fn readiness_stays_query_ready_when_indexed_docs_exist_but_latest_job_failed() {
         let now = Utc::now();
         let summary = summarize_readiness(
             project(),
@@ -243,16 +235,39 @@ mod tests {
             ],
         );
 
-        assert!(!summary.ready_for_query);
-        assert_eq!(summary.indexing_state, "stale");
+        assert!(summary.ready_for_query);
+        assert_eq!(summary.indexing_state, "indexed_with_failures");
+        assert_eq!(summary.latest_ingestion_status.as_deref(), Some("failed"));
+        assert_eq!(summary.completed_ingestion_jobs, 1);
+        assert_eq!(summary.failed_ingestion_jobs, 1);
     }
 
     #[test]
-    fn readiness_marks_completed_latest_job_as_indexed() {
+    fn readiness_marks_completed_library_as_indexed() {
         let summary =
             summarize_readiness(project(), 1, 2, vec![ingestion_job("completed", Utc::now())]);
 
         assert!(summary.ready_for_query);
         assert_eq!(summary.indexing_state, "indexed");
+        assert_eq!(summary.active_ingestion_jobs, 0);
+    }
+
+    #[test]
+    fn readiness_marks_inflight_jobs_as_partially_indexed_when_docs_already_exist() {
+        let now = Utc::now();
+        let summary = summarize_readiness(
+            project(),
+            1,
+            2,
+            vec![
+                ingestion_job("completed", now - Duration::minutes(10)),
+                ingestion_job("running", now),
+            ],
+        );
+
+        assert!(!summary.ready_for_query);
+        assert_eq!(summary.indexing_state, "partially_indexed");
+        assert_eq!(summary.active_ingestion_jobs, 1);
+        assert_eq!(summary.completed_ingestion_jobs, 1);
     }
 }
