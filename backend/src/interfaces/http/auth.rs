@@ -54,6 +54,11 @@ impl AuthContext {
             _ => Err(ApiError::Unauthorized),
         }
     }
+
+    #[must_use]
+    pub fn can_access_workspace(&self, workspace_id: Uuid) -> bool {
+        self.token_kind == "instance_admin" || self.workspace_id == Some(workspace_id)
+    }
 }
 
 #[derive(Serialize)]
@@ -539,6 +544,23 @@ mod tests {
         };
 
         assert!(auth.require_workspace_access(Uuid::now_v7()).is_ok());
+    }
+
+    #[test]
+    fn can_access_workspace_matches_require_workspace_access_behavior() {
+        let workspace_id = Uuid::now_v7();
+        let matching_workspace_auth = workspace_token(Some(workspace_id));
+        let mismatched_workspace_auth = workspace_token(Some(Uuid::now_v7()));
+        let instance_admin = AuthContext {
+            token_id: Uuid::now_v7(),
+            workspace_id: None,
+            token_kind: "instance_admin".into(),
+            scopes: Vec::new(),
+        };
+
+        assert!(matching_workspace_auth.can_access_workspace(workspace_id));
+        assert!(!mismatched_workspace_auth.can_access_workspace(workspace_id));
+        assert!(instance_admin.can_access_workspace(workspace_id));
     }
 
     #[test]

@@ -22,6 +22,7 @@ pub struct WorkspaceSummary {
     pub status: String,
 }
 
+
 #[derive(Deserialize)]
 pub struct CreateWorkspaceRequest {
     pub slug: String,
@@ -49,12 +50,14 @@ pub fn router() -> Router<crate::app::state::AppState> {
 }
 
 async fn list_workspaces(
+    auth: AuthContext,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<WorkspaceSummary>>, ApiError> {
     let items = repositories::list_workspaces(&state.persistence.postgres)
         .await
         .map_err(|_| ApiError::Internal)?
         .into_iter()
+        .filter(|row| auth.can_access_workspace(row.id))
         .map(|row| WorkspaceSummary {
             id: row.id,
             slug: row.slug,
