@@ -8,16 +8,17 @@ export interface ColorToken {
 }
 
 export const colorTokens: ColorToken[] = [
-  { label: 'Canvas', token: '--rr-color-bg-canvas', value: '#f3f7fb' },
-  { label: 'Surface', token: '--rr-color-bg-surface', value: 'rgb(255 255 255 / 0.94)' },
-  { label: 'Accent', token: '--rr-color-accent-600', value: '#2563eb', textColor: '#f8fafc' },
-  { label: 'Info', token: '--rr-color-info-600', value: '#2563eb', textColor: '#f8fafc' },
-  { label: 'Success', token: '--rr-color-success-600', value: '#16a34a', textColor: '#f8fafc' },
-  { label: 'Warning', token: '--rr-color-warning-600', value: '#d97706', textColor: '#f8fafc' },
-  { label: 'Danger', token: '--rr-color-danger-600', value: '#dc2626', textColor: '#f8fafc' },
+  { label: 'Canvas', token: '--rr-color-bg-canvas', value: '#f3f4ee' },
+  { label: 'Surface', token: '--rr-surface-panel', value: 'rgb(255 255 255 / 0.92)' },
+  { label: 'Accent', token: '--rr-color-accent-600', value: '#1d4ed8', textColor: '#f8fafc' },
+  { label: 'Info', token: '--rr-surface-banner-info', value: '#eaf0ff' },
+  { label: 'Success', token: '--rr-color-success-600', value: '#15803d', textColor: '#f8fafc' },
+  { label: 'Warning', token: '--rr-color-warning-600', value: '#b45309', textColor: '#f8fafc' },
+  { label: 'Danger', token: '--rr-color-danger-600', value: '#c2410c', textColor: '#f8fafc' },
 ] as const
 
 export const spacingTokens = [
+  '--rr-space-1 · 4px',
   '--rr-space-2 · 8px',
   '--rr-space-4 · 16px',
   '--rr-space-6 · 24px',
@@ -27,9 +28,9 @@ export const spacingTokens = [
 
 export const principles = [
   'Operator-first, not marketing-first: dense enough for real work, never cramped.',
-  'Context stays sticky: workspace, project, ingestion posture, and API status should remain visible.',
+  'Foundation starts with semantic tokens, then flows into components and utility classes.',
   'States are first-class: loading, empty, degraded, blocked, and success deserve reusable patterns.',
-  'One visual language across shell and product pages: same tokens, same elevation, same spacing rhythm.',
+  'One visual language across shell and product pages: same header, surface, form, and banner rules.',
 ]
 
 export const workflowSteps = [
@@ -47,10 +48,10 @@ export const inventoryRows: InventoryRow[] = [
     nextStep: 'Move route meta and environment status wiring into a typed shell config.',
   },
   {
-    primitive: 'Page section',
-    purpose: 'Shared page header for title, eyebrow, description, and actions.',
-    states: 'default, with actions, status badge, long description',
-    nextStep: 'Adopt across all top-level pages to kill hand-rolled headers.',
+    primitive: 'Page header + section container',
+    purpose: 'Shared page header and body framing for title, eyebrow, description, actions, and status.',
+    states: 'default, with actions, status badge, long description, stacked mobile layout',
+    nextStep: 'Keep top-level pages on the same component instead of reintroducing scoped header CSS.',
   },
   {
     primitive: 'Status badge',
@@ -59,21 +60,21 @@ export const inventoryRows: InventoryRow[] = [
     nextStep: 'Replace raw status text in dashboard, projects, providers, ingestion.',
   },
   {
-    primitive: 'State cards',
+    primitive: 'State cards + status banner',
     purpose: 'Consistent empty, loading, and error communication.',
-    states: 'empty, loading, error, retry action, secondary hint',
-    nextStep: 'Use in all async pages before adding more bespoke placeholders.',
+    states: 'empty, loading, error, warning banner, info banner, retry action, secondary hint',
+    nextStep: 'Use in all async pages before adding more bespoke placeholders or inline status text.',
   },
   {
     primitive: 'Panel/card',
     purpose: 'Base surface for metrics, lists, forms, and diagnostics blocks.',
-    states: 'default, muted, highlighted, interactive',
-    nextStep: 'Extract as a Vue primitive once 2-3 pages share the same markup.',
+    states: 'default, muted, highlighted, headerless, with actions',
+    nextStep: 'Standardize future surface work on the AppPanel wrapper plus rr-panel classes.',
   },
   {
-    primitive: 'Action controls',
-    purpose: 'Primary/secondary/destructive button and segmented actions.',
-    states: 'default, hover, focus, disabled, busy',
-    nextStep: 'Introduce tokenized button classes before forms spread further.',
+    primitive: 'Buttons + form rows',
+    purpose: 'Shared controls for actions and dense forms.',
+    states: 'primary, secondary, ghost, disabled, one-column, two-column, three-column',
+    nextStep: 'Keep new forms inside rr-form-row or rr-form-grid to prevent ad hoc spacing drift.',
   },
 ]

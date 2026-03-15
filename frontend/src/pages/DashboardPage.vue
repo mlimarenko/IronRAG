@@ -5,6 +5,7 @@ import { RouterLink } from 'vue-router'
 
 import { fetchProjects, fetchWorkspaces } from 'src/boot/api'
 import PageSection from 'src/components/shell/PageSection.vue'
+import AppPanel from 'src/components/ui/AppPanel.vue'
 import {
   getSelectedProjectId,
   getSelectedWorkspaceId,
@@ -91,7 +92,7 @@ onMounted(async () => {
         </article>
       </div>
 
-      <article class="rr-panel rr-panel--muted flow-shortcuts">
+      <AppPanel class="flow-shortcuts" tone="muted" eyebrow="Path" :title="nextAction">
         <p class="flow-shortcuts__title">{{ nextAction }}</p>
         <div class="flow-shortcuts__actions">
           <RouterLink class="rr-button rr-button--secondary" to="/setup">
@@ -104,7 +105,7 @@ onMounted(async () => {
             {{ t('flow.overview.cards.search.title') }}
           </RouterLink>
         </div>
-      </article>
+      </AppPanel>
     </PageSection>
   </section>
 </template>
