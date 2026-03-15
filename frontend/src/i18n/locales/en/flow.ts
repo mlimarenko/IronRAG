@@ -8,11 +8,11 @@ export default {
   home: {
     title: 'Home',
     description:
-      'Start by adding documents. Once RustRAG finishes processing them, the next move into Ask stays obvious.',
-    secondaryEyebrow: 'More surfaces',
-    secondaryTitle: 'Setup and technical tools',
+      'Start by adding documents. Once RustRAG finishes preparing them, the next move into Ask stays obvious.',
+    secondaryEyebrow: 'Advanced',
+    secondaryTitle: 'Advanced tools',
     secondaryDescription:
-      'These routes still exist, but they stay behind the main upload-first path instead of owning the first screen.',
+      'These screens still exist, but they stay behind the main upload-first path instead of owning the first screen.',
     secondaryToggle: 'Show more',
     stats: {
       documents: 'Indexed documents',
@@ -59,7 +59,7 @@ export default {
         title: 'Choose a collection for uploads',
         body: 'Before you can add documents, RustRAG needs one destination collection selected for this session.',
         status: 'Required before upload',
-        action: 'Open setup',
+        action: 'Open advanced context',
       },
       processing: {
         title: 'Keep going with upload',
@@ -110,19 +110,19 @@ export default {
     },
     secondary: {
       setup: {
-        title: 'Setup',
+        title: 'Advanced context',
         body: 'Choose the destination collection when uploads are not ready yet.',
-        action: 'Open Setup',
+        action: 'Open advanced context',
       },
       graph: {
-        title: 'Graph',
-        body: 'Inspect entities, relations, and coverage only when you need technical depth.',
-        action: 'Open Graph',
+        title: 'Related context details',
+        body: 'Inspect related items and connections only when you need technical depth.',
+        action: 'Open related context details',
       },
       api: {
-        title: 'API',
-        body: 'Use developer-facing integration tools and tokens outside the normal document path.',
-        action: 'Open API',
+        title: 'Advanced integrations',
+        body: 'Use integration tools outside the normal document path.',
+        action: 'Open integrations',
       },
     },
   },

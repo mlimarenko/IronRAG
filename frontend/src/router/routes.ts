@@ -79,6 +79,66 @@ const routes = [
               shellStatus: 'healthy',
             },
           },
+          {
+            path: 'advanced/projects',
+            component: () => import('src/pages/ProjectsPage.vue'),
+            meta: {
+              shellSection: 'advanced',
+              shellStatus: 'focused',
+            },
+          },
+          {
+            path: 'advanced/providers',
+            component: () => import('src/pages/ProvidersPage.vue'),
+            meta: {
+              shellSection: 'advanced',
+              shellStatus: 'focused',
+            },
+          },
+          {
+            path: 'advanced/diagnostics',
+            component: () => import('src/pages/DiagnosticsPage.vue'),
+            meta: {
+              shellSection: 'advanced',
+              shellStatus: 'warning',
+            },
+          },
+          {
+            path: 'advanced/onboarding',
+            component: () => import('src/pages/OnboardingPage.vue'),
+            meta: {
+              shellSection: 'advanced',
+              shellStatus: 'focused',
+            },
+          },
+          {
+            path: 'advanced/graph',
+            component: () => import('src/pages/GraphPage.vue'),
+            meta: {
+              shellSection: 'advanced',
+              shellStatus: 'focused',
+            },
+          },
+          {
+            path: 'projects',
+            redirect: '/advanced/projects',
+          },
+          {
+            path: 'providers',
+            redirect: '/advanced/providers',
+          },
+          {
+            path: 'diagnostics',
+            redirect: '/advanced/diagnostics',
+          },
+          {
+            path: 'onboarding',
+            redirect: '/advanced/onboarding',
+          },
+          {
+            path: 'graph',
+            redirect: '/advanced/graph',
+          },
         ],
       },
     ],
