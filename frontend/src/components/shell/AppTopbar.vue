@@ -9,9 +9,11 @@ const { locale, localeOptions, setLocale } = useAppLocale()
 withDefaults(
   defineProps<{
     sectionLabel?: string
+    sectionSummary?: string
   }>(),
   {
     sectionLabel: undefined,
+    sectionSummary: undefined,
   },
 )
 </script>
@@ -21,21 +23,26 @@ withDefaults(
     <div class="app-topbar__copy">
       <p class="app-topbar__label">{{ t('shell.topbar.surface') }}</p>
       <p class="app-topbar__section">{{ sectionLabel }}</p>
+      <p v-if="sectionSummary" class="app-topbar__summary">{{ sectionSummary }}</p>
     </div>
 
     <div class="app-topbar__controls">
-      <div class="rr-segmented" role="group" :aria-label="t('shell.topbar.language')">
-        <button
-          v-for="option in localeOptions"
-          :key="option"
-          type="button"
-          class="rr-segmented__button"
-          :data-active="locale === option"
-          :aria-pressed="locale === option"
-          @click="setLocale(option)"
-        >
-          {{ t(`shell.locale.${option}`) }}
-        </button>
+      <div class="app-topbar__locale">
+        <span class="app-topbar__locale-label">{{ t('shell.topbar.languageHint') }}</span>
+        <div class="rr-segmented" role="group" :aria-label="t('shell.topbar.language')">
+          <button
+            v-for="option in localeOptions"
+            :key="option"
+            type="button"
+            class="rr-segmented__button"
+            :data-active="locale === option"
+            :aria-pressed="locale === option"
+            :title="t(`common.localeName.${option}`)"
+            @click="setLocale(option)"
+          >
+            {{ t(`shell.locale.${option}`) }}
+          </button>
+        </div>
       </div>
     </div>
   </header>
@@ -66,9 +73,9 @@ withDefaults(
 
 .app-topbar__label {
   margin: 0;
-  font-size: 0.76rem;
+  font-size: 0.72rem;
   font-weight: 700;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--rr-color-text-muted);
 }
@@ -81,6 +88,26 @@ withDefaults(
   color: var(--rr-color-text-primary);
 }
 
+.app-topbar__summary {
+  margin: 0;
+  color: var(--rr-color-text-secondary);
+  font-size: 0.9rem;
+}
+
+.app-topbar__locale {
+  display: grid;
+  gap: 6px;
+  justify-items: end;
+}
+
+.app-topbar__locale-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--rr-color-text-muted);
+}
+
 @media (width <= 900px) {
   .app-topbar {
     align-items: flex-start;
@@ -89,6 +116,11 @@ withDefaults(
 
   .app-topbar__controls {
     width: 100%;
+    justify-content: flex-end;
+  }
+
+  .app-topbar__locale {
+    justify-items: start;
   }
 }
 </style>

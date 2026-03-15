@@ -1,35 +1,37 @@
 export default {
   brand: {
     title: 'RustRAG',
-    subtitle: 'RAG flow',
+    subtitle: 'Operator console',
   },
   nav: {
-    primary: 'Flow',
-    manage: 'More',
+    product: 'Product areas',
     items: {
+      processing: {
+        label: 'Processing',
+        hint: 'Choose the space and library for this session.',
+      },
       files: {
         label: 'Files',
+        hint: 'Add notes and uploads to your library.',
       },
-      processing: {
-        label: 'Overview',
-      },
-      ask: {
-        label: 'Ask',
+      search: {
+        label: 'Search',
+        hint: 'Ask questions and review grounded answers.',
       },
       graph: {
         label: 'Graph',
+        hint: 'Inspect relationship coverage and evidence.',
       },
       api: {
-        label: 'API',
-      },
-      context: {
-        label: 'Setup',
+        label: 'API Hub',
+        hint: 'Start with public routes, tokens, and scoped examples.',
       },
     },
   },
   topbar: {
-    surface: 'Workspace',
+    surface: 'Current surface',
     language: 'Language',
+    languageHint: 'Interface language',
   },
   locale: {
     en: 'EN',
@@ -41,23 +43,25 @@ export default {
     healthy: 'Healthy',
   },
   pages: {
+    processing: {
+      title: 'Processing',
+      summary: 'Set the scope that powers files, search, graph, and API.',
+    },
     files: {
       title: 'Files',
+      summary: 'Bring new content into the active library.',
     },
-    processing: {
-      title: 'Overview',
-    },
-    context: {
-      title: 'Setup',
-    },
-    ask: {
-      title: 'Ask',
+    search: {
+      title: 'Search',
+      summary: 'Find answers grounded in your library.',
     },
     graph: {
       title: 'Graph',
+      summary: 'See what relationships and evidence are visible today.',
     },
     api: {
-      title: 'API',
+      title: 'API Hub',
+      summary: 'Start from the live RustRAG API surface and grow into docs-ready usage.',
     },
   },
 } as const

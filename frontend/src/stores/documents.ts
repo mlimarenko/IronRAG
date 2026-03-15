@@ -7,6 +7,7 @@ import {
   createSource,
   fetchChunks,
   fetchDocuments,
+  fetchIngestionJobs,
   fetchSources,
   ingestText,
   searchChunks,
@@ -15,6 +16,7 @@ import {
   type CreateSourceRequest,
   type DocumentSummary,
   type IngestionJobDetail,
+  type IngestionJobSummary,
   type IngestTextRequest,
   type SearchChunkResult,
   type SearchChunksRequest,
@@ -24,7 +26,7 @@ import { createAsyncState, type AsyncState } from 'src/types/state'
 
 export interface ProjectDocumentState {
   documents: AsyncState<DocumentSummary[]>
-  jobs: AsyncState<IngestionJobDetail[]>
+  jobs: AsyncState<IngestionJobSummary[]>
   sources: AsyncState<SourceSummary[]>
 }
 
@@ -47,8 +49,8 @@ export const useDocumentsStore = defineStore('documents', () => {
   const createSourceState = ref<AsyncState<SourceSummary | null>>(
     createAsyncState<SourceSummary | null>(null),
   )
-  const createJobState = ref<AsyncState<IngestionJobDetail | null>>(
-    createAsyncState<IngestionJobDetail | null>(null),
+  const createJobState = ref<AsyncState<IngestionJobSummary | null>>(
+    createAsyncState<IngestionJobSummary | null>(null),
   )
 
   function ensureProjectState(projectId: string): ProjectDocumentState {
@@ -56,7 +58,7 @@ export const useDocumentsStore = defineStore('documents', () => {
       byProjectId.value[projectId] ??
       ({
         documents: createAsyncState<DocumentSummary[]>([]),
-        jobs: createAsyncState<IngestionJobDetail[]>([]),
+        jobs: createAsyncState<IngestionJobSummary[]>([]),
         sources: createAsyncState<SourceSummary[]>([]),
       } satisfies ProjectDocumentState)
     byProjectId.value = {
@@ -102,15 +104,13 @@ export const useDocumentsStore = defineStore('documents', () => {
     Object.values(byProjectId.value).reduce((sum, state) => sum + state.documents.data.length, 0),
   )
 
-  async function fetchProjectJobs(projectId?: string): Promise<IngestionJobDetail[]> {
+  async function fetchProjectJobs(projectId?: string): Promise<IngestionJobSummary[]> {
     const key = projectId ?? '__all__'
     const state = ensureProjectState(key)
     state.jobs.status = 'loading'
     state.jobs.error = null
     try {
-      const { data } = await api.get<IngestionJobDetail[]>('/ingestion-jobs', {
-        params: projectId ? { project_id: projectId } : {},
-      })
+      const data = await fetchIngestionJobs(projectId)
       state.jobs.data = data
       state.jobs.status = 'success'
       state.jobs.lastLoadedAt = new Date().toISOString()
@@ -227,7 +227,7 @@ export const useDocumentsStore = defineStore('documents', () => {
     }
   }
 
-  async function createJobForProject(payload: CreateIngestionJobRequest): Promise<IngestionJobDetail> {
+  async function createJobForProject(payload: CreateIngestionJobRequest): Promise<IngestionJobSummary> {
     createJobState.value.status = 'loading'
     createJobState.value.error = null
     try {

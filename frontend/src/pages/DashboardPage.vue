@@ -72,7 +72,7 @@ onMounted(async () => {
       :status-label="t('shell.status.focused')"
     >
       <template #actions>
-        <RouterLink class="rr-button" to="/setup">
+        <RouterLink class="rr-button" to="/processing">
           {{ t('flow.overview.cta') }}
         </RouterLink>
       </template>
@@ -95,13 +95,13 @@ onMounted(async () => {
       <AppPanel class="flow-shortcuts" tone="muted" eyebrow="Path" :title="nextAction">
         <p class="flow-shortcuts__title">{{ nextAction }}</p>
         <div class="flow-shortcuts__actions">
-          <RouterLink class="rr-button rr-button--secondary" to="/setup">
+          <RouterLink class="rr-button rr-button--secondary" to="/processing">
             {{ t('flow.overview.cards.workspace.title') }}
           </RouterLink>
-          <RouterLink class="rr-button rr-button--secondary" to="/ingest">
+          <RouterLink class="rr-button rr-button--secondary" to="/files">
             {{ t('flow.overview.cards.library.title') }}
           </RouterLink>
-          <RouterLink class="rr-button rr-button--secondary" to="/ask">
+          <RouterLink class="rr-button rr-button--secondary" to="/search">
             {{ t('flow.overview.cards.search.title') }}
           </RouterLink>
         </div>

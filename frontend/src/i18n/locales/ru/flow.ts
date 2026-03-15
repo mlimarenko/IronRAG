@@ -322,6 +322,17 @@ export default {
       referencesEmpty: 'В этом run ссылки не сохранились.',
       debug: 'Технические данные',
       debugEmpty: 'Технические данные не вернулись.',
+      referenceChip: 'Чанк',
+      referenceTitles: {
+        passage: 'Фрагмент {index}',
+        document: 'Документ {index}',
+        reference: 'Ссылка {index}',
+      },
+      referenceMeta: {
+        documentChunk: 'Документ {documentId} · чанк {chunkId}',
+        document: 'Документ {documentId}',
+        stored: 'Сохраненная retrieval-ссылка',
+      },
     },
   },
 } as const

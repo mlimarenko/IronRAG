@@ -9,26 +9,22 @@ const routes = [
         children: [
           {
             path: '',
-            component: () => import('src/pages/DashboardPage.vue'),
+            redirect: '/processing',
+          },
+          {
+            path: 'processing',
+            component: () => import('src/pages/WorkspacesPage.vue'),
             meta: {
               shellSection: 'processing',
               shellStatus: 'focused',
             },
           },
           {
-            path: 'processing',
-            redirect: '/',
-          },
-          {
             path: 'setup',
-            component: () => import('src/pages/WorkspacesPage.vue'),
-            meta: {
-              shellSection: 'context',
-              shellStatus: 'ready',
-            },
+            redirect: '/processing',
           },
           {
-            path: 'ingest',
+            path: 'files',
             component: () => import('src/pages/IngestionPage.vue'),
             meta: {
               shellSection: 'files',
@@ -36,20 +32,20 @@ const routes = [
             },
           },
           {
-            path: 'files',
-            redirect: '/ingest',
+            path: 'ingest',
+            redirect: '/files',
           },
           {
-            path: 'ask',
+            path: 'search',
             component: () => import('src/pages/ChatPage.vue'),
             meta: {
-              shellSection: 'ask',
+              shellSection: 'search',
               shellStatus: 'healthy',
             },
           },
           {
-            path: 'search',
-            redirect: '/ask',
+            path: 'ask',
+            redirect: '/search',
           },
           {
             path: 'graph',

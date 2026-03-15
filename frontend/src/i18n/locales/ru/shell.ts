@@ -1,63 +1,67 @@
 export default {
   brand: {
     title: 'RustRAG',
-    subtitle: 'RAG flow',
+    subtitle: 'Операторская консоль',
   },
   nav: {
-    primary: 'Основное',
-    manage: 'Ещё',
+    product: 'Разделы продукта',
     items: {
+      processing: {
+        label: 'Подготовка',
+        hint: 'Выберите пространство и библиотеку для текущей сессии.',
+      },
       files: {
         label: 'Файлы',
+        hint: 'Добавляйте заметки и загрузки в активную библиотеку.',
       },
-      processing: {
-        label: 'Обзор',
-      },
-      ask: {
-        label: 'Вопросы',
+      search: {
+        label: 'Поиск',
+        hint: 'Задавайте вопросы и проверяйте ответы с источниками.',
       },
       graph: {
         label: 'Граф',
+        hint: 'Смотрите связи и доступные доказательства.',
       },
       api: {
-        label: 'API',
-      },
-      context: {
-        label: 'Настройка',
+        label: 'API Hub',
+        hint: 'Начинайте с public routes, токенов и scoped examples.',
       },
     },
   },
   topbar: {
-    surface: 'Workspace',
+    surface: 'Текущая поверхность',
     language: 'Язык',
+    languageHint: 'Язык интерфейса',
   },
   locale: {
     en: 'EN',
     ru: 'RU',
   },
   status: {
-    focused: 'Фокус',
+    focused: 'В фокусе',
     ready: 'Готово',
     healthy: 'Стабильно',
   },
   pages: {
+    processing: {
+      title: 'Подготовка',
+      summary: 'Задайте scope, который используют Файлы, Поиск, Граф и API.',
+    },
     files: {
       title: 'Файлы',
+      summary: 'Добавляйте новый контент в активную библиотеку.',
     },
-    processing: {
-      title: 'Обзор',
-    },
-    context: {
-      title: 'Настройка',
-    },
-    ask: {
-      title: 'Вопросы',
+    search: {
+      title: 'Поиск',
+      summary: 'Ищите ответы по активной библиотеке.',
     },
     graph: {
       title: 'Граф',
+      summary: 'Смотрите, какие связи и доказательства уже доступны.',
     },
     api: {
-      title: 'API',
+      title: 'API Hub',
+      summary: 'Начинайте с живой API-поверхности RustRAG и достраивайте docs-ready usage.',
     },
   },
 } as const

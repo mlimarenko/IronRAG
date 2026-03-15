@@ -8,40 +8,20 @@ const { t } = useI18n()
 
 interface NavItem {
   to: string
-  key: 'processing' | 'files' | 'ask' | 'graph' | 'api' | 'context'
+  key: 'processing' | 'files' | 'search' | 'graph' | 'api'
 }
 
-interface NavGroup {
-  label: string
-  items: readonly NavItem[]
-}
-
-const navGroups = computed<readonly NavGroup[]>(() => [
-  {
-    label: t('shell.nav.primary'),
-    items: [
-      { to: '/', key: 'processing' },
-      { to: '/setup', key: 'context' },
-      { to: '/ingest', key: 'files' },
-      { to: '/ask', key: 'ask' },
-    ],
-  },
-  {
-    label: t('shell.nav.manage'),
-    items: [
-      { to: '/graph', key: 'graph' },
-      { to: '/api', key: 'api' },
-    ],
-  },
+const navItems = computed<readonly NavItem[]>(() => [
+  { to: '/processing', key: 'processing' },
+  { to: '/files', key: 'files' },
+  { to: '/search', key: 'search' },
+  { to: '/graph', key: 'graph' },
+  { to: '/api', key: 'api' },
 ])
 
 const activePath = computed(() => route.path)
 
 function isActive(item: NavItem) {
-  if (item.to === '/') {
-    return activePath.value === item.to
-  }
-
   return activePath.value === item.to || activePath.value.startsWith(`${item.to}/`)
 }
 </script>
@@ -58,27 +38,18 @@ function isActive(item: NavItem) {
       </RouterLink>
     </div>
 
-    <div class="app-sidebar__groups">
-      <nav
-        v-for="group in navGroups"
-        :key="group.label"
-        class="app-sidebar__group"
-        :aria-label="group.label"
+    <nav class="app-sidebar__nav" :aria-label="t('shell.nav.product')">
+      <RouterLink
+        v-for="item in navItems"
+        :key="item.to"
+        :to="item.to"
+        class="app-sidebar__link"
+        :data-active="isActive(item)"
       >
-        <p class="app-sidebar__group-label">{{ group.label }}</p>
-        <div class="app-sidebar__nav">
-          <RouterLink
-            v-for="item in group.items"
-            :key="item.to"
-            :to="item.to"
-            class="app-sidebar__link"
-            :data-active="isActive(item)"
-          >
-            <span class="app-sidebar__label">{{ t(`shell.nav.items.${item.key}.label`) }}</span>
-          </RouterLink>
-        </div>
-      </nav>
-    </div>
+        <span class="app-sidebar__label">{{ t(`shell.nav.items.${item.key}.label`) }}</span>
+        <span class="app-sidebar__hint">{{ t(`shell.nav.items.${item.key}.hint`) }}</span>
+      </RouterLink>
+    </nav>
   </aside>
 </template>
 
@@ -130,27 +101,16 @@ function isActive(item: NavItem) {
   color: var(--rr-color-text-secondary);
 }
 
-.app-sidebar__groups,
-.app-sidebar__group,
 .app-sidebar__nav {
   display: grid;
-  gap: var(--rr-space-2);
-}
-
-.app-sidebar__group-label {
-  margin: 0 0 6px;
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-  color: var(--rr-color-text-muted);
+  gap: var(--rr-space-3);
 }
 
 .app-sidebar__link {
-  display: flex;
-  align-items: center;
-  min-height: 44px;
-  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+  min-height: 56px;
+  padding: 12px;
   border: 1px solid transparent;
   border-radius: calc(var(--rr-radius-sm) + 2px);
   color: var(--rr-color-text-secondary);
@@ -174,5 +134,16 @@ function isActive(item: NavItem) {
 .app-sidebar__label {
   font-size: 0.94rem;
   font-weight: 650;
+}
+
+.app-sidebar__hint {
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: var(--rr-color-text-muted);
+}
+
+.app-sidebar__link:hover .app-sidebar__hint,
+.app-sidebar__link[data-active='true'] .app-sidebar__hint {
+  color: var(--rr-color-text-secondary);
 }
 </style>

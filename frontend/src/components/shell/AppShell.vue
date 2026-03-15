@@ -9,7 +9,7 @@ import AppTopbar from './AppTopbar.vue'
 const route = useRoute()
 const { t } = useI18n()
 
-type ShellSection = 'processing' | 'context' | 'files' | 'ask' | 'graph' | 'api'
+type ShellSection = 'processing' | 'files' | 'search' | 'graph' | 'api'
 
 const routeMeta = computed(() => {
   const meta = route.meta as {
@@ -19,6 +19,7 @@ const routeMeta = computed(() => {
 
   return {
     sectionLabel: t(`shell.pages.${section}.title`),
+    sectionSummary: t(`shell.pages.${section}.summary`),
   }
 })
 </script>
@@ -30,7 +31,10 @@ const routeMeta = computed(() => {
     </aside>
 
     <div class="app-shell__main">
-      <AppTopbar :section-label="routeMeta.sectionLabel" />
+      <AppTopbar
+        :section-label="routeMeta.sectionLabel"
+        :section-summary="routeMeta.sectionSummary"
+      />
 
       <main class="app-shell__content">
         <router-view />

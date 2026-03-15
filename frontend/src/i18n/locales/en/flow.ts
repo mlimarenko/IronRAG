@@ -391,6 +391,17 @@ export default {
       referencesEmpty: 'No references were stored on the run.',
       debug: 'Raw technical payload',
       debugEmpty: 'No technical payload was returned.',
+      referenceChip: 'Chunk',
+      referenceTitles: {
+        passage: 'Passage {index}',
+        document: 'Document {index}',
+        reference: 'Reference {index}',
+      },
+      referenceMeta: {
+        documentChunk: 'Document {documentId} · chunk {chunkId}',
+        document: 'Document {documentId}',
+        stored: 'Stored retrieval reference',
+      },
     },
   },
 } as const

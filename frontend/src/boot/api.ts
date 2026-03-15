@@ -1,5 +1,7 @@
 import axios from 'axios'
 
+import { getApiBearerToken } from 'src/lib/apiAuth'
+
 interface FrontendEnv {
   readonly VITE_BACKEND_URL?: string
 }
@@ -110,6 +112,15 @@ export interface UsageSummary {
   completion_tokens: number
   total_tokens: number
   estimated_cost: number
+}
+
+export interface IngestionJobSummary {
+  id: string
+  project_id: string
+  source_id?: string | null
+  trigger_kind: string
+  status: string
+  stage: string
 }
 
 export interface IngestionJobDetail {
@@ -238,11 +249,118 @@ export interface RetrievalRunDetail {
   debug_json: Record<string, unknown>
 }
 
+export interface IntegrationsProductSnapshot {
+  workspace_id: string
+  provider_accounts: ProviderAccountSummary[]
+  model_profiles: ModelProfileSummary[]
+  projects: ProjectSummary[]
+  available_scopes: string[]
+  generated_at: string
+  warning?: string | null
+}
+
+export interface GraphCoverageSummary {
+  project_id: string
+  entity_count: number
+  relation_count: number
+  extraction_runs: number
+  status: string
+  warning?: string | null
+}
+
+export interface GraphEntitySummary {
+  id: string
+  project_id: string
+  canonical_name: string
+  entity_type?: string | null
+  source_chunk_count: number
+}
+
+export interface GraphRelationSummary {
+  id: string
+  project_id: string
+  relation_type: string
+  from_entity_id: string
+  to_entity_id: string
+  source_chunk_count: number
+}
+
+export interface GraphProductSnapshot {
+  project_id: string
+  coverage: GraphCoverageSummary
+  entities: GraphEntitySummary[]
+  relations: GraphRelationSummary[]
+  generated_at: string
+}
+
+export interface GraphProjectSummaryResponse {
+  project_id: string
+  coverage: GraphCoverageSummary
+  entity_kinds: Array<{ name: string; count: number }>
+  relation_kinds: Array<{ name: string; count: number }>
+  top_entities: GraphEntitySummary[]
+  sample_relations: GraphRelationSummary[]
+  generated_at: string
+}
+
+export interface GraphEntitySearchHit {
+  entity: GraphEntitySummary
+  match_reasons: string[]
+}
+
+export interface GraphRelationSearchHit {
+  relation: GraphRelationSummary
+  from_entity_name: string
+  to_entity_name: string
+  match_reasons: string[]
+}
+
+export interface GraphSearchResponse {
+  project_id: string
+  query: string
+  searched_fields: string[]
+  result_count: number
+  entity_results: GraphEntitySearchHit[]
+  relation_results: GraphRelationSearchHit[]
+  generated_at: string
+  warning?: string | null
+}
+
+export interface GraphRelationDetail {
+  relation: GraphRelationSummary
+  from_entity_name: string
+  to_entity_name: string
+}
+
+export interface GraphEntityDetailResponse {
+  project_id: string
+  entity: GraphEntitySummary
+  aliases: string[]
+  source_document_ids: string[]
+  source_chunk_ids: string[]
+  observed_relation_count: number
+  incoming_relations: GraphRelationDetail[]
+  outgoing_relations: GraphRelationDetail[]
+  generated_at: string
+  warning?: string | null
+}
+
 const env = import.meta.env as ImportMetaEnv & FrontendEnv
 export const backendUrl: string = env.VITE_BACKEND_URL?.trim() || window.location.origin
 
 export const api = axios.create({
   baseURL: env.VITE_BACKEND_URL?.trim() || '/v1',
+})
+
+api.interceptors.request.use((config) => {
+  const token = getApiBearerToken()
+  if (token) {
+    config.headers.set('Authorization', `Bearer ${token}`)
+  } else {
+    config.headers.delete('Authorization')
+  }
+
+  return config
 })
 
 api.interceptors.response.use(
@@ -267,6 +385,15 @@ api.interceptors.response.use(
     return Promise.reject(error)
   },
 )
+
+export function isUnauthorizedApiError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false
+  }
+
+  const message = error.message.toLowerCase()
+  return message.includes('401') || message.includes('unauthorized') || message.includes('authorization')
+}
 
 export async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
   const { data } = await api.get<WorkspaceSummary[]>('/workspaces')
@@ -354,6 +481,13 @@ export async function fetchIngestionJobDetail(id: string): Promise<IngestionJobD
   return data
 }
 
+export async function fetchIngestionJobs(projectId?: string): Promise<IngestionJobSummary[]> {
+  const { data } = await api.get<IngestionJobSummary[]>('/ingestion-jobs', {
+    params: projectId ? { project_id: projectId } : {},
+  })
+  return data
+}
+
 export async function createIngestionJob(
   payload: CreateIngestionJobRequest,
 ): Promise<IngestionJobDetail> {
@@ -432,5 +566,39 @@ export async function runQuery(payload: {
 
 export async function fetchRetrievalRunDetail(id: string): Promise<RetrievalRunDetail> {
   const { data } = await api.get<RetrievalRunDetail>(`/retrieval-runs/${id}`)
+  return data
+}
+
+export async function fetchIntegrationsProduct(workspaceId: string): Promise<IntegrationsProductSnapshot> {
+  const { data } = await api.get<{ snapshot: IntegrationsProductSnapshot }>(
+    `/integrations-products/${workspaceId}`,
+  )
+  return data.snapshot
+}
+
+export async function fetchGraphProduct(projectId: string): Promise<GraphProductSnapshot> {
+  const { data } = await api.get<{ snapshot: GraphProductSnapshot }>(`/graph-products/${projectId}`)
+  return data.snapshot
+}
+
+export async function fetchGraphSummary(projectId: string): Promise<GraphProjectSummaryResponse> {
+  const { data } = await api.get<GraphProjectSummaryResponse>(`/graph-products/${projectId}/summary`)
+  return data
+}
+
+export async function searchGraph(projectId: string, q: string, limit = 8): Promise<GraphSearchResponse> {
+  const { data } = await api.get<GraphSearchResponse>(`/graph-products/${projectId}/search`, {
+    params: { q, limit },
+  })
+  return data
+}
+
+export async function fetchGraphEntityDetail(
+  projectId: string,
+  entityId: string,
+): Promise<GraphEntityDetailResponse> {
+  const { data } = await api.get<GraphEntityDetailResponse>(
+    `/graph-products/${projectId}/entities/${entityId}`,
+  )
   return data
 }

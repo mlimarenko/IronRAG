@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
+import { translateStatusLabel } from 'src/i18n/helpers'
+
 const props = withDefaults(
   defineProps<{
     status?: string | null
@@ -52,18 +54,8 @@ function normalizeTone(status?: string | null) {
   return 'neutral'
 }
 
-function formatLabel(value?: string | null) {
-  if (!value) {
-    return 'Unknown'
-  }
-
-  return value
-    .replace(/[_-]+/g, ' ')
-    .replace(/\b\w/g, (char) => char.toUpperCase())
-}
-
 const resolvedTone = computed(() => props.tone ?? normalizeTone(props.status ?? props.label))
-const resolvedLabel = computed(() => props.label ?? formatLabel(props.status))
+const resolvedLabel = computed(() => props.label ?? translateStatusLabel(props.status))
 </script>
 
 <template>

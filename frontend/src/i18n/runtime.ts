@@ -1,6 +1,10 @@
 import { defaultLocale, supportedLocales, type AppLocale } from './messages'
 
 const localeStorageKey = 'rustrag.locale'
+const intlLocaleByAppLocale: Record<AppLocale, string> = {
+  en: 'en-US',
+  ru: 'ru-RU',
+}
 
 export function isSupportedLocale(value: string): value is AppLocale {
   return supportedLocales.includes(value as AppLocale)
@@ -30,4 +34,16 @@ export function persistLocale(locale: AppLocale) {
   }
 
   window.localStorage.setItem(localeStorageKey, locale)
+}
+
+export function getIntlLocale(locale: AppLocale): string {
+  return intlLocaleByAppLocale[locale]
+}
+
+export function syncDocumentLocale(locale: AppLocale) {
+  if (typeof document === 'undefined') {
+    return
+  }
+
+  document.documentElement.lang = locale
 }
