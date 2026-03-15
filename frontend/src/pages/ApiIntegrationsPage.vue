@@ -29,6 +29,10 @@ import {
   maskApiBearerToken,
   setApiBearerToken,
 } from 'src/lib/apiAuth'
+import {
+  setWorkspaceWithProjectReset,
+  syncWorkspaceProjectScope,
+} from 'src/stores/flow'
 import { useIntegrationsStore } from 'src/stores/integrations'
 
 interface TokenSummary {
@@ -615,11 +619,8 @@ function formatDate(value?: string | null) {
 }
 
 function syncSelectedProject(projectItems: ProjectSummary[]) {
-  if (projectItems.some((project) => project.id === selectedProjectId.value)) {
-    return
-  }
-
-  selectedProjectId.value = projectItems[0]?.id ?? null
+  const scope = syncWorkspaceProjectScope(workspaces.value, projectItems)
+  selectedProjectId.value = scope.projectId || null
 }
 
 function resetProtectedSurface() {
@@ -723,7 +724,9 @@ async function selectWorkspace(workspaceId: string) {
     return
   }
 
+  setWorkspaceWithProjectReset(workspaceId)
   selectedWorkspaceId.value = workspaceId
+  selectedProjectId.value = null
   await refreshPage()
 }
 
@@ -744,7 +747,8 @@ async function clearSessionToken() {
 onMounted(async () => {
   try {
     workspaces.value = await fetchWorkspaces()
-    selectedWorkspaceId.value = workspaces.value[0]?.id ?? null
+    const scope = syncWorkspaceProjectScope(workspaces.value, [])
+    selectedWorkspaceId.value = scope.workspaceId || null
 
     if (selectedWorkspaceId.value) {
       await loadWorkspaceBundle(selectedWorkspaceId.value)

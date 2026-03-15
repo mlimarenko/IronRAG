@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import {
   fetchProjects,
   fetchProjectReadiness,
+  fetchWorkspaces,
   isUnauthorizedApiError,
   type ProjectReadinessSummary,
   type ProjectSummary,
+  type WorkspaceSummary,
 } from 'src/boot/api'
 import PageSection from 'src/components/shell/PageSection.vue'
 import EmptyStateCard from 'src/components/state/EmptyStateCard.vue'
@@ -15,14 +17,22 @@ import ErrorStateCard from 'src/components/state/ErrorStateCard.vue'
 import LoadingSkeletonPanel from 'src/components/state/LoadingSkeletonPanel.vue'
 import AppPanel from 'src/components/ui/AppPanel.vue'
 import StatusBanner from 'src/components/ui/StatusBanner.vue'
+import {
+  ensureProjectMatchesWorkspace,
+  getSelectedProjectId,
+  getSelectedWorkspaceId,
+  setSelectedProjectId,
+  syncWorkspaceProjectScope,
+} from 'src/stores/flow'
 
 const { t } = useI18n()
 
+const workspaces = ref<WorkspaceSummary[]>([])
 const projects = ref<ProjectSummary[]>([])
 const readiness = ref<ProjectReadinessSummary | null>(null)
 const errorMessage = ref<string | null>(null)
 const infoMessage = ref<string | null>(null)
-const selectedProjectId = ref<string | null>(null)
+const selectedProjectId = ref<string>(getSelectedProjectId())
 const loading = ref(true)
 
 function extractErrorMessage(error: unknown): string {
@@ -30,12 +40,20 @@ function extractErrorMessage(error: unknown): string {
 }
 
 async function loadReadiness(id: string) {
+  const scopedId = ensureProjectMatchesWorkspace(projects.value, id)
+  if (!scopedId) {
+    readiness.value = null
+    selectedProjectId.value = ''
+    return
+  }
+
   errorMessage.value = null
   infoMessage.value = null
-  selectedProjectId.value = id
+  selectedProjectId.value = scopedId
+  setSelectedProjectId(scopedId)
 
   try {
-    readiness.value = await fetchProjectReadiness(id)
+    readiness.value = await fetchProjectReadiness(scopedId)
   } catch (error) {
     const message = extractErrorMessage(error)
     if (isUnauthorizedApiError(error)) {
@@ -71,16 +89,38 @@ const pageStatus = computed(() => {
   return { status: 'partial', label: 'Inventory loaded' }
 })
 
+watch(selectedProjectId, async (value, previousValue) => {
+  if (!value || value === previousValue) {
+    return
+  }
+
+  await loadReadiness(value)
+})
+
 onMounted(async () => {
   try {
-    projects.value = await fetchProjects()
+    workspaces.value = await fetchWorkspaces()
+    const workspaceId = getSelectedWorkspaceId() || syncWorkspaceProjectScope(workspaces.value, []).workspaceId
 
-    if (projects.value.length === 0) {
-      infoMessage.value = 'No projects created yet. Create a workspace and project to start ingestion and retrieval.'
+    if (!workspaceId) {
+      projects.value = []
+      selectedProjectId.value = ''
+      infoMessage.value = 'No workspace selected yet. Open Setup to choose a workspace before inspecting projects.'
       return
     }
 
-    await loadReadiness(projects.value[0].id)
+    projects.value = await fetchProjects(workspaceId)
+    const scope = syncWorkspaceProjectScope(workspaces.value, projects.value)
+    selectedProjectId.value = scope.projectId
+
+    if (projects.value.length === 0) {
+      infoMessage.value = 'No projects created yet in this workspace. Create one in Setup to start ingestion and retrieval.'
+      return
+    }
+
+    if (scope.projectId) {
+      await loadReadiness(scope.projectId)
+    }
   } catch (error) {
     errorMessage.value = extractErrorMessage(error)
   } finally {

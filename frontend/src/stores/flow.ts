@@ -5,6 +5,10 @@ interface SelectableItem {
   id: string
 }
 
+interface WorkspaceScopedItem extends SelectableItem {
+  workspace_id: string
+}
+
 export function getSelectedWorkspaceId(): string {
   return window.sessionStorage.getItem(WORKSPACE_KEY) ?? ''
 }
@@ -54,4 +58,56 @@ export function syncSelectedWorkspaceId(items: readonly SelectableItem[]): strin
 
 export function syncSelectedProjectId(items: readonly SelectableItem[]): string {
   return syncSelectedId(items, getSelectedProjectId, setSelectedProjectId)
+}
+
+export function syncWorkspaceProjectScope<TWorkspace extends SelectableItem, TProject extends WorkspaceScopedItem>(
+  workspaces: readonly TWorkspace[],
+  projects: readonly TProject[],
+): { workspaceId: string; projectId: string } {
+  const workspaceId = syncSelectedWorkspaceId(workspaces)
+
+  if (!workspaceId) {
+    setSelectedProjectId('')
+    return { workspaceId: '', projectId: '' }
+  }
+
+  const scopedProjects = projects.filter((project) => project.workspace_id === workspaceId)
+  const currentProjectId = getSelectedProjectId()
+
+  if (currentProjectId && scopedProjects.some((project) => project.id === currentProjectId)) {
+    return { workspaceId, projectId: currentProjectId }
+  }
+
+  const projectId = syncSelectedProjectId(scopedProjects)
+  return { workspaceId, projectId }
+}
+
+export function ensureProjectMatchesWorkspace<TProject extends WorkspaceScopedItem>(
+  projects: readonly TProject[],
+  projectId: string,
+): string {
+  const workspaceId = getSelectedWorkspaceId()
+
+  if (!workspaceId) {
+    setSelectedProjectId('')
+    return ''
+  }
+
+  const selectedProject = projects.find((project) => project.id === projectId)
+  if (selectedProject?.workspace_id === workspaceId) {
+    return projectId
+  }
+
+  const nextProjectId = projects.find((project) => project.workspace_id === workspaceId)?.id ?? ''
+  setSelectedProjectId(nextProjectId)
+  return nextProjectId
+}
+
+export function setWorkspaceWithProjectReset(workspaceId: string): void {
+  const previousWorkspaceId = getSelectedWorkspaceId()
+  setSelectedWorkspaceId(workspaceId)
+
+  if (!workspaceId || workspaceId !== previousWorkspaceId) {
+    setSelectedProjectId('')
+  }
 }

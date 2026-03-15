@@ -43,8 +43,9 @@ import {
 import {
   getSelectedProjectId,
   getSelectedWorkspaceId,
-  syncSelectedProjectId,
-  syncSelectedWorkspaceId,
+  setSelectedProjectId,
+  setWorkspaceWithProjectReset,
+  syncWorkspaceProjectScope,
 } from 'src/stores/flow'
 
 interface WorkspaceItem {
@@ -1039,14 +1040,17 @@ async function retryJob(jobId: string) {
 onMounted(async () => {
   try {
     workspaces.value = await fetchWorkspaces()
-    const workspaceId = syncSelectedWorkspaceId(workspaces.value)
+    const workspaceId = getSelectedWorkspaceId() || workspaces.value[0]?.id || ''
 
     if (workspaceId) {
+      if (workspaceId !== getSelectedWorkspaceId()) {
+        setWorkspaceWithProjectReset(workspaceId)
+      }
       projects.value = await fetchProjects(workspaceId)
-      syncSelectedProjectId(projects.value)
+      syncWorkspaceProjectScope(workspaces.value, projects.value)
     } else {
       projects.value = []
-      syncSelectedProjectId([])
+      setSelectedProjectId('')
     }
 
     if (selectedProjectId.value) {
@@ -1098,6 +1102,38 @@ onUnmounted(() => {
           <p>{{ t('flow.library.description') }}</p>
         </div>
 
+        <div class="library-quickstart__main-action">
+          <RouterLink class="rr-button" to="/ask" :aria-disabled="!selectedProjectId">
+            {{ t('flow.library.action') }}
+          </RouterLink>
+          <p class="rr-note">
+            {{
+              selectedProjectId
+                ? t('flow.library.quickstart.ready')
+                : t('flow.library.quickstart.blocked')
+            }}
+          </p>
+        </div>
+      </div>
+
+      <details class="rr-panel rr-panel--muted library-progress" :open="activeJobsCount > 0 || !documents.length">
+        <summary class="library-progress__summary">
+          <div>
+            <p class="rr-kicker">{{ t('flow.library.quickstart.progressEyebrow') }}</p>
+            <h3>{{ t('flow.library.quickstart.progressTitle') }}</h3>
+          </div>
+          <StatusBadge
+            :status="pageStatus.status"
+            :label="
+              activeJobsCount > 0
+                ? t('flow.library.statusProcessing', { count: activeJobsCount })
+                : documents.length
+                  ? t('flow.library.documentsCount', { count: documents.length })
+                  : t('flow.library.statusDraft')
+            "
+          />
+        </summary>
+
         <div class="library-quickstart__steps">
           <article class="library-quickstart__step">
             <span>1</span>
@@ -1121,7 +1157,7 @@ onUnmounted(() => {
             </div>
           </article>
         </div>
-      </div>
+      </details>
 
       <div class="rr-stat-strip">
         <article class="rr-stat">
@@ -1972,7 +2008,7 @@ onUnmounted(() => {
 
 .ingestion-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(340px, 0.8fr);
+  grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
   gap: var(--rr-space-4);
 }
 
@@ -2217,6 +2253,30 @@ onUnmounted(() => {
   gap: 6px;
 }
 
+.library-progress {
+  display: grid;
+  gap: var(--rr-space-3);
+}
+
+.library-progress__summary {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--rr-space-3);
+  align-items: flex-start;
+  cursor: pointer;
+  list-style: none;
+}
+
+.library-progress__summary::-webkit-details-marker {
+  display: none;
+}
+
+.library-quickstart__main-action {
+  display: grid;
+  gap: var(--rr-space-2);
+  justify-items: start;
+}
+
 .job-queue {
   display: grid;
   gap: var(--rr-space-3);
@@ -2307,7 +2367,8 @@ onUnmounted(() => {
   .inventory-list li,
   .file-library-row__title-line,
   .file-library-detail__header,
-  .file-library-detail__processing-head {
+  .file-library-detail__processing-head,
+  .library-progress__summary {
     flex-direction: column;
     align-items: flex-start;
   }
