@@ -124,8 +124,16 @@ async fn list_retrieval_runs(
 
     let rows = repositories::list_retrieval_runs(&state.persistence.postgres, query.project_id)
         .await
-        .map_err(|_| ApiError::Internal)?;
-    let items = if auth.token_kind == "instance_admin" {
+        .map_err(|error| {
+            error!(
+                auth_token_id = %auth.token_id,
+                project_id = ?query.project_id,
+                ?error,
+                "failed to list retrieval runs",
+            );
+            ApiError::Internal
+        })?;
+    let items: Vec<RetrievalRunSummary> = if auth.token_kind == "instance_admin" {
         rows
     } else {
         let workspace_id = auth.workspace_id.ok_or(ApiError::Unauthorized)?;
@@ -134,7 +142,16 @@ async fn list_retrieval_runs(
             let project =
                 repositories::get_project_by_id(&state.persistence.postgres, row.project_id)
                     .await
-                    .map_err(|_| ApiError::Internal)?
+                    .map_err(|error| {
+                        error!(
+                            auth_token_id = %auth.token_id,
+                            workspace_id = %workspace_id,
+                            project_id = %row.project_id,
+                            ?error,
+                            "failed to load project while filtering retrieval runs",
+                        );
+                        ApiError::Internal
+                    })?
                     .ok_or_else(|| {
                         ApiError::NotFound(format!("project {} not found", row.project_id))
                     })?;
@@ -161,6 +178,14 @@ async fn list_retrieval_runs(
     })
     .collect();
 
+    info!(
+        auth_token_id = %auth.token_id,
+        workspace_id = ?auth.workspace_id,
+        project_id = ?query.project_id,
+        retrieval_run_count = items.len(),
+        "listed retrieval runs",
+    );
+
     Ok(Json(items))
 }
 
@@ -172,6 +197,7 @@ async fn create_retrieval_run(
     auth.require_any_scope(POLICY_QUERY_RUN)?;
     if payload.query_text.trim().is_empty() {
         warn!(
+            auth_token_id = %auth.token_id,
             project_id = %payload.project_id,
             model_profile_id = ?payload.model_profile_id,
             "rejecting retrieval run creation with empty query_text",
@@ -181,6 +207,7 @@ async fn create_retrieval_run(
     let top_k = payload.top_k.unwrap_or(8);
     if top_k <= 0 {
         warn!(
+            auth_token_id = %auth.token_id,
             project_id = %payload.project_id,
             model_profile_id = ?payload.model_profile_id,
             top_k,
@@ -193,6 +220,7 @@ async fn create_retrieval_run(
         load_project_and_authorize(&auth, &state, payload.project_id, POLICY_QUERY_RUN).await?;
 
     info!(
+        auth_token_id = %auth.token_id,
         workspace_id = %project.workspace_id,
         project_id = %payload.project_id,
         model_profile_id = ?payload.model_profile_id,
@@ -212,11 +240,23 @@ async fn create_retrieval_run(
         serde_json::json!({"mode":"manual"}),
     )
     .await
-    .map_err(|_| ApiError::Internal)?;
+    .map_err(|error| {
+        error!(
+            auth_token_id = %auth.token_id,
+            workspace_id = %project.workspace_id,
+            project_id = %payload.project_id,
+            model_profile_id = ?payload.model_profile_id,
+            top_k,
+            ?error,
+            "failed to create retrieval run",
+        );
+        ApiError::Internal
+    })?;
 
     let (answer_status, weak_grounding, _, _, _) = extract_retrieval_debug(&row.debug_json);
 
     info!(
+        auth_token_id = %auth.token_id,
         workspace_id = %project.workspace_id,
         project_id = %row.project_id,
         retrieval_run_id = %row.id,
@@ -248,13 +288,36 @@ async fn get_retrieval_run_detail(
 
     let row = repositories::get_retrieval_run_by_id(&state.persistence.postgres, id)
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|error| {
+            error!(
+                auth_token_id = %auth.token_id,
+                retrieval_run_id = %id,
+                ?error,
+                "failed to load retrieval run detail",
+            );
+            ApiError::Internal
+        })?
         .ok_or_else(|| ApiError::NotFound(format!("retrieval_run {id} not found")))?;
 
-    load_project_and_authorize(&auth, &state, row.project_id, POLICY_QUERY_READ).await?;
+    let project =
+        load_project_and_authorize(&auth, &state, row.project_id, POLICY_QUERY_READ).await?;
 
     let (answer_status, weak_grounding, references, matched_chunk_ids, warning) =
         extract_retrieval_debug(&row.debug_json);
+
+    info!(
+        auth_token_id = %auth.token_id,
+        workspace_id = %project.workspace_id,
+        project_id = %row.project_id,
+        retrieval_run_id = %row.id,
+        model_profile_id = ?row.model_profile_id,
+        top_k = row.top_k,
+        answer_status,
+        weak_grounding,
+        reference_count = references.len(),
+        matched_chunk_count = matched_chunk_ids.len(),
+        "loaded retrieval run detail",
+    );
 
     Ok(Json(RetrievalRunDetail {
         id: row.id,
@@ -282,6 +345,7 @@ async fn run_query(
     let top_k = payload.top_k.unwrap_or(8);
     if let Err(error) = validate_query_payload(&payload) {
         warn!(
+            auth_token_id = %auth.token_id,
             workspace_id = %project.workspace_id,
             project_id = %payload.project_id,
             model_profile_id = ?payload.model_profile_id,
@@ -296,6 +360,7 @@ async fn run_query(
     let started_at = Instant::now();
 
     info!(
+        auth_token_id = %auth.token_id,
         workspace_id = %project.workspace_id,
         project_id = %payload.project_id,
         model_profile_id = ?payload.model_profile_id,
@@ -314,6 +379,7 @@ async fn run_query(
                 top_k,
                 started_at.elapsed().as_millis(),
                 "execute_query",
+                auth.token_id,
                 &error,
             );
             return Err(error);
@@ -331,6 +397,7 @@ async fn run_query(
                 top_k,
                 started_at.elapsed().as_millis(),
                 "persist_query_artifacts",
+                auth.token_id,
                 &error,
             );
             return Err(error);
@@ -339,6 +406,7 @@ async fn run_query(
 
     if response.0.weak_grounding {
         warn!(
+            auth_token_id = %auth.token_id,
             workspace_id = %project.workspace_id,
             project_id = %payload.project_id,
             retrieval_run_id = %response.0.retrieval_run_id,
@@ -357,6 +425,7 @@ async fn run_query(
         );
     } else {
         info!(
+            auth_token_id = %auth.token_id,
             workspace_id = %project.workspace_id,
             project_id = %payload.project_id,
             retrieval_run_id = %response.0.retrieval_run_id,
@@ -394,16 +463,19 @@ fn log_query_request_failure(
     top_k: i32,
     latency_ms: u128,
     phase: &str,
+    auth_token_id: Uuid,
     error: &ApiError,
 ) {
     match error {
         ApiError::Internal => {
             error!(
+                auth_token_id = %auth_token_id,
                 workspace_id = %workspace_id,
                 project_id = %payload.project_id,
                 model_profile_id = ?payload.model_profile_id,
                 embedding_model_profile_id = ?payload.embedding_model_profile_id,
                 top_k,
+                query_len = payload.query_text.trim().chars().count(),
                 latency_ms,
                 phase,
                 error = %error,
@@ -412,11 +484,13 @@ fn log_query_request_failure(
         }
         _ => {
             warn!(
+                auth_token_id = %auth_token_id,
                 workspace_id = %workspace_id,
                 project_id = %payload.project_id,
                 model_profile_id = ?payload.model_profile_id,
                 embedding_model_profile_id = ?payload.embedding_model_profile_id,
                 top_k,
+                query_len = payload.query_text.trim().chars().count(),
                 latency_ms,
                 phase,
                 error = %error,
@@ -440,7 +514,15 @@ async fn execute_query(
         top_k,
     )
     .await
-    .map_err(|_| ApiError::Internal)?;
+    .map_err(|error| {
+        error!(
+            project_id = %payload.project_id,
+            top_k,
+            ?error,
+            "failed to search lexical retrieval chunks",
+        );
+        ApiError::Internal
+    })?;
     let lexical_chunk_count = lexical_chunks.len();
     let (embedding_provider_kind, embedding_model_name, _) = resolve_embedding_model(
         state,
@@ -461,6 +543,17 @@ async fn execute_query(
     .await?;
     let semantic_chunk_count = semantic_chunks.len();
     let matched_chunks = rank_chunks(lexical_chunks, semantic_chunks, top_k);
+    if matched_chunks.is_empty() {
+        warn!(
+            project_id = %payload.project_id,
+            provider_kind = %provider_kind,
+            model_name = %model_name,
+            embedding_provider_kind = %embedding_provider_kind,
+            embedding_model_name = %embedding_model_name,
+            top_k,
+            "query has no retrieval evidence; generating answer without matched chunks",
+        );
+    }
     info!(
         project_id = %payload.project_id,
         provider_kind = %provider_kind,
@@ -483,7 +576,17 @@ async fn execute_query(
             prompt: format!("{context_block}User question: {}", payload.query_text),
         })
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|error| {
+            error!(
+                project_id = %payload.project_id,
+                provider_kind = %provider_kind,
+                model_name = %model_name,
+                matched_chunk_count = matched_chunks.len(),
+                ?error,
+                "llm query generation failed",
+            );
+            ApiError::Internal
+        })?;
     let references = build_references(&matched_chunks);
 
     Ok(QueryExecutionResult {
@@ -532,12 +635,30 @@ async fn persist_query_artifacts(
         }),
     )
     .await
-    .map_err(|_| ApiError::Internal)?;
+    .map_err(|error| {
+        error!(
+            project_id = %payload.project_id,
+            model_profile_id = ?payload.model_profile_id,
+            provider_kind = %query_result.provider_kind,
+            model_name = %query_result.model_name,
+            matched_chunk_count = query_result.matched_chunks.len(),
+            ?error,
+            "failed to persist retrieval run artifacts",
+        );
+        ApiError::Internal
+    })?;
 
     let workspace_id =
         repositories::get_project_by_id(&state.persistence.postgres, payload.project_id)
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|error| {
+                error!(
+                    project_id = %payload.project_id,
+                    ?error,
+                    "failed to load project while persisting query usage",
+                );
+                ApiError::Internal
+            })?
             .map(|project| project.workspace_id);
     let (prompt_tokens, completion_tokens, total_tokens) =
         extract_usage_tokens(&query_result.usage_json);
@@ -556,7 +677,17 @@ async fn persist_query_artifacts(
         },
     )
     .await
-    .map_err(|_| ApiError::Internal)?;
+    .map_err(|error| {
+        error!(
+            workspace_id = ?workspace_id,
+            project_id = %payload.project_id,
+            provider_account_id = ?query_result.provider_account_id,
+            model_profile_id = ?payload.model_profile_id,
+            ?error,
+            "failed to create query usage event",
+        );
+        ApiError::Internal
+    })?;
 
     let (input_price_per_1m, output_price_per_1m) =
         usage_prices(state, &query_result.provider_kind);
@@ -581,7 +712,35 @@ async fn persist_query_artifacts(
         }),
     )
     .await
-    .map_err(|_| ApiError::Internal)?;
+    .map_err(|error| {
+        error!(
+            workspace_id = ?workspace_id,
+            project_id = %payload.project_id,
+            usage_event_id = %usage_event.id,
+            provider_kind = %query_result.provider_kind,
+            model_name = %query_result.model_name,
+            estimated_cost_usd = estimated_cost,
+            ?error,
+            "failed to create query cost ledger entry",
+        );
+        ApiError::Internal
+    })?;
+
+    info!(
+        workspace_id = ?workspace_id,
+        project_id = %payload.project_id,
+        retrieval_run_id = %row.id,
+        usage_event_id = %usage_event.id,
+        provider_kind = %query_result.provider_kind,
+        model_name = %query_result.model_name,
+        answer_status,
+        weak_grounding,
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        estimated_cost_usd = estimated_cost,
+        "persisted query artifacts",
+    );
 
     Ok(Json(QueryResponse {
         retrieval_run_id: row.id,
@@ -606,19 +765,44 @@ async fn resolve_chat_model(
                 model_profile_id,
             )
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|error| {
+                error!(model_profile_id = %model_profile_id, ?error, "failed to load chat model profile");
+                ApiError::Internal
+            })?
             .ok_or_else(|| ApiError::NotFound("model_profile not found".into()))?;
             let provider = repositories::get_provider_account_by_id(
                 &state.persistence.postgres,
                 profile.provider_account_id,
             )
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|error| {
+                error!(
+                    provider_account_id = %profile.provider_account_id,
+                    model_profile_id = %model_profile_id,
+                    ?error,
+                    "failed to load chat provider account",
+                );
+                ApiError::Internal
+            })?
             .ok_or_else(|| ApiError::NotFound("provider_account not found".into()))?;
 
+            info!(
+                model_profile_id = %model_profile_id,
+                provider_account_id = %profile.provider_account_id,
+                provider_kind = %provider.provider_kind,
+                model_name = %profile.model_name,
+                "resolved explicit chat model",
+            );
             Ok((provider.provider_kind, profile.model_name, Some(profile.provider_account_id)))
         }
-        None => Ok(("openai".to_string(), "unbound-foundation-model".to_string(), None)),
+        None => {
+            info!(
+                provider_kind = "openai",
+                model_name = "unbound-foundation-model",
+                "using default chat model",
+            );
+            Ok(("openai".to_string(), "unbound-foundation-model".to_string(), None))
+        }
     }
 }
 
@@ -635,19 +819,48 @@ async fn resolve_embedding_model(
                 model_profile_id,
             )
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|error| {
+                error!(
+                    model_profile_id = %model_profile_id,
+                    ?error,
+                    "failed to load embedding model profile",
+                );
+                ApiError::Internal
+            })?
             .ok_or_else(|| ApiError::NotFound("embedding model_profile not found".into()))?;
             let provider = repositories::get_provider_account_by_id(
                 &state.persistence.postgres,
                 profile.provider_account_id,
             )
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|error| {
+                error!(
+                    provider_account_id = %profile.provider_account_id,
+                    model_profile_id = %model_profile_id,
+                    ?error,
+                    "failed to load embedding provider account",
+                );
+                ApiError::Internal
+            })?
             .ok_or_else(|| ApiError::NotFound("embedding provider_account not found".into()))?;
 
+            info!(
+                model_profile_id = %model_profile_id,
+                provider_account_id = %profile.provider_account_id,
+                provider_kind = %provider.provider_kind,
+                model_name = %profile.model_name,
+                "resolved explicit embedding model",
+            );
             Ok((provider.provider_kind, profile.model_name, Some(profile.provider_account_id)))
         }
-        None => Ok((default_provider_kind.to_string(), default_model_name.to_string(), None)),
+        None => {
+            info!(
+                provider_kind = %default_provider_kind,
+                model_name = %default_model_name,
+                "using query model as embedding model fallback",
+            );
+            Ok((default_provider_kind.to_string(), default_model_name.to_string(), None))
+        }
     }
 }
 
@@ -670,6 +883,14 @@ async fn collect_semantic_chunks(
 
     match embedding_result {
         Ok(query_embedding) => {
+            info!(
+                project_id = %project_id,
+                provider_kind,
+                model_name,
+                top_k,
+                embedding_dimensions = query_embedding.embedding.len(),
+                "generated query embedding for semantic retrieval",
+            );
             search_semantic_chunks(state, project_id, top_k, &query_embedding.embedding).await
         }
         Err(error) => {
@@ -699,15 +920,39 @@ async fn search_semantic_chunks(
     )
     .await
     {
-        Ok(scored_rows) if !scored_rows.is_empty() => Ok(scored_rows
-            .into_iter()
-            .map(|row| {
-                let score = row.cosine_similarity_score();
-                let chunk = row.into_chunk();
-                (chunk.id, score, chunk)
-            })
-            .collect()),
-        _ => fallback_semantic_chunks(state, project_id, top_k, query_embedding).await,
+        Ok(scored_rows) if !scored_rows.is_empty() => {
+            info!(
+                project_id = %project_id,
+                top_k,
+                semantic_chunk_count = scored_rows.len(),
+                "semantic retrieval used vector index",
+            );
+            Ok(scored_rows
+                .into_iter()
+                .map(|row| {
+                    let score = row.cosine_similarity_score();
+                    let chunk = row.into_chunk();
+                    (chunk.id, score, chunk)
+                })
+                .collect())
+        }
+        Ok(_) => {
+            warn!(
+                project_id = %project_id,
+                top_k,
+                "semantic vector search returned no rows; falling back to persisted embeddings",
+            );
+            fallback_semantic_chunks(state, project_id, top_k, query_embedding).await
+        }
+        Err(error) => {
+            warn!(
+                project_id = %project_id,
+                top_k,
+                ?error,
+                "semantic vector search failed; falling back to persisted embeddings",
+            );
+            fallback_semantic_chunks(state, project_id, top_k, query_embedding).await
+        }
     }
 }
 
@@ -723,11 +968,19 @@ async fn fallback_semantic_chunks(
         500,
     )
     .await
-    .map_err(|_| ApiError::Internal)?;
+    .map_err(|error| {
+        error!(project_id = %project_id, ?error, "failed to load persisted chunk embeddings");
+        ApiError::Internal
+    })?;
     let chunk_rows =
         repositories::list_chunks_by_project(&state.persistence.postgres, project_id, 500)
             .await
-            .map_err(|_| ApiError::Internal)?;
+            .map_err(|error| {
+                error!(project_id = %project_id, ?error, "failed to load project chunks for fallback semantic retrieval");
+                ApiError::Internal
+            })?;
+    let persisted_embedding_count = embedding_rows.len();
+    let chunk_count = chunk_rows.len();
 
     let mut scored = Vec::new();
     for embedding_row in embedding_rows {
@@ -743,7 +996,30 @@ async fn fallback_semantic_chunks(
     scored.sort_by(|left, right| right.0.partial_cmp(&left.0).unwrap_or(std::cmp::Ordering::Equal));
 
     let limit = usize::try_from(top_k).unwrap_or_default();
-    Ok(scored.into_iter().take(limit).map(|(score, chunk)| (chunk.id, score, chunk)).collect())
+    let result = scored
+        .into_iter()
+        .take(limit)
+        .map(|(score, chunk)| (chunk.id, score, chunk))
+        .collect::<Vec<_>>();
+    if result.is_empty() {
+        warn!(
+            project_id = %project_id,
+            top_k,
+            persisted_embedding_count,
+            chunk_count,
+            "fallback semantic retrieval produced no matches",
+        );
+    } else {
+        info!(
+            project_id = %project_id,
+            top_k,
+            persisted_embedding_count,
+            chunk_count,
+            semantic_chunk_count = result.len(),
+            "fallback semantic retrieval completed",
+        );
+    }
+    Ok(result)
 }
 
 fn rank_chunks(

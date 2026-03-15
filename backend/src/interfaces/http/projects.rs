@@ -168,7 +168,10 @@ mod tests {
         }
     }
 
-    fn ingestion_job(status: &str, created_at: chrono::DateTime<Utc>) -> repositories::IngestionJobRow {
+    fn ingestion_job(
+        status: &str,
+        created_at: chrono::DateTime<Utc>,
+    ) -> repositories::IngestionJobRow {
         repositories::IngestionJobRow {
             id: Uuid::now_v7(),
             project_id: Uuid::now_v7(),
@@ -246,12 +249,8 @@ mod tests {
 
     #[test]
     fn readiness_marks_completed_latest_job_as_indexed() {
-        let summary = summarize_readiness(
-            project(),
-            1,
-            2,
-            vec![ingestion_job("completed", Utc::now())],
-        );
+        let summary =
+            summarize_readiness(project(), 1, 2, vec![ingestion_job("completed", Utc::now())]);
 
         assert!(summary.ready_for_query);
         assert_eq!(summary.indexing_state, "indexed");

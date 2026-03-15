@@ -112,6 +112,15 @@ async fn execute_job(
         "starting ingestion job",
     );
 
+    info!(
+        job_id = %job.id,
+        %worker_id,
+        project_id = %payload.project_id,
+        source_id = ?payload.source_id,
+        attempt_no,
+        stage = "persisting_document",
+        "ingestion job stage started",
+    );
     repositories::mark_ingestion_job_stage(
         &state.persistence.postgres,
         job.id,
@@ -144,6 +153,24 @@ async fn execute_job(
     )
     .await?;
 
+    info!(
+        job_id = %job.id,
+        %worker_id,
+        project_id = %payload.project_id,
+        document_id = %document.id,
+        checksum = %checksum,
+        "persisted ingestion document",
+    );
+
+    info!(
+        job_id = %job.id,
+        %worker_id,
+        project_id = %payload.project_id,
+        document_id = %document.id,
+        attempt_no,
+        stage = "chunking",
+        "ingestion job stage started",
+    );
     repositories::mark_ingestion_job_stage(
         &state.persistence.postgres,
         job.id,
@@ -165,6 +192,25 @@ async fn execute_job(
     .await?;
 
     let chunks = split_text_into_chunks(&payload.text, 1200);
+    if chunks.is_empty() {
+        warn!(
+            job_id = %job.id,
+            %worker_id,
+            project_id = %payload.project_id,
+            document_id = %document.id,
+            text_len = payload.text.len(),
+            "ingestion job produced zero chunks",
+        );
+    } else {
+        info!(
+            job_id = %job.id,
+            %worker_id,
+            project_id = %payload.project_id,
+            document_id = %document.id,
+            chunk_count = chunks.len(),
+            "prepared ingestion chunks",
+        );
+    }
     let mut chunk_count = 0usize;
     for (idx, content) in chunks.iter().enumerate() {
         repositories::create_chunk(
@@ -231,6 +277,7 @@ pub async fn fail_job(
         attempt_no,
         elapsed_ms,
         error = %message,
+        error_debug = ?error,
         "ingestion job failed",
     );
 
@@ -286,6 +333,8 @@ async fn recover_expired_leases(state: &AppState, worker_id: &str) -> anyhow::Re
             source_id = ?job.source_id,
             previous_worker_id = ?job.worker_id,
             attempt_no = job.attempt_count,
+            previous_stage = %job.stage,
+            previous_status = %job.status,
             "requeued abandoned ingestion job after lease expiry",
         );
     }

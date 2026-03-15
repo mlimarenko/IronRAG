@@ -55,9 +55,19 @@ impl IntoResponse for ApiError {
         let message = self.to_string();
 
         if status.is_server_error() {
-            error!(%status, error_kind, error = %message, "request failed");
+            error!(
+                %status,
+                error_kind,
+                error_message = %message,
+                "http request failed in handler",
+            );
         } else {
-            warn!(%status, error_kind, error = %message, "request rejected");
+            warn!(
+                %status,
+                error_kind,
+                error_message = %message,
+                "http request rejected in handler",
+            );
         }
 
         let body = Json(ApiErrorBody { error: message });

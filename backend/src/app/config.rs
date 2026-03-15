@@ -64,9 +64,6 @@ mod tests {
     fn from_env_provides_default_database_url() {
         let settings = Settings::from_env().expect("settings should load with defaults");
 
-        assert_eq!(
-            settings.database_url,
-            "postgres://postgres:postgres@127.0.0.1:5432/rustrag"
-        );
+        assert_eq!(settings.database_url, "postgres://postgres:postgres@127.0.0.1:5432/rustrag");
     }
 }

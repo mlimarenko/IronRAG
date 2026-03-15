@@ -2,13 +2,15 @@ pub mod config;
 pub mod shutdown;
 pub mod state;
 
-use axum::Router;
-use std::net::SocketAddr;
-use tower_http::{
-    cors::CorsLayer,
-    trace::{DefaultMakeSpan, DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer},
+use ::http::Response;
+use axum::{
+    Router,
+    extract::MatchedPath,
+    http::{Request, header},
 };
-use tracing::{Level, info};
+use std::{net::SocketAddr, time::Duration};
+use tower_http::{classify::ServerErrorsFailureClass, cors::CorsLayer, trace::TraceLayer};
+use tracing::{Span, error, info, warn};
 
 use crate::{interfaces::http, services::ingestion_worker};
 
@@ -29,10 +31,56 @@ pub async fn run() -> anyhow::Result<()> {
         .layer(CorsLayer::permissive())
         .layer(
             TraceLayer::new_for_http()
-                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
-                .on_request(DefaultOnRequest::new().level(Level::INFO))
-                .on_response(DefaultOnResponse::new().level(Level::INFO))
-                .on_failure(DefaultOnFailure::new().level(Level::ERROR)),
+                .make_span_with(|request: &Request<_>| {
+                    let matched_path = request.extensions().get::<MatchedPath>().map_or_else(
+                        || "<unmatched>".to_string(),
+                        |path| path.as_str().to_string(),
+                    );
+                    tracing::info_span!(
+                        "http_request",
+                        method = %request.method(),
+                        matched_path,
+                        uri = %request.uri(),
+                    )
+                })
+                .on_request(|request: &Request<_>, _span: &Span| {
+                    let matched_path = request.extensions().get::<MatchedPath>().map_or_else(
+                        || "<unmatched>".to_string(),
+                        |path| path.as_str().to_string(),
+                    );
+                    let user_agent = request
+                        .headers()
+                        .get(header::USER_AGENT)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("-");
+                    info!(
+                        method = %request.method(),
+                        matched_path,
+                        uri = %request.uri(),
+                        user_agent,
+                        "http request started",
+                    );
+                })
+                .on_response(|response: &Response<_>, latency: Duration, _span: &Span| {
+                    let latency_ms = latency.as_millis();
+                    let status = response.status();
+                    if status.is_server_error() {
+                        error!(%status, latency_ms, "http request completed with server error");
+                    } else if status.is_client_error() {
+                        warn!(%status, latency_ms, "http request completed with client error");
+                    } else {
+                        info!(%status, latency_ms, "http request completed");
+                    }
+                })
+                .on_failure(
+                    |failure_class: ServerErrorsFailureClass, latency: Duration, _span: &Span| {
+                        error!(
+                            %failure_class,
+                            latency_ms = latency.as_millis(),
+                            "http request failed before response",
+                        );
+                    },
+                ),
         )
         .with_state(state);
 

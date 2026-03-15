@@ -5,6 +5,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -94,7 +95,7 @@ pub struct ListTokensQuery {
 pub fn router() -> Router<crate::app::state::AppState> {
     Router::new()
         .route("/auth/tokens", axum::routing::post(create_token).get(list_tokens))
-        .route("/auth/tokens/{id}", axum::routing::get(get_token))
+        .route("/auth/tokens/{id}", axum::routing::get(get_token).delete(revoke_token))
 }
 
 #[must_use]
@@ -119,12 +120,37 @@ pub async fn create_token(
     Json(payload): Json<CreateTokenRequest>,
 ) -> Result<Json<TokenCreateResponse>, ApiError> {
     if payload.token_kind.trim().is_empty() || payload.label.trim().is_empty() {
+        warn!(
+            workspace_id = ?payload.workspace_id,
+            token_kind = %payload.token_kind,
+            label = %payload.label,
+            scope_count = payload.scopes.len(),
+            "rejecting token creation request with empty identity fields",
+        );
         return Err(ApiError::BadRequest("token_kind and label must not be empty".into()));
     }
 
     let plaintext = mint_plaintext_token();
     let token_hash = hash_token(&plaintext);
-    let scope_json = serde_json::to_value(&payload.scopes).map_err(|_| ApiError::Internal)?;
+    let scope_json = serde_json::to_value(&payload.scopes).map_err(|error| {
+        error!(
+            workspace_id = ?payload.workspace_id,
+            token_kind = %payload.token_kind,
+            label = %payload.label,
+            scope_count = payload.scopes.len(),
+            ?error,
+            "failed to serialize token scopes",
+        );
+        ApiError::Internal
+    })?;
+
+    info!(
+        workspace_id = ?payload.workspace_id,
+        token_kind = %payload.token_kind,
+        label = %payload.label,
+        scope_count = payload.scopes.len(),
+        "accepted token creation request",
+    );
 
     let row = repositories::create_api_token(
         &state.persistence.postgres,
@@ -135,7 +161,26 @@ pub async fn create_token(
         scope_json,
     )
     .await
-    .map_err(|_| ApiError::Internal)?;
+    .map_err(|error| {
+        error!(
+            workspace_id = ?payload.workspace_id,
+            token_kind = %payload.token_kind,
+            label = %payload.label,
+            scope_count = payload.scopes.len(),
+            ?error,
+            "failed to persist api token",
+        );
+        ApiError::Internal
+    })?;
+
+    info!(
+        workspace_id = ?row.workspace_id,
+        api_token_id = %row.id,
+        token_kind = %row.token_kind,
+        label = %row.label,
+        scope_count = payload.scopes.len(),
+        "created api token",
+    );
 
     Ok(Json(TokenCreateResponse {
         id: row.id,
@@ -159,12 +204,28 @@ pub async fn list_tokens(
 ) -> Result<Json<Vec<TokenSummary>>, ApiError> {
     auth.require_any_scope(&["workspace:admin"])?;
 
-    let items = repositories::list_api_tokens(&state.persistence.postgres, query.workspace_id)
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .into_iter()
-        .map(map_token_summary)
-        .collect();
+    let items: Vec<TokenSummary> =
+        repositories::list_api_tokens(&state.persistence.postgres, query.workspace_id)
+            .await
+            .map_err(|error| {
+                error!(
+                    auth_token_id = %auth.token_id,
+                    workspace_id = ?query.workspace_id,
+                    ?error,
+                    "failed to list api tokens",
+                );
+                ApiError::Internal
+            })?
+            .into_iter()
+            .map(map_token_summary)
+            .collect();
+
+    info!(
+        auth_token_id = %auth.token_id,
+        requested_workspace_id = ?query.workspace_id,
+        token_count = items.len(),
+        "listed api tokens",
+    );
 
     Ok(Json(items))
 }
@@ -184,10 +245,98 @@ pub async fn get_token(
 
     let row = repositories::get_api_token_by_id(&state.persistence.postgres, id)
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|error| {
+            error!(
+                auth_token_id = %auth.token_id,
+                api_token_id = %id,
+                ?error,
+                "failed to load api token",
+            );
+            ApiError::Internal
+        })?
         .ok_or_else(|| ApiError::NotFound(format!("api_token {id} not found")))?;
 
+    info!(
+        auth_token_id = %auth.token_id,
+        api_token_id = %row.id,
+        workspace_id = ?row.workspace_id,
+        token_kind = %row.token_kind,
+        status = %row.status,
+        "loaded api token",
+    );
+
     Ok(Json(map_token_summary(row)))
+}
+
+/// Revokes a single API token by id.
+///
+/// # Errors
+/// Returns [`ApiError::Unauthorized`] when the caller lacks admin scope,
+/// [`ApiError::NotFound`] when the token does not exist, and [`ApiError::Internal`]
+/// when token persistence fails.
+pub async fn revoke_token(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    auth.require_any_scope(&["workspace:admin"])?;
+
+    let row = repositories::get_api_token_by_id(&state.persistence.postgres, id)
+        .await
+        .map_err(|error| {
+            error!(
+                auth_token_id = %auth.token_id,
+                api_token_id = %id,
+                ?error,
+                "failed to load api token for revoke",
+            );
+            ApiError::Internal
+        })?
+        .ok_or_else(|| ApiError::NotFound(format!("api_token {id} not found")))?;
+
+    if let Some(workspace_id) = row.workspace_id {
+        auth.require_workspace_access(workspace_id)?;
+    } else if auth.token_kind != "instance_admin" {
+        warn!(
+            auth_token_id = %auth.token_id,
+            api_token_id = %id,
+            "rejecting api token revoke outside instance admin scope",
+        );
+        return Err(ApiError::Unauthorized);
+    }
+
+    info!(
+        auth_token_id = %auth.token_id,
+        api_token_id = %row.id,
+        workspace_id = ?row.workspace_id,
+        token_kind = %row.token_kind,
+        previous_status = %row.status,
+        "accepted api token revoke request",
+    );
+
+    repositories::revoke_api_token(&state.persistence.postgres, id)
+        .await
+        .map_err(|error| {
+            error!(
+                auth_token_id = %auth.token_id,
+                api_token_id = %id,
+                workspace_id = ?row.workspace_id,
+                ?error,
+                "failed to revoke api token",
+            );
+            ApiError::Internal
+        })?
+        .ok_or_else(|| ApiError::NotFound(format!("api_token {id} not found")))?;
+
+    info!(
+        auth_token_id = %auth.token_id,
+        api_token_id = %row.id,
+        workspace_id = ?row.workspace_id,
+        token_kind = %row.token_kind,
+        "revoked api token",
+    );
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 fn map_token_summary(row: repositories::ApiTokenRow) -> TokenSummary {

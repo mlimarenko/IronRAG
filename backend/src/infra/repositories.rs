@@ -859,6 +859,22 @@ pub async fn list_api_tokens(
     }
 }
 
+/// Revokes an API token and returns the updated row.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while updating or querying the `api_token` row.
+pub async fn revoke_api_token(pool: &PgPool, id: Uuid) -> Result<Option<ApiTokenRow>, sqlx::Error> {
+    sqlx::query_as::<_, ApiTokenRow>(
+        "update api_token
+         set status = 'revoked', updated_at = now()
+         where id = $1
+         returning id, workspace_id, token_kind, label, token_hash, scope_json, status, last_used_at, created_at, updated_at",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
 /// Loads a model profile by primary key.
 ///
 /// # Errors

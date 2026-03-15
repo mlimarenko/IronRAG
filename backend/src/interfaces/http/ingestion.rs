@@ -4,7 +4,7 @@ use axum::{
     routing::get,
 };
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -12,8 +12,7 @@ use crate::{
     domains::ingestion_state::IngestionLifecycleState,
     infra::repositories,
     interfaces::http::{
-        auth::AuthContext,
-        authorization::load_ingestion_job_and_authorize,
+        auth::AuthContext, authorization::load_ingestion_job_and_authorize,
         router_support::ApiError,
     },
     shared::retry::is_retryable_ingestion_state,
@@ -86,18 +85,23 @@ async fn list_sources(
     State(state): State<AppState>,
     Query(query): Query<ProjectScopedQuery>,
 ) -> Result<Json<Vec<SourceSummary>>, ApiError> {
-    let items = repositories::list_sources(&state.persistence.postgres, query.project_id)
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .into_iter()
-        .map(|row| SourceSummary {
-            id: row.id,
-            project_id: row.project_id,
-            source_kind: row.source_kind,
-            label: row.label,
-            status: row.status,
-        })
-        .collect();
+    let project_id = query.project_id;
+    let items: Vec<SourceSummary> =
+        repositories::list_sources(&state.persistence.postgres, query.project_id)
+            .await
+            .map_err(|error| {
+                log_ingestion_internal_error("list sources", project_id, None, None, &error);
+                ApiError::Internal
+            })?
+            .into_iter()
+            .map(map_source_summary)
+            .collect();
+
+    info!(
+        project_id = ?project_id,
+        source_count = items.len(),
+        "listed ingestion sources",
+    );
 
     Ok(Json(items))
 }
@@ -110,9 +114,27 @@ async fn create_source(
     auth.require_any_scope(&["documents:write", "workspace:admin"])?;
     let project = repositories::get_project_by_id(&state.persistence.postgres, payload.project_id)
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|error| {
+            log_ingestion_internal_error(
+                "load project for source creation",
+                Some(payload.project_id),
+                None,
+                Some(auth.token_id),
+                &error,
+            );
+            ApiError::Internal
+        })?
         .ok_or_else(|| ApiError::NotFound(format!("project {} not found", payload.project_id)))?;
     auth.require_workspace_access(project.workspace_id)?;
+
+    info!(
+        auth_token_id = %auth.token_id,
+        workspace_id = %project.workspace_id,
+        project_id = %payload.project_id,
+        source_kind = %payload.source_kind,
+        label = %payload.label,
+        "accepted source creation request",
+    );
 
     let row = repositories::create_source(
         &state.persistence.postgres,
@@ -121,34 +143,51 @@ async fn create_source(
         &payload.label,
     )
     .await
-    .map_err(|_| ApiError::Internal)?;
+    .map_err(|error| {
+        log_ingestion_internal_error(
+            "create source",
+            Some(payload.project_id),
+            None,
+            Some(auth.token_id),
+            &error,
+        );
+        ApiError::Internal
+    })?;
 
-    Ok(Json(SourceSummary {
-        id: row.id,
-        project_id: row.project_id,
-        source_kind: row.source_kind,
-        label: row.label,
-        status: row.status,
-    }))
+    info!(
+        auth_token_id = %auth.token_id,
+        workspace_id = %project.workspace_id,
+        project_id = %row.project_id,
+        source_id = %row.id,
+        source_kind = %row.source_kind,
+        status = %row.status,
+        "created source",
+    );
+
+    Ok(Json(map_source_summary(row)))
 }
 
 async fn list_ingestion_jobs(
     State(state): State<AppState>,
     Query(query): Query<ProjectScopedQuery>,
 ) -> Result<Json<Vec<IngestionJobSummary>>, ApiError> {
-    let items = repositories::list_ingestion_jobs(&state.persistence.postgres, query.project_id)
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .into_iter()
-        .map(|row| IngestionJobSummary {
-            id: row.id,
-            project_id: row.project_id,
-            source_id: row.source_id,
-            trigger_kind: row.trigger_kind,
-            status: row.status,
-            stage: row.stage,
-        })
-        .collect();
+    let project_id = query.project_id;
+    let items: Vec<IngestionJobSummary> =
+        repositories::list_ingestion_jobs(&state.persistence.postgres, query.project_id)
+            .await
+            .map_err(|error| {
+                log_ingestion_internal_error("list ingestion jobs", project_id, None, None, &error);
+                ApiError::Internal
+            })?
+            .into_iter()
+            .map(map_ingestion_job_summary)
+            .collect();
+
+    info!(
+        project_id = ?project_id,
+        ingestion_job_count = items.len(),
+        "listed ingestion jobs",
+    );
 
     Ok(Json(items))
 }
@@ -161,11 +200,21 @@ async fn create_ingestion_job(
     auth.require_any_scope(&["documents:write", "workspace:admin"])?;
     let project = repositories::get_project_by_id(&state.persistence.postgres, payload.project_id)
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|error| {
+            log_ingestion_internal_error(
+                "load project for ingestion job creation",
+                Some(payload.project_id),
+                None,
+                Some(auth.token_id),
+                &error,
+            );
+            ApiError::Internal
+        })?
         .ok_or_else(|| ApiError::NotFound(format!("project {} not found", payload.project_id)))?;
     auth.require_workspace_access(project.workspace_id)?;
 
     info!(
+        auth_token_id = %auth.token_id,
         workspace_id = %project.workspace_id,
         project_id = %payload.project_id,
         source_id = ?payload.source_id,
@@ -185,9 +234,19 @@ async fn create_ingestion_job(
         serde_json::json!({}),
     )
     .await
-    .map_err(|_| ApiError::Internal)?;
+    .map_err(|error| {
+        log_ingestion_internal_error(
+            "create ingestion job",
+            Some(payload.project_id),
+            None,
+            Some(auth.token_id),
+            &error,
+        );
+        ApiError::Internal
+    })?;
 
     info!(
+        auth_token_id = %auth.token_id,
         workspace_id = %project.workspace_id,
         project_id = %row.project_id,
         source_id = ?row.source_id,
@@ -198,14 +257,7 @@ async fn create_ingestion_job(
         "created ingestion job",
     );
 
-    Ok(Json(IngestionJobSummary {
-        id: row.id,
-        project_id: row.project_id,
-        source_id: row.source_id,
-        trigger_kind: row.trigger_kind,
-        status: row.status,
-        stage: row.stage,
-    }))
+    Ok(Json(map_ingestion_job_summary(row)))
 }
 
 async fn get_ingestion_job_detail(
@@ -217,14 +269,44 @@ async fn get_ingestion_job_detail(
 
     let row = repositories::get_ingestion_job_by_id(&state.persistence.postgres, id)
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|error| {
+            log_ingestion_internal_error(
+                "load ingestion job detail",
+                None,
+                Some(id),
+                Some(auth.token_id),
+                &error,
+            );
+            ApiError::Internal
+        })?
         .ok_or_else(|| ApiError::NotFound(format!("ingestion_job {id} not found")))?;
 
     let project = repositories::get_project_by_id(&state.persistence.postgres, row.project_id)
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|error| {
+            log_ingestion_internal_error(
+                "load project for ingestion job detail",
+                Some(row.project_id),
+                Some(row.id),
+                Some(auth.token_id),
+                &error,
+            );
+            ApiError::Internal
+        })?
         .ok_or_else(|| ApiError::NotFound(format!("project {} not found", row.project_id)))?;
     auth.require_workspace_access(project.workspace_id)?;
+
+    info!(
+        auth_token_id = %auth.token_id,
+        workspace_id = %project.workspace_id,
+        project_id = %row.project_id,
+        ingestion_job_id = %row.id,
+        source_id = ?row.source_id,
+        status = %row.status,
+        stage = %row.stage,
+        retryable = is_retryable_ingestion_state(&row.status),
+        "loaded ingestion job detail",
+    );
 
     Ok(Json(map_ingestion_job_detail(row)))
 }
@@ -234,12 +316,17 @@ async fn retry_ingestion_job(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<IngestionJobDetail>, ApiError> {
-    let (row, project) =
-        load_ingestion_job_and_authorize(&auth, &state, id, &["documents:write", "workspace:admin"])
-            .await?;
+    let (row, project) = load_ingestion_job_and_authorize(
+        &auth,
+        &state,
+        id,
+        &["documents:write", "workspace:admin"],
+    )
+    .await?;
 
     if !is_retryable_ingestion_state(&row.status) {
         warn!(
+            auth_token_id = %auth.token_id,
             workspace_id = %project.workspace_id,
             project_id = %row.project_id,
             ingestion_job_id = %row.id,
@@ -251,6 +338,7 @@ async fn retry_ingestion_job(
     }
 
     info!(
+        auth_token_id = %auth.token_id,
         workspace_id = %project.workspace_id,
         project_id = %row.project_id,
         ingestion_job_id = %row.id,
@@ -272,9 +360,19 @@ async fn retry_ingestion_job(
         row.payload_json.clone(),
     )
     .await
-    .map_err(|_| ApiError::Internal)?;
+    .map_err(|error| {
+        log_ingestion_internal_error(
+            "create retry ingestion job",
+            Some(row.project_id),
+            Some(row.id),
+            Some(auth.token_id),
+            &error,
+        );
+        ApiError::Internal
+    })?;
 
     info!(
+        auth_token_id = %auth.token_id,
         workspace_id = %project.workspace_id,
         project_id = %retried.project_id,
         ingestion_job_id = %retried.id,
@@ -287,6 +385,27 @@ async fn retry_ingestion_job(
     );
 
     Ok(Json(map_ingestion_job_detail(retried)))
+}
+
+fn map_source_summary(row: repositories::SourceRow) -> SourceSummary {
+    SourceSummary {
+        id: row.id,
+        project_id: row.project_id,
+        source_kind: row.source_kind,
+        label: row.label,
+        status: row.status,
+    }
+}
+
+fn map_ingestion_job_summary(row: repositories::IngestionJobRow) -> IngestionJobSummary {
+    IngestionJobSummary {
+        id: row.id,
+        project_id: row.project_id,
+        source_id: row.source_id,
+        trigger_kind: row.trigger_kind,
+        status: row.status,
+        stage: row.stage,
+    }
 }
 
 fn map_ingestion_job_detail(row: repositories::IngestionJobRow) -> IngestionJobDetail {
@@ -316,6 +435,23 @@ fn map_ingestion_job_detail(row: repositories::IngestionJobRow) -> IngestionJobD
         retryable,
         lifecycle,
     }
+}
+
+fn log_ingestion_internal_error(
+    operation: &'static str,
+    project_id: Option<Uuid>,
+    ingestion_job_id: Option<Uuid>,
+    auth_token_id: Option<Uuid>,
+    error: &impl std::fmt::Debug,
+) {
+    error!(
+        operation,
+        project_id = ?project_id,
+        ingestion_job_id = ?ingestion_job_id,
+        auth_token_id = ?auth_token_id,
+        ?error,
+        "ingestion http operation failed",
+    );
 }
 
 #[cfg(test)]
