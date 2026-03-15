@@ -32,7 +32,6 @@ const projects = ref<ProjectItem[]>([])
 const readiness = ref<ProjectReadinessSummary | null>(null)
 const recentSessions = ref<ChatSessionSurface[]>([])
 
-const hasWorkspace = computed(() => workspaces.value.length > 0)
 const hasProject = computed(() => projects.value.length > 0)
 const selectedWorkspace = computed(
   () => workspaces.value.find((item) => item.id === getSelectedWorkspaceId()) ?? null,
@@ -53,60 +52,6 @@ const primaryUploadAction = computed(() => ({
     ? t('flow.home.hero.hints.uploadReady')
     : t('flow.home.hero.hints.uploadBlocked'),
 }))
-
-const nextStepCard = computed(() => {
-  if (!hasWorkspace.value || !hasProject.value) {
-    return {
-      title: t('flow.home.nextSteps.prepare.title'),
-      body: t('flow.home.nextSteps.prepare.body'),
-      status: t('flow.home.nextSteps.prepare.status'),
-      to: '/processing',
-      action: t('flow.home.nextSteps.prepare.action'),
-    }
-  }
-
-  if (hasReadyLibrary.value) {
-    return {
-      title: t('flow.home.nextSteps.ask.title'),
-      body: t('flow.home.nextSteps.ask.body'),
-      status: t('flow.home.nextSteps.ask.status'),
-      to: '/search',
-      action: t('flow.home.nextSteps.ask.action'),
-    }
-  }
-
-  return {
-    title: t('flow.home.nextSteps.processing.title'),
-    body: t('flow.home.nextSteps.processing.body'),
-    status:
-      indexedDocuments.value > 0
-        ? t('flow.home.nextSteps.processing.statusWorking')
-        : t('flow.home.nextSteps.processing.statusWaiting'),
-    to: '/files',
-    action: t('flow.home.nextSteps.processing.action'),
-  }
-})
-
-const uploadChecklist = computed(() => [
-  {
-    key: 'upload',
-    title: t('flow.home.checklist.upload.title'),
-    body: t('flow.home.checklist.upload.body'),
-    done: hasProject.value && indexedDocuments.value > 0,
-  },
-  {
-    key: 'processing',
-    title: t('flow.home.checklist.processing.title'),
-    body: t('flow.home.checklist.processing.body'),
-    done: hasReadyLibrary.value,
-  },
-  {
-    key: 'ask',
-    title: t('flow.home.checklist.ask.title'),
-    body: t('flow.home.checklist.ask.body'),
-    done: hasReadyLibrary.value && Boolean(latestSession.value),
-  },
-])
 
 const recentSessionStatus = computed(() => {
   if (!selectedProject.value) {
@@ -180,10 +125,16 @@ function formatDateTime(value: string) {
       :status-label="t('shell.status.focused')"
     >
       <template #actions>
-        <RouterLink class="rr-button" :to="primaryUploadAction.to">
+        <RouterLink
+          class="rr-button"
+          :to="primaryUploadAction.to"
+        >
           {{ primaryUploadAction.label }}
         </RouterLink>
-        <RouterLink class="rr-button rr-button--secondary" to="/search">
+        <RouterLink
+          class="rr-button rr-button--secondary"
+          to="/search"
+        >
           {{ t('flow.home.hero.actions.ask') }}
         </RouterLink>
       </template>
@@ -196,7 +147,10 @@ function formatDateTime(value: string) {
         </div>
 
         <div class="upload-hero__main-action">
-          <RouterLink class="rr-button" :to="primaryUploadAction.to">
+          <RouterLink
+            class="rr-button"
+            :to="primaryUploadAction.to"
+          >
             {{ primaryUploadAction.label }}
           </RouterLink>
           <p class="rr-note">{{ primaryUploadAction.hint }}</p>
@@ -268,7 +222,10 @@ function formatDateTime(value: string) {
           <article class="session-card">
             <h4>{{ latestSession?.title || t('flow.home.sessions.fallbackTitle') }}</h4>
             <p>{{ latestSession?.last_message_preview || t('flow.home.sessions.emptyBody') }}</p>
-            <dl v-if="latestSession" class="session-meta">
+            <dl
+              v-if="latestSession"
+              class="session-meta"
+            >
               <div>
                 <dt>{{ t('flow.home.sessions.fields.updated') }}</dt>
                 <dd>{{ recentSessionUpdatedLabel }}</dd>
@@ -279,16 +236,21 @@ function formatDateTime(value: string) {
               </div>
             </dl>
             <div class="rr-action-row">
-              <RouterLink class="rr-button rr-button--secondary" :to="recentSessionRoute">
+              <RouterLink
+                class="rr-button rr-button--secondary"
+                :to="recentSessionRoute"
+              >
                 {{ latestSession ? t('flow.home.sessions.resume') : t('flow.home.sessions.start') }}
               </RouterLink>
-              <RouterLink class="rr-button rr-button--ghost" to="/search">
+              <RouterLink
+                class="rr-button rr-button--ghost"
+                to="/search"
+              >
                 {{ t('flow.home.sessions.openAsk') }}
               </RouterLink>
             </div>
           </article>
         </article>
-
       </div>
     </PageSection>
   </section>
@@ -299,14 +261,19 @@ function formatDateTime(value: string) {
 .upload-hero,
 .upload-hero__copy,
 .upload-hero__steps,
-.home-core-grid,
 .home-secondary-grid,
-.checklist-items,
 .session-card,
-.session-meta,
-.admin-links {
+.session-meta {
   display: grid;
   gap: var(--rr-space-4);
+}
+
+.home-secondary-grid--single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.session-panel {
+  max-width: 48rem;
 }
 
 .upload-hero {
@@ -314,36 +281,21 @@ function formatDateTime(value: string) {
 }
 
 .upload-hero__copy h2,
-.next-step-panel__header h3,
 .session-panel__header h3,
-.admin-surfaces-panel__summary h3,
 .session-card h4 {
   margin: 0;
 }
 
 .upload-hero__main-action,
-.next-step-panel__header,
-.session-panel__header,
-.admin-surfaces-panel__summary,
-.admin-link-card,
-.checklist-item {
+.session-panel__header {
   display: flex;
   gap: var(--rr-space-3);
-}
-
-.upload-hero__main-action,
-.next-step-panel__header,
-.session-panel__header,
-.admin-surfaces-panel__summary,
-.admin-link-card {
   align-items: center;
   justify-content: space-between;
 }
 
 .upload-step-card,
-.session-card,
-.admin-link-card,
-.checklist-item {
+.session-card {
   padding: var(--rr-space-4);
   border: 1px solid var(--rr-color-border-subtle);
   border-radius: var(--rr-radius-lg);
@@ -359,8 +311,7 @@ function formatDateTime(value: string) {
   gap: var(--rr-space-3);
 }
 
-.upload-step-card span,
-.checklist-item__marker {
+.upload-step-card span {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -373,9 +324,7 @@ function formatDateTime(value: string) {
 }
 
 .upload-step-card p,
-.checklist-item p,
 .session-card p,
-.admin-link-card p,
 .session-meta dt,
 .upload-status-strip p {
   margin: 0;
@@ -386,12 +335,10 @@ function formatDateTime(value: string) {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-.home-core-grid,
 .home-secondary-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.next-step-panel__status,
 .session-panel__status {
   margin: 0;
   font-size: 0.88rem;
@@ -399,9 +346,20 @@ function formatDateTime(value: string) {
   color: var(--rr-color-accent-700);
 }
 
-.checklist-item[data-done='true'] {
-  border-color: rgb(21 128 61 / 0.28);
-  background: rgb(240 253 244 / 0.8);
+.session-card .rr-action-row {
+  flex-wrap: wrap;
+}
+
+.session-card .rr-button {
+  text-decoration: none;
+}
+
+.session-card .rr-button--ghost {
+  padding-inline: 0;
+}
+
+.session-card .rr-button--ghost:hover {
+  padding-inline: 0;
 }
 
 .session-meta {
@@ -413,39 +371,16 @@ function formatDateTime(value: string) {
   margin: 0;
 }
 
-.admin-surfaces-panel__summary {
-  cursor: pointer;
-  list-style: none;
-}
-
-.admin-surfaces-panel__summary::-webkit-details-marker {
-  display: none;
-}
-
-.admin-link-card {
-  text-decoration: none;
-  color: inherit;
-}
-
-.admin-link-card span {
-  font-weight: 700;
-  color: var(--rr-color-accent-700);
-}
-
 @media (width <= 900px) {
   .upload-hero__steps,
   .upload-status-strip,
-  .home-core-grid,
   .home-secondary-grid,
   .session-meta {
     grid-template-columns: 1fr;
   }
 
   .upload-hero__main-action,
-  .next-step-panel__header,
-  .session-panel__header,
-  .admin-surfaces-panel__summary,
-  .admin-link-card {
+  .session-panel__header {
     flex-direction: column;
     align-items: flex-start;
   }

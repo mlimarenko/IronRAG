@@ -19,7 +19,6 @@ import {
   type RetrievalRunDetail,
 } from 'src/boot/api'
 import ReferenceList from 'src/components/chat/ReferenceList.vue'
-import RetrievalDiagnosticsPanel from 'src/components/chat/RetrievalDiagnosticsPanel.vue'
 import StatusPill from 'src/components/chat/StatusPill.vue'
 import PageSection from 'src/components/shell/PageSection.vue'
 import EmptyStateCard from 'src/components/state/EmptyStateCard.vue'
@@ -68,9 +67,6 @@ const windowWidth = ref(typeof window === 'undefined' ? MOBILE_BREAKPOINT + 1 : 
 const selectedProjectId = computed(() => getSelectedProjectId())
 const selectedProject = computed(
   () => projects.value.find((item) => item.id === getSelectedProjectId()) ?? null,
-)
-const selectedWorkspace = computed(
-  () => workspaces.value.find((item) => item.id === getSelectedWorkspaceId()) ?? null,
 )
 const hasIndexedDocuments = computed(() => (readiness.value?.documents ?? 0) > 0)
 const hasIngestionRuns = computed(() => (readiness.value?.ingestion_jobs ?? 0) > 0)
@@ -130,29 +126,6 @@ const pageStatus = computed(() => {
 
   return { status: 'blocked', label: t('flow.search.statusNeedsContent') }
 })
-const contextItems = computed(() => [
-  {
-    label: t('flow.search.context.workspace'),
-    value: selectedWorkspace.value?.name ?? t('flow.common.empty'),
-  },
-  {
-    label: t('flow.search.context.project'),
-    value: selectedProject.value?.name ?? t('flow.common.empty'),
-  },
-  {
-    label: t('flow.search.context.indexing'),
-    value: formatIndexingStateLabel(readiness.value?.indexing_state),
-  },
-  {
-    label: t('flow.search.context.documents'),
-    value: readiness.value ? String(readiness.value.documents) : t('flow.common.empty'),
-  },
-])
-const queryExamples = computed(() => [
-  t('flow.search.query.examples.summary'),
-  t('flow.search.query.examples.risks'),
-  t('flow.search.query.examples.next'),
-])
 const queryHint = computed(() => {
   if (!selectedProject.value) {
     return t('flow.search.query.hintBlocked')
@@ -190,24 +163,6 @@ const composerStatus = computed(() => {
   return activeSession.value
     ? t('flow.search.query.statusResume', { count: timeline.value.length })
     : t('flow.search.query.statusReady')
-})
-const resultSummary = computed(() => {
-  if (!result.value) {
-    return ''
-  }
-
-  if (result.value.references.length > 0) {
-    return t('flow.search.result.summarySupported', { count: result.value.references.length })
-  }
-
-  return t('flow.search.result.summaryNoReferences')
-})
-const resultModeLabel = computed(() => {
-  if (!result.value) {
-    return ''
-  }
-
-  return formatModeLabel(result.value.mode)
 })
 const resultNotice = computed<{ tone: BannerTone; message: string } | null>(() => {
   if (!result.value) {
@@ -256,23 +211,6 @@ const readinessNotice = computed<{ tone: BannerTone; title: string; message: str
     }
   },
 )
-const weakContextActions = computed(() => {
-  const actions = [
-    {
-      label: t('flow.search.nextActions.openFiles'),
-      to: '/files',
-    },
-  ]
-
-  if (selectedProject.value && (hasIndexedDocuments.value || hasIngestionRuns.value)) {
-    actions.push({
-      label: t('flow.search.nextActions.retryQuestion'),
-      to: `/search?q=${encodeURIComponent(queryText.value.trim() || t('flow.search.query.examples.summary'))}`,
-    })
-  }
-
-  return actions
-})
 
 watch(
   () => route.query.q,
@@ -378,24 +316,6 @@ function updateViewportWidth() {
   windowWidth.value = window.innerWidth
 }
 
-function formatModeLabel(mode: string) {
-  const normalized = mode.trim().toLowerCase()
-
-  if (normalized === 'gateway_live') {
-    return t('flow.search.result.modeLive')
-  }
-
-  if (normalized === 'fallback') {
-    return t('flow.search.result.modeFallback')
-  }
-
-  return mode
-    .split(/[_-]/g)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ')
-}
-
 function formatIndexingStateLabel(state?: string | null) {
   const normalized = state?.trim().toLowerCase() ?? ''
 
@@ -485,11 +405,6 @@ async function loadMessages(sessionId: string) {
   } catch {
     messages.value = []
   }
-}
-
-function applyExampleQuery(example: string) {
-  queryText.value = example
-  queryInputRef.value?.focus()
 }
 
 function handleTextareaKeydown(event: KeyboardEvent) {
@@ -605,7 +520,10 @@ async function submitQuery() {
 </script>
 
 <template>
-  <section class="rr-page-grid chat-page" :class="{ 'chat-page--mobile': isMobile }">
+  <section
+    class="rr-page-grid chat-page"
+    :class="{ 'chat-page--mobile': isMobile }"
+  >
     <PageSection
       :title="t('flow.search.title')"
       :description="isMobile ? t('flow.search.descriptionMobile') : t('flow.search.description')"
@@ -615,13 +533,22 @@ async function submitQuery() {
       :hide-actions="isMobile"
     >
       <template #actions>
-        <RouterLink class="rr-button rr-button--secondary" to="/files">
+        <RouterLink
+          class="rr-button rr-button--secondary"
+          to="/files"
+        >
           {{ t('flow.search.action') }}
         </RouterLink>
       </template>
 
-      <div class="chat-page__layout" :class="{ 'chat-page__layout--single': isMobile }">
-        <aside v-if="shouldShowSessionList" class="rr-panel rr-panel--muted session-sidebar">
+      <div
+        class="chat-page__layout"
+        :class="{ 'chat-page__layout--single': isMobile }"
+      >
+        <aside
+          v-if="shouldShowSessionList"
+          class="rr-panel rr-panel--muted session-sidebar"
+        >
           <div class="session-sidebar__header">
             <div>
               <p class="rr-kicker">{{ t('flow.search.sessions.kicker') }}</p>
@@ -639,18 +566,30 @@ async function submitQuery() {
             >
               {{ t('flow.search.sessions.hideAction') }}
             </button>
-            <p v-else class="rr-note">
+            <p
+              v-else
+              class="rr-note"
+            >
               {{ t('flow.search.sessions.description') }}
             </p>
           </div>
 
-          <p v-if="isMobile" class="rr-note">
+          <p
+            v-if="isMobile"
+            class="rr-note"
+          >
             {{ t('flow.search.sessions.mobileDescription') }}
           </p>
-          <div v-if="sessionLoading" class="rr-note">
+          <div
+            v-if="sessionLoading"
+            class="rr-note"
+          >
             {{ t('flow.search.sessions.loading') }}
           </div>
-          <div v-else-if="!sessions.length" class="rr-note">
+          <div
+            v-else-if="!sessions.length"
+            class="rr-note"
+          >
             {{ t('flow.search.sessions.empty') }}
           </div>
           <button
@@ -663,7 +602,7 @@ async function submitQuery() {
           >
             <strong>{{
               session.title ||
-              t('flow.search.sessions.fallbackTitle', { id: session.id.slice(0, 8) })
+                t('flow.search.sessions.fallbackTitle', { id: session.id.slice(0, 8) })
             }}</strong>
             <span>{{
               session.last_message_preview || t('flow.search.sessions.emptyPreview')
@@ -703,7 +642,10 @@ async function submitQuery() {
               </button>
             </div>
 
-            <article v-if="hasTimeline" class="rr-panel rr-panel--muted timeline-panel">
+            <article
+              v-if="hasTimeline"
+              class="rr-panel rr-panel--muted timeline-panel"
+            >
               <div class="timeline-panel__header">
                 <div>
                   <p class="rr-kicker">{{ t('flow.search.timeline.kicker') }}</p>
@@ -723,7 +665,10 @@ async function submitQuery() {
                 }}</span>
               </div>
 
-              <div ref="timelineListRef" class="timeline-list">
+              <div
+                ref="timelineListRef"
+                class="timeline-list"
+              >
                 <article
                   v-for="message in timeline"
                   :key="message.id"
@@ -743,36 +688,31 @@ async function submitQuery() {
               </div>
             </article>
 
-            <p v-if="errorMessage" class="rr-banner" data-tone="danger">
+            <p
+              v-if="errorMessage"
+              class="rr-banner"
+              data-tone="danger"
+            >
               {{ errorMessage }}
             </p>
 
-            <article v-if="result" class="rr-panel answer-panel">
+            <article
+              v-if="result"
+              class="rr-panel answer-panel"
+            >
               <div class="answer-panel__header">
                 <div class="answer-panel__copy">
                   <p class="rr-kicker">{{ t('flow.search.result.kicker') }}</p>
                   <h3>{{ t('flow.search.result.title') }}</h3>
-                  <p class="answer-panel__summary">{{ resultSummary }}</p>
                 </div>
                 <StatusPill :status="result.answer_status" />
               </div>
 
-              <div class="answer-meta">
-                <article class="answer-meta__card">
-                  <span class="answer-meta__label">{{ t('flow.search.result.mode') }}</span>
-                  <strong>{{ resultModeLabel }}</strong>
-                </article>
-                <article class="answer-meta__card">
-                  <span class="answer-meta__label">{{ t('flow.search.result.references') }}</span>
-                  <strong>{{ result.references.length }}</strong>
-                </article>
-                <article class="answer-meta__card">
-                  <span class="answer-meta__label">{{ t('flow.search.result.session') }}</span>
-                  <strong>{{ result.session_id.slice(0, 8) }}</strong>
-                </article>
-              </div>
-
-              <p v-if="resultNotice" class="rr-banner" :data-tone="resultNotice.tone">
+              <p
+                v-if="resultNotice"
+                class="rr-banner"
+                :data-tone="resultNotice.tone"
+              >
                 {{ resultNotice.message }}
               </p>
 
@@ -796,7 +736,10 @@ async function submitQuery() {
               :hint="t('flow.search.empty.noProject.hint')"
             >
               <template #actions>
-                <RouterLink class="rr-button rr-button--secondary" to="/processing">
+                <RouterLink
+                  class="rr-button rr-button--secondary"
+                  to="/processing"
+                >
                   {{ t('flow.search.empty.noProject.action') }}
                 </RouterLink>
               </template>
@@ -812,10 +755,10 @@ async function submitQuery() {
               :message="
                 hasIndexedDocuments || hasIngestionRuns
                   ? t('flow.search.empty.partial.body', {
-                      state: formatIndexingStateLabel(readiness?.indexing_state),
-                      documents: readiness?.documents ?? 0,
-                      jobs: readiness?.ingestion_jobs ?? 0,
-                    })
+                    state: formatIndexingStateLabel(readiness?.indexing_state),
+                    documents: readiness?.documents ?? 0,
+                    jobs: readiness?.ingestion_jobs ?? 0,
+                  })
                   : t('flow.search.empty.noContent.body')
               "
               :hint="
@@ -825,32 +768,29 @@ async function submitQuery() {
               "
             >
               <template #actions>
-                <div class="empty-actions">
-                  <RouterLink
-                    v-for="action in weakContextActions"
-                    :key="action.label"
-                    class="rr-button rr-button--secondary"
-                    :to="action.to"
-                  >
-                    {{ action.label }}
-                  </RouterLink>
-                </div>
+                <RouterLink
+                  class="rr-button rr-button--secondary"
+                  to="/files"
+                >
+                  {{ t('flow.search.nextActions.openFiles') }}
+                </RouterLink>
               </template>
             </EmptyStateCard>
 
-            <article v-else class="rr-panel rr-panel--muted empty-answer">
+            <article
+              v-else
+              class="rr-panel rr-panel--muted empty-answer"
+            >
               <p class="rr-kicker">{{ t('flow.search.result.waitingKicker') }}</p>
               <h3>{{ t('flow.search.result.waitingTitle') }}</h3>
               <p class="rr-note">{{ t('flow.search.result.waitingBody') }}</p>
             </article>
-
-            <details v-if="detail" class="answer-details-toggle">
-              <summary>{{ t('flow.search.diagnostics.action') }}</summary>
-              <RetrievalDiagnosticsPanel :detail="detail" />
-            </details>
           </div>
 
-          <article class="rr-panel rr-panel--accent ask-panel ask-composer" :data-sticky="isMobile">
+          <article
+            class="rr-panel rr-panel--accent ask-panel ask-composer"
+            :data-sticky="isMobile"
+          >
             <div class="ask-panel__header">
               <div class="ask-panel__copy">
                 <p class="rr-kicker">{{ t('flow.search.query.kicker') }}</p>
@@ -859,29 +799,18 @@ async function submitQuery() {
               </div>
 
               <RouterLink
-                v-if="isMobile"
-                class="rr-button rr-button--ghost ask-panel__files-link"
+                class="rr-button rr-button--ghost"
                 to="/files"
               >
                 {{ t('flow.search.action') }}
               </RouterLink>
-
-              <div v-else class="context-grid">
-                <article v-for="item in contextItems" :key="item.label" class="context-card">
-                  <span class="context-card__label">{{ item.label }}</span>
-                  <strong>{{ item.value }}</strong>
-                </article>
-              </div>
             </div>
 
-            <div v-if="isMobile" class="context-strip" aria-label="Current library context">
-              <article v-for="item in contextItems" :key="item.label" class="context-chip">
-                <span>{{ item.label }}</span>
-                <strong>{{ item.value }}</strong>
-              </article>
-            </div>
-
-            <p v-if="readinessNotice" class="rr-banner" :data-tone="readinessNotice.tone">
+            <p
+              v-if="readinessNotice"
+              class="rr-banner"
+              :data-tone="readinessNotice.tone"
+            >
               <strong>{{ readinessNotice.title }}</strong>
               <span>{{ readinessNotice.message }}</span>
             </p>
@@ -898,21 +827,6 @@ async function submitQuery() {
                 @keydown="handleTextareaKeydown"
               />
             </label>
-
-            <div class="query-examples">
-              <span class="query-examples__label">{{ t('flow.search.query.examplesLabel') }}</span>
-              <div class="query-examples__list">
-                <button
-                  v-for="example in queryExamples"
-                  :key="example"
-                  type="button"
-                  class="query-example"
-                  @click="applyExampleQuery(example)"
-                >
-                  {{ example }}
-                </button>
-              </div>
-            </div>
 
             <div class="rr-action-row ask-panel__actions">
               <button
@@ -997,23 +911,6 @@ async function submitQuery() {
   box-shadow: 0 -8px 28px rgb(15 23 42 / 0.08);
 }
 
-.context-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(120px, 1fr));
-  gap: var(--rr-space-3);
-}
-
-.context-strip {
-  display: flex;
-  gap: var(--rr-space-3);
-  overflow-x: auto;
-  padding-bottom: 4px;
-  scrollbar-width: thin;
-}
-
-.context-card,
-.context-chip,
-.answer-meta__card,
 .session-item,
 .timeline-item,
 .mobile-session-bar {
@@ -1022,59 +919,19 @@ async function submitQuery() {
   background: rgba(255, 255, 255, 0.03);
 }
 
-.context-card,
-.context-chip,
-.answer-meta__card,
 .timeline-item,
 .mobile-session-bar {
   padding: var(--rr-space-3);
 }
 
-.context-chip {
-  min-width: 160px;
-  display: grid;
-  gap: 2px;
-}
-
-.context-chip span,
-.context-card__label,
-.answer-meta__label {
-  display: block;
-  font-size: 0.8rem;
-  color: var(--rr-color-text-muted);
-  margin-bottom: 4px;
-}
-
-.query-examples,
-.answer-meta,
-.empty-actions,
-.timeline-list,
-.query-examples__list {
+.timeline-list {
   display: grid;
   gap: var(--rr-space-3);
 }
 
-.answer-meta {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.query-examples__list {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.query-example,
 .session-item {
   padding: var(--rr-space-3);
   text-align: left;
-}
-
-.query-example {
-  border: 1px solid var(--rr-color-border);
-  border-radius: var(--rr-radius-lg);
-  background: rgb(255 255 255 / 0.62);
-}
-
-.session-item {
   display: grid;
   gap: 6px;
   background: transparent;
@@ -1138,15 +995,42 @@ async function submitQuery() {
   min-width: 136px;
 }
 
-.query-examples__label {
-  font-size: 0.82rem;
-  font-weight: 700;
-  color: var(--rr-color-text-muted);
+.session-sidebar__dismiss,
+.ask-panel .rr-button--ghost {
+  white-space: nowrap;
 }
 
-.session-sidebar__dismiss,
-.ask-panel__files-link {
-  white-space: nowrap;
+.answer-panel {
+  display: grid;
+  gap: var(--rr-space-4);
+}
+
+.answer-panel .rr-banner {
+  margin: 0;
+}
+
+.answer-body__label {
+  display: block;
+  margin-bottom: var(--rr-space-2);
+  color: var(--rr-color-text-muted);
+  font-size: 0.85rem;
+}
+
+.ask-panel .rr-button,
+.empty-actions .rr-button {
+  text-decoration: none;
+}
+
+.ask-panel .rr-button--ghost {
+  padding-inline: 0;
+}
+
+.ask-panel .rr-button--ghost:hover {
+  padding-inline: 0;
+}
+
+.empty-actions {
+  display: flex;
 }
 
 @media (max-width: 1100px) {
@@ -1182,11 +1066,6 @@ async function submitQuery() {
     margin-top: auto;
   }
 
-  .query-examples__list,
-  .answer-meta {
-    grid-template-columns: 1fr;
-  }
-
   .timeline-list {
     max-height: none;
   }
@@ -1199,11 +1078,6 @@ async function submitQuery() {
   .mobile-session-bar,
   .session-sidebar__header {
     flex-direction: column;
-  }
-
-  .context-grid,
-  .answer-meta {
-    grid-template-columns: 1fr;
   }
 
   .ask-panel__actions {
