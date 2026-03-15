@@ -1,7 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 
-import { api, fetchProjectReadiness, type ProjectReadinessSummary } from 'src/boot/api'
+import {
+  fetchProjects,
+  fetchProjectReadiness,
+  isUnauthorizedApiError,
+  type ProjectReadinessSummary,
+  type ProjectSummary,
+} from 'src/boot/api'
 import PageSection from 'src/components/shell/PageSection.vue'
 import EmptyStateCard from 'src/components/state/EmptyStateCard.vue'
 import ErrorStateCard from 'src/components/state/ErrorStateCard.vue'
@@ -9,7 +16,9 @@ import LoadingSkeletonPanel from 'src/components/state/LoadingSkeletonPanel.vue'
 import AppPanel from 'src/components/ui/AppPanel.vue'
 import StatusBanner from 'src/components/ui/StatusBanner.vue'
 
-const projects = ref<{ id: string; name: string; slug: string }[]>([])
+const { t } = useI18n()
+
+const projects = ref<ProjectSummary[]>([])
 const readiness = ref<ProjectReadinessSummary | null>(null)
 const errorMessage = ref<string | null>(null)
 const infoMessage = ref<string | null>(null)
@@ -17,12 +26,7 @@ const selectedProjectId = ref<string | null>(null)
 const loading = ref(true)
 
 function extractErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'Unknown project error'
-}
-
-function isUnauthorizedMessage(message: string): boolean {
-  const normalized = message.toLowerCase()
-  return normalized.includes('401') || normalized.includes('unauthorized') || normalized.includes('authorization')
+  return error instanceof Error ? error.message : t('common.messages.unknownError')
 }
 
 async function loadReadiness(id: string) {
@@ -34,7 +38,7 @@ async function loadReadiness(id: string) {
     readiness.value = await fetchProjectReadiness(id)
   } catch (error) {
     const message = extractErrorMessage(error)
-    if (isUnauthorizedMessage(message)) {
+    if (isUnauthorizedApiError(error)) {
       infoMessage.value = 'Project list is visible, but readiness details require an authorized API token.'
       readiness.value = null
     } else {
@@ -69,15 +73,14 @@ const pageStatus = computed(() => {
 
 onMounted(async () => {
   try {
-    const { data } = await api.get<{ id: string; name: string; slug: string }[]>('/projects')
-    projects.value = data
+    projects.value = await fetchProjects()
 
-    if (data.length === 0) {
+    if (projects.value.length === 0) {
       infoMessage.value = 'No projects created yet. Create a workspace and project to start ingestion and retrieval.'
       return
     }
 
-    await loadReadiness(data[0].id)
+    await loadReadiness(projects.value[0].id)
   } catch (error) {
     errorMessage.value = extractErrorMessage(error)
   } finally {
