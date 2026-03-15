@@ -58,6 +58,12 @@ function isActive(item: ShellNavItem) {
       </RouterLink>
     </div>
 
+    <div class="app-sidebar__focus">
+      <p class="app-sidebar__focus-label">{{ t('shell.topbar.surface') }}</p>
+      <strong>{{ t(`shell.nav.items.${activeSection}.label`) }}</strong>
+      <small>{{ t(`shell.nav.items.${activeSection}.hint`) }}</small>
+    </div>
+
     <ProductSpine :active-section="activeSection" compact />
 
     <div class="app-sidebar__sections" :aria-label="t('shell.nav.product')">
@@ -116,6 +122,33 @@ function isActive(item: ShellNavItem) {
 .app-sidebar__brand-copy {
   display: grid;
   gap: 2px;
+}
+
+.app-sidebar__focus {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid rgb(15 23 42 / 0.06);
+  border-radius: var(--rr-radius-lg);
+  background: rgb(255 255 255 / 0.66);
+}
+
+.app-sidebar__focus-label {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--rr-color-text-muted);
+}
+
+.app-sidebar__focus strong,
+.app-sidebar__focus small {
+  margin: 0;
+}
+
+.app-sidebar__focus small {
+  color: var(--rr-color-text-secondary);
 }
 
 .app-sidebar__sections {

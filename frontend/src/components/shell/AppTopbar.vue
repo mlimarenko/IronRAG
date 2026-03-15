@@ -36,7 +36,6 @@ withDefaults(
       <p class="app-topbar__label">{{ t('shell.topbar.surface') }}</p>
       <p class="app-topbar__section">{{ sectionLabel }}</p>
       <p v-if="sectionSummary" class="app-topbar__summary">{{ sectionSummary }}</p>
-      <p v-if="sectionKey" class="app-topbar__workflow">{{ t(`shell.guide.sections.${sectionKey}.stage`) }}</p>
     </div>
 
     <div

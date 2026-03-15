@@ -408,9 +408,6 @@ async function submitQuery() {
         </RouterLink>
       </template>
 
-      <ProductSpine active-section="search" />
-      <CrossSurfaceGuide active-section="search" />
-
       <article class="rr-panel rr-panel--accent ask-panel">
         <div class="ask-panel__header">
           <div class="ask-panel__copy">
@@ -439,13 +436,6 @@ async function submitQuery() {
           <strong>{{ readinessNotice.title }}</strong>
           <span>{{ readinessNotice.message }}</span>
         </p>
-
-        <div class="capability-panel">
-          <p class="capability-panel__label">{{ t('flow.search.capabilities.label') }}</p>
-          <ul class="capability-list">
-            <li v-for="item in answerCapabilities" :key="item">{{ item }}</li>
-          </ul>
-        </div>
 
         <label class="rr-field">
           <span class="rr-field__label">{{ t('flow.search.query.question') }}</span>
@@ -607,10 +597,10 @@ async function submitQuery() {
         <p class="rr-note">{{ t('flow.search.result.waitingBody') }}</p>
       </article>
 
-      <RetrievalDiagnosticsPanel
-        v-if="detail"
-        :detail="detail"
-      />
+      <details v-if="detail" class="answer-details-toggle">
+        <summary>{{ t('flow.search.diagnostics.action') }}</summary>
+        <RetrievalDiagnosticsPanel :detail="detail" />
+      </details>
     </PageSection>
   </section>
 </template>
@@ -693,6 +683,25 @@ async function submitQuery() {
 
 .capability-list li {
   line-height: 1.5;
+}
+
+.answer-details-toggle {
+  border-radius: var(--rr-radius-lg);
+}
+
+.answer-details-toggle summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 0.95rem 1.1rem;
+  border: 1px solid var(--rr-color-border-subtle);
+  border-radius: var(--rr-radius-lg);
+  background: rgb(255 255 255 / 0.7);
+  font-weight: 700;
+  color: var(--rr-color-text-secondary);
+}
+
+.answer-details-toggle[open] summary {
+  margin-bottom: var(--rr-space-3);
 }
 
 .ask-panel__input {

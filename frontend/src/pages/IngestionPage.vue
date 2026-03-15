@@ -1091,8 +1091,37 @@ onUnmounted(() => {
         </RouterLink>
       </template>
 
-      <ProductSpine active-section="files" />
-      <CrossSurfaceGuide active-section="files" />
+      <div class="library-quickstart rr-panel rr-panel--accent">
+        <div class="library-quickstart__copy">
+          <p class="rr-kicker">{{ t('flow.library.eyebrow') }}</p>
+          <h2>{{ t('flow.library.title') }}</h2>
+          <p>{{ t('flow.library.description') }}</p>
+        </div>
+
+        <div class="library-quickstart__steps">
+          <article class="library-quickstart__step">
+            <span>1</span>
+            <div>
+              <strong>{{ t('flow.library.form.title') }}</strong>
+              <p>{{ t('flow.library.form.helper') }}</p>
+            </div>
+          </article>
+          <article class="library-quickstart__step">
+            <span>2</span>
+            <div>
+              <strong>{{ t('flow.library.processing.activeTitle') }}</strong>
+              <p>{{ t('flow.library.notices.progressBody') }}</p>
+            </div>
+          </article>
+          <article class="library-quickstart__step">
+            <span>3</span>
+            <div>
+              <strong>{{ t('flow.search.title') }}</strong>
+              <p>{{ t('flow.library.notices.completedBody') }}</p>
+            </div>
+          </article>
+        </div>
+      </div>
 
       <div class="rr-stat-strip">
         <article class="rr-stat">
@@ -1730,6 +1759,55 @@ onUnmounted(() => {
 <style scoped>
 .rr-stack--tight {
   gap: 0.35rem;
+}
+
+.library-quickstart {
+  display: grid;
+  gap: var(--rr-space-4);
+  padding: clamp(var(--rr-space-4), 3vw, var(--rr-space-5));
+}
+
+.library-quickstart__copy,
+.library-quickstart__steps,
+.library-quickstart__step {
+  display: grid;
+  gap: var(--rr-space-3);
+}
+
+.library-quickstart__copy h2,
+.library-quickstart__step strong,
+.library-quickstart__step p {
+  margin: 0;
+}
+
+.library-quickstart__steps {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.library-quickstart__step {
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  padding: var(--rr-space-3);
+  border-radius: var(--rr-radius-md);
+  background: rgb(255 255 255 / 0.78);
+  border: 1px solid var(--rr-border-default);
+}
+
+.library-quickstart__step span {
+  display: inline-grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 999px;
+  background: rgb(59 130 246 / 0.12);
+  color: var(--rr-color-accent-700);
+  font-weight: 800;
+}
+
+@media (width <= 900px) {
+  .library-quickstart__steps {
+    grid-template-columns: 1fr;
+  }
 }
 
 .file-library-panel {

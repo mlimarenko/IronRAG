@@ -32,7 +32,7 @@ export default {
       workspace: {
         title: 'Processing',
         body: 'Choose the active space and library for this session.',
-        action: 'Open Processing',
+        action: 'Open Setup',
         ready: 'Library selected',
         partial: 'Space selected',
         draft: 'Needs scope',
@@ -47,7 +47,7 @@ export default {
       search: {
         title: 'Search',
         body: 'Ask questions over indexed files.',
-        action: 'Open Search',
+        action: 'Open Ask',
         ready: 'Ready to search',
         blocked: 'Needs indexed content',
       },
@@ -56,7 +56,7 @@ export default {
   processing: {
     eyebrow: 'Processing',
     title: 'Processing',
-    description: 'Choose the space and library that Files, Search, Graph, and API use.',
+    description: 'Choose the space and library for this session, then move straight into Files.',
     statusReady: 'Library selected',
     statusPartial: 'Space selected',
     statusDraft: 'Choose a space',
@@ -64,7 +64,7 @@ export default {
       workspaces: 'Space',
       projects: 'Library',
       next: 'Next step',
-      nextReady: 'Open Files',
+      nextReady: 'Continue to Files',
       nextSetup: 'Create a library',
     },
     success: 'Saved',
@@ -84,12 +84,12 @@ export default {
         'Setup needs an authorized session token before RustRAG can create a space or library.',
       summary: {
         ready: 'You are connected. The next practical move is choosing or creating your space, then opening Files.',
-        pending: 'Start by connecting access. After that, setup becomes a simple two-step flow: choose a space, then create a library.',
+        pending: 'Start by connecting access. Then choose a space and create the library you want to fill next.',
       },
       cards: {
         auth: {
           title: '1. Connect access',
-          body: 'Bring in a session token so protected setup actions can work.',
+          body: 'Add a session token so setup can create your space and library.',
           hintReady: 'Connected with {token}.',
           hintPending: 'Use either of the methods below to continue.',
           ready: 'Connected',
@@ -97,8 +97,8 @@ export default {
         },
         setup: {
           title: '2. Create your space and library',
-          body: 'Once access is ready, the forms below save the scope this session will use.',
-          hint: 'RustRAG keeps workspace first, then library.',
+          body: 'Once access is ready, choose the space and library for this session.',
+          hint: 'First pick a space, then the library inside it.',
           ready: 'Unlocked',
           pending: 'Comes next',
         },
@@ -208,7 +208,7 @@ export default {
       },
     },
     progress: {
-      start: 'Access first, then choose your first space.',
+      start: 'Connect access, then choose your first space.',
       workspaceReady: 'Great — now create or pick the library that should receive files.',
       complete: 'Setup is ready. Continue into Files to ingest the first content.',
     },
@@ -223,15 +223,15 @@ export default {
       readyNext: 'Open Files next',
       workspace: {
         title: 'Choose or create a space',
-        description: 'A space groups the libraries and product surfaces for this session.',
+        description: 'A space groups the libraries for this session.',
       },
       project: {
         title: 'Choose or create a library',
-        description: 'A library is where files are indexed and later queried.',
+        description: 'A library is where you add content and ask questions later.',
       },
       files: {
         title: 'Continue into Files',
-        description: 'After setup, go straight to ingestion so the product path stays obvious.',
+        description: 'After setup, go straight to Files so you can add the first content.',
       },
     },
     sidebar: {
@@ -245,7 +245,7 @@ export default {
       workspace: {
         kicker: 'Space',
         title: 'Choose the space for this session',
-        helper: 'Use an existing space or create a new one for the content you want to ingest.',
+        helper: 'Pick the space you want to work in, or create one if this is a new library.',
         selected: 'Active space',
         empty: 'Choose a space',
         required: 'Required',
@@ -257,7 +257,7 @@ export default {
       project: {
         kicker: 'Library',
         title: 'Choose the library that will receive files',
-        helper: 'Libraries hold the files you index and the answers you query later.',
+        helper: 'Pick the library that should receive the content you add next.',
         selected: 'Active library',
         empty: 'Choose a library',
         selectedBadge: 'Selected',
@@ -275,8 +275,8 @@ export default {
     eyebrow: 'Files',
     title: 'Files',
     description:
-      'Add text or a file to the active library and keep processing visible while it runs.',
-    action: 'Open Search',
+      'Add text or a file to the active library, then watch it become ready to ask.',
+    action: 'Open Ask',
     statusBlocked: 'Choose a library in Processing',
     statusProcessing: '{count} active runs',
     statusAttention: 'Processing needs attention',
@@ -472,7 +472,7 @@ export default {
     inventory: {
       kicker: 'Library inventory',
       title: 'Browse files',
-      helper: 'Triage the current library, filter for recent or problematic files, and jump straight into search from the selected file.',
+      helper: 'See what is already in this library, check what is ready, and jump straight into Ask from a selected file.',
       emptyBadge: 'No files yet',
       emptyTitle: 'No indexed files yet',
       emptyBody: 'Completed files will appear here as soon as processing finishes.',
@@ -526,7 +526,7 @@ export default {
   search: {
     eyebrow: 'Search',
     title: 'Ask',
-    description: 'Ask the active library and review the answer with its backing passages.',
+    description: 'Ask the active library and review the answer with the passages behind it.',
     action: 'Open Files',
     statusBlocked: 'Choose a library in Processing',
     statusDraft: 'Ready',
@@ -545,17 +545,17 @@ export default {
     },
     query: {
       kicker: 'Question',
-      title: 'Ask',
+      title: 'Ask the library',
       question: 'Question',
       placeholder: 'What should I know from these files?',
-      action: 'Search',
+      action: 'Ask',
       actionBusy: 'Searching...',
-      hintReady: 'The answer will stay focused on the active library.',
+      hintReady: 'Your answer will stay focused on the active library.',
       hintBlocked: 'Choose a library in Processing before asking.',
       hintIndexing: 'Indexing is still in progress. Search stays blocked until RustRAG has enough content to answer reliably.',
       hintNoContent: 'Add and index source files first. Search cannot answer until this library has searchable content.',
       shortcut: 'Press Ctrl+Enter or Cmd+Enter to ask.',
-      examplesLabel: 'Try',
+      examplesLabel: 'Try one',
       examples: {
         summary: 'Summarize the key points in this library.',
         risks: 'What risks or unknowns appear in these files?',
@@ -580,8 +580,8 @@ export default {
       groundingStrong: 'Backed by retrieved passages',
       groundingWeak: 'Weak or incomplete support',
       waitingKicker: 'Waiting',
-      waitingTitle: 'Ask the library',
-      waitingBody: 'Answer and supporting passages appear here after the first search.',
+      waitingTitle: 'Ask your first question',
+      waitingBody: 'Your answer and supporting passages appear here after the first question.',
       warningWeak:
         'This answer may be missing support from the indexed files. Review the passages before relying on it.',
       warningNoReferences: 'This answer was returned without supporting passages.',
@@ -604,7 +604,7 @@ export default {
       },
     },
     capabilities: {
-      label: 'What Search can do right now',
+      label: 'What Ask can do right now',
       ready: {
         answer: 'Answer questions from the active library with supporting passages.',
         verify: 'Show stored references so an operator can verify provenance quickly.',
@@ -623,18 +623,18 @@ export default {
     },
     nextActions: {
       openFiles: 'Open Files',
-      retryQuestion: 'Prepare this question for later',
+      retryQuestion: 'Keep this question for later',
     },
     empty: {
       noProject: {
-        title: 'Choose a library before asking Search',
-        body: 'Search only works inside the active library. Pick the scope in Processing first.',
-        hint: 'Once a library is selected, Search will explain whether it is indexed enough to answer.',
-        action: 'Open Processing',
+        title: 'Choose a library before asking',
+        body: 'Ask only works inside the active library. Pick the scope in Setup first.',
+        hint: 'Once a library is selected, Ask will explain whether it is indexed enough to answer.',
+        action: 'Open Setup',
       },
       noContent: {
         title: 'No indexed content yet',
-        body: 'This library does not have searchable files yet, so Search cannot answer honestly.',
+        body: 'This library does not have searchable files yet, so Ask cannot answer honestly.',
         hint: 'Add files in Files, wait for indexing to complete, then ask again.',
       },
       partial: {

@@ -251,9 +251,6 @@ async function createProjectItem() {
         </RouterLink>
       </template>
 
-      <ProductSpine active-section="processing" />
-      <CrossSurfaceGuide active-section="processing" />
-
       <article class="setup-hero">
         <div class="setup-hero__copy">
           <p class="rr-kicker">{{ t('flow.processing.hero.eyebrow') }}</p>

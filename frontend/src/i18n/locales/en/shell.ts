@@ -1,27 +1,27 @@
 export default {
   brand: {
     title: 'RustRAG',
-    subtitle: 'Operator console',
+    subtitle: 'Setup → Add content → Ask',
   },
   nav: {
     product: 'Product areas',
     groups: {
-      flow: 'Core flow',
+      flow: 'Main flow',
       inspect: 'Inspect',
       extend: 'Integrate',
     },
     items: {
       processing: {
         label: 'Processing',
-        hint: 'Choose session scope.',
+        hint: 'Pick your space and library.',
       },
       files: {
         label: 'Files',
-        hint: 'Add content.',
+        hint: 'Add your first content.',
       },
       search: {
         label: 'Search',
-        hint: 'Review grounded answers.',
+        hint: 'Ask questions with sources.',
       },
       graph: {
         label: 'Technical graph',
@@ -34,7 +34,7 @@ export default {
     },
   },
   topbar: {
-    surface: 'Current area',
+    surface: 'Current step',
     language: 'Language',
     languageHint: 'Interface',
   },
@@ -50,21 +50,21 @@ export default {
     end: 'This is the furthest surface in the current shell.',
     sections: {
       processing: {
-        stage: 'Foundation',
-        why: 'Choose the active workspace and library so every other surface shares the same operating context.',
-        previous: 'Scope the session before you add content or inspect anything else.',
-        next: 'Move into Files once the active library is set.',
+        stage: 'Step 1',
+        why: 'Pick the space and library you want to work in before adding content or asking questions.',
+        previous: 'Start here so the rest of the product knows where your content should live.',
+        next: 'Move into Files once the active library is ready.',
       },
       files: {
-        stage: 'Ingest',
-        why: 'Bring content into the selected library and keep processing, inventory, and triage in one place.',
-        previous: 'Processing defines which library receives new content.',
-        next: 'Open Search once enough content is indexed.',
+        stage: 'Step 2',
+        why: 'Add content to the selected library and keep progress visible in one place.',
+        previous: 'Setup chooses the library that should receive new content.',
+        next: 'Open Ask once enough content is indexed.',
       },
       search: {
-        stage: 'Operate',
-        why: 'Ask grounded questions against the same library you prepared in Processing and fed in Files.',
-        previous: 'Files determines what is actually searchable right now.',
+        stage: 'Step 3',
+        why: 'Ask questions against the same library you prepared in Setup and filled in Files.',
+        previous: 'Files determines what is actually ready to answer questions.',
         next: 'Use Graph when you need structure-level inspection beyond answer passages.',
       },
       graph: {
@@ -93,7 +93,7 @@ export default {
   pages: {
     processing: {
       title: 'Processing',
-      summary: 'Set the active scope.',
+      summary: 'Choose your library.',
     },
     files: {
       title: 'Files',
@@ -101,7 +101,7 @@ export default {
     },
     search: {
       title: 'Search',
-      summary: 'Ask grounded questions.',
+      summary: 'Ask questions with sources.',
     },
     graph: {
       title: 'Technical graph',
