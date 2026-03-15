@@ -8,12 +8,14 @@ import {
   fetchDocuments,
   fetchIngestionJobDetail,
   fetchIngestionJobs,
+  fetchProjectReadiness,
   fetchSources,
   retryIngestionJob,
   uploadAndIngest,
   type DocumentSummary,
   type IngestionJobDetail,
   type IngestionJobSummary,
+  type ProjectReadinessSummary,
   type SourceSummary,
 } from 'src/boot/api'
 import CrossSurfaceGuide from 'src/components/shell/CrossSurfaceGuide.vue'
@@ -81,6 +83,7 @@ interface JobViewModel {
 }
 
 const MAX_VISIBLE_QUEUE_ITEMS = 6
+const FILE_GROUP_ORDER = ['attention', 'processing', 'ready'] as const
 const POLL_INTERVAL_MS = 900
 const MAX_POLL_ATTEMPTS = 12
 const AUTO_REFRESH_INTERVAL_MS = 3000
@@ -110,6 +113,7 @@ const feedback = ref<FeedbackState | null>(null)
 const submitMode = ref<'upload' | null>(null)
 const retryingJobId = ref<string | null>(null)
 const recentJobs = ref<IngestionJobDetail[]>([])
+const readiness = ref<ProjectReadinessSummary | null>(null)
 const queueLoading = ref(false)
 let refreshTimer: number | null = null
 
@@ -313,9 +317,19 @@ const filesAttentionCount = computed(
 const filesProcessingCount = computed(
   () => fileInventory.value.filter((record) => record.statusTone === 'info').length,
 )
-const recentFileRecords = computed(() =>
-  filteredFileInventory.value.slice(0, MAX_VISIBLE_QUEUE_ITEMS),
-)
+const inventoryGroups = computed(() => {
+  const groups = {
+    attention: filteredFileInventory.value.filter((record) => record.attention),
+    processing: filteredFileInventory.value.filter((record) => record.statusTone === 'info'),
+    ready: filteredFileInventory.value.filter((record) => record.statusTone === 'positive'),
+  }
+
+  return FILE_GROUP_ORDER.map((key) => ({
+    key,
+    records: groups[key].slice(0, MAX_VISIBLE_QUEUE_ITEMS),
+    total: groups[key].length,
+  })).filter((group) => group.total > 0)
+})
 const nextActionRoute = computed(() => {
   if (!selectedProjectId.value) {
     return '/setup'
@@ -573,14 +587,16 @@ async function hydrateRecentJobs(jobSummaries: IngestionJobSummary[]) {
 }
 
 async function loadProjectData(projectId: string) {
-  const [docs, srcs, jobs] = await Promise.all([
+  const [docs, srcs, jobs, readinessSummary] = await Promise.all([
     fetchDocuments(projectId),
     fetchSources(projectId),
     fetchIngestionJobs(projectId),
+    fetchProjectReadiness(projectId),
   ])
 
   documents.value = docs
   sources.value = srcs
+  readiness.value = readinessSummary
   await hydrateRecentJobs(jobs)
 }
 
@@ -763,18 +779,25 @@ async function uploadCurrentFile() {
       tone: 'info',
       title: t('flow.library.notices.queuedTitle'),
       body: t('flow.library.notices.queuedBody'),
-      detail: `${t('flow.library.processing.runId')}: ${shortJobId(result.ingestion_job_id)}`,
+      detail: t('flow.library.notices.queuedDetail'),
     })
 
     const jobDetail = await waitForIngestionJob(result.ingestion_job_id)
     await loadProjectData(selectedProjectId.value)
 
     if (jobDetail?.status === 'completed') {
+      const libraryReadyForAsk = readiness.value?.ready_for_query ?? false
       setFeedbackState({
         tone: 'success',
-        title: t('flow.library.notices.completedTitle'),
-        body: t('flow.library.notices.completedBody'),
-        detail: `${t('flow.library.processing.runId')}: ${shortJobId(jobDetail.id)}`,
+        title: libraryReadyForAsk
+          ? t('flow.library.notices.completedReadyTitle')
+          : t('flow.library.notices.completedTitle'),
+        body: libraryReadyForAsk
+          ? t('flow.library.notices.completedReadyBody')
+          : t('flow.library.notices.completedContinueBody'),
+        detail: libraryReadyForAsk
+          ? t('flow.library.notices.completedReadyDetail')
+          : t('flow.library.notices.completedContinueDetail'),
       })
       clearSelectedUpload()
       return
@@ -829,18 +852,25 @@ async function retryJob(jobId: string) {
       tone: 'info',
       title: t('flow.library.notices.retryQueuedTitle'),
       body: t('flow.library.notices.retryQueuedBody'),
-      detail: `${t('flow.library.processing.runId')}: ${shortJobId(retried.id)}`,
+      detail: t('flow.library.notices.retryQueuedDetail'),
     })
 
     const terminalState = await waitForIngestionJob(retried.id)
     await loadProjectData(selectedProjectId.value)
 
     if (terminalState?.status === 'completed') {
+      const libraryReadyForAsk = readiness.value?.ready_for_query ?? false
       setFeedbackState({
         tone: 'success',
-        title: t('flow.library.notices.completedTitle'),
-        body: t('flow.library.notices.completedBody'),
-        detail: `${t('flow.library.processing.runId')}: ${shortJobId(terminalState.id)}`,
+        title: libraryReadyForAsk
+          ? t('flow.library.notices.completedReadyTitle')
+          : t('flow.library.notices.completedTitle'),
+        body: libraryReadyForAsk
+          ? t('flow.library.notices.completedReadyBody')
+          : t('flow.library.notices.completedContinueBody'),
+        detail: libraryReadyForAsk
+          ? t('flow.library.notices.completedReadyDetail')
+          : t('flow.library.notices.completedContinueDetail'),
       })
       return
     }
@@ -955,6 +985,14 @@ onUnmounted(() => {
           <p v-if="feedback.detail" class="feedback-banner__detail">
             {{ feedback.detail }}
           </p>
+          <div
+            v-if="feedback.tone === 'success' && canGoToAsk"
+            class="rr-action-row feedback-banner__actions"
+          >
+            <RouterLink class="rr-button" to="/search">
+              {{ t('flow.library.notices.openAskAction') }}
+            </RouterLink>
+          </div>
         </article>
 
         <div class="flow-reset__layout">
@@ -1227,7 +1265,9 @@ onUnmounted(() => {
               :status="documents.length ? 'ready' : activeJobsCount > 0 ? 'partial' : 'draft'"
               :label="
                 documents.length
-                  ? t('flow.library.inventory.summaryReady', { count: recentFileRecords.length })
+                  ? t('flow.library.inventory.summaryReady', {
+                      count: filteredFileInventory.length,
+                    })
                   : t('flow.library.inventory.emptyBadge')
               "
             />
@@ -1254,29 +1294,50 @@ onUnmounted(() => {
           />
 
           <div v-else class="file-library-list recent-files-list">
-            <button
-              v-for="record in recentFileRecords"
-              :key="record.id"
-              type="button"
-              class="file-library-row"
-              :data-active="selectedInventoryRecord?.id === record.id"
-              @click="selectDocument(record.id)"
-            >
-              <div class="file-library-row__copy">
-                <div class="file-library-row__title-line">
-                  <strong>{{ record.title }}</strong>
-                  <StatusBadge :tone="record.statusTone" :label="record.statusLabel" />
+            <section v-for="group in inventoryGroups" :key="group.key" class="inventory-group">
+              <div class="inventory-group__header">
+                <div class="rr-stack rr-stack--tight">
+                  <strong>{{ t(`flow.library.inventory.groups.${group.key}.title`) }}</strong>
+                  <p class="rr-note">{{ t(`flow.library.inventory.groups.${group.key}.hint`) }}</p>
                 </div>
-                <p class="rr-muted">{{ record.summaryLabel }}</p>
+                <StatusBadge
+                  :tone="
+                    group.key === 'attention'
+                      ? 'warning'
+                      : group.key === 'processing'
+                        ? 'info'
+                        : 'positive'
+                  "
+                  :label="
+                    t(`flow.library.inventory.groups.${group.key}.count`, { count: group.total })
+                  "
+                />
               </div>
-              <div class="file-library-row__meta">
-                <span v-if="record.updatedAt">{{ record.updatedAt }}</span>
-                <span>{{ record.mimeLabel }}</span>
-              </div>
-            </button>
+
+              <button
+                v-for="record in group.records"
+                :key="record.id"
+                type="button"
+                class="file-library-row"
+                :data-active="selectedInventoryRecord?.id === record.id"
+                @click="selectDocument(record.id)"
+              >
+                <div class="file-library-row__copy">
+                  <div class="file-library-row__title-line">
+                    <strong>{{ record.title }}</strong>
+                    <StatusBadge :tone="record.statusTone" :label="record.statusLabel" />
+                  </div>
+                  <p class="rr-muted">{{ record.summaryLabel }}</p>
+                </div>
+                <div class="file-library-row__meta">
+                  <span v-if="record.updatedAt">{{ record.updatedAt }}</span>
+                  <span>{{ record.mimeLabel }}</span>
+                </div>
+              </button>
+            </section>
 
             <EmptyStateCard
-              v-if="!recentFileRecords.length"
+              v-if="!inventoryGroups.length"
               :title="t('flow.library.inventory.filteredEmptyTitle')"
               :message="t('flow.library.inventory.filteredEmptyBody')"
             />
@@ -1377,7 +1438,8 @@ onUnmounted(() => {
 .file-library-detail__header,
 .rr-action-row,
 .upload-selection-card,
-.upload-selection-card__meta {
+.upload-selection-card__meta,
+.inventory-group__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1430,7 +1492,8 @@ onUnmounted(() => {
 .file-library-detail__facts,
 .processing-steps,
 .processing-step,
-.processing-step__copy {
+.processing-step__copy,
+.inventory-group {
   display: grid;
   gap: 0.75rem;
 }
@@ -1492,6 +1555,10 @@ onUnmounted(() => {
   padding: 1rem;
 }
 
+.feedback-banner__actions {
+  margin-top: 0.75rem;
+}
+
 .feedback-banner[data-tone='success'] {
   background: rgba(73, 204, 144, 0.14);
 }
@@ -1506,5 +1573,13 @@ onUnmounted(() => {
 
 .feedback-banner[data-tone='info'] {
   background: rgba(110, 168, 254, 0.14);
+}
+
+.inventory-group {
+  gap: 0.75rem;
+}
+
+.inventory-group__header {
+  align-items: start;
 }
 </style>

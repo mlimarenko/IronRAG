@@ -383,8 +383,17 @@ export default {
     notices: {
       queuedTitle: 'File added to the queue',
       queuedBody: 'The worker has accepted the request. Watch the queue below for progress.',
+      queuedDetail: 'Stay here if you want to watch progress, or refresh when you come back.',
       completedTitle: 'File indexed',
       completedBody: 'The content is ready for search.',
+      completedContinueBody:
+        'The file finished indexing. Add another file or keep an eye on processing until Ask is ready.',
+      completedContinueDetail: 'Stay in Files if you still want to add more content.',
+      completedReadyTitle: 'File indexed — Ask is ready',
+      completedReadyBody:
+        'The library now has searchable files, so the next move is asking a question.',
+      completedReadyDetail: 'You can move straight into Ask now.',
+      openAskAction: 'Open Ask now',
       progressTitle: 'Processing is still running',
       progressBody: 'The worker has not reached a terminal state yet.',
       retryQueuedTitle: 'Retry queued',
@@ -443,7 +452,7 @@ export default {
       titlePlaceholder: 'Optional override for the file name',
       titleHint: 'Leave blank to keep the original filename as the document title.',
       helper:
-        'Drop one file. RustRAG checks support before upload so blocked formats are explained early.',
+        'Drop one file into the current library. RustRAG checks support before upload so the page stays honest about what works now, what is still processing, and what still needs attention.',
       autoSourceLabel: 'File upload',
       browse: 'Browse files',
       dropzoneIdleBadge: 'Single file',
@@ -572,7 +581,7 @@ export default {
       kicker: 'Recent files',
       title: 'Recent files',
       helper:
-        'See the latest files in this library, confirm what is ready, and open Ask when the library is ready.',
+        'Files are grouped by what you should do next first: fix attention items, wait on processing, or move into Ask once files are ready.',
       emptyBadge: 'No files yet',
       emptyTitle: 'No indexed files yet',
       emptyBody: 'Completed files will appear here as soon as processing finishes.',
@@ -598,6 +607,23 @@ export default {
         attention: 'Needs attention',
         manual: 'Manual paste',
         upload: 'Uploads',
+      },
+      groups: {
+        attention: {
+          title: 'Needs attention',
+          hint: 'These files did not finish cleanly and may need a retry.',
+          count: '{count} to review',
+        },
+        processing: {
+          title: 'Still processing',
+          hint: 'These files are still moving through indexing.',
+          count: '{count} in progress',
+        },
+        ready: {
+          title: 'Ready for Ask',
+          hint: 'These files are searchable now.',
+          count: '{count} ready',
+        },
       },
       fields: {
         externalKey: 'File key',
