@@ -287,6 +287,12 @@ export default {
     statusAttention: 'Processing needs attention',
     statusDraft: 'Ready for the first file',
     documentsCount: '{count} files indexed',
+    quickstart: {
+      ready: 'Add another file or jump straight into Ask.',
+      blocked: 'Choose a library in Setup before adding files.',
+      progressEyebrow: 'Flow',
+      progressTitle: 'Setup → Add content → Ask',
+    },
     stats: {
       workspace: 'Space',
       project: 'Library',
@@ -543,6 +549,7 @@ export default {
     authRequired:
       'Ask requires a bearer token with query access. Save or mint a session token in Setup first.',
     context: {
+      summaryTitle: 'Current library context',
       workspace: 'Space',
       project: 'Library',
       indexing: 'Indexing state',
