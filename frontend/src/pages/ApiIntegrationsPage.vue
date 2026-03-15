@@ -14,9 +14,7 @@ import {
   type WorkspaceGovernanceSummary,
   type WorkspaceSummary,
 } from 'src/boot/api'
-import CrossSurfaceGuide from 'src/components/shell/CrossSurfaceGuide.vue'
 import PageSection from 'src/components/shell/PageSection.vue'
-import ProductSpine from 'src/components/shell/ProductSpine.vue'
 import StatusBadge from 'src/components/shell/StatusBadge.vue'
 import EmptyStateCard from 'src/components/state/EmptyStateCard.vue'
 import ErrorStateCard from 'src/components/state/ErrorStateCard.vue'

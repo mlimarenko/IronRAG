@@ -80,7 +80,7 @@ function isActive(item: ShellNavItem) {
             :data-active="isActive(item)"
             :aria-current="isActive(item) ? 'page' : undefined"
           >
-            <span class="app-sidebar__step">{{ item.stepLabel }}</span>
+            <span class="app-sidebar__step">{{ item.step }}</span>
             <span class="app-sidebar__label">{{ t(`shell.nav.items.${item.key}.label`) }}</span>
           </RouterLink>
         </nav>
