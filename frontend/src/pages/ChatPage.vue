@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { RouterLink } from 'vue-router'
+import { RouterLink, useRoute } from 'vue-router'
 
 import {
   fetchProjects,
@@ -39,6 +39,7 @@ interface ProjectItem {
 type BannerTone = 'warning' | 'info'
 
 const { t } = useI18n()
+const route = useRoute()
 
 const workspaces = ref<WorkspaceItem[]>([])
 const projects = ref<ProjectItem[]>([])
@@ -132,6 +133,16 @@ const resultNotice = computed<{ tone: BannerTone; message: string } | null>(() =
 
   return null
 })
+
+watch(
+  () => route.query.q,
+  (value) => {
+    if (typeof value === 'string' && value.trim()) {
+      queryText.value = value.trim()
+    }
+  },
+  { immediate: true },
+)
 
 onMounted(async () => {
   workspaces.value = await fetchWorkspaces()
