@@ -168,9 +168,7 @@ const selectedProject = computed(
 const selectedWorkspace = computed(
   () => workspaces.value.find((item) => item.id === getSelectedWorkspaceId()) ?? null,
 )
-const sourceLabelById = computed(
-  () => new Map(sources.value.map((item) => [item.id, item.label])),
-)
+const sourceLabelById = computed(() => new Map(sources.value.map((item) => [item.id, item.label])))
 
 const activeJobsCount = computed(
   () => recentJobs.value.filter((job) => isActiveJobStatus(job.status)).length,
@@ -181,9 +179,9 @@ const uploadSelection = computed(() =>
 const canUploadSelectedFile = computed(() =>
   Boolean(
     selectedProjectId.value &&
-      uploadFile.value &&
-      uploadSelection.value?.supportStatus === 'supported_now' &&
-      submitMode.value !== 'upload',
+    uploadFile.value &&
+    uploadSelection.value?.supportStatus === 'supported_now' &&
+    submitMode.value !== 'upload',
   ),
 )
 const pageStatus = computed(() => {
@@ -198,7 +196,10 @@ const pageStatus = computed(() => {
     }
   }
 
-  if (recentJobs.value[0] && ['failed', 'retryable_failed', 'canceled'].includes(recentJobs.value[0].status)) {
+  if (
+    recentJobs.value[0] &&
+    ['failed', 'retryable_failed', 'canceled'].includes(recentJobs.value[0].status)
+  ) {
     return {
       status: 'warning',
       label: t('flow.library.statusAttention'),
@@ -215,7 +216,8 @@ const pageStatus = computed(() => {
   return { status: 'draft', label: t('flow.library.statusDraft') }
 })
 const highlightedJob = computed(
-  () => recentJobs.value.find((job) => isActiveJobStatus(job.status)) ?? recentJobs.value[0] ?? null,
+  () =>
+    recentJobs.value.find((job) => isActiveJobStatus(job.status)) ?? recentJobs.value[0] ?? null,
 )
 const jobViewModels = computed<JobViewModel[]>(() =>
   recentJobs.value.map((job) => ({
@@ -264,20 +266,6 @@ const processingStatHint = computed(() => {
 
   return t('flow.library.stats.processingHint')
 })
-
-function slugify(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 48)
-}
-
-function buildExternalKey(prefix: string, seed: string): string {
-  const base = slugify(seed) || prefix
-  return `${prefix}-${base}-${Date.now()}`
-}
 
 function setFeedbackState(state: FeedbackState | null) {
   feedback.value = state
@@ -434,9 +422,21 @@ function formatDocumentStatus(status?: string | null): string {
     return t('flow.library.lists.documents.indexed')
   }
 
-  return status
-    .replace(/[_-]+/g, ' ')
-    .replace(/\b\w/g, (char) => char.toUpperCase())
+  return status.replace(/[_-]+/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase())
+}
+
+function slugify(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48)
+}
+
+function buildExternalKey(prefix: string, seed: string): string {
+  const base = slugify(seed) || prefix
+  return `${prefix}-${base}-${Date.now()}`
 }
 
 function sleep(ms: number): Promise<void> {
@@ -525,7 +525,8 @@ async function refreshProcessingState(showConfirmation: boolean) {
       })
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
+    const message =
+      error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
     const copy = describeIngestionError(message, t)
     setFeedbackState({
       tone: 'danger',
@@ -657,11 +658,10 @@ async function ingestCurrentText() {
 
   try {
     const sourceId = await ensureSource(MANUAL_SOURCE_KIND)
-    const externalKey = buildExternalKey('note', title.value || text.value.slice(0, 48))
     const result = await ingestText({
       project_id: selectedProjectId.value,
       source_id: sourceId,
-      external_key: externalKey,
+      external_key: buildExternalKey('note', title.value || text.value.slice(0, 48)),
       title: title.value.trim() || null,
       text: text.value,
     })
@@ -708,7 +708,8 @@ async function ingestCurrentText() {
         t('flow.library.processing.stages.unknown'),
     })
   } catch (error) {
-    const message = error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
+    const message =
+      error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
     const copy = describeIngestionError(message, t)
     setFeedbackState({
       tone: 'danger',
@@ -810,7 +811,8 @@ async function uploadCurrentFile() {
         t('flow.library.processing.stages.unknown'),
     })
   } catch (error) {
-    const message = error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
+    const message =
+      error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
     const copy = describeIngestionError(message, t)
     setFeedbackState({
       tone: 'danger',
@@ -864,7 +866,8 @@ async function retryJob(jobId: string) {
       })
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
+    const message =
+      error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
     const copy = describeIngestionError(message, t)
     setFeedbackState({
       tone: 'danger',
@@ -894,7 +897,8 @@ onMounted(async () => {
       await loadProjectData(selectedProjectId.value)
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
+    const message =
+      error instanceof Error ? error.message : t('flow.library.notices.genericErrorBody')
     const copy = describeIngestionError(message, t)
     setFeedbackState({
       tone: 'danger',
@@ -953,17 +957,10 @@ onUnmounted(() => {
         </article>
       </div>
 
-      <article
-        v-if="feedback"
-        class="feedback-banner"
-        :data-tone="feedback.tone"
-      >
+      <article v-if="feedback" class="feedback-banner" :data-tone="feedback.tone">
         <strong>{{ feedback.title }}</strong>
         <p>{{ feedback.body }}</p>
-        <p
-          v-if="feedback.detail"
-          class="feedback-banner__detail"
-        >
+        <p v-if="feedback.detail" class="feedback-banner__detail">
           {{ feedback.detail }}
         </p>
       </article>
@@ -1006,10 +1003,7 @@ onUnmounted(() => {
               }}
             </p>
 
-            <div
-              v-if="highlightedJobView"
-              class="processing-meta"
-            >
+            <div v-if="highlightedJobView" class="processing-meta">
               <article class="processing-meta__card">
                 <span>{{ t('flow.library.processing.currentSource') }}</span>
                 <strong>{{ highlightedJobView.sourceLabel }}</strong>
@@ -1032,10 +1026,7 @@ onUnmounted(() => {
               </article>
             </div>
 
-            <div
-              v-if="highlightedJobSteps.length"
-              class="processing-steps"
-            >
+            <div v-if="highlightedJobSteps.length" class="processing-steps">
               <article
                 v-for="step in highlightedJobSteps"
                 :key="step.key"
@@ -1050,24 +1041,15 @@ onUnmounted(() => {
               </article>
             </div>
 
-            <article
-              v-if="highlightedJobView?.error"
-              class="processing-error"
-            >
+            <article v-if="highlightedJobView?.error" class="processing-error">
               <strong>{{ highlightedJobView.error.title }}</strong>
               <p>{{ highlightedJobView.error.body }}</p>
-              <p
-                v-if="highlightedJobView.error.detail"
-                class="processing-error__detail"
-              >
+              <p v-if="highlightedJobView.error.detail" class="processing-error__detail">
                 {{ highlightedJobView.error.detail }}
               </p>
             </article>
 
-            <div
-              v-if="highlightedJobView"
-              class="rr-action-row"
-            >
+            <div v-if="highlightedJobView" class="rr-action-row">
               <button
                 type="button"
                 class="rr-button rr-button--secondary"
@@ -1223,10 +1205,7 @@ onUnmounted(() => {
               <p class="rr-field__hint">{{ t('flow.library.upload.titleHint') }}</p>
             </label>
 
-            <div
-              v-if="uploadFile && uploadSelection"
-              class="upload-selection-card"
-            >
+            <div v-if="uploadFile && uploadSelection" class="upload-selection-card">
               <div class="upload-selection-card__meta">
                 <strong>{{ uploadFile.name }}</strong>
                 <span class="rr-muted">
@@ -1236,11 +1215,7 @@ onUnmounted(() => {
               <StatusBadge :tone="uploadSelection.badgeTone" :label="uploadSelection.badgeLabel" />
             </div>
 
-            <p
-              v-if="uploadSelection"
-              class="rr-banner"
-              :data-tone="uploadSelection.bannerTone"
-            >
+            <p v-if="uploadSelection" class="rr-banner" :data-tone="uploadSelection.bannerTone">
               {{ uploadSelection.message }}
             </p>
 
@@ -1286,15 +1261,8 @@ onUnmounted(() => {
               :message="t('flow.library.processing.emptyBody')"
             />
 
-            <ul
-              v-else
-              class="job-queue"
-            >
-              <li
-                v-for="item in jobViewModels"
-                :key="item.job.id"
-                class="job-queue__item"
-              >
+            <ul v-else class="job-queue">
+              <li v-for="item in jobViewModels" :key="item.job.id" class="job-queue__item">
                 <div class="job-queue__header">
                   <div>
                     <strong>{{ item.sourceLabel }}</strong>
@@ -1321,17 +1289,11 @@ onUnmounted(() => {
                   </span>
                 </div>
 
-                <p
-                  v-if="item.error"
-                  class="job-queue__error"
-                >
+                <p v-if="item.error" class="job-queue__error">
                   {{ item.error.body }}
                 </p>
 
-                <div
-                  v-if="item.job.retryable"
-                  class="job-queue__actions"
-                >
+                <div v-if="item.job.retryable" class="job-queue__actions">
                   <button
                     type="button"
                     class="rr-button rr-button--secondary"
@@ -1365,36 +1327,21 @@ onUnmounted(() => {
               />
             </div>
 
-            <p
-              v-if="!documents.length"
-              class="rr-note"
-            >
+            <p v-if="!documents.length" class="rr-note">
               {{ t('flow.library.lists.documents.emptyMessage') }}
             </p>
 
-            <ul
-              v-else
-              class="inventory-list"
-            >
-              <li
-                v-for="document in visibleDocuments"
-                :key="document.id"
-              >
+            <ul v-else class="inventory-list">
+              <li v-for="document in visibleDocuments" :key="document.id">
                 <div>
                   <strong>{{ document.title || document.external_key }}</strong>
                   <p class="rr-muted">{{ document.external_key }}</p>
                 </div>
-                <StatusBadge
-                  tone="positive"
-                  :label="formatDocumentStatus(document.status)"
-                />
+                <StatusBadge tone="positive" :label="formatDocumentStatus(document.status)" />
               </li>
             </ul>
 
-            <p
-              v-if="remainingDocumentCount > 0"
-              class="rr-note"
-            >
+            <p v-if="remainingDocumentCount > 0" class="rr-note">
               {{ t('flow.library.lists.documents.more', { count: remainingDocumentCount }) }}
             </p>
           </article>
@@ -1415,21 +1362,12 @@ onUnmounted(() => {
               />
             </div>
 
-            <p
-              v-if="!sources.length"
-              class="rr-note"
-            >
+            <p v-if="!sources.length" class="rr-note">
               {{ t('flow.library.lists.sources.emptyMessage') }}
             </p>
 
-            <ul
-              v-else
-              class="inventory-list"
-            >
-              <li
-                v-for="source in visibleSources"
-                :key="source.id"
-              >
+            <ul v-else class="inventory-list">
+              <li v-for="source in visibleSources" :key="source.id">
                 <div>
                   <strong>{{ source.label }}</strong>
                   <p class="rr-muted">{{ formatSourceKind(source.source_kind, t) }}</p>
@@ -1438,10 +1376,7 @@ onUnmounted(() => {
               </li>
             </ul>
 
-            <p
-              v-if="remainingSourceCount > 0"
-              class="rr-note"
-            >
+            <p v-if="remainingSourceCount > 0" class="rr-note">
               {{ t('flow.library.lists.sources.more', { count: remainingSourceCount }) }}
             </p>
           </article>

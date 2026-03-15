@@ -126,4 +126,133 @@ export default {
       ],
     },
   },
+  states: {
+    chooseProject: 'Choose project',
+    loadingSurface: 'Loading graph surface',
+    backendPending: 'Backend entry point pending',
+    surfaceDegraded: 'Graph surface degraded',
+  },
+  actions: {
+    processing: 'Setup scope',
+    ingest: 'Ingest content',
+  },
+  surface: {
+    noProject: {
+      status: 'Blocked',
+      headline: 'Select a project to inspect graph relations.',
+      body: 'This screen is ready to show persisted entities and relation coverage as soon as a project scope is selected.',
+      highlights: [
+        'Project scope comes from the same workspace flow used by Files and Search.',
+        'The page stays explicit about missing context instead of inventing graph data.',
+        'Once a project is selected, the screen probes live graph endpoints immediately.',
+      ],
+    },
+    unavailable: {
+      status: 'Entry point ready',
+      headline: 'Graph UI is wired, but this backend build does not expose graph runtime routes yet.',
+      body: 'The product surface is project-scoped and ready for real graph data, but `/graph-products/*` still needs backend wiring in the running environment.',
+      highlights: [
+        'No fake entities or relations are rendered when the route is unavailable.',
+        'Project selection, status mapping, and empty states are already product-ready.',
+        'The same screen will light up automatically once graph routes ship on the backend.',
+      ],
+    },
+    live: {
+      status: 'Live graph rows',
+      headline: 'Inspect persisted entities, relation coverage, and search results for the selected project.',
+      body: 'This view is reading real graph rows. Relation search and entity detail are live where the backend has persisted records.',
+      highlights: [
+        'Search results come from persisted entities and relation rows, not placeholder text.',
+        'Entity detail exposes aliases, supporting documents, chunk references, and observed relations.',
+        'Warnings stay visible when extraction tracking or provenance depth are still partial.',
+      ],
+    },
+    waiting: {
+      status: 'Waiting for extraction',
+      headline: 'Graph endpoints respond, but this project has no persisted relation rows yet.',
+      body: 'The screen is live against the backend, and the current blocker is runtime extraction populating entity and relation rows for this project.',
+      highlights: [
+        'The page confirms backend reachability even when graph counts are zero.',
+        'Entity and relation counts stay at zero until extraction writes persisted rows.',
+        'As soon as rows appear, search and detail panels switch to live data without UI changes.',
+      ],
+    },
+  },
+  metricLabels: {
+    entities: 'Entities',
+    relations: 'Relations',
+    extractionRuns: 'Extraction runs',
+    noProjectSelected: 'No project selected',
+    awaitingProjectScope: 'Awaiting project scope',
+    backendRoutePending: 'Backend route pending',
+  },
+  panels: {
+    summary: {
+      eyebrow: 'Scope and readiness',
+      title: 'Graph summary',
+      description:
+        'Project-scoped graph readiness, live coverage, and the blocker that still keeps relation extraction partial.',
+      workspace: 'Workspace',
+      workspaceEmpty: 'No workspace selected',
+      project: 'Project',
+      projectPlaceholder: 'Select a project',
+      relationKinds: 'Relation kinds',
+      entityKinds: 'Entity kinds',
+      currentBlocker: 'Current blocker',
+      blockerApiUnavailable: 'Backend route is not wired in this runtime build yet.',
+      blockerPartial: 'Extraction tracking and provenance depth remain partial.',
+      blockerNoRows: 'Runtime extraction has not written entity and relation rows for this project yet.',
+    },
+    search: {
+      eyebrow: 'Discovery',
+      title: 'Graph search',
+      description:
+        'Search persisted entities and relations when the graph runtime is available. Without a query, the panel shows top entities and sample relations.',
+      label: 'Search graph concepts',
+      placeholder: 'Search entities, relations, aliases...',
+      loading: 'Loading graph',
+      noProject: {
+        title: 'Select a project first',
+        message: 'Graph is scoped per project. Choose a project to inspect entity and relation coverage.',
+        hint: 'The selector in this panel uses the same session scope as the rest of the operator shell.',
+      },
+      unavailable: {
+        title: 'Graph backend route is not available',
+        message: 'This product surface is ready, but the running backend does not expose `/graph-products/*` yet.',
+        hint: 'Backend wiring is the remaining blocker before live entity and relation data can appear here.',
+      },
+      noMatches: {
+        title: 'No graph matches yet',
+        message: 'No persisted entities or relations matched that search.',
+        hint: 'Try broader terms like a canonical entity name, alias, or relation type.',
+      },
+      noRows: {
+        title: 'No graph rows yet',
+        message: 'This project does not have persisted graph rows yet.',
+        hint: 'Once extraction writes entity and relation rows, the search panel will populate automatically.',
+      },
+      searching: 'Searching graph records...',
+    },
+    detail: {
+      eyebrow: 'Detail',
+      title: 'Graph detail',
+      description:
+        'Inspect the selected entity or relation without inventing provenance the backend does not actually expose yet.',
+      loading: 'Loading detail',
+      loadErrorTitle: 'Entity detail could not be loaded',
+      loadErrorHint:
+        'Coverage and search results can still be reviewed while backend detail for this entity is investigated.',
+      emptySelection: {
+        title: 'No graph detail selected',
+        message: 'Pick an entity or relation from the search panel to inspect live graph coverage.',
+        hint: 'The detail panel only renders persisted graph data and explicit blockers.',
+      },
+    },
+  },
+  errors: {
+    loadEntityDetail: 'Failed to load entity detail',
+    loadPageContext: 'Failed to load graph page context',
+    loadCoverage: 'Failed to load graph coverage',
+    searchFailed: 'Graph search failed',
+  },
 } as const

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { RouterLink } from 'vue-router'
 
 import { fetchProjects, fetchWorkspaces } from 'src/boot/api'
@@ -7,6 +8,7 @@ import PageSection from 'src/components/shell/PageSection.vue'
 import StatusBadge from 'src/components/shell/StatusBadge.vue'
 import EmptyStateCard from 'src/components/state/EmptyStateCard.vue'
 import LoadingSkeletonPanel from 'src/components/state/LoadingSkeletonPanel.vue'
+import { translateStatusLabel } from 'src/i18n/helpers'
 import {
   fetchGraphEntityDetail,
   fetchGraphProductSnapshot,
@@ -68,6 +70,7 @@ interface GraphSelection {
   kind: 'entity' | 'relation'
 }
 
+const { t, tm } = useI18n()
 const workspaces = ref<WorkspaceItem[]>([])
 const projects = ref<ProjectItem[]>([])
 
@@ -114,51 +117,48 @@ const coverageWarning = computed(() => currentCoverage.value?.warning ?? null)
 
 const pageStatus = computed(() => {
   if (!selectedProject.value) {
-    return { status: 'blocked', label: 'Choose project' }
+    return { status: 'blocked', label: t('graph.states.chooseProject') }
   }
 
   if (loadingSurface.value) {
-    return { status: 'pending', label: 'Loading graph surface' }
+    return { status: 'pending', label: t('graph.states.loadingSurface') }
   }
 
   if (apiUnavailable.value) {
-    return { status: 'blocked', label: 'Backend entry point pending' }
+    return { status: 'blocked', label: t('graph.states.backendPending') }
   }
 
   if (surfaceError.value) {
-    return { status: 'warning', label: 'Graph surface degraded' }
+    return { status: 'warning', label: t('graph.states.surfaceDegraded') }
   }
 
   return {
     status: currentCoverage.value?.status ?? 'draft',
-    label: formatStatusLabel(currentCoverage.value?.status ?? 'preview'),
+    label: translateStatusLabel(currentCoverage.value?.status ?? 'preview'),
   }
 })
+
+function translateList(key: string): string[] {
+  const value = tm(key)
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
 
 const graphSummary = computed(() => {
   if (!selectedProject.value) {
     return {
-      status: 'Blocked',
-      headline: 'Select a project to inspect graph relations.',
-      body: 'This screen is ready to show persisted entities and relation coverage as soon as a project scope is selected.',
-      highlights: [
-        'Project scope comes from the same workspace flow used by Ingest and Ask.',
-        'The page stays explicit about missing context instead of inventing graph data.',
-        'Once a project is selected, the screen probes live graph endpoints immediately.',
-      ],
+      status: t('graph.surface.noProject.status'),
+      headline: t('graph.surface.noProject.headline'),
+      body: t('graph.surface.noProject.body'),
+      highlights: translateList('graph.surface.noProject.highlights'),
     }
   }
 
   if (apiUnavailable.value) {
     return {
-      status: 'Entry point ready',
-      headline: 'Graph UI is wired, but this backend build does not expose graph runtime routes yet.',
-      body: 'The product surface is now project-scoped and ready for real graph data, but `/graph-products/*` still needs backend wiring in the running environment.',
-      highlights: [
-        'No fake entities or relations are rendered when the route is unavailable.',
-        'Project selection, status mapping, and empty states are already product-ready.',
-        'The same screen will light up automatically once graph routes ship on the backend.',
-      ],
+      status: t('graph.surface.unavailable.status'),
+      headline: t('graph.surface.unavailable.headline'),
+      body: t('graph.surface.unavailable.body'),
+      highlights: translateList('graph.surface.unavailable.highlights'),
     }
   }
 
@@ -167,51 +167,43 @@ const graphSummary = computed(() => {
     (currentCoverage.value.entity_count > 0 || currentCoverage.value.relation_count > 0)
   ) {
     return {
-      status: 'Live graph rows',
-      headline: 'Inspect persisted entities, relation coverage, and search results for the selected project.',
-      body: 'This view is reading real graph rows. Relation search and entity detail are live where the backend has persisted records.',
-      highlights: [
-        'Search results come from persisted entities and relation rows, not placeholder text.',
-        'Entity detail exposes aliases, supporting documents, chunk references, and observed relations.',
-        'Warnings stay visible when extraction tracking or provenance depth are still partial.',
-      ],
+      status: t('graph.surface.live.status'),
+      headline: t('graph.surface.live.headline'),
+      body: t('graph.surface.live.body'),
+      highlights: translateList('graph.surface.live.highlights'),
     }
   }
 
   return {
-    status: 'Waiting for extraction',
-    headline: 'Graph endpoints respond, but this project has no persisted relation rows yet.',
-    body: 'The screen is live against the backend, and the current blocker is runtime extraction populating `entity` and `relation` rows for this project.',
-    highlights: [
-      'The page confirms backend reachability even when graph counts are zero.',
-      'Entity and relation counts stay at zero until extraction writes persisted rows.',
-      'As soon as rows appear, search and detail panels switch to live data without UI changes.',
-    ],
+    status: t('graph.surface.waiting.status'),
+    headline: t('graph.surface.waiting.headline'),
+    body: t('graph.surface.waiting.body'),
+    highlights: translateList('graph.surface.waiting.highlights'),
   }
 })
 
 const productMetrics = computed<GraphProductMetric[]>(() => [
   {
-    label: 'Entities',
+    label: t('graph.metricLabels.entities'),
     value: currentCoverage.value
       ? formatCount(currentCoverage.value.entity_count, 'entity')
-      : 'No project selected',
+      : t('graph.metricLabels.noProjectSelected'),
     tone: currentCoverage.value && currentCoverage.value.entity_count > 0 ? 'good' : 'warning',
   },
   {
-    label: 'Relations',
+    label: t('graph.metricLabels.relations'),
     value: currentCoverage.value
       ? formatCount(currentCoverage.value.relation_count, 'relation')
-      : 'Awaiting project scope',
+      : t('graph.metricLabels.awaitingProjectScope'),
     tone: currentCoverage.value && currentCoverage.value.relation_count > 0 ? 'good' : 'warning',
   },
   {
-    label: 'Extraction runs',
+    label: t('graph.metricLabels.extractionRuns'),
     value: currentCoverage.value
       ? formatCount(currentCoverage.value.extraction_runs, 'run')
       : apiUnavailable.value
-        ? 'Backend route pending'
-        : 'Awaiting project scope',
+        ? t('graph.metricLabels.backendRoutePending')
+        : t('graph.metricLabels.awaitingProjectScope'),
     tone: currentCoverage.value && currentCoverage.value.extraction_runs > 0 ? 'good' : 'warning',
   },
 ])
@@ -349,7 +341,8 @@ watch(selectedItem, (item) => {
         return
       }
 
-      detailError.value = error instanceof Error ? error.message : 'Failed to load entity detail'
+      detailError.value =
+        error instanceof Error ? error.message : t('graph.errors.loadEntityDetail')
     })
     .finally(() => {
       if (requestId === detailRequestId) {
@@ -384,13 +377,13 @@ watch(searchQuery, (value) => {
 
         searchResponse.value = response
       })
-      .catch((error: unknown) => {
-        if (requestId !== searchRequestId) {
-          return
-        }
+    .catch((error: unknown) => {
+      if (requestId !== searchRequestId) {
+        return
+      }
 
-        searchError.value = error instanceof Error ? error.message : 'Graph search failed'
-      })
+      searchError.value = error instanceof Error ? error.message : t('graph.errors.searchFailed')
+    })
       .finally(() => {
         if (requestId === searchRequestId) {
           loadingSearch.value = false
@@ -404,8 +397,7 @@ onMounted(async () => {
     await loadContext()
     await loadGraphSurface(selectedProjectId.value)
   } catch (error) {
-    surfaceError.value =
-      error instanceof Error ? error.message : 'Failed to load graph page context'
+    surfaceError.value = error instanceof Error ? error.message : t('graph.errors.loadPageContext')
   }
 })
 
@@ -473,8 +465,7 @@ async function loadGraphSurface(projectId: string) {
       apiUnavailable.value = true
       surfaceError.value = null
     } else {
-      surfaceError.value =
-        error instanceof Error ? error.message : 'Failed to load graph coverage'
+      surfaceError.value = error instanceof Error ? error.message : t('graph.errors.loadCoverage')
     }
   } finally {
     if (requestId === surfaceRequestId) {
@@ -554,12 +545,6 @@ function formatReasonsSummary(reasons: string[], chunkCount: number): string {
   return `Matched on ${reasons.join(', ')}. ${formatCount(chunkCount, 'supporting chunk')} linked to this record.`
 }
 
-function formatStatusLabel(value: string): string {
-  return value
-    .replace(/[_-]+/g, ' ')
-    .replace(/\b\w/g, (char) => char.toUpperCase())
-}
-
 function formatRelationLine(relation: GraphRelationDetail): string {
   return `${relation.from_entity_name} ${relation.relation.relation_type} ${relation.to_entity_name}`
 }
@@ -567,18 +552,18 @@ function formatRelationLine(relation: GraphRelationDetail): string {
 
 <template>
   <PageSection
-    eyebrow="Knowledge graph"
-    title="Graph"
-    description="Inspect live graph coverage for the selected project, search persisted entities and relations when available, and keep backend blockers explicit when runtime extraction is still missing."
+    :eyebrow="t('graph.page.eyebrow')"
+    :title="t('graph.page.title')"
+    :description="t('graph.page.description')"
     :status="pageStatus.status"
     :status-label="pageStatus.label"
   >
     <template #actions>
-      <RouterLink class="rr-button rr-button--secondary" to="/setup">
-        Setup scope
+      <RouterLink class="rr-button rr-button--secondary" to="/processing">
+        {{ t('graph.actions.processing') }}
       </RouterLink>
       <RouterLink class="rr-button rr-button--secondary" to="/ingest">
-        Ingest content
+        {{ t('graph.actions.ingest') }}
       </RouterLink>
     </template>
 
@@ -619,23 +604,20 @@ function formatRelationLine(relation: GraphRelationDetail): string {
       <article class="card workspace-panel">
         <div class="panel-header">
           <div>
-            <p class="rr-kicker">Scope and readiness</p>
-            <h3>Graph summary</h3>
-            <p class="panel-subtitle">
-              Project-scoped graph readiness, live coverage, and the blocker that still keeps
-              relation extraction partial.
-            </p>
+            <p class="rr-kicker">{{ t('graph.panels.summary.eyebrow') }}</p>
+            <h3>{{ t('graph.panels.summary.title') }}</h3>
+            <p class="panel-subtitle">{{ t('graph.panels.summary.description') }}</p>
           </div>
           <StatusBadge :status="pageStatus.status" :label="pageStatus.label" />
         </div>
 
         <div class="summary-list">
           <article class="summary-row">
-            <span class="summary-row__label">Workspace</span>
-            <strong>{{ selectedWorkspace?.name ?? 'No workspace selected' }}</strong>
+            <span class="summary-row__label">{{ t('graph.panels.summary.workspace') }}</span>
+            <strong>{{ selectedWorkspace?.name ?? t('graph.panels.summary.workspaceEmpty') }}</strong>
           </article>
           <article class="summary-row">
-            <span class="summary-row__label">Project</span>
+            <span class="summary-row__label">{{ t('graph.panels.summary.project') }}</span>
             <div class="summary-row__control">
               <select
                 class="rr-control"
@@ -643,7 +625,7 @@ function formatRelationLine(relation: GraphRelationDetail): string {
                 :disabled="projects.length === 0"
                 @change="handleProjectChange"
               >
-                <option value="">Select a project</option>
+                <option value="">{{ t('graph.panels.summary.projectPlaceholder') }}</option>
                 <option v-for="project in projects" :key="project.id" :value="project.id">
                   {{ project.name }}
                 </option>
@@ -651,22 +633,22 @@ function formatRelationLine(relation: GraphRelationDetail): string {
             </div>
           </article>
           <article class="summary-row">
-            <span class="summary-row__label">Relation kinds</span>
+            <span class="summary-row__label">{{ t('graph.panels.summary.relationKinds') }}</span>
             <strong>{{ relationKinds }}</strong>
           </article>
           <article class="summary-row">
-            <span class="summary-row__label">Entity kinds</span>
+            <span class="summary-row__label">{{ t('graph.panels.summary.entityKinds') }}</span>
             <strong>{{ entityKinds }}</strong>
           </article>
           <article class="summary-row">
-            <span class="summary-row__label">Current blocker</span>
+            <span class="summary-row__label">{{ t('graph.panels.summary.currentBlocker') }}</span>
             <strong>
               {{
                 apiUnavailable
-                  ? 'Backend route is not wired in this runtime build yet.'
+                  ? t('graph.panels.summary.blockerApiUnavailable')
                   : currentCoverage?.relation_count
-                    ? 'Extraction tracking and provenance depth remain partial.'
-                    : 'Runtime extraction has not written entity/relation rows for this project yet.'
+                    ? t('graph.panels.summary.blockerPartial')
+                    : t('graph.panels.summary.blockerNoRows')
               }}
             </strong>
           </article>
@@ -676,42 +658,39 @@ function formatRelationLine(relation: GraphRelationDetail): string {
       <article class="card workspace-panel">
         <div class="panel-header panel-header--stacked">
           <div>
-            <p class="rr-kicker">Discovery</p>
-            <h3>Graph search</h3>
-            <p class="panel-subtitle">
-              Search persisted entities and relations when the graph runtime is available. Without a
-              query, the panel shows top entities and sample relations.
-            </p>
+            <p class="rr-kicker">{{ t('graph.panels.search.eyebrow') }}</p>
+            <h3>{{ t('graph.panels.search.title') }}</h3>
+            <p class="panel-subtitle">{{ t('graph.panels.search.description') }}</p>
           </div>
           <label class="search-field">
-            <span class="search-field__label">Search graph concepts</span>
+            <span class="search-field__label">{{ t('graph.panels.search.label') }}</span>
             <input
               v-model="searchQuery"
               type="text"
               :disabled="!selectedProjectId || apiUnavailable"
-              placeholder="Search entities, relations, aliases..."
+              :placeholder="t('graph.panels.search.placeholder')"
             />
           </label>
         </div>
 
         <LoadingSkeletonPanel
           v-if="loadingSurface"
-          title="Loading graph"
+          :title="t('graph.panels.search.loading')"
           :lines="5"
         />
 
         <EmptyStateCard
           v-else-if="!selectedProjectId"
-          title="Select a project first"
-          message="Graph is scoped per project. Choose a project to inspect entity and relation coverage."
-          hint="The selector in this panel uses the same session scope as the rest of the operator shell."
+          :title="t('graph.panels.search.noProject.title')"
+          :message="t('graph.panels.search.noProject.message')"
+          :hint="t('graph.panels.search.noProject.hint')"
         />
 
         <EmptyStateCard
           v-else-if="apiUnavailable"
-          title="Graph backend route is not available"
-          message="This product surface is ready, but the running backend does not expose `/graph-products/*` yet."
-          hint="Backend wiring is the remaining blocker before live entity and relation data can appear here."
+          :title="t('graph.panels.search.unavailable.title')"
+          :message="t('graph.panels.search.unavailable.message')"
+          :hint="t('graph.panels.search.unavailable.hint')"
         />
 
         <div v-else-if="visibleResults.length" class="search-results">
@@ -734,20 +713,20 @@ function formatRelationLine(relation: GraphRelationDetail): string {
 
         <EmptyStateCard
           v-else
-          :title="searchQuery.trim() ? 'No graph matches yet' : 'No graph rows yet'"
+          :title="searchQuery.trim() ? t('graph.panels.search.noMatches.title') : t('graph.panels.search.noRows.title')"
           :message="
             searchQuery.trim()
-              ? 'No persisted entities or relations matched that search.'
-              : 'This project does not have persisted graph rows yet.'
+              ? t('graph.panels.search.noMatches.message')
+              : t('graph.panels.search.noRows.message')
           "
           :hint="
             searchQuery.trim()
-              ? 'Try broader terms like a canonical entity name, alias, or relation type.'
-              : 'Once extraction writes entity and relation rows, the search panel will populate automatically.'
+              ? t('graph.panels.search.noMatches.hint')
+              : t('graph.panels.search.noRows.hint')
           "
         />
 
-        <p v-if="loadingSearch" class="rr-note">Searching graph records...</p>
+        <p v-if="loadingSearch" class="rr-note">{{ t('graph.panels.search.searching') }}</p>
         <p v-if="searchError" class="rr-banner" data-tone="danger">
           {{ searchError }}
         </p>
@@ -757,18 +736,15 @@ function formatRelationLine(relation: GraphRelationDetail): string {
     <article class="card workspace-panel detail-panel">
       <div class="panel-header">
         <div>
-          <p class="rr-kicker">Detail</p>
-          <h3>Graph detail</h3>
-          <p class="panel-subtitle">
-            Inspect the selected entity or relation without inventing provenance the backend does
-            not actually expose yet.
-          </p>
+          <p class="rr-kicker">{{ t('graph.panels.detail.eyebrow') }}</p>
+          <h3>{{ t('graph.panels.detail.title') }}</h3>
+          <p class="panel-subtitle">{{ t('graph.panels.detail.description') }}</p>
         </div>
       </div>
 
       <LoadingSkeletonPanel
         v-if="loadingDetail"
-        title="Loading detail"
+        :title="t('graph.panels.detail.loading')"
         :lines="4"
       />
 
@@ -896,16 +872,16 @@ function formatRelationLine(relation: GraphRelationDetail): string {
 
       <EmptyStateCard
         v-else-if="detailError"
-        title="Entity detail could not be loaded"
+        :title="t('graph.panels.detail.loadErrorTitle')"
         :message="detailError"
-        hint="Coverage and search results can still be reviewed while backend detail for this entity is investigated."
+        :hint="t('graph.panels.detail.loadErrorHint')"
       />
 
       <EmptyStateCard
         v-else
-        title="No graph detail selected"
-        message="Pick an entity or relation from the search panel to inspect live graph coverage."
-        hint="The detail panel only renders persisted graph data and explicit blockers."
+        :title="t('graph.panels.detail.emptySelection.title')"
+        :message="t('graph.panels.detail.emptySelection.message')"
+        :hint="t('graph.panels.detail.emptySelection.hint')"
       />
     </article>
   </PageSection>

@@ -126,4 +126,133 @@ export default {
       ],
     },
   },
+  states: {
+    chooseProject: 'Выберите проект',
+    loadingSurface: 'Загружаем граф',
+    backendPending: 'Точка входа backend еще не готова',
+    surfaceDegraded: 'Поверхность графа деградировала',
+  },
+  actions: {
+    processing: 'Настроить scope',
+    ingest: 'Загрузить контент',
+  },
+  surface: {
+    noProject: {
+      status: 'Заблокировано',
+      headline: 'Выберите проект, чтобы проверить связи графа.',
+      body: 'Этот экран готов показывать сохраненные сущности и покрытие связей сразу после выбора project scope.',
+      highlights: [
+        'Project scope приходит из того же workspace flow, который используют Файлы и Поиск.',
+        'Страница явно показывает отсутствие контекста и не выдумывает graph-данные.',
+        'Как только проект выбран, экран сразу пробует живые graph endpoint-ы.',
+      ],
+    },
+    unavailable: {
+      status: 'Точка входа готова',
+      headline: 'UI для графа готов, но эта сборка backend пока не отдает runtime routes для графа.',
+      body: 'Продуктовая поверхность уже project-scoped и готова к реальным graph-данным, но `/graph-products/*` все еще требует wiring в текущем окружении.',
+      highlights: [
+        'При недоступном маршруте UI не рисует фейковые сущности и связи.',
+        'Выбор проекта, статусы и empty states уже готовы для продукта.',
+        'Как только backend отдаст graph routes, эта же страница автоматически загорится живыми данными.',
+      ],
+    },
+    live: {
+      status: 'Живые graph rows',
+      headline: 'Проверяйте сохраненные сущности, покрытие связей и результаты поиска для выбранного проекта.',
+      body: 'Эта страница читает реальные graph rows. Поиск по связям и детали сущностей работают там, где backend уже сохранил записи.',
+      highlights: [
+        'Результаты поиска строятся по сохраненным сущностям и relation rows, а не по placeholder-тексту.',
+        'Детали сущности показывают алиасы, документы, ссылки на чанки и наблюдаемые связи.',
+        'Предупреждения остаются видимыми, если tracking extraction или глубина provenance еще частичны.',
+      ],
+    },
+    waiting: {
+      status: 'Ждем extraction',
+      headline: 'Graph endpoints отвечают, но у этого проекта пока нет сохраненных relation rows.',
+      body: 'Экран уже работает против backend, а текущий блокер в том, что runtime extraction еще не заполнил entity и relation rows для этого проекта.',
+      highlights: [
+        'Страница подтверждает достижимость backend даже когда graph counts равны нулю.',
+        'Счетчики сущностей и связей останутся нулевыми, пока extraction не запишет строки.',
+        'Как только строки появятся, поиск и панель деталей переключатся на живые данные без изменений в UI.',
+      ],
+    },
+  },
+  metricLabels: {
+    entities: 'Сущности',
+    relations: 'Связи',
+    extractionRuns: 'Запуски extraction',
+    noProjectSelected: 'Проект не выбран',
+    awaitingProjectScope: 'Ждем scope проекта',
+    backendRoutePending: 'Маршрут backend еще не готов',
+  },
+  panels: {
+    summary: {
+      eyebrow: 'Scope и готовность',
+      title: 'Сводка по графу',
+      description:
+        'Project-scoped готовность графа, живое покрытие и текущее ограничение, которое пока мешает полноценно извлекать связи.',
+      workspace: 'Workspace',
+      workspaceEmpty: 'Workspace не выбран',
+      project: 'Проект',
+      projectPlaceholder: 'Выберите проект',
+      relationKinds: 'Типы связей',
+      entityKinds: 'Типы сущностей',
+      currentBlocker: 'Текущий блокер',
+      blockerApiUnavailable: 'Маршрут backend в этой runtime-сборке еще не подключен.',
+      blockerPartial: 'Трекинг extraction и глубина provenance пока частичные.',
+      blockerNoRows: 'Runtime extraction еще не записал entity и relation rows для этого проекта.',
+    },
+    search: {
+      eyebrow: 'Поиск',
+      title: 'Поиск по графу',
+      description:
+        'Ищите сохраненные сущности и связи, когда graph runtime доступен. Без запроса панель показывает top entities и sample relations.',
+      label: 'Искать graph concepts',
+      placeholder: 'Ищите сущности, связи, алиасы...',
+      loading: 'Загружаем граф',
+      noProject: {
+        title: 'Сначала выберите проект',
+        message: 'Граф привязан к проекту. Выберите проект, чтобы посмотреть покрытие сущностей и связей.',
+        hint: 'Селектор в этой панели использует тот же session scope, что и остальная shell-навигация.',
+      },
+      unavailable: {
+        title: 'Маршрут graph backend недоступен',
+        message: 'Эта продуктовая поверхность готова, но текущий backend еще не отдает `/graph-products/*`.',
+        hint: 'Подключение backend остается последним блокером перед появлением живых данных по сущностям и связям.',
+      },
+      noMatches: {
+        title: 'Совпадений в графе пока нет',
+        message: 'Ни одна сохраненная сущность или связь не совпала с этим запросом.',
+        hint: 'Попробуйте более общий canonical name, alias или relation type.',
+      },
+      noRows: {
+        title: 'Graph rows пока нет',
+        message: 'У этого проекта пока нет сохраненных graph rows.',
+        hint: 'Как только extraction запишет entity и relation rows, панель поиска заполнится автоматически.',
+      },
+      searching: 'Ищем graph records...',
+    },
+    detail: {
+      eyebrow: 'Детали',
+      title: 'Детали графа',
+      description:
+        'Проверяйте выбранную сущность или связь, не выдумывая provenance, которого backend еще реально не отдает.',
+      loading: 'Загружаем детали',
+      loadErrorTitle: 'Не удалось загрузить детали сущности',
+      loadErrorHint:
+        'Покрытие и результаты поиска все равно можно проверить, пока backend-детали этой сущности расследуются.',
+      emptySelection: {
+        title: 'Детали графа не выбраны',
+        message: 'Выберите сущность или связь из панели поиска, чтобы посмотреть живое покрытие графа.',
+        hint: 'Панель деталей рендерит только сохраненные graph-данные и явные блокеры.',
+      },
+    },
+  },
+  errors: {
+    loadEntityDetail: 'Не удалось загрузить детали сущности',
+    loadPageContext: 'Не удалось загрузить контекст graph page',
+    loadCoverage: 'Не удалось загрузить покрытие графа',
+    searchFailed: 'Поиск по графу завершился ошибкой',
+  },
 } as const
