@@ -32,7 +32,6 @@ import {
   isActiveJobStatus,
   isTerminalJobStatus,
   jobDetailFromSummary,
-  shortJobId,
 } from 'src/pages/support/ingestion-status'
 import { buildFileInventory, matchesInventoryFilter } from 'src/pages/support/file-library'
 import { getSelectedProjectId, getSelectedWorkspaceId } from 'src/stores/flow'
