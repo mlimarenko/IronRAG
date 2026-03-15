@@ -12,16 +12,20 @@ import { translateStatusLabel } from 'src/i18n/helpers'
 import {
   fetchGraphEntityDetail,
   fetchGraphProductSnapshot,
+  fetchGraphProjectDiagnostics,
   fetchGraphProjectSummary,
+  fetchGraphSubgraph,
   isGraphApiUnavailableError,
   searchGraphProduct,
   type GraphEntityDetailResponse,
   type GraphEntitySummary,
   type GraphProductSnapshot,
+  type GraphProjectDiagnosticsResponse,
   type GraphProjectSummaryResponse,
   type GraphRelationDetail,
   type GraphRelationSummary,
   type GraphSearchResponse,
+  type GraphSubgraphResponse,
 } from 'src/lib/graphProduct'
 import {
   getSelectedProjectId,
@@ -77,11 +81,14 @@ const projects = ref<ProjectItem[]>([])
 const selectedWorkspaceId = ref(getSelectedWorkspaceId())
 const selectedProjectId = ref(getSelectedProjectId())
 const searchQuery = ref('')
+const subgraphDepth = ref(1)
 
 const productSnapshot = ref<GraphProductSnapshot | null>(null)
 const projectSummary = ref<GraphProjectSummaryResponse | null>(null)
+const projectDiagnostics = ref<GraphProjectDiagnosticsResponse | null>(null)
 const searchResponse = ref<GraphSearchResponse | null>(null)
 const entityDetail = ref<GraphEntityDetailResponse | null>(null)
+const entitySubgraph = ref<GraphSubgraphResponse | null>(null)
 
 const loadingSurface = ref(false)
 const loadingSearch = ref(false)
@@ -112,8 +119,23 @@ const entityNameById = computed<Record<string, string>>(() => {
     productSnapshot.value.entities.map((entity) => [entity.id, entity.canonical_name]),
   )
 })
-const currentCoverage = computed(() => projectSummary.value?.coverage ?? productSnapshot.value?.coverage ?? null)
-const coverageWarning = computed(() => currentCoverage.value?.warning ?? null)
+const currentCoverage = computed(
+  () => projectDiagnostics.value?.coverage ?? projectSummary.value?.coverage ?? productSnapshot.value?.coverage ?? null,
+)
+const coverageWarning = computed(
+  () => projectDiagnostics.value?.coverage.warning ?? currentCoverage.value?.warning ?? null,
+)
+const readinessSummary = computed(() => projectDiagnostics.value?.readiness ?? null)
+const contentSummary = computed(() => projectDiagnostics.value?.content ?? null)
+const provenanceSummary = computed(() => projectDiagnostics.value?.provenance ?? null)
+const diagnosticsBlockers = computed(() => readinessSummary.value?.blockers ?? [])
+const diagnosticsNextSteps = computed(() => readinessSummary.value?.next_steps ?? [])
+const canLoadSubgraph = computed(() =>
+  Boolean(selectedProjectId.value && selectedCard.value?.kind === 'entity' && !apiUnavailable.value),
+)
+const selectedSubgraphEntityName = computed(() =>
+  selectedCard.value?.kind === 'entity' ? selectedCard.value.title : '',
+)
 
 const pageStatus = computed(() => {
   if (!selectedProject.value) {
@@ -138,7 +160,7 @@ const pageStatus = computed(() => {
   }
 })
 
-function translateList(key: string): string[] {
+const translateList = (key: string): string[] => {
   const value = tm(key)
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
 }
@@ -220,7 +242,7 @@ const defaultResultCards = computed<GraphResultCard[]>(() => {
     id: entity.id,
     kind: 'entity' as const,
     title: entity.canonical_name,
-    subtitle: entity.entity_type ?? 'Entity',
+    subtitle: 'Entity',
     summary: `${formatCount(entity.source_chunk_count, 'supporting chunk')} linked to this entity.`,
     badge: 'Entity',
     sourceChunkCount: entity.source_chunk_count,
@@ -293,6 +315,7 @@ watch(
     if (!items.length) {
       selectedItem.value = null
       entityDetail.value = null
+      entitySubgraph.value = null
       detailError.value = null
       return
     }
@@ -315,9 +338,10 @@ watch(
   { immediate: true },
 )
 
-watch(selectedItem, (item) => {
+watch([selectedItem, subgraphDepth], ([item]) => {
   detailRequestId += 1
   entityDetail.value = null
+  entitySubgraph.value = null
   detailError.value = null
   loadingDetail.value = false
 
@@ -328,13 +352,17 @@ watch(selectedItem, (item) => {
   const requestId = detailRequestId
   loadingDetail.value = true
 
-  void fetchGraphEntityDetail(selectedProjectId.value, item.id)
-    .then((response) => {
+  void Promise.all([
+    fetchGraphEntityDetail(selectedProjectId.value, item.id),
+    fetchGraphSubgraph(selectedProjectId.value, item.id, subgraphDepth.value),
+  ])
+    .then(([detail, subgraph]) => {
       if (requestId !== detailRequestId) {
         return
       }
 
-      entityDetail.value = response
+      entityDetail.value = detail
+      entitySubgraph.value = subgraph
     })
     .catch((error: unknown) => {
       if (requestId !== detailRequestId) {
@@ -377,13 +405,13 @@ watch(searchQuery, (value) => {
 
         searchResponse.value = response
       })
-    .catch((error: unknown) => {
-      if (requestId !== searchRequestId) {
-        return
-      }
+      .catch((error: unknown) => {
+        if (requestId !== searchRequestId) {
+          return
+        }
 
-      searchError.value = error instanceof Error ? error.message : t('graph.errors.searchFailed')
-    })
+        searchError.value = error instanceof Error ? error.message : t('graph.errors.searchFailed')
+      })
       .finally(() => {
         if (requestId === searchRequestId) {
           loadingSearch.value = false
@@ -429,6 +457,7 @@ async function loadGraphSurface(projectId: string) {
   searchQuery.value = ''
   searchResponse.value = null
   entityDetail.value = null
+  entitySubgraph.value = null
   selectedItem.value = null
   apiUnavailable.value = false
   surfaceError.value = null
@@ -436,6 +465,8 @@ async function loadGraphSurface(projectId: string) {
   detailError.value = null
   productSnapshot.value = null
   projectSummary.value = null
+  projectDiagnostics.value = null
+  subgraphDepth.value = 1
 
   if (!projectId) {
     loadingSurface.value = false
@@ -445,9 +476,10 @@ async function loadGraphSurface(projectId: string) {
   loadingSurface.value = true
 
   try {
-    const [snapshot, summary] = await Promise.all([
+    const [snapshot, summary, diagnostics] = await Promise.all([
       fetchGraphProductSnapshot(projectId),
       fetchGraphProjectSummary(projectId),
+      fetchGraphProjectDiagnostics(projectId),
     ])
 
     if (requestId !== surfaceRequestId) {
@@ -456,6 +488,7 @@ async function loadGraphSurface(projectId: string) {
 
     productSnapshot.value = snapshot
     projectSummary.value = summary
+    projectDiagnostics.value = diagnostics
   } catch (error) {
     if (requestId !== surfaceRequestId) {
       return
@@ -487,6 +520,15 @@ async function handleProjectChange(event: Event) {
   }
 
   await handleProjectSelection(target.value)
+}
+
+function handleSubgraphDepthChange(event: Event) {
+  const target = event.target
+  if (!(target instanceof HTMLSelectElement)) {
+    return
+  }
+
+  subgraphDepth.value = Number.parseInt(target.value, 10) || 1
 }
 
 function selectCard(item: GraphResultCard) {
@@ -523,7 +565,7 @@ function relationToCard(
 
 function summarizeKinds(items: { name: string; count: number }[]): string {
   if (!items.length) {
-    return 'No graph rows yet'
+    return t('graph.common.noGraphRows')
   }
 
   return items
@@ -600,7 +642,7 @@ function formatRelationLine(relation: GraphRelationDetail): string {
       </p>
     </section>
 
-    <div class="workspace-grid">
+    <div class="workspace-grid workspace-grid--triple">
       <article class="card workspace-panel">
         <div class="panel-header">
           <div>
@@ -646,9 +688,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
               {{
                 apiUnavailable
                   ? t('graph.panels.summary.blockerApiUnavailable')
-                  : currentCoverage?.relation_count
-                    ? t('graph.panels.summary.blockerPartial')
-                    : t('graph.panels.summary.blockerNoRows')
+                  : readinessSummary?.blockers?.[0] ??
+                    (currentCoverage?.relation_count
+                      ? t('graph.panels.summary.blockerPartial')
+                      : t('graph.panels.summary.blockerNoRows'))
               }}
             </strong>
           </article>
@@ -731,6 +774,89 @@ function formatRelationLine(relation: GraphRelationDetail): string {
           {{ searchError }}
         </p>
       </article>
+
+      <article class="card workspace-panel diagnostics-panel">
+        <div class="panel-header panel-header--stacked">
+          <div>
+            <p class="rr-kicker">{{ t('graph.panels.diagnostics.eyebrow') }}</p>
+            <h3>{{ t('graph.panels.diagnostics.title') }}</h3>
+            <p class="panel-subtitle">{{ t('graph.panels.diagnostics.description') }}</p>
+          </div>
+          <StatusBadge
+            :status="readinessSummary?.status ? 'warning' : 'draft'"
+            :label="readinessSummary?.status ?? t('graph.panels.diagnostics.pending')"
+          />
+        </div>
+
+        <LoadingSkeletonPanel
+          v-if="loadingSurface"
+          :title="t('graph.panels.diagnostics.loading')"
+          :lines="6"
+        />
+
+        <EmptyStateCard
+          v-else-if="!selectedProjectId"
+          :title="t('graph.panels.diagnostics.noProject.title')"
+          :message="t('graph.panels.diagnostics.noProject.message')"
+          :hint="t('graph.panels.diagnostics.noProject.hint')"
+        />
+
+        <EmptyStateCard
+          v-else-if="apiUnavailable"
+          :title="t('graph.panels.diagnostics.unavailable.title')"
+          :message="t('graph.panels.diagnostics.unavailable.message')"
+          :hint="t('graph.panels.diagnostics.unavailable.hint')"
+        />
+
+        <template v-else>
+          <div class="diagnostics-grid">
+            <article class="metric-card" data-tone="default">
+              <span class="metric-card__label">{{ t('graph.panels.diagnostics.metrics.documents') }}</span>
+              <strong>{{ contentSummary ? formatCount(contentSummary.persisted_document_count, 'document') : '—' }}</strong>
+            </article>
+            <article class="metric-card" data-tone="default">
+              <span class="metric-card__label">{{ t('graph.panels.diagnostics.metrics.chunks') }}</span>
+              <strong>{{ contentSummary ? formatCount(contentSummary.persisted_chunk_count, 'chunk') : '—' }}</strong>
+            </article>
+            <article class="metric-card" data-tone="default">
+              <span class="metric-card__label">{{ t('graph.panels.diagnostics.metrics.embeddings') }}</span>
+              <strong>{{ contentSummary ? formatCount(contentSummary.embedded_chunk_count, 'embedding') : '—' }}</strong>
+            </article>
+            <article class="metric-card" data-tone="default">
+              <span class="metric-card__label">{{ t('graph.panels.diagnostics.metrics.retrievalRuns') }}</span>
+              <strong>{{ contentSummary ? formatCount(contentSummary.retrieval_run_count, 'run') : '—' }}</strong>
+            </article>
+            <article class="metric-card" data-tone="default">
+              <span class="metric-card__label">{{ t('graph.panels.diagnostics.metrics.entityRefs') }}</span>
+              <strong>
+                {{ provenanceSummary ? formatCount(provenanceSummary.entities_with_chunk_refs, 'entity') : '—' }}
+              </strong>
+            </article>
+            <article class="metric-card" data-tone="default">
+              <span class="metric-card__label">{{ t('graph.panels.diagnostics.metrics.relationRefs') }}</span>
+              <strong>
+                {{ provenanceSummary ? formatCount(provenanceSummary.relations_with_chunk_refs, 'relation') : '—' }}
+              </strong>
+            </article>
+          </div>
+
+          <div class="diagnostics-block">
+            <h4>{{ t('graph.panels.diagnostics.blockersTitle') }}</h4>
+            <ul v-if="diagnosticsBlockers.length" class="bullet-list">
+              <li v-for="blocker in diagnosticsBlockers" :key="blocker">{{ blocker }}</li>
+            </ul>
+            <p v-else class="rr-note">{{ t('graph.panels.diagnostics.noBlockers') }}</p>
+          </div>
+
+          <div class="diagnostics-block">
+            <h4>{{ t('graph.panels.diagnostics.nextStepsTitle') }}</h4>
+            <ul v-if="diagnosticsNextSteps.length" class="bullet-list">
+              <li v-for="step in diagnosticsNextSteps" :key="step">{{ step }}</li>
+            </ul>
+            <p v-else class="rr-note">{{ t('graph.panels.diagnostics.noNextSteps') }}</p>
+          </div>
+        </template>
+      </article>
     </div>
 
     <article class="card workspace-panel detail-panel">
@@ -740,133 +866,139 @@ function formatRelationLine(relation: GraphRelationDetail): string {
           <h3>{{ t('graph.panels.detail.title') }}</h3>
           <p class="panel-subtitle">{{ t('graph.panels.detail.description') }}</p>
         </div>
+        <label class="subgraph-depth-field">
+          <span class="search-field__label">{{ t('graph.panels.detail.subgraphDepth') }}</span>
+          <select
+            class="rr-control"
+            :value="String(subgraphDepth)"
+            :disabled="!canLoadSubgraph"
+            @change="handleSubgraphDepthChange"
+          >
+            <option value="1">1 hop</option>
+            <option value="2">2 hops</option>
+            <option value="3">3 hops</option>
+          </select>
+        </label>
       </div>
 
       <LoadingSkeletonPanel
         v-if="loadingDetail"
         :title="t('graph.panels.detail.loading')"
-        :lines="4"
+        :lines="6"
       />
 
       <template v-else-if="selectedEntityCard && entityDetail">
-        <div class="detail-header">
-          <div>
-            <p class="detail-header__kind">{{ selectedEntityCard.subtitle }}</p>
-            <h4>{{ selectedEntityCard.title }}</h4>
-          </div>
-          <StatusBadge status="Ready" label="Live entity detail" />
-        </div>
+        <div class="detail-grid">
+          <article class="detail-card">
+            <p class="rr-kicker">{{ selectedEntityCard.subtitle }}</p>
+            <h4>{{ entityDetail.entity.canonical_name }}</h4>
+            <p class="rr-note">
+              {{ t('graph.panels.detail.entitySummary', { count: entityDetail.observed_relation_count }) }}
+            </p>
 
-        <p class="detail-summary">
-          Entity detail is coming from persisted graph rows. Aliases, source documents, source
-          chunks, and observed incoming/outgoing relations are live for this record.
-        </p>
+            <div class="token-section">
+              <span class="token-section__label">{{ t('graph.panels.detail.aliases') }}</span>
+              <div v-if="entityDetail.aliases.length" class="token-list">
+                <span v-for="alias in entityDetail.aliases" :key="alias" class="token-chip">{{ alias }}</span>
+              </div>
+              <p v-else class="rr-note">{{ t('graph.panels.detail.noAliases') }}</p>
+            </div>
+
+            <div class="token-section">
+              <span class="token-section__label">{{ t('graph.panels.detail.documents') }}</span>
+              <div v-if="entityDetail.source_document_ids.length" class="token-list">
+                <span v-for="documentId in entityDetail.source_document_ids" :key="documentId" class="token-chip token-chip--mono">{{ documentId }}</span>
+              </div>
+              <p v-else class="rr-note">{{ t('graph.panels.detail.noDocuments') }}</p>
+            </div>
+
+            <div class="token-section">
+              <span class="token-section__label">{{ t('graph.panels.detail.chunks') }}</span>
+              <div v-if="entityDetail.source_chunk_ids.length" class="token-list">
+                <span v-for="chunkId in entityDetail.source_chunk_ids" :key="chunkId" class="token-chip token-chip--mono">{{ chunkId }}</span>
+              </div>
+              <p v-else class="rr-note">{{ t('graph.panels.detail.noChunks') }}</p>
+            </div>
+          </article>
+
+          <article class="detail-card">
+            <div class="detail-card__header">
+              <div>
+                <p class="rr-kicker">{{ t('graph.panels.detail.subgraphEyebrow') }}</p>
+                <h4>{{ t('graph.panels.detail.subgraphTitle', { name: selectedSubgraphEntityName || entityDetail.entity.canonical_name }) }}</h4>
+              </div>
+              <StatusBadge
+                :label="t('graph.panels.detail.subgraphStats', { entities: entitySubgraph?.entity_count ?? 0, relations: entitySubgraph?.relation_count ?? 0 })"
+              />
+            </div>
+
+            <p class="rr-note">{{ t('graph.panels.detail.subgraphHint', { depth: entitySubgraph?.depth ?? subgraphDepth }) }}</p>
+
+            <div v-if="entitySubgraph?.entities.length" class="token-section">
+              <span class="token-section__label">{{ t('graph.panels.detail.subgraphEntities') }}</span>
+              <div class="token-list">
+                <span v-for="entity in entitySubgraph.entities" :key="entity.id" class="token-chip">
+                  {{ entity.canonical_name }}
+                </span>
+              </div>
+            </div>
+            <p v-else class="rr-note">{{ t('graph.panels.detail.noSubgraphEntities') }}</p>
+
+            <div class="relation-columns">
+              <div>
+                <span class="token-section__label">{{ t('graph.panels.detail.outgoingRelations') }}</span>
+                <ul v-if="entityDetail.outgoing_relations.length" class="bullet-list bullet-list--compact">
+                  <li v-for="relation in entityDetail.outgoing_relations" :key="relation.relation.id">
+                    {{ formatRelationLine(relation) }}
+                  </li>
+                </ul>
+                <p v-else class="rr-note">{{ t('graph.panels.detail.noOutgoingRelations') }}</p>
+              </div>
+              <div>
+                <span class="token-section__label">{{ t('graph.panels.detail.incomingRelations') }}</span>
+                <ul v-if="entityDetail.incoming_relations.length" class="bullet-list bullet-list--compact">
+                  <li v-for="relation in entityDetail.incoming_relations" :key="relation.relation.id">
+                    {{ formatRelationLine(relation) }}
+                  </li>
+                </ul>
+                <p v-else class="rr-note">{{ t('graph.panels.detail.noIncomingRelations') }}</p>
+              </div>
+            </div>
+
+            <div class="token-section">
+              <span class="token-section__label">{{ t('graph.panels.detail.subgraphRelations') }}</span>
+              <ul v-if="entitySubgraph?.relations.length" class="bullet-list bullet-list--compact">
+                <li v-for="relation in entitySubgraph.relations" :key="relation.relation.id">
+                  {{ formatRelationLine(relation) }}
+                </li>
+              </ul>
+              <p v-else class="rr-note">{{ t('graph.panels.detail.noSubgraphRelations') }}</p>
+            </div>
+          </article>
+        </div>
 
         <p v-if="entityDetail.warning" class="rr-banner" data-tone="warning">
           {{ entityDetail.warning }}
         </p>
-
-        <div class="detail-grid">
-          <section class="detail-card">
-            <h5>Entity evidence</h5>
-            <ul>
-              <li><strong>Aliases:</strong> {{ entityDetail.aliases.join(', ') || 'None recorded' }}</li>
-              <li>
-                <strong>Source documents:</strong>
-                {{ formatCount(entityDetail.source_document_ids.length, 'document') }}
-              </li>
-              <li>
-                <strong>Source chunks:</strong>
-                {{ formatCount(entityDetail.source_chunk_ids.length, 'chunk') }}
-              </li>
-              <li>
-                <strong>Observed relations:</strong>
-                {{ formatCount(entityDetail.observed_relation_count, 'relation') }}
-              </li>
-            </ul>
-          </section>
-
-          <section class="detail-card">
-            <h5>Outgoing relations</h5>
-            <div v-if="entityDetail.outgoing_relations.length" class="relation-list">
-              <article
-                v-for="relation in entityDetail.outgoing_relations"
-                :key="relation.relation.id"
-                class="relation-row"
-              >
-                <strong>{{ formatRelationLine(relation) }}</strong>
-                <span>{{ formatCount(relation.relation.source_chunk_count, 'chunk') }}</span>
-              </article>
-            </div>
-            <EmptyStateCard
-              v-else
-              title="No outgoing relations"
-              message="This entity currently has no outgoing relations in persisted graph rows."
-            />
-          </section>
-
-          <section class="detail-card">
-            <h5>Incoming relations</h5>
-            <div v-if="entityDetail.incoming_relations.length" class="relation-list">
-              <article
-                v-for="relation in entityDetail.incoming_relations"
-                :key="relation.relation.id"
-                class="relation-row"
-              >
-                <strong>{{ formatRelationLine(relation) }}</strong>
-                <span>{{ formatCount(relation.relation.source_chunk_count, 'chunk') }}</span>
-              </article>
-            </div>
-            <EmptyStateCard
-              v-else
-              title="No incoming relations"
-              message="This entity currently has no incoming relations in persisted graph rows."
-            />
-          </section>
-        </div>
+        <p v-if="entitySubgraph?.warning" class="rr-banner" data-tone="warning">
+          {{ entitySubgraph.warning }}
+        </p>
       </template>
 
       <template v-else-if="selectedRelationCard">
-        <div class="detail-header">
-          <div>
-            <p class="detail-header__kind">{{ selectedRelationCard.subtitle }}</p>
+        <div class="detail-grid detail-grid--single">
+          <article class="detail-card">
+            <p class="rr-kicker">{{ selectedRelationCard.subtitle }}</p>
             <h4>{{ selectedRelationCard.title }}</h4>
-          </div>
-          <StatusBadge status="Partial" label="Relation summary only" />
-        </div>
-
-        <p class="detail-summary">
-          Relation coverage is live enough to show the tuple and supporting chunk count. A dedicated
-          relation detail endpoint with richer provenance is still a backend follow-up.
-        </p>
-
-        <div class="detail-grid">
-          <section class="detail-card">
-            <h5>Relation tuple</h5>
-            <ul>
-              <li><strong>From:</strong> {{ selectedRelationCard.fromEntityName }}</li>
-              <li>
-                <strong>Relation type:</strong>
-                {{ selectedRelationCard.relation?.relation_type ?? selectedRelationCard.badge }}
-              </li>
-              <li><strong>To:</strong> {{ selectedRelationCard.toEntityName }}</li>
-            </ul>
-          </section>
-
-          <section class="detail-card">
-            <h5>Current evidence</h5>
-            <ul>
-              <li>
-                <strong>Supporting chunks:</strong>
-                {{ formatCount(selectedRelationCard.sourceChunkCount, 'chunk') }}
-              </li>
-              <li>
-                <strong>Matched fields:</strong>
-                {{ selectedRelationCard.matchReasons.join(', ') || 'Top relation coverage sample' }}
-              </li>
-              <li><strong>Status:</strong> Relation tuple is visible; deep provenance is still partial.</li>
-            </ul>
-          </section>
+            <p>{{ selectedRelationCard.summary }}</p>
+            <div class="token-section">
+              <span class="token-section__label">{{ t('graph.panels.detail.matchReasons') }}</span>
+              <div v-if="selectedRelationCard.matchReasons.length" class="token-list">
+                <span v-for="reason in selectedRelationCard.matchReasons" :key="reason" class="token-chip">{{ reason }}</span>
+              </div>
+              <p v-else class="rr-note">{{ t('graph.panels.detail.noMatchReasons') }}</p>
+            </div>
+          </article>
         </div>
       </template>
 
@@ -888,269 +1020,175 @@ function formatRelationLine(relation: GraphRelationDetail): string {
 </template>
 
 <style scoped>
-.card {
-  padding: var(--rr-space-6);
-  border: 1px solid var(--rr-color-border-subtle);
-  border-radius: var(--rr-radius-md);
-  background: var(--rr-color-bg-surface);
-  box-shadow: var(--rr-shadow-sm);
-}
-
-.hero,
-.workspace-panel,
-.hero__copy,
-.hero__metrics,
-.workspace-grid,
-.detail-grid,
-.summary-list,
-.search-results,
-.relation-list {
-  display: grid;
-}
-
-.hero,
-.workspace-panel {
-  gap: var(--rr-space-4);
-}
-
-.hero__copy {
-  gap: var(--rr-space-3);
-  max-width: 76ch;
-}
-
-.hero__copy h2,
-.hero__copy p,
-.hero__highlights,
-.hero__highlights li,
-.panel-header h3,
-.panel-subtitle,
-.summary-row,
-.summary-row__label,
-.search-result p,
-.detail-summary,
-.detail-card h5,
-.detail-card ul,
-.detail-card li,
-.detail-header h4,
-.detail-header__kind {
-  margin: 0;
-}
-
-.hero__eyebrow,
-.panel-subtitle,
-.summary-row__label,
-.search-field__label,
-.search-result__kind,
-.detail-header__kind {
-  color: var(--rr-color-text-muted);
-}
-
-.hero__eyebrow,
-.search-result__kind,
-.detail-header__kind {
-  font-size: 0.8rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.hero {
-  background:
-    radial-gradient(circle at top right, rgb(59 130 246 / 0.12), transparent 28%),
-    var(--rr-color-bg-surface);
-}
-
-.hero__metrics,
-.workspace-grid,
-.detail-grid {
-  gap: var(--rr-space-4);
-}
-
-.hero__metrics {
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-}
-
-.metric-card,
-.summary-row,
-.detail-card,
-.search-result,
-.relation-row {
-  border-radius: var(--rr-radius-sm);
-}
-
-.metric-card {
-  display: grid;
-  gap: var(--rr-space-2);
-  padding: var(--rr-space-4);
-  border: 1px solid var(--rr-color-border-subtle);
-  background: var(--rr-color-bg-surface-muted);
-}
-
-.metric-card[data-tone='warning'] {
-  background: var(--rr-color-warning-50);
-  border-color: rgb(217 119 6 / 0.24);
-}
-
-.metric-card[data-tone='good'] {
-  background: var(--rr-color-success-50);
-  border-color: rgb(22 163 74 / 0.22);
-}
-
-.metric-card__label {
-  color: var(--rr-color-text-muted);
-  font-size: 0.92rem;
-}
-
-.hero__highlights {
-  padding-left: 18px;
-  color: var(--rr-color-text-secondary);
-  gap: var(--rr-space-2);
-}
-
 .workspace-grid {
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  display: grid;
+  gap: 1.5rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.panel-header {
+.workspace-grid--triple {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.workspace-panel,
+.detail-panel,
+.hero,
+.detail-card,
+.metric-card {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.panel-header,
+.panel-header--stacked,
+.detail-card__header {
   display: flex;
   justify-content: space-between;
-  gap: var(--rr-space-4);
-  align-items: flex-start;
+  gap: 1rem;
 }
 
 .panel-header--stacked {
   flex-direction: column;
+  align-items: stretch;
+}
+
+.panel-subtitle,
+.rr-note {
+  color: var(--rr-text-muted);
 }
 
 .summary-list,
 .search-results,
-.relation-list {
-  gap: var(--rr-space-3);
+.detail-grid,
+.relation-columns,
+.diagnostics-grid {
+  display: grid;
+  gap: 1rem;
 }
 
 .summary-row {
   display: grid;
-  gap: 6px;
-  padding: var(--rr-space-4);
-  background: var(--rr-color-bg-surface-muted);
+  gap: 0.375rem;
 }
 
-.summary-row__control {
-  width: 100%;
+.summary-row__label,
+.metric-card__label,
+.search-field__label,
+.token-section__label,
+.search-result__kind {
+  font-size: 0.875rem;
+  color: var(--rr-text-muted);
 }
 
-.search-field {
+.summary-row__control,
+.search-field,
+.subgraph-depth-field,
+.token-section,
+.diagnostics-block {
   display: grid;
-  gap: 6px;
-  width: 100%;
+  gap: 0.5rem;
 }
 
-.search-field input {
-  width: 100%;
-  padding: 11px 13px;
-  border: 1px solid var(--rr-color-border-strong);
-  border-radius: 12px;
-  font: inherit;
-  background: #fff;
+.search-results {
+  align-content: start;
 }
 
 .search-result {
   display: grid;
-  gap: var(--rr-space-2);
-  width: 100%;
-  padding: var(--rr-space-4);
-  border: 1px solid var(--rr-color-border-subtle);
+  gap: 0.75rem;
   text-align: left;
-  background: #fff;
-  cursor: pointer;
-  transition:
-    border-color var(--rr-motion-base),
-    box-shadow var(--rr-motion-base),
-    transform var(--rr-motion-base);
+  border: 1px solid var(--rr-border);
+  border-radius: 1rem;
+  padding: 1rem;
+  background: var(--rr-surface);
 }
 
 .search-result:hover,
 .search-result[data-active='true'] {
-  border-color: var(--rr-color-border-focus);
-  box-shadow: var(--rr-shadow-sm);
-  transform: translateY(-1px);
-}
-
-.search-result[data-active='true'] {
-  background: var(--rr-color-accent-50);
+  border-color: var(--rr-accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--rr-accent) 35%, transparent);
 }
 
 .search-result__meta {
   display: grid;
-  gap: 4px;
+  gap: 0.25rem;
 }
 
-.search-result :deep(.status-badge) {
-  width: fit-content;
+.diagnostics-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.detail-panel {
-  gap: var(--rr-space-5);
+.metric-card {
+  border: 1px solid var(--rr-border);
+  border-radius: 1rem;
+  padding: 1rem;
+  background: var(--rr-surface-muted);
 }
 
-.detail-header {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--rr-space-4);
-  align-items: flex-start;
+.metric-card[data-tone='good'] {
+  border-color: color-mix(in srgb, var(--rr-positive) 45%, var(--rr-border));
 }
 
-.detail-summary {
-  color: var(--rr-color-text-secondary);
-  line-height: 1.6;
+.metric-card[data-tone='warning'] {
+  border-color: color-mix(in srgb, var(--rr-warning) 45%, var(--rr-border));
 }
 
 .detail-grid {
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.detail-grid--single {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .detail-card {
-  display: grid;
-  gap: var(--rr-space-3);
-  padding: var(--rr-space-4);
-  border: 1px solid var(--rr-color-border-subtle);
-  background: var(--rr-color-bg-surface-muted);
+  border: 1px solid var(--rr-border);
+  border-radius: 1rem;
+  padding: 1rem;
+  background: var(--rr-surface-muted);
 }
 
-.detail-card ul {
-  display: grid;
-  gap: 10px;
-  padding-left: 18px;
-}
-
-.relation-row {
+.token-list,
+.bullet-list {
   display: flex;
-  justify-content: space-between;
-  gap: var(--rr-space-3);
-  align-items: center;
-  padding: var(--rr-space-3) var(--rr-space-4);
-  background: var(--rr-color-bg-surface-muted);
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
-.relation-row strong {
-  flex: 1;
+.bullet-list {
+  display: grid;
+  gap: 0.5rem;
+  list-style: disc;
+  padding-left: 1.25rem;
 }
 
-.relation-row span {
-  color: var(--rr-color-text-muted);
-  white-space: nowrap;
+.bullet-list--compact {
+  gap: 0.35rem;
 }
 
-@media (width <= 720px) {
-  .card {
-    padding: var(--rr-space-5);
-  }
+.token-chip {
+  border-radius: 999px;
+  padding: 0.35rem 0.75rem;
+  background: color-mix(in srgb, var(--rr-accent) 12%, white);
+  border: 1px solid color-mix(in srgb, var(--rr-accent) 28%, var(--rr-border));
+}
 
-  .panel-header,
-  .detail-header,
-  .relation-row {
-    flex-direction: column;
-    align-items: flex-start;
+.token-chip--mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  font-size: 0.8125rem;
+}
+
+@media (max-width: 1200px) {
+  .workspace-grid,
+  .workspace-grid--triple,
+  .detail-grid,
+  .diagnostics-grid,
+  .relation-columns {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>

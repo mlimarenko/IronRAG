@@ -91,6 +91,51 @@ export interface GraphEntityDetailResponse {
   warning?: string | null
 }
 
+export interface GraphContentSummary {
+  persisted_document_count: number
+  persisted_chunk_count: number
+  embedded_chunk_count: number
+  retrieval_run_count: number
+  referenced_document_count: number
+  referenced_chunk_count: number
+}
+
+export interface GraphProvenanceSummary {
+  entities_with_document_refs: number
+  entities_with_chunk_refs: number
+  entities_without_chunk_refs: number
+  relations_with_document_refs: number
+  relations_with_chunk_refs: number
+  relations_without_chunk_refs: number
+}
+
+export interface GraphReadinessSummary {
+  status: string
+  blockers: string[]
+  next_steps: string[]
+}
+
+export interface GraphProjectDiagnosticsResponse {
+  project_id: string
+  coverage: GraphCoverageSummary
+  content: GraphContentSummary
+  provenance: GraphProvenanceSummary
+  readiness: GraphReadinessSummary
+  generated_at: string
+}
+
+export interface GraphSubgraphResponse {
+  project_id: string
+  focus_entity_id: string
+  depth: number
+  entity_count: number
+  relation_count: number
+  entities: GraphEntitySummary[]
+  relations: GraphRelationDetail[]
+  generated_at: string
+  warning?: string | null
+}
+
 export async function fetchGraphProductSnapshot(projectId: string): Promise<GraphProductSnapshot> {
   const { data } = await api.get<{ snapshot: GraphProductSnapshot }>(`/graph-products/${projectId}`)
   return data.snapshot
@@ -100,6 +145,15 @@ export async function fetchGraphProjectSummary(
   projectId: string,
 ): Promise<GraphProjectSummaryResponse> {
   const { data } = await api.get<GraphProjectSummaryResponse>(`/graph-products/${projectId}/summary`)
+  return data
+}
+
+export async function fetchGraphProjectDiagnostics(
+  projectId: string,
+): Promise<GraphProjectDiagnosticsResponse> {
+  const { data } = await api.get<GraphProjectDiagnosticsResponse>(
+    `/graph-products/${projectId}/diagnostics`,
+  )
   return data
 }
 
@@ -120,6 +174,20 @@ export async function fetchGraphEntityDetail(
 ): Promise<GraphEntityDetailResponse> {
   const { data } = await api.get<GraphEntityDetailResponse>(
     `/graph-products/${projectId}/entities/${entityId}`,
+  )
+  return data
+}
+
+export async function fetchGraphSubgraph(
+  projectId: string,
+  entityId: string,
+  depth = 1,
+): Promise<GraphSubgraphResponse> {
+  const { data } = await api.get<GraphSubgraphResponse>(
+    `/graph-products/${projectId}/entities/${entityId}/subgraph`,
+    {
+      params: { depth },
+    },
   )
   return data
 }
