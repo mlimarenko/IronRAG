@@ -24,8 +24,10 @@ const items = computed(() =>
     index,
     title: t(`shell.nav.items.${item.key}.label`),
     hint: t(`shell.nav.items.${item.key}.hint`),
+    groupLabel: t(`shell.nav.groups.${item.stage}`),
     active: item.key === props.activeSection,
     complete: index < shellNavItems.findIndex((candidate) => candidate.key === props.activeSection),
+    secondary: item.emphasis === 'secondary',
   })),
 )
 </script>
@@ -45,9 +47,10 @@ const items = computed(() =>
         :data-active="item.active"
         :data-complete="item.complete"
       >
-        <RouterLink :to="item.to" class="product-spine__link">
+        <RouterLink :to="item.to" class="product-spine__link" :data-secondary="item.secondary">
           <span class="product-spine__step">{{ item.step }}</span>
           <span class="product-spine__copy">
+            <small class="product-spine__group">{{ item.groupLabel }}</small>
             <strong>{{ item.title }}</strong>
             <small>{{ item.hint }}</small>
           </span>
@@ -119,6 +122,16 @@ const items = computed(() =>
   background: rgb(239 246 255 / 0.95);
 }
 
+.product-spine__link[data-secondary='true'] {
+  border-style: dashed;
+  background: rgb(248 250 252 / 0.52);
+}
+
+.product-spine__item[data-active='true'] .product-spine__link[data-secondary='true'] {
+  background: rgb(241 245 249 / 0.9);
+  border-color: rgb(148 163 184 / 0.4);
+}
+
 .product-spine__item[data-complete='true'] .product-spine__link {
   background: rgb(240 253 244 / 0.92);
 }
@@ -151,6 +164,14 @@ const items = computed(() =>
   display: grid;
   gap: 4px;
   min-width: 0;
+}
+
+.product-spine__group {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--rr-color-text-muted);
 }
 
 .product-spine__copy strong {

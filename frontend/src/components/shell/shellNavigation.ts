@@ -6,6 +6,7 @@ export interface ShellNavItem {
   legacyTo?: string
   step: string
   stage: 'flow' | 'inspect' | 'extend'
+  emphasis?: 'primary' | 'secondary'
 }
 
 export const shellNavItems: readonly ShellNavItem[] = [
@@ -15,6 +16,7 @@ export const shellNavItems: readonly ShellNavItem[] = [
     legacyTo: '/setup',
     step: '01',
     stage: 'flow',
+    emphasis: 'primary',
   },
   {
     key: 'files',
@@ -22,6 +24,7 @@ export const shellNavItems: readonly ShellNavItem[] = [
     legacyTo: '/ingest',
     step: '02',
     stage: 'flow',
+    emphasis: 'primary',
   },
   {
     key: 'search',
@@ -29,18 +32,21 @@ export const shellNavItems: readonly ShellNavItem[] = [
     legacyTo: '/ask',
     step: '03',
     stage: 'flow',
+    emphasis: 'primary',
   },
   {
     key: 'graph',
     to: '/graph',
     step: '04',
     stage: 'inspect',
+    emphasis: 'secondary',
   },
   {
     key: 'api',
     to: '/api',
     step: '05',
     stage: 'extend',
+    emphasis: 'secondary',
   },
 ] as const
 
