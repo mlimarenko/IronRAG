@@ -305,12 +305,15 @@ watch(
       return
     }
 
-  if (
-    selectedItem.value &&
-    items.some((item) => item.id === selectedItem.value.id && item.kind === selectedItem.value.kind)
-  ) {
-    return
-  }
+    const currentSelection = selectedItem.value
+
+    if (currentSelection) {
+      const { id, kind } = currentSelection
+
+      if (items.some((item) => item.id === id && item.kind === kind)) {
+        return
+      }
+    }
 
     selectedItem.value = {
       id: items[0].id,
