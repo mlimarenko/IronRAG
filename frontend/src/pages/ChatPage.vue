@@ -5,10 +5,12 @@ import { RouterLink, useRoute } from 'vue-router'
 
 import {
   fetchProjects,
+  fetchProjectReadiness,
   fetchRetrievalRunDetail,
   fetchWorkspaces,
   isUnauthorizedApiError,
   runQuery,
+  type ProjectReadinessSummary,
   type QueryResponseSurface,
   type RetrievalRunDetail,
 } from 'src/boot/api'
@@ -16,6 +18,7 @@ import ReferenceList from 'src/components/chat/ReferenceList.vue'
 import RetrievalDiagnosticsPanel from 'src/components/chat/RetrievalDiagnosticsPanel.vue'
 import StatusPill from 'src/components/chat/StatusPill.vue'
 import PageSection from 'src/components/shell/PageSection.vue'
+import EmptyStateCard from 'src/components/state/EmptyStateCard.vue'
 import {
   getSelectedProjectId,
   getSelectedWorkspaceId,
@@ -43,6 +46,7 @@ const route = useRoute()
 
 const workspaces = ref<WorkspaceItem[]>([])
 const projects = ref<ProjectItem[]>([])
+const readiness = ref<ProjectReadinessSummary | null>(null)
 const queryInputRef = ref<HTMLTextAreaElement | null>(null)
 
 const queryText = ref('')
@@ -58,8 +62,17 @@ const selectedProject = computed(
 const selectedWorkspace = computed(
   () => workspaces.value.find((item) => item.id === getSelectedWorkspaceId()) ?? null,
 )
+const normalizedIndexingState = computed(() => readiness.value?.indexing_state.trim().toLowerCase() ?? '')
+const hasIndexedDocuments = computed(() => (readiness.value?.documents ?? 0) > 0)
+const hasIngestionRuns = computed(() => (readiness.value?.ingestion_jobs ?? 0) > 0)
 const canSubmit = computed(
-  () => Boolean(selectedProjectId.value && queryText.value.trim() && !loading.value),
+  () =>
+    Boolean(
+      selectedProjectId.value &&
+        queryText.value.trim() &&
+        !loading.value &&
+        readiness.value?.ready_for_query,
+    ),
 )
 const pageStatus = computed(() => {
   if (result.value) {
@@ -73,7 +86,15 @@ const pageStatus = computed(() => {
     return { status: 'blocked', label: t('flow.search.statusBlocked') }
   }
 
-  return { status: 'draft', label: t('flow.search.statusDraft') }
+  if (readiness.value?.ready_for_query) {
+    return { status: 'draft', label: t('flow.search.statusDraft') }
+  }
+
+  if (hasIndexedDocuments.value || hasIngestionRuns.value) {
+    return { status: 'partial', label: t('flow.search.statusIndexing') }
+  }
+
+  return { status: 'blocked', label: t('flow.search.statusNeedsContent') }
 })
 const contextItems = computed(() => [
   {
@@ -84,15 +105,35 @@ const contextItems = computed(() => [
     label: t('flow.search.context.project'),
     value: selectedProject.value?.name ?? t('flow.common.empty'),
   },
+  {
+    label: t('flow.search.context.indexing'),
+    value: formatIndexingStateLabel(readiness.value?.indexing_state),
+  },
+  {
+    label: t('flow.search.context.documents'),
+    value: readiness.value ? String(readiness.value.documents) : t('flow.common.empty'),
+  },
 ])
 const queryExamples = computed(() => [
   t('flow.search.query.examples.summary'),
   t('flow.search.query.examples.risks'),
   t('flow.search.query.examples.next'),
 ])
-const queryHint = computed(() =>
-  selectedProject.value ? t('flow.search.query.hintReady') : t('flow.search.query.hintBlocked'),
-)
+const queryHint = computed(() => {
+  if (!selectedProject.value) {
+    return t('flow.search.query.hintBlocked')
+  }
+
+  if (readiness.value?.ready_for_query) {
+    return t('flow.search.query.hintReady')
+  }
+
+  if (hasIndexedDocuments.value || hasIngestionRuns.value) {
+    return t('flow.search.query.hintIndexing')
+  }
+
+  return t('flow.search.query.hintNoContent')
+})
 const resultSummary = computed(() => {
   if (!result.value) {
     return ''
@@ -133,6 +174,73 @@ const resultNotice = computed<{ tone: BannerTone; message: string } | null>(() =
 
   return null
 })
+const readinessNotice = computed<{ tone: BannerTone; title: string; message: string } | null>(() => {
+  if (!selectedProject.value || readiness.value?.ready_for_query) {
+    return null
+  }
+
+  if (!hasIndexedDocuments.value && !hasIngestionRuns.value) {
+    return {
+      tone: 'info',
+      title: t('flow.search.readiness.emptyState.title'),
+      message: t('flow.search.readiness.emptyState.body'),
+    }
+  }
+
+  return {
+    tone: 'warning',
+    title: t('flow.search.readiness.partialState.title'),
+    message: t('flow.search.readiness.partialState.body', {
+      state: formatIndexingStateLabel(readiness.value?.indexing_state),
+      documents: readiness.value?.documents ?? 0,
+      jobs: readiness.value?.ingestion_jobs ?? 0,
+    }),
+  }
+})
+const answerCapabilities = computed(() => {
+  if (!selectedProject.value) {
+    return []
+  }
+
+  if (readiness.value?.ready_for_query) {
+    return [
+      t('flow.search.capabilities.ready.answer'),
+      t('flow.search.capabilities.ready.verify'),
+      t('flow.search.capabilities.ready.followUp'),
+    ]
+  }
+
+  if (hasIndexedDocuments.value || hasIngestionRuns.value) {
+    return [
+      t('flow.search.capabilities.partial.answer'),
+      t('flow.search.capabilities.partial.verify'),
+      t('flow.search.capabilities.partial.next'),
+    ]
+  }
+
+  return [
+    t('flow.search.capabilities.empty.answer'),
+    t('flow.search.capabilities.empty.verify'),
+    t('flow.search.capabilities.empty.next'),
+  ]
+})
+const weakContextActions = computed(() => {
+  const actions = [
+    {
+      label: t('flow.search.nextActions.openFiles'),
+      to: '/ingest',
+    },
+  ]
+
+  if (selectedProject.value && (hasIndexedDocuments.value || hasIngestionRuns.value)) {
+    actions.push({
+      label: t('flow.search.nextActions.retryQuestion'),
+      to: `/chat?q=${encodeURIComponent(queryText.value.trim() || t('flow.search.query.examples.summary'))}`,
+    })
+  }
+
+  return actions
+})
 
 watch(
   () => route.query.q,
@@ -144,12 +252,28 @@ watch(
   { immediate: true },
 )
 
+watch(selectedProjectId, async (projectId) => {
+  result.value = null
+  detail.value = null
+  errorMessage.value = null
+  readiness.value = null
+
+  if (!projectId) {
+    return
+  }
+
+  await loadReadiness(projectId)
+})
+
 onMounted(async () => {
   workspaces.value = await fetchWorkspaces()
   const workspaceId = syncSelectedWorkspaceId(workspaces.value)
   if (workspaceId) {
     projects.value = await fetchProjects(workspaceId)
-    syncSelectedProjectId(projects.value)
+    const projectId = syncSelectedProjectId(projects.value)
+    if (projectId) {
+      await loadReadiness(projectId)
+    }
   } else {
     projects.value = []
     syncSelectedProjectId([])
@@ -172,6 +296,34 @@ function formatModeLabel(mode: string) {
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(' ')
+}
+
+function formatIndexingStateLabel(state?: string | null) {
+  const normalized = state?.trim().toLowerCase() ?? ''
+
+  switch (normalized) {
+    case 'ready':
+    case 'query_ready':
+      return t('flow.search.readiness.states.ready')
+    case 'indexing':
+    case 'processing':
+    case 'partial':
+      return t('flow.search.readiness.states.indexing')
+    case 'empty':
+    case 'pending':
+    case 'not_ready':
+      return t('flow.search.readiness.states.empty')
+    default:
+      return state?.trim() || t('flow.search.readiness.states.unknown')
+  }
+}
+
+async function loadReadiness(projectId: string) {
+  try {
+    readiness.value = await fetchProjectReadiness(projectId)
+  } catch {
+    readiness.value = null
+  }
 }
 
 function applyExampleQuery(example: string) {
@@ -204,6 +356,14 @@ async function submitQuery() {
   try {
     if (!selectedProjectId.value) {
       throw new Error(t('flow.search.query.hintBlocked'))
+    }
+
+    if (!readiness.value?.ready_for_query) {
+      throw new Error(
+        hasIndexedDocuments.value || hasIngestionRuns.value
+          ? t('flow.search.query.hintIndexing')
+          : t('flow.search.query.hintNoContent'),
+      )
     }
 
     const response = await runQuery({
@@ -266,6 +426,22 @@ async function submitQuery() {
           </div>
         </div>
 
+        <p
+          v-if="readinessNotice"
+          class="rr-banner"
+          :data-tone="readinessNotice.tone"
+        >
+          <strong>{{ readinessNotice.title }}</strong>
+          <span>{{ readinessNotice.message }}</span>
+        </p>
+
+        <div class="capability-panel">
+          <p class="capability-panel__label">{{ t('flow.search.capabilities.label') }}</p>
+          <ul class="capability-list">
+            <li v-for="item in answerCapabilities" :key="item">{{ item }}</li>
+          </ul>
+        </div>
+
         <label class="rr-field">
           <span class="rr-field__label">{{ t('flow.search.query.question') }}</span>
           <textarea
@@ -274,6 +450,7 @@ async function submitQuery() {
             class="rr-control ask-panel__input"
             rows="4"
             :placeholder="t('flow.search.query.placeholder')"
+            :disabled="!selectedProject"
             @keydown="handleTextareaKeydown"
           />
         </label>
@@ -334,6 +511,16 @@ async function submitQuery() {
             <span class="answer-meta__label">{{ t('flow.search.result.references') }}</span>
             <strong>{{ result.references.length }}</strong>
           </article>
+          <article class="answer-meta__card">
+            <span class="answer-meta__label">{{ t('flow.search.result.grounding') }}</span>
+            <strong>
+              {{
+                result.weak_grounding
+                  ? t('flow.search.result.groundingWeak')
+                  : t('flow.search.result.groundingStrong')
+              }}
+            </strong>
+          </article>
         </div>
 
         <p
@@ -356,6 +543,55 @@ async function submitQuery() {
           :references="result.references"
         />
       </article>
+
+      <EmptyStateCard
+        v-else-if="!selectedProject"
+        :title="t('flow.search.empty.noProject.title')"
+        :message="t('flow.search.empty.noProject.body')"
+        :hint="t('flow.search.empty.noProject.hint')"
+      >
+        <template #actions>
+          <RouterLink class="rr-button rr-button--secondary" to="/processing">
+            {{ t('flow.search.empty.noProject.action') }}
+          </RouterLink>
+        </template>
+      </EmptyStateCard>
+
+      <EmptyStateCard
+        v-else-if="!readiness?.ready_for_query"
+        :title="
+          hasIndexedDocuments || hasIngestionRuns
+            ? t('flow.search.empty.partial.title')
+            : t('flow.search.empty.noContent.title')
+        "
+        :message="
+          hasIndexedDocuments || hasIngestionRuns
+            ? t('flow.search.empty.partial.body', {
+                state: formatIndexingStateLabel(readiness?.indexing_state),
+                documents: readiness?.documents ?? 0,
+                jobs: readiness?.ingestion_jobs ?? 0,
+              })
+            : t('flow.search.empty.noContent.body')
+        "
+        :hint="
+          hasIndexedDocuments || hasIngestionRuns
+            ? t('flow.search.empty.partial.hint')
+            : t('flow.search.empty.noContent.hint')
+        "
+      >
+        <template #actions>
+          <div class="empty-actions">
+            <RouterLink
+              v-for="action in weakContextActions"
+              :key="action.label"
+              class="rr-button rr-button--secondary"
+              :to="action.to"
+            >
+              {{ action.label }}
+            </RouterLink>
+          </div>
+        </template>
+      </EmptyStateCard>
 
       <article
         v-else
@@ -414,7 +650,8 @@ async function submitQuery() {
 }
 
 .context-card,
-.answer-meta__card {
+.answer-meta__card,
+.capability-panel {
   display: grid;
   gap: 6px;
   min-width: 0;
@@ -426,7 +663,8 @@ async function submitQuery() {
 
 .context-card__label,
 .answer-meta__label,
-.answer-body__label {
+.answer-body__label,
+.capability-panel__label {
   font-size: 0.76rem;
   font-weight: 700;
   letter-spacing: 0.06em;
@@ -438,6 +676,18 @@ async function submitQuery() {
 .answer-meta__card strong {
   font-size: 0.95rem;
   overflow-wrap: anywhere;
+}
+
+.capability-list {
+  display: grid;
+  gap: var(--rr-space-2);
+  margin: 0;
+  padding-left: 1.1rem;
+  color: var(--rr-color-text-secondary);
+}
+
+.capability-list li {
+  line-height: 1.5;
 }
 
 .ask-panel__input {
@@ -510,6 +760,12 @@ async function submitQuery() {
 
 .empty-answer {
   justify-items: start;
+}
+
+.empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rr-space-3);
 }
 
 @media (width <= 900px) {

@@ -74,13 +74,104 @@ export default {
       selectWorkspaceFirst: 'Select or create a space first.',
     },
     auth: {
-      title: 'Session auth for setup',
+      eyebrow: 'Access',
+      title: 'Unlock setup in one short step',
       description:
-        'Space and library creation are protected backend calls. Save a bearer token here or mint a temporary session token from the backend bootstrap secret.',
+        'Create your space and library with a real session token, then move straight into files. You can paste a token you already have or use a bootstrap secret if this backend supports it.',
       note:
-        'The saved session token is injected into workspace, library, ingestion, and search requests for this browser session.',
+        'The saved session token is reused only in this browser session for setup, files, and search requests.',
       createRequired:
-        'Space and library creation require an authorized session token. Save or mint one first.',
+        'Setup needs an authorized session token before RustRAG can create a space or library.',
+      summary: {
+        ready: 'You are connected. The next practical move is choosing or creating your space, then opening Files.',
+        pending: 'Start by connecting access. After that, setup becomes a simple two-step flow: choose a space, then create a library.',
+      },
+      cards: {
+        auth: {
+          title: '1. Connect access',
+          body: 'Bring in a session token so protected setup actions can work.',
+          hintReady: 'Connected with {token}.',
+          hintPending: 'Use either of the methods below to continue.',
+          ready: 'Connected',
+          pending: 'Needed first',
+        },
+        setup: {
+          title: '2. Create your space and library',
+          body: 'Once access is ready, the forms below save the scope this session will use.',
+          hint: 'RustRAG keeps workspace first, then library.',
+          ready: 'Unlocked',
+          pending: 'Comes next',
+        },
+        next: {
+          title: '3. Move to Files',
+          body: 'After setup, continue directly into file ingestion and indexing.',
+          hint: 'This keeps the files-first path visible instead of burying it behind admin UI.',
+          ready: 'Ready for files',
+          pending: 'Waiting on setup',
+        },
+      },
+      methods: {
+        manual: {
+          eyebrow: 'Bring your own token',
+          title: 'Paste an existing session token',
+          description: 'Best when you already have a bearer token from an operator or another auth flow.',
+          action: 'Use this token',
+          ready: 'Ready to save',
+          connected: 'Token active',
+        },
+        bootstrap: {
+          eyebrow: 'First-time setup',
+          title: 'Mint a session token from bootstrap secret',
+          description: 'Use this only for initial setup on backends that expose the bootstrap endpoint.',
+          action: 'Mint and continue',
+          ready: 'Secret added',
+          optional: 'Optional path',
+          hint:
+            'If bootstrap minting works here, RustRAG will save the returned token for this browser session and use it for setup, files, and search.',
+        },
+      },
+      activeDescription: {
+        ready: 'This session is ready for protected setup and the path into Files stays open.',
+        pending: 'No token is active yet, so creation stays safely blocked until access is connected.',
+      },
+      states: {
+        tokenSaved: {
+          title: 'Access connected',
+          body: 'Your session token is saved locally for this browser session.',
+        },
+        tokenCleared: {
+          title: 'Access removed',
+          body: 'Protected setup is paused until you add a token again.',
+        },
+        secretMissing: {
+          title: 'Add the bootstrap secret first',
+          body: 'Paste the backend bootstrap secret before trying to mint a session token.',
+        },
+        bootstrapSuccess: {
+          title: 'Access connected from bootstrap',
+          body: 'RustRAG minted a session token and saved it for this browser session.',
+        },
+        bootstrapRejected: {
+          title: 'That bootstrap secret did not work',
+          body: 'Check the secret value and try again.',
+        },
+        bootstrapUnavailable: {
+          title: 'Bootstrap minting is not turned on here',
+          body: 'Use an existing token instead, or enable the backend bootstrap flow outside this UI.',
+        },
+        bootstrapMissing: {
+          title: 'This backend does not expose bootstrap setup here',
+          body: 'The bootstrap route could not be reached. Use an existing token or verify backend setup.',
+        },
+        bootstrapNetwork: {
+          title: 'RustRAG could not reach the backend',
+          body: 'Check the server connection, then try again.',
+        },
+        bootstrapFailed: {
+          title: 'Setup access could not be completed',
+          body: 'RustRAG got an unexpected response while trying to prepare access.',
+        },
+      },
     },
     placeholders: {
       workspaceName: 'Acme support',
@@ -88,10 +179,73 @@ export default {
       projectName: 'Customer support library',
       projectSlug: 'support-docs',
     },
+    hero: {
+      eyebrow: 'Mobile-first setup',
+      title: 'Get RustRAG ready for files',
+      description:
+        'This page keeps setup lightweight: connect access, choose a space, create a library, then continue into Files.',
+      progressLabel: 'Setup progress',
+      cards: {
+        workspace: {
+          title: 'Current space',
+          empty: 'No space selected yet',
+          ready: 'Used across setup, files, search, and API pages.',
+          hint: 'Choose one existing space or create a new one below.',
+        },
+        project: {
+          title: 'Current library',
+          empty: 'No library selected yet',
+          ready: 'Files you add next will land in this library.',
+          hint: 'Libraries unlock the files-first ingestion path.',
+        },
+        next: {
+          title: 'Next step',
+          workspace: 'Connect access and choose a space',
+          project: 'Create a library',
+          files: 'Open Files and ingest content',
+          hint: 'The setup flow ends in ingestion, not in admin busywork.',
+        },
+      },
+    },
+    progress: {
+      start: 'Access first, then choose your first space.',
+      workspaceReady: 'Great — now create or pick the library that should receive files.',
+      complete: 'Setup is ready. Continue into Files to ingest the first content.',
+    },
+    checklist: {
+      eyebrow: 'Checklist',
+      title: 'What still needs doing',
+      done: 'Done',
+      todo: 'To do',
+      inProgress: 'Ready next',
+      blocked: 'Blocked',
+      waiting: 'Waiting',
+      readyNext: 'Open Files next',
+      workspace: {
+        title: 'Choose or create a space',
+        description: 'A space groups the libraries and product surfaces for this session.',
+      },
+      project: {
+        title: 'Choose or create a library',
+        description: 'A library is where files are indexed and later queried.',
+      },
+      files: {
+        title: 'Continue into Files',
+        description: 'After setup, go straight to ingestion so the product path stays obvious.',
+      },
+    },
+    sidebar: {
+      eyebrow: 'After setup',
+      title: 'Keep going into Files',
+      description:
+        'The intended flow is setup → files → ask. Once a library is selected, jump into ingestion right away.',
+      action: 'Open Files',
+    },
     panels: {
       workspace: {
         kicker: 'Space',
-        title: 'Space',
+        title: 'Choose the space for this session',
+        helper: 'Use an existing space or create a new one for the content you want to ingest.',
         selected: 'Active space',
         empty: 'Choose a space',
         required: 'Required',
@@ -102,7 +256,8 @@ export default {
       },
       project: {
         kicker: 'Library',
-        title: 'Library',
+        title: 'Choose the library that will receive files',
+        helper: 'Libraries hold the files you index and the answers you query later.',
         selected: 'Active library',
         empty: 'Choose a library',
         selectedBadge: 'Selected',
@@ -377,12 +532,16 @@ export default {
     statusDraft: 'Ready',
     statusWeak: 'Needs review',
     statusReady: 'Answered',
+    statusIndexing: 'Indexing in progress',
+    statusNeedsContent: 'Needs source content',
     error: 'Search failed',
     authRequired:
       'Search requires a bearer token with query access. Save or mint a session token in Processing first.',
     context: {
       workspace: 'Space',
       project: 'Library',
+      indexing: 'Indexing state',
+      documents: 'Indexed files',
     },
     query: {
       kicker: 'Question',
@@ -393,6 +552,8 @@ export default {
       actionBusy: 'Searching...',
       hintReady: 'The answer will stay focused on the active library.',
       hintBlocked: 'Choose a library in Processing before asking.',
+      hintIndexing: 'Indexing is still in progress. Search stays blocked until RustRAG has enough content to answer reliably.',
+      hintNoContent: 'Add and index source files first. Search cannot answer until this library has searchable content.',
       shortcut: 'Press Ctrl+Enter or Cmd+Enter to ask.',
       examplesLabel: 'Try',
       examples: {
@@ -414,6 +575,10 @@ export default {
       referencesTitle: 'Supporting passages',
       referencesDescription: 'Use these passages to verify the answer.',
       referencesEmpty: 'No supporting passages were returned for this answer.',
+      referenceRawLabel: 'Stored reference',
+      grounding: 'Grounding',
+      groundingStrong: 'Backed by retrieved passages',
+      groundingWeak: 'Weak or incomplete support',
       waitingKicker: 'Waiting',
       waitingTitle: 'Ask the library',
       waitingBody: 'Answer and supporting passages appear here after the first search.',
@@ -421,6 +586,62 @@ export default {
         'This answer may be missing support from the indexed files. Review the passages before relying on it.',
       warningNoReferences: 'This answer was returned without supporting passages.',
       warningDetail: 'Model note',
+    },
+    readiness: {
+      states: {
+        ready: 'Ready',
+        indexing: 'Indexing in progress',
+        empty: 'No indexed content yet',
+        unknown: 'Unknown',
+      },
+      emptyState: {
+        title: 'Search is waiting for source material',
+        body: 'This library has no indexed files yet. Add content first, then come back to ask questions.',
+      },
+      partialState: {
+        title: 'Search is waiting for indexing to finish',
+        body: 'RustRAG is still preparing this library. Current state: {state}. Indexed files: {documents}. Ingestion runs: {jobs}.',
+      },
+    },
+    capabilities: {
+      label: 'What Search can do right now',
+      ready: {
+        answer: 'Answer questions from the active library with supporting passages.',
+        verify: 'Show stored references so an operator can verify provenance quickly.',
+        followUp: 'Expose technical retrieval details when you need to inspect a weak answer.',
+      },
+      partial: {
+        answer: 'Explain that the library is only partially indexed and block unreliable asks.',
+        verify: 'Show indexing state and file counts so operators know what is missing.',
+        next: 'Point back to Files to finish ingestion before retrying the question.',
+      },
+      empty: {
+        answer: 'Explain that there is no searchable source content yet.',
+        verify: 'Show the active scope so you know which library still needs files.',
+        next: 'Send you to Files to ingest content instead of pretending to answer.',
+      },
+    },
+    nextActions: {
+      openFiles: 'Open Files',
+      retryQuestion: 'Prepare this question for later',
+    },
+    empty: {
+      noProject: {
+        title: 'Choose a library before asking Search',
+        body: 'Search only works inside the active library. Pick the scope in Processing first.',
+        hint: 'Once a library is selected, Search will explain whether it is indexed enough to answer.',
+        action: 'Open Processing',
+      },
+      noContent: {
+        title: 'No indexed content yet',
+        body: 'This library does not have searchable files yet, so Search cannot answer honestly.',
+        hint: 'Add files in Files, wait for indexing to complete, then ask again.',
+      },
+      partial: {
+        title: 'Indexing is still in progress',
+        body: 'Search is blocked until indexing is reliable enough. Current state: {state}. Indexed files: {documents}. Ingestion runs: {jobs}.',
+        hint: 'Use Files to monitor the queue, then retry your question when the library is ready.',
+      },
     },
     diagnostics: {
       kicker: 'Trace',

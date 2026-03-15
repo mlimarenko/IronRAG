@@ -69,7 +69,10 @@ const items = computed(() =>
         class="reference-card"
       >
         <div class="reference-card__header">
-          <strong>{{ item.title }}</strong>
+          <div class="reference-card__title-block">
+            <strong>{{ item.title }}</strong>
+            <p class="reference-card__meta">{{ item.meta }}</p>
+          </div>
           <span
             v-if="item.isChunkScoped"
             class="reference-card__chip"
@@ -77,8 +80,10 @@ const items = computed(() =>
             {{ t('flow.search.diagnostics.referenceChip') }}
           </span>
         </div>
-        <p class="reference-card__meta">{{ item.meta }}</p>
-        <code class="reference-card__raw">{{ item.raw }}</code>
+        <div class="reference-card__body">
+          <span class="reference-card__raw-label">{{ t('flow.search.result.referenceRawLabel') }}</span>
+          <code class="reference-card__raw">{{ item.raw }}</code>
+        </div>
       </li>
     </ol>
   </section>
@@ -129,7 +134,7 @@ const items = computed(() =>
 
 .reference-card {
   display: grid;
-  gap: var(--rr-space-2);
+  gap: var(--rr-space-3);
   padding: var(--rr-space-4);
   border: 1px solid var(--rr-color-border-subtle);
   border-radius: var(--rr-radius-md);
@@ -140,7 +145,12 @@ const items = computed(() =>
   display: flex;
   justify-content: space-between;
   gap: var(--rr-space-3);
-  align-items: center;
+  align-items: flex-start;
+}
+
+.reference-card__title-block {
+  display: grid;
+  gap: 6px;
 }
 
 .reference-card__header strong {
@@ -164,6 +174,19 @@ const items = computed(() =>
 .reference-card__meta {
   margin: 0;
   color: var(--rr-color-text-secondary);
+}
+
+.reference-card__body {
+  display: grid;
+  gap: 6px;
+}
+
+.reference-card__raw-label {
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--rr-color-text-muted);
 }
 
 .reference-card__raw {
