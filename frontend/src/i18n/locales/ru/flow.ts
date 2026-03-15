@@ -678,17 +678,6 @@ export default {
       openFiles: 'Открыть Файлы',
       retryQuestion: 'Подготовить этот вопрос на потом',
     },
-    sessions: {
-      kicker: 'Недавние сессии',
-      description: 'Откройте недавний диалог по этой библиотеке или начните новую ветку.',
-      newAction: 'Новая сессия',
-      loading: 'Загружаем сессии…',
-      empty: 'Сохранённых сессий пока нет. Первый вопрос создаст новую.',
-      currentBadge: 'Текущая',
-      previewFallback: 'Сообщений пока нет',
-      untitled: 'Сессия {id}',
-      messageCount: 'Сообщений: {count}',
-    },
     empty: {
       noProject: {
         title: 'Сначала выберите библиотеку для Search',

@@ -12,6 +12,10 @@ const productAliases = [
     redirect: '/search',
   },
   {
+    path: 'chat',
+    redirect: '/search',
+  },
+  {
     path: 'dashboard',
     redirect: '/home',
   },

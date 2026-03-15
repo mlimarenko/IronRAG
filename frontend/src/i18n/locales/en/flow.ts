@@ -674,17 +674,6 @@ export default {
       openFiles: 'Open Files',
       retryQuestion: 'Keep this question for later',
     },
-    sessions: {
-      kicker: 'Recent sessions',
-      description: 'Reopen a recent conversation for this library or start a clean thread.',
-      newAction: 'Start new session',
-      loading: 'Loading sessions…',
-      empty: 'No saved sessions yet. Your first question will create one.',
-      currentBadge: 'Current',
-      previewFallback: 'No messages yet',
-      untitled: 'Session {id}',
-      messageCount: '{count} messages',
-    },
     empty: {
       noProject: {
         title: 'Choose a library before asking',

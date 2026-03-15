@@ -3,7 +3,14 @@ import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { RouterLink } from 'vue-router'
 
-import { fetchProjects, fetchProjectReadiness, fetchWorkspaces, type ProjectReadinessSummary } from 'src/boot/api'
+import {
+  fetchChatSessions,
+  fetchProjects,
+  fetchProjectReadiness,
+  fetchWorkspaces,
+  type ChatSessionSurface,
+  type ProjectReadinessSummary,
+} from 'src/boot/api'
 import PageSection from 'src/components/shell/PageSection.vue'
 import AppPanel from 'src/components/ui/AppPanel.vue'
 import {
@@ -30,6 +37,7 @@ const { t } = useI18n()
 const workspaces = ref<WorkspaceItem[]>([])
 const projects = ref<ProjectItem[]>([])
 const readiness = ref<ProjectReadinessSummary | null>(null)
+const recentSessions = ref<ChatSessionSurface[]>([])
 
 const hasWorkspace = computed(() => workspaces.value.length > 0)
 const hasProject = computed(() => projects.value.length > 0)
@@ -41,6 +49,7 @@ const selectedProject = computed(
 )
 const indexedDocuments = computed(() => readiness.value?.documents ?? 0)
 const hasReadyLibrary = computed(() => Boolean(readiness.value?.ready_for_query))
+const latestSession = computed(() => recentSessions.value.at(0))
 const nextAction = computed(() => {
   if (!hasWorkspace.value) {
     return t('flow.home.next.setup')
@@ -123,6 +132,26 @@ const secondaryCards = computed(() => [
     action: t('flow.home.secondary.api.action'),
   },
 ])
+const recentSessionStatus = computed(() => {
+  if (!selectedProject.value) {
+    return t('flow.home.sessions.blocked')
+  }
+
+  const session = latestSession.value
+  if (!session) {
+    return t('flow.home.sessions.empty')
+  }
+
+  return t('flow.home.sessions.ready', { count: session.message_count })
+})
+const recentSessionRoute = computed(() => {
+  const session = latestSession.value
+  return session ? `/search?session=${encodeURIComponent(session.id)}` : '/search'
+})
+const recentSessionUpdatedLabel = computed(() => {
+  const session = latestSession.value
+  return session ? formatDateTime(session.updated_at) : ''
+})
 
 onMounted(async () => {
   workspaces.value = await fetchWorkspaces()
@@ -131,6 +160,7 @@ onMounted(async () => {
   if (!activeWorkspaceId) {
     projects.value = []
     readiness.value = null
+    recentSessions.value = []
     syncSelectedProjectId([])
     return
   }
@@ -140,15 +170,32 @@ onMounted(async () => {
 
   if (!activeProjectId) {
     readiness.value = null
+    recentSessions.value = []
     return
   }
 
   try {
-    readiness.value = await fetchProjectReadiness(activeProjectId)
+    const [nextReadiness, nextSessions] = await Promise.all([
+      fetchProjectReadiness(activeProjectId),
+      fetchChatSessions(activeProjectId),
+    ])
+    readiness.value = nextReadiness
+    recentSessions.value = nextSessions.slice(0, 3)
   } catch {
     readiness.value = null
+    recentSessions.value = []
   }
 })
+
+function formatDateTime(value: string) {
+  const date = new Date(value)
+
+  if (Number.isNaN(date.getTime())) {
+    return value
+  }
+
+  return date.toLocaleString()
+}
 </script>
 
 <template>
@@ -213,6 +260,64 @@ onMounted(async () => {
       </div>
 
       <AppPanel
+        class="home-session-panel"
+        tone="muted"
+        :eyebrow="t('flow.home.sessions.eyebrow')"
+        :title="t('flow.home.sessions.title')"
+      >
+        <p class="rr-note">{{ t('flow.home.sessions.description') }}</p>
+
+        <div class="home-session-grid">
+          <article class="home-session-card">
+            <p class="home-card__status">{{ recentSessionStatus }}</p>
+            <h3>
+              {{ latestSession?.title || t('flow.home.sessions.fallbackTitle') }}
+            </h3>
+            <p class="home-session-card__preview">
+              {{ latestSession?.last_message_preview || t('flow.home.sessions.emptyBody') }}
+            </p>
+            <dl v-if="latestSession" class="home-session-meta">
+              <div>
+                <dt>{{ t('flow.home.sessions.fields.updated') }}</dt>
+                <dd>{{ recentSessionUpdatedLabel }}</dd>
+              </div>
+              <div>
+                <dt>{{ t('flow.home.sessions.fields.messages') }}</dt>
+                <dd>{{ latestSession.message_count }}</dd>
+              </div>
+            </dl>
+            <div class="rr-action-row">
+              <RouterLink class="rr-button rr-button--secondary" :to="recentSessionRoute">
+                {{ latestSession ? t('flow.home.sessions.resume') : t('flow.home.sessions.start') }}
+              </RouterLink>
+              <RouterLink v-if="selectedProject" class="rr-button rr-button--ghost" to="/search">
+                {{ t('flow.home.sessions.openAsk') }}
+              </RouterLink>
+            </div>
+          </article>
+
+          <div v-if="recentSessions.length > 1" class="home-session-list">
+            <article
+              v-for="session in recentSessions.slice(1)"
+              :key="session.id"
+              class="home-session-list__item"
+            >
+              <div>
+                <strong>{{ session.title || t('flow.home.sessions.fallbackTitle') }}</strong>
+                <p>{{ session.last_message_preview || t('flow.home.sessions.emptyBody') }}</p>
+              </div>
+              <RouterLink
+                class="rr-button rr-button--secondary"
+                :to="`/search?session=${encodeURIComponent(session.id)}`"
+              >
+                {{ t('flow.home.sessions.resume') }}
+              </RouterLink>
+            </article>
+          </div>
+        </div>
+      </AppPanel>
+
+      <AppPanel
         class="home-secondary-panel"
         tone="muted"
         :eyebrow="t('flow.home.secondaryEyebrow')"
@@ -242,28 +347,39 @@ onMounted(async () => {
 .home-secondary-grid,
 .home-secondary-card,
 .home-card,
-.home-hero {
+.home-hero,
+.home-session-grid,
+.home-session-card,
+.home-session-list {
   gap: var(--rr-space-4);
 }
 
-.home-hero__copy {
+.home-hero__copy,
+.home-session-meta,
+.home-session-list__item {
   display: grid;
   gap: 0.45rem;
 }
 
 .home-hero__copy h2,
-.home-secondary-card h3 {
+.home-secondary-card h3,
+.home-session-card h3 {
   margin: 0;
 }
 
 .home-card__body,
 .home-card__status,
-.home-secondary-card p {
+.home-secondary-card p,
+.home-session-card__preview,
+.home-session-list__item p {
   margin: 0;
 }
 
 .home-card__body,
-.home-secondary-card p {
+.home-secondary-card p,
+.home-session-card__preview,
+.home-session-list__item p,
+.home-session-meta dt {
   color: var(--rr-color-text-secondary);
 }
 
@@ -273,9 +389,40 @@ onMounted(async () => {
   color: var(--rr-color-accent-700);
 }
 
-.home-primary-grid {
+.home-primary-grid,
+.home-session-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.home-session-card {
+  grid-column: span 2;
+}
+
+.home-session-card,
+.home-session-list__item,
+.home-secondary-card {
+  padding: var(--rr-space-4);
+  border: 1px solid var(--rr-color-border-subtle);
+  border-radius: var(--rr-radius-lg);
+  background: rgb(255 255 255 / 0.7);
+}
+
+.home-session-meta {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.home-session-meta dt,
+.home-session-meta dd {
+  margin: 0;
+}
+
+.home-session-list {
+  display: grid;
+}
+
+.home-session-list__item {
+  align-content: space-between;
 }
 
 .home-secondary-grid {
@@ -283,19 +430,16 @@ onMounted(async () => {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.home-secondary-card {
-  display: grid;
-  gap: var(--rr-space-3);
-  padding: var(--rr-space-4);
-  border: 1px solid var(--rr-color-border-subtle);
-  border-radius: var(--rr-radius-lg);
-  background: rgb(255 255 255 / 0.7);
-}
-
 @media (width <= 900px) {
   .home-primary-grid,
-  .home-secondary-grid {
+  .home-secondary-grid,
+  .home-session-grid,
+  .home-session-meta {
     grid-template-columns: 1fr;
+  }
+
+  .home-session-card {
+    grid-column: span 1;
   }
 }
 </style>
