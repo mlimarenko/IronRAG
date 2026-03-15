@@ -608,10 +608,10 @@ function formatRelationLine(relation: GraphRelationDetail): string {
     :status-label="pageStatus.label"
   >
     <template #actions>
-      <RouterLink class="rr-button rr-button--secondary" to="/processing">
+      <RouterLink class="rr-button rr-button--secondary" to="/home">
         {{ t('graph.actions.processing') }}
       </RouterLink>
-      <RouterLink class="rr-button rr-button--secondary" to="/ingest">
+      <RouterLink class="rr-button rr-button--secondary" to="/files">
         {{ t('graph.actions.ingest') }}
       </RouterLink>
     </template>

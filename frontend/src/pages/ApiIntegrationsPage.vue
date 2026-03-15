@@ -886,7 +886,7 @@ onMounted(async () => {
             <RouterLink class="rr-button rr-button--secondary" to="/setup">
               {{ t('api.start.actions.setup') }}
             </RouterLink>
-            <RouterLink class="rr-button rr-button--secondary" to="/ingest">
+            <RouterLink class="rr-button rr-button--secondary" to="/files">
               {{ t('api.start.actions.ingest') }}
             </RouterLink>
           </div>

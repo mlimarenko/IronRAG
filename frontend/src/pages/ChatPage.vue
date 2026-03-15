@@ -230,7 +230,7 @@ const weakContextActions = computed(() => {
   const actions = [
     {
       label: t('flow.search.nextActions.openFiles'),
-      to: '/ingest',
+      to: '/files',
     },
   ]
 
@@ -409,7 +409,7 @@ async function submitQuery() {
       :status-label="pageStatus.label"
     >
       <template #actions>
-        <RouterLink class="rr-button rr-button--secondary" to="/ingest">
+        <RouterLink class="rr-button rr-button--secondary" to="/files">
           {{ t('flow.search.action') }}
         </RouterLink>
       </template>

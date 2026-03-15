@@ -11,6 +11,10 @@ const productAliases = [
     path: 'ask',
     redirect: '/search',
   },
+  {
+    path: 'dashboard',
+    redirect: '/home',
+  },
 ]
 
 const routes = [
@@ -24,7 +28,15 @@ const routes = [
         children: [
           {
             path: '',
-            redirect: '/processing',
+            redirect: '/home',
+          },
+          {
+            path: 'home',
+            component: () => import('src/pages/HomePage.vue'),
+            meta: {
+              shellSection: 'home',
+              shellStatus: 'focused',
+            },
           },
           {
             path: 'processing',

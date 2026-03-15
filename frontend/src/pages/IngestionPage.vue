@@ -1090,7 +1090,7 @@ onUnmounted(() => {
         >
           {{ t('flow.library.processing.refresh') }}
         </button>
-        <RouterLink class="rr-button rr-button--secondary" to="/ask">
+        <RouterLink class="rr-button rr-button--secondary" to="/search">
           {{ t('flow.library.action') }}
         </RouterLink>
       </template>
@@ -1103,7 +1103,7 @@ onUnmounted(() => {
         </div>
 
         <div class="library-quickstart__main-action">
-          <RouterLink class="rr-button" to="/ask" :aria-disabled="!selectedProjectId">
+          <RouterLink class="rr-button" to="/search" :aria-disabled="!selectedProjectId">
             {{ t('flow.library.action') }}
           </RouterLink>
           <p class="rr-note">

@@ -34,7 +34,7 @@ const activeSection = computed(
   () =>
     (route.meta.shellSection as ShellNavItem['key'] | undefined) ??
     shellNavItems.find((item) => activePath.value === item.to || activePath.value.startsWith(`${item.to}/`))?.key ??
-    'processing',
+    'home',
 )
 
 function isActive(item: ShellNavItem) {
@@ -261,6 +261,14 @@ function isActive(item: ShellNavItem) {
 
   .app-sidebar__link {
     min-height: 56px;
+  }
+}
+
+@media (width <= 900px) {
+  .app-sidebar__focus,
+  .app-sidebar__sections,
+  :deep(.product-spine) {
+    display: none;
   }
 }
 

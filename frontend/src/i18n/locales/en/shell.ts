@@ -1,7 +1,7 @@
 export default {
   brand: {
     title: 'RustRAG',
-    subtitle: 'Setup → Add content → Ask',
+    subtitle: 'Home → Files → Ask',
   },
   nav: {
     product: 'Product areas',
@@ -11,6 +11,10 @@ export default {
       extend: 'Integrate',
     },
     items: {
+      home: {
+        label: 'Home',
+        hint: 'Start from the primary product path.',
+      },
       processing: {
         label: 'Setup',
         hint: 'Pick your space and library.',
@@ -38,6 +42,10 @@ export default {
     language: 'Language',
     languageHint: 'Interface',
   },
+  mobileNav: {
+    primary: 'Primary product navigation',
+    more: 'More',
+  },
   spine: {
     eyebrow: 'Product spine',
   },
@@ -49,6 +57,12 @@ export default {
     start: 'This is the start of the product flow.',
     end: 'This is the furthest surface in the current shell.',
     sections: {
+      home: {
+        stage: 'Start',
+        why: 'Home keeps the main product path visible first so setup, files, and asking stay easy to reach from mobile and desktop alike.',
+        previous: 'This is the landing point for the product flow before you decide whether to set up, add files, or ask.',
+        next: 'Move into Files when the active library is ready, or open Setup when you still need to pick the scope.',
+      },
       processing: {
         stage: 'Step 1',
         why: 'Pick the space and library you want to work in before adding content or asking questions.',
@@ -91,6 +105,10 @@ export default {
     healthy: 'Healthy',
   },
   pages: {
+    home: {
+      title: 'Home',
+      summary: 'Start with the main product path.',
+    },
     processing: {
       title: 'Setup',
       summary: 'Choose your library.',
