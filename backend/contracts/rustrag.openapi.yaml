@@ -1003,6 +1003,57 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+  /v1/chat/sessions:
+    get:
+      tags: [chat]
+      summary: List chat sessions for a project
+      operationId: listChatSessions
+      description: Requires `query:run`, `workspace:admin`, `documents:read`, or an `instance_admin` token. Workspace-scoped tokens may only access sessions in their own workspace.
+      parameters:
+        - name: project_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Chat sessions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ChatSessionSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/chat/sessions/{id}/messages:
+    get:
+      tags: [chat]
+      summary: List messages for a chat session
+      operationId: listChatMessages
+      description: Requires `query:run`, `workspace:admin`, `documents:read`, or an `instance_admin` token. Workspace-scoped tokens may only access sessions in their own workspace.
+      parameters:
+        - $ref: "#/components/parameters/id"
+      responses:
+        "200":
+          description: Chat messages
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ChatMessageItem"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/query:
     post:
       tags: [retrieval]
@@ -1987,6 +2038,10 @@ components:
         project_id:
           type: string
           format: uuid
+        session_id:
+          type: string
+          format: uuid
+          nullable: true
         query_text:
           type: string
         top_k:
@@ -2179,6 +2234,51 @@ components:
           type: object
           additionalProperties: true
 
+    ChatSessionSummary:
+      type: object
+      required: [id, workspace_id, project_id, title, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        project_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ChatMessageItem:
+      type: object
+      required: [id, session_id, project_id, role, content, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        session_id:
+          type: string
+          format: uuid
+        project_id:
+          type: string
+          format: uuid
+        role:
+          type: string
+        content:
+          type: string
+        retrieval_run_id:
+          type: string
+          format: uuid
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
     CreateRetrievalRunRequest:
       type: object
       required: [project_id, query_text]

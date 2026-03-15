@@ -652,6 +652,46 @@ export interface paths {
     patch?: never
     trace?: never
   }
+  '/v1/chat/sessions': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * List chat sessions for a project
+     * @description Requires `query:run`, `workspace:admin`, `documents:read`, or an `instance_admin` token. Workspace-scoped tokens may only access sessions in their own workspace.
+     */
+    get: operations['listChatSessions']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/chat/sessions/{id}/messages': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * List messages for a chat session
+     * @description Requires `query:run`, `workspace:admin`, `documents:read`, or an `instance_admin` token. Workspace-scoped tokens may only access sessions in their own workspace.
+     */
+    get: operations['listChatMessages']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
   '/v1/query': {
     parameters: {
       query?: never
@@ -1205,6 +1245,8 @@ export interface components {
     SearchChunksRequest: {
       /** Format: uuid */
       project_id: string
+      /** Format: uuid */
+      session_id?: string | null
       query_text: string
       /** Format: int32 */
       top_k?: number | null
@@ -1304,6 +1346,33 @@ export interface components {
       debug_json: {
         [key: string]: unknown
       }
+    }
+    ChatSessionSummary: {
+      /** Format: uuid */
+      id: string
+      /** Format: uuid */
+      workspace_id: string
+      /** Format: uuid */
+      project_id: string
+      title: string
+      /** Format: date-time */
+      created_at: string
+      /** Format: date-time */
+      updated_at: string
+    }
+    ChatMessageItem: {
+      /** Format: uuid */
+      id: string
+      /** Format: uuid */
+      session_id: string
+      /** Format: uuid */
+      project_id: string
+      role: string
+      content: string
+      /** Format: uuid */
+      retrieval_run_id?: string | null
+      /** Format: date-time */
+      created_at: string
     }
     CreateRetrievalRunRequest: {
       /** Format: uuid */
@@ -2883,6 +2952,56 @@ export interface operations {
         }
         content: {
           'application/json': components['schemas']['RetrievalRunDetail']
+        }
+      }
+      401: components['responses']['Unauthorized']
+      404: components['responses']['NotFound']
+      500: components['responses']['InternalError']
+    }
+  }
+  listChatSessions: {
+    parameters: {
+      query: {
+        project_id: string
+      }
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Chat sessions */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ChatSessionSummary'][]
+        }
+      }
+      401: components['responses']['Unauthorized']
+      404: components['responses']['NotFound']
+      500: components['responses']['InternalError']
+    }
+  }
+  listChatMessages: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        id: components['parameters']['id']
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Chat messages */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ChatMessageItem'][]
         }
       }
       401: components['responses']['Unauthorized']

@@ -22,7 +22,6 @@ pub struct WorkspaceSummary {
     pub status: String,
 }
 
-
 #[derive(Deserialize)]
 pub struct CreateWorkspaceRequest {
     pub slug: String,
