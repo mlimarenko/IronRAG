@@ -5,15 +5,8 @@ import { RouterLink } from 'vue-router'
 
 import { createProject, createWorkspace, fetchProjects, isUnauthorizedApiError } from 'src/boot/api'
 import AuthSessionPanel from 'src/components/shell/AuthSessionPanel.vue'
-import CrossSurfaceGuide from 'src/components/shell/CrossSurfaceGuide.vue'
 import PageSection from 'src/components/shell/PageSection.vue'
-import ProductSpine from 'src/components/shell/ProductSpine.vue'
-import StatusBadge from 'src/components/shell/StatusBadge.vue'
-import {
-  getSelectedProjectId,
-  getSelectedWorkspaceId,
-  setSelectedProjectId,
-} from 'src/stores/flow'
+import { getSelectedProjectId, getSelectedWorkspaceId, setSelectedProjectId } from 'src/stores/flow'
 import { setWorkspaceWithProjectReset, syncWorkspaceProjectScope } from 'src/lib/flowSelection'
 import { hydrateWorkspaceProjectScope } from 'src/lib/productFlow'
 
@@ -36,8 +29,10 @@ const { t } = useI18n()
 
 const workspaces = ref<WorkspaceItem[]>([])
 const projects = ref<ProjectItem[]>([])
-const workspaceForm = ref({ slug: '', name: '' })
-const projectForm = ref({ slug: '', name: '', description: '' })
+const workspaceForm = ref({ name: '', slug: '' })
+const projectForm = ref({ name: '', slug: '', description: '' })
+const showWorkspaceAdvanced = ref(false)
+const showProjectAdvanced = ref(false)
 const workspaceError = ref<string | null>(null)
 const projectError = ref<string | null>(null)
 const successMessage = ref<string | null>(null)
@@ -79,6 +74,32 @@ watch(selectedWorkspaceId, async (value) => {
   syncWorkspaceProjectScope(workspaces.value, projects.value)
 })
 
+function slugify(value: string): string {
+  return value
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
+
+function updateWorkspaceSlugFromName() {
+  if (!showWorkspaceAdvanced.value) {
+    workspaceForm.value.slug = slugify(workspaceForm.value.name)
+  }
+}
+
+function updateProjectSlugFromName() {
+  if (!showProjectAdvanced.value) {
+    projectForm.value.slug = slugify(projectForm.value.name)
+  }
+}
+
+const showAuthPanel = computed(() => !workspaces.value.length && !selectedWorkspace.value)
+const canCreateWorkspace = computed(() => workspaceForm.value.name.trim().length > 0)
+const canCreateProject = computed(
+  () => !!selectedWorkspaceId.value && projectForm.value.name.trim().length > 0,
+)
+
 async function loadSetupState() {
   await hydrateWorkspaceProjectScope({
     setWorkspaces: (items) => {
@@ -107,15 +128,19 @@ async function createWorkspaceItem() {
   successMessage.value = null
   try {
     const created = await createWorkspace({
-      slug: workspaceForm.value.slug.trim(),
+      slug: slugify(workspaceForm.value.slug || workspaceForm.value.name),
       name: workspaceForm.value.name.trim(),
     })
     workspaces.value = [created, ...workspaces.value.filter((item) => item.id !== created.id)]
-    workspaceForm.value = { slug: '', name: '' }
+    workspaceForm.value = { name: '', slug: '' }
+    showWorkspaceAdvanced.value = false
     setWorkspaceWithProjectReset(created.id)
     successMessage.value = `${t('flow.processing.success')}: ${created.name}`
   } catch (error) {
-    workspaceError.value = formatProtectedCreateError(error, t('flow.processing.errors.createWorkspace'))
+    workspaceError.value = formatProtectedCreateError(
+      error,
+      t('flow.processing.errors.createWorkspace'),
+    )
   }
 }
 
@@ -130,16 +155,20 @@ async function createProjectItem() {
   try {
     const created = await createProject({
       workspace_id: getSelectedWorkspaceId(),
-      slug: projectForm.value.slug.trim(),
+      slug: slugify(projectForm.value.slug || projectForm.value.name),
       name: projectForm.value.name.trim(),
       description: projectForm.value.description.trim() || null,
     })
     projects.value = [created, ...projects.value.filter((item) => item.id !== created.id)]
-    projectForm.value = { slug: '', name: '', description: '' }
+    projectForm.value = { name: '', slug: '', description: '' }
+    showProjectAdvanced.value = false
     syncWorkspaceProjectScope(workspaces.value, projects.value)
     successMessage.value = `${t('flow.processing.success')}: ${created.name}`
   } catch (error) {
-    projectError.value = formatProtectedCreateError(error, t('flow.processing.errors.createProject'))
+    projectError.value = formatProtectedCreateError(
+      error,
+      t('flow.processing.errors.createProject'),
+    )
   }
 }
 </script>
@@ -155,132 +184,153 @@ async function createProjectItem() {
     >
       <template #actions>
         <RouterLink class="rr-button" to="/files" :aria-disabled="!selectedProject">
-          {{ t('flow.processing.stats.nextReady') }}
+          {{ t('flow.processing.cta.continue') }}
         </RouterLink>
       </template>
 
-      <article class="setup-reset rr-panel rr-panel--accent">
-        <div class="setup-reset__hero">
-          <div class="setup-reset__copy">
-            <p class="rr-kicker">{{ t('flow.processing.hero.eyebrow') }}</p>
+      <article class="rr-panel rr-panel--accent setup-flow">
+        <div class="setup-flow__header">
+          <div>
             <h2>{{ t('flow.processing.hero.title') }}</h2>
             <p>{{ t('flow.processing.hero.description') }}</p>
           </div>
-          <StatusBadge :status="setupStatus.status" :label="setupStatus.label" emphasis="strong" />
+          <RouterLink v-if="selectedProject" class="rr-button" to="/files">
+            {{ t('flow.processing.cta.continue') }}
+          </RouterLink>
         </div>
 
         <p v-if="successMessage" class="rr-banner" data-tone="success">
           {{ successMessage }}
         </p>
 
-        <div class="setup-reset__scope">
-          <article class="setup-reset__scope-card">
-            <span>{{ t('flow.processing.hero.cards.workspace.title') }}</span>
-            <strong>{{ selectedWorkspace?.name ?? t('flow.processing.hero.cards.workspace.empty') }}</strong>
-          </article>
-          <article class="setup-reset__scope-card">
-            <span>{{ t('flow.processing.hero.cards.project.title') }}</span>
-            <strong>{{ selectedProject?.name ?? t('flow.processing.hero.cards.project.empty') }}</strong>
-          </article>
-        </div>
-
         <AuthSessionPanel
+          v-if="showAuthPanel"
           :title="t('flow.processing.auth.title')"
           :description="t('flow.processing.auth.description')"
           :context-note="t('flow.processing.auth.note')"
           @updated="void loadSetupState()"
         />
 
-        <div class="setup-reset__forms">
-          <article class="rr-panel setup-panel">
-            <div class="setup-panel__heading">
-              <div>
-                <p class="rr-kicker">{{ t('flow.processing.panels.workspace.kicker') }}</p>
-                <h3>{{ t('flow.processing.panels.workspace.title') }}</h3>
-                <p>{{ t('flow.processing.panels.workspace.helper') }}</p>
-              </div>
-              <StatusBadge
-                :status="selectedWorkspace ? 'ready' : 'draft'"
-                :label="selectedWorkspace ? t('flow.processing.panels.workspace.selectedBadge') : t('flow.processing.panels.workspace.required')"
+        <article class="rr-panel setup-card">
+          <div class="setup-card__header">
+            <div>
+              <p class="rr-kicker">{{ t('flow.processing.panels.workspace.kicker') }}</p>
+              <h3>{{ t('flow.processing.panels.workspace.title') }}</h3>
+              <p>{{ t('flow.processing.panels.workspace.helper') }}</p>
+            </div>
+          </div>
+
+          <label class="rr-field">
+            <span class="rr-field__label">{{
+              t('flow.processing.panels.workspace.selected')
+            }}</span>
+            <select v-model="selectedWorkspaceId" class="rr-control">
+              <option value="">{{ t('flow.processing.panels.workspace.empty') }}</option>
+              <option v-for="workspace in workspaces" :key="workspace.id" :value="workspace.id">
+                {{ workspace.name }}
+              </option>
+            </select>
+          </label>
+
+          <div class="setup-card__divider">{{ t('flow.processing.common.or') }}</div>
+
+          <div class="rr-form-grid">
+            <label class="rr-field">
+              <span class="rr-field__label">{{ t('flow.processing.panels.workspace.name') }}</span>
+              <input
+                v-model="workspaceForm.name"
+                class="rr-control"
+                type="text"
+                :placeholder="t('flow.processing.placeholders.workspaceName')"
+                @input="updateWorkspaceSlugFromName"
               />
-            </div>
+            </label>
 
-            <div class="rr-form-grid">
-              <label class="rr-field">
-                <span class="rr-field__label">{{ t('flow.processing.panels.workspace.selected') }}</span>
-                <select v-model="selectedWorkspaceId" class="rr-control">
-                  <option value="">{{ t('flow.processing.panels.workspace.empty') }}</option>
-                  <option v-for="workspace in workspaces" :key="workspace.id" :value="workspace.id">
-                    {{ workspace.name }} ({{ workspace.slug }})
-                  </option>
-                </select>
-              </label>
+            <button
+              type="button"
+              class="rr-button rr-button--secondary setup-card__advanced-toggle"
+              @click="showWorkspaceAdvanced = !showWorkspaceAdvanced"
+            >
+              {{
+                showWorkspaceAdvanced
+                  ? t('flow.processing.advanced.hide')
+                  : t('flow.processing.advanced.show')
+              }}
+            </button>
 
-              <label class="rr-field">
-                <span class="rr-field__label">{{ t('flow.processing.panels.workspace.name') }}</span>
-                <input
-                  v-model="workspaceForm.name"
-                  class="rr-control"
-                  type="text"
-                  :placeholder="t('flow.processing.placeholders.workspaceName')"
-                >
-              </label>
-
-              <label class="rr-field">
-                <span class="rr-field__label">{{ t('flow.processing.panels.workspace.slug') }}</span>
-                <input
-                  v-model="workspaceForm.slug"
-                  class="rr-control"
-                  type="text"
-                  :placeholder="t('flow.processing.placeholders.workspaceSlug')"
-                >
-              </label>
-            </div>
-
-            <p v-if="workspaceError" class="rr-banner" data-tone="danger">{{ workspaceError }}</p>
-
-            <div class="rr-action-row">
-              <button type="button" class="rr-button" @click="createWorkspaceItem">
-                {{ t('flow.processing.panels.workspace.create') }}
-              </button>
-            </div>
-          </article>
-
-          <article class="rr-panel setup-panel">
-            <div class="setup-panel__heading">
-              <div>
-                <p class="rr-kicker">{{ t('flow.processing.panels.project.kicker') }}</p>
-                <h3>{{ t('flow.processing.panels.project.title') }}</h3>
-                <p>{{ t('flow.processing.panels.project.helper') }}</p>
-              </div>
-              <StatusBadge
-                :status="selectedProject ? 'ready' : selectedWorkspace ? 'partial' : 'blocked'"
-                :label="selectedProject ? t('flow.processing.panels.project.selectedBadge') : selectedWorkspace ? t('flow.processing.panels.project.workspaceReady') : t('flow.processing.panels.project.needsWorkspace')"
+            <label v-if="showWorkspaceAdvanced" class="rr-field">
+              <span class="rr-field__label">{{ t('flow.processing.panels.workspace.slug') }}</span>
+              <input
+                v-model="workspaceForm.slug"
+                class="rr-control"
+                type="text"
+                :placeholder="t('flow.processing.placeholders.workspaceSlug')"
               />
+            </label>
+          </div>
+
+          <p v-if="workspaceError" class="rr-banner" data-tone="danger">{{ workspaceError }}</p>
+
+          <div class="rr-action-row">
+            <button
+              type="button"
+              class="rr-button"
+              :disabled="!canCreateWorkspace"
+              @click="createWorkspaceItem"
+            >
+              {{ t('flow.processing.panels.workspace.create') }}
+            </button>
+          </div>
+        </article>
+
+        <article class="rr-panel setup-card">
+          <div class="setup-card__header">
+            <div>
+              <p class="rr-kicker">{{ t('flow.processing.panels.project.kicker') }}</p>
+              <h3>{{ t('flow.processing.panels.project.title') }}</h3>
+              <p>{{ t('flow.processing.panels.project.helper') }}</p>
             </div>
+          </div>
 
-            <div class="rr-form-grid">
-              <label class="rr-field">
-                <span class="rr-field__label">{{ t('flow.processing.panels.project.selected') }}</span>
-                <select v-model="selectedProjectId" class="rr-control" :disabled="!selectedWorkspaceId">
-                  <option value="">{{ t('flow.processing.panels.project.empty') }}</option>
-                  <option v-for="project in projects" :key="project.id" :value="project.id">
-                    {{ project.name }} ({{ project.slug }})
-                  </option>
-                </select>
-              </label>
+          <label class="rr-field">
+            <span class="rr-field__label">{{ t('flow.processing.panels.project.selected') }}</span>
+            <select v-model="selectedProjectId" class="rr-control" :disabled="!selectedWorkspaceId">
+              <option value="">{{ t('flow.processing.panels.project.empty') }}</option>
+              <option v-for="project in projects" :key="project.id" :value="project.id">
+                {{ project.name }}
+              </option>
+            </select>
+          </label>
 
-              <label class="rr-field">
-                <span class="rr-field__label">{{ t('flow.processing.panels.project.name') }}</span>
-                <input
-                  v-model="projectForm.name"
-                  class="rr-control"
-                  type="text"
-                  :placeholder="t('flow.processing.placeholders.projectName')"
-                  :disabled="!selectedWorkspaceId"
-                >
-              </label>
+          <div class="setup-card__divider">{{ t('flow.processing.common.or') }}</div>
 
+          <div class="rr-form-grid">
+            <label class="rr-field">
+              <span class="rr-field__label">{{ t('flow.processing.panels.project.name') }}</span>
+              <input
+                v-model="projectForm.name"
+                class="rr-control"
+                type="text"
+                :placeholder="t('flow.processing.placeholders.projectName')"
+                :disabled="!selectedWorkspaceId"
+                @input="updateProjectSlugFromName"
+              />
+            </label>
+
+            <button
+              type="button"
+              class="rr-button rr-button--secondary setup-card__advanced-toggle"
+              :disabled="!selectedWorkspaceId"
+              @click="showProjectAdvanced = !showProjectAdvanced"
+            >
+              {{
+                showProjectAdvanced
+                  ? t('flow.processing.advanced.hide')
+                  : t('flow.processing.advanced.show')
+              }}
+            </button>
+
+            <template v-if="showProjectAdvanced">
               <label class="rr-field">
                 <span class="rr-field__label">{{ t('flow.processing.panels.project.slug') }}</span>
                 <input
@@ -289,37 +339,45 @@ async function createProjectItem() {
                   type="text"
                   :placeholder="t('flow.processing.placeholders.projectSlug')"
                   :disabled="!selectedWorkspaceId"
-                >
+                />
               </label>
 
               <label class="rr-field rr-field--full">
-                <span class="rr-field__label">{{ t('flow.processing.panels.project.description') }}</span>
+                <span class="rr-field__label">{{
+                  t('flow.processing.panels.project.description')
+                }}</span>
                 <textarea
                   v-model="projectForm.description"
                   class="rr-control"
-                  rows="4"
+                  rows="3"
                   :placeholder="t('flow.processing.panels.project.descriptionPlaceholder')"
                   :disabled="!selectedWorkspaceId"
                 />
               </label>
-            </div>
+            </template>
+          </div>
 
-            <p v-if="projectError" class="rr-banner" data-tone="danger">{{ projectError }}</p>
+          <p v-if="projectError" class="rr-banner" data-tone="danger">{{ projectError }}</p>
 
-            <div class="rr-action-row">
-              <button type="button" class="rr-button" :disabled="!selectedWorkspaceId" @click="createProjectItem">
-                {{ t('flow.processing.panels.project.create') }}
-              </button>
-              <RouterLink class="rr-button rr-button--secondary" to="/files" :aria-disabled="!selectedProject">
-                {{ t('flow.processing.hero.primaryAction.files') }}
-              </RouterLink>
-            </div>
-          </article>
-        </div>
+          <div class="rr-action-row">
+            <button
+              type="button"
+              class="rr-button"
+              :disabled="!canCreateProject"
+              @click="createProjectItem"
+            >
+              {{ t('flow.processing.panels.project.create') }}
+            </button>
+            <RouterLink
+              class="rr-button rr-button--secondary"
+              to="/files"
+              :aria-disabled="!selectedProject"
+            >
+              {{ t('flow.processing.cta.continue') }}
+            </RouterLink>
+          </div>
+        </article>
       </article>
-
-      <CrossSurfaceGuide active-section="processing" />
-      <ProductSpine active-section="processing" />
     </PageSection>
   </section>
 </template>
@@ -329,55 +387,45 @@ async function createProjectItem() {
   gap: 1.5rem;
 }
 
-.setup-reset,
-.setup-reset__scope-card,
-.setup-panel {
+.setup-flow,
+.setup-card {
   display: grid;
   gap: 1rem;
 }
 
-.setup-reset__hero,
-.setup-panel__heading {
+.setup-flow__header,
+.setup-card__header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 1rem;
 }
 
-.setup-reset__hero h2,
-.setup-panel__heading h3,
-.setup-reset__scope-card strong {
+.setup-flow__header h2,
+.setup-card__header h3 {
   margin: 0;
   color: var(--rr-ink-strong);
 }
 
-.setup-reset__hero p,
-.setup-panel__heading p,
-.setup-reset__scope-card span {
+.setup-flow__header p,
+.setup-card__header p {
   margin: 0;
   color: var(--rr-ink-muted);
 }
 
-.setup-reset__scope,
-.setup-reset__forms {
-  display: grid;
-  gap: 1rem;
+.setup-card__divider {
+  text-align: center;
+  color: var(--rr-ink-muted);
+  font-size: 0.875rem;
 }
 
-.setup-reset__scope {
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-}
-
-.setup-reset__scope-card {
-  padding: 1rem;
-  border-radius: 1rem;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+.setup-card__advanced-toggle {
+  justify-self: start;
 }
 
 @media (max-width: 720px) {
-  .setup-reset__hero,
-  .setup-panel__heading {
+  .setup-flow__header,
+  .setup-card__header {
     flex-direction: column;
   }
 }
