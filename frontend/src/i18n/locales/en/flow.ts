@@ -634,6 +634,24 @@ export default {
         updated: 'Last processing update',
         checksum: 'Checksum',
       },
+      readiness: {
+        label: 'Readiness: {status}',
+        hint: '{hint}',
+      },
+      provenance: {
+        label: 'Stored provenance',
+        hintWithChecksum:
+          'Saved from {source} ({kind}), type {mime}, checksum {checksum}. Use this to confirm where the indexed file came from.',
+        hintWithoutChecksum:
+          'Saved from {source} ({kind}), type {mime}. Use this to confirm where the indexed file came from.',
+      },
+      nextStepLabel: 'Suggested next step',
+      nextSteps: {
+        retry: 'Review processing and retry if needed',
+        wait: 'Wait for indexing to finish',
+        ask: 'Open Ask with this file in mind',
+        addMore: 'Add another file while this library keeps building toward Ask',
+      },
     },
     nextActions: {
       kicker: 'Next step',

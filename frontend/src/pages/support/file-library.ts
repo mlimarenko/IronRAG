@@ -22,6 +22,11 @@ export interface FileInventoryRecord {
   updatedAt: string | null
   updatedSortValue: number
   summaryLabel: string
+  readinessLabel: string
+  readinessHint: string
+  provenanceLabel: string
+  provenanceHint: string
+  nextStepLabel: string
   mimeLabel: string
   checksumShort: string | null
   routeQuery: {
@@ -146,6 +151,14 @@ export function buildFileInventory(
     recentLabel: string
     checksumLabel: string
     mimeFallback: string
+    readinessFormatter: (health: FileHealthSummary) => { label: string; hint: string }
+    provenanceFormatter: (input: {
+      sourceLabel: string
+      sourceKindLabel: string
+      checksumShort: string | null
+      mimeLabel: string
+    }) => { label: string; hint: string }
+    nextStepFormatter: (health: FileHealthSummary) => string
   },
 ): FileInventoryRecord[] {
   const jobBySourceId = buildDocumentJobMap(jobs)
@@ -161,7 +174,17 @@ export function buildFileInventory(
         ? new Date(relatedJob.started_at).getTime()
         : 0
 
-    const summaryParts = [health.hint]
+    const mimeLabel = document.mime_type ?? options.mimeFallback
+    const checksumShort = shortChecksum(document.checksum)
+    const readiness = options.readinessFormatter(health)
+    const provenance = options.provenanceFormatter({
+      sourceLabel: sourceMeta.label,
+      sourceKindLabel: options.sourceKindFormatter(sourceMeta.kind),
+      checksumShort,
+      mimeLabel,
+    })
+
+    const summaryParts = [readiness.hint]
     if (updatedAt) {
       summaryParts.push(`${options.recentLabel} ${updatedAt}`)
     }
@@ -179,8 +202,13 @@ export function buildFileInventory(
       updatedAt,
       updatedSortValue: Number.isFinite(updatedSortValue) ? updatedSortValue : 0,
       summaryLabel: summaryParts.join(' · '),
-      mimeLabel: document.mime_type ?? options.mimeFallback,
-      checksumShort: shortChecksum(document.checksum),
+      readinessLabel: readiness.label,
+      readinessHint: readiness.hint,
+      provenanceLabel: provenance.label,
+      provenanceHint: provenance.hint,
+      nextStepLabel: options.nextStepFormatter(health),
+      mimeLabel,
+      checksumShort,
       routeQuery: {
         doc: document.id,
       },

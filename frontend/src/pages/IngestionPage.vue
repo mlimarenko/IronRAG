@@ -261,6 +261,38 @@ const fileInventory = computed(() =>
     recentLabel: t('flow.library.inventory.updatedPrefix'),
     checksumLabel: t('flow.library.inventory.checksum'),
     mimeFallback: t('flow.library.inventory.mimeFallback'),
+    readinessFormatter: (health) => ({
+      label: t('flow.library.inventory.readiness.label', { status: health.label }),
+      hint: t('flow.library.inventory.readiness.hint', { hint: health.hint }),
+    }),
+    provenanceFormatter: ({ sourceLabel, sourceKindLabel, checksumShort, mimeLabel }) => ({
+      label: t('flow.library.inventory.provenance.label'),
+      hint: checksumShort
+        ? t('flow.library.inventory.provenance.hintWithChecksum', {
+            source: sourceLabel,
+            kind: sourceKindLabel,
+            checksum: checksumShort,
+            mime: mimeLabel,
+          })
+        : t('flow.library.inventory.provenance.hintWithoutChecksum', {
+            source: sourceLabel,
+            kind: sourceKindLabel,
+            mime: mimeLabel,
+          }),
+    }),
+    nextStepFormatter: (health) => {
+      if (health.tone === 'warning') {
+        return t('flow.library.inventory.nextSteps.retry')
+      }
+
+      if (health.tone === 'info') {
+        return t('flow.library.inventory.nextSteps.wait')
+      }
+
+      return canGoToAsk.value
+        ? t('flow.library.inventory.nextSteps.ask')
+        : t('flow.library.inventory.nextSteps.addMore')
+    },
   }),
 )
 const normalizedLibrarySearch = computed(() => librarySearch.value.trim().toLowerCase())
@@ -1402,9 +1434,22 @@ onUnmounted(() => {
                       : 'success'
                 "
               >
-                <strong>{{ selectedInventoryRecord.statusLabel }}</strong>
-                <p>{{ selectedInventoryRecord.summaryLabel }}</p>
+                <strong>{{ selectedInventoryRecord.readinessLabel }}</strong>
+                <p>{{ selectedInventoryRecord.readinessHint }}</p>
               </article>
+
+              <div class="file-library-detail__trust-grid">
+                <article class="file-library-detail__trust-card">
+                  <span>{{ t('flow.library.inventory.provenance.label') }}</span>
+                  <strong>{{ selectedInventoryRecord.provenanceLabel }}</strong>
+                  <p class="rr-note">{{ selectedInventoryRecord.provenanceHint }}</p>
+                </article>
+                <article class="file-library-detail__trust-card">
+                  <span>{{ t('flow.library.inventory.nextStepLabel') }}</span>
+                  <strong>{{ selectedInventoryRecord.nextStepLabel }}</strong>
+                  <p class="rr-note">{{ selectedInventoryRecord.summaryLabel }}</p>
+                </article>
+              </div>
 
               <div class="rr-action-row">
                 <button
@@ -1536,6 +1581,25 @@ onUnmounted(() => {
 
 .file-library-detail__facts {
   grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+}
+
+.file-library-detail__trust-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 0.75rem;
+}
+
+.file-library-detail__trust-card {
+  display: grid;
+  gap: 0.35rem;
+  border: 1px solid var(--rr-border, rgba(255, 255, 255, 0.08));
+  border-radius: 0.85rem;
+  padding: 0.9rem;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.file-library-detail__trust-card span {
+  color: var(--rr-muted, rgba(255, 255, 255, 0.68));
 }
 
 .file-library-detail__facts div {
