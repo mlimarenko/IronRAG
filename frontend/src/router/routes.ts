@@ -1,11 +1,19 @@
 const productAliases = [
   {
     path: 'setup',
-    redirect: '/processing',
+    redirect: '/advanced/context',
+  },
+  {
+    path: 'processing',
+    redirect: '/advanced/context',
   },
   {
     path: 'ingest',
-    redirect: '/files',
+    redirect: '/documents',
+  },
+  {
+    path: 'files',
+    redirect: '/documents',
   },
   {
     path: 'ask',
@@ -17,11 +25,11 @@ const productAliases = [
   },
   {
     path: 'dashboard',
-    redirect: '/files',
+    redirect: '/documents',
   },
   {
     path: 'home',
-    redirect: '/files',
+    redirect: '/documents',
   },
 ]
 
@@ -36,22 +44,14 @@ const routes = [
         children: [
           {
             path: '',
-            redirect: '/files',
-          },
-          {
-            path: 'processing',
-            component: () => import('src/pages/WorkspacesPage.vue'),
-            meta: {
-              shellSection: 'processing',
-              shellStatus: 'focused',
-            },
+            redirect: '/documents',
           },
           ...productAliases,
           {
-            path: 'files',
+            path: 'documents',
             component: () => import('src/pages/IngestionPage.vue'),
             meta: {
-              shellSection: 'files',
+              shellSection: 'documents',
               shellStatus: 'ready',
             },
           },
@@ -59,15 +59,23 @@ const routes = [
             path: 'search',
             component: () => import('src/pages/ChatPage.vue'),
             meta: {
-              shellSection: 'search',
+              shellSection: 'ask',
               shellStatus: 'healthy',
             },
           },
           {
-            path: 'api',
+            path: 'advanced/context',
+            component: () => import('src/pages/WorkspacesPage.vue'),
+            meta: {
+              shellSection: 'advanced',
+              shellStatus: 'focused',
+            },
+          },
+          {
+            path: 'advanced/api',
             component: () => import('src/pages/ApiIntegrationsPage.vue'),
             meta: {
-              shellSection: 'api',
+              shellSection: 'advanced',
               shellStatus: 'healthy',
             },
           },

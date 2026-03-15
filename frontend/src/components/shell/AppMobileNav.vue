@@ -8,8 +8,16 @@ import { shellNavItems, type ShellNavItem } from './shellNavigation'
 const route = useRoute()
 const { t } = useI18n()
 
-const primaryItems = computed(() => shellNavItems.filter((item) => item.emphasis === 'primary'))
-const secondaryItems = computed(() => shellNavItems.filter((item) => item.emphasis !== 'primary'))
+const primaryItems = computed(() =>
+  shellNavItems
+    .map((item, index) => ({ ...item, stepLabel: String(index + 1).padStart(2, '0') }))
+    .filter((item) => item.emphasis === 'primary'),
+)
+const secondaryItems = computed(() =>
+  shellNavItems
+    .map((item, index) => ({ ...item, stepLabel: String(index + 1).padStart(2, '0') }))
+    .filter((item) => item.emphasis !== 'primary'),
+)
 const activePath = computed(() => route.path)
 
 function isActive(item: ShellNavItem) {
@@ -34,7 +42,7 @@ function isActive(item: ShellNavItem) {
       :data-active="isActive(item)"
       :aria-current="isActive(item) ? 'page' : undefined"
     >
-      <span class="app-mobile-nav__step">{{ item.step }}</span>
+      <span class="app-mobile-nav__step">{{ item.stepLabel }}</span>
       <span class="app-mobile-nav__label">{{ t(`shell.nav.items.${item.key}.label`) }}</span>
     </RouterLink>
 
@@ -55,7 +63,7 @@ function isActive(item: ShellNavItem) {
             <strong>{{ t(`shell.nav.items.${item.key}.label`) }}</strong>
             <p>{{ t(`shell.nav.items.${item.key}.hint`) }}</p>
           </div>
-          <span>{{ item.step }}</span>
+          <span>{{ item.stepLabel }}</span>
         </RouterLink>
       </div>
     </details>
@@ -68,7 +76,7 @@ function isActive(item: ShellNavItem) {
   bottom: 0;
   z-index: 30;
   display: none;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.65rem;
   padding: 0.85rem 0.9rem calc(0.85rem + env(safe-area-inset-bottom, 0px));
   border-top: 1px solid rgb(15 23 42 / 0.08);

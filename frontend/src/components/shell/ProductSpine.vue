@@ -22,6 +22,7 @@ const items = computed(() =>
   shellNavItems.map((item, index) => ({
     ...item,
     index,
+    stepLabel: String(index + 1).padStart(2, '0'),
     title: t(`shell.nav.items.${item.key}.label`),
     hint: t(`shell.nav.items.${item.key}.hint`),
     groupLabel: t(`shell.nav.groups.${item.stage}`),
@@ -48,7 +49,7 @@ const items = computed(() =>
         :data-complete="item.complete"
       >
         <RouterLink :to="item.to" class="product-spine__link" :data-secondary="item.secondary">
-          <span class="product-spine__step">{{ item.step }}</span>
+          <span class="product-spine__step">{{ item.stepLabel }}</span>
           <span class="product-spine__copy">
             <small class="product-spine__group">{{ item.groupLabel }}</small>
             <strong>{{ item.title }}</strong>

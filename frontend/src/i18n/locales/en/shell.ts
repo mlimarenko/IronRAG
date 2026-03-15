@@ -1,35 +1,31 @@
 export default {
   brand: {
     title: 'RustRAG',
-    subtitle: 'Documents → Ask + Graph',
+    subtitle: 'Documents and Ask',
   },
   nav: {
-    product: 'Product areas',
+    product: 'Product navigation',
     groups: {
-      primary: 'Primary flow',
+      primary: 'Main',
       advanced: 'Advanced',
     },
     items: {
-      processing: {
-        label: 'Advanced setup',
-        hint: 'Choose space, library, and operator access when needed.',
-      },
-      files: {
+      documents: {
         label: 'Documents',
-        hint: 'Upload documents, watch processing, and take the next action.',
+        hint: 'Upload documents, check progress, and see what is ready.',
       },
-      search: {
-        label: 'Ask + Graph',
-        hint: 'Ask questions, review answers, and inspect related graph context.',
+      ask: {
+        label: 'Ask',
+        hint: 'Ask questions and review answers with related context.',
       },
-      api: {
-        label: 'Developer API',
-        hint: 'Tokens, examples, and integration routes.',
+      advanced: {
+        label: 'Advanced',
+        hint: 'Workspace, library, and integration controls when needed.',
       },
     },
   },
   topbar: {
-    surface: 'Current step',
+    surface: 'Current page',
     language: 'Language',
     languageHint: 'Interface',
   },
@@ -41,31 +37,30 @@ export default {
     eyebrow: 'Product spine',
   },
   guide: {
-    eyebrow: 'How this area fits',
+    eyebrow: 'How this page fits',
     previous: 'Comes from',
     next: 'Leads to',
-    related: 'Also connects to',
-    start: 'This is the start of the product flow.',
-    end: 'This is the furthest surface in the current shell.',
+    related: 'Also available',
+    start: 'This is the main starting point.',
+    end: 'This is the last page in the main flow.',
     sections: {
-      processing: {
-        stage: 'Advanced',
-        why: 'Keep workspace, library, and access configuration available without letting setup own the primary path.',
-        previous:
-          'Most people should arrive here only when they need to change scope or unlock access.',
-        next: 'Return to Documents after adjusting the active library or permissions.',
-      },
-      files: {
+      documents: {
         stage: 'Step 1',
-        why: 'Documents is the main operational page: upload files, watch processing, review status, and move on when the library is ready.',
-        previous: 'This is the main landing point for the product experience.',
-        next: 'Open Ask + Graph once documents are indexed enough to answer honestly.',
+        why: 'Upload documents, watch processing, and see when content is ready to ask about.',
+        previous: 'This is the default front door for the app.',
+        next: 'Open Ask when your content is ready or keep uploading.',
       },
-      search: {
+      ask: {
         stage: 'Step 2',
-        why: 'Ask + Graph keeps questions, answers, sources, and related graph context in one primary surface.',
-        previous: 'Documents determines what is actually ready to answer questions.',
-        next: 'Use advanced setup or API only when you need operator controls beyond the normal document workflow.',
+        why: 'Ask questions, continue conversations, and inspect related context in one place.',
+        previous: 'Documents tells you what is ready to ask about.',
+        next: 'Use Advanced only when you need to change workspace, library, or integrations.',
+      },
+      advanced: {
+        stage: 'Secondary',
+        why: 'Keep environment controls available without making them part of the normal flow.',
+        previous: 'Most people should stay in Documents and Ask.',
+        next: 'Return to Documents or Ask after changing context.',
       },
     },
   },
@@ -79,25 +74,17 @@ export default {
     healthy: 'Healthy',
   },
   pages: {
-    processing: {
-      title: 'Advanced setup',
-      summary: 'Change workspace, library, and access when needed.',
-    },
-    files: {
+    documents: {
       title: 'Documents',
-      summary: 'Upload documents, monitor processing, and keep next actions obvious.',
+      summary: 'Upload documents, monitor progress, and keep the next step obvious.',
     },
-    search: {
-      title: 'Ask + Graph',
-      summary: 'Ask questions, review answers, and inspect related graph context.',
+    ask: {
+      title: 'Ask',
+      summary: 'Ask questions, review answers, and inspect related context.',
     },
-    graph: {
-      title: 'Graph diagnostics',
-      summary: 'Secondary graph inspection and evidence checks.',
-    },
-    api: {
-      title: 'Developer API',
-      summary: 'Secondary integration and automation tools.',
+    advanced: {
+      title: 'Advanced',
+      summary: 'Change workspace, library, and integrations only when needed.',
     },
   },
 } as const

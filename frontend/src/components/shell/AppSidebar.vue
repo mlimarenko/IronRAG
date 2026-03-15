@@ -3,7 +3,6 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { RouterLink, useRoute } from 'vue-router'
 
-import ProductSpine from './ProductSpine.vue'
 import { shellNavItems, type ShellNavItem } from './shellNavigation'
 
 const route = useRoute()
@@ -17,11 +16,15 @@ interface NavGroup {
 const navGroups = computed<readonly NavGroup[]>(() => [
   {
     key: 'primary',
-    items: shellNavItems.filter((item) => item.stage === 'primary'),
+    items: shellNavItems
+      .map((item, index) => ({ ...item, stepLabel: String(index + 1).padStart(2, '0') }))
+      .filter((item) => item.stage === 'primary'),
   },
   {
     key: 'advanced',
-    items: shellNavItems.filter((item) => item.stage === 'advanced'),
+    items: shellNavItems
+      .map((item, index) => ({ ...item, stepLabel: String(index + 1).padStart(2, '0') }))
+      .filter((item) => item.stage === 'advanced'),
   },
 ])
 
@@ -32,7 +35,7 @@ const activeSection = computed(
     shellNavItems.find(
       (item) => activePath.value === item.to || activePath.value.startsWith(`${item.to}/`),
     )?.key ??
-    'files',
+    'documents',
 )
 
 function isActive(item: ShellNavItem) {
@@ -65,8 +68,6 @@ function isActive(item: ShellNavItem) {
       <small>{{ t(`shell.nav.items.${activeSection}.hint`) }}</small>
     </div>
 
-    <ProductSpine :active-section="activeSection" compact />
-
     <div class="app-sidebar__sections" :aria-label="t('shell.nav.product')">
       <section v-for="group in navGroups" :key="group.key" class="app-sidebar__section">
         <p class="app-sidebar__section-label">{{ t(`shell.nav.groups.${group.key}`) }}</p>
@@ -79,7 +80,7 @@ function isActive(item: ShellNavItem) {
             :data-active="isActive(item)"
             :aria-current="isActive(item) ? 'page' : undefined"
           >
-            <span class="app-sidebar__step">{{ item.step }}</span>
+            <span class="app-sidebar__step">{{ item.stepLabel }}</span>
             <span class="app-sidebar__label">{{ t(`shell.nav.items.${item.key}.label`) }}</span>
           </RouterLink>
         </nav>

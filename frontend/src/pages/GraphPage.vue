@@ -620,8 +620,8 @@ function formatRelationLine(relation: GraphRelationDetail): string {
       </RouterLink>
     </template>
 
-    <ProductSpine active-section="graph" />
-    <CrossSurfaceGuide active-section="graph" />
+    <ProductSpine active-section="advanced" />
+    <CrossSurfaceGuide active-section="advanced" />
 
     <section class="hero card">
       <div class="hero__copy">

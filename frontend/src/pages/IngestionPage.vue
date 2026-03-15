@@ -20,8 +20,6 @@ import {
   type ProjectReadinessSummary,
   type SourceSummary,
 } from 'src/boot/api'
-import CrossSurfaceGuide from 'src/components/shell/CrossSurfaceGuide.vue'
-import ProductSpine from 'src/components/shell/ProductSpine.vue'
 import StatusBadge from 'src/components/shell/StatusBadge.vue'
 import PageSection from 'src/components/shell/PageSection.vue'
 import EmptyStateCard from 'src/components/state/EmptyStateCard.vue'
@@ -367,21 +365,13 @@ const inventoryGroups = computed(() => {
   })).filter((group) => group.total > 0)
 })
 const nextActionRoute = computed(() => {
-  if (!selectedProjectId.value) {
-    return '/setup'
-  }
-
-  if (documents.value.length > 0 && activeJobsCount.value === 0) {
+  if (canGoToAsk.value) {
     return '/search'
   }
 
-  return '/files'
+  return '/documents'
 })
 const nextActionLabel = computed(() => {
-  if (!selectedProjectId.value) {
-    return t('flow.library.nextActions.chooseLibrary')
-  }
-
   if (activeJobsCount.value > 0) {
     return t('flow.library.nextActions.waitForReady')
   }
@@ -393,10 +383,6 @@ const nextActionLabel = computed(() => {
   return t('flow.library.nextActions.uploadFirst')
 })
 const nextActionHint = computed(() => {
-  if (!selectedProjectId.value) {
-    return t('flow.library.nextActions.chooseLibraryHint')
-  }
-
   if (readinessPresentation.value.queryable) {
     return readinessPresentation.value.askHint
   }
@@ -419,7 +405,6 @@ const latestSession = computed(() => recentSessions.value.at(0) ?? null)
 const latestSessionRoute = computed(() =>
   latestSession.value ? `/search?session=${encodeURIComponent(latestSession.value.id)}` : '/search',
 )
-const setupSurfaceTone = computed(() => (selectedProjectId.value ? 'info' : 'warning'))
 
 function setFeedbackState(state: FeedbackState | null) {
   feedback.value = state
@@ -1027,19 +1012,6 @@ onUnmounted(() => {
           </article>
         </div>
 
-        <article class="rr-banner front-door-banner" :data-tone="setupSurfaceTone">
-          <strong>{{ t('flow.library.frontDoor.title') }}</strong>
-          <p>{{ t('flow.library.frontDoor.body') }}</p>
-          <div class="rr-action-row front-door-banner__actions">
-            <RouterLink class="rr-button rr-button--secondary" to="/processing">
-              {{ t('flow.library.frontDoor.setupAction') }}
-            </RouterLink>
-            <RouterLink class="rr-button rr-button--ghost" to="/api">
-              {{ t('flow.library.frontDoor.apiAction') }}
-            </RouterLink>
-          </div>
-        </article>
-
         <article v-if="feedback" class="feedback-banner" :data-tone="feedback.tone">
           <strong>{{ feedback.title }}</strong>
           <p>{{ feedback.body }}</p>
@@ -1102,13 +1074,11 @@ onUnmounted(() => {
             <div class="rr-action-row">
               <RouterLink class="rr-button" :to="nextActionRoute">{{ nextActionLabel }}</RouterLink>
               <RouterLink
+                v-if="latestSession"
                 class="rr-button rr-button--secondary"
                 :to="latestSessionRoute"
-                :aria-disabled="!latestSession && !canGoToAsk"
               >
-                {{
-                  latestSession ? t('flow.library.frontDoor.resumeAsk') : t('flow.library.action')
-                }}
+                {{ t('flow.library.frontDoor.resumeAsk') }}
               </RouterLink>
             </div>
           </article>
@@ -1218,13 +1188,6 @@ onUnmounted(() => {
                       : t('flow.library.upload.action')
                   }}
                 </button>
-                <RouterLink
-                  v-if="!selectedProjectId"
-                  class="rr-button rr-button--secondary"
-                  to="/processing"
-                >
-                  {{ t('flow.processing.title') }}
-                </RouterLink>
               </div>
             </article>
 
@@ -1575,9 +1538,6 @@ onUnmounted(() => {
           </article>
         </div>
       </article>
-
-      <CrossSurfaceGuide active-section="files" />
-      <ProductSpine active-section="files" />
     </PageSection>
   </section>
 </template>

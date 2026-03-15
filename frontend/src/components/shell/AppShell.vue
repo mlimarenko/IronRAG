@@ -15,7 +15,7 @@ const routeMeta = computed(() => {
   const meta = route.meta as {
     shellSection?: ShellSection
   }
-  const section = meta.shellSection ?? 'files'
+  const section = meta.shellSection ?? 'documents'
 
   return {
     section,

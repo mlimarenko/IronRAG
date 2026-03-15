@@ -784,9 +784,6 @@ onMounted(async () => {
       </button>
     </template>
 
-    <ProductSpine active-section="api" />
-    <CrossSurfaceGuide active-section="api" />
-
     <LoadingSkeletonPanel v-if="loading" :title="t('api.page.loadingTitle')" :lines="8" />
 
     <ErrorStateCard

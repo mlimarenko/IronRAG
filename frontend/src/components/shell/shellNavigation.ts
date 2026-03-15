@@ -1,4 +1,4 @@
-export type ShellSection = 'files' | 'search' | 'processing' | 'graph' | 'api'
+export type ShellSection = 'documents' | 'ask' | 'advanced'
 
 export interface ShellNavItem {
   key: ShellSection
@@ -11,15 +11,15 @@ export interface ShellNavItem {
 
 export const shellNavItems: readonly ShellNavItem[] = [
   {
-    key: 'files',
-    to: '/files',
-    legacyTo: '/ingest',
+    key: 'documents',
+    to: '/documents',
+    legacyTo: '/files',
     step: '01',
     stage: 'primary',
     emphasis: 'primary',
   },
   {
-    key: 'search',
+    key: 'ask',
     to: '/search',
     legacyTo: '/ask',
     step: '02',
@@ -27,24 +27,10 @@ export const shellNavItems: readonly ShellNavItem[] = [
     emphasis: 'primary',
   },
   {
-    key: 'processing',
-    to: '/processing',
-    legacyTo: '/setup',
-    step: 'A1',
-    stage: 'advanced',
-    emphasis: 'secondary',
-  },
-  {
-    key: 'graph',
-    to: '/graph',
-    step: 'A2',
-    stage: 'advanced',
-    emphasis: 'secondary',
-  },
-  {
-    key: 'api',
-    to: '/api',
-    step: 'A3',
+    key: 'advanced',
+    to: '/advanced/context',
+    legacyTo: '/processing',
+    step: 'A',
     stage: 'advanced',
     emphasis: 'secondary',
   },

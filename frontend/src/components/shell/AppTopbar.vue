@@ -23,7 +23,7 @@ withDefaults(
   defineProps<{
     sectionLabel?: string
     sectionSummary?: string
-    sectionKey?: 'files' | 'search' | 'processing' | 'graph' | 'api'
+    sectionKey?: 'documents' | 'ask' | 'advanced'
   }>(),
   {
     sectionLabel: undefined,
