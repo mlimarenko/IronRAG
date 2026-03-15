@@ -51,7 +51,8 @@ export default {
       processing: {
         stage: 'Advanced',
         why: 'Keep workspace, library, and access configuration available without letting setup own the primary path.',
-        previous: 'Most people should arrive here only when they need to change scope or unlock access.',
+        previous:
+          'Most people should arrive here only when they need to change scope or unlock access.',
         next: 'Return to Documents after adjusting the active library or permissions.',
       },
       files: {

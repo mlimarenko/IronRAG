@@ -20,8 +20,27 @@ import ReferenceList from 'src/components/chat/ReferenceList.vue'
 import RetrievalDiagnosticsPanel from 'src/components/chat/RetrievalDiagnosticsPanel.vue'
 import StatusPill from 'src/components/chat/StatusPill.vue'
 import PageSection from 'src/components/shell/PageSection.vue'
+import StatusBadge from 'src/components/shell/StatusBadge.vue'
 import EmptyStateCard from 'src/components/state/EmptyStateCard.vue'
+import LoadingSkeletonPanel from 'src/components/state/LoadingSkeletonPanel.vue'
 import { formatLocaleDateTime } from 'src/lib/formatting'
+import {
+  fetchGraphEntityDetail,
+  fetchGraphProductSnapshot,
+  fetchGraphProjectDiagnostics,
+  fetchGraphProjectSummary,
+  fetchGraphSubgraph,
+  isGraphApiUnavailableError,
+  searchGraphProduct,
+  type GraphEntityDetailResponse,
+  type GraphEntitySummary,
+  type GraphProjectDiagnosticsResponse,
+  type GraphProjectSummaryResponse,
+  type GraphRelationDetail,
+  type GraphRelationSummary,
+  type GraphSearchResponse,
+  type GraphSubgraphResponse,
+} from 'src/lib/graphProduct'
 import { formatProjectReadiness } from 'src/lib/projectReadiness'
 import { hydrateWorkspaceProjectScope } from 'src/lib/productFlow'
 import { getSelectedProjectId, setSelectedProjectId } from 'src/stores/flow'
@@ -41,6 +60,26 @@ interface ProjectItem {
 }
 
 type BannerTone = 'warning' | 'info'
+
+interface GraphResultCard {
+  id: string
+  kind: 'entity' | 'relation'
+  title: string
+  subtitle: string
+  summary: string
+  badge: string
+  sourceChunkCount: number
+  matchReasons: string[]
+  entity?: GraphEntitySummary
+  relation?: GraphRelationSummary
+  fromEntityName?: string
+  toEntityName?: string
+}
+
+interface GraphSelection {
+  id: string
+  kind: 'entity' | 'relation'
+}
 
 const MOBILE_BREAKPOINT = 900
 
@@ -65,6 +104,28 @@ const messages = ref<ChatMessageSurface[]>([])
 const activeSessionId = ref('')
 const showMobileSessions = ref(false)
 const windowWidth = ref(typeof window === 'undefined' ? MOBILE_BREAKPOINT + 1 : window.innerWidth)
+
+const graphSearchQuery = ref('')
+const subgraphDepth = ref(1)
+const projectSummary = ref<GraphProjectSummaryResponse | null>(null)
+const projectDiagnostics = ref<GraphProjectDiagnosticsResponse | null>(null)
+const searchResponse = ref<GraphSearchResponse | null>(null)
+const entityDetail = ref<GraphEntityDetailResponse | null>(null)
+const entitySubgraph = ref<GraphSubgraphResponse | null>(null)
+const loadingGraphSurface = ref(false)
+const loadingGraphSearch = ref(false)
+const loadingGraphDetail = ref(false)
+const graphApiUnavailable = ref(false)
+const graphSurfaceError = ref<string | null>(null)
+const graphSearchError = ref<string | null>(null)
+const graphDetailError = ref<string | null>(null)
+const selectedGraphItem = ref<GraphSelection | null>(null)
+const showTechnicalGraphDetail = ref(false)
+
+let graphSearchTimer: number | undefined
+let graphSurfaceRequestId = 0
+let graphSearchRequestId = 0
+let graphDetailRequestId = 0
 
 const selectedProjectId = computed(() => getSelectedProjectId())
 const selectedProject = computed(
@@ -262,6 +323,139 @@ const readinessNotice = computed<{ tone: BannerTone; title: string; message: str
   },
 )
 
+const currentGraphCoverage = computed(
+  () => projectDiagnostics.value?.coverage ?? projectSummary.value?.coverage ?? null,
+)
+const graphCoverageWarning = computed(
+  () => projectDiagnostics.value?.coverage.warning ?? currentGraphCoverage.value?.warning ?? null,
+)
+const graphReadinessSummary = computed(() => projectDiagnostics.value?.readiness ?? null)
+const graphContentSummary = computed(() => projectDiagnostics.value?.content ?? null)
+const graphProvenanceSummary = computed(() => projectDiagnostics.value?.provenance ?? null)
+const graphDiagnosticsBlockers = computed(() => graphReadinessSummary.value?.blockers ?? [])
+const graphDiagnosticsNextSteps = computed(() => graphReadinessSummary.value?.next_steps ?? [])
+const graphEntityNameById = computed<Record<string, string>>(() => {
+  if (!projectSummary.value) {
+    return {}
+  }
+
+  return Object.fromEntries(
+    projectSummary.value.top_entities.map((entity) => [entity.id, entity.canonical_name]),
+  )
+})
+const graphDefaultResultCards = computed<GraphResultCard[]>(() => {
+  if (!projectSummary.value) {
+    return []
+  }
+
+  const entityCards = projectSummary.value.top_entities.map((entity) => ({
+    id: entity.id,
+    kind: 'entity' as const,
+    title: entity.canonical_name,
+    subtitle: 'Entity',
+    summary: `${formatCount(entity.source_chunk_count, 'supporting chunk')} linked to this entity.`,
+    badge: 'Entity',
+    sourceChunkCount: entity.source_chunk_count,
+    matchReasons: [],
+    entity,
+  }))
+
+  const relationCards = projectSummary.value.sample_relations.map((relation) =>
+    relationToCard(relation, graphEntityNameById.value, []),
+  )
+
+  return [...entityCards, ...relationCards]
+})
+const graphSearchResultCards = computed<GraphResultCard[]>(() => {
+  if (!searchResponse.value) {
+    return []
+  }
+
+  const entityCards = searchResponse.value.entity_results.map(({ entity, match_reasons }) => ({
+    id: entity.id,
+    kind: 'entity' as const,
+    title: entity.canonical_name,
+    subtitle: entity.entity_type ?? 'Entity',
+    summary: formatReasonsSummary(match_reasons, entity.source_chunk_count),
+    badge: 'Entity',
+    sourceChunkCount: entity.source_chunk_count,
+    matchReasons: match_reasons,
+    entity,
+  }))
+
+  const relationCards = searchResponse.value.relation_results.map(
+    ({ relation, from_entity_name, to_entity_name, match_reasons }) =>
+      relationToCard(
+        relation,
+        graphEntityNameById.value,
+        match_reasons,
+        from_entity_name,
+        to_entity_name,
+      ),
+  )
+
+  return [...entityCards, ...relationCards]
+})
+const visibleGraphResults = computed<GraphResultCard[]>(() =>
+  graphSearchQuery.value.trim() ? graphSearchResultCards.value : graphDefaultResultCards.value,
+)
+const selectedGraphCard = computed<GraphResultCard | null>(() => {
+  const selectedItem = selectedGraphItem.value
+
+  if (!selectedItem) {
+    return visibleGraphResults.value[0] ?? null
+  }
+
+  return (
+    visibleGraphResults.value.find(
+      (item) => item.kind === selectedItem.kind && item.id === selectedItem.id,
+    ) ?? null
+  )
+})
+const selectedGraphEntityCard = computed(() =>
+  selectedGraphCard.value?.kind === 'entity' ? selectedGraphCard.value : null,
+)
+const selectedGraphRelationCard = computed(() =>
+  selectedGraphCard.value?.kind === 'relation' ? selectedGraphCard.value : null,
+)
+const canLoadGraphSubgraph = computed(() =>
+  Boolean(
+    selectedProjectId.value &&
+    selectedGraphCard.value?.kind === 'entity' &&
+    !graphApiUnavailable.value,
+  ),
+)
+const selectedSubgraphEntityName = computed(() =>
+  selectedGraphCard.value?.kind === 'entity' ? selectedGraphCard.value.title : '',
+)
+const graphPanelStatus = computed(() => {
+  if (!selectedProject.value) {
+    return { status: 'blocked', label: t('flow.search.graph.status.noProject') }
+  }
+
+  if (loadingGraphSurface.value) {
+    return { status: 'pending', label: t('flow.search.graph.status.loading') }
+  }
+
+  if (graphApiUnavailable.value) {
+    return { status: 'blocked', label: t('flow.search.graph.status.unavailable') }
+  }
+
+  if (graphSurfaceError.value) {
+    return { status: 'warning', label: t('flow.search.graph.status.degraded') }
+  }
+
+  if ((currentGraphCoverage.value?.relation_count ?? 0) > 0) {
+    return { status: 'ready', label: t('flow.search.graph.status.live') }
+  }
+
+  if ((currentGraphCoverage.value?.entity_count ?? 0) > 0) {
+    return { status: 'partial', label: t('flow.search.graph.status.entityOnly') }
+  }
+
+  return { status: 'draft', label: t('flow.search.graph.status.waiting') }
+})
+
 watch(
   () => route.query.q,
   (value) => {
@@ -304,6 +498,7 @@ watch(
     messages.value = []
     activeSessionId.value = ''
     showMobileSessions.value = false
+    resetGraphSurface()
 
     if (!scopedProjectId) {
       return
@@ -313,8 +508,11 @@ watch(
       setSelectedProjectId(scopedProjectId)
     }
 
-    await loadReadiness(scopedProjectId)
-    await loadSessions(scopedProjectId)
+    await Promise.all([
+      loadReadiness(scopedProjectId),
+      loadSessions(scopedProjectId),
+      loadGraphSurface(scopedProjectId),
+    ])
   },
 )
 
@@ -343,6 +541,114 @@ watch(isMobile, (mobile) => {
   }
 })
 
+watch(
+  visibleGraphResults,
+  (items) => {
+    if (!items.length) {
+      selectedGraphItem.value = null
+      entityDetail.value = null
+      entitySubgraph.value = null
+      graphDetailError.value = null
+      return
+    }
+
+    const selectedItem = selectedGraphItem.value
+
+    if (
+      selectedItem &&
+      items.some((item) => item.id === selectedItem.id && item.kind === selectedItem.kind)
+    ) {
+      return
+    }
+
+    selectedGraphItem.value = { id: items[0].id, kind: items[0].kind }
+  },
+  { immediate: true },
+)
+
+watch([selectedGraphItem, subgraphDepth], ([item]) => {
+  graphDetailRequestId += 1
+  entityDetail.value = null
+  entitySubgraph.value = null
+  graphDetailError.value = null
+  loadingGraphDetail.value = false
+
+  if (item?.kind !== 'entity' || !selectedProjectId.value || graphApiUnavailable.value) {
+    return
+  }
+
+  const requestId = graphDetailRequestId
+  loadingGraphDetail.value = true
+
+  void Promise.all([
+    fetchGraphEntityDetail(selectedProjectId.value, item.id),
+    fetchGraphSubgraph(selectedProjectId.value, item.id, subgraphDepth.value),
+  ])
+    .then(([detailResponse, subgraph]) => {
+      if (requestId !== graphDetailRequestId) {
+        return
+      }
+
+      entityDetail.value = detailResponse
+      entitySubgraph.value = subgraph
+    })
+    .catch((error: unknown) => {
+      if (requestId !== graphDetailRequestId) {
+        return
+      }
+
+      graphDetailError.value =
+        error instanceof Error ? error.message : t('flow.search.graph.errors.detail')
+    })
+    .finally(() => {
+      if (requestId === graphDetailRequestId) {
+        loadingGraphDetail.value = false
+      }
+    })
+})
+
+watch(graphSearchQuery, (value) => {
+  graphSearchError.value = null
+  searchResponse.value = null
+
+  if (graphSearchTimer) {
+    window.clearTimeout(graphSearchTimer)
+  }
+
+  const query = value.trim()
+  if (!query || !selectedProjectId.value || graphApiUnavailable.value) {
+    loadingGraphSearch.value = false
+    return
+  }
+
+  const requestId = ++graphSearchRequestId
+  loadingGraphSearch.value = true
+
+  graphSearchTimer = window.setTimeout(() => {
+    void searchGraphProduct(selectedProjectId.value, query)
+      .then((response) => {
+        if (requestId !== graphSearchRequestId) {
+          return
+        }
+
+        searchResponse.value = response
+      })
+      .catch((error: unknown) => {
+        if (requestId !== graphSearchRequestId) {
+          return
+        }
+
+        graphSearchError.value =
+          error instanceof Error ? error.message : t('flow.search.graph.errors.search')
+      })
+      .finally(() => {
+        if (requestId === graphSearchRequestId) {
+          loadingGraphSearch.value = false
+        }
+      })
+  }, 250)
+})
+
 onMounted(async () => {
   updateViewportWidth()
   window.addEventListener('resize', updateViewportWidth, { passive: true })
@@ -357,12 +663,19 @@ onMounted(async () => {
   })
 
   if (scope.projectId) {
-    await Promise.all([loadReadiness(scope.projectId), loadSessions(scope.projectId)])
+    await Promise.all([
+      loadReadiness(scope.projectId),
+      loadSessions(scope.projectId),
+      loadGraphSurface(scope.projectId),
+    ])
   }
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', updateViewportWidth)
+  if (graphSearchTimer) {
+    window.clearTimeout(graphSearchTimer)
+  }
 })
 
 function updateViewportWidth() {
@@ -555,7 +868,11 @@ async function submitQuery() {
     activeSessionId.value = response.session_id
     showMobileSessions.value = false
 
-    await Promise.all([loadSessions(selectedProjectId.value), loadMessages(response.session_id)])
+    await Promise.all([
+      loadSessions(selectedProjectId.value),
+      loadMessages(response.session_id),
+      loadGraphSurface(selectedProjectId.value),
+    ])
 
     try {
       detail.value = await fetchRetrievalRunDetail(response.retrieval_run_id)
@@ -573,6 +890,135 @@ async function submitQuery() {
   } finally {
     loading.value = false
   }
+}
+
+function resetGraphSurface() {
+  graphSearchQuery.value = ''
+  projectSummary.value = null
+  projectDiagnostics.value = null
+  searchResponse.value = null
+  entityDetail.value = null
+  entitySubgraph.value = null
+  loadingGraphSurface.value = false
+  loadingGraphSearch.value = false
+  loadingGraphDetail.value = false
+  graphApiUnavailable.value = false
+  graphSurfaceError.value = null
+  graphSearchError.value = null
+  graphDetailError.value = null
+  selectedGraphItem.value = null
+  subgraphDepth.value = 1
+}
+
+async function loadGraphSurface(projectId: string) {
+  graphSurfaceRequestId += 1
+  const requestId = graphSurfaceRequestId
+
+  graphSearchQuery.value = ''
+  searchResponse.value = null
+  entityDetail.value = null
+  entitySubgraph.value = null
+  selectedGraphItem.value = null
+  graphApiUnavailable.value = false
+  graphSurfaceError.value = null
+  graphSearchError.value = null
+  graphDetailError.value = null
+  projectSummary.value = null
+  projectDiagnostics.value = null
+  subgraphDepth.value = 1
+
+  if (!projectId) {
+    loadingGraphSurface.value = false
+    return
+  }
+
+  loadingGraphSurface.value = true
+
+  try {
+    const [, summary, diagnostics] = await Promise.all([
+      fetchGraphProductSnapshot(projectId),
+      fetchGraphProjectSummary(projectId),
+      fetchGraphProjectDiagnostics(projectId),
+    ])
+
+    if (requestId !== graphSurfaceRequestId) {
+      return
+    }
+
+    projectSummary.value = summary
+    projectDiagnostics.value = diagnostics
+  } catch (error) {
+    if (requestId !== graphSurfaceRequestId) {
+      return
+    }
+
+    if (isGraphApiUnavailableError(error)) {
+      graphApiUnavailable.value = true
+      graphSurfaceError.value = null
+    } else {
+      graphSurfaceError.value =
+        error instanceof Error ? error.message : t('flow.search.graph.errors.load')
+    }
+  } finally {
+    if (requestId === graphSurfaceRequestId) {
+      loadingGraphSurface.value = false
+    }
+  }
+}
+
+function selectGraphCard(item: GraphResultCard) {
+  selectedGraphItem.value = { id: item.id, kind: item.kind }
+}
+
+function handleSubgraphDepthChange(event: Event) {
+  const target = event.target
+  if (!(target instanceof HTMLSelectElement)) {
+    return
+  }
+
+  subgraphDepth.value = Number.parseInt(target.value, 10) || 1
+}
+
+function relationToCard(
+  relation: GraphRelationSummary,
+  entityNames: Partial<Record<string, string>>,
+  matchReasons: string[],
+  fromEntityName?: string,
+  toEntityName?: string,
+): GraphResultCard {
+  const fromName = fromEntityName ?? entityNames[relation.from_entity_id] ?? relation.from_entity_id
+  const toName = toEntityName ?? entityNames[relation.to_entity_id] ?? relation.to_entity_id
+
+  return {
+    id: relation.id,
+    kind: 'relation',
+    title: `${fromName} ${relation.relation_type} ${toName}`,
+    subtitle: 'Relation',
+    summary: formatReasonsSummary(matchReasons, relation.source_chunk_count),
+    badge: relation.relation_type,
+    sourceChunkCount: relation.source_chunk_count,
+    matchReasons,
+    relation,
+    fromEntityName: fromName,
+    toEntityName: toName,
+  }
+}
+
+function formatCount(value: number, singular: string): string {
+  const plural = singular.endsWith('s') ? singular : `${singular}s`
+  return `${String(value)} ${value === 1 ? singular : plural}`
+}
+
+function formatReasonsSummary(reasons: string[], chunkCount: number): string {
+  if (!reasons.length) {
+    return `${formatCount(chunkCount, 'supporting chunk')} linked to this record.`
+  }
+
+  return `Matched on ${reasons.join(', ')}. ${formatCount(chunkCount, 'supporting chunk')} linked to this record.`
+}
+
+function formatRelationLine(relation: GraphRelationDetail): string {
+  return `${relation.from_entity_name} ${relation.relation.relation_type} ${relation.to_entity_name}`
 }
 </script>
 
@@ -817,7 +1263,7 @@ async function submitQuery() {
                 ref="queryInputRef"
                 v-model="queryText"
                 class="rr-control ask-panel__input"
-                rows="isMobile ? 3 : 4"
+                :rows="isMobile ? 3 : 4"
                 :placeholder="t('flow.search.query.placeholder')"
                 :disabled="!selectedProject"
                 @keydown="handleTextareaKeydown"
@@ -856,6 +1302,397 @@ async function submitQuery() {
               </div>
             </div>
           </article>
+
+          <article class="rr-panel rr-panel--muted graph-context-panel">
+            <div class="graph-context-panel__header">
+              <div>
+                <p class="rr-kicker">{{ t('flow.search.graph.kicker') }}</p>
+                <h3>{{ t('flow.search.graph.title') }}</h3>
+                <p class="rr-note">{{ t('flow.search.graph.description') }}</p>
+              </div>
+              <StatusBadge :status="graphPanelStatus.status" :label="graphPanelStatus.label" />
+            </div>
+
+            <p v-if="graphCoverageWarning" class="rr-banner" data-tone="warning">
+              {{ graphCoverageWarning }}
+            </p>
+            <p v-if="graphSurfaceError" class="rr-banner" data-tone="danger">
+              {{ graphSurfaceError }}
+            </p>
+
+            <div class="graph-context-panel__metrics">
+              <article class="metric-card">
+                <span class="metric-card__label">{{
+                  t('flow.search.graph.metrics.entities')
+                }}</span>
+                <strong>{{
+                  currentGraphCoverage
+                    ? formatCount(currentGraphCoverage.entity_count, 'entity')
+                    : '—'
+                }}</strong>
+              </article>
+              <article class="metric-card">
+                <span class="metric-card__label">{{
+                  t('flow.search.graph.metrics.relations')
+                }}</span>
+                <strong>{{
+                  currentGraphCoverage
+                    ? formatCount(currentGraphCoverage.relation_count, 'relation')
+                    : '—'
+                }}</strong>
+              </article>
+              <article class="metric-card">
+                <span class="metric-card__label">{{ t('flow.search.graph.metrics.runs') }}</span>
+                <strong>{{
+                  currentGraphCoverage
+                    ? formatCount(currentGraphCoverage.extraction_runs, 'run')
+                    : '—'
+                }}</strong>
+              </article>
+            </div>
+
+            <div class="graph-context-panel__search">
+              <label class="rr-field">
+                <span class="rr-field__label">{{ t('flow.search.graph.search.label') }}</span>
+                <input
+                  v-model="graphSearchQuery"
+                  class="rr-control"
+                  type="text"
+                  :disabled="!selectedProjectId || graphApiUnavailable"
+                  :placeholder="t('flow.search.graph.search.placeholder')"
+                />
+              </label>
+              <p v-if="loadingGraphSearch" class="rr-note">
+                {{ t('flow.search.graph.search.loading') }}
+              </p>
+              <p v-if="graphSearchError" class="rr-banner" data-tone="danger">
+                {{ graphSearchError }}
+              </p>
+            </div>
+
+            <LoadingSkeletonPanel
+              v-if="loadingGraphSurface"
+              :title="t('flow.search.graph.loading')"
+              :lines="4"
+            />
+
+            <EmptyStateCard
+              v-else-if="!selectedProject"
+              :title="t('flow.search.graph.empty.noProject.title')"
+              :message="t('flow.search.graph.empty.noProject.body')"
+              :hint="t('flow.search.graph.empty.noProject.hint')"
+            />
+
+            <EmptyStateCard
+              v-else-if="graphApiUnavailable"
+              :title="t('flow.search.graph.empty.unavailable.title')"
+              :message="t('flow.search.graph.empty.unavailable.body')"
+              :hint="t('flow.search.graph.empty.unavailable.hint')"
+            />
+
+            <div v-else class="graph-context-panel__body">
+              <div class="graph-results">
+                <h4>{{ t('flow.search.graph.search.resultsTitle') }}</h4>
+                <div v-if="visibleGraphResults.length" class="graph-results__list">
+                  <button
+                    v-for="item in visibleGraphResults"
+                    :key="`${item.kind}-${item.id}`"
+                    type="button"
+                    class="graph-result"
+                    :data-active="
+                      selectedGraphCard?.id === item.id && selectedGraphCard?.kind === item.kind
+                    "
+                    @click="selectGraphCard(item)"
+                  >
+                    <div class="graph-result__meta">
+                      <span class="graph-result__kind">{{ item.subtitle }}</span>
+                      <strong>{{ item.title }}</strong>
+                    </div>
+                    <StatusBadge :label="item.badge" />
+                    <p>{{ item.summary }}</p>
+                  </button>
+                </div>
+                <EmptyStateCard
+                  v-else
+                  :title="
+                    graphSearchQuery.trim()
+                      ? t('flow.search.graph.empty.noMatches.title')
+                      : t('flow.search.graph.empty.noRows.title')
+                  "
+                  :message="
+                    graphSearchQuery.trim()
+                      ? t('flow.search.graph.empty.noMatches.body')
+                      : t('flow.search.graph.empty.noRows.body')
+                  "
+                  :hint="
+                    graphSearchQuery.trim()
+                      ? t('flow.search.graph.empty.noMatches.hint')
+                      : t('flow.search.graph.empty.noRows.hint')
+                  "
+                />
+              </div>
+
+              <div class="graph-detail">
+                <div class="graph-detail__header">
+                  <div>
+                    <h4>{{ t('flow.search.graph.detail.title') }}</h4>
+                    <p class="rr-note">{{ t('flow.search.graph.detail.description') }}</p>
+                  </div>
+                  <details class="technical-details" :open="showTechnicalGraphDetail">
+                    <summary @click.prevent="showTechnicalGraphDetail = !showTechnicalGraphDetail">
+                      <span>{{ t('flow.search.graph.detail.technicalSummary') }}</span>
+                      <small>{{ t('flow.search.graph.detail.technicalHint') }}</small>
+                    </summary>
+                    <label class="subgraph-depth-field">
+                      <span class="rr-field__label">{{
+                        t('flow.search.graph.detail.subgraphDepth')
+                      }}</span>
+                      <select
+                        class="rr-control"
+                        :value="String(subgraphDepth)"
+                        :disabled="!canLoadGraphSubgraph"
+                        @change="handleSubgraphDepthChange"
+                      >
+                        <option value="1">1 hop</option>
+                        <option value="2">2 hops</option>
+                        <option value="3">3 hops</option>
+                      </select>
+                    </label>
+                  </details>
+                </div>
+
+                <LoadingSkeletonPanel
+                  v-if="loadingGraphDetail"
+                  :title="t('flow.search.graph.detail.loading')"
+                  :lines="5"
+                />
+
+                <template v-else-if="selectedGraphEntityCard && entityDetail">
+                  <div class="graph-detail__grid">
+                    <article class="detail-card">
+                      <p class="rr-kicker">{{ selectedGraphEntityCard.subtitle }}</p>
+                      <h4>{{ entityDetail.entity.canonical_name }}</h4>
+                      <p class="rr-note">
+                        {{
+                          t('flow.search.graph.detail.entitySummary', {
+                            count: entityDetail.observed_relation_count,
+                          })
+                        }}
+                      </p>
+
+                      <div class="token-section">
+                        <span class="token-section__label">{{
+                          t('flow.search.graph.detail.aliases')
+                        }}</span>
+                        <div v-if="entityDetail.aliases.length" class="token-list">
+                          <span
+                            v-for="alias in entityDetail.aliases"
+                            :key="alias"
+                            class="token-chip"
+                            >{{ alias }}</span
+                          >
+                        </div>
+                        <p v-else class="rr-note">{{ t('flow.search.graph.detail.noAliases') }}</p>
+                      </div>
+
+                      <div class="token-section">
+                        <span class="token-section__label">{{
+                          t('flow.search.graph.detail.documents')
+                        }}</span>
+                        <div v-if="entityDetail.source_document_ids.length" class="token-list">
+                          <span
+                            v-for="documentId in entityDetail.source_document_ids"
+                            :key="documentId"
+                            class="token-chip token-chip--mono"
+                            >{{ documentId }}</span
+                          >
+                        </div>
+                        <p v-else class="rr-note">
+                          {{ t('flow.search.graph.detail.noDocuments') }}
+                        </p>
+                      </div>
+                    </article>
+
+                    <article class="detail-card">
+                      <p class="rr-kicker">{{ t('flow.search.graph.detail.subgraphEyebrow') }}</p>
+                      <h4>
+                        {{
+                          t('flow.search.graph.detail.subgraphTitle', {
+                            name: selectedSubgraphEntityName || entityDetail.entity.canonical_name,
+                          })
+                        }}
+                      </h4>
+                      <p class="rr-note">
+                        {{
+                          t('flow.search.graph.detail.subgraphStats', {
+                            entities: entitySubgraph?.entity_count ?? 0,
+                            relations: entitySubgraph?.relation_count ?? 0,
+                          })
+                        }}
+                      </p>
+
+                      <div class="token-section">
+                        <span class="token-section__label">{{
+                          t('flow.search.graph.detail.outgoingRelations')
+                        }}</span>
+                        <ul
+                          v-if="entityDetail.outgoing_relations.length"
+                          class="bullet-list bullet-list--compact"
+                        >
+                          <li
+                            v-for="relation in entityDetail.outgoing_relations"
+                            :key="relation.relation.id"
+                          >
+                            {{ formatRelationLine(relation) }}
+                          </li>
+                        </ul>
+                        <p v-else class="rr-note">
+                          {{ t('flow.search.graph.detail.noOutgoingRelations') }}
+                        </p>
+                      </div>
+
+                      <div class="token-section">
+                        <span class="token-section__label">{{
+                          t('flow.search.graph.detail.incomingRelations')
+                        }}</span>
+                        <ul
+                          v-if="entityDetail.incoming_relations.length"
+                          class="bullet-list bullet-list--compact"
+                        >
+                          <li
+                            v-for="relation in entityDetail.incoming_relations"
+                            :key="relation.relation.id"
+                          >
+                            {{ formatRelationLine(relation) }}
+                          </li>
+                        </ul>
+                        <p v-else class="rr-note">
+                          {{ t('flow.search.graph.detail.noIncomingRelations') }}
+                        </p>
+                      </div>
+                    </article>
+                  </div>
+
+                  <p v-if="entityDetail.warning" class="rr-banner" data-tone="warning">
+                    {{ entityDetail.warning }}
+                  </p>
+                  <p v-if="entitySubgraph?.warning" class="rr-banner" data-tone="warning">
+                    {{ entitySubgraph.warning }}
+                  </p>
+                </template>
+
+                <template v-else-if="selectedGraphRelationCard">
+                  <article class="detail-card">
+                    <p class="rr-kicker">{{ selectedGraphRelationCard.subtitle }}</p>
+                    <h4>{{ selectedGraphRelationCard.title }}</h4>
+                    <p>{{ selectedGraphRelationCard.summary }}</p>
+                    <div class="token-section">
+                      <span class="token-section__label">{{
+                        t('flow.search.graph.detail.matchReasons')
+                      }}</span>
+                      <div v-if="selectedGraphRelationCard.matchReasons.length" class="token-list">
+                        <span
+                          v-for="reason in selectedGraphRelationCard.matchReasons"
+                          :key="reason"
+                          class="token-chip"
+                          >{{ reason }}</span
+                        >
+                      </div>
+                      <p v-else class="rr-note">
+                        {{ t('flow.search.graph.detail.noMatchReasons') }}
+                      </p>
+                    </div>
+                  </article>
+                </template>
+
+                <EmptyStateCard
+                  v-else-if="graphDetailError"
+                  :title="t('flow.search.graph.detail.loadErrorTitle')"
+                  :message="graphDetailError"
+                  :hint="t('flow.search.graph.detail.loadErrorHint')"
+                />
+
+                <EmptyStateCard
+                  v-else
+                  :title="t('flow.search.graph.detail.empty.title')"
+                  :message="t('flow.search.graph.detail.empty.body')"
+                  :hint="t('flow.search.graph.detail.empty.hint')"
+                />
+              </div>
+
+              <div class="graph-diagnostics">
+                <h4>{{ t('flow.search.graph.diagnostics.title') }}</h4>
+                <p class="rr-note">{{ t('flow.search.graph.diagnostics.description') }}</p>
+
+                <div class="diagnostics-block">
+                  <h5>{{ t('flow.search.graph.diagnostics.blockersTitle') }}</h5>
+                  <ul
+                    v-if="graphDiagnosticsBlockers.length"
+                    class="bullet-list bullet-list--compact"
+                  >
+                    <li v-for="blocker in graphDiagnosticsBlockers" :key="blocker">
+                      {{ blocker }}
+                    </li>
+                  </ul>
+                  <p v-else class="rr-note">{{ t('flow.search.graph.diagnostics.noBlockers') }}</p>
+                </div>
+
+                <div class="diagnostics-block">
+                  <h5>{{ t('flow.search.graph.diagnostics.nextStepsTitle') }}</h5>
+                  <ul
+                    v-if="graphDiagnosticsNextSteps.length"
+                    class="bullet-list bullet-list--compact"
+                  >
+                    <li v-for="step in graphDiagnosticsNextSteps" :key="step">{{ step }}</li>
+                  </ul>
+                  <p v-else class="rr-note">{{ t('flow.search.graph.diagnostics.noNextSteps') }}</p>
+                </div>
+
+                <div class="graph-context-panel__metrics graph-context-panel__metrics--diagnostics">
+                  <article class="metric-card">
+                    <span class="metric-card__label">{{
+                      t('flow.search.graph.metrics.documents')
+                    }}</span>
+                    <strong>{{
+                      graphContentSummary
+                        ? formatCount(graphContentSummary.persisted_document_count, 'document')
+                        : '—'
+                    }}</strong>
+                  </article>
+                  <article class="metric-card">
+                    <span class="metric-card__label">{{
+                      t('flow.search.graph.metrics.chunks')
+                    }}</span>
+                    <strong>{{
+                      graphContentSummary
+                        ? formatCount(graphContentSummary.persisted_chunk_count, 'chunk')
+                        : '—'
+                    }}</strong>
+                  </article>
+                  <article class="metric-card">
+                    <span class="metric-card__label">{{
+                      t('flow.search.graph.metrics.entityRefs')
+                    }}</span>
+                    <strong>{{
+                      graphProvenanceSummary
+                        ? formatCount(graphProvenanceSummary.entities_with_chunk_refs, 'entity')
+                        : '—'
+                    }}</strong>
+                  </article>
+                  <article class="metric-card">
+                    <span class="metric-card__label">{{
+                      t('flow.search.graph.metrics.relationRefs')
+                    }}</span>
+                    <strong>{{
+                      graphProvenanceSummary
+                        ? formatCount(graphProvenanceSummary.relations_with_chunk_refs, 'relation')
+                        : '—'
+                    }}</strong>
+                  </article>
+                </div>
+              </div>
+            </div>
+          </article>
         </div>
       </div>
     </PageSection>
@@ -886,15 +1723,18 @@ async function submitQuery() {
 .answer-panel,
 .empty-answer,
 .timeline-panel,
-.mobile-session-bar {
+.mobile-session-bar,
+.graph-context-panel,
+.graph-context-panel__search,
+.graph-results,
+.graph-detail,
+.graph-diagnostics,
+.diagnostics-block {
   display: grid;
   gap: var(--rr-space-5);
 }
 
-.chat-page__main {
-  min-width: 0;
-}
-
+.chat-page__main,
 .chat-page__conversation {
   min-width: 0;
 }
@@ -903,7 +1743,9 @@ async function submitQuery() {
 .answer-panel__header,
 .timeline-panel__header,
 .session-sidebar__summary,
-.mobile-session-bar {
+.mobile-session-bar,
+.graph-context-panel__header,
+.graph-detail__header {
   display: flex;
   justify-content: space-between;
   gap: var(--rr-space-5);
@@ -927,18 +1769,32 @@ async function submitQuery() {
 
 .session-item,
 .timeline-item,
-.mobile-session-bar {
+.mobile-session-bar,
+.graph-result,
+.metric-card,
+.detail-card,
+.diagnostics-block {
   border: 1px solid var(--rr-color-border);
   border-radius: var(--rr-radius-lg);
   background: rgba(255, 255, 255, 0.03);
 }
 
 .timeline-item,
-.mobile-session-bar {
+.mobile-session-bar,
+.graph-result,
+.metric-card,
+.detail-card,
+.diagnostics-block {
   padding: var(--rr-space-3);
 }
 
-.timeline-list {
+.timeline-list,
+.graph-results__list,
+.graph-detail__grid,
+.graph-context-panel__metrics,
+.token-section,
+.token-list,
+.bullet-list {
   display: grid;
   gap: var(--rr-space-3);
 }
@@ -951,14 +1807,18 @@ async function submitQuery() {
   background: transparent;
 }
 
-.session-item[data-active='true'] {
+.session-item[data-active='true'],
+.graph-result[data-active='true'] {
   border-color: var(--rr-color-accent);
   background: rgba(121, 182, 255, 0.08);
 }
 
 .session-item span,
 .session-item small,
-.timeline-item__meta span {
+.timeline-item__meta span,
+.metric-card__label,
+.graph-result__kind,
+.token-section__label {
   color: var(--rr-color-text-muted);
 }
 
@@ -985,7 +1845,8 @@ async function submitQuery() {
 }
 
 .answer-copy,
-.timeline-item p {
+.timeline-item p,
+.graph-result p {
   white-space: pre-wrap;
   margin: 0;
 }
@@ -999,7 +1860,8 @@ async function submitQuery() {
   margin: 0;
 }
 
-.ask-panel__examples-list {
+.ask-panel__examples-list,
+.token-list {
   display: flex;
   flex-wrap: wrap;
   gap: var(--rr-space-3);
@@ -1038,7 +1900,11 @@ async function submitQuery() {
   display: none;
 }
 
-.session-sidebar__summary h3 {
+.session-sidebar__summary h3,
+.graph-context-panel h3,
+.graph-detail h4,
+.graph-diagnostics h4,
+.graph-results h4 {
   margin: 0;
 }
 
@@ -1083,15 +1949,87 @@ async function submitQuery() {
   display: flex;
 }
 
+.graph-context-panel__metrics {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.graph-context-panel__metrics--diagnostics,
+.graph-detail__grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.graph-context-panel__body {
+  display: grid;
+  gap: var(--rr-space-5);
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.2fr) minmax(0, 1fr);
+}
+
+.graph-result {
+  display: grid;
+  gap: var(--rr-space-2);
+  text-align: left;
+}
+
+.graph-result__meta {
+  display: grid;
+  gap: 4px;
+}
+
+.technical-details {
+  padding: 0.875rem 1rem;
+  border: 1px dashed var(--rr-color-border);
+  border-radius: var(--rr-radius-md);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.technical-details summary {
+  display: grid;
+  gap: 0.25rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.technical-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.token-chip {
+  border-radius: 999px;
+  padding: 0.35rem 0.75rem;
+  background: rgba(121, 182, 255, 0.12);
+  border: 1px solid rgba(121, 182, 255, 0.28);
+}
+
+.token-chip--mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  font-size: 0.8125rem;
+}
+
+.bullet-list {
+  margin: 0;
+  padding-left: 1.25rem;
+  list-style: disc;
+}
+
+.bullet-list--compact {
+  gap: 0.35rem;
+}
+
+@media (max-width: 1200px) {
+  .graph-context-panel__body,
+  .graph-context-panel__metrics,
+  .graph-context-panel__metrics--diagnostics,
+  .graph-detail__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 @media (max-width: 900px) {
   .chat-page {
     gap: var(--rr-space-4);
   }
 
-  .chat-page__main {
-    gap: var(--rr-space-4);
-  }
-
+  .chat-page__main,
   .chat-page__conversation {
     gap: var(--rr-space-4);
   }
@@ -1116,7 +2054,9 @@ async function submitQuery() {
   .answer-panel__header,
   .timeline-panel__header,
   .mobile-session-bar,
-  .session-sidebar__summary {
+  .session-sidebar__summary,
+  .graph-context-panel__header,
+  .graph-detail__header {
     flex-direction: column;
   }
 
