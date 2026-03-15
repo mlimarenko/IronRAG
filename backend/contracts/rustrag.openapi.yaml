@@ -92,7 +92,7 @@ paths:
       tags: [auth]
       summary: Mint an API token
       operationId: createToken
-      security: []
+      description: Requires `workspace:admin` scope or an `instance_admin` token. Workspace-scoped tokens may mint tokens only for their own workspace. Global tokens without `workspace_id` require an `instance_admin` caller.
       requestBody:
         required: true
         content:
@@ -1185,6 +1185,32 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/GraphProjectSummaryResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/graph-products/{project_id}/diagnostics:
+    get:
+      tags: [graph, product]
+      summary: Get graph project diagnostics
+      operationId: getGraphDiagnostics
+      description: Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Returns persisted content counts, graph provenance coverage, and concrete readiness blockers/next steps without mutating runtime state.
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Graph diagnostics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GraphProjectDiagnosticsResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -2970,6 +2996,103 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/GraphRelationSummary"
+        generated_at:
+          type: string
+          format: date-time
+
+    GraphContentSummary:
+      type: object
+      required:
+        [
+          persisted_document_count,
+          persisted_chunk_count,
+          embedded_chunk_count,
+          retrieval_run_count,
+          referenced_document_count,
+          referenced_chunk_count,
+        ]
+      properties:
+        persisted_document_count:
+          type: integer
+          minimum: 0
+        persisted_chunk_count:
+          type: integer
+          minimum: 0
+        embedded_chunk_count:
+          type: integer
+          minimum: 0
+        retrieval_run_count:
+          type: integer
+          minimum: 0
+        referenced_document_count:
+          type: integer
+          minimum: 0
+        referenced_chunk_count:
+          type: integer
+          minimum: 0
+
+    GraphProvenanceSummary:
+      type: object
+      required:
+        [
+          entities_with_document_refs,
+          entities_with_chunk_refs,
+          entities_without_chunk_refs,
+          relations_with_document_refs,
+          relations_with_chunk_refs,
+          relations_without_chunk_refs,
+        ]
+      properties:
+        entities_with_document_refs:
+          type: integer
+          minimum: 0
+        entities_with_chunk_refs:
+          type: integer
+          minimum: 0
+        entities_without_chunk_refs:
+          type: integer
+          minimum: 0
+        relations_with_document_refs:
+          type: integer
+          minimum: 0
+        relations_with_chunk_refs:
+          type: integer
+          minimum: 0
+        relations_without_chunk_refs:
+          type: integer
+          minimum: 0
+
+    GraphReadinessSummary:
+      type: object
+      required: [status, blockers, next_steps]
+      properties:
+        status:
+          type: string
+          example: awaiting_graph_rows
+        blockers:
+          type: array
+          items:
+            type: string
+        next_steps:
+          type: array
+          items:
+            type: string
+
+    GraphProjectDiagnosticsResponse:
+      type: object
+      required: [project_id, coverage, content, provenance, readiness, generated_at]
+      properties:
+        project_id:
+          type: string
+          format: uuid
+        coverage:
+          $ref: "#/components/schemas/GraphCoverageSummary"
+        content:
+          $ref: "#/components/schemas/GraphContentSummary"
+        provenance:
+          $ref: "#/components/schemas/GraphProvenanceSummary"
+        readiness:
+          $ref: "#/components/schemas/GraphReadinessSummary"
         generated_at:
           type: string
           format: date-time

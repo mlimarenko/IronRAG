@@ -24,6 +24,7 @@ use crate::{
 const DEFAULT_SEARCH_LIMIT: usize = 8;
 const MAX_SEARCH_LIMIT: usize = 50;
 const DEFAULT_GRAPH_WARNING: &str = "Graph runtime is live on persisted entity/relation rows, but extraction run tracking and provenance depth are still partial.";
+const ENTITY_ONLY_GRAPH_WARNING: &str = "Graph runtime has persisted entity rows, but relation coverage is still empty and extraction provenance remains partial.";
 const EMPTY_GRAPH_WARNING: &str = "Graph runtime is wired, but this project does not have persisted graph rows yet. Ingestion-time extraction remains the blocker.";
 
 #[derive(Debug, Clone, FromRow)]
@@ -165,6 +166,43 @@ pub struct GraphSubgraphResponse {
     pub warning: Option<String>,
 }
 
+#[derive(Serialize)]
+pub struct GraphContentSummary {
+    pub persisted_document_count: usize,
+    pub persisted_chunk_count: usize,
+    pub embedded_chunk_count: usize,
+    pub retrieval_run_count: usize,
+    pub referenced_document_count: usize,
+    pub referenced_chunk_count: usize,
+}
+
+#[derive(Serialize)]
+pub struct GraphProvenanceSummary {
+    pub entities_with_document_refs: usize,
+    pub entities_with_chunk_refs: usize,
+    pub entities_without_chunk_refs: usize,
+    pub relations_with_document_refs: usize,
+    pub relations_with_chunk_refs: usize,
+    pub relations_without_chunk_refs: usize,
+}
+
+#[derive(Serialize)]
+pub struct GraphReadinessSummary {
+    pub status: String,
+    pub blockers: Vec<String>,
+    pub next_steps: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct GraphProjectDiagnosticsResponse {
+    pub project_id: Uuid,
+    pub coverage: GraphCoverageSummary,
+    pub content: GraphContentSummary,
+    pub provenance: GraphProvenanceSummary,
+    pub readiness: GraphReadinessSummary,
+    pub generated_at: DateTime<Utc>,
+}
+
 #[derive(Deserialize)]
 pub struct GraphSearchQuery {
     pub q: String,
@@ -176,10 +214,18 @@ pub struct GraphSubgraphQuery {
     pub depth: Option<u8>,
 }
 
+struct GraphProjectCounts {
+    document_count: usize,
+    chunk_count: usize,
+    embedded_chunk_count: usize,
+    retrieval_run_count: usize,
+}
+
 pub fn router() -> Router<crate::app::state::AppState> {
     Router::new()
         .route("/graph-products/{project_id}", get(get_graph_product))
         .route("/graph-products/{project_id}/summary", get(get_graph_summary))
+        .route("/graph-products/{project_id}/diagnostics", get(get_graph_diagnostics))
         .route("/graph-products/{project_id}/search", get(search_graph))
         .route("/graph-products/{project_id}/entities/{entity_id}", get(get_graph_entity_detail))
         .route(
@@ -252,6 +298,33 @@ async fn get_graph_summary(
     }))
 }
 
+async fn get_graph_diagnostics(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(project_id): Path<Uuid>,
+) -> Result<Json<GraphProjectDiagnosticsResponse>, ApiError> {
+    let project = load_project_and_authorize(&auth, &state, project_id, POLICY_QUERY_READ).await?;
+
+    let entities = load_entities(&state.persistence.postgres, project_id).await?;
+    let relations = load_relations(&state.persistence.postgres, project_id).await?;
+    let counts = load_graph_project_counts(&state.persistence.postgres, project_id).await?;
+    let diagnostics = build_graph_diagnostics(project_id, &counts, &entities, &relations);
+
+    info!(
+        auth_token_id = %auth.token_id,
+        workspace_id = %project.workspace_id,
+        project_id = %project_id,
+        entity_count = diagnostics.coverage.entity_count,
+        relation_count = diagnostics.coverage.relation_count,
+        document_count = diagnostics.content.persisted_document_count,
+        chunk_count = diagnostics.content.persisted_chunk_count,
+        readiness_status = %diagnostics.readiness.status,
+        "loaded graph diagnostics",
+    );
+
+    Ok(Json(diagnostics))
+}
+
 async fn search_graph(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -316,7 +389,6 @@ async fn search_graph(
         .take(limit)
         .collect::<Vec<_>>();
 
-    let has_rows = !(entities.is_empty() && relations.is_empty());
     let result_count = entity_results.len() + relation_results.len();
 
     info!(
@@ -345,7 +417,7 @@ async fn search_graph(
         entity_results,
         relation_results,
         generated_at: Utc::now(),
-        warning: Some(graph_warning(has_rows)),
+        warning: Some(graph_warning(entities.len(), relations.len())),
     }))
 }
 
@@ -421,7 +493,7 @@ async fn get_graph_entity_detail(
         incoming_relations: sort_relation_details(incoming_relations),
         outgoing_relations: sort_relation_details(outgoing_relations),
         generated_at: Utc::now(),
-        warning: Some(graph_warning(true)),
+        warning: Some(graph_warning(entities.len(), relations.len())),
     }))
 }
 
@@ -504,7 +576,7 @@ async fn get_graph_subgraph(
         entities: entity_items,
         relations: relation_items,
         generated_at: Utc::now(),
-        warning: Some(graph_warning(true)),
+        warning: Some(graph_warning(entities.len(), relations.len())),
     }))
 }
 
@@ -514,22 +586,68 @@ async fn load_graph_snapshot(
 ) -> Result<GraphProductSnapshot, ApiError> {
     let entities = load_entities(pool, project_id).await?;
     let relations = load_relations(pool, project_id).await?;
-    let has_rows = !(entities.is_empty() && relations.is_empty());
+    let coverage = build_graph_coverage(project_id, entities.len(), relations.len());
 
     Ok(GraphProductSnapshot {
         project_id,
-        coverage: GraphCoverageSummary {
-            project_id,
-            entity_count: entities.len(),
-            relation_count: relations.len(),
-            extraction_runs: 0,
-            status: if has_rows { "partial".into() } else { "waiting_for_extraction".into() },
-            warning: Some(graph_warning(has_rows)),
-        },
+        coverage,
         entities: sort_entity_summaries(entities.iter().map(entity_summary).collect()),
         relations: sort_relation_summaries(relations.iter().map(relation_summary).collect()),
         generated_at: Utc::now(),
     })
+}
+
+async fn load_graph_project_counts(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<GraphProjectCounts, ApiError> {
+    Ok(GraphProjectCounts {
+        document_count: load_project_count(
+            pool,
+            project_id,
+            "select count(*) from document where project_id = $1",
+            "documents",
+        )
+        .await?,
+        chunk_count: load_project_count(
+            pool,
+            project_id,
+            "select count(*) from chunk where project_id = $1",
+            "chunks",
+        )
+        .await?,
+        embedded_chunk_count: load_project_count(
+            pool,
+            project_id,
+            "select count(*) from chunk_embedding where project_id = $1",
+            "chunk embeddings",
+        )
+        .await?,
+        retrieval_run_count: load_project_count(
+            pool,
+            project_id,
+            "select count(*) from retrieval_run where project_id = $1",
+            "retrieval runs",
+        )
+        .await?,
+    })
+}
+
+async fn load_project_count(
+    pool: &PgPool,
+    project_id: Uuid,
+    query: &str,
+    label: &str,
+) -> Result<usize, ApiError> {
+    sqlx::query_scalar::<_, i64>(query)
+        .bind(project_id)
+        .fetch_one(pool)
+        .await
+        .map(|value| usize::try_from(value).unwrap_or_default())
+        .map_err(|error| {
+            error!(project_id = %project_id, table = label, ?error, "failed to load graph project count");
+            ApiError::Internal
+        })
 }
 
 async fn load_entities(pool: &PgPool, project_id: Uuid) -> Result<Vec<EntityRow>, ApiError> {
@@ -636,6 +754,174 @@ fn summarize_kind_counts(items: Vec<String>) -> Vec<GraphKindCount> {
         right.count.cmp(&left.count).then_with(|| left.name.cmp(&right.name))
     });
     values
+}
+
+fn build_graph_coverage(
+    project_id: Uuid,
+    entity_count: usize,
+    relation_count: usize,
+) -> GraphCoverageSummary {
+    let status = if entity_count == 0 && relation_count == 0 {
+        "waiting_for_extraction"
+    } else if relation_count == 0 {
+        "entity_only"
+    } else {
+        "partial"
+    };
+
+    GraphCoverageSummary {
+        project_id,
+        entity_count,
+        relation_count,
+        extraction_runs: 0,
+        status: status.into(),
+        warning: Some(graph_warning(entity_count, relation_count)),
+    }
+}
+
+fn build_graph_diagnostics(
+    project_id: Uuid,
+    counts: &GraphProjectCounts,
+    entities: &[EntityRow],
+    relations: &[RelationRow],
+) -> GraphProjectDiagnosticsResponse {
+    let mut referenced_document_ids = BTreeSet::new();
+    let mut referenced_chunk_ids = BTreeSet::new();
+
+    let mut entities_with_document_refs = 0usize;
+    let mut entities_with_chunk_refs = 0usize;
+    let mut relations_with_document_refs = 0usize;
+    let mut relations_with_chunk_refs = 0usize;
+
+    for entity in entities {
+        let document_ids =
+            collect_uuid_values(&entity.metadata_json, &["source_document_ids", "document_ids"]);
+        if !document_ids.is_empty() {
+            entities_with_document_refs += 1;
+            referenced_document_ids.extend(document_ids);
+        }
+
+        let chunk_ids =
+            collect_uuid_values(&entity.metadata_json, &["source_chunk_ids", "chunk_ids"]);
+        if !chunk_ids.is_empty() {
+            entities_with_chunk_refs += 1;
+            referenced_chunk_ids.extend(chunk_ids);
+        }
+    }
+
+    for relation in relations {
+        let document_ids = collect_uuid_values(
+            &relation.provenance_json,
+            &["source_document_ids", "document_ids"],
+        );
+        if !document_ids.is_empty() {
+            relations_with_document_refs += 1;
+            referenced_document_ids.extend(document_ids);
+        }
+
+        let chunk_ids =
+            collect_uuid_values(&relation.provenance_json, &["source_chunk_ids", "chunk_ids"]);
+        if !chunk_ids.is_empty() {
+            relations_with_chunk_refs += 1;
+            referenced_chunk_ids.extend(chunk_ids);
+        }
+    }
+
+    let content = GraphContentSummary {
+        persisted_document_count: counts.document_count,
+        persisted_chunk_count: counts.chunk_count,
+        embedded_chunk_count: counts.embedded_chunk_count,
+        retrieval_run_count: counts.retrieval_run_count,
+        referenced_document_count: referenced_document_ids.len(),
+        referenced_chunk_count: referenced_chunk_ids.len(),
+    };
+    let provenance = GraphProvenanceSummary {
+        entities_with_document_refs,
+        entities_with_chunk_refs,
+        entities_without_chunk_refs: entities.len().saturating_sub(entities_with_chunk_refs),
+        relations_with_document_refs,
+        relations_with_chunk_refs,
+        relations_without_chunk_refs: relations.len().saturating_sub(relations_with_chunk_refs),
+    };
+    let coverage = build_graph_coverage(project_id, entities.len(), relations.len());
+    let readiness = build_graph_readiness(&coverage, &content, &provenance);
+
+    GraphProjectDiagnosticsResponse {
+        project_id,
+        coverage,
+        content,
+        provenance,
+        readiness,
+        generated_at: Utc::now(),
+    }
+}
+
+fn build_graph_readiness(
+    coverage: &GraphCoverageSummary,
+    content: &GraphContentSummary,
+    provenance: &GraphProvenanceSummary,
+) -> GraphReadinessSummary {
+    let mut blockers = Vec::new();
+    let mut next_steps = Vec::new();
+
+    let status = if content.persisted_document_count == 0 && content.persisted_chunk_count == 0 {
+        blockers.push(
+            "Project has no persisted documents or chunks to extract graph evidence from.".into(),
+        );
+        next_steps.push(
+            "Ingest plain text or upload a supported text-like file into this project before expecting graph rows."
+                .into(),
+        );
+        "no_content"
+    } else if coverage.entity_count == 0 && coverage.relation_count == 0 {
+        blockers.push(
+            "Project content exists, but no entity or relation rows have been persisted yet."
+                .into(),
+        );
+        next_steps.push("Hook entity/relation extraction into the authoritative ingestion execution path so content ingestion emits graph rows.".into());
+        "awaiting_graph_rows"
+    } else if coverage.relation_count == 0 {
+        blockers
+            .push("Persisted entities exist, but no relation rows have been extracted yet.".into());
+        next_steps.push(
+            "Extend extraction to persist relation rows alongside entities so graph navigation becomes connected."
+                .into(),
+        );
+        "entity_only"
+    } else if provenance.entities_without_chunk_refs > 0
+        || provenance.relations_without_chunk_refs > 0
+    {
+        if provenance.entities_without_chunk_refs > 0 {
+            blockers.push(format!(
+                "{} entity rows are missing source chunk references.",
+                provenance.entities_without_chunk_refs
+            ));
+        }
+        if provenance.relations_without_chunk_refs > 0 {
+            blockers.push(format!(
+                "{} relation rows are missing source chunk references.",
+                provenance.relations_without_chunk_refs
+            ));
+        }
+        next_steps.push("Persist source chunk ids in `entity.metadata_json` and `relation.provenance_json` for every extracted row.".into());
+        if content.referenced_document_count == 0 {
+            next_steps.push(
+                "Persist source document ids next to chunk refs so graph evidence can link back to operator-facing document diagnostics."
+                    .into(),
+            );
+        }
+        "provenance_partial"
+    } else {
+        if content.persisted_chunk_count > 0 && content.embedded_chunk_count == 0 {
+            next_steps.push(
+                "Backfill chunk embeddings if retrieval and graph evidence should operate over the same warmed project corpus."
+                    .into(),
+            );
+        }
+        "graph_live"
+    };
+
+    GraphReadinessSummary { status: status.into(), blockers, next_steps }
 }
 
 fn entity_match_reasons(row: &EntityRow, needle: &str) -> Vec<String> {
@@ -752,8 +1038,14 @@ fn sort_relation_details(mut items: Vec<GraphRelationDetail>) -> Vec<GraphRelati
     items
 }
 
-fn graph_warning(has_rows: bool) -> String {
-    if has_rows { DEFAULT_GRAPH_WARNING.into() } else { EMPTY_GRAPH_WARNING.into() }
+fn graph_warning(entity_count: usize, relation_count: usize) -> String {
+    if entity_count == 0 && relation_count == 0 {
+        EMPTY_GRAPH_WARNING.into()
+    } else if relation_count == 0 {
+        ENTITY_ONLY_GRAPH_WARNING.into()
+    } else {
+        DEFAULT_GRAPH_WARNING.into()
+    }
 }
 
 #[cfg(test)]
@@ -782,11 +1074,85 @@ mod tests {
             canonical_name: "RustRAG".into(),
             entity_type: Some("product".into()),
             metadata_json: serde_json::json!({ "aliases": ["Runtime Graph"] }),
-            created_at: Utc::now(),
         };
 
         let reasons = entity_match_reasons(&row, "runtime");
 
         assert_eq!(reasons, vec!["aliases"]);
+    }
+
+    #[test]
+    fn build_graph_coverage_marks_entity_only_when_relations_are_missing() {
+        let coverage = build_graph_coverage(Uuid::now_v7(), 3, 0);
+
+        assert_eq!(coverage.status, "entity_only");
+        assert_eq!(coverage.warning.as_deref(), Some(ENTITY_ONLY_GRAPH_WARNING));
+    }
+
+    #[test]
+    fn build_graph_diagnostics_marks_waiting_when_content_exists_without_graph_rows() {
+        let diagnostics = build_graph_diagnostics(
+            Uuid::now_v7(),
+            &GraphProjectCounts {
+                document_count: 2,
+                chunk_count: 8,
+                embedded_chunk_count: 0,
+                retrieval_run_count: 0,
+            },
+            &[],
+            &[],
+        );
+
+        assert_eq!(diagnostics.readiness.status, "awaiting_graph_rows");
+        assert_eq!(diagnostics.content.persisted_chunk_count, 8);
+        assert_eq!(diagnostics.coverage.status, "waiting_for_extraction");
+        assert_eq!(
+            diagnostics.readiness.blockers,
+            vec!["Project content exists, but no entity or relation rows have been persisted yet."]
+        );
+    }
+
+    #[test]
+    fn build_graph_diagnostics_marks_provenance_partial_when_chunk_refs_are_missing() {
+        let entity = EntityRow {
+            id: Uuid::now_v7(),
+            project_id: Uuid::now_v7(),
+            canonical_name: "Acme".into(),
+            entity_type: Some("company".into()),
+            metadata_json: serde_json::json!({
+                "source_document_ids": ["9f7303c8-a2f4-4df7-a4c5-72e130f523e3"]
+            }),
+        };
+        let relation = RelationRow {
+            id: Uuid::now_v7(),
+            project_id: entity.project_id,
+            from_entity_id: entity.id,
+            to_entity_id: Uuid::now_v7(),
+            relation_type: "supplies".into(),
+            provenance_json: serde_json::json!({}),
+        };
+
+        let diagnostics = build_graph_diagnostics(
+            entity.project_id,
+            &GraphProjectCounts {
+                document_count: 1,
+                chunk_count: 3,
+                embedded_chunk_count: 3,
+                retrieval_run_count: 1,
+            },
+            &[entity],
+            &[relation],
+        );
+
+        assert_eq!(diagnostics.readiness.status, "provenance_partial");
+        assert_eq!(diagnostics.provenance.entities_without_chunk_refs, 1);
+        assert_eq!(diagnostics.provenance.relations_without_chunk_refs, 1);
+        assert!(
+            diagnostics
+                .readiness
+                .next_steps
+                .iter()
+                .any(|item| item.contains("entity.metadata_json"))
+        );
     }
 }
