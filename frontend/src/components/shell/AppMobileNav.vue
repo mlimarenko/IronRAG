@@ -5,6 +5,8 @@ import { RouterLink, useRoute } from 'vue-router'
 
 import { shellNavItems, type ShellNavItem } from './shellNavigation'
 
+import AppContextControls from './AppContextControls.vue'
+
 const route = useRoute()
 const { t } = useI18n()
 
@@ -51,6 +53,7 @@ function isActive(item: ShellNavItem) {
         <span>{{ t('shell.mobileNav.advanced') }}</span>
       </summary>
       <div class="app-mobile-nav__more-sheet">
+        <AppContextControls class="app-mobile-nav__context" compact />
         <RouterLink
           v-for="item in secondaryItems"
           :key="item.to"
@@ -147,12 +150,16 @@ function isActive(item: ShellNavItem) {
   bottom: calc(100% + 0.75rem);
   display: grid;
   gap: 0.6rem;
-  width: min(280px, calc(100vw - 1.2rem));
+  width: min(320px, calc(100vw - 1.2rem));
   padding: 0.8rem;
   border-radius: 1.1rem;
   border: 1px solid rgb(15 23 42 / 0.08);
   background: rgb(255 255 255 / 0.98);
   box-shadow: 0 18px 44px rgb(15 23 42 / 0.14);
+}
+
+.app-mobile-nav__context {
+  margin-bottom: 0.1rem;
 }
 
 .app-mobile-nav__secondary {

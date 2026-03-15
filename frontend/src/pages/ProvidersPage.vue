@@ -36,7 +36,7 @@ onMounted(async () => {
 
     if (!workspaceId.value) {
       infoMessage.value =
-        'No workspace yet. Create a workspace before configuring provider accounts.'
+        'No workspace yet. Open Advanced context to create a workspace before configuring provider accounts.'
       return
     }
 

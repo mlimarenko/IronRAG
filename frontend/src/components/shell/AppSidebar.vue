@@ -5,6 +5,8 @@ import { RouterLink, useRoute } from 'vue-router'
 
 import { shellNavItems, type ShellNavItem } from './shellNavigation'
 
+import AppContextControls from './AppContextControls.vue'
+
 const route = useRoute()
 const { t } = useI18n()
 
@@ -67,6 +69,8 @@ function isActive(item: ShellNavItem) {
       <strong>{{ t(`shell.nav.items.${activeSection}.label`) }}</strong>
       <small>{{ t(`shell.nav.items.${activeSection}.hint`) }}</small>
     </div>
+
+    <AppContextControls class="app-sidebar__context" compact />
 
     <div class="app-sidebar__sections" :aria-label="t('shell.nav.product')">
       <section v-for="group in navGroups" :key="group.key" class="app-sidebar__section">
@@ -147,6 +151,10 @@ function isActive(item: ShellNavItem) {
 
 .app-sidebar__focus small {
   color: var(--rr-color-text-secondary);
+}
+
+.app-sidebar__context {
+  margin-top: -4px;
 }
 
 .app-sidebar__sections {

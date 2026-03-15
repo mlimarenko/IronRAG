@@ -29,6 +29,23 @@ export default {
     language: 'Язык',
     languageHint: 'Интерфейс',
   },
+  context: {
+    eyebrow: 'Текущий контекст',
+    workspace: 'Workspace',
+    library: 'Library',
+    none: 'Не выбрано',
+    loading: 'Загружаем workspace и library…',
+    empty: 'Выберите workspace и library для работы.',
+    ready: '{workspace} · {library}',
+    defaultWorkspace: 'Workspace по умолчанию',
+    defaultLibrary: 'Library по умолчанию',
+    advanced: 'Дополнительные действия',
+    advancedHint:
+      'Создавайте и меняйте workspace или library только когда это действительно нужно.',
+    manage: 'Открыть дополнительные настройки',
+    backToDocuments: 'Вернуться в Документы',
+    error: 'Не удалось загрузить workspace и library.',
+  },
   mobileNav: {
     primary: 'Основная навигация продукта',
     advanced: 'Дополнительно',

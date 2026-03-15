@@ -30,7 +30,7 @@ export const shellNavItems: readonly ShellNavItem[] = [
     key: 'advanced',
     to: '/advanced/context',
     legacyTo: '/processing',
-    step: 'A',
+    step: '⋯',
     stage: 'advanced',
     emphasis: 'secondary',
   },

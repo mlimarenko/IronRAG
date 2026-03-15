@@ -168,7 +168,7 @@ onMounted(async () => {
             title="No projects found"
             :message="
               infoMessage ??
-              'Create a workspace and at least one project before querying readiness.'
+              'Create a workspace and at least one library from Advanced context before querying readiness.'
             "
             hint="Once projects exist, use the same shared panel layout to inspect indexing posture."
           />

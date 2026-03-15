@@ -4,6 +4,8 @@ import { useI18n } from 'vue-i18n'
 
 import { useAppLocale } from 'src/composables/useAppLocale'
 
+import AppContextControls from './AppContextControls.vue'
+
 const { t } = useI18n()
 const { locale, localeOptions, setLocale } = useAppLocale()
 const applyLocale = (nextLocale: (typeof localeOptions)[number]) => {
@@ -35,12 +37,16 @@ withDefaults(
 
 <template>
   <header class="app-topbar">
-    <div class="app-topbar__copy">
-      <p class="app-topbar__label">{{ t('shell.topbar.surface') }}</p>
-      <p class="app-topbar__section">{{ sectionLabel }}</p>
-      <p v-if="sectionSummary" class="app-topbar__summary">
-        {{ sectionSummary }}
-      </p>
+    <div class="app-topbar__main">
+      <div class="app-topbar__copy">
+        <p class="app-topbar__label">{{ t('shell.topbar.surface') }}</p>
+        <p class="app-topbar__section">{{ sectionLabel }}</p>
+        <p v-if="sectionSummary" class="app-topbar__summary">
+          {{ sectionSummary }}
+        </p>
+      </div>
+
+      <AppContextControls class="app-topbar__context" compact />
     </div>
 
     <div class="app-topbar__locale" role="group" :aria-label="t('shell.topbar.language')">
@@ -67,11 +73,14 @@ withDefaults(
 
 <style scoped>
 .app-topbar {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
   gap: var(--rr-space-4);
-  align-items: center;
   padding: 4px 0 2px;
+}
+
+.app-topbar__main {
+  display: grid;
+  gap: 12px;
 }
 
 .app-topbar__copy {
@@ -188,8 +197,6 @@ withDefaults(
 
 @media (width <= 900px) {
   .app-topbar {
-    align-items: flex-start;
-    flex-direction: column;
     padding-top: 0;
   }
 
