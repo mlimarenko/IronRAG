@@ -254,7 +254,6 @@ const fileInventory = computed(() =>
   buildFileInventory(documents.value, sources.value, recentJobs.value, {
     unknownSourceLabel: t('flow.library.inventory.unknownSource'),
     sourceKindFormatter: (value: string) => formatSourceKind(value, t),
-    statusFormatter: () => '',
     untitledLabel: t('flow.library.inventory.untitled'),
     recentLabel: t('flow.library.inventory.updatedPrefix'),
     checksumLabel: t('flow.library.inventory.checksum'),

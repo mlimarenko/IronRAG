@@ -142,7 +142,6 @@ export function buildFileInventory(
   options: {
     unknownSourceLabel: string
     sourceKindFormatter: (value: string) => string
-    statusFormatter: (value?: string | null) => string
     untitledLabel: string
     recentLabel: string
     checksumLabel: string
