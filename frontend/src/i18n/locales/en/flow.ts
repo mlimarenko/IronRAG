@@ -209,41 +209,46 @@ export default {
       },
       states: {
         tokenSaved: {
-          title: 'Access connected',
-          body: 'Your session token is saved locally for this browser session.',
+          title: 'Access saved',
+          body: 'The access value is saved locally for this browser session.',
         },
         tokenCleared: {
           title: 'Access removed',
-          body: 'Protected setup is paused until you add a token again.',
+          body: 'Protected setup is paused until you add access again.',
         },
         secretMissing: {
-          title: 'Add the bootstrap secret first',
-          body: 'Paste the backend bootstrap secret before trying to mint a session token.',
+          title: 'Add the setup secret first',
+          body: 'Paste the backend setup secret before trying this advanced path.',
         },
         bootstrapSuccess: {
-          title: 'Access connected from bootstrap',
-          body: 'RustRAG minted a session token and saved it for this browser session.',
+          title: 'Access added from setup secret',
+          body: 'RustRAG completed the setup-secret flow and saved the returned access for this browser session.',
         },
         bootstrapRejected: {
-          title: 'That bootstrap secret did not work',
+          title: 'That setup secret did not work',
           body: 'Check the secret value and try again.',
         },
         bootstrapUnavailable: {
-          title: 'Bootstrap minting is not turned on here',
-          body: 'Use an existing token instead, or enable the backend bootstrap flow outside this UI.',
+          title: 'This setup-secret route is not turned on here',
+          body: 'Use an existing access value instead, or finish this backend setup outside this UI.',
         },
         bootstrapMissing: {
-          title: 'This backend does not expose bootstrap setup here',
-          body: 'The bootstrap route could not be reached. Use an existing token or verify backend setup.',
+          title: 'This backend does not expose the setup-secret route here',
+          body: 'The setup route could not be reached. Use an existing access value or verify backend setup.',
         },
         bootstrapNetwork: {
           title: 'RustRAG could not reach the backend',
           body: 'Check the server connection, then try again.',
         },
         bootstrapFailed: {
-          title: 'Setup access could not be completed',
+          title: 'Advanced access could not be completed',
           body: 'RustRAG got an unexpected response while trying to prepare access.',
         },
+      },
+      secondary: {
+        show: 'Advanced access options',
+        hide: 'Hide advanced access options',
+        hint: 'Only open this if setup is blocked and the backend asks for credentials or a setup secret.',
       },
     },
     placeholders: {
@@ -400,8 +405,8 @@ export default {
       imageTitle: 'Image upload is not available yet',
       imageBody:
         'OCR and image extraction still need a backend adapter before they can be indexed.',
-      authTitle: 'API authorization is required',
-      authBody: 'Use a valid API token with document access before running ingestion.',
+      authTitle: 'Access is required',
+      authBody: 'This backend needs document access before ingestion can run.',
       jobLeaseTitle: 'The worker timed out',
       jobLeaseBody: 'The processing lease expired before completion. Retry the run from the queue.',
       genericErrorTitle: 'Processing failed',
@@ -620,7 +625,7 @@ export default {
     statusNeedsContent: 'Needs source content',
     error: 'Ask failed',
     authRequired:
-      'Ask requires a bearer token with query access. Save or mint a session token in Setup first.',
+      'Ask needs query access on this backend. Open Setup → advanced access if this library is protected.',
     context: {
       summaryTitle: 'Current library context',
       workspace: 'Space',

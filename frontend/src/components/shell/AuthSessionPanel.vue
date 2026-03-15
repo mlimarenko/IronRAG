@@ -62,6 +62,7 @@ const panelStatus = computed(() =>
 )
 const hasDraftToken = computed(() => sessionTokenDraft.value.trim().length > 0)
 const hasBootstrapSecret = computed(() => bootstrapSecret.value.trim().length > 0)
+const showAdvancedAccess = ref(false)
 const stepItems = computed(() => [
   {
     key: 'auth',
@@ -167,6 +168,10 @@ function saveSessionToken() {
   emit('updated')
 }
 
+function toggleAdvancedAccess() {
+  showAdvancedAccess.value = !showAdvancedAccess.value
+}
+
 function clearSessionToken() {
   clearApiBearerToken()
   refreshSessionDraft()
@@ -258,7 +263,19 @@ async function mintBootstrapSessionToken() {
       {{ contextNote }}
     </p>
 
-    <div class="auth-session-panel__grid">
+    <div class="auth-session-panel__secondary">
+      <button
+        type="button"
+        class="rr-button rr-button--secondary auth-session-panel__toggle"
+        :aria-expanded="showAdvancedAccess ? 'true' : 'false'"
+        @click="toggleAdvancedAccess"
+      >
+        {{ showAdvancedAccess ? t('flow.processing.auth.secondary.hide') : t('flow.processing.auth.secondary.show') }}
+      </button>
+      <p class="rr-note">{{ t('flow.processing.auth.secondary.hint') }}</p>
+    </div>
+
+    <div v-if="showAdvancedAccess" class="auth-session-panel__grid">
       <section class="auth-session-panel__card auth-session-panel__card--manual">
         <div class="auth-session-panel__card-header">
           <div>
@@ -419,6 +436,24 @@ async function mintBootstrapSessionToken() {
   font-size: 1rem;
   line-height: 1.5;
   color: var(--rr-color-text-primary);
+}
+
+.auth-session-panel__secondary {
+  display: grid;
+  gap: var(--rr-space-2);
+}
+
+.auth-session-panel__toggle {
+  justify-self: flex-start;
+}
+
+.auth-session-panel__secondary {
+  display: grid;
+  gap: var(--rr-space-2);
+}
+
+.auth-session-panel__toggle {
+  justify-self: flex-start;
 }
 
 .auth-session-panel__steps {

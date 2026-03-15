@@ -1090,293 +1090,49 @@ onUnmounted(() => {
         >
           {{ t('flow.library.processing.refresh') }}
         </button>
-        <RouterLink class="rr-button rr-button--secondary" to="/search">
+        <RouterLink class="rr-button" to="/search" :aria-disabled="!selectedProjectId || activeJobsCount > 0">
           {{ t('flow.library.action') }}
         </RouterLink>
       </template>
 
-      <div class="library-quickstart rr-panel rr-panel--accent">
-        <div class="library-quickstart__copy">
-          <p class="rr-kicker">{{ t('flow.library.eyebrow') }}</p>
-          <h2>{{ t('flow.library.title') }}</h2>
-          <p>{{ t('flow.library.description') }}</p>
-        </div>
-
-        <div class="library-quickstart__main-action">
-          <RouterLink class="rr-button" to="/search" :aria-disabled="!selectedProjectId">
-            {{ t('flow.library.action') }}
-          </RouterLink>
-          <p class="rr-note">
-            {{
-              selectedProjectId
-                ? t('flow.library.quickstart.ready')
-                : t('flow.library.quickstart.blocked')
-            }}
-          </p>
-        </div>
-      </div>
-
-      <details class="rr-panel rr-panel--muted library-progress" :open="activeJobsCount > 0 || !documents.length">
-        <summary class="library-progress__summary">
-          <div>
-            <p class="rr-kicker">{{ t('flow.library.quickstart.progressEyebrow') }}</p>
-            <h3>{{ t('flow.library.quickstart.progressTitle') }}</h3>
+      <article class="rr-panel rr-panel--accent flow-reset">
+        <div class="flow-reset__hero">
+          <div class="flow-reset__copy">
+            <p class="rr-kicker">{{ t('flow.library.eyebrow') }}</p>
+            <h2>{{ t('flow.library.title') }}</h2>
+            <p>{{ t('flow.library.description') }}</p>
           </div>
-          <StatusBadge
-            :status="pageStatus.status"
-            :label="
-              activeJobsCount > 0
-                ? t('flow.library.statusProcessing', { count: activeJobsCount })
-                : documents.length
-                  ? t('flow.library.documentsCount', { count: documents.length })
-                  : t('flow.library.statusDraft')
-            "
-          />
-        </summary>
+          <StatusBadge :status="pageStatus.status" :label="pageStatus.label" emphasis="strong" />
+        </div>
 
-        <div class="library-quickstart__steps">
-          <article class="library-quickstart__step">
-            <span>1</span>
-            <div>
-              <strong>{{ t('flow.library.form.title') }}</strong>
-              <p>{{ t('flow.library.form.helper') }}</p>
-            </div>
+        <div class="flow-reset__scope">
+          <article class="flow-reset__scope-card">
+            <span>{{ t('flow.library.stats.workspace') }}</span>
+            <strong>{{ selectedWorkspace?.name ?? t('flow.common.empty') }}</strong>
           </article>
-          <article class="library-quickstart__step">
-            <span>2</span>
-            <div>
-              <strong>{{ t('flow.library.processing.activeTitle') }}</strong>
-              <p>{{ t('flow.library.notices.progressBody') }}</p>
-            </div>
+          <article class="flow-reset__scope-card">
+            <span>{{ t('flow.library.stats.project') }}</span>
+            <strong>{{ selectedProject?.name ?? t('flow.common.empty') }}</strong>
           </article>
-          <article class="library-quickstart__step">
-            <span>3</span>
-            <div>
-              <strong>{{ t('flow.search.title') }}</strong>
-              <p>{{ t('flow.library.notices.completedBody') }}</p>
-            </div>
+          <article class="flow-reset__scope-card">
+            <span>{{ t('flow.library.stats.documents') }}</span>
+            <strong>{{ documents.length }}</strong>
+            <small>{{ t('flow.library.stats.documentsHint') }}</small>
           </article>
         </div>
-      </details>
 
-      <div class="rr-stat-strip">
-        <article class="rr-stat">
-          <p class="rr-stat__label">{{ t('flow.library.stats.workspace') }}</p>
-          <strong>{{ selectedWorkspace?.name ?? t('flow.common.empty') }}</strong>
-        </article>
-        <article class="rr-stat">
-          <p class="rr-stat__label">{{ t('flow.library.stats.project') }}</p>
-          <strong>{{ selectedProject?.name ?? t('flow.common.empty') }}</strong>
-        </article>
-        <article class="rr-stat">
-          <p class="rr-stat__label">{{ t('flow.library.stats.documents') }}</p>
-          <strong>{{ documents.length }}</strong>
-          <p>{{ t('flow.library.stats.documentsHint') }}</p>
-        </article>
-        <article class="rr-stat">
-          <p class="rr-stat__label">{{ t('flow.library.stats.processing') }}</p>
-          <strong>{{ processingStatLabel }}</strong>
-          <p>{{ processingStatHint }}</p>
-        </article>
-      </div>
-
-      <article
-        v-if="feedback"
-        class="feedback-banner"
-        :data-tone="feedback.tone"
-      >
-        <strong>{{ feedback.title }}</strong>
-        <p>{{ feedback.body }}</p>
-        <p
-          v-if="feedback.detail"
-          class="feedback-banner__detail"
+        <article
+          v-if="feedback"
+          class="feedback-banner"
+          :data-tone="feedback.tone"
         >
-          {{ feedback.detail }}
-        </p>
-      </article>
+          <strong>{{ feedback.title }}</strong>
+          <p>{{ feedback.body }}</p>
+          <p v-if="feedback.detail" class="feedback-banner__detail">{{ feedback.detail }}</p>
+        </article>
 
-      <div class="ingestion-grid">
-        <div class="ingestion-primary rr-grid">
-          <article class="rr-panel rr-panel--accent rr-stack processing-overview">
-            <div class="ingestion-panel__heading">
-              <div class="rr-stack rr-stack--tight">
-                <p class="rr-kicker">{{ t('flow.library.processing.kicker') }}</p>
-                <h3>
-                  {{
-                    activeJobsCount > 0
-                      ? t('flow.library.processing.activeTitle')
-                      : highlightedJobView
-                        ? t('flow.library.processing.latestTitle')
-                        : t('flow.library.processing.emptyTitle')
-                  }}
-                </h3>
-              </div>
-              <StatusBadge
-                v-if="highlightedJobView"
-                :tone="highlightedJobView.presentation.tone"
-                :label="highlightedJobView.presentation.statusLabel"
-                emphasis="strong"
-              />
-              <StatusBadge
-                v-else
-                tone="info"
-                :label="t('flow.library.processing.queueIdle')"
-                emphasis="strong"
-              />
-            </div>
-
-            <p class="rr-note">
-              {{
-                highlightedJobView
-                  ? highlightedJobView.presentation.summary
-                  : t('flow.library.processing.emptyBody')
-              }}
-            </p>
-
-            <div
-              v-if="highlightedJobView"
-              class="processing-meta"
-            >
-              <article class="processing-meta__card">
-                <span>{{ t('flow.library.processing.currentSource') }}</span>
-                <strong>{{ highlightedJobView.sourceLabel }}</strong>
-              </article>
-              <article class="processing-meta__card">
-                <span>{{ t('flow.library.processing.currentTrigger') }}</span>
-                <strong>{{ highlightedJobView.triggerLabel }}</strong>
-              </article>
-              <article class="processing-meta__card">
-                <span>{{ t('flow.library.processing.currentUpdated') }}</span>
-                <strong>{{
-                  highlightedJobView.updatedLabel ?? t('flow.library.processing.updating')
-                }}</strong>
-              </article>
-              <article class="processing-meta__card">
-                <span>{{ t('flow.library.processing.currentDuration') }}</span>
-                <strong>{{
-                  highlightedJobView.durationLabel ?? t('flow.library.processing.notStarted')
-                }}</strong>
-              </article>
-            </div>
-
-            <div
-              v-if="highlightedJobSteps.length"
-              class="processing-steps"
-            >
-              <article
-                v-for="step in highlightedJobSteps"
-                :key="step.key"
-                class="processing-step"
-                :data-state="step.state"
-              >
-                <div class="processing-step__dot" />
-                <div class="processing-step__copy">
-                  <strong>{{ step.label }}</strong>
-                  <p>{{ step.description }}</p>
-                </div>
-              </article>
-            </div>
-
-            <article
-              v-if="highlightedJobView?.error"
-              class="processing-error"
-            >
-              <strong>{{ highlightedJobView.error.title }}</strong>
-              <p>{{ highlightedJobView.error.body }}</p>
-              <p
-                v-if="highlightedJobView.error.detail"
-                class="processing-error__detail"
-              >
-                {{ highlightedJobView.error.detail }}
-              </p>
-            </article>
-
-            <div
-              v-if="highlightedJobView"
-              class="rr-action-row"
-            >
-              <button
-                type="button"
-                class="rr-button rr-button--secondary"
-                :disabled="queueLoading"
-                @click="refreshProcessingState(true)"
-              >
-                {{ t('flow.library.processing.refresh') }}
-              </button>
-              <button
-                v-if="highlightedJobView.job.retryable"
-                type="button"
-                class="rr-button"
-                :disabled="retryingJobId === highlightedJobView.job.id"
-                @click="retryJob(highlightedJobView.job.id)"
-              >
-                {{
-                  retryingJobId === highlightedJobView.job.id
-                    ? t('flow.library.processing.retryBusy')
-                    : t('flow.library.processing.retryAction')
-                }}
-              </button>
-            </div>
-          </article>
-
-          <article class="rr-panel rr-stack">
-            <div class="ingestion-panel__heading">
-              <div class="rr-stack rr-stack--tight">
-                <p class="rr-kicker">{{ t('flow.library.form.kicker') }}</p>
-                <h3>{{ t('flow.library.form.title') }}</h3>
-              </div>
-              <StatusBadge
-                :status="selectedProjectId ? 'ready' : 'blocked'"
-                :label="
-                  selectedProjectId
-                    ? t('flow.library.form.ready')
-                    : t('flow.library.form.needsSetup')
-                "
-              />
-            </div>
-
-            <p class="rr-note">{{ t('flow.library.form.helper') }}</p>
-
-            <div class="rr-form-grid">
-              <label class="rr-field">
-                <span class="rr-field__label">{{ t('flow.library.form.titleLabel') }}</span>
-                <input
-                  v-model="title"
-                  class="rr-control"
-                  type="text"
-                  :placeholder="t('flow.library.form.titlePlaceholder')"
-                >
-                <p class="rr-field__hint">{{ t('flow.library.form.titleHint') }}</p>
-              </label>
-              <label class="rr-field">
-                <span class="rr-field__label">{{ t('flow.library.form.text') }}</span>
-                <textarea
-                  v-model="text"
-                  class="rr-control"
-                  rows="12"
-                  :placeholder="t('flow.library.form.textPlaceholder')"
-                />
-                <p class="rr-field__hint">{{ t('flow.library.form.autoHint') }}</p>
-              </label>
-            </div>
-
-            <div class="rr-action-row">
-              <button
-                type="button"
-                class="rr-button"
-                :disabled="!selectedProjectId || !text.trim() || submitMode === 'text'"
-                @click="ingestCurrentText"
-              >
-                {{
-                  submitMode === 'text'
-                    ? t('flow.library.form.actionBusy')
-                    : t('flow.library.form.action')
-                }}
-              </button>
-            </div>
-          </article>
-
-          <article class="rr-panel rr-stack">
+        <div class="flow-reset__layout">
+          <article class="rr-panel rr-stack upload-focus">
             <div class="ingestion-panel__heading">
               <div class="rr-stack rr-stack--tight">
                 <p class="rr-kicker">{{ t('flow.library.upload.kicker') }}</p>
@@ -1384,11 +1140,7 @@ onUnmounted(() => {
               </div>
               <StatusBadge
                 :status="selectedProjectId ? 'ready' : 'blocked'"
-                :label="
-                  selectedProjectId
-                    ? t('flow.library.upload.ready')
-                    : t('flow.library.upload.needsSetup')
-                "
+                :label="selectedProjectId ? t('flow.library.upload.ready') : t('flow.library.upload.needsSetup')"
               />
             </div>
 
@@ -1415,18 +1167,10 @@ onUnmounted(() => {
               <div class="upload-dropzone__body">
                 <StatusBadge tone="info" :label="t('flow.library.upload.dropzoneIdleBadge')" />
                 <h4>
-                  {{
-                    isUploadDragActive
-                      ? t('flow.library.upload.dropzoneActiveTitle')
-                      : t('flow.library.upload.dropzoneTitle')
-                  }}
+                  {{ isUploadDragActive ? t('flow.library.upload.dropzoneActiveTitle') : t('flow.library.upload.dropzoneTitle') }}
                 </h4>
                 <p>
-                  {{
-                    isUploadDragActive
-                      ? t('flow.library.upload.dropzoneActiveBody')
-                      : t('flow.library.upload.dropzoneBody')
-                  }}
+                  {{ isUploadDragActive ? t('flow.library.upload.dropzoneActiveBody') : t('flow.library.upload.dropzoneBody') }}
                 </p>
                 <button
                   type="button"
@@ -1450,24 +1194,15 @@ onUnmounted(() => {
               <p class="rr-field__hint">{{ t('flow.library.upload.titleHint') }}</p>
             </label>
 
-            <div
-              v-if="uploadFile && uploadSelection"
-              class="upload-selection-card"
-            >
+            <div v-if="uploadFile && uploadSelection" class="upload-selection-card">
               <div class="upload-selection-card__meta">
                 <strong>{{ uploadFile.name }}</strong>
-                <span class="rr-muted">
-                  {{ uploadSelection.fileKindLabel }} · {{ formatFileSize(uploadFile.size) }}
-                </span>
+                <span class="rr-muted">{{ uploadSelection.fileKindLabel }} · {{ formatFileSize(uploadFile.size) }}</span>
               </div>
               <StatusBadge :tone="uploadSelection.badgeTone" :label="uploadSelection.badgeLabel" />
             </div>
 
-            <p
-              v-if="uploadSelection"
-              class="rr-banner"
-              :data-tone="uploadSelection.bannerTone"
-            >
+            <p v-if="uploadSelection" class="rr-banner" :data-tone="uploadSelection.bannerTone">
               {{ uploadSelection.message }}
             </p>
 
@@ -1478,899 +1213,360 @@ onUnmounted(() => {
                 :disabled="!canUploadSelectedFile"
                 @click="uploadCurrentFile"
               >
-                {{
-                  submitMode === 'upload'
-                    ? t('flow.library.upload.actionBusy')
-                    : t('flow.library.upload.action')
-                }}
+                {{ submitMode === 'upload' ? t('flow.library.upload.actionBusy') : t('flow.library.upload.action') }}
               </button>
+              <RouterLink class="rr-button rr-button--secondary" to="/processing" v-if="!selectedProjectId">
+                {{ t('flow.processing.title') }}
+              </RouterLink>
             </div>
           </article>
-        </div>
 
-        <div class="ingestion-side rr-grid">
-          <article class="rr-panel rr-panel--muted rr-stack">
+          <article class="rr-panel rr-panel--accent rr-stack processing-overview">
             <div class="ingestion-panel__heading">
               <div class="rr-stack rr-stack--tight">
-                <p class="rr-kicker">{{ t('flow.library.processing.queueKicker') }}</p>
-                <h3>{{ t('flow.library.processing.queueTitle') }}</h3>
+                <p class="rr-kicker">{{ t('flow.library.processing.kicker') }}</p>
+                <h3>
+                  {{ activeJobsCount > 0 ? t('flow.library.processing.activeTitle') : highlightedJobView ? t('flow.library.processing.latestTitle') : t('flow.library.processing.emptyTitle') }}
+                </h3>
               </div>
               <StatusBadge
-                :status="activeJobsCount > 0 ? 'running' : recentJobs.length ? 'ready' : 'draft'"
-                :label="
-                  activeJobsCount > 0
-                    ? t('flow.library.processing.queueCount', { count: activeJobsCount })
-                    : recentJobs.length
-                      ? t('flow.library.processing.queueLoaded', { count: recentJobs.length })
-                      : t('flow.library.processing.queueIdle')
-                "
+                v-if="highlightedJobView"
+                :tone="highlightedJobView.presentation.tone"
+                :label="highlightedJobView.presentation.statusLabel"
+                emphasis="strong"
               />
+              <StatusBadge v-else tone="info" :label="t('flow.library.processing.queueIdle')" emphasis="strong" />
             </div>
 
-            <EmptyStateCard
-              v-if="!recentJobs.length && !queueLoading"
-              :title="t('flow.library.processing.emptyTitle')"
-              :message="t('flow.library.processing.emptyBody')"
-            />
+            <p class="rr-note">
+              {{ highlightedJobView ? highlightedJobView.presentation.summary : t('flow.library.processing.emptyBody') }}
+            </p>
 
-            <ul
-              v-else
-              class="job-queue"
-            >
-              <li
-                v-for="item in jobViewModels"
-                :key="item.job.id"
-                class="job-queue__item"
-              >
-                <div class="job-queue__header">
-                  <div>
-                    <strong>{{ item.sourceLabel }}</strong>
-                    <p class="rr-muted">
-                      {{ item.triggerLabel }} · {{ t('flow.library.processing.runId') }}
-                      {{ item.shortId }}
-                    </p>
-                  </div>
-                  <StatusBadge
-                    :tone="item.presentation.tone"
-                    :label="item.presentation.statusLabel"
-                  />
-                </div>
-
-                <p class="job-queue__summary">{{ item.presentation.summary }}</p>
-
-                <div class="job-queue__meta">
-                  <span>{{ item.presentation.stageLabel }}</span>
-                  <span v-if="item.startedLabel">
-                    {{ t('flow.library.processing.currentSubmitted') }}: {{ item.startedLabel }}
-                  </span>
-                  <span v-if="item.durationLabel">
-                    {{ t('flow.library.processing.currentDuration') }}: {{ item.durationLabel }}
-                  </span>
-                </div>
-
-                <p
-                  v-if="item.error"
-                  class="job-queue__error"
-                >
-                  {{ item.error.body }}
-                </p>
-
-                <div
-                  v-if="item.job.retryable"
-                  class="job-queue__actions"
-                >
-                  <button
-                    type="button"
-                    class="rr-button rr-button--secondary"
-                    :disabled="retryingJobId === item.job.id"
-                    @click="retryJob(item.job.id)"
-                  >
-                    {{
-                      retryingJobId === item.job.id
-                        ? t('flow.library.processing.retryBusy')
-                        : t('flow.library.processing.retryAction')
-                    }}
-                  </button>
-                </div>
-              </li>
-            </ul>
-          </article>
-
-          <article class="rr-panel rr-stack file-library-panel">
-            <div class="ingestion-panel__heading">
-              <div class="rr-stack rr-stack--tight">
-                <p class="rr-kicker">{{ t('flow.library.inventory.kicker') }}</p>
-                <h3>{{ t('flow.library.inventory.title') }}</h3>
-              </div>
-              <StatusBadge
-                :status="documents.length ? 'ready' : 'draft'"
-                :label="documents.length ? inventorySummary : t('flow.library.inventory.emptyBadge')"
-              />
+            <div v-if="highlightedJobView" class="processing-human">
+              <article class="processing-human__card">
+                <span>{{ t('flow.library.processing.currentSource') }}</span>
+                <strong>{{ highlightedJobView.sourceLabel }}</strong>
+              </article>
+              <article class="processing-human__card">
+                <span>{{ t('flow.library.processing.currentTrigger') }}</span>
+                <strong>{{ highlightedJobView.triggerLabel }}</strong>
+              </article>
+              <article class="processing-human__card">
+                <span>{{ t('flow.library.processing.currentUpdated') }}</span>
+                <strong>{{ highlightedJobView.updatedLabel ?? t('flow.library.processing.updating') }}</strong>
+              </article>
+              <article class="processing-human__card">
+                <span>{{ t('flow.library.processing.currentDuration') }}</span>
+                <strong>{{ highlightedJobView.durationLabel ?? t('flow.library.processing.notStarted') }}</strong>
+              </article>
             </div>
 
-            <p class="rr-note">{{ t('flow.library.inventory.helper') }}</p>
-
-            <div
-              v-if="documents.length"
-              class="file-library-toolbar"
-            >
-              <label class="rr-field file-library-toolbar__search">
-                <span class="rr-field__label">{{ t('flow.library.inventory.searchLabel') }}</span>
-                <input
-                  v-model="librarySearch"
-                  class="rr-control"
-                  type="search"
-                  :placeholder="t('flow.library.inventory.searchPlaceholder')"
-                >
-              </label>
-
-              <div class="file-library-toolbar__filters">
-                <button
-                  v-for="option in inventoryFilterOptions"
-                  :key="option.value"
-                  type="button"
-                  class="rr-button rr-button--secondary"
-                  :data-active="libraryFilter === option.value"
-                  @click="libraryFilter = option.value"
-                >
-                  {{ option.label }}
-                </button>
-              </div>
-            </div>
-
-            <EmptyStateCard
-              v-if="!documents.length"
-              :title="t('flow.library.inventory.emptyTitle')"
-              :message="t('flow.library.inventory.emptyBody')"
-            />
-
-            <div
-              v-else
-              class="file-library-grid"
-            >
-              <div class="file-library-list">
-                <button
-                  v-for="record in filteredFileInventory"
-                  :key="record.id"
-                  type="button"
-                  class="file-library-row"
-                  :data-active="selectedInventoryRecord?.id === record.id"
-                  @click="selectDocument(record.id)"
-                >
-                  <div class="file-library-row__copy">
-                    <div class="file-library-row__title-line">
-                      <strong>{{ record.title }}</strong>
-                      <StatusBadge :tone="record.statusTone" :label="record.statusLabel" />
-                    </div>
-                    <p class="rr-muted">{{ record.subtitle }}</p>
-                    <p class="file-library-row__summary">{{ record.summaryLabel }}</p>
-                  </div>
-                  <div class="file-library-row__meta">
-                    <span>{{ record.sourceKindLabel }}</span>
-                    <span>{{ record.mimeLabel }}</span>
-                  </div>
-                </button>
-
-                <EmptyStateCard
-                  v-if="!filteredFileInventory.length"
-                  :title="t('flow.library.inventory.filteredEmptyTitle')"
-                  :message="t('flow.library.inventory.filteredEmptyBody')"
-                />
-              </div>
-
+            <div v-if="highlightedJobSteps.length" class="processing-steps processing-steps--compact">
               <article
-                v-if="selectedInventoryRecord"
-                class="file-library-detail"
+                v-for="step in highlightedJobSteps"
+                :key="step.key"
+                class="processing-step"
+                :data-state="step.state"
               >
-                <div class="file-library-detail__header">
-                  <div class="rr-stack rr-stack--tight">
-                    <p class="rr-kicker">{{ t('flow.library.inventory.detailKicker') }}</p>
-                    <h4>{{ selectedInventoryRecord.title }}</h4>
-                  </div>
-                  <StatusBadge
-                    :tone="selectedInventoryRecord.statusTone"
-                    :label="selectedInventoryRecord.statusLabel"
-                    emphasis="strong"
-                  />
-                </div>
-
-                <dl class="file-library-detail__facts">
-                  <div>
-                    <dt>{{ t('flow.library.inventory.fields.externalKey') }}</dt>
-                    <dd>{{ selectedInventoryRecord.subtitle }}</dd>
-                  </div>
-                  <div>
-                    <dt>{{ t('flow.library.inventory.fields.source') }}</dt>
-                    <dd>{{ selectedInventoryRecord.sourceLabel }}</dd>
-                  </div>
-                  <div>
-                    <dt>{{ t('flow.library.inventory.fields.kind') }}</dt>
-                    <dd>{{ selectedInventoryRecord.sourceKindLabel }}</dd>
-                  </div>
-                  <div>
-                    <dt>{{ t('flow.library.inventory.fields.mime') }}</dt>
-                    <dd>{{ selectedInventoryRecord.mimeLabel }}</dd>
-                  </div>
-                  <div v-if="selectedInventoryRecord.updatedAt">
-                    <dt>{{ t('flow.library.inventory.fields.updated') }}</dt>
-                    <dd>{{ selectedInventoryRecord.updatedAt }}</dd>
-                  </div>
-                  <div v-if="selectedInventoryRecord.checksumShort">
-                    <dt>{{ t('flow.library.inventory.fields.checksum') }}</dt>
-                    <dd>{{ selectedInventoryRecord.checksumShort }}</dd>
-                  </div>
-                </dl>
-
-                <p class="rr-note">{{ selectedInventoryRecord.summaryLabel }}</p>
-
-                <article
-                  v-if="selectedDocumentRelatedJob"
-                  class="file-library-detail__processing"
-                >
-                  <div class="file-library-detail__processing-head">
-                    <strong>{{ t('flow.library.inventory.processingTitle') }}</strong>
-                    <StatusBadge
-                      :tone="selectedDocumentProcessingPresentation?.tone"
-                      :label="selectedDocumentProcessingPresentation?.statusLabel"
-                    />
-                  </div>
-                  <p>
-                    {{ selectedDocumentProcessingPresentation?.summary }}
-                  </p>
-                </article>
-
-                <div class="rr-action-row">
-                  <button
-                    type="button"
-                    class="rr-button"
-                    @click="useDocumentTitleForSearch"
-                  >
-                    {{ t('flow.library.inventory.searchAction') }}
-                  </button>
-                  <button
-                    type="button"
-                    class="rr-button rr-button--secondary"
-                    :disabled="queueLoading"
-                    @click="refreshProcessingState(true)"
-                  >
-                    {{ t('flow.library.processing.refresh') }}
-                  </button>
+                <div class="processing-step__dot" />
+                <div class="processing-step__copy">
+                  <strong>{{ step.label }}</strong>
+                  <p>{{ step.description }}</p>
                 </div>
               </article>
             </div>
-          </article>
 
-          <article class="rr-panel rr-panel--muted rr-stack">
-            <div class="ingestion-panel__heading">
-              <div class="rr-stack rr-stack--tight">
-                <p class="rr-kicker">{{ t('flow.library.lists.sources.kicker') }}</p>
-                <h3>{{ t('flow.library.lists.sources.title') }}</h3>
-              </div>
-              <StatusBadge
-                :status="sources.length ? 'ready' : 'draft'"
-                :label="
-                  sources.length
-                    ? t('flow.library.lists.sources.ready')
-                    : t('flow.library.lists.sources.empty')
-                "
-              />
-            </div>
+            <article v-if="highlightedJobView?.error" class="processing-error">
+              <strong>{{ highlightedJobView.error.title }}</strong>
+              <p>{{ highlightedJobView.error.body }}</p>
+              <p v-if="highlightedJobView.error.detail" class="processing-error__detail">{{ highlightedJobView.error.detail }}</p>
+            </article>
 
-            <p
-              v-if="!sources.length"
-              class="rr-note"
-            >
-              {{ t('flow.library.lists.sources.emptyMessage') }}
-            </p>
-
-            <ul
-              v-else
-              class="inventory-list"
-            >
-              <li
-                v-for="source in visibleSources"
-                :key="source.id"
+            <div v-if="highlightedJobView" class="rr-action-row">
+              <button type="button" class="rr-button rr-button--secondary" :disabled="queueLoading" @click="refreshProcessingState(true)">
+                {{ t('flow.library.processing.refresh') }}
+              </button>
+              <button
+                v-if="highlightedJobView.job.retryable"
+                type="button"
+                class="rr-button"
+                :disabled="retryingJobId === highlightedJobView.job.id"
+                @click="retryJob(highlightedJobView.job.id)"
               >
-                <div>
-                  <strong>{{ source.label }}</strong>
-                  <p class="rr-muted">{{ formatSourceKind(source.source_kind, t) }}</p>
-                </div>
-                <StatusBadge :label="source.status" />
-              </li>
-            </ul>
-
-            <p
-              v-if="remainingSourceCount > 0"
-              class="rr-note"
-            >
-              {{ t('flow.library.lists.sources.more', { count: remainingSourceCount }) }}
-            </p>
+                {{ retryingJobId === highlightedJobView.job.id ? t('flow.library.processing.retryBusy') : t('flow.library.processing.retryAction') }}
+              </button>
+              <RouterLink class="rr-button" to="/search" :aria-disabled="activeJobsCount > 0 || !documents.length">
+                {{ t('flow.library.action') }}
+              </RouterLink>
+            </div>
           </article>
         </div>
-      </div>
+
+        <article class="rr-panel rr-stack file-library-panel" v-if="documents.length || recentJobs.length">
+          <div class="ingestion-panel__heading">
+            <div class="rr-stack rr-stack--tight">
+              <p class="rr-kicker">{{ t('flow.library.inventory.kicker') }}</p>
+              <h3>{{ t('flow.library.inventory.title') }}</h3>
+            </div>
+            <StatusBadge
+              :status="documents.length ? 'ready' : activeJobsCount > 0 ? 'partial' : 'draft'"
+              :label="documents.length ? inventorySummary : t('flow.library.inventory.emptyBadge')"
+            />
+          </div>
+
+          <p class="rr-note">{{ t('flow.library.inventory.helper') }}</p>
+
+          <div v-if="documents.length" class="file-library-toolbar">
+            <label class="rr-field file-library-toolbar__search">
+              <span class="rr-field__label">{{ t('flow.library.inventory.searchLabel') }}</span>
+              <input v-model="librarySearch" class="rr-control" type="search" :placeholder="t('flow.library.inventory.searchPlaceholder')">
+            </label>
+
+            <div class="file-library-toolbar__filters">
+              <button
+                v-for="option in inventoryFilterOptions"
+                :key="option.value"
+                type="button"
+                class="rr-button rr-button--secondary"
+                :data-active="libraryFilter === option.value"
+                @click="libraryFilter = option.value"
+              >
+                {{ option.label }}
+              </button>
+            </div>
+          </div>
+
+          <EmptyStateCard v-if="!documents.length" :title="t('flow.library.inventory.emptyTitle')" :message="t('flow.library.inventory.emptyBody')" />
+
+          <div v-else class="file-library-grid">
+            <div class="file-library-list">
+              <button
+                v-for="record in filteredFileInventory"
+                :key="record.id"
+                type="button"
+                class="file-library-row"
+                :data-active="selectedInventoryRecord?.id === record.id"
+                @click="selectDocument(record.id)"
+              >
+                <div class="file-library-row__copy">
+                  <div class="file-library-row__title-line">
+                    <strong>{{ record.title }}</strong>
+                    <StatusBadge :tone="record.statusTone" :label="record.statusLabel" />
+                  </div>
+                  <p class="rr-muted">{{ record.subtitle }}</p>
+                  <p class="file-library-row__summary">{{ record.summaryLabel }}</p>
+                </div>
+                <div class="file-library-row__meta">
+                  <span>{{ record.sourceKindLabel }}</span>
+                  <span>{{ record.mimeLabel }}</span>
+                </div>
+              </button>
+
+              <EmptyStateCard v-if="!filteredFileInventory.length" :title="t('flow.library.inventory.filteredEmptyTitle')" :message="t('flow.library.inventory.filteredEmptyBody')" />
+            </div>
+
+            <article v-if="selectedInventoryRecord" class="file-library-detail">
+              <div class="file-library-detail__header">
+                <div class="rr-stack rr-stack--tight">
+                  <p class="rr-kicker">{{ t('flow.library.inventory.detailKicker') }}</p>
+                  <h4>{{ selectedInventoryRecord.title }}</h4>
+                </div>
+                <StatusBadge :tone="selectedInventoryRecord.statusTone" :label="selectedInventoryRecord.statusLabel" emphasis="strong" />
+              </div>
+
+              <dl class="file-library-detail__facts">
+                <div>
+                  <dt>{{ t('flow.library.inventory.fields.externalKey') }}</dt>
+                  <dd>{{ selectedInventoryRecord.subtitle }}</dd>
+                </div>
+                <div>
+                  <dt>{{ t('flow.library.inventory.fields.source') }}</dt>
+                  <dd>{{ selectedInventoryRecord.sourceLabel }}</dd>
+                </div>
+                <div>
+                  <dt>{{ t('flow.library.inventory.fields.kind') }}</dt>
+                  <dd>{{ selectedInventoryRecord.sourceKindLabel }}</dd>
+                </div>
+                <div>
+                  <dt>{{ t('flow.library.inventory.fields.mime') }}</dt>
+                  <dd>{{ selectedInventoryRecord.mimeLabel }}</dd>
+                </div>
+                <div v-if="selectedInventoryRecord.updatedAt">
+                  <dt>{{ t('flow.library.inventory.fields.updated') }}</dt>
+                  <dd>{{ selectedInventoryRecord.updatedAt }}</dd>
+                </div>
+                <div v-if="selectedInventoryRecord.checksumShort">
+                  <dt>{{ t('flow.library.inventory.fields.checksum') }}</dt>
+                  <dd>{{ selectedInventoryRecord.checksumShort }}</dd>
+                </div>
+              </dl>
+
+              <p class="rr-note">{{ selectedInventoryRecord.summaryLabel }}</p>
+
+              <article v-if="selectedDocumentRelatedJob" class="file-library-detail__processing">
+                <div class="file-library-detail__processing-head">
+                  <strong>{{ t('flow.library.inventory.processingTitle') }}</strong>
+                  <StatusBadge :tone="selectedDocumentProcessingPresentation?.tone" :label="selectedDocumentProcessingPresentation?.statusLabel" />
+                </div>
+                <p>{{ selectedDocumentProcessingPresentation?.summary }}</p>
+              </article>
+
+              <div class="rr-action-row">
+                <button type="button" class="rr-button" @click="useDocumentTitleForSearch">
+                  {{ t('flow.library.inventory.searchAction') }}
+                </button>
+                <button type="button" class="rr-button rr-button--secondary" :disabled="queueLoading" @click="refreshProcessingState(true)">
+                  {{ t('flow.library.processing.refresh') }}
+                </button>
+              </div>
+            </article>
+          </div>
+        </article>
+      </article>
+
+      <CrossSurfaceGuide active-section="files" />
+      <ProductSpine active-section="files" />
     </PageSection>
   </section>
 </template>
 
 <style scoped>
-.rr-stack--tight {
-  gap: 0.35rem;
+.ingestion-page {
+  gap: 1.5rem;
 }
 
-.library-quickstart {
+.flow-reset,
+.flow-reset__scope-card,
+.flow-reset__scope,
+.flow-reset__layout,
+.processing-human,
+.processing-human__card {
   display: grid;
-  gap: var(--rr-space-4);
-  padding: clamp(var(--rr-space-4), 3vw, var(--rr-space-5));
+  gap: 1rem;
 }
 
-.library-quickstart__copy,
-.library-quickstart__steps,
-.library-quickstart__step {
-  display: grid;
-  gap: var(--rr-space-3);
+.flow-reset__hero,
+.ingestion-panel__heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
 }
 
-.library-quickstart__copy h2,
-.library-quickstart__step strong,
-.library-quickstart__step p {
+.flow-reset__hero h2,
+.flow-reset__scope-card strong,
+.ingestion-panel__heading h3,
+.file-library-detail__header h4 {
   margin: 0;
+  color: var(--rr-ink-strong);
 }
 
-.library-quickstart__steps {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+.flow-reset__hero p,
+.flow-reset__scope-card span,
+.flow-reset__scope-card small,
+.ingestion-panel__heading p {
+  margin: 0;
+  color: var(--rr-ink-muted);
 }
 
-.library-quickstart__step {
-  grid-template-columns: auto 1fr;
+.flow-reset__scope {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.flow-reset__scope-card,
+.processing-human__card {
+  padding: 1rem;
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.flow-reset__layout {
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr);
   align-items: start;
-  padding: var(--rr-space-3);
-  border-radius: var(--rr-radius-md);
-  background: rgb(255 255 255 / 0.78);
-  border: 1px solid var(--rr-border-default);
 }
 
-.library-quickstart__step span {
-  display: inline-grid;
-  place-items: center;
-  width: 2rem;
-  height: 2rem;
-  border-radius: 999px;
-  background: rgb(59 130 246 / 0.12);
-  color: var(--rr-color-accent-700);
-  font-weight: 800;
+.processing-human {
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
 }
 
-@media (width <= 900px) {
-  .library-quickstart__steps {
-    grid-template-columns: 1fr;
-  }
+.processing-steps--compact {
+  gap: 0.75rem;
+}
+
+.upload-focus {
+  position: sticky;
+  top: 1rem;
 }
 
 .file-library-panel {
-  min-height: 100%;
+  margin-top: 1rem;
 }
 
-.file-library-toolbar {
+.file-library-detail__processing,
+.file-library-detail,
+.file-library-row,
+.file-library-grid,
+.file-library-list,
+.file-library-toolbar,
+.file-library-row__title-line,
+.file-library-detail__header,
+.file-library-detail__processing-head,
+.file-library-row__meta {
   display: grid;
-  gap: var(--rr-space-3);
-}
-
-.file-library-toolbar__search {
-  margin: 0;
+  gap: 0.75rem;
 }
 
 .file-library-toolbar__filters {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.65rem;
-}
-
-.file-library-toolbar__filters .rr-button[data-active='true'] {
-  background: var(--rr-color-bg-contrast);
-  color: var(--rr-color-text-inverse);
-  border-color: transparent;
-}
-
-.file-library-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(260px, 0.9fr);
-  gap: var(--rr-space-3);
-}
-
-.file-library-list {
-  display: grid;
-  gap: var(--rr-space-3);
-  align-content: start;
+  gap: 0.5rem;
 }
 
 .file-library-row {
-  display: grid;
-  gap: var(--rr-space-3);
-  padding: var(--rr-space-3);
-  border: 1px solid var(--rr-color-border-subtle);
-  border-radius: var(--rr-radius-md);
-  background: rgb(255 255 255 / 0.72);
+  width: 100%;
   text-align: left;
-  cursor: pointer;
-  transition:
-    border-color var(--rr-motion-base),
-    box-shadow var(--rr-motion-base),
-    transform var(--rr-motion-base);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 1rem;
+  padding: 1rem;
+  background: rgba(255, 255, 255, 0.02);
 }
 
-.file-library-row:hover,
 .file-library-row[data-active='true'] {
-  border-color: rgb(59 130 246 / 0.24);
-  box-shadow: 0 14px 32px rgb(59 130 246 / 0.1);
-  transform: translateY(-1px);
+  border-color: rgba(114, 137, 255, 0.6);
+  background: rgba(114, 137, 255, 0.08);
 }
 
-.file-library-row__copy,
-.file-library-row__meta {
-  display: grid;
-  gap: 0.35rem;
-}
-
-.file-library-row__title-line {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--rr-space-3);
-  align-items: start;
-}
-
-.file-library-row__title-line strong,
-.file-library-row__summary {
-  margin: 0;
-}
-
-.file-library-row__summary {
-  color: var(--rr-color-text-secondary);
-}
-
-.file-library-row__meta {
-  font-size: 0.88rem;
-  color: var(--rr-color-text-muted);
-}
-
-.file-library-detail {
-  display: grid;
-  gap: var(--rr-space-3);
-  align-content: start;
-  padding: var(--rr-space-4);
-  border-radius: var(--rr-radius-lg);
-  border: 1px solid rgb(15 23 42 / 0.08);
-  background:
-    linear-gradient(180deg, rgb(255 255 255 / 0.96), rgb(248 250 252 / 0.94)),
-    var(--rr-color-bg-surface-muted);
-}
-
-.file-library-detail__header {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--rr-space-3);
-  align-items: start;
-}
-
-.file-library-detail__header h4 {
-  margin: 0;
+.file-library-grid {
+  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
 }
 
 .file-library-detail__facts {
   display: grid;
-  gap: var(--rr-space-3);
-  margin: 0;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
 }
 
-.file-library-detail__facts div {
-  display: grid;
-  gap: 0.25rem;
-  padding-bottom: var(--rr-space-2);
-  border-bottom: 1px solid var(--rr-color-border-subtle);
-}
-
-.file-library-detail__facts dt {
-  font-size: 0.74rem;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--rr-color-text-muted);
-}
-
+.file-library-detail__facts dt,
 .file-library-detail__facts dd {
   margin: 0;
-  color: var(--rr-color-text-primary);
 }
 
-.file-library-detail__processing {
-  display: grid;
-  gap: 0.5rem;
-  padding: var(--rr-space-3);
-  border-radius: var(--rr-radius-md);
-  border: 1px solid var(--rr-color-border-subtle);
-  background: rgb(255 255 255 / 0.78);
-}
-
-.file-library-detail__processing p,
-.file-library-detail__processing strong {
-  margin: 0;
-}
-
-.file-library-detail__processing-head {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--rr-space-3);
-  align-items: center;
-}
-
-.rr-stack--tight {
-  gap: 0.35rem;
-}
-
-.ingestion-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
-  gap: var(--rr-space-4);
-}
-
-.ingestion-primary {
-  gap: var(--rr-space-4);
-}
-
-.ingestion-panel__heading {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--rr-space-3);
-  align-items: center;
-}
-
-.ingestion-panel__heading h3 {
-  margin: 0;
-  font-size: 1rem;
-}
-
-.feedback-banner {
-  display: grid;
-  gap: 0.35rem;
-  padding: var(--rr-space-4);
-  border-radius: var(--rr-radius-lg);
-  border: 1px solid transparent;
-}
-
-.feedback-banner strong,
-.feedback-banner p {
-  margin: 0;
-}
-
-.feedback-banner[data-tone='success'] {
-  border-color: rgb(34 197 94 / 0.22);
-  background: rgb(240 253 244 / 0.96);
-  color: var(--rr-color-success-600);
-}
-
-.feedback-banner[data-tone='warning'] {
-  border-color: rgb(245 158 11 / 0.24);
-  background: rgb(255 251 235 / 0.98);
-  color: var(--rr-color-warning-600);
-}
-
-.feedback-banner[data-tone='danger'] {
-  border-color: rgb(239 68 68 / 0.24);
-  background: rgb(254 242 242 / 0.98);
-  color: var(--rr-color-danger-600);
-}
-
-.feedback-banner[data-tone='info'] {
-  border-color: rgb(59 130 246 / 0.24);
-  background: rgb(239 246 255 / 0.96);
-  color: var(--rr-color-accent-700);
-}
-
-.feedback-banner__detail {
-  font-size: 0.92rem;
-  opacity: 0.85;
-}
-
-.processing-overview {
-  background:
-    radial-gradient(circle at top right, rgb(29 78 216 / 0.12), transparent 40%),
-    linear-gradient(180deg, rgb(255 255 255 / 0.98), rgb(243 247 255 / 0.96)),
-    var(--rr-color-bg-surface-strong);
-}
-
-.processing-meta {
-  display: grid;
-  gap: var(--rr-space-3);
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-}
-
-.processing-meta__card {
-  display: grid;
-  gap: 0.35rem;
-  padding: 0.95rem 1rem;
-  border-radius: var(--rr-radius-md);
-  border: 1px solid rgb(29 78 216 / 0.12);
-  background: rgb(255 255 255 / 0.7);
-}
-
-.processing-meta__card span {
-  font-size: 0.74rem;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--rr-color-text-muted);
-}
-
-.processing-meta__card strong {
-  font-size: 0.96rem;
-}
-
-.processing-steps {
-  display: grid;
-  gap: var(--rr-space-3);
-}
-
-.processing-step {
-  display: grid;
-  grid-template-columns: 18px minmax(0, 1fr);
-  gap: var(--rr-space-3);
-  align-items: start;
-  padding: 0.8rem 0.9rem;
-  border-radius: var(--rr-radius-md);
-  border: 1px solid var(--rr-color-border-subtle);
-  background: rgb(255 255 255 / 0.72);
-}
-
-.processing-step__dot {
-  width: 12px;
-  height: 12px;
-  margin-top: 0.3rem;
-  border-radius: 999px;
-  background: rgb(148 163 184 / 0.55);
-}
-
-.processing-step__copy {
-  display: grid;
-  gap: 0.2rem;
-}
-
-.processing-step__copy strong,
-.processing-step__copy p {
-  margin: 0;
-}
-
-.processing-step__copy p {
-  color: var(--rr-color-text-secondary);
-}
-
-.processing-step[data-state='complete'] {
-  border-color: rgb(34 197 94 / 0.18);
-  background: rgb(240 253 244 / 0.72);
-}
-
-.processing-step[data-state='complete'] .processing-step__dot {
-  background: var(--rr-color-success-600);
-}
-
-.processing-step[data-state='active'] {
-  border-color: rgb(245 158 11 / 0.22);
-  background: rgb(255 251 235 / 0.84);
-}
-
-.processing-step[data-state='active'] .processing-step__dot {
-  background: var(--rr-color-warning-600);
-}
-
-.processing-step[data-state='error'] {
-  border-color: rgb(239 68 68 / 0.24);
-  background: rgb(254 242 242 / 0.82);
-}
-
-.processing-step[data-state='error'] .processing-step__dot {
-  background: var(--rr-color-danger-600);
-}
-
-.processing-error {
-  display: grid;
-  gap: 0.35rem;
-  padding: var(--rr-space-4);
-  border: 1px solid rgb(239 68 68 / 0.2);
-  border-radius: var(--rr-radius-md);
-  background: rgb(254 242 242 / 0.86);
-}
-
-.processing-error strong,
-.processing-error p {
-  margin: 0;
-}
-
-.processing-error p {
-  color: #7f1d1d;
-}
-
-.processing-error__detail {
-  font-size: 0.92rem;
-}
-
-.upload-dropzone {
-  position: relative;
-  overflow: hidden;
-  cursor: pointer;
-  border: 1.5px dashed rgb(15 23 42 / 0.16);
-  border-radius: var(--rr-radius-xl);
-  background:
-    radial-gradient(circle at top right, rgb(59 130 246 / 0.14), transparent 42%),
-    linear-gradient(160deg, rgb(255 255 255 / 0.96), rgb(241 245 249 / 0.88));
-  transition:
-    border-color 160ms ease,
-    transform 160ms ease,
-    box-shadow 160ms ease;
-}
-
-.upload-dropzone.is-active {
-  border-color: var(--rr-color-accent-700);
-  box-shadow: 0 18px 45px rgb(59 130 246 / 0.15);
-  transform: translateY(-1px);
-}
-
-.upload-dropzone.is-selected {
-  border-color: rgb(15 23 42 / 0.28);
-}
-
-.upload-dropzone__input {
-  display: none;
-}
-
-.upload-dropzone__body {
-  display: grid;
-  justify-items: start;
-  gap: var(--rr-space-3);
-  padding: var(--rr-space-4);
-}
-
-.upload-dropzone__body h4,
-.upload-dropzone__body p {
-  margin: 0;
-}
-
-.upload-dropzone__body p {
-  max-width: 42rem;
-  color: var(--rr-color-text-secondary);
-}
-
-.upload-selection-card {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--rr-space-3);
-  align-items: center;
-  padding: var(--rr-space-3);
-  border-radius: var(--rr-radius-lg);
-  border: 1px solid var(--rr-color-border-subtle);
-  background: var(--rr-color-bg-surface-muted);
-}
-
-.upload-selection-card__meta {
-  display: grid;
-  gap: 6px;
-}
-
-.library-progress {
-  display: grid;
-  gap: var(--rr-space-3);
-}
-
-.library-progress__summary {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--rr-space-3);
-  align-items: flex-start;
-  cursor: pointer;
-  list-style: none;
-}
-
-.library-progress__summary::-webkit-details-marker {
-  display: none;
-}
-
-.library-quickstart__main-action {
-  display: grid;
-  gap: var(--rr-space-2);
-  justify-items: start;
-}
-
-.job-queue {
-  display: grid;
-  gap: var(--rr-space-3);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.job-queue__item {
-  display: grid;
-  gap: var(--rr-space-3);
-  padding: var(--rr-space-4);
-  border-radius: var(--rr-radius-md);
-  border: 1px solid var(--rr-color-border-subtle);
-  background: rgb(255 255 255 / 0.72);
-}
-
-.job-queue__header {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--rr-space-3);
-  align-items: start;
-}
-
-.job-queue__header strong,
-.job-queue__header p,
-.job-queue__summary,
-.job-queue__error {
-  margin: 0;
-}
-
-.job-queue__summary {
-  color: var(--rr-color-text-secondary);
-}
-
-.job-queue__meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.65rem 1rem;
-  font-size: 0.9rem;
-  color: var(--rr-color-text-muted);
-}
-
-.job-queue__error {
-  color: #991b1b;
-}
-
-.job-queue__actions {
-  display: flex;
-  justify-content: flex-start;
-}
-
-.inventory-list {
-  display: grid;
-  gap: var(--rr-space-3);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.inventory-list li {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--rr-space-3);
-  align-items: start;
-  padding: 0.95rem 1rem;
-  border-radius: var(--rr-radius-md);
-  border: 1px solid var(--rr-color-border-subtle);
-  background: rgb(255 255 255 / 0.72);
-}
-
-.inventory-list strong,
-.inventory-list p {
-  margin: 0;
-}
-
-@media (width <= 1100px) {
-  .ingestion-grid,
+@media (max-width: 960px) {
+  .flow-reset__layout,
   .file-library-grid {
     grid-template-columns: 1fr;
   }
+
+  .upload-focus {
+    position: static;
+  }
 }
 
-@media (width <= 700px) {
-  .ingestion-panel__heading,
-  .job-queue__header,
-  .upload-selection-card,
-  .inventory-list li,
-  .file-library-row__title-line,
-  .file-library-detail__header,
-  .file-library-detail__processing-head,
-  .library-progress__summary {
+@media (max-width: 720px) {
+  .flow-reset__hero,
+  .ingestion-panel__heading {
     flex-direction: column;
-    align-items: flex-start;
   }
 }
 </style>
