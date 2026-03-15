@@ -697,13 +697,13 @@ export async function fetchGraphEntityDetail(
 }
 
 export async function fetchChatSessions(projectId: string): Promise<ChatSessionSurface[]> {
-  const { data } = await api.get<ChatSessionSurface[]>('/chat-sessions', {
+  const { data } = await api.get<ChatSessionSurface[]>('/chat/sessions', {
     params: { project_id: projectId },
   })
   return data
 }
 
 export async function fetchChatMessages(sessionId: string): Promise<ChatMessageSurface[]> {
-  const { data } = await api.get<ChatMessageSurface[]>(`/chat-sessions/${sessionId}/messages`)
+  const { data } = await api.get<ChatMessageSurface[]>(`/chat/sessions/${sessionId}/messages`)
   return data
 }

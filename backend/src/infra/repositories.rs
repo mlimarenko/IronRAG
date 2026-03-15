@@ -517,6 +517,18 @@ pub struct ChatSessionRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ChatSessionListRow {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub project_id: Uuid,
+    pub title: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub message_count: i64,
+    pub last_message_preview: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct ChatMessageRow {
     pub id: Uuid,
     pub session_id: Uuid,
@@ -635,11 +647,25 @@ pub async fn get_chat_session_by_id(
 pub async fn list_chat_sessions_by_project(
     pool: &PgPool,
     project_id: Uuid,
-) -> Result<Vec<ChatSessionRow>, sqlx::Error> {
-    sqlx::query_as::<_, ChatSessionRow>(
-        "select id, workspace_id, project_id, title, created_at, updated_at
-         from chat_session where project_id = $1
-         order by updated_at desc, created_at desc",
+) -> Result<Vec<ChatSessionListRow>, sqlx::Error> {
+    sqlx::query_as::<_, ChatSessionListRow>(
+        "select
+            session.id,
+            session.workspace_id,
+            session.project_id,
+            session.title,
+            session.created_at,
+            session.updated_at,
+            count(message.id)::bigint as message_count,
+            (
+                array_agg(left(message.content, 180) order by message.created_at desc, message.id desc)
+                filter (where message.id is not null)
+            )[1] as last_message_preview
+         from chat_session session
+         left join chat_message message on message.session_id = session.id
+         where session.project_id = $1
+         group by session.id, session.workspace_id, session.project_id, session.title, session.created_at, session.updated_at
+         order by session.updated_at desc, session.created_at desc",
     )
     .bind(project_id)
     .fetch_all(pool)

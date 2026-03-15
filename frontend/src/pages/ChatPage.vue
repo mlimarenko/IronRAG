@@ -70,7 +70,6 @@ const selectedProject = computed(
 const selectedWorkspace = computed(
   () => workspaces.value.find((item) => item.id === getSelectedWorkspaceId()) ?? null,
 )
-const normalizedIndexingState = computed(() => readiness.value?.indexing_state.trim().toLowerCase() ?? '')
 const hasIndexedDocuments = computed(() => (readiness.value?.documents ?? 0) > 0)
 const hasIngestionRuns = computed(() => (readiness.value?.ingestion_jobs ?? 0) > 0)
 const canSubmit = computed(
@@ -141,7 +140,7 @@ const queryHint = computed(() => {
   }
 
   if (activeSession.value) {
-    return `${t('flow.search.query.hintReady')} · Session ${activeSession.value.id.slice(0, 8)}`
+    return t('flow.search.query.hintResume', { id: activeSession.value.id.slice(0, 8) })
   }
 
   if (readiness.value?.ready_for_query) {
@@ -228,7 +227,7 @@ const weakContextActions = computed(() => {
   if (selectedProject.value && (hasIndexedDocuments.value || hasIngestionRuns.value)) {
     actions.push({
       label: t('flow.search.nextActions.retryQuestion'),
-      to: `/chat?q=${encodeURIComponent(queryText.value.trim() || t('flow.search.query.examples.summary'))}`,
+      to: `/search?q=${encodeURIComponent(queryText.value.trim() || t('flow.search.query.examples.summary'))}`,
     })
   }
 
@@ -241,6 +240,23 @@ watch(
     if (typeof value === 'string' && value.trim()) {
       queryText.value = value.trim()
     }
+  },
+  { immediate: true },
+)
+
+watch(
+  () => route.query.session,
+  async (value) => {
+    if (typeof value !== 'string' || !value.trim()) {
+      return
+    }
+
+    const nextSessionId = value.trim()
+    if (!sessions.value.some((session) => session.id === nextSessionId) || activeSessionId.value === nextSessionId) {
+      return
+    }
+
+    await reopenSession(nextSessionId)
   },
   { immediate: true },
 )
@@ -316,7 +332,7 @@ function formatIndexingStateLabel(state?: string | null) {
     case 'not_ready':
       return t('flow.search.readiness.states.empty')
     default:
-      return state?.trim() || t('flow.search.readiness.states.unknown')
+      return state?.trim() ?? t('flow.search.readiness.states.unknown')
   }
 }
 
@@ -340,6 +356,19 @@ async function loadSessions(projectId: string) {
   sessionLoading.value = true
   try {
     sessions.value = await fetchChatSessions(projectId)
+
+    const requestedSessionId =
+      typeof route.query.session === 'string' && route.query.session.trim() ? route.query.session.trim() : ''
+    const requestedSessionExists = requestedSessionId
+      ? sessions.value.some((session) => session.id === requestedSessionId)
+      : false
+
+    if (requestedSessionExists) {
+      activeSessionId.value = requestedSessionId
+      await loadMessages(requestedSessionId)
+      return
+    }
+
     if (activeSessionId.value && sessions.value.some((session) => session.id === activeSessionId.value)) {
       await loadMessages(activeSessionId.value)
       return
@@ -464,13 +493,13 @@ async function submitQuery() {
       <div class="chat-page__layout">
         <aside class="rr-panel rr-panel--muted session-sidebar">
           <div class="session-sidebar__header">
-            <p class="rr-kicker">Recent sessions</p>
-            <h3>{{ selectedProject ? selectedProject.name : 'Ask' }}</h3>
-            <p class="rr-note">Reopen a recent conversation for this project.</p>
+            <p class="rr-kicker">{{ t('flow.search.sessions.kicker') }}</p>
+            <h3>{{ selectedProject ? selectedProject.name : t('flow.search.sessions.titleFallback') }}</h3>
+            <p class="rr-note">{{ t('flow.search.sessions.description') }}</p>
           </div>
 
-          <div v-if="sessionLoading" class="rr-note">Loading sessions…</div>
-          <div v-else-if="!sessions.length" class="rr-note">No saved sessions yet. Your first question will create one.</div>
+          <div v-if="sessionLoading" class="rr-note">{{ t('flow.search.sessions.loading') }}</div>
+          <div v-else-if="!sessions.length" class="rr-note">{{ t('flow.search.sessions.empty') }}</div>
           <button
             v-for="session in sessions"
             :key="session.id"
@@ -479,9 +508,9 @@ async function submitQuery() {
             :data-active="session.id === activeSessionId"
             @click="reopenSession(session.id)"
           >
-            <strong>{{ session.title || `Session ${session.id.slice(0, 8)}` }}</strong>
-            <span>{{ session.last_message_preview || 'No messages yet' }}</span>
-            <small>{{ session.message_count }} messages</small>
+            <strong>{{ session.title || t('flow.search.sessions.fallbackTitle', { id: session.id.slice(0, 8) }) }}</strong>
+            <span>{{ session.last_message_preview || t('flow.search.sessions.emptyPreview') }}</span>
+            <small>{{ t('flow.search.sessions.count', { count: session.message_count }) }}</small>
           </button>
         </aside>
 
@@ -568,10 +597,10 @@ async function submitQuery() {
           >
             <div class="timeline-panel__header">
               <div>
-                <p class="rr-kicker">Session timeline</p>
-                <h3>{{ activeSession ? activeSession.title || `Session ${activeSession.id.slice(0, 8)}` : 'Current session' }}</h3>
+                <p class="rr-kicker">{{ t('flow.search.timeline.kicker') }}</p>
+                <h3>{{ activeSession ? activeSession.title || t('flow.search.sessions.fallbackTitle', { id: activeSession.id.slice(0, 8) }) : t('flow.search.timeline.current') }}</h3>
               </div>
-              <span class="rr-note">{{ timeline.length }} messages</span>
+              <span class="rr-note">{{ t('flow.search.timeline.count', { count: timeline.length }) }}</span>
             </div>
 
             <div class="timeline-list">
@@ -582,7 +611,7 @@ async function submitQuery() {
                 :data-role="message.role"
               >
                 <div class="timeline-item__meta">
-                  <strong>{{ message.role === 'assistant' ? 'Assistant' : 'You' }}</strong>
+                  <strong>{{ message.role === 'assistant' ? t('flow.search.timeline.assistant') : t('flow.search.timeline.you') }}</strong>
                   <span>{{ formatMessageTimestamp(message.created_at) }}</span>
                 </div>
                 <p>{{ message.content }}</p>
@@ -613,7 +642,7 @@ async function submitQuery() {
                 <strong>{{ result.references.length }}</strong>
               </article>
               <article class="answer-meta__card">
-                <span class="answer-meta__label">Session</span>
+                <span class="answer-meta__label">{{ t('flow.search.result.session') }}</span>
                 <strong>{{ result.session_id.slice(0, 8) }}</strong>
               </article>
             </div>

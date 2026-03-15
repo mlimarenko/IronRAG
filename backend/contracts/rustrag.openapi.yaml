@@ -2236,7 +2236,7 @@ components:
 
     ChatSessionSummary:
       type: object
-      required: [id, workspace_id, project_id, title, created_at, updated_at]
+      required: [id, workspace_id, project_id, title, created_at, updated_at, message_count]
       properties:
         id:
           type: string
@@ -2255,6 +2255,12 @@ components:
         updated_at:
           type: string
           format: date-time
+        message_count:
+          type: integer
+          format: int64
+        last_message_preview:
+          type: string
+          nullable: true
     ChatMessageItem:
       type: object
       required: [id, session_id, project_id, role, content, created_at]

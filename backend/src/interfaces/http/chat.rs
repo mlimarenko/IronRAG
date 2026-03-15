@@ -29,6 +29,8 @@ pub struct ChatSessionSummary {
     pub title: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub message_count: i64,
+    pub last_message_preview: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -77,6 +79,8 @@ async fn list_chat_sessions(
                 title: row.title,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
+                message_count: row.message_count,
+                last_message_preview: row.last_message_preview,
             })
             .collect::<Vec<_>>();
 
