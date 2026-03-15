@@ -23,8 +23,8 @@ export default {
         hint: 'Смотрите связи и доступные доказательства.',
       },
       api: {
-        label: 'API Hub',
-        hint: 'Начинайте с public routes, токенов и scoped examples.',
+        label: 'API',
+        hint: 'Работайте с токенами, примерами и endpoint-ами.',
       },
     },
   },
@@ -60,8 +60,8 @@ export default {
       summary: 'Смотрите, какие связи и доказательства уже доступны.',
     },
     api: {
-      title: 'API Hub',
-      summary: 'Начинайте с живой API-поверхности RustRAG и достраивайте docs-ready usage.',
+      title: 'API',
+      summary: 'Подключайтесь к текущей API-поверхности RustRAG.',
     },
   },
 } as const

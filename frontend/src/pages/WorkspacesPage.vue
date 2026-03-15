@@ -102,7 +102,8 @@ async function createWorkspaceItem() {
     setSelectedWorkspaceId(created.id)
     successMessage.value = `${t('flow.processing.success')}: ${created.name}`
   } catch (error) {
-    workspaceError.value = error instanceof Error ? error.message : 'Failed to create space'
+    workspaceError.value =
+      error instanceof Error ? error.message : t('flow.processing.errors.createWorkspace')
   }
 }
 
@@ -110,7 +111,7 @@ async function createProjectItem() {
   projectError.value = null
   successMessage.value = null
   if (!getSelectedWorkspaceId()) {
-    projectError.value = 'Select or create a space first.'
+    projectError.value = t('flow.processing.errors.selectWorkspaceFirst')
     return
   }
 
@@ -126,7 +127,8 @@ async function createProjectItem() {
     syncSelectedProjectId([created, ...projects.value.filter((item) => item.id !== created.id)])
     successMessage.value = `${t('flow.processing.success')}: ${created.name}`
   } catch (error) {
-    projectError.value = error instanceof Error ? error.message : 'Failed to create library'
+    projectError.value =
+      error instanceof Error ? error.message : t('flow.processing.errors.createProject')
   }
 }
 </script>
@@ -193,7 +195,7 @@ async function createProjectItem() {
                   v-model="workspaceForm.name"
                   class="rr-control"
                   type="text"
-                  placeholder="Acme support"
+                  :placeholder="t('flow.processing.placeholders.workspaceName')"
                 >
               </label>
               <label class="rr-field">
@@ -202,7 +204,7 @@ async function createProjectItem() {
                   v-model="workspaceForm.slug"
                   class="rr-control"
                   type="text"
-                  placeholder="acme-kb"
+                  :placeholder="t('flow.processing.placeholders.workspaceSlug')"
                 >
               </label>
             </div>
@@ -257,7 +259,7 @@ async function createProjectItem() {
                   v-model="projectForm.name"
                   class="rr-control"
                   type="text"
-                  placeholder="Customer support library"
+                  :placeholder="t('flow.processing.placeholders.projectName')"
                 >
               </label>
               <label class="rr-field">
@@ -266,7 +268,7 @@ async function createProjectItem() {
                   v-model="projectForm.slug"
                   class="rr-control"
                   type="text"
-                  placeholder="support-docs"
+                  :placeholder="t('flow.processing.placeholders.projectSlug')"
                 >
               </label>
             </div>

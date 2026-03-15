@@ -23,8 +23,8 @@ export default {
         hint: 'Inspect relationship coverage and evidence.',
       },
       api: {
-        label: 'API Hub',
-        hint: 'Start with public routes, tokens, and scoped examples.',
+        label: 'API',
+        hint: 'Use tokens, examples, and endpoints.',
       },
     },
   },
@@ -60,8 +60,8 @@ export default {
       summary: 'See what relationships and evidence are visible today.',
     },
     api: {
-      title: 'API Hub',
-      summary: 'Start from the live RustRAG API surface and grow into docs-ready usage.',
+      title: 'API',
+      summary: 'Build against the live RustRAG API surface.',
     },
   },
 } as const

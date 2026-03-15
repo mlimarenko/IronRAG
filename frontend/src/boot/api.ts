@@ -392,7 +392,9 @@ export function isUnauthorizedApiError(error: unknown): boolean {
   }
 
   const message = error.message.toLowerCase()
-  return message.includes('401') || message.includes('unauthorized') || message.includes('authorization')
+  return (
+    message.includes('401') || message.includes('unauthorized') || message.includes('authorization')
+  )
 }
 
 export async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
@@ -569,7 +571,9 @@ export async function fetchRetrievalRunDetail(id: string): Promise<RetrievalRunD
   return data
 }
 
-export async function fetchIntegrationsProduct(workspaceId: string): Promise<IntegrationsProductSnapshot> {
+export async function fetchIntegrationsProduct(
+  workspaceId: string,
+): Promise<IntegrationsProductSnapshot> {
   const { data } = await api.get<{ snapshot: IntegrationsProductSnapshot }>(
     `/integrations-products/${workspaceId}`,
   )
@@ -582,11 +586,17 @@ export async function fetchGraphProduct(projectId: string): Promise<GraphProduct
 }
 
 export async function fetchGraphSummary(projectId: string): Promise<GraphProjectSummaryResponse> {
-  const { data } = await api.get<GraphProjectSummaryResponse>(`/graph-products/${projectId}/summary`)
+  const { data } = await api.get<GraphProjectSummaryResponse>(
+    `/graph-products/${projectId}/summary`,
+  )
   return data
 }
 
-export async function searchGraph(projectId: string, q: string, limit = 8): Promise<GraphSearchResponse> {
+export async function searchGraph(
+  projectId: string,
+  q: string,
+  limit = 8,
+): Promise<GraphSearchResponse> {
   const { data } = await api.get<GraphSearchResponse>(`/graph-products/${projectId}/search`, {
     params: { q, limit },
   })

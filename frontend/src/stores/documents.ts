@@ -43,9 +43,9 @@ export const useDocumentsStore = defineStore('documents', () => {
       }>
     >
   >({})
-  const ingestState = ref<AsyncState<{ ingestionJobId: string; status: string; stage: string } | null>>(
-    createAsyncState<{ ingestionJobId: string; status: string; stage: string } | null>(null),
-  )
+  const ingestState = ref<
+    AsyncState<{ ingestionJobId: string; status: string; stage: string } | null>
+  >(createAsyncState<{ ingestionJobId: string; status: string; stage: string } | null>(null))
   const createSourceState = ref<AsyncState<SourceSummary | null>>(
     createAsyncState<SourceSummary | null>(null),
   )
@@ -86,7 +86,9 @@ export const useDocumentsStore = defineStore('documents', () => {
     return state
   }
 
-  function ensureChunkSearchState(projectId: string): AsyncState<{ query: string; results: SearchChunkResult[] }> {
+  function ensureChunkSearchState(
+    projectId: string,
+  ): AsyncState<{ query: string; results: SearchChunkResult[] }> {
     const state =
       chunkSearchByProjectId.value[projectId] ??
       createAsyncState<{ query: string; results: SearchChunkResult[] }>({
@@ -156,7 +158,10 @@ export const useDocumentsStore = defineStore('documents', () => {
     }
   }
 
-  async function fetchDocumentChunks(documentId: string, options?: { projectId?: string; limit?: number }) {
+  async function fetchDocumentChunks(
+    documentId: string,
+    options?: { projectId?: string; limit?: number },
+  ) {
     const state = ensureChunkState(documentId)
     state.status = 'loading'
     state.error = null
@@ -222,12 +227,15 @@ export const useDocumentsStore = defineStore('documents', () => {
       return created
     } catch (error) {
       createSourceState.value.status = 'error'
-      createSourceState.value.error = error instanceof Error ? error.message : 'Unknown source creation error'
+      createSourceState.value.error =
+        error instanceof Error ? error.message : 'Unknown source creation error'
       throw error
     }
   }
 
-  async function createJobForProject(payload: CreateIngestionJobRequest): Promise<IngestionJobSummary> {
+  async function createJobForProject(
+    payload: CreateIngestionJobRequest,
+  ): Promise<IngestionJobSummary> {
     createJobState.value.status = 'loading'
     createJobState.value.error = null
     try {
@@ -242,7 +250,8 @@ export const useDocumentsStore = defineStore('documents', () => {
       return created
     } catch (error) {
       createJobState.value.status = 'error'
-      createJobState.value.error = error instanceof Error ? error.message : 'Unknown ingestion job creation error'
+      createJobState.value.error =
+        error instanceof Error ? error.message : 'Unknown ingestion job creation error'
       throw error
     }
   }
@@ -264,7 +273,8 @@ export const useDocumentsStore = defineStore('documents', () => {
       return ingestState.value.data
     } catch (error) {
       ingestState.value.status = 'error'
-      ingestState.value.error = error instanceof Error ? error.message : 'Unknown document ingest error'
+      ingestState.value.error =
+        error instanceof Error ? error.message : 'Unknown document ingest error'
       throw error
     }
   }

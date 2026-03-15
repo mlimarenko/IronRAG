@@ -19,6 +19,8 @@ import StatusBadge from 'src/components/shell/StatusBadge.vue'
 import EmptyStateCard from 'src/components/state/EmptyStateCard.vue'
 import ErrorStateCard from 'src/components/state/ErrorStateCard.vue'
 import LoadingSkeletonPanel from 'src/components/state/LoadingSkeletonPanel.vue'
+import type { AppLocale } from 'src/i18n/messages'
+import { getIntlLocale } from 'src/i18n/runtime'
 import {
   clearApiBearerToken,
   getApiBearerToken,
@@ -62,7 +64,7 @@ interface GroundworkCard {
 
 type ProtectedSurfaceState = 'missing_token' | 'ready' | 'unauthorized' | 'error'
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const integrationsStore = useIntegrationsStore()
 
 const loading = ref(true)
@@ -600,7 +602,8 @@ function formatDate(value?: string | null) {
     return value
   }
 
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat(getIntlLocale(locale.value as AppLocale), {
+    localeMatcher: 'best fit',
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(date)
@@ -1150,7 +1153,6 @@ onMounted(async () => {
                 </div>
                 <StatusBadge
                   :status="token.status"
-                  :label="token.status"
                 />
               </div>
 
@@ -1273,10 +1275,10 @@ onMounted(async () => {
                   <h4>{{ endpoint.label }}</h4>
                   <p>{{ endpoint.baseUrl }}</p>
                 </div>
-                <StatusBadge
-                  :status="endpoint.status === 'configured' ? 'Healthy' : 'Warning'"
-                  :label="endpoint.status"
-                />
+              <StatusBadge
+                :status="endpoint.status === 'configured' ? 'Healthy' : 'Warning'"
+                :label="t(`common.status.${endpoint.status}`)"
+              />
               </div>
 
               <ul class="endpoint-links">

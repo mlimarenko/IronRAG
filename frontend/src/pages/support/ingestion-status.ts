@@ -258,10 +258,7 @@ export function buildJobSteps(
   })
 }
 
-export function describeIngestionError(
-  rawMessage: string,
-  t: TranslateFn,
-): IngestionErrorCopy {
+export function describeIngestionError(rawMessage: string, t: TranslateFn): IngestionErrorCopy {
   const message = rawMessage.trim()
   const normalized = message.toLowerCase()
 
@@ -276,7 +273,10 @@ export function describeIngestionError(
     }
   }
 
-  if (normalized.includes('text must not be empty') || normalized.includes('uploaded file is empty')) {
+  if (
+    normalized.includes('text must not be empty') ||
+    normalized.includes('uploaded file is empty')
+  ) {
     return {
       title: t('flow.library.notices.emptyTitle'),
       body: t('flow.library.notices.emptyBody'),
@@ -320,7 +320,11 @@ export function describeIngestionError(
     }
   }
 
-  if (normalized.includes('authorization') || normalized.includes('401') || normalized.includes('unauthorized')) {
+  if (
+    normalized.includes('authorization') ||
+    normalized.includes('401') ||
+    normalized.includes('unauthorized')
+  ) {
     return {
       title: t('flow.library.notices.authTitle'),
       body: t('flow.library.notices.authBody'),

@@ -109,7 +109,8 @@ export default {
   library: {
     eyebrow: 'Files',
     title: 'Files',
-    description: 'Add text or a file to the active library and keep processing visible while it runs.',
+    description:
+      'Add text or a file to the active library and keep processing visible while it runs.',
     action: 'Open Search',
     statusBlocked: 'Choose a library in Processing',
     statusProcessing: '{count} active runs',
@@ -136,7 +137,8 @@ export default {
       retryQueuedTitle: 'Retry queued',
       retryQueuedBody: 'The failed run was placed back into the processing queue.',
       duplicateTitle: 'This content is already queued',
-      duplicateBody: 'Wait for the existing run to finish or change the content before submitting again.',
+      duplicateBody:
+        'Wait for the existing run to finish or change the content before submitting again.',
       emptyTitle: 'Add some content first',
       emptyBody: 'Paste text or choose a non-empty UTF-8 text-like file.',
       collectionTitle: 'Choose a library first',
@@ -172,7 +174,8 @@ export default {
       textPlaceholder: 'Paste the content you want to index.',
       helper:
         'Use one direct form. RustRAG generates the internal key and reuses a stable source automatically.',
-      autoHint: 'Internal file keys and source labels are generated automatically for manual paste runs.',
+      autoHint:
+        'Internal file keys and source labels are generated automatically for manual paste runs.',
       autoSourceLabel: 'Manual paste',
       action: 'Add text',
       actionBusy: 'Adding...',
