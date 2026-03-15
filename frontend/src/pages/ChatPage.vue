@@ -7,9 +7,7 @@ import {
   fetchChatMessages,
   fetchChatSessions,
   fetchProjectReadiness,
-  fetchProjects,
   fetchRetrievalRunDetail,
-  fetchWorkspaces,
   isUnauthorizedApiError,
   runQuery,
   type ChatMessageSurface,
@@ -19,11 +17,14 @@ import {
   type RetrievalRunDetail,
 } from 'src/boot/api'
 import ReferenceList from 'src/components/chat/ReferenceList.vue'
+import RetrievalDiagnosticsPanel from 'src/components/chat/RetrievalDiagnosticsPanel.vue'
 import StatusPill from 'src/components/chat/StatusPill.vue'
 import PageSection from 'src/components/shell/PageSection.vue'
 import EmptyStateCard from 'src/components/state/EmptyStateCard.vue'
-import { getSelectedProjectId, getSelectedWorkspaceId, setSelectedProjectId } from 'src/stores/flow'
-import { ensureProjectMatchesWorkspace, syncWorkspaceProjectScope } from 'src/lib/flowSelection'
+import { formatLocaleDateTime } from 'src/lib/formatting'
+import { hydrateWorkspaceProjectScope } from 'src/lib/productFlow'
+import { getSelectedProjectId, setSelectedProjectId } from 'src/stores/flow'
+import { ensureProjectMatchesWorkspace } from 'src/lib/flowSelection'
 
 interface WorkspaceItem {
   id: string
@@ -89,6 +90,7 @@ const shouldShowMobileSessionToggle = computed(() => isMobile.value && sessions.
 const shouldShowSessionList = computed(
   () => shouldShowDesktopSidebar.value || showMobileSessions.value,
 )
+const shouldShowTechnicalDetails = computed(() => Boolean(result.value && detail.value))
 const mobileSessionToggleLabel = computed(() => {
   if (showMobileSessions.value) {
     return t('flow.search.sessions.hideAction')
@@ -132,7 +134,7 @@ const queryHint = computed(() => {
   }
 
   if (activeSession.value) {
-    return t('flow.search.query.hintResume', { id: activeSession.value.id.slice(0, 8) })
+    return t('flow.search.query.hintResume')
   }
 
   if (readiness.value?.ready_for_query) {
@@ -163,6 +165,22 @@ const composerStatus = computed(() => {
   return activeSession.value
     ? t('flow.search.query.statusResume', { count: timeline.value.length })
     : t('flow.search.query.statusReady')
+})
+const recentSessionsSummary = computed(() => {
+  if (!sessions.value.length) {
+    return t('flow.search.sessions.empty')
+  }
+
+  if (activeSession.value) {
+    return t('flow.search.sessions.summaryActive', {
+      count: sessions.value.length,
+      title:
+        activeSession.value.title ??
+        t('flow.search.sessions.fallbackTitle', { id: activeSession.value.id.slice(0, 8) }),
+    })
+  }
+
+  return t('flow.search.sessions.summary', { count: sessions.value.length })
 })
 const resultNotice = computed<{ tone: BannerTone; message: string } | null>(() => {
   if (!result.value) {
@@ -242,7 +260,7 @@ watch(
   { immediate: true },
 )
 
-watch(selectedProjectId, async (projectId) => {
+watch(() => selectedProjectId.value, async (projectId) => {
   const scopedProjectId = ensureProjectMatchesWorkspace(projects.value, projectId)
   result.value = null
   detail.value = null
@@ -258,10 +276,12 @@ watch(selectedProjectId, async (projectId) => {
   }
 
   if (scopedProjectId !== projectId) {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
     setSelectedProjectId(scopedProjectId)
   }
 
-  await Promise.all([loadReadiness(scopedProjectId), loadSessions(scopedProjectId)])
+  await loadReadiness(scopedProjectId)
+  await loadSessions(scopedProjectId)
 })
 
 watch(activeSessionId, async (sessionId, previousSessionId) => {
@@ -293,18 +313,17 @@ onMounted(async () => {
   updateViewportWidth()
   window.addEventListener('resize', updateViewportWidth, { passive: true })
 
-  workspaces.value = await fetchWorkspaces()
-  const workspaceId = getSelectedWorkspaceId() || workspaces.value[0]?.id || ''
+  const scope = await hydrateWorkspaceProjectScope({
+    setWorkspaces: (items) => {
+      workspaces.value = items
+    },
+    setProjects: (items) => {
+      projects.value = items
+    },
+  })
 
-  if (workspaceId) {
-    projects.value = await fetchProjects(workspaceId)
-    const scope = syncWorkspaceProjectScope(workspaces.value, projects.value)
-    if (scope.projectId) {
-      await Promise.all([loadReadiness(scope.projectId), loadSessions(scope.projectId)])
-    }
-  } else {
-    projects.value = []
-    setSelectedProjectId('')
+  if (scope.projectId) {
+    await Promise.all([loadReadiness(scope.projectId), loadSessions(scope.projectId)])
   }
 })
 
@@ -337,11 +356,7 @@ function formatIndexingStateLabel(state?: string | null) {
 }
 
 function formatMessageTimestamp(value: string) {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) {
-    return value
-  }
-  return date.toLocaleString()
+  return formatLocaleDateTime(value) ?? value
 }
 
 async function loadReadiness(projectId: string) {
@@ -520,10 +535,7 @@ async function submitQuery() {
 </script>
 
 <template>
-  <section
-    class="rr-page-grid chat-page"
-    :class="{ 'chat-page--mobile': isMobile }"
-  >
+  <section class="rr-page-grid chat-page" :class="{ 'chat-page--mobile': isMobile }">
     <PageSection
       :title="t('flow.search.title')"
       :description="isMobile ? t('flow.search.descriptionMobile') : t('flow.search.description')"
@@ -533,86 +545,63 @@ async function submitQuery() {
       :hide-actions="isMobile"
     >
       <template #actions>
-        <RouterLink
-          class="rr-button rr-button--secondary"
-          to="/files"
-        >
+        <RouterLink class="rr-button rr-button--secondary" to="/files">
           {{ t('flow.search.action') }}
         </RouterLink>
       </template>
 
-      <div
-        class="chat-page__layout"
-        :class="{ 'chat-page__layout--single': isMobile }"
-      >
-        <aside
-          v-if="shouldShowSessionList"
-          class="rr-panel rr-panel--muted session-sidebar"
-        >
-          <div class="session-sidebar__header">
-            <div>
-              <p class="rr-kicker">{{ t('flow.search.sessions.kicker') }}</p>
-              <h3>
-                {{
-                  selectedProject ? selectedProject.name : t('flow.search.sessions.titleFallback')
-                }}
-              </h3>
-            </div>
-            <button
-              v-if="isMobile"
-              type="button"
-              class="rr-button rr-button--ghost session-sidebar__dismiss"
-              @click="showMobileSessions = false"
-            >
-              {{ t('flow.search.sessions.hideAction') }}
-            </button>
-            <p
-              v-else
-              class="rr-note"
-            >
-              {{ t('flow.search.sessions.description') }}
-            </p>
-          </div>
-
-          <p
-            v-if="isMobile"
-            class="rr-note"
-          >
-            {{ t('flow.search.sessions.mobileDescription') }}
-          </p>
-          <div
-            v-if="sessionLoading"
-            class="rr-note"
-          >
-            {{ t('flow.search.sessions.loading') }}
-          </div>
-          <div
-            v-else-if="!sessions.length"
-            class="rr-note"
-          >
-            {{ t('flow.search.sessions.empty') }}
-          </div>
-          <button
-            v-for="session in sessions"
-            :key="session.id"
-            type="button"
-            class="session-item"
-            :data-active="session.id === activeSessionId"
-            @click="reopenSession(session.id)"
-          >
-            <strong>{{
-              session.title ||
-                t('flow.search.sessions.fallbackTitle', { id: session.id.slice(0, 8) })
-            }}</strong>
-            <span>{{
-              session.last_message_preview || t('flow.search.sessions.emptyPreview')
-            }}</span>
-            <small>{{ t('flow.search.sessions.count', { count: session.message_count }) }}</small>
-          </button>
-        </aside>
-
+      <div class="chat-page__layout" :class="{ 'chat-page__layout--single': isMobile }">
         <div class="chat-page__main">
           <div class="chat-page__conversation">
+            <details
+              v-if="shouldShowSessionList"
+              class="rr-panel rr-panel--muted session-sidebar"
+              :open="showMobileSessions || !isMobile"
+            >
+              <summary class="session-sidebar__summary">
+                <div>
+                  <p class="rr-kicker">{{ t('flow.search.sessions.kicker') }}</p>
+                  <h3>{{ t('flow.search.sessions.title') }}</h3>
+                </div>
+                <p class="rr-note">{{ recentSessionsSummary }}</p>
+              </summary>
+
+              <div class="session-sidebar__body">
+                <p class="rr-note">
+                  {{
+                    isMobile
+                      ? t('flow.search.sessions.mobileDescription')
+                      : t('flow.search.sessions.description')
+                  }}
+                </p>
+                <div v-if="sessionLoading" class="rr-note">
+                  {{ t('flow.search.sessions.loading') }}
+                </div>
+                <div v-else-if="!sessions.length" class="rr-note">
+                  {{ t('flow.search.sessions.empty') }}
+                </div>
+                <button
+                  v-for="session in sessions"
+                  :key="session.id"
+                  type="button"
+                  class="session-item"
+                  :data-active="session.id === activeSessionId"
+                  @click="reopenSession(session.id)"
+                >
+                  <strong>{{
+                    session.title ||
+                    t('flow.search.sessions.fallbackTitle', { id: session.id.slice(0, 8) })
+                  }}</strong>
+                  <span>{{
+                    session.last_message_preview || t('flow.search.sessions.emptyPreview')
+                  }}</span>
+                  <small>{{
+                    t('flow.search.sessions.count', { count: session.message_count })
+                  }}</small>
+                </button>
+              </div>
+            </details>
+
             <div
               v-if="shouldShowMobileSessionToggle"
               class="mobile-session-bar rr-panel rr-panel--muted"
@@ -622,10 +611,7 @@ async function submitQuery() {
                 <strong>
                   {{
                     activeSession
-                      ? activeSession.title ||
-                        t('flow.search.sessions.fallbackTitle', {
-                          id: activeSession.id.slice(0, 8),
-                        })
+                      ? activeSession.title || t('flow.search.sessions.fallbackTitle')
                       : t('flow.search.timeline.current')
                   }}
                 </strong>
@@ -642,20 +628,14 @@ async function submitQuery() {
               </button>
             </div>
 
-            <article
-              v-if="hasTimeline"
-              class="rr-panel rr-panel--muted timeline-panel"
-            >
+            <article v-if="hasTimeline" class="rr-panel rr-panel--muted timeline-panel">
               <div class="timeline-panel__header">
                 <div>
                   <p class="rr-kicker">{{ t('flow.search.timeline.kicker') }}</p>
                   <h3>
                     {{
                       activeSession
-                        ? activeSession.title ||
-                          t('flow.search.sessions.fallbackTitle', {
-                            id: activeSession.id.slice(0, 8),
-                          })
+                        ? activeSession.title || t('flow.search.sessions.fallbackTitle')
                         : t('flow.search.timeline.current')
                     }}
                   </h3>
@@ -665,10 +645,7 @@ async function submitQuery() {
                 }}</span>
               </div>
 
-              <div
-                ref="timelineListRef"
-                class="timeline-list"
-              >
+              <div ref="timelineListRef" class="timeline-list">
                 <article
                   v-for="message in timeline"
                   :key="message.id"
@@ -688,18 +665,11 @@ async function submitQuery() {
               </div>
             </article>
 
-            <p
-              v-if="errorMessage"
-              class="rr-banner"
-              data-tone="danger"
-            >
+            <p v-if="errorMessage" class="rr-banner" data-tone="danger">
               {{ errorMessage }}
             </p>
 
-            <article
-              v-if="result"
-              class="rr-panel answer-panel"
-            >
+            <article v-if="result" class="rr-panel answer-panel">
               <div class="answer-panel__header">
                 <div class="answer-panel__copy">
                   <p class="rr-kicker">{{ t('flow.search.result.kicker') }}</p>
@@ -708,11 +678,7 @@ async function submitQuery() {
                 <StatusPill :status="result.answer_status" />
               </div>
 
-              <p
-                v-if="resultNotice"
-                class="rr-banner"
-                :data-tone="resultNotice.tone"
-              >
+              <p v-if="resultNotice" class="rr-banner" :data-tone="resultNotice.tone">
                 {{ resultNotice.message }}
               </p>
 
@@ -729,6 +695,11 @@ async function submitQuery() {
               />
             </article>
 
+            <RetrievalDiagnosticsPanel
+              v-if="shouldShowTechnicalDetails && detail"
+              :detail="detail"
+            />
+
             <EmptyStateCard
               v-else-if="!selectedProject"
               :title="t('flow.search.empty.noProject.title')"
@@ -736,10 +707,7 @@ async function submitQuery() {
               :hint="t('flow.search.empty.noProject.hint')"
             >
               <template #actions>
-                <RouterLink
-                  class="rr-button rr-button--secondary"
-                  to="/processing"
-                >
+                <RouterLink class="rr-button rr-button--secondary" to="/processing">
                   {{ t('flow.search.empty.noProject.action') }}
                 </RouterLink>
               </template>
@@ -755,10 +723,10 @@ async function submitQuery() {
               :message="
                 hasIndexedDocuments || hasIngestionRuns
                   ? t('flow.search.empty.partial.body', {
-                    state: formatIndexingStateLabel(readiness?.indexing_state),
-                    documents: readiness?.documents ?? 0,
-                    jobs: readiness?.ingestion_jobs ?? 0,
-                  })
+                      state: formatIndexingStateLabel(readiness?.indexing_state),
+                      documents: readiness?.documents ?? 0,
+                      jobs: readiness?.ingestion_jobs ?? 0,
+                    })
                   : t('flow.search.empty.noContent.body')
               "
               :hint="
@@ -768,29 +736,20 @@ async function submitQuery() {
               "
             >
               <template #actions>
-                <RouterLink
-                  class="rr-button rr-button--secondary"
-                  to="/files"
-                >
+                <RouterLink class="rr-button rr-button--secondary" to="/files">
                   {{ t('flow.search.nextActions.openFiles') }}
                 </RouterLink>
               </template>
             </EmptyStateCard>
 
-            <article
-              v-else
-              class="rr-panel rr-panel--muted empty-answer"
-            >
+            <article v-else class="rr-panel rr-panel--muted empty-answer">
               <p class="rr-kicker">{{ t('flow.search.result.waitingKicker') }}</p>
               <h3>{{ t('flow.search.result.waitingTitle') }}</h3>
               <p class="rr-note">{{ t('flow.search.result.waitingBody') }}</p>
             </article>
           </div>
 
-          <article
-            class="rr-panel rr-panel--accent ask-panel ask-composer"
-            :data-sticky="isMobile"
-          >
+          <article class="rr-panel rr-panel--accent ask-panel ask-composer" :data-sticky="isMobile">
             <div class="ask-panel__header">
               <div class="ask-panel__copy">
                 <p class="rr-kicker">{{ t('flow.search.query.kicker') }}</p>
@@ -798,19 +757,12 @@ async function submitQuery() {
                 <p class="rr-note">{{ queryHint }}</p>
               </div>
 
-              <RouterLink
-                class="rr-button rr-button--ghost"
-                to="/files"
-              >
+              <RouterLink class="rr-button rr-button--ghost" to="/files">
                 {{ t('flow.search.action') }}
               </RouterLink>
             </div>
 
-            <p
-              v-if="readinessNotice"
-              class="rr-banner"
-              :data-tone="readinessNotice.tone"
-            >
+            <p v-if="readinessNotice" class="rr-banner" :data-tone="readinessNotice.tone">
               <strong>{{ readinessNotice.title }}</strong>
               <span>{{ readinessNotice.message }}</span>
             </p>
@@ -856,7 +808,7 @@ async function submitQuery() {
 
 .chat-page__layout {
   display: grid;
-  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--rr-space-5);
   align-items: start;
 }
@@ -868,6 +820,7 @@ async function submitQuery() {
 .chat-page__main,
 .chat-page__conversation,
 .session-sidebar,
+.session-sidebar__body,
 .ask-panel,
 .answer-panel,
 .empty-answer,
@@ -888,7 +841,7 @@ async function submitQuery() {
 .ask-panel__header,
 .answer-panel__header,
 .timeline-panel__header,
-.session-sidebar__header,
+.session-sidebar__summary,
 .mobile-session-bar {
   display: flex;
   justify-content: space-between;
@@ -898,7 +851,7 @@ async function submitQuery() {
 
 .ask-panel__copy,
 .answer-panel__copy,
-.session-sidebar__header,
+.session-sidebar__summary,
 .mobile-session-bar__copy {
   display: grid;
   gap: 6px;
@@ -995,7 +948,23 @@ async function submitQuery() {
   min-width: 136px;
 }
 
-.session-sidebar__dismiss,
+.session-sidebar__summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.session-sidebar__summary::-webkit-details-marker {
+  display: none;
+}
+
+.session-sidebar__summary h3 {
+  margin: 0;
+}
+
+.session-sidebar__body {
+  margin-top: var(--rr-space-3);
+}
+
 .ask-panel .rr-button--ghost {
   white-space: nowrap;
 }
@@ -1033,16 +1002,6 @@ async function submitQuery() {
   display: flex;
 }
 
-@media (max-width: 1100px) {
-  .chat-page__layout {
-    grid-template-columns: 1fr;
-  }
-
-  .session-sidebar {
-    order: 2;
-  }
-}
-
 @media (max-width: 900px) {
   .chat-page {
     gap: var(--rr-space-4);
@@ -1076,7 +1035,7 @@ async function submitQuery() {
   .answer-panel__header,
   .timeline-panel__header,
   .mobile-session-bar,
-  .session-sidebar__header {
+  .session-sidebar__summary {
     flex-direction: column;
   }
 
