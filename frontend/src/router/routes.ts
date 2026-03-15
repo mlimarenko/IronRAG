@@ -1,11 +1,11 @@
 const productAliases = [
   {
     path: 'setup',
-    redirect: '/advanced/context',
+    redirect: '/documents',
   },
   {
     path: 'processing',
-    redirect: '/advanced/context',
+    redirect: '/documents',
   },
   {
     path: 'ingest',

@@ -142,7 +142,7 @@ export default {
       unavailable: 'Ask is not ready yet',
     },
     askHints: {
-      chooseLibrary: 'Choose a library in Setup first.',
+      chooseLibrary: 'Choose a library first.',
       available: 'This library is searchable, so you can ask questions now.',
       availableWithWarnings: 'Ask still works because searchable files are already indexed.',
       availableLatestFailed:
@@ -410,16 +410,16 @@ export default {
     description:
       'Upload files into the active library, see when they become ready, and move straight into Ask.',
     action: 'Open Ask',
-    statusBlocked: 'Choose a library in Setup',
+    statusBlocked: 'Choose a library first',
     statusProcessing: '{count} active runs',
     statusAttention: 'Processing needs attention',
     statusDraft: 'Ready for the first file',
     documentsCount: '{count} files indexed',
     quickstart: {
       ready: 'Add another file or jump straight into Ask.',
-      blocked: 'Choose a library in Setup before adding files.',
+      blocked: 'Choose a library before adding files.',
       progressEyebrow: 'Flow',
-      progressTitle: 'Setup → Add content → Ask',
+      progressTitle: 'Documents → Ask',
     },
     stats: {
       workspace: 'Space',
@@ -456,7 +456,7 @@ export default {
       emptyTitle: 'Add some content first',
       emptyBody: 'Paste text or choose a non-empty UTF-8 text-like file.',
       collectionTitle: 'Choose a library first',
-      collectionBody: 'Select an active library in Setup before you add content.',
+      collectionBody: 'Select an active library before you add content.',
       fileTitle: 'Choose a file first',
       fileBody: 'Pick a supported file before starting upload.',
       uploadTypeTitle: 'Choose a supported file type',
@@ -470,10 +470,10 @@ export default {
       authBody: 'This backend needs document access before ingestion can run.',
       jobLeaseTitle: 'The worker timed out',
       jobLeaseBody: 'The processing lease expired before completion. Retry the run from the queue.',
-      genericErrorTitle: 'Processing failed',
+      genericErrorTitle: 'Document preparation failed',
       genericErrorBody: 'RustRAG could not finish this ingestion run.',
       payloadBody: 'The queued payload could not be read by the worker. Retry the run.',
-      refreshedTitle: 'Processing state refreshed',
+      refreshedTitle: 'Status refreshed',
       refreshedBody: 'Queue, files, and sources were reloaded from the backend.',
     },
     form: {
@@ -544,12 +544,12 @@ export default {
       filesAttentionHint: 'Open details only if something looks stuck or finished with a problem.',
       detailsToggle: 'Show file readiness details',
       queueActive: '{count} files still getting ready',
-      activeTitle: 'Current processing run',
+      activeTitle: 'Current document activity',
       latestTitle: 'Latest processing result',
-      emptyTitle: 'No processing runs yet',
+      emptyTitle: 'No document activity yet',
       emptyBody: 'Paste text or upload a file to start indexing.',
       queueKicker: 'Queue',
-      queueTitle: 'Processing queue',
+      queueTitle: 'Document activity',
       queueCount: '{count} active runs',
       queueLoaded: '{count} recent runs',
       queueIdle: 'Nothing else is running',
@@ -608,7 +608,7 @@ export default {
         failed: 'The run stopped before indexing finished.',
         canceled: 'The run was canceled before indexing finished.',
         partial: 'The run completed only part of the work and needs attention.',
-        fallback: 'Processing state updated. Check the queue for the latest step.',
+        fallback: 'Status updated. Check the latest document activity for the newest change.',
       },
       steps: {
         queued: {
@@ -625,7 +625,7 @@ export default {
         },
         ready: {
           label: 'Ready for search',
-          description: 'Processing finished successfully.',
+          description: 'Document preparation finished successfully.',
         },
       },
     },
@@ -643,7 +643,7 @@ export default {
       searchPlaceholder: 'Filter by title, key, source, or type',
       detailKicker: 'Selected file',
       detailToggle: 'Show file details for {title}',
-      processingTitle: 'Related processing run',
+      processingTitle: 'Related document activity',
       searchAction: 'Open Ask',
       summaryEmpty: 'No matching files',
       summaryReady: '{count} files in view',
@@ -708,7 +708,7 @@ export default {
     },
     nextActions: {
       kicker: 'Next step',
-      chooseLibrary: 'Choose a library in Setup first',
+      chooseLibrary: 'Choose a library first',
       chooseLibraryHint: 'Pick the destination library first so RustRAG knows where to put files.',
       uploadFirst: 'Upload the first file',
       uploadFirstHint: 'Once one file finishes indexing, Ask becomes the obvious next step.',
@@ -740,7 +740,7 @@ export default {
     descriptionMobile:
       'Stay in one conversation, reopen the latest session, and keep asking from the same library.',
     action: 'Back to Files',
-    statusBlocked: 'Choose a library in Setup',
+    statusBlocked: 'Choose a library first',
     statusDraft: 'Ready',
     statusWeak: 'Needs review',
     statusReady: 'Answered',
@@ -749,7 +749,7 @@ export default {
     statusNeedsContent: 'Needs source content',
     error: 'Ask failed',
     authRequired:
-      'Ask needs query access on this backend. Open Setup → advanced access if this library is protected.',
+      'Ask needs query access on this backend. Open Advanced access if this library is protected.',
     context: {
       summaryTitle: 'Current library context',
       workspace: 'Space',
@@ -766,7 +766,7 @@ export default {
       actionBusy: 'Searching...',
       hintReady: 'Your answer will stay focused on the active library.',
       hintResume: 'Continue the active conversation in this library.',
-      hintBlocked: 'Choose a library in Setup before asking.',
+      hintBlocked: 'Choose a library before asking.',
       hintIndexing:
         'Indexing is still in progress. Ask stays blocked until RustRAG has enough content to answer reliably.',
       hintNoContent:
@@ -775,7 +775,7 @@ export default {
       statusReady: 'Ready to keep the conversation going in this library.',
       statusResume: 'Continuing this session · {count} messages so far',
       statusBusy: 'Sending your question…',
-      statusBlocked: 'Choose a library in Setup before asking.',
+      statusBlocked: 'Choose a library before asking.',
       statusIndexing: 'Waiting for indexing to finish before Ask can continue reliably.',
       statusNoContent: 'Add indexed files first so Ask has something honest to reference.',
       examplesLabel: 'Try one',
@@ -881,7 +881,7 @@ export default {
     empty: {
       noProject: {
         title: 'Choose a library before asking',
-        body: 'Ask only works inside the active library. Pick the scope in Setup first.',
+        body: 'Ask only works inside the active library. Pick the library first.',
         hint: 'Once a library is selected, Ask will explain whether it is indexed enough to answer.',
         action: 'Open Files',
       },
@@ -931,12 +931,13 @@ export default {
       kicker: 'Related graph context',
       title: 'Related entities and relations',
       description:
-        'Keep asking on the main surface while reviewing graph coverage, connected entities, and readiness blockers here.',
+        'Open this only when an answer needs related entities or a quick relationship check.',
+      summaryCta: 'Open related context',
       loading: 'Loading graph context',
       status: {
         noProject: 'Choose a library',
         loading: 'Loading graph context',
-        unavailable: 'Graph runtime unavailable',
+        unavailable: 'Related context unavailable',
         degraded: 'Graph context degraded',
         live: 'Graph relations live',
         entityOnly: 'Entities available, relations partial',
@@ -998,10 +999,10 @@ export default {
         noProject: {
           title: 'Choose a library first',
           body: 'Graph context appears inside Ask once the active library is selected.',
-          hint: 'Pick the scope in Setup, then this panel will probe graph coverage automatically.',
+          hint: 'Pick a library, then this panel will load related context automatically.',
         },
         unavailable: {
-          title: 'Graph runtime is not available',
+          title: 'Related context is not available',
           body: 'This backend does not expose graph product routes yet.',
           hint: 'Ask still works; graph remains an honest supporting panel instead of a separate destination.',
         },

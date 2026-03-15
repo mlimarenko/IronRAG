@@ -108,7 +108,7 @@ export default {
       unavailable: 'Ask пока не готов',
     },
     askHints: {
-      chooseLibrary: 'Сначала выберите библиотеку в Setup.',
+      chooseLibrary: 'Сначала выберите библиотеку.',
       available: 'Эта библиотека уже searchable, поэтому можно задавать вопросы прямо сейчас.',
       availableWithWarnings:
         'Ask всё ещё работает, потому что searchable-файлы уже проиндексированы.',
@@ -517,12 +517,12 @@ export default {
       filesAttentionHint: 'Открывайте детали только если что-то зависло или завершилось проблемой.',
       detailsToggle: 'Показать детали готовности файлов',
       queueActive: 'Файлы ещё готовятся: {count}',
-      activeTitle: 'Текущий processing run',
+      activeTitle: 'Текущая активность по документу',
       latestTitle: 'Последний результат обработки',
       emptyTitle: 'Запусков обработки пока нет',
       emptyBody: 'Вставьте текст или загрузите файл, чтобы начать индексацию.',
       queueKicker: 'Очередь',
-      queueTitle: 'Очередь обработки',
+      queueTitle: 'Активность документов',
       queueCount: 'Активных запусков: {count}',
       queueLoaded: 'Последних запусков: {count}',
       queueIdle: 'Сейчас ничего не выполняется',
@@ -616,7 +616,7 @@ export default {
       searchPlaceholder: 'Фильтр по названию, ключу, источнику или типу',
       detailKicker: 'Выбранный файл',
       detailToggle: 'Показать детали файла: {title}',
-      processingTitle: 'Связанный processing run',
+      processingTitle: 'Связанная активность по документу',
       searchAction: 'Открыть Ask',
       summaryEmpty: 'Совпадающих файлов нет',
       summaryReady: 'В текущем виде файлов: {count}',
@@ -681,7 +681,7 @@ export default {
     },
     nextActions: {
       kicker: 'Следующий шаг',
-      chooseLibrary: 'Сначала выберите библиотеку в Setup',
+      chooseLibrary: 'Сначала выберите библиотеку',
       chooseLibraryHint:
         'Сначала выберите библиотеку назначения, чтобы RustRAG понимал, куда класть файлы.',
       uploadFirst: 'Загрузите первый файл',
@@ -903,12 +903,13 @@ export default {
       kicker: 'Связанный graph-контекст',
       title: 'Связанные сущности и связи',
       description:
-        'Оставайтесь на главной поверхности вопросов и параллельно проверяйте graph coverage, соседние сущности и readiness-блокеры здесь.',
+        'Открывайте этот блок только когда ответу нужен связанный контекст или быстрая проверка связей.',
+      summaryCta: 'Открыть связанный контекст',
       loading: 'Загружаем graph-контекст',
       status: {
         noProject: 'Сначала выберите библиотеку',
         loading: 'Загружаем graph-контекст',
-        unavailable: 'Graph runtime недоступен',
+        unavailable: 'Связанный контекст недоступен',
         degraded: 'Graph-контекст деградировал',
         live: 'Graph-связи уже доступны',
         entityOnly: 'Сущности есть, связи пока частичные',
@@ -974,7 +975,7 @@ export default {
           hint: 'Задайте scope в разделе «Подготовка», и эта панель сама проверит graph coverage.',
         },
         unavailable: {
-          title: 'Graph runtime недоступен',
+          title: 'Связанный контекст недоступен',
           body: 'Этот backend пока не отдаёт graph product routes.',
           hint: 'Ask/Search всё равно работает; graph остаётся честной supporting-панелью, а не отдельным направлением.',
         },

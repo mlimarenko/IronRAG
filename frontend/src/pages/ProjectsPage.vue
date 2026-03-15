@@ -108,7 +108,7 @@ onMounted(async () => {
       projects.value = []
       selectedProjectId.value = ''
       infoMessage.value =
-        'No workspace selected yet. Open Setup to choose a workspace before inspecting projects.'
+        'No workspace selected yet. Choose a workspace from the navigation before inspecting libraries.'
       return
     }
 
@@ -118,7 +118,7 @@ onMounted(async () => {
 
     if (projects.value.length === 0) {
       infoMessage.value =
-        'No projects created yet in this workspace. Create one in Setup to start ingestion and retrieval.'
+        'No libraries created yet in this workspace. Create one from Advanced context to start adding documents.'
       return
     }
 

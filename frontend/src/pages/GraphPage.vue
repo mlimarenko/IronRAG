@@ -5,8 +5,6 @@ import { RouterLink } from 'vue-router'
 
 import { fetchProjects, fetchWorkspaces } from 'src/boot/api'
 import PageSection from 'src/components/shell/PageSection.vue'
-import CrossSurfaceGuide from 'src/components/shell/CrossSurfaceGuide.vue'
-import ProductSpine from 'src/components/shell/ProductSpine.vue'
 import StatusBadge from 'src/components/shell/StatusBadge.vue'
 import EmptyStateCard from 'src/components/state/EmptyStateCard.vue'
 import LoadingSkeletonPanel from 'src/components/state/LoadingSkeletonPanel.vue'
@@ -612,16 +610,13 @@ function formatRelationLine(relation: GraphRelationDetail): string {
     :status-label="pageStatus.label"
   >
     <template #actions>
-      <RouterLink class="rr-button rr-button--secondary" to="/home">
-        {{ t('graph.actions.processing') }}
-      </RouterLink>
-      <RouterLink class="rr-button rr-button--secondary" to="/files">
+      <RouterLink class="rr-button rr-button--secondary" to="/documents">
         {{ t('graph.actions.ingest') }}
       </RouterLink>
+      <RouterLink class="rr-button rr-button--secondary" to="/search">
+        {{ t('graph.actions.processing') }}
+      </RouterLink>
     </template>
-
-    <ProductSpine active-section="advanced" />
-    <CrossSurfaceGuide active-section="advanced" />
 
     <section class="hero card">
       <div class="hero__copy">
