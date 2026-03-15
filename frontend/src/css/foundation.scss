@@ -93,6 +93,10 @@ textarea {
   gap: var(--rr-space-5);
 }
 
+.rr-page-header--compact {
+  gap: var(--rr-space-3);
+}
+
 .rr-page-header__copy {
   display: grid;
   gap: 6px;

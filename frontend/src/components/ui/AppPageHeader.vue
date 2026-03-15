@@ -9,6 +9,8 @@ withDefaults(
     status?: string
     statusLabel?: string
     titleTag?: 'h1' | 'h2' | 'h3'
+    compact?: boolean
+    hideActions?: boolean
   }>(),
   {
     eyebrow: undefined,
@@ -16,12 +18,14 @@ withDefaults(
     status: undefined,
     statusLabel: undefined,
     titleTag: 'h1',
+    compact: false,
+    hideActions: false,
   },
 )
 </script>
 
 <template>
-  <header class="rr-page-header">
+  <header class="rr-page-header" :class="{ 'rr-page-header--compact': compact }">
     <div class="rr-page-header__copy">
       <p v-if="eyebrow" class="rr-page-header__eyebrow rr-kicker">
         {{ eyebrow }}
@@ -45,7 +49,7 @@ withDefaults(
       </p>
     </div>
 
-    <div v-if="$slots.actions" class="rr-page-header__actions">
+    <div v-if="$slots.actions && !hideActions" class="rr-page-header__actions">
       <slot name="actions" />
     </div>
   </header>

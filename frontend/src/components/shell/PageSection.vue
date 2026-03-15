@@ -8,12 +8,16 @@ withDefaults(
     description?: string
     status?: string
     statusLabel?: string
+    compactHeader?: boolean
+    hideActions?: boolean
   }>(),
   {
     eyebrow: undefined,
     description: undefined,
     status: undefined,
     statusLabel: undefined,
+    compactHeader: false,
+    hideActions: false,
   },
 )
 </script>
@@ -26,8 +30,10 @@ withDefaults(
       :description="description"
       :status="status"
       :status-label="statusLabel"
+      :compact="compactHeader"
+      :hide-actions="hideActions"
     >
-      <template v-if="$slots.actions" #actions>
+      <template v-if="$slots.actions && !hideActions" #actions>
         <slot name="actions" />
       </template>
     </AppPageHeader>
