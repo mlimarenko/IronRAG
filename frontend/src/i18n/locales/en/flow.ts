@@ -6,10 +6,10 @@ export default {
     reset: 'Reset',
   },
   overview: {
-    eyebrow: 'Processing',
-    title: 'Processing',
+    eyebrow: 'Setup',
+    title: 'Setup',
     description: 'Choose the scope for this session, then add files or search.',
-    cta: 'Open Processing',
+    cta: 'Open Setup',
     stats: {
       workspace: {
         label: 'Space',
@@ -18,8 +18,8 @@ export default {
       },
       project: {
         label: 'Library',
-        ready: 'Used by Files and Search.',
-        empty: 'Pick one in Processing.',
+        ready: 'Used by Files and Ask.',
+        empty: 'Pick one in Setup.',
       },
       next: {
         label: 'Next step',
@@ -30,7 +30,7 @@ export default {
     },
     cards: {
       workspace: {
-        title: 'Processing',
+        title: 'Setup',
         body: 'Choose the active space and library for this session.',
         action: 'Open Setup',
         ready: 'Library selected',
@@ -40,7 +40,7 @@ export default {
       library: {
         title: 'Files',
         body: 'Add source text and uploads to the active library.',
-        action: 'Open Files',
+        action: 'Back to Files',
         ready: 'Ready for content',
         blocked: 'Needs a library',
       },
@@ -54,8 +54,8 @@ export default {
     },
   },
   processing: {
-    eyebrow: 'Processing',
-    title: 'Processing',
+    eyebrow: 'Setup',
+    title: 'Setup',
     description: 'Choose the space and library for this session, then move straight into Files.',
     statusReady: 'Library selected',
     statusPartial: 'Space selected',
@@ -239,7 +239,7 @@ export default {
       title: 'Keep going into Files',
       description:
         'The intended flow is setup → files → ask. Once a library is selected, jump into ingestion right away.',
-      action: 'Open Files',
+      action: 'Back to Files',
     },
     panels: {
       workspace: {
@@ -277,7 +277,7 @@ export default {
     description:
       'Add text or a file to the active library, then watch it become ready to ask.',
     action: 'Open Ask',
-    statusBlocked: 'Choose a library in Processing',
+    statusBlocked: 'Choose a library in Setup',
     statusProcessing: '{count} active runs',
     statusAttention: 'Processing needs attention',
     statusDraft: 'Ready for the first file',
@@ -307,7 +307,7 @@ export default {
       emptyTitle: 'Add some content first',
       emptyBody: 'Paste text or choose a non-empty UTF-8 text-like file.',
       collectionTitle: 'Choose a library first',
-      collectionBody: 'Select an active library in Processing before you ingest content.',
+      collectionBody: 'Select an active library in Setup before you add content.',
       fileTitle: 'Choose a file first',
       fileBody: 'Pick a supported file before starting upload.',
       uploadTypeTitle: 'Choose a supported file type',
@@ -482,7 +482,7 @@ export default {
       searchPlaceholder: 'Filter by title, key, source, or type',
       detailKicker: 'Selected file',
       processingTitle: 'Related processing run',
-      searchAction: 'Ask Search about this file',
+      searchAction: 'Ask about this file',
       summaryEmpty: 'No matching files',
       summaryReady: '{count} files in view',
       summaryAttention: '{count} need attention out of {total}',
@@ -524,19 +524,19 @@ export default {
     },
   },
   search: {
-    eyebrow: 'Search',
+    eyebrow: 'Ask',
     title: 'Ask',
     description: 'Ask the active library and review the answer with the passages behind it.',
-    action: 'Open Files',
-    statusBlocked: 'Choose a library in Processing',
+    action: 'Back to Files',
+    statusBlocked: 'Choose a library in Setup',
     statusDraft: 'Ready',
     statusWeak: 'Needs review',
     statusReady: 'Answered',
     statusIndexing: 'Indexing in progress',
     statusNeedsContent: 'Needs source content',
-    error: 'Search failed',
+    error: 'Ask failed',
     authRequired:
-      'Search requires a bearer token with query access. Save or mint a session token in Processing first.',
+      'Ask requires a bearer token with query access. Save or mint a session token in Setup first.',
     context: {
       workspace: 'Space',
       project: 'Library',
@@ -551,9 +551,9 @@ export default {
       action: 'Ask',
       actionBusy: 'Searching...',
       hintReady: 'Your answer will stay focused on the active library.',
-      hintBlocked: 'Choose a library in Processing before asking.',
-      hintIndexing: 'Indexing is still in progress. Search stays blocked until RustRAG has enough content to answer reliably.',
-      hintNoContent: 'Add and index source files first. Search cannot answer until this library has searchable content.',
+      hintBlocked: 'Choose a library in Setup before asking.',
+      hintIndexing: 'Indexing is still in progress. Ask stays blocked until RustRAG has enough content to answer reliably.',
+      hintNoContent: 'Add and index source files first. Ask cannot answer until this library has searchable content.',
       shortcut: 'Press Ctrl+Enter or Cmd+Enter to ask.',
       examplesLabel: 'Try one',
       examples: {
@@ -595,11 +595,11 @@ export default {
         unknown: 'Unknown',
       },
       emptyState: {
-        title: 'Search is waiting for source material',
+        title: 'Ask is waiting for source material',
         body: 'This library has no indexed files yet. Add content first, then come back to ask questions.',
       },
       partialState: {
-        title: 'Search is waiting for indexing to finish',
+        title: 'Ask is waiting for indexing to finish',
         body: 'RustRAG is still preparing this library. Current state: {state}. Indexed files: {documents}. Ingestion runs: {jobs}.',
       },
     },
@@ -607,12 +607,12 @@ export default {
       label: 'What Ask can do right now',
       ready: {
         answer: 'Answer questions from the active library with supporting passages.',
-        verify: 'Show stored references so an operator can verify provenance quickly.',
+        verify: 'Show stored references so you can verify the answer quickly.',
         followUp: 'Expose technical retrieval details when you need to inspect a weak answer.',
       },
       partial: {
         answer: 'Explain that the library is only partially indexed and block unreliable asks.',
-        verify: 'Show indexing state and file counts so operators know what is missing.',
+        verify: 'Show indexing state and file counts so you know what is missing.',
         next: 'Point back to Files to finish ingestion before retrying the question.',
       },
       empty: {
@@ -639,7 +639,7 @@ export default {
       },
       partial: {
         title: 'Indexing is still in progress',
-        body: 'Search is blocked until indexing is reliable enough. Current state: {state}. Indexed files: {documents}. Ingestion runs: {jobs}.',
+        body: 'Ask is blocked until indexing is reliable enough. Current state: {state}. Indexed files: {documents}. Ingestion runs: {jobs}.',
         hint: 'Use Files to monitor the queue, then retry your question when the library is ready.',
       },
     },

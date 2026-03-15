@@ -12,7 +12,7 @@ export default {
     },
     items: {
       processing: {
-        label: 'Processing',
+        label: 'Setup',
         hint: 'Pick your space and library.',
       },
       files: {
@@ -20,7 +20,7 @@ export default {
         hint: 'Add your first content.',
       },
       search: {
-        label: 'Search',
+        label: 'Ask',
         hint: 'Ask questions with sources.',
       },
       graph: {
@@ -92,7 +92,7 @@ export default {
   },
   pages: {
     processing: {
-      title: 'Processing',
+      title: 'Setup',
       summary: 'Choose your library.',
     },
     files: {
@@ -100,7 +100,7 @@ export default {
       summary: 'Add content.',
     },
     search: {
-      title: 'Search',
+      title: 'Ask',
       summary: 'Ask questions with sources.',
     },
     graph: {
