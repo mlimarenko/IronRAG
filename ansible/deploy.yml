@@ -107,6 +107,20 @@
         argv: "{{ compose_cmd + ['pull', service_name] }}"
         chdir: "{{ deploy_path }}"
 
+    - name: Ensure dependency services are running for backend deploy
+      ansible.builtin.shell:
+        cmd: >-
+          flock {{ deploy_lock_file | quote }}
+          docker compose
+          -p {{ compose_project | quote }}
+          --env-file {{ env_file | quote }}
+          --env-file {{ image_env_file | quote }}
+          -f {{ compose_file | quote }}
+          up -d --no-build postgres redis
+        chdir: "{{ deploy_path }}"
+        executable: /bin/bash
+      when: service_name == 'backend'
+
     - name: Restart application service from pulled image
       ansible.builtin.shell:
         cmd: >-
@@ -116,7 +130,7 @@
           --env-file {{ env_file | quote }}
           --env-file {{ image_env_file | quote }}
           -f {{ compose_file | quote }}
-          up -d --no-deps --no-build {{ service_name | quote }}
+          up -d --no-build {{ service_name | quote }}
         chdir: "{{ deploy_path }}"
         executable: /bin/bash
 
