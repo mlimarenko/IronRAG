@@ -1,22 +1,24 @@
 services:
   postgres:
-    image: pgvector/pgvector:0.8.2-pg18-trixie
+    image: ${RUSTRAG_POSTGRES_IMAGE:-pgvector/pgvector:0.8.2-pg18-trixie}
     security_opt:
       - apparmor=unconfined
     environment:
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_USER: postgres
-      POSTGRES_DB: rustrag
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_DB: ${POSTGRES_DB}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d rustrag"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 20
+    ports:
+      - "10.0.1.109:${POSTGRES_PORT:-55432}:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql
+      - ./data/postgres:/var/lib/postgresql
 
   redis:
-    image: redis:8.4
+    image: ${RUSTRAG_REDIS_IMAGE:-redis:8.4}
     security_opt:
       - apparmor=unconfined
     healthcheck:
@@ -24,28 +26,30 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    ports:
+      - "10.0.1.109:${REDIS_PORT:-56379}:6379"
+
   neo4j:
-    image: neo4j:5.26.0
+    image: ${RUSTRAG_NEO4J_IMAGE:-neo4j:5.26.0}
     security_opt:
       - apparmor=unconfined
     environment:
-      NEO4J_AUTH: neo4j/rustrag-dev
-      NEO4J_server_memory_pagecache_size: 256M
-      NEO4J_server_memory_heap_initial__size: 256M
-      NEO4J_server_memory_heap_max__size: 256M
+      NEO4J_AUTH: ${RUSTRAG_NEO4J_AUTH:-neo4j/rustrag-dev}
+      NEO4J_server_memory_pagecache_size: ${RUSTRAG_NEO4J_PAGECACHE_SIZE:-256M}
+      NEO4J_server_memory_heap_initial__size: ${RUSTRAG_NEO4J_HEAP_INITIAL_SIZE:-256M}
+      NEO4J_server_memory_heap_max__size: ${RUSTRAG_NEO4J_HEAP_MAX_SIZE:-256M}
     healthcheck:
-      test: ["CMD-SHELL", "cypher-shell -a bolt://localhost:7687 -u neo4j -p rustrag-dev 'RETURN 1;' >/dev/null 2>&1"]
+      test: ["CMD-SHELL", "cypher-shell -a bolt://localhost:7687 -u ${RUSTRAG_NEO4J_USERNAME:-neo4j} -p ${RUSTRAG_NEO4J_PASSWORD:-rustrag-dev} 'RETURN 1;' >/dev/null 2>&1"]
       interval: 10s
       timeout: 10s
       retries: 20
+    ports:
+      - "10.0.1.109:${NEO4J_BOLT_PORT:-57687}:7687"
     volumes:
-      - neo4j_data:/data
+      - ./data/neo4j:/data
 
   backend:
-    image: ${RUSTRAG_BACKEND_IMAGE:-rustrag-backend:local}
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    image: ${RUSTRAG_BACKEND_IMAGE}
     security_opt:
       - apparmor=unconfined
     restart: unless-stopped
@@ -59,17 +63,17 @@ services:
     environment:
       bind_addr: 0.0.0.0:8080
       service_name: rustrag-backend
-      environment: local-compose
-      database_url: postgres://postgres:postgres@postgres:5432/rustrag
-      database_max_connections: 20
+      environment: production
+      database_url: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      database_max_connections: ${RUSTRAG_DATABASE_MAX_CONNECTIONS:-20}
       redis_url: redis://redis:6379
       neo4j_uri: neo4j:7687
-      neo4j_username: neo4j
-      neo4j_password: rustrag-dev
-      neo4j_database: neo4j
-      neo4j_max_connections: 16
-      log_filter: info
-      frontend_origin: http://127.0.0.1:19000,http://localhost:19000,http://127.0.0.1:9000,http://localhost:9000,http://127.0.0.1:3000,http://localhost:3000
+      neo4j_username: ${RUSTRAG_NEO4J_USERNAME:-neo4j}
+      neo4j_password: ${RUSTRAG_NEO4J_PASSWORD:-rustrag-dev}
+      neo4j_database: ${RUSTRAG_NEO4J_DATABASE:-neo4j}
+      neo4j_max_connections: ${RUSTRAG_NEO4J_MAX_CONNECTIONS:-16}
+      log_filter: ${RUSTRAG_LOG_FILTER:-info}
+      frontend_origin: ${RUSTRAG_FRONTEND_ORIGIN:-https://lightrag.piping.space}
       bootstrap_token: ${RUSTRAG_BOOTSTRAP_TOKEN:-bootstrap-local}
       openai_api_key: ${RUSTRAG_OPENAI_API_KEY:-}
       deepseek_api_key: ${RUSTRAG_DEEPSEEK_API_KEY:-}
@@ -92,17 +96,12 @@ services:
       qwen_vision_output_price_per_1m: ${RUSTRAG_QWEN_VISION_OUTPUT_PRICE_PER_1M:-0}
       RUST_BACKTRACE: full
     ports:
-      - "18080:8080"
+      - "10.0.1.109:${BACKEND_PORT:-18080}:8080"
 
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
+    image: ${RUSTRAG_FRONTEND_IMAGE}
+    restart: unless-stopped
     depends_on:
       - backend
     ports:
-      - "19000:3000"
-
-volumes:
-  postgres_data:
-  neo4j_data:
+      - "10.0.1.109:${FRONTEND_PORT:-13000}:3000"
