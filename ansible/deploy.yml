@@ -11,6 +11,7 @@
     backend_image: "{{ lookup('env', 'RUSTRAG_BACKEND_DEPLOY_IMAGE') | default('', true) }}"
     frontend_image: "{{ lookup('env', 'RUSTRAG_FRONTEND_DEPLOY_IMAGE') | default('', true) }}"
     cleanup_volumes: "{{ (lookup('env', 'RUSTRAG_DEPLOY_CLEAN_VOLUMES') | default('false', true)) | bool }}"
+    openai_api_key: "{{ lookup('env', 'RUSTRAG_OPENAI_API_KEY') | default('', true) }}"
     registry_url: "{{ lookup('env', 'CI_REGISTRY') | default('', true) }}"
     registry_user: "{{ lookup('env', 'CI_REGISTRY_USER') | default('', true) }}"
     registry_password: "{{ lookup('env', 'CI_REGISTRY_PASSWORD') | default('', true) }}"
@@ -52,6 +53,16 @@
       ansible.builtin.fail:
         msg: ".env not found at {{ env_file }} on target host"
       when: not env_file_stat.stat.exists
+
+    - name: Persist OpenAI API key into target env file when provided by CI
+      ansible.builtin.lineinfile:
+        path: "{{ env_file }}"
+        regexp: '^RUSTRAG_OPENAI_API_KEY='
+        line: "RUSTRAG_OPENAI_API_KEY={{ openai_api_key }}"
+        create: false
+        mode: "0600"
+      no_log: true
+      when: openai_api_key | length > 0
 
     - name: Fail when deploy images are missing
       ansible.builtin.fail:
