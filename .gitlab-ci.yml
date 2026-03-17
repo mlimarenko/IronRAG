@@ -20,12 +20,9 @@ variables:
   DEPLOY_PORT: "22"
   DEPLOY_USER: "root"
   APP_COMPOSE_PROJECT: "rustrag"
-  BACKEND_SERVICE_NAME: "backend"
-  BACKEND_IMAGE_ENV_VAR: "RUSTRAG_BACKEND_IMAGE"
   BACKEND_IMAGE_NAME: "$CI_REGISTRY_IMAGE/backend"
-  FRONTEND_SERVICE_NAME: "frontend"
-  FRONTEND_IMAGE_ENV_VAR: "RUSTRAG_FRONTEND_IMAGE"
   FRONTEND_IMAGE_NAME: "$CI_REGISTRY_IMAGE/frontend"
+  RUSTRAG_DEPLOY_CLEAN_VOLUMES: "false"
 
 python lint:
   stage: test
@@ -101,12 +98,16 @@ frontend build:
     DOCKER_IMAGE_NAME: "$FRONTEND_IMAGE_NAME"
     DOCKER_ARGS: ""
 
-.deploy_common:
+compose deploy:
   stage: deploy
   image: gitlab.piping.space:4567/general/devopsimage:latest
   tags: [docker]
   rules:
     - if: '$CI_COMMIT_REF_NAME == "develop"'
+  needs:
+    - job: backend build
+    - job: frontend build
+    - job: get version
   before_script:
     - test -n "$SSH_PRIVATE_KEY_B64" || (echo "SSH_PRIVATE_KEY_B64 is required" && exit 1)
     - mkdir -p ~/.ssh
@@ -123,32 +124,7 @@ frontend build:
       CFG
     - chmod 600 ~/.ssh/config
   script:
+    - export RUSTRAG_BACKEND_DEPLOY_IMAGE="$BACKEND_DEPLOY_IMAGE"
+    - export RUSTRAG_FRONTEND_DEPLOY_IMAGE="$FRONTEND_DEPLOY_IMAGE"
     - unset SSH_AUTH_SOCK
     - ansible-playbook -i "${DEPLOY_HOST}," ansible/deploy.yml -u "$DEPLOY_USER" --private-key ~/.ssh/id_ed25519 -e "ansible_port=${DEPLOY_PORT}"
-
-backend deploy:
-  extends: .deploy_common
-  needs:
-    - job: backend build
-    - job: get version
-  variables:
-    APP_SERVICE_NAME: "$BACKEND_SERVICE_NAME"
-    APP_IMAGE_ENV_VAR: "$BACKEND_IMAGE_ENV_VAR"
-  script:
-    - export DEPLOY_IMAGE="$BACKEND_DEPLOY_IMAGE"
-    - unset SSH_AUTH_SOCK
-    - ansible-playbook -i "${DEPLOY_HOST}," ansible/deploy.yml -u "$DEPLOY_USER" --private-key ~/.ssh/id_ed25519 -e "ansible_port=${DEPLOY_PORT}"
-
-frontend deploy:
-  extends: .deploy_common
-  needs:
-    - job: frontend build
-    - job: get version
-  variables:
-    APP_SERVICE_NAME: "$FRONTEND_SERVICE_NAME"
-    APP_IMAGE_ENV_VAR: "$FRONTEND_IMAGE_ENV_VAR"
-  script:
-    - export DEPLOY_IMAGE="$FRONTEND_DEPLOY_IMAGE"
-    - unset SSH_AUTH_SOCK
-    - ansible-playbook -i "${DEPLOY_HOST}," ansible/deploy.yml -u "$DEPLOY_USER" --private-key ~/.ssh/id_ed25519 -e "ansible_port=${DEPLOY_PORT}"
-
