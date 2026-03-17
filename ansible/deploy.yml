@@ -37,15 +37,11 @@
         state: directory
         mode: "0755"
 
-    - name: Ensure compose file exists on target host
-      ansible.builtin.stat:
-        path: "{{ compose_file }}"
-      register: compose_file_stat
-
-    - name: Fail when compose file is missing on target host
-      ansible.builtin.fail:
-        msg: "Compose file not found at {{ compose_file }} on target host"
-      when: not compose_file_stat.stat.exists
+    - name: Sync compose file to target host
+      ansible.builtin.copy:
+        src: "{{ playbook_dir | dirname }}/docker-compose.yml"
+        dest: "{{ compose_file }}"
+        mode: "0644"
 
     - name: Ensure env file exists on target host
       ansible.builtin.stat:
