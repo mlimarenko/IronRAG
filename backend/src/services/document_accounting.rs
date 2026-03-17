@@ -21,10 +21,33 @@ use crate::{
 pub struct DocumentAccountingService;
 
 #[derive(Debug, Clone)]
+pub enum StageAccountingScope {
+    StageRollup,
+    ProviderCall { call_sequence_no: i32 },
+}
+
+impl StageAccountingScope {
+    fn scope_label(&self) -> &'static str {
+        match self {
+            Self::StageRollup => "stage_rollup",
+            Self::ProviderCall { .. } => "provider_call",
+        }
+    }
+
+    fn call_sequence_no(&self) -> i32 {
+        match self {
+            Self::StageRollup => 0,
+            Self::ProviderCall { call_sequence_no } => *call_sequence_no,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct RecordStageAccountingRequest {
     pub ingestion_run_id: Uuid,
     pub stage_event_id: Uuid,
     pub stage: String,
+    pub accounting_scope: StageAccountingScope,
     pub workspace_id: Option<Uuid>,
     pub project_id: Option<Uuid>,
     pub provider_kind: Option<String>,
@@ -46,6 +69,7 @@ pub struct StageUsageAccountingRequest {
     pub ingestion_run_id: Uuid,
     pub stage_event_id: Uuid,
     pub stage: String,
+    pub accounting_scope: StageAccountingScope,
     pub workspace_id: Option<Uuid>,
     pub project_id: Option<Uuid>,
     pub model_profile_id: Option<Uuid>,
@@ -73,6 +97,7 @@ pub struct StageAccountingGapRequest {
     pub ingestion_run_id: Uuid,
     pub stage_event_id: Uuid,
     pub stage: String,
+    pub accounting_scope: StageAccountingScope,
     pub workspace_id: Option<Uuid>,
     pub project_id: Option<Uuid>,
     pub provider_kind: Option<String>,
@@ -103,6 +128,8 @@ pub async fn record_stage_accounting(
             ingestion_run_id: request.ingestion_run_id,
             stage_event_id: request.stage_event_id,
             stage: request.stage,
+            accounting_scope: request.accounting_scope.scope_label().to_string(),
+            call_sequence_no: request.accounting_scope.call_sequence_no(),
             workspace_id: request.workspace_id,
             project_id: request.project_id,
             provider_kind: request.provider_kind,
@@ -205,6 +232,7 @@ pub async fn record_stage_usage_and_cost(
             ingestion_run_id: request.ingestion_run_id,
             stage_event_id: request.stage_event_id,
             stage: request.stage,
+            accounting_scope: request.accounting_scope,
             workspace_id: request.workspace_id,
             project_id: request.project_id,
             provider_kind: Some(request.provider_kind),
@@ -245,6 +273,7 @@ pub async fn record_stage_accounting_gap(
             ingestion_run_id: request.ingestion_run_id,
             stage_event_id: request.stage_event_id,
             stage: request.stage,
+            accounting_scope: request.accounting_scope,
             workspace_id: request.workspace_id,
             project_id: request.project_id,
             provider_kind: request.provider_kind,

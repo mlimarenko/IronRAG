@@ -58,6 +58,7 @@ struct WorkerDocumentContext {
 
 #[derive(Debug, Clone)]
 struct RuntimeStageSpan {
+    stage_event_id: Uuid,
     stage: String,
     started_at: DateTime<Utc>,
     provider_kind: Option<String>,
@@ -592,6 +593,7 @@ async fn execute_job(
         provider_profile.indexing.provider_kind.as_str(),
         &provider_profile.indexing.model_name,
     );
+    let mut graph_extract_call_sequence_no = 0_i32;
     for chunk in &persisted_chunks {
         lease_heartbeat.maybe_renew(state.as_ref()).await?;
         let extracted = extract_and_persist_chunk_graph_result(
@@ -606,6 +608,64 @@ async fn execute_job(
             },
         )
         .await?;
+        if let (Some(runtime_ingestion_run_id), Some(extracting_graph_span)) = (
+            runtime_ingestion_run_id,
+            extracting_graph_span.as_ref(),
+        ) {
+            for usage_call in &extracted.usage_calls {
+                graph_extract_call_sequence_no =
+                    graph_extract_call_sequence_no.saturating_add(1);
+                let _ = document_accounting::record_stage_usage_and_cost(
+                    state.as_ref(),
+                    document_accounting::StageUsageAccountingRequest {
+                        ingestion_run_id: runtime_ingestion_run_id,
+                        stage_event_id: extracting_graph_span.stage_event_id,
+                        stage: "extracting_graph".to_string(),
+                        accounting_scope: document_accounting::StageAccountingScope::ProviderCall {
+                            call_sequence_no: graph_extract_call_sequence_no,
+                        },
+                        workspace_id,
+                        project_id: Some(payload.project_id),
+                        model_profile_id: None,
+                        provider_kind: extracted.provider_kind.clone(),
+                        model_name: extracted.model_name.clone(),
+                        capability: PricingCapability::GraphExtract,
+                        billing_unit: PricingBillingUnit::Per1MTokens,
+                        usage_kind: "runtime_document_graph_extract_call".to_string(),
+                        prompt_tokens: usage_call
+                            .usage_json
+                            .get("prompt_tokens")
+                            .and_then(serde_json::Value::as_i64)
+                            .and_then(|value| i32::try_from(value).ok()),
+                        completion_tokens: usage_call
+                            .usage_json
+                            .get("completion_tokens")
+                            .and_then(serde_json::Value::as_i64)
+                            .and_then(|value| i32::try_from(value).ok()),
+                        total_tokens: usage_call
+                            .usage_json
+                            .get("total_tokens")
+                            .and_then(serde_json::Value::as_i64)
+                            .and_then(|value| i32::try_from(value).ok()),
+                        raw_usage_json: serde_json::json!({
+                            "provider_call_no": usage_call.provider_call_no,
+                            "provider_attempt_no": usage_call.provider_attempt_no,
+                            "graph_prompt_hash": usage_call.prompt_hash,
+                            "chunk_id": chunk.id,
+                            "chunk_ordinal": chunk.ordinal,
+                            "document_id": document_for_processing.id,
+                            "usage": usage_call.usage_json,
+                            "provider_kind": extracted.provider_kind,
+                            "model_name": extracted.model_name,
+                            "prompt_tokens": usage_call.usage_json.get("prompt_tokens").cloned().unwrap_or(serde_json::Value::Null),
+                            "completion_tokens": usage_call.usage_json.get("completion_tokens").cloned().unwrap_or(serde_json::Value::Null),
+                            "total_tokens": usage_call.usage_json.get("total_tokens").cloned().unwrap_or(serde_json::Value::Null),
+                        }),
+                    },
+                )
+                .await?;
+            }
+        }
         graph_extract_usage.absorb_usage_json(&extracted.usage_json);
         if !extracted.normalized.entities.is_empty() || !extracted.normalized.relations.is_empty() {
             chunk_graph_results.push((chunk.clone(), extracted.normalized));
@@ -1562,7 +1622,7 @@ async fn start_runtime_stage(
         None,
     )
     .await?;
-    repositories::append_runtime_stage_event(
+    let stage_event = repositories::append_runtime_stage_event(
         &state.persistence.postgres,
         runtime_ingestion_run_id,
         attempt_no,
@@ -1580,6 +1640,7 @@ async fn start_runtime_stage(
     )
     .await?;
     Ok(Some(RuntimeStageSpan {
+        stage_event_id: stage_event.id,
         stage: stage_name.to_string(),
         started_at: stage_started_at,
         provider_kind: provider_kind.map(str::to_string),
@@ -1666,6 +1727,7 @@ async fn maybe_record_extraction_stage_accounting(
             ingestion_run_id: runtime_ingestion_run_id,
             stage_event_id: stage_event.id,
             stage: stage_name.to_string(),
+            accounting_scope: document_accounting::StageAccountingScope::StageRollup,
             workspace_id,
             project_id: Some(project_id),
             provider_kind: Some(provider_kind.to_string()),
@@ -1718,6 +1780,7 @@ async fn maybe_record_usage_stage_accounting(
                 ingestion_run_id: runtime_ingestion_run_id,
                 stage_event_id: stage_event.id,
                 stage: stage_name.to_string(),
+                accounting_scope: document_accounting::StageAccountingScope::StageRollup,
                 workspace_id,
                 project_id: Some(project_id),
                 provider_kind: Some(provider_kind.to_string()),
@@ -1743,6 +1806,7 @@ async fn maybe_record_usage_stage_accounting(
             ingestion_run_id: runtime_ingestion_run_id,
             stage_event_id: stage_event.id,
             stage: stage_name.to_string(),
+            accounting_scope: document_accounting::StageAccountingScope::StageRollup,
             workspace_id,
             project_id: Some(project_id),
             model_profile_id,

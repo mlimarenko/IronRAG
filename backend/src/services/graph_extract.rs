@@ -56,8 +56,17 @@ pub struct GraphExtractionOutcome {
     pub prompt_hash: String,
     pub raw_output_json: serde_json::Value,
     pub usage_json: serde_json::Value,
+    pub usage_calls: Vec<GraphExtractionUsageCall>,
     pub normalized: GraphExtractionCandidateSet,
     pub lifecycle: GraphExtractionLifecycle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphExtractionUsageCall {
+    pub provider_call_no: i32,
+    pub provider_attempt_no: i32,
+    pub prompt_hash: String,
+    pub usage_json: serde_json::Value,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +105,7 @@ struct ResolvedGraphExtraction {
     prompt_hash: String,
     output_text: String,
     usage_json: serde_json::Value,
+    usage_calls: Vec<GraphExtractionUsageCall>,
     normalized: GraphExtractionCandidateSet,
     lifecycle: GraphExtractionLifecycle,
     recovery: GraphExtractionRecoveryTrace,
@@ -152,6 +162,7 @@ pub async fn extract_chunk_graph(
             &resolved.recovery,
         ),
         usage_json: resolved.usage_json.clone(),
+        usage_calls: resolved.usage_calls,
         normalized: resolved.normalized,
         lifecycle: resolved.lifecycle,
     })
@@ -223,6 +234,7 @@ pub async fn extract_and_persist_chunk_graph_result(
                     &resolved.recovery,
                 ),
                 usage_json: resolved.usage_json.clone(),
+                usage_calls: resolved.usage_calls.clone(),
                 normalized: resolved.normalized,
                 lifecycle: resolved.lifecycle,
             };
@@ -315,6 +327,7 @@ async fn resolve_graph_extraction_with_gateway(
     };
     let mut trace = GraphExtractionRecoveryTrace::default();
     let mut usage_samples = Vec::new();
+    let mut usage_calls = Vec::new();
     let mut previous_invalid_output = None;
     let mut previous_parse_error = None;
 
@@ -364,6 +377,12 @@ async fn resolve_graph_extraction_with_gateway(
             }
         };
         usage_samples.push(raw.usage_json.clone());
+        usage_calls.push(GraphExtractionUsageCall {
+            provider_call_no: i32::try_from(usage_calls.len() + 1).unwrap_or(i32::MAX),
+            provider_attempt_no: i32::try_from(provider_attempt_no).unwrap_or(i32::MAX),
+            prompt_hash: raw.prompt_hash.clone(),
+            usage_json: raw.usage_json.clone(),
+        });
         match normalize_graph_extraction_output_with_repair(&raw.output_text) {
             Ok((normalized, normalization_path, repair_candidate)) => {
                 trace.provider_attempt_count = provider_attempt_no;
@@ -388,6 +407,7 @@ async fn resolve_graph_extraction_with_gateway(
                         &raw.model_name,
                         &usage_samples,
                     ),
+                    usage_calls,
                     normalized,
                     lifecycle: raw.lifecycle.clone(),
                     recovery: trace,

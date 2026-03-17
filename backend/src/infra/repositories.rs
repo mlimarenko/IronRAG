@@ -2882,6 +2882,8 @@ pub struct AttemptStageAccountingRow {
     pub ingestion_run_id: Uuid,
     pub stage_event_id: Uuid,
     pub stage: String,
+    pub accounting_scope: String,
+    pub call_sequence_no: i32,
     pub workspace_id: Option<Uuid>,
     pub project_id: Option<Uuid>,
     pub provider_kind: Option<String>,
@@ -2903,9 +2905,13 @@ pub struct AttemptStageAccountingRow {
 pub struct AttemptStageCostSummaryRow {
     pub ingestion_run_id: Uuid,
     pub total_estimated_cost: Option<Decimal>,
+    pub settled_estimated_cost: Option<Decimal>,
+    pub in_flight_estimated_cost: Option<Decimal>,
     pub currency: Option<String>,
     pub priced_stage_count: i32,
     pub unpriced_stage_count: i32,
+    pub in_flight_stage_count: i32,
+    pub missing_stage_count: i32,
     pub accounting_status: String,
     pub computed_at: DateTime<Utc>,
 }
@@ -3151,6 +3157,8 @@ pub struct NewAttemptStageAccounting {
     pub ingestion_run_id: Uuid,
     pub stage_event_id: Uuid,
     pub stage: String,
+    pub accounting_scope: String,
+    pub call_sequence_no: i32,
     pub workspace_id: Option<Uuid>,
     pub project_id: Option<Uuid>,
     pub provider_kind: Option<String>,
@@ -3173,6 +3181,26 @@ fn sanitize_new_attempt_stage_accounting(
     let ownership =
         stage_native_ownership(new_row.ingestion_run_id, new_row.stage_event_id, &new_row.stage);
     let mut normalized = new_row.clone();
+    if normalized.accounting_scope.trim().is_empty() {
+        normalized.accounting_scope = "stage_rollup".to_string();
+    }
+    match normalized.accounting_scope.as_str() {
+        "stage_rollup" => normalized.call_sequence_no = 0,
+        "provider_call" => {
+            if normalized.call_sequence_no <= 0 {
+                return Err(sqlx::Error::Protocol(format!(
+                    "provider_call accounting for stage {} must use positive call_sequence_no",
+                    normalized.stage
+                )));
+            }
+        }
+        other => {
+            return Err(sqlx::Error::Protocol(format!(
+                "unsupported accounting_scope {} for stage {}",
+                other, normalized.stage
+            )));
+        }
+    }
     normalized.token_usage_json =
         decorate_payload_with_stage_ownership(normalized.token_usage_json, &ownership);
     normalized.pricing_snapshot_json =
@@ -4319,16 +4347,16 @@ pub async fn create_attempt_stage_accounting(
     sqlx::query_as::<_, AttemptStageAccountingRow>(
         "insert into runtime_attempt_stage_accounting (
             id, ingestion_run_id, stage_event_id, stage, workspace_id, project_id, provider_kind,
-            model_name, capability, billing_unit, usage_event_id, cost_ledger_id,
+            model_name, capability, billing_unit, accounting_scope, call_sequence_no, usage_event_id, cost_ledger_id,
             pricing_catalog_entry_id, pricing_status, estimated_cost, currency, token_usage_json,
             pricing_snapshot_json
          ) values (
             $1, $2, $3, $4, $5, $6, $7,
-            $8, $9, $10, $11, $12,
-            $13, $14, $15, $16, $17,
-            $18
+            $8, $9, $10, $11, $12, $13,
+            $14, $15, $16, $17, $18,
+            $19
          )
-         on conflict (stage_event_id) do update
+         on conflict (stage_event_id, accounting_scope, call_sequence_no) do update
          set ingestion_run_id = excluded.ingestion_run_id,
              stage = excluded.stage,
              workspace_id = excluded.workspace_id,
@@ -4337,6 +4365,8 @@ pub async fn create_attempt_stage_accounting(
              model_name = excluded.model_name,
              capability = excluded.capability,
              billing_unit = excluded.billing_unit,
+             accounting_scope = excluded.accounting_scope,
+             call_sequence_no = excluded.call_sequence_no,
              usage_event_id = excluded.usage_event_id,
              cost_ledger_id = excluded.cost_ledger_id,
              pricing_catalog_entry_id = excluded.pricing_catalog_entry_id,
@@ -4345,7 +4375,7 @@ pub async fn create_attempt_stage_accounting(
              currency = excluded.currency,
              token_usage_json = excluded.token_usage_json,
              pricing_snapshot_json = excluded.pricing_snapshot_json
-         returning id, ingestion_run_id, stage_event_id, stage, workspace_id, project_id,
+         returning id, ingestion_run_id, stage_event_id, stage, accounting_scope, call_sequence_no, workspace_id, project_id,
             provider_kind, model_name, capability, billing_unit, usage_event_id, cost_ledger_id,
             pricing_catalog_entry_id, pricing_status, estimated_cost, currency, token_usage_json,
             pricing_snapshot_json, created_at",
@@ -4360,6 +4390,8 @@ pub async fn create_attempt_stage_accounting(
     .bind(normalized.model_name.as_deref())
     .bind(&normalized.capability)
     .bind(&normalized.billing_unit)
+    .bind(&normalized.accounting_scope)
+    .bind(normalized.call_sequence_no)
     .bind(normalized.usage_event_id)
     .bind(normalized.cost_ledger_id)
     .bind(normalized.pricing_catalog_entry_id)
@@ -4381,13 +4413,13 @@ pub async fn list_attempt_stage_accounting_by_run(
     ingestion_run_id: Uuid,
 ) -> Result<Vec<AttemptStageAccountingRow>, sqlx::Error> {
     sqlx::query_as::<_, AttemptStageAccountingRow>(
-        "select id, ingestion_run_id, stage_event_id, stage, workspace_id, project_id, provider_kind,
+        "select id, ingestion_run_id, stage_event_id, stage, accounting_scope, call_sequence_no, workspace_id, project_id, provider_kind,
             model_name, capability, billing_unit, usage_event_id, cost_ledger_id,
             pricing_catalog_entry_id, pricing_status, estimated_cost, currency, token_usage_json,
             pricing_snapshot_json, created_at
          from runtime_attempt_stage_accounting
          where ingestion_run_id = $1
-         order by created_at asc, id asc",
+         order by created_at asc, accounting_scope asc, call_sequence_no asc, id asc",
     )
     .bind(ingestion_run_id)
     .fetch_all(pool)
@@ -4404,40 +4436,135 @@ pub async fn refresh_attempt_stage_cost_summary(
 ) -> Result<AttemptStageCostSummaryRow, sqlx::Error> {
     sqlx::query_as::<_, AttemptStageCostSummaryRow>(
         "insert into runtime_attempt_cost_summary (
-            ingestion_run_id, total_estimated_cost, currency, priced_stage_count, unpriced_stage_count,
-            accounting_status, computed_at
+            ingestion_run_id, total_estimated_cost, settled_estimated_cost, in_flight_estimated_cost,
+            currency, priced_stage_count, unpriced_stage_count, in_flight_stage_count,
+            missing_stage_count, accounting_status, computed_at
+         )
+         with current_attempt as (
+            select id as ingestion_run_id, current_attempt_no
+            from runtime_ingestion_run
+            where id = $1
+         ),
+         billable_stages as (
+            select distinct stage_event.ingestion_run_id, stage_event.stage
+            from runtime_ingestion_stage_event as stage_event
+            join current_attempt
+              on current_attempt.ingestion_run_id = stage_event.ingestion_run_id
+             and current_attempt.current_attempt_no = stage_event.attempt_no
+            where stage_event.stage in ('extracting_content', 'embedding_chunks', 'extracting_graph')
+         ),
+         stage_rollups as (
+            select
+                accounting.ingestion_run_id,
+                accounting.stage,
+                max(accounting.estimated_cost) as estimated_cost,
+                max(accounting.currency) as currency,
+                (array_agg(accounting.pricing_status order by accounting.created_at desc))[1] as pricing_status
+            from runtime_attempt_stage_accounting as accounting
+            join runtime_ingestion_stage_event as stage_event
+              on stage_event.id = accounting.stage_event_id
+            join current_attempt
+              on current_attempt.ingestion_run_id = accounting.ingestion_run_id
+             and current_attempt.current_attempt_no = stage_event.attempt_no
+            where accounting.ingestion_run_id = $1
+              and accounting.accounting_scope = 'stage_rollup'
+              and accounting.stage in ('extracting_content', 'embedding_chunks', 'extracting_graph')
+            group by accounting.ingestion_run_id, accounting.stage
+         ),
+         provider_calls as (
+            select
+                accounting.ingestion_run_id,
+                accounting.stage,
+                sum(accounting.estimated_cost) as estimated_cost,
+                max(accounting.currency) as currency,
+                count(*) filter (where accounting.pricing_status = 'priced')::integer as priced_call_count,
+                count(*) filter (where accounting.pricing_status <> 'priced')::integer as unpriced_call_count
+            from runtime_attempt_stage_accounting as accounting
+            join runtime_ingestion_stage_event as stage_event
+              on stage_event.id = accounting.stage_event_id
+            join current_attempt
+              on current_attempt.ingestion_run_id = accounting.ingestion_run_id
+             and current_attempt.current_attempt_no = stage_event.attempt_no
+            where accounting.ingestion_run_id = $1
+              and accounting.accounting_scope = 'provider_call'
+              and accounting.stage in ('extracting_content', 'embedding_chunks', 'extracting_graph')
+            group by accounting.ingestion_run_id, accounting.stage
+         ),
+         resolved_stage_accounting as (
+            select
+                billable_stages.ingestion_run_id,
+                billable_stages.stage,
+                case
+                    when stage_rollups.stage is not null then 'stage_rollup'
+                    when provider_calls.stage is not null then 'provider_call'
+                    else 'missing'
+                end as accounting_scope,
+                coalesce(stage_rollups.estimated_cost, provider_calls.estimated_cost) as estimated_cost,
+                coalesce(stage_rollups.currency, provider_calls.currency) as currency,
+                case
+                    when stage_rollups.stage is not null then stage_rollups.pricing_status
+                    when provider_calls.stage is not null
+                     and provider_calls.priced_call_count > 0
+                     and provider_calls.unpriced_call_count = 0 then 'priced'
+                    when provider_calls.stage is not null
+                     and provider_calls.priced_call_count > 0 then 'partial'
+                    when provider_calls.stage is not null then 'unpriced'
+                    else 'unpriced'
+                end as pricing_status
+            from billable_stages
+            left join stage_rollups
+              on stage_rollups.ingestion_run_id = billable_stages.ingestion_run_id
+             and stage_rollups.stage = billable_stages.stage
+            left join provider_calls
+              on provider_calls.ingestion_run_id = billable_stages.ingestion_run_id
+             and provider_calls.stage = billable_stages.stage
          )
          select
             $1,
-            sum(estimated_cost) as total_estimated_cost,
-            max(currency) as currency,
-            count(*) filter (where pricing_status = 'priced')::integer as priced_stage_count,
-            count(*) filter (where pricing_status <> 'priced')::integer as unpriced_stage_count,
+            sum(resolved_stage_accounting.estimated_cost) as total_estimated_cost,
+            sum(resolved_stage_accounting.estimated_cost) filter (where resolved_stage_accounting.accounting_scope = 'stage_rollup') as settled_estimated_cost,
+            sum(resolved_stage_accounting.estimated_cost) filter (where resolved_stage_accounting.accounting_scope = 'provider_call') as in_flight_estimated_cost,
+            max(resolved_stage_accounting.currency) as currency,
+            count(*) filter (
+                where resolved_stage_accounting.accounting_scope = 'stage_rollup'
+                  and resolved_stage_accounting.pricing_status = 'priced'
+            )::integer as priced_stage_count,
+            count(*) filter (
+                where resolved_stage_accounting.accounting_scope = 'stage_rollup'
+                  and resolved_stage_accounting.pricing_status <> 'priced'
+            )::integer as unpriced_stage_count,
+            count(*) filter (where resolved_stage_accounting.accounting_scope = 'provider_call')::integer as in_flight_stage_count,
+            count(*) filter (where resolved_stage_accounting.accounting_scope = 'missing')::integer as missing_stage_count,
             case
-                when count(*) filter (where pricing_status = 'priced') > 0
-                 and count(*) filter (where pricing_status <> 'priced') = 0 then 'priced'
-                when count(*) filter (where pricing_status = 'priced') > 0 then 'partial'
+                when count(*) filter (where resolved_stage_accounting.accounting_scope = 'provider_call') > 0
+                    then 'in_flight_unsettled'
+                when count(*) filter (
+                    where resolved_stage_accounting.accounting_scope = 'stage_rollup'
+                      and resolved_stage_accounting.pricing_status = 'priced'
+                ) > 0
+                 and count(*) filter (
+                    where resolved_stage_accounting.accounting_scope <> 'stage_rollup'
+                       or resolved_stage_accounting.pricing_status <> 'priced'
+                ) = 0 then 'priced'
+                when count(*) filter (where resolved_stage_accounting.accounting_scope = 'stage_rollup') > 0
+                    then 'partial'
                 else 'unpriced'
             end as accounting_status,
             now()
-         from runtime_attempt_stage_accounting as accounting
-         join runtime_ingestion_stage_event as stage_event
-           on stage_event.id = accounting.stage_event_id
-         join runtime_ingestion_run as runtime_run
-           on runtime_run.id = accounting.ingestion_run_id
-         where accounting.ingestion_run_id = $1
-           and stage_event.attempt_no = runtime_run.current_attempt_no
-           and accounting.stage = stage_event.stage
-           and accounting.stage in ('extracting_content', 'embedding_chunks', 'extracting_graph')
+         from resolved_stage_accounting
          on conflict (ingestion_run_id) do update
          set total_estimated_cost = excluded.total_estimated_cost,
+             settled_estimated_cost = excluded.settled_estimated_cost,
+             in_flight_estimated_cost = excluded.in_flight_estimated_cost,
              currency = excluded.currency,
              priced_stage_count = excluded.priced_stage_count,
              unpriced_stage_count = excluded.unpriced_stage_count,
+             in_flight_stage_count = excluded.in_flight_stage_count,
+             missing_stage_count = excluded.missing_stage_count,
              accounting_status = excluded.accounting_status,
              computed_at = excluded.computed_at
-         returning ingestion_run_id, total_estimated_cost, currency, priced_stage_count,
-            unpriced_stage_count, accounting_status, computed_at",
+         returning ingestion_run_id, total_estimated_cost, settled_estimated_cost, in_flight_estimated_cost, currency, priced_stage_count,
+            unpriced_stage_count, in_flight_stage_count, missing_stage_count, accounting_status, computed_at",
     )
     .bind(ingestion_run_id)
     .fetch_one(pool)
@@ -4453,8 +4580,8 @@ pub async fn get_attempt_stage_cost_summary_by_run(
     ingestion_run_id: Uuid,
 ) -> Result<Option<AttemptStageCostSummaryRow>, sqlx::Error> {
     sqlx::query_as::<_, AttemptStageCostSummaryRow>(
-        "select ingestion_run_id, total_estimated_cost, currency, priced_stage_count,
-            unpriced_stage_count, accounting_status, computed_at
+        "select ingestion_run_id, total_estimated_cost, settled_estimated_cost, in_flight_estimated_cost, currency, priced_stage_count,
+            unpriced_stage_count, in_flight_stage_count, missing_stage_count, accounting_status, computed_at
          from runtime_attempt_cost_summary
          where ingestion_run_id = $1",
     )

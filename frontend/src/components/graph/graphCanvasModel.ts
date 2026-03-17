@@ -557,14 +557,14 @@ function assignCircleLayout(
   degreeMap: Map<string, number>,
 ): void {
   const ordered = sortNodesByWeight(nodes, degreeMap)
-  const baseCapacity = 34
-  const ringGap = 0.23
-  const innerRadius = 1.05
+  const baseCapacity = 64
+  const ringGap = 0.12
+  const innerRadius = 1.36
   let startIndex = 0
   let ringIndex = 0
 
   while (startIndex < ordered.length) {
-    const ringCapacity = baseCapacity + ringIndex * 14
+    const ringCapacity = baseCapacity + ringIndex * 24
     const ringNodes = ordered.slice(startIndex, startIndex + ringCapacity)
     const radius = innerRadius + ringIndex * ringGap
     const angularOffset = ringIndex * 0.22
@@ -577,12 +577,12 @@ function assignCircleLayout(
       const angle = t * Math.PI * 2 + angularOffset + typeBias + jitter
       const localRadius =
         radius +
-        (hashToUnit(`${node.id}:circle:radius`) - 0.5) * 0.06 -
+        (hashToUnit(`${node.id}:circle:radius`) - 0.5) * 0.04 -
         Math.min(0.06, Math.log10(Math.max(1, node.supportCount)) * 0.012)
 
       graph.mergeNodeAttributes(node.id, {
-        x: Math.cos(angle) * localRadius * 1.08,
-        y: Math.sin(angle) * localRadius * 0.92,
+        x: Math.cos(angle) * localRadius * 1.1,
+        y: Math.sin(angle) * localRadius * 0.94,
       })
     })
 
