@@ -23,19 +23,21 @@ use crate::{
         authorization::{POLICY_DOCUMENTS_READ, POLICY_DOCUMENTS_WRITE},
         router_support::{
             ApiError, ApiWarningBody, blocked_activity_warning, map_runtime_lifecycle_error,
-            partial_accounting_warning, stalled_activity_warning,
+            map_runtime_upload_error, map_runtime_write_error, partial_accounting_warning,
+            stalled_activity_warning,
         },
         runtime_support::load_library_and_authorize,
+        upload_support::{MultipartUploadFileInput, build_runtime_upload_requests},
     },
     services::document_reconciliation::{
         AppendDocumentRequest, ReplaceDocumentRequest, queue_append_document_mutation,
         queue_replace_document_mutation,
     },
     services::runtime_ingestion::{
-        QueueRuntimeUploadRequest, RuntimeUploadFileInput, classify_runtime_document_activity,
-        delete_runtime_run_and_rebuild, queue_new_runtime_upload,
-        reprocess_runtime_run_and_rebuild, requeue_runtime_run,
+        RuntimeUploadFileInput, classify_runtime_document_activity, delete_runtime_run_and_rebuild,
+        queue_new_runtime_upload, reprocess_runtime_run_and_rebuild, requeue_runtime_run,
     },
+    shared::file_extract::UploadAdmissionError,
 };
 
 #[derive(Debug, Deserialize)]
@@ -271,14 +273,11 @@ async fn upload_runtime_documents(
     let project =
         load_library_and_authorize(&auth, &state, library_id, POLICY_DOCUMENTS_WRITE).await?;
     let upload_batch_id = Uuid::now_v7();
-    let upload_limit_bytes = state.ui_runtime.upload_max_size_mb.saturating_mul(1024 * 1024);
-    let mut requests = Vec::new();
+    let mut files = Vec::new();
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|_| ApiError::BadRequest("invalid multipart payload".into()))?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(|_| {
+        ApiError::from_upload_admission(UploadAdmissionError::invalid_multipart_payload())
+    })? {
         let Some(name) = field.name() else {
             continue;
         };
@@ -294,35 +293,24 @@ async fn upload_runtime_documents(
         let file_bytes = field
             .bytes()
             .await
-            .map_err(|_| ApiError::BadRequest("invalid file body".into()))?
+            .map_err(|_| {
+                ApiError::from_upload_admission(UploadAdmissionError::invalid_file_body(
+                    Some(&file_name),
+                    mime_type.as_deref(),
+                ))
+            })?
             .to_vec();
-        let file_size_bytes = u64::try_from(file_bytes.len()).unwrap_or(u64::MAX);
-        if file_size_bytes > upload_limit_bytes {
-            return Err(ApiError::BadRequest(format!(
-                "file {} exceeds the {} MB upload limit",
-                file_name, state.ui_runtime.upload_max_size_mb
-            )));
-        }
-        requests.push(QueueRuntimeUploadRequest {
-            project_id: project.id,
-            upload_batch_id: Some(upload_batch_id),
-            requested_by: Some(auth.token_id.to_string()),
-            trigger_kind: "runtime_upload".to_string(),
-            parent_job_id: None,
-            idempotency_key: None,
-            file: RuntimeUploadFileInput {
-                source_id: None,
-                file_name,
-                mime_type,
-                file_bytes,
-                title: None,
-            },
-        });
+        files.push(MultipartUploadFileInput { file_name, mime_type, file_bytes });
     }
 
-    if requests.is_empty() {
-        return Err(ApiError::BadRequest("no files were uploaded".into()));
-    }
+    let requests = build_runtime_upload_requests(
+        project.id,
+        upload_batch_id,
+        Some(auth.token_id.to_string()),
+        "runtime_upload",
+        state.ui_runtime.upload_max_size_mb,
+        files,
+    )?;
 
     let upload_concurrency = state.settings.ingestion_worker_concurrency.max(1);
     let queued_results = stream::iter(requests.into_iter().map(|request| {
@@ -334,7 +322,7 @@ async fn upload_runtime_documents(
     .await;
     let mut accepted = Vec::with_capacity(queued_results.len());
     for queued in queued_results {
-        let queued = queued.map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        let queued = queued.map_err(map_runtime_upload_error)?;
         accepted.push(load_runtime_document_row(&state, &queued.runtime_run).await?);
     }
 
@@ -615,11 +603,9 @@ async fn replace_runtime_document(
     let upload_limit_bytes = state.ui_runtime.upload_max_size_mb.saturating_mul(1024 * 1024);
     let mut replacement_file = None;
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|_| ApiError::BadRequest("invalid multipart payload".into()))?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(|_| {
+        ApiError::from_upload_admission(UploadAdmissionError::invalid_multipart_payload())
+    })? {
         let Some(name) = field.name() else {
             continue;
         };
@@ -635,13 +621,20 @@ async fn replace_runtime_document(
         let file_bytes = field
             .bytes()
             .await
-            .map_err(|_| ApiError::BadRequest("invalid file body".into()))?
+            .map_err(|_| {
+                ApiError::from_upload_admission(UploadAdmissionError::invalid_file_body(
+                    Some(&file_name),
+                    mime_type.as_deref(),
+                ))
+            })?
             .to_vec();
         let file_size_bytes = u64::try_from(file_bytes.len()).unwrap_or(u64::MAX);
         if file_size_bytes > upload_limit_bytes {
-            return Err(ApiError::BadRequest(format!(
-                "file {} exceeds the {} MB upload limit",
-                file_name, state.ui_runtime.upload_max_size_mb
+            return Err(ApiError::from_upload_admission(UploadAdmissionError::file_too_large(
+                &file_name,
+                mime_type.as_deref(),
+                file_size_bytes,
+                state.ui_runtime.upload_max_size_mb,
             )));
         }
         replacement_file = Some(RuntimeUploadFileInput {
@@ -654,8 +647,11 @@ async fn replace_runtime_document(
         break;
     }
 
-    let file = replacement_file
-        .ok_or_else(|| ApiError::BadRequest("no replacement file was uploaded".into()))?;
+    let file = replacement_file.ok_or_else(|| {
+        ApiError::from_upload_admission(UploadAdmissionError::missing_upload_file(
+            "no replacement file was uploaded",
+        ))
+    })?;
     let mutation = queue_replace_document_mutation(
         &state,
         ReplaceDocumentRequest {
@@ -667,7 +663,7 @@ async fn replace_runtime_document(
         },
     )
     .await
-    .map_err(map_runtime_lifecycle_error)?;
+    .map_err(map_runtime_write_error)?;
 
     Ok((
         StatusCode::ACCEPTED,

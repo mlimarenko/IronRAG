@@ -13,7 +13,7 @@ import DocumentsTable from 'src/components/documents/DocumentsTable.vue'
 import DocumentSummaryCard from 'src/components/documents/DocumentSummaryCard.vue'
 import ReplaceDocumentDialog from 'src/components/documents/ReplaceDocumentDialog.vue'
 import UploadDropzone from 'src/components/documents/UploadDropzone.vue'
-import type { DocumentStatus } from 'src/models/ui/documents'
+import type { DocumentStatus, DocumentUploadFailure } from 'src/models/ui/documents'
 import { downloadDocumentExtractedText } from 'src/services/api/documents'
 import { useDocumentsStore } from 'src/stores/documents'
 import { useShellStore } from 'src/stores/shell'
@@ -36,6 +36,7 @@ const {
   replaceDialogDocumentId,
   refreshIntervalMs,
   surface,
+  uploadFailures,
   uploadLoading,
 } =
   storeToRefs(documentsStore)
@@ -54,6 +55,7 @@ watch(
     if (!libraryId) {
       return
     }
+    documentsStore.clearUploadFailures()
     documentsStore.closeDetail()
     await documentsStore.loadSurface()
   },
@@ -159,6 +161,28 @@ const importProgressMessage = computed(() => {
   return null
 })
 
+const uploadFailureSummary = computed(() => {
+  const count = uploadFailures.value.length
+  if (count === 0) {
+    return null
+  }
+  return t('documents.uploadReport.summary', { count })
+})
+
+function uploadFailureMeta(failure: DocumentUploadFailure): string[] {
+  const meta: string[] = []
+  if (failure.detectedFormat) {
+    meta.push(`${t('documents.uploadReport.labels.format')}: ${failure.detectedFormat}`)
+  }
+  if (failure.mimeType) {
+    meta.push(`${t('documents.uploadReport.labels.mimeType')}: ${failure.mimeType}`)
+  }
+  if (failure.uploadLimitMb !== null) {
+    meta.push(`${t('documents.uploadReport.labels.limit')}: ${String(failure.uploadLimitMb)} MB`)
+  }
+  return meta
+}
+
 async function openInGraph(graphNodeId: string) {
   await router.push({
     path: '/graph',
@@ -205,6 +229,60 @@ async function submitReplace(file: File) {
         :loading="uploadLoading"
         @select="documentsStore.uploadFiles"
       />
+
+      <section
+        v-if="uploadFailures.length"
+        class="rr-documents__upload-report"
+        role="status"
+        aria-live="polite"
+      >
+        <div class="rr-documents__upload-report-header">
+          <div>
+            <strong>{{ $t('documents.uploadReport.title') }}</strong>
+            <p>{{ uploadFailureSummary }}</p>
+          </div>
+          <button
+            type="button"
+            class="rr-button rr-button--ghost rr-button--tiny"
+            @click="documentsStore.clearUploadFailures"
+          >
+            {{ $t('documents.uploadReport.dismiss') }}
+          </button>
+        </div>
+
+        <ul class="rr-documents__upload-report-list">
+          <li
+            v-for="failure in uploadFailures"
+            :key="`${failure.fileName}:${failure.message}`"
+            class="rr-documents__upload-report-item"
+          >
+            <div class="rr-documents__upload-report-headline">
+              <strong>{{ failure.fileName }}</strong>
+              <span>{{ failure.message }}</span>
+            </div>
+            <p
+              v-if="failure.rejectionCause"
+              class="rr-documents__upload-report-copy"
+            >
+              <span>{{ $t('documents.uploadReport.labels.reason') }}:</span>
+              {{ failure.rejectionCause }}
+            </p>
+            <p
+              v-if="failure.operatorAction"
+              class="rr-documents__upload-report-copy"
+            >
+              <span>{{ $t('documents.uploadReport.labels.action') }}:</span>
+              {{ failure.operatorAction }}
+            </p>
+            <p
+              v-if="uploadFailureMeta(failure).length"
+              class="rr-documents__upload-report-meta"
+            >
+              {{ uploadFailureMeta(failure).join(' · ') }}
+            </p>
+          </li>
+        </ul>
+      </section>
 
       <section class="rr-documents__summary">
         <article

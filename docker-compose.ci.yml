@@ -73,7 +73,7 @@ services:
       neo4j_database: ${RUSTRAG_NEO4J_DATABASE:-neo4j}
       neo4j_max_connections: ${RUSTRAG_NEO4J_MAX_CONNECTIONS:-16}
       log_filter: ${RUSTRAG_LOG_FILTER:-info}
-      frontend_origin: ${RUSTRAG_FRONTEND_ORIGIN:-https://lightrag.piping.space}
+      frontend_origin: ${RUSTRAG_FRONTEND_ORIGIN:-https://gra.piping.space}
       bootstrap_token: ${RUSTRAG_BOOTSTRAP_TOKEN:-bootstrap-local}
       openai_api_key: ${RUSTRAG_OPENAI_API_KEY:-}
       deepseek_api_key: ${RUSTRAG_DEEPSEEK_API_KEY:-}

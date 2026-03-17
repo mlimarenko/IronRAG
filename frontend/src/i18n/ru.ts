@@ -52,6 +52,18 @@ const ru = {
     attemptShort: 'Попытка #{number}',
     loadingDetail: 'Загрузка деталей документа…',
     uploadQueuedHint: 'Принятые файлы сразу ставятся в очередь и продолжают обрабатываться в фоне.',
+    uploadReport: {
+      title: 'Отчет по загрузке',
+      summary: 'Во время загрузки отклонено файлов: {count}.',
+      dismiss: 'Скрыть',
+      labels: {
+        format: 'Формат',
+        mimeType: 'MIME-тип',
+        limit: 'Лимит',
+        reason: 'Причина',
+        action: 'Что сделать',
+      },
+    },
     headers: {
       fileName: 'Файл',
       type: 'Тип',
@@ -258,8 +270,13 @@ const ru = {
     fit: 'Вписать',
     layouts: {
       cloud: 'Облако',
+      circle: 'Круг',
       rings: 'Кольца',
-      lanes: 'Полосы',
+      lanes: 'Колонки',
+      clusters: 'Кластеры',
+      focus: 'Фокус',
+      islands: 'Острова',
+      spiral: 'Спираль',
     },
     webglUnavailableTitle: 'Граф недоступен',
     webglUnavailableDescription:

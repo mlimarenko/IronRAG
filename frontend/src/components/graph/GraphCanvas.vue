@@ -43,7 +43,11 @@ const graphRef = shallowRef<
   MultiUndirectedGraph<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes> | null
 >(null)
 const draggedNodeId = ref<string | null>(null)
+const dragStartViewport = ref<{ x: number; y: number } | null>(null)
+const dragMoved = ref(false)
 const ignoreStageClickUntil = ref(0)
+const suppressNodeSelectionUntil = ref(0)
+const didInitialFit = ref(false)
 const renderMode = ref<'sigma' | 'placeholder'>('sigma')
 
 const baseNodes = computed(() =>
@@ -247,6 +251,8 @@ function destroyGraph(): void {
   }
   graphRef.value = null
   draggedNodeId.value = null
+  dragStartViewport.value = null
+  dragMoved.value = false
   renderMode.value = 'sigma'
 }
 
@@ -280,6 +286,9 @@ function registerSigmaInteractions(
   }
 
   sigma.on('clickNode', ({ node }: SigmaNodeEventPayload) => {
+    if (Date.now() < suppressNodeSelectionUntil.value || dragMoved.value) {
+      return
+    }
     ignoreStageClickUntil.value = Date.now() + 180
     emit('selectNode', node)
   })
@@ -293,7 +302,10 @@ function registerSigmaInteractions(
   })
 
   sigma.on('clickStage', ({ event }: SigmaStageEventPayload) => {
-    if (Date.now() < ignoreStageClickUntil.value) {
+    if (
+      Date.now() < ignoreStageClickUntil.value ||
+      Date.now() < suppressNodeSelectionUntil.value
+    ) {
       return
     }
 
@@ -306,8 +318,10 @@ function registerSigmaInteractions(
     emit('clearFocus')
   })
 
-  sigma.on('downNode', ({ node }: SigmaNodeEventPayload) => {
+  sigma.on('downNode', ({ node, event }: SigmaNodeEventPayload) => {
     draggedNodeId.value = node
+    dragStartViewport.value = { x: event.x, y: event.y }
+    dragMoved.value = false
     sigma.setSetting('enableCameraPanning', false)
     sigma.setCustomBBox(sigma.getBBox())
     canvasRef.value?.classList.add('is-dragging')
@@ -319,6 +333,16 @@ function registerSigmaInteractions(
   const handleMouseMoveBody = (event: SigmaStageEventPayload['event']) => {
     if (!draggedNodeId.value || !graph?.hasNode(draggedNodeId.value)) {
       return
+    }
+
+    if (dragStartViewport.value) {
+      const distance = Math.hypot(
+        event.x - dragStartViewport.value.x,
+        event.y - dragStartViewport.value.y,
+      )
+      if (distance > 5) {
+        dragMoved.value = true
+      }
     }
 
     const graphPosition = sigma.viewportToGraph({
@@ -342,7 +366,13 @@ function registerSigmaInteractions(
     if (!draggedNodeId.value) {
       return
     }
+    if (dragMoved.value) {
+      suppressNodeSelectionUntil.value = Date.now() + 260
+      ignoreStageClickUntil.value = suppressNodeSelectionUntil.value
+    }
     draggedNodeId.value = null
+    dragStartViewport.value = null
+    dragMoved.value = false
     sigma.setSetting('enableCameraPanning', true)
     canvasRef.value?.classList.remove('is-dragging')
   }
@@ -410,7 +440,10 @@ function mountSigmaGraph(
   })
 
   window.setTimeout(() => {
-    fitViewport(0)
+    if (!didInitialFit.value) {
+      fitViewport(0)
+      didInitialFit.value = true
+    }
     if (props.focusedNodeId) {
       focusNode(props.focusedNodeId)
     }
@@ -437,6 +470,59 @@ function rebuildGraph(): void {
       props.layoutMode,
     ),
   )
+}
+
+function syncGraphData(): void {
+  const graph = graphRef.value
+  const sigma = sigmaRef.value
+  if (!graph || !sigma) {
+    rebuildGraph()
+    return
+  }
+
+  if (draggedNodeId.value) {
+    return
+  }
+
+  const targetGraph = createGraphModel(
+    filteredNodes.value,
+    aggregatedEdges.value,
+    props.focusedNodeId,
+    props.layoutMode,
+  )
+
+  const currentNodeIds = new Set(graph.nodes())
+  const targetNodeIds = new Set(targetGraph.nodes())
+
+  currentNodeIds.forEach((nodeId) => {
+    if (!targetNodeIds.has(nodeId)) {
+      graph.dropNode(nodeId)
+    }
+  })
+
+  targetGraph.forEachNode((nodeId, targetAttributes) => {
+    if (graph.hasNode(nodeId)) {
+      const currentAttributes = graph.getNodeAttributes(nodeId)
+      graph.replaceNodeAttributes(nodeId, {
+        ...targetAttributes,
+        x: currentAttributes.x,
+        y: currentAttributes.y,
+      })
+      return
+    }
+
+    graph.addNode(nodeId, targetAttributes)
+  })
+
+  graph.clearEdges()
+  targetGraph.forEachEdge((_, attributes, source, target) => {
+    if (!graph.hasNode(source) || !graph.hasNode(target)) {
+      return
+    }
+    graph.addEdge(source, target, attributes)
+  })
+
+  safeRefreshAll()
 }
 
 function relayoutGraph(): void {
@@ -473,19 +559,20 @@ function relayoutGraph(): void {
 }
 
 watch(
-  () =>
-    [
-      props.surfaceVersion,
-      props.filter,
-      props.focusedNodeId,
-      props.nodes.length,
-      props.edges.length,
-    ] as const,
+  () => [props.filter, props.focusedNodeId] as const,
   async () => {
     await nextTick()
     rebuildGraph()
   },
   { immediate: true },
+)
+
+watch(
+  () => [props.surfaceVersion, props.nodes.length, props.edges.length] as const,
+  async () => {
+    await nextTick()
+    syncGraphData()
+  },
 )
 
 watch(

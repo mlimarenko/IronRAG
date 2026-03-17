@@ -26,6 +26,7 @@ pub mod ui_documents;
 pub mod ui_graph;
 pub mod ui_shell;
 pub mod ui_support;
+pub mod upload_support;
 pub mod uploads;
 pub mod usage;
 pub mod workspaces;

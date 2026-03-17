@@ -4,12 +4,14 @@ import type {
   DocumentAttemptGroup,
   DocumentDetail,
   DocumentMutationAccepted,
+  DocumentUploadFailure,
   DocumentRow,
   DocumentsSurfaceResponse,
   DocumentMutationStatus,
+  UploadRejectionDetails,
   UploadDocumentsResponse,
 } from 'src/models/ui/documents'
-import { apiHttp, unwrap } from './http'
+import { ApiClientError, apiHttp, unwrap } from './http'
 
 interface RawDocumentRow {
   id: string
@@ -201,6 +203,54 @@ const STALLED_ACTIVITY_AFTER_MS = 180_000
 
 function pick<T>(snake: T | undefined, camel: T | undefined): T | undefined {
   return snake ?? camel
+}
+
+function readString(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key]
+  return typeof value === 'string' ? value : null
+}
+
+function readNumber(record: Record<string, unknown>, key: string): number | null {
+  const value = record[key]
+  return typeof value === 'number' ? value : null
+}
+
+function normalizeUploadRejectionDetails(details: unknown): UploadRejectionDetails | null {
+  if (!details || typeof details !== 'object') {
+    return null
+  }
+  const record = details as Record<string, unknown>
+  return {
+    fileName: readString(record, 'fileName'),
+    detectedFormat: readString(record, 'detectedFormat'),
+    mimeType: readString(record, 'mimeType'),
+    fileSizeBytes: readNumber(record, 'fileSizeBytes'),
+    uploadLimitMb: readNumber(record, 'uploadLimitMb'),
+    rejectionCause: readString(record, 'rejectionCause'),
+    operatorAction: readString(record, 'operatorAction'),
+  }
+}
+
+export function normalizeDocumentUploadFailure(
+  file: File,
+  error: unknown,
+): DocumentUploadFailure {
+  const details =
+    error instanceof ApiClientError ? normalizeUploadRejectionDetails(error.details) : null
+  const message =
+    error instanceof Error ? error.message : 'Failed to upload document'
+
+  return {
+    fileName: details?.fileName ?? file.name,
+    message,
+    errorKind: error instanceof ApiClientError ? error.errorKind : null,
+    detectedFormat: details?.detectedFormat ?? null,
+    mimeType: details?.mimeType ?? (file.type || null),
+    fileSizeBytes: details?.fileSizeBytes ?? file.size,
+    uploadLimitMb: details?.uploadLimitMb ?? null,
+    rejectionCause: details?.rejectionCause ?? null,
+    operatorAction: details?.operatorAction ?? null,
+  }
 }
 
 function deriveActivityStatus(

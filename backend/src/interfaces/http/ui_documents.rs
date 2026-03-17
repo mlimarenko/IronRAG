@@ -16,14 +16,15 @@ use crate::{
     domains::ui_documents::{DocumentDetailModel, DocumentListItem, DocumentSurfaceModel},
     infra::{repositories, ui_queries},
     interfaces::http::{
-        router_support::{ApiError, map_runtime_lifecycle_error},
+        router_support::{ApiError, map_runtime_lifecycle_error, map_runtime_upload_error},
         ui_support::{UiSessionContext, load_active_ui_context},
+        upload_support::{MultipartUploadFileInput, build_runtime_upload_requests},
     },
     services::runtime_ingestion::{
-        QueueRuntimeUploadRequest, RuntimeUploadFileInput, delete_runtime_run_and_rebuild,
-        queue_new_runtime_upload, reprocess_runtime_run_and_rebuild, requeue_runtime_run,
+        delete_runtime_run_and_rebuild, queue_new_runtime_upload,
+        reprocess_runtime_run_and_rebuild, requeue_runtime_run,
     },
-    shared::file_extract,
+    shared::file_extract::{self, UploadAdmissionError},
 };
 
 pub fn router() -> Router<crate::app::state::AppState> {
@@ -97,14 +98,11 @@ async fn upload_documents(
 ) -> Result<Json<UploadDocumentsResponse>, ApiError> {
     let active = load_active_ui_context(&state, &ui_session).await?;
     let upload_batch_id = Uuid::now_v7();
-    let upload_limit_bytes = state.ui_runtime.upload_max_size_mb.saturating_mul(1024 * 1024);
-    let mut requests = Vec::new();
+    let mut files = Vec::new();
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|_| ApiError::BadRequest("invalid multipart payload".into()))?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(|_| {
+        ApiError::from_upload_admission(UploadAdmissionError::invalid_multipart_payload())
+    })? {
         let field_name = field.name().unwrap_or_default().to_string();
         if field_name != "file" && field_name != "files" {
             continue;
@@ -118,37 +116,24 @@ async fn upload_documents(
         let file_bytes = field
             .bytes()
             .await
-            .map_err(|_| ApiError::BadRequest("invalid file body".into()))?
+            .map_err(|_| {
+                ApiError::from_upload_admission(UploadAdmissionError::invalid_file_body(
+                    Some(&file_name),
+                    mime_type.as_deref(),
+                ))
+            })?
             .to_vec();
-        let file_size_bytes = u64::try_from(file_bytes.len()).unwrap_or(u64::MAX);
-
-        if file_size_bytes > upload_limit_bytes {
-            return Err(ApiError::BadRequest(format!(
-                "file {} exceeds the {} MB upload limit",
-                file_name, state.ui_runtime.upload_max_size_mb
-            )));
-        }
-
-        requests.push(QueueRuntimeUploadRequest {
-            project_id: active.project.id,
-            upload_batch_id: Some(upload_batch_id),
-            requested_by: Some(ui_session.email.clone()),
-            trigger_kind: "ui_upload".to_string(),
-            parent_job_id: None,
-            idempotency_key: None,
-            file: RuntimeUploadFileInput {
-                source_id: None,
-                file_name,
-                mime_type,
-                file_bytes,
-                title: None,
-            },
-        });
+        files.push(MultipartUploadFileInput { file_name, mime_type, file_bytes });
     }
 
-    if requests.is_empty() {
-        return Err(ApiError::BadRequest("no files were uploaded".into()));
-    }
+    let requests = build_runtime_upload_requests(
+        active.project.id,
+        upload_batch_id,
+        Some(ui_session.email.clone()),
+        "ui_upload",
+        state.ui_runtime.upload_max_size_mb,
+        files,
+    )?;
 
     let upload_concurrency = state.settings.ingestion_worker_concurrency.max(1);
     let queued_results = stream::iter(requests.into_iter().map(|request| {
@@ -160,7 +145,7 @@ async fn upload_documents(
     .await;
     let mut accepted_rows = Vec::with_capacity(queued_results.len());
     for queued in queued_results {
-        let queued = queued.map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        let queued = queued.map_err(map_runtime_upload_error)?;
         info!(
             user_id = %ui_session.user_id,
             workspace_id = %active.workspace.id,

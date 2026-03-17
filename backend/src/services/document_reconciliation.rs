@@ -241,6 +241,7 @@ pub async fn queue_replace_document_mutation(
         load_mutable_document_context(state, &request.runtime_run).await?;
     let provider_profile =
         resolve_effective_provider_profile(state, request.runtime_run.project_id).await?;
+    let file_size_bytes = u64::try_from(request.file.file_bytes.len()).unwrap_or(u64::MAX);
     let extraction_plan = build_runtime_file_extraction_plan(
         state.llm_gateway.as_ref(),
         &provider_profile.vision,
@@ -249,8 +250,23 @@ pub async fn queue_replace_document_mutation(
         request.file.file_bytes.clone(),
     )
     .await
-    .with_context(|| format!("failed to extract {}", request.file.file_name))?;
-    validate_runtime_extraction_plan(&request.file.file_name, &extraction_plan)?;
+    .map_err(|error| {
+        anyhow::Error::new(
+            crate::shared::file_extract::UploadAdmissionError::from_file_extract_error(
+                &request.file.file_name,
+                request.file.mime_type.as_deref(),
+                file_size_bytes,
+                error,
+            ),
+        )
+    })?;
+    validate_runtime_extraction_plan(
+        &request.file.file_name,
+        request.file.mime_type.as_deref(),
+        file_size_bytes,
+        &extraction_plan,
+    )
+    .map_err(anyhow::Error::new)?;
     let replacement_text = extraction_plan
         .extracted_text
         .clone()

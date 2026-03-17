@@ -11,11 +11,12 @@ use crate::{
     interfaces::http::{
         auth::AuthContext,
         authorization::{POLICY_DOCUMENTS_WRITE, load_project_and_authorize},
-        router_support::ApiError,
+        router_support::{ApiError, map_runtime_upload_error},
     },
     services::runtime_ingestion::{
         QueueRuntimeUploadRequest, RuntimeUploadFileInput, queue_new_runtime_upload,
     },
+    shared::file_extract::UploadAdmissionError,
 };
 
 #[derive(serde::Serialize)]
@@ -40,6 +41,7 @@ async fn upload_and_ingest(
     mut multipart: Multipart,
 ) -> Result<Json<UploadIngestResponse>, ApiError> {
     auth.require_any_scope(POLICY_DOCUMENTS_WRITE)?;
+    let upload_limit_bytes = state.ui_runtime.upload_max_size_mb.saturating_mul(1024 * 1024);
     let mut project_id: Option<Uuid> = None;
     let mut source_id: Option<Uuid> = None;
     let mut title: Option<String> = None;
@@ -49,7 +51,7 @@ async fn upload_and_ingest(
 
     while let Some(field) = multipart.next_field().await.map_err(|_| {
         warn!("rejecting upload ingestion request with invalid multipart payload");
-        ApiError::BadRequest("invalid multipart payload".into())
+        ApiError::from_upload_admission(UploadAdmissionError::invalid_multipart_payload())
     })? {
         let name = field.name().unwrap_or_default().to_string();
         match name.as_str() {
@@ -96,7 +98,12 @@ async fn upload_and_ingest(
                                 mime_type = ?mime_type,
                                 "rejecting upload ingestion request with unreadable file body",
                             );
-                            ApiError::BadRequest("invalid file body".into())
+                            ApiError::from_upload_admission(
+                                UploadAdmissionError::invalid_file_body(
+                                    file_name.as_deref(),
+                                    mime_type.as_deref(),
+                                ),
+                            )
                         })?
                         .to_vec(),
                 );
@@ -118,10 +125,19 @@ async fn upload_and_ingest(
             source_id = ?source_id,
             "rejecting upload ingestion request without file payload",
         );
-        ApiError::BadRequest("missing file".into())
+        ApiError::from_upload_admission(UploadAdmissionError::missing_upload_file("missing file"))
     })?;
     let external_key = file_name.unwrap_or_else(|| format!("upload-{}", Uuid::now_v7()));
     let file_size_bytes = file_bytes.len();
+    let file_size_bytes_u64 = u64::try_from(file_size_bytes).unwrap_or(u64::MAX);
+    if file_size_bytes_u64 > upload_limit_bytes {
+        return Err(ApiError::from_upload_admission(UploadAdmissionError::file_too_large(
+            &external_key,
+            mime_type.as_deref(),
+            file_size_bytes_u64,
+            state.ui_runtime.upload_max_size_mb,
+        )));
+    }
     let queued = queue_new_runtime_upload(
         &state,
         QueueRuntimeUploadRequest {
@@ -152,7 +168,7 @@ async fn upload_and_ingest(
             error = %error,
             "rejecting upload ingestion request for unsupported file kind or extraction failure",
         );
-        ApiError::BadRequest(error.to_string())
+        map_runtime_upload_error(error)
     })?;
     let payload = repositories::parse_ingestion_execution_payload(&queued.ingestion_job)
         .map_err(|_| ApiError::Internal)?;

@@ -28,6 +28,14 @@ const emit = defineEmits<{
       </button>
       <button
         class="rr-button rr-button--ghost rr-button--tiny"
+        :class="{ 'is-active': layoutMode === 'circle' }"
+        type="button"
+        @click="emit('setLayout', 'circle')"
+      >
+        {{ $t('graph.layouts.circle') }}
+      </button>
+      <button
+        class="rr-button rr-button--ghost rr-button--tiny"
         :class="{ 'is-active': layoutMode === 'rings' }"
         type="button"
         @click="emit('setLayout', 'rings')"
@@ -41,6 +49,38 @@ const emit = defineEmits<{
         @click="emit('setLayout', 'lanes')"
       >
         {{ $t('graph.layouts.lanes') }}
+      </button>
+      <button
+        class="rr-button rr-button--ghost rr-button--tiny"
+        :class="{ 'is-active': layoutMode === 'clusters' }"
+        type="button"
+        @click="emit('setLayout', 'clusters')"
+      >
+        {{ $t('graph.layouts.clusters') }}
+      </button>
+      <button
+        class="rr-button rr-button--ghost rr-button--tiny"
+        :class="{ 'is-active': layoutMode === 'focus' }"
+        type="button"
+        @click="emit('setLayout', 'focus')"
+      >
+        {{ $t('graph.layouts.focus') }}
+      </button>
+      <button
+        class="rr-button rr-button--ghost rr-button--tiny"
+        :class="{ 'is-active': layoutMode === 'islands' }"
+        type="button"
+        @click="emit('setLayout', 'islands')"
+      >
+        {{ $t('graph.layouts.islands') }}
+      </button>
+      <button
+        class="rr-button rr-button--ghost rr-button--tiny"
+        :class="{ 'is-active': layoutMode === 'spiral' }"
+        type="button"
+        @click="emit('setLayout', 'spiral')"
+      >
+        {{ $t('graph.layouts.spiral') }}
       </button>
     </div>
     <button

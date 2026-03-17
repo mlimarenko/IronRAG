@@ -219,3 +219,25 @@ export interface DocumentsSurfaceResponse {
 export interface UploadDocumentsResponse {
   acceptedRows: DocumentRow[]
 }
+
+export interface UploadRejectionDetails {
+  fileName: string | null
+  detectedFormat: string | null
+  mimeType: string | null
+  fileSizeBytes: number | null
+  uploadLimitMb: number | null
+  rejectionCause: string | null
+  operatorAction: string | null
+}
+
+export interface DocumentUploadFailure {
+  fileName: string
+  message: string
+  errorKind: string | null
+  detectedFormat: string | null
+  mimeType: string | null
+  fileSizeBytes: number | null
+  uploadLimitMb: number | null
+  rejectionCause: string | null
+  operatorAction: string | null
+}

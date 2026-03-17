@@ -174,8 +174,13 @@ export const useGraphStore = defineStore('graph', {
       return assistantConfig
     },
     async loadSurface(libraryId: string, options?: { preserveUi?: boolean }): Promise<void> {
+      const previousLibraryId = this.activeLibraryId
       this.activeLibraryId = libraryId
-      this.loading = true
+      const shouldShowLoading =
+        !options?.preserveUi || !this.surface || previousLibraryId !== libraryId
+      if (shouldShowLoading) {
+        this.loading = true
+      }
       this.error = null
       if (!options?.preserveUi) {
         this.assistantError = null

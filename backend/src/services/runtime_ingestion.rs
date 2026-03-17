@@ -34,7 +34,8 @@ use crate::{
         ingest_activity::IngestActivityService,
     },
     shared::file_extract::{
-        FileExtractionPlan, UploadFileKind, build_runtime_file_extraction_plan,
+        FileExtractionPlan, UploadAdmissionError, UploadFileKind,
+        build_runtime_file_extraction_plan,
     },
 };
 
@@ -538,12 +539,22 @@ pub async fn persist_extracted_content_from_payload(
 
 pub fn validate_runtime_extraction_plan(
     file_name: &str,
+    mime_type: Option<&str>,
+    file_size_bytes: u64,
     extraction_plan: &FileExtractionPlan,
-) -> anyhow::Result<()> {
+) -> Result<(), UploadAdmissionError> {
     if extraction_plan.file_kind == UploadFileKind::TextLike
         && extraction_plan.extracted_text.as_deref().is_some_and(|text| text.trim().is_empty())
     {
-        bail!("uploaded file {file_name} is empty");
+        return Err(UploadAdmissionError::from_file_extract_error(
+            file_name,
+            mime_type,
+            file_size_bytes,
+            crate::shared::file_extract::FileExtractError::ExtractionFailed {
+                file_kind: UploadFileKind::TextLike,
+                message: format!("uploaded file {file_name} is empty"),
+            },
+        ));
     }
 
     Ok(())
@@ -840,6 +851,7 @@ pub async fn queue_new_runtime_upload(
     state: &AppState,
     request: QueueRuntimeUploadRequest,
 ) -> anyhow::Result<RuntimeQueuedUpload> {
+    let file_size_bytes = u64::try_from(request.file.file_bytes.len()).unwrap_or(u64::MAX);
     let provider_profile = resolve_effective_provider_profile(state, request.project_id).await?;
     let extraction_plan = build_runtime_file_extraction_plan(
         state.llm_gateway.as_ref(),
@@ -849,8 +861,21 @@ pub async fn queue_new_runtime_upload(
         request.file.file_bytes.clone(),
     )
     .await
-    .with_context(|| format!("failed to extract {}", request.file.file_name))?;
-    validate_runtime_extraction_plan(&request.file.file_name, &extraction_plan)?;
+    .map_err(|error| {
+        anyhow::Error::new(UploadAdmissionError::from_file_extract_error(
+            &request.file.file_name,
+            request.file.mime_type.as_deref(),
+            file_size_bytes,
+            error,
+        ))
+    })?;
+    validate_runtime_extraction_plan(
+        &request.file.file_name,
+        request.file.mime_type.as_deref(),
+        file_size_bytes,
+        &extraction_plan,
+    )
+    .map_err(anyhow::Error::new)?;
     let initial_document =
         create_initial_document_snapshot(state, &request, &extraction_plan).await?;
 

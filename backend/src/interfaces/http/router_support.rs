@@ -9,6 +9,8 @@ use thiserror::Error;
 use tracing::{error, warn};
 use uuid::Uuid;
 
+use crate::shared::file_extract::{UploadAdmissionError, UploadRejectionDetails};
+
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
 
 #[derive(Debug, Serialize)]
@@ -17,6 +19,8 @@ pub struct ApiErrorBody {
     pub error: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_kind: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<UploadRejectionDetails>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
 }
@@ -44,6 +48,8 @@ pub enum ApiError {
     ConflictingMutation(String),
     #[error("conflict: {0}")]
     MissingPrice(String),
+    #[error("{message}")]
+    UploadRejected { message: String, error_kind: &'static str, details: UploadRejectionDetails },
     #[error("internal server error")]
     Internal,
 }
@@ -58,6 +64,7 @@ impl ApiError {
             | Self::StaleRevision(_)
             | Self::ConflictingMutation(_)
             | Self::MissingPrice(_) => StatusCode::CONFLICT,
+            Self::UploadRejected { .. } => StatusCode::BAD_REQUEST,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -71,13 +78,47 @@ impl ApiError {
             Self::StaleRevision(_) => "stale_revision",
             Self::ConflictingMutation(_) => "conflicting_mutation",
             Self::MissingPrice(_) => "missing_price",
+            Self::UploadRejected { error_kind, .. } => error_kind,
             Self::Internal => "internal",
+        }
+    }
+
+    fn details(&self) -> Option<UploadRejectionDetails> {
+        match self {
+            Self::UploadRejected { details, .. } => Some(details.clone()),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn from_upload_admission(error: UploadAdmissionError) -> Self {
+        Self::UploadRejected {
+            message: error.message().to_string(),
+            error_kind: error.error_kind(),
+            details: error.details().clone(),
         }
     }
 }
 
 pub fn map_runtime_lifecycle_error(error: AnyhowError) -> ApiError {
     map_runtime_lifecycle_error_message(error.to_string())
+}
+
+pub fn map_runtime_upload_error(error: AnyhowError) -> ApiError {
+    match error.downcast::<UploadAdmissionError>() {
+        Ok(upload_error) => ApiError::from_upload_admission(upload_error),
+        Err(error) => {
+            error!(error = ?error, "runtime upload handler failed with unexpected internal error");
+            ApiError::Internal
+        }
+    }
+}
+
+pub fn map_runtime_write_error(error: AnyhowError) -> ApiError {
+    match error.downcast::<UploadAdmissionError>() {
+        Ok(upload_error) => ApiError::from_upload_admission(upload_error),
+        Err(error) => map_runtime_lifecycle_error(error),
+    }
 }
 
 pub fn map_runtime_lifecycle_error_message(message: String) -> ApiError {
@@ -127,6 +168,7 @@ impl IntoResponse for ApiError {
         let error_kind = self.kind();
         let message = self.to_string();
         let request_id = None::<String>;
+        let details = self.details();
 
         if status.is_server_error() {
             error!(
@@ -151,6 +193,7 @@ impl IntoResponse for ApiError {
             Json(ApiErrorBody {
                 error: message,
                 error_kind: Some(error_kind),
+                details,
                 request_id: request_id.clone(),
             }),
         )
@@ -186,7 +229,8 @@ pub struct RequestId(pub String);
 
 #[cfg(test)]
 mod tests {
-    use super::{ApiError, map_runtime_lifecycle_error_message};
+    use super::{ApiError, map_runtime_lifecycle_error_message, map_runtime_upload_error};
+    use crate::shared::file_extract::UploadAdmissionError;
 
     #[test]
     fn maps_stale_revision_errors_to_specific_kind() {
@@ -210,5 +254,20 @@ mod tests {
             "missing price for provider/model/capability".to_string(),
         );
         assert!(matches!(error, ApiError::MissingPrice(_)));
+    }
+
+    #[test]
+    fn maps_upload_admission_errors_to_structured_upload_rejections() {
+        let error = map_runtime_upload_error(anyhow::Error::new(
+            UploadAdmissionError::invalid_file_body(Some("report.pdf"), Some("application/pdf")),
+        ));
+        match error {
+            ApiError::UploadRejected { error_kind, details, .. } => {
+                assert_eq!(error_kind, "invalid_file_body");
+                assert_eq!(details.file_name.as_deref(), Some("report.pdf"));
+                assert_eq!(details.detected_format.as_deref(), Some("PDF"));
+            }
+            other => panic!("expected upload rejection, got {other:?}"),
+        }
     }
 }

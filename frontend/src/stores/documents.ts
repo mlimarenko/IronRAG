@@ -8,6 +8,7 @@ import type {
   DocumentMutationStatus,
   DocumentRow,
   DocumentStatus,
+  DocumentUploadFailure,
   DocumentsSurfaceResponse,
 } from 'src/models/ui/documents'
 import {
@@ -15,6 +16,7 @@ import {
   deleteDocumentItem,
   fetchDocumentDetail,
   fetchDocumentsSurface,
+  normalizeDocumentUploadFailure,
   replaceDocumentItem,
   reprocessDocumentItem,
   retryDocumentItem,
@@ -41,6 +43,7 @@ interface DocumentsState {
   detailOpen: boolean
   appendDialogDocumentId: string | null
   replaceDialogDocumentId: string | null
+  uploadFailures: DocumentUploadFailure[]
 }
 
 const LOCAL_UPLOAD_CONCURRENCY = 3
@@ -341,6 +344,7 @@ export const useDocumentsStore = defineStore('documents', {
     detailOpen: false,
     appendDialogDocumentId: null,
     replaceDialogDocumentId: null,
+    uploadFailures: [],
   }),
   getters: {
     filteredRows(state): DocumentRow[] {
@@ -399,6 +403,9 @@ export const useDocumentsStore = defineStore('documents', {
         return
       }
       this.surface = withRows(this.surface, removeRow(this.surface.rows, placeholderId))
+    },
+    clearUploadFailures(): void {
+      this.uploadFailures = []
     },
     async loadSurface(options?: { syncDetail?: boolean }): Promise<void> {
       this.loading = true
@@ -463,6 +470,7 @@ export const useDocumentsStore = defineStore('documents', {
 
       this.uploadLoading = true
       this.error = null
+      this.clearUploadFailures()
       const graphStore = useGraphStore() as {
         loadSurface: (libraryId: string, options?: { preserveUi?: boolean }) => Promise<void>
       }
@@ -478,7 +486,7 @@ export const useDocumentsStore = defineStore('documents', {
       )
       this.localUploadRows = [...placeholders, ...this.localUploadRows]
       this.surface = mergeLocalUploadRows(this.surface ?? createEmptySurface(), this.localUploadRows)
-      const failures: string[] = []
+      const failures: DocumentUploadFailure[] = []
       try {
         await processWithConcurrency(
           queuedFiles,
@@ -489,21 +497,21 @@ export const useDocumentsStore = defineStore('documents', {
               this.upsertAcceptedRow(row, placeholderId)
             } catch (error) {
               this.removeLocalUploadRow(placeholderId)
-              const message = error instanceof Error ? error.message : 'Failed to upload document'
-              failures.push(`${file.name}: ${message}`)
+              failures.push(normalizeDocumentUploadFailure(file, error))
             }
           },
         )
+        this.uploadFailures = failures
         await this.loadSurface({ syncDetail: true })
         if (libraryId) {
           await graphStore.loadSurface(libraryId, { preserveUi: true }).catch(() => undefined)
         }
         if (failures.length > 0) {
-          const firstFailure = failures[0] ?? 'Unknown upload error'
+          const firstFailure = failures[0]
           this.error =
             failures.length === 1
-              ? firstFailure
-              : `${String(failures.length)} files failed to upload. First error: ${firstFailure}`
+              ? firstFailure.message
+              : `${String(failures.length)} files failed to upload. First error: ${firstFailure.message}`
         }
       } catch (error) {
         this.error = error instanceof Error ? error.message : 'Failed to upload documents'

@@ -52,6 +52,18 @@ const en = {
     attemptShort: 'Attempt #{number}',
     loadingDetail: 'Loading document detail…',
     uploadQueuedHint: 'Accepted files are queued immediately and continue processing in the background.',
+    uploadReport: {
+      title: 'Upload report',
+      summary: '{count} file(s) were rejected during upload.',
+      dismiss: 'Dismiss',
+      labels: {
+        format: 'Format',
+        mimeType: 'MIME type',
+        limit: 'Limit',
+        reason: 'Reason',
+        action: 'Next step',
+      },
+    },
     headers: {
       fileName: 'File name',
       type: 'Type',
@@ -258,8 +270,13 @@ const en = {
     fit: 'Fit',
     layouts: {
       cloud: 'Cloud',
+      circle: 'Circle',
       rings: 'Rings',
-      lanes: 'Lanes',
+      lanes: 'Columns',
+      clusters: 'Clusters',
+      focus: 'Focus',
+      islands: 'Islands',
+      spiral: 'Spiral',
     },
     webglUnavailableTitle: 'Graph unavailable',
     webglUnavailableDescription:
