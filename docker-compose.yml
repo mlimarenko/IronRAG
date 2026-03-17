@@ -43,9 +43,6 @@ services:
 
   backend:
     image: ${RUSTRAG_BACKEND_IMAGE:-rustrag-backend:local}
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
     security_opt:
       - apparmor=unconfined
     restart: unless-stopped
@@ -95,9 +92,7 @@ services:
       - "18080:8080"
 
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
+    image: ${RUSTRAG_FRONTEND_IMAGE:-rustrag-frontend:local}
     depends_on:
       - backend
     ports:
