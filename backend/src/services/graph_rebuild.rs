@@ -1,0 +1,230 @@
+use std::collections::BTreeSet;
+
+use anyhow::Context;
+use uuid::Uuid;
+
+use crate::{
+    app::state::AppState,
+    infra::repositories::{self, RuntimeGraphExtractionRecordRow},
+    services::{
+        graph_extract::{GraphExtractionCandidateSet, extraction_lifecycle_from_record},
+        graph_merge::{GraphMergeScope, merge_chunk_graph_candidates},
+        graph_projection::{
+            GraphProjectionOutcome, ensure_empty_graph_snapshot, next_projection_version,
+            rebuild_projection_from_canonical,
+        },
+        runtime_ingestion::{
+            embed_runtime_graph_edges, embed_runtime_graph_nodes,
+            resolve_effective_provider_profile,
+        },
+    },
+};
+
+#[derive(Debug, Clone)]
+pub struct GraphRebuildPlan {
+    pub library_id: Uuid,
+    pub projection_version: i64,
+    pub surviving_extraction_count: usize,
+    pub surviving_document_count: usize,
+}
+
+pub async fn plan_graph_rebuild(
+    state: &AppState,
+    library_id: Uuid,
+) -> anyhow::Result<GraphRebuildPlan> {
+    let snapshot =
+        repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
+            .await
+            .context("failed to load graph snapshot while planning rebuild")?;
+    let extractions = repositories::list_runtime_graph_extraction_records_by_project(
+        &state.persistence.postgres,
+        library_id,
+    )
+    .await
+    .context("failed to load runtime graph extraction records while planning rebuild")?;
+
+    Ok(GraphRebuildPlan {
+        library_id,
+        projection_version: next_projection_version(snapshot.as_ref()),
+        surviving_document_count: count_surviving_documents(&extractions),
+        surviving_extraction_count: extractions.len(),
+    })
+}
+
+pub async fn rebuild_library_graph(
+    state: &AppState,
+    library_id: Uuid,
+) -> anyhow::Result<GraphProjectionOutcome> {
+    let plan = plan_graph_rebuild(state, library_id).await?;
+    let provider_profile = resolve_effective_provider_profile(state, library_id).await?;
+    let extractions = repositories::list_runtime_graph_extraction_records_by_project(
+        &state.persistence.postgres,
+        library_id,
+    )
+    .await
+    .context("failed to reload runtime graph extraction records for rebuild")?;
+
+    if extractions.is_empty() {
+        return ensure_empty_graph_snapshot(state, library_id, plan.projection_version).await;
+    }
+
+    let mut merged_any = false;
+
+    for record in extractions {
+        if record.status != "ready" {
+            continue;
+        }
+
+        let Some(document) =
+            repositories::get_document_by_id(&state.persistence.postgres, record.document_id)
+                .await
+                .with_context(|| format!("failed to load document {}", record.document_id))?
+        else {
+            continue;
+        };
+        if document.deleted_at.is_some() {
+            continue;
+        }
+        let extraction_lifecycle = extraction_lifecycle_from_record(&record);
+        if extraction_lifecycle.revision_id.is_some()
+            && extraction_lifecycle.revision_id != document.current_revision_id
+        {
+            continue;
+        }
+        let Some(chunk) =
+            repositories::get_chunk_by_id(&state.persistence.postgres, record.chunk_id)
+                .await
+                .with_context(|| format!("failed to load chunk {}", record.chunk_id))?
+        else {
+            continue;
+        };
+        let candidates = serde_json::from_value::<GraphExtractionCandidateSet>(
+            record.normalized_output_json.clone(),
+        )
+        .unwrap_or_default();
+        if candidates.entities.is_empty() && candidates.relations.is_empty() {
+            continue;
+        }
+
+        let merge_scope = GraphMergeScope::new(library_id, plan.projection_version).with_lifecycle(
+            extraction_lifecycle.revision_id.or(document.current_revision_id),
+            extraction_lifecycle.activated_by_attempt_id,
+        );
+        merge_chunk_graph_candidates(
+            &state.persistence.postgres,
+            &state.bulk_ingest_hardening_services.graph_quality_guard,
+            &merge_scope,
+            &document,
+            &chunk,
+            &candidates,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to rebuild graph knowledge for document {} chunk {}",
+                document.id, chunk.id
+            )
+        })?;
+        merged_any = true;
+    }
+
+    let merged_nodes = repositories::list_admitted_runtime_graph_nodes_by_projection(
+        &state.persistence.postgres,
+        library_id,
+        plan.projection_version,
+    )
+    .await
+    .context("failed to load rebuilt graph nodes")?;
+    let merged_edges = repositories::list_admitted_runtime_graph_edges_by_projection(
+        &state.persistence.postgres,
+        library_id,
+        plan.projection_version,
+    )
+    .await
+    .context("failed to load rebuilt graph edges")?;
+
+    if merged_nodes.is_empty() && merged_edges.is_empty() {
+        return ensure_empty_graph_snapshot(state, library_id, plan.projection_version).await;
+    }
+
+    if merged_any {
+        embed_runtime_graph_nodes(state, &provider_profile, &merged_nodes, None)
+            .await
+            .context("failed to embed rebuilt graph nodes")?;
+        embed_runtime_graph_edges(state, &provider_profile, &merged_nodes, &merged_edges, None)
+            .await
+            .context("failed to embed rebuilt graph edges")?;
+    }
+
+    rebuild_projection_from_canonical(state, library_id, plan.projection_version)
+        .await
+        .context("failed to project rebuilt graph")
+}
+
+fn count_surviving_documents(records: &[RuntimeGraphExtractionRecordRow]) -> usize {
+    records.iter().map(|record| record.document_id).collect::<BTreeSet<_>>().len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_unique_documents_in_rebuild_plan() {
+        let document_id = Uuid::now_v7();
+        let other_document_id = Uuid::now_v7();
+
+        let records = vec![
+            RuntimeGraphExtractionRecordRow {
+                id: Uuid::now_v7(),
+                project_id: Uuid::now_v7(),
+                document_id,
+                chunk_id: Uuid::now_v7(),
+                provider_kind: "openai".to_string(),
+                model_name: "gpt-5-mini".to_string(),
+                extraction_version: "graph_extract_v1".to_string(),
+                prompt_hash: "a".to_string(),
+                status: "completed".to_string(),
+                raw_output_json: serde_json::json!({}),
+                normalized_output_json: serde_json::json!({}),
+                glean_pass_count: 1,
+                error_message: None,
+                created_at: chrono::Utc::now(),
+            },
+            RuntimeGraphExtractionRecordRow {
+                id: Uuid::now_v7(),
+                project_id: Uuid::now_v7(),
+                document_id,
+                chunk_id: Uuid::now_v7(),
+                provider_kind: "openai".to_string(),
+                model_name: "gpt-5-mini".to_string(),
+                extraction_version: "graph_extract_v1".to_string(),
+                prompt_hash: "b".to_string(),
+                status: "completed".to_string(),
+                raw_output_json: serde_json::json!({}),
+                normalized_output_json: serde_json::json!({}),
+                glean_pass_count: 1,
+                error_message: None,
+                created_at: chrono::Utc::now(),
+            },
+            RuntimeGraphExtractionRecordRow {
+                id: Uuid::now_v7(),
+                project_id: Uuid::now_v7(),
+                document_id: other_document_id,
+                chunk_id: Uuid::now_v7(),
+                provider_kind: "openai".to_string(),
+                model_name: "gpt-5-mini".to_string(),
+                extraction_version: "graph_extract_v1".to_string(),
+                prompt_hash: "c".to_string(),
+                status: "completed".to_string(),
+                raw_output_json: serde_json::json!({}),
+                normalized_output_json: serde_json::json!({}),
+                glean_pass_count: 1,
+                error_message: None,
+                created_at: chrono::Utc::now(),
+            },
+        ];
+
+        assert_eq!(count_surviving_documents(&records), 2);
+    }
+}

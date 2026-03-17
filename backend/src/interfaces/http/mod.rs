@@ -11,8 +11,21 @@ pub mod ingestion;
 pub mod integrations;
 pub mod projects;
 pub mod providers;
+pub mod query_experience;
 pub mod retrieval;
 pub mod router_support;
+pub mod runtime_documents;
+pub mod runtime_graph;
+pub mod runtime_pricing;
+pub mod runtime_providers;
+pub mod runtime_query;
+pub mod runtime_support;
+pub mod ui_admin;
+pub mod ui_auth;
+pub mod ui_documents;
+pub mod ui_graph;
+pub mod ui_shell;
+pub mod ui_support;
 pub mod uploads;
 pub mod usage;
 pub mod workspaces;
@@ -34,6 +47,17 @@ pub fn router() -> Router<crate::app::state::AppState> {
         .merge(content::router())
         .merge(chat::router())
         .merge(chunks::router())
+        .merge(runtime_documents::router())
+        .merge(runtime_graph::router())
+        .merge(runtime_pricing::router())
+        .merge(runtime_query::router())
+        .merge(runtime_providers::router())
+        .merge(query_experience::router())
+        .merge(ui_auth::router())
+        .merge(ui_shell::router())
+        .merge(ui_documents::router())
+        .merge(ui_graph::router())
+        .merge(ui_admin::router())
         .merge(uploads::router())
         .merge(retrieval::router())
         .merge(graph::router())

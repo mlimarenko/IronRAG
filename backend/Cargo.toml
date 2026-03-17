@@ -40,10 +40,20 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "json", "env-filter"]
 uuid = { version = "1.16", features = ["v7", "serde"] }
 redis = { version = "0.32", features = ["tokio-comp"] }
 anyhow = "1.0"
+futures = "0.3"
 sha2 = "0.10"
 hex = "0.4"
 async-trait = "0.1"
 rust_decimal = { version = "1", features = ["serde"] }
+cookie = "0.18"
+argon2 = "0.5"
+neo4rs = { version = "0.9.0-rc.9", features = ["uuid"] }
+lopdf = "0.39.0"
+roxmltree = "0.21.1"
+zip = { version = "8.2.0", default-features = false, features = ["deflate"] }
+base64 = "0.22.1"
+tempfile = "3.23.0"
+json5 = "0.4"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

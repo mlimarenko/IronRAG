@@ -13,6 +13,9 @@ backend-doc:
 backend-test:
 	cd backend && cargo test
 
+backend-change-gate:
+	cd backend && $(MAKE) change-gate
+
 backend-audit:
 	cd backend && cargo audit
 
@@ -31,12 +34,12 @@ frontend-typecheck:
 frontend-build:
 	cd frontend && npm run build
 
-check: backend-lint backend-test frontend-lint frontend-format-check frontend-typecheck
+check: backend-change-gate frontend-lint frontend-format-check frontend-typecheck
 
-check-strict: backend-lint backend-doc backend-test frontend-lint frontend-format-check frontend-typecheck
+check-strict: backend-change-gate backend-doc frontend-lint frontend-format-check frontend-typecheck
 
 enterprise-validate:
-	cd backend && $(MAKE) quality
+	$(MAKE) backend-change-gate
 	cd frontend && npm run enterprise:check
 
 audit: backend-audit

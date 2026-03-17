@@ -12,8 +12,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
-    ports:
-      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql
 
@@ -26,8 +24,22 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
-    ports:
-      - "6379:6379"
+  neo4j:
+    image: neo4j:5.26.0
+    security_opt:
+      - apparmor=unconfined
+    environment:
+      NEO4J_AUTH: neo4j/rustrag-dev
+      NEO4J_server_memory_pagecache_size: 256M
+      NEO4J_server_memory_heap_initial__size: 256M
+      NEO4J_server_memory_heap_max__size: 256M
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -a bolt://localhost:7687 -u neo4j -p rustrag-dev 'RETURN 1;' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+    volumes:
+      - neo4j_data:/data
 
   backend:
     image: ${RUSTRAG_BACKEND_IMAGE:-rustrag-backend:local}
@@ -42,6 +54,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      neo4j:
+        condition: service_healthy
     environment:
       bind_addr: 0.0.0.0:8080
       service_name: rustrag-backend
@@ -49,11 +63,36 @@ services:
       database_url: postgres://postgres:postgres@postgres:5432/rustrag
       database_max_connections: 20
       redis_url: redis://redis:6379
+      neo4j_uri: neo4j:7687
+      neo4j_username: neo4j
+      neo4j_password: rustrag-dev
+      neo4j_database: neo4j
+      neo4j_max_connections: 16
       log_filter: info
+      frontend_origin: http://127.0.0.1:19000,http://localhost:19000,http://127.0.0.1:9000,http://localhost:9000,http://127.0.0.1:3000,http://localhost:3000
       bootstrap_token: ${RUSTRAG_BOOTSTRAP_TOKEN:-bootstrap-local}
+      openai_api_key: ${RUSTRAG_OPENAI_API_KEY:-}
+      deepseek_api_key: ${RUSTRAG_DEEPSEEK_API_KEY:-}
+      qwen_api_key: ${RUSTRAG_QWEN_API_KEY:-}
+      qwen_api_base_url: ${RUSTRAG_QWEN_API_BASE_URL:-https://dashscope-intl.aliyuncs.com/compatible-mode/v1}
+      ingestion_worker_concurrency: ${RUSTRAG_INGESTION_WORKER_CONCURRENCY:-4}
+      runtime_default_indexing_provider: ${RUSTRAG_RUNTIME_DEFAULT_INDEXING_PROVIDER:-openai}
+      runtime_default_indexing_model: ${RUSTRAG_RUNTIME_DEFAULT_INDEXING_MODEL:-gpt-5-mini}
+      runtime_default_embedding_provider: ${RUSTRAG_RUNTIME_DEFAULT_EMBEDDING_PROVIDER:-openai}
+      runtime_default_embedding_model: ${RUSTRAG_RUNTIME_DEFAULT_EMBEDDING_MODEL:-text-embedding-3-large}
+      runtime_default_answer_provider: ${RUSTRAG_RUNTIME_DEFAULT_ANSWER_PROVIDER:-openai}
+      runtime_default_answer_model: ${RUSTRAG_RUNTIME_DEFAULT_ANSWER_MODEL:-gpt-5.4}
+      runtime_default_vision_provider: ${RUSTRAG_RUNTIME_DEFAULT_VISION_PROVIDER:-openai}
+      runtime_default_vision_model: ${RUSTRAG_RUNTIME_DEFAULT_VISION_MODEL:-gpt-5-mini}
+      runtime_live_validation_enabled: ${RUSTRAG_RUNTIME_LIVE_VALIDATION_ENABLED:-true}
+      qwen_input_price_per_1m: ${RUSTRAG_QWEN_INPUT_PRICE_PER_1M:-0.07}
+      qwen_chat_input_price_per_1m: ${RUSTRAG_QWEN_CHAT_INPUT_PRICE_PER_1M:-0}
+      qwen_chat_output_price_per_1m: ${RUSTRAG_QWEN_CHAT_OUTPUT_PRICE_PER_1M:-0}
+      qwen_vision_input_price_per_1m: ${RUSTRAG_QWEN_VISION_INPUT_PRICE_PER_1M:-0}
+      qwen_vision_output_price_per_1m: ${RUSTRAG_QWEN_VISION_OUTPUT_PRICE_PER_1M:-0}
       RUST_BACKTRACE: full
     ports:
-      - "8080:8080"
+      - "18080:8080"
 
   frontend:
     build:
@@ -62,7 +101,8 @@ services:
     depends_on:
       - backend
     ports:
-      - "3000:3000"
+      - "19000:3000"
 
 volumes:
   postgres_data:
+  neo4j_data:

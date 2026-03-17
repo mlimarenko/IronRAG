@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RustRAG Graph Redesign</title>
+    <link rel="stylesheet" href="/figma-mockups/mockup.css" />
+    <script src="/figma-mockups/capture-bootstrap.js"></script>
+  </head>
+  <body>
+    <div class="shell">
+      <div class="topbar">
+        <div class="brand">
+          <div class="brand-badge">RR</div>
+          <div>
+            <h1>RustRAG</h1>
+            <p>Graph workspace redesign</p>
+          </div>
+          <div class="nav">
+            <span>Документы</span>
+            <span class="is-active">Граф</span>
+            <span>Админ</span>
+          </div>
+        </div>
+        <div class="workspace-meta">
+          <div class="selector">Workspace · Default workspace</div>
+          <div class="selector">Library · Default library</div>
+          <div class="locale">EN · RU</div>
+          <div class="user-chip">
+            <div class="avatar">A</div>
+            <div class="user-meta">
+              <strong>Admin</strong>
+              <span>owner</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="page">
+        <div class="content-card">
+          <div class="page-head">
+            <div>
+              <h2>Knowledge graph</h2>
+              <p>
+                Большое рабочее полотно с более читаемыми кластерами, фокусом на выбранный
+                документ и отдельной AI-панелью по мотивам AI Elements Vue.
+              </p>
+            </div>
+            <div class="badge success">Ready · 55 nodes · 84 relations</div>
+          </div>
+
+          <div class="toolbar">
+            <div class="selector">Поиск по документам, сущностям и темам</div>
+            <div class="selector">Все типы узлов</div>
+            <div class="pill"><span class="dot green"></span>Focus: data-model.md</div>
+            <div class="icon-button">＋</div>
+            <div class="icon-button">－</div>
+            <div class="icon-button">⌂</div>
+          </div>
+
+          <div class="graph-wrap">
+            <div class="graph-board">
+              <div class="cluster-card docs">
+                <h4>Documents cluster</h4>
+                <p>Основные документы собираются в левом кластере и не смешиваются с темами.</p>
+              </div>
+              <div class="cluster-card entities">
+                <h4>Entity focus</h4>
+                <p>Выбранный документ раскрывает только релевантные сущности и связи первого шага.</p>
+              </div>
+              <div class="cluster-card themes">
+                <h4>Topics</h4>
+                <p>Темы вынесены в отдельный контур, чтобы поле не превращалось в плотный шум.</p>
+              </div>
+              <div class="cluster-card relations">
+                <h4>Evidence edges</h4>
+                <p>Связи сгруппированы по силе, а не раскиданы равномерным волосатым облаком.</p>
+              </div>
+              <div class="cluster-card sources">
+                <h4>Linked chunks</h4>
+                <p>Источники и чанки раскрываются локально, а не занимают всё полотно сразу.</p>
+              </div>
+
+              <div class="node is-document focused" style="top: 300px; left: 320px">data-model.md</div>
+              <div class="node is-document" style="top: 186px; left: 182px">spec.md</div>
+              <div class="node is-document" style="top: 456px; left: 148px">plan.md</div>
+              <div class="node is-document" style="top: 564px; left: 336px">tasks.md</div>
+              <div class="node is-topic" style="top: 178px; left: 690px">Runtime graph</div>
+              <div class="node is-topic" style="top: 510px; left: 820px">Provider profiles</div>
+              <div class="node is-entity" style="top: 320px; left: 662px">Neo4j projection</div>
+              <div class="node is-entity" style="top: 430px; left: 568px">Embedding pipeline</div>
+              <div class="node is-entity" style="top: 270px; left: 910px">Evidence links</div>
+              <div class="node is-entity" style="top: 570px; left: 650px">Query grounding</div>
+
+              <div class="edge" style="top: 330px; left: 450px; width: 220px; transform: rotate(-8deg)"></div>
+              <div class="edge" style="top: 338px; left: 452px; width: 170px; transform: rotate(26deg)"></div>
+              <div class="edge" style="top: 332px; left: 392px; width: 180px; transform: rotate(-142deg)"></div>
+              <div class="edge" style="top: 360px; left: 410px; width: 230px; transform: rotate(83deg)"></div>
+              <div class="edge" style="top: 336px; left: 486px; width: 320px; transform: rotate(44deg)"></div>
+              <div class="edge" style="top: 356px; left: 506px; width: 420px; transform: rotate(-13deg)"></div>
+
+              <div class="legend">
+                <div class="legend-item"><span class="dot" style="background:#5b45ff"></span>Document</div>
+                <div class="legend-item"><span class="dot" style="background:#f59e0b"></span>Entity</div>
+                <div class="legend-item"><span class="dot" style="background:#10b981"></span>Topic</div>
+                <div class="legend-item"><span class="dot" style="background:#94a3b8"></span>Relation</div>
+              </div>
+            </div>
+
+            <aside class="chat-panel">
+              <div class="chat-head">
+                <div class="chat-title">
+                  <h3>Ask AI</h3>
+                  <div class="token">ai-elements style</div>
+                </div>
+                <p class="prompt-copy">
+                  Панель строится как conversation + sources + prompt input, а не как длинная белая колонка с тяжёлым текстом.
+                </p>
+                <div class="badge-row">
+                  <div class="mode is-active">Hybrid</div>
+                  <div class="mode">Document</div>
+                  <div class="mode">Global</div>
+                  <div class="mode">Mix</div>
+                </div>
+              </div>
+
+              <div class="conversation">
+                <div class="conversation-card">
+                  <div class="avatar">A</div>
+                  <div class="bubble user">Какие ключевые темы видны вокруг data-model.md?</div>
+                </div>
+
+                <div class="conversation-card">
+                  <div class="avatar" style="background: rgba(58,127,255,0.12); color:#2668df">AI</div>
+                  <div class="bubble ai">
+                    Видны три устойчивые ветки: runtime graph, embedding pipeline и query grounding. Основной документ служит точкой связывания между провайдерами, проекцией в Neo4j и evidence-потоком.
+                  </div>
+                </div>
+
+                <div class="source-card">
+                  <h4>Grounded sources</h4>
+                  <p>Ссылки на чанки и документы сворачиваются в аккуратный блок, а не расползаются по длинному сообщению.</p>
+                  <span class="source-chip">data-model.md · chunk 4</span>
+                  <span class="source-chip">spec.md · chunk 2</span>
+                  <span class="source-chip">tasks.md · chunk 9</span>
+                </div>
+
+                <div class="soft-card">
+                  <h4>Selected node</h4>
+                  <p>
+                    <strong>data-model.md</strong><br />
+                    11 chunks · 54 linked nodes · 231 evidence links
+                  </p>
+                </div>
+              </div>
+
+              <div class="prompt-box">
+                <div class="badge-row" style="margin-top:0; margin-bottom:12px">
+                  <div class="mode is-active">Sources on</div>
+                  <div class="mode">Reasoning collapsed</div>
+                  <div class="mode">Scope: active library</div>
+                </div>
+                <div class="mini-row">
+                  <div class="mini-input">Спроси о графе, документе или связях…</div>
+                  <div class="ghost-button">＋</div>
+                  <div class="ghost-button primary">Отправить</div>
+                </div>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

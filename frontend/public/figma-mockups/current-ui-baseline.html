@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RustRAG Current UI Baseline</title>
+    <link rel="stylesheet" href="/figma-mockups/mockup.css" />
+    <script src="/figma-mockups/capture-bootstrap.js"></script>
+  </head>
+  <body>
+    <div class="shell" style="width: 1480px">
+      <div class="topbar">
+        <div class="brand">
+          <div class="brand-badge">RR</div>
+          <div>
+            <h1>RustRAG</h1>
+            <p>Current UI baseline captured from the live app</p>
+          </div>
+        </div>
+        <div class="badge info">Reference before redesign</div>
+      </div>
+
+      <div class="page">
+        <div class="content-card" style="padding: 22px">
+          <div class="page-head" style="padding: 0 0 18px">
+            <div>
+              <h2>Current product state</h2>
+              <p>
+                Эта reference-page фиксирует текущие живые экраны перед редизайном. Ниже три реальные страницы приложения: documents, graph и admin.
+              </p>
+            </div>
+          </div>
+
+          <div class="baseline-stack">
+            <section class="baseline-card">
+              <h3>Documents</h3>
+              <p>
+                Текущее состояние рабочее, но details раскрываются неаккуратно и визуально не отделены от основной таблицы.
+              </p>
+              <img src="/figma-mockups/current-documents.png" alt="Current documents page" />
+            </section>
+
+            <section class="baseline-card">
+              <h3>Graph + AI panel</h3>
+              <p>
+                Главная боль: граф слишком плотный, связи не читаются, а AI-панель выглядит как длинная текстовая колонка без ясной иерархии сообщений и sources.
+              </p>
+              <img src="/figma-mockups/current-graph.png" alt="Current graph page" />
+            </section>
+
+            <section class="baseline-card">
+              <h3>Admin settings</h3>
+              <p>
+                Экран функциональный, но визуально тяжёлый: контенту не хватает структуры по важности, а provider profile спорит с системными полями за внимание.
+              </p>
+              <img src="/figma-mockups/current-admin.png" alt="Current admin page" />
+            </section>
+          </div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

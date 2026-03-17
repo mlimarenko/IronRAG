@@ -1,9 +1,10 @@
-use rust_decimal::Decimal;
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState, infra::repositories, integrations::llm::EmbeddingRequest,
-    interfaces::http::router_support::ApiError, shared::chunking::split_text_into_chunks,
+    interfaces::http::router_support::ApiError, services::pricing_catalog,
+    shared::chunking::split_text_into_chunks,
 };
 
 pub struct TextIngestRequest<'a> {
@@ -135,26 +136,46 @@ pub async fn embed_project_chunks_with_usage(
         .await
         .map_err(|_| ApiError::Internal)?;
 
-        let input_price_per_1m = match provider_kind.as_str() {
-            "openai" => state.settings.openai_input_price_per_1m,
-            "deepseek" => state.settings.deepseek_input_price_per_1m,
-            _ => 0.0,
-        };
-        let estimated_cost =
-            f64::from(prompt_tokens.unwrap_or(0)) / 1_000_000.0 * input_price_per_1m;
-
-        repositories::create_cost_ledger(
-            &state.persistence.postgres,
-            workspace_id,
-            Some(project_id),
-            usage_event.id,
-            &provider_kind,
-            &model_name,
-            Decimal::from_f64_retain(estimated_cost).unwrap_or(Decimal::ZERO),
-            serde_json::json!({"input_price_per_1m": input_price_per_1m}),
+        let pricing_resolution = pricing_catalog::resolve_usage_cost(
+            state,
+            pricing_catalog::UsageCostLookupRequest {
+                workspace_id,
+                provider_kind: embedding.provider_kind.clone(),
+                model_name: embedding.model_name.clone(),
+                capability: "embedding".to_string(),
+                billing_unit: "per_1m_input_tokens".to_string(),
+                prompt_tokens,
+                completion_tokens: None,
+                total_tokens,
+                at: usage_event.created_at,
+            },
         )
         .await
         .map_err(|_| ApiError::Internal)?;
+
+        if let Some(estimated_cost) = pricing_resolution.estimated_cost {
+            repositories::create_cost_ledger(
+                &state.persistence.postgres,
+                workspace_id,
+                Some(project_id),
+                usage_event.id,
+                &embedding.provider_kind,
+                &embedding.model_name,
+                estimated_cost,
+                pricing_resolution.pricing_snapshot_json,
+            )
+            .await
+            .map_err(|_| ApiError::Internal)?;
+        } else {
+            warn!(
+                project_id = %project_id,
+                usage_event_id = %usage_event.id,
+                provider_kind = %embedding.provider_kind,
+                model_name = %embedding.model_name,
+                pricing_status = pricing_catalog::pricing_status_label(&pricing_resolution.status),
+                "skipping embedding cost ledger because pricing could not be resolved",
+            );
+        }
 
         embedded += 1;
     }

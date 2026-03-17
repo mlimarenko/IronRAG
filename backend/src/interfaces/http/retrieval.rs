@@ -2,7 +2,6 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
 };
-use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use tracing::{error, info, warn};
@@ -10,31 +9,27 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    infra::{repositories, vector_search},
-    integrations::llm::{ChatRequest, EmbeddingRequest},
+    domains::{
+        query_intelligence::{ContextAssemblyMetadata, QueryPlanningMetadata, RerankMetadata},
+        query_modes::RuntimeQueryMode,
+        runtime_query::RuntimeQueryReference,
+    },
+    infra::repositories,
     interfaces::http::{
         auth::AuthContext,
         authorization::{POLICY_QUERY_READ, POLICY_QUERY_RUN, load_project_and_authorize},
         router_support::ApiError,
     },
+    services::{
+        pricing_catalog,
+        query_runtime::{
+            PersistedRuntimeQuery, RuntimeAnswerQueryResult, RuntimeQueryRequest,
+            execute_answer_query, persist_answer_query_result,
+        },
+    },
 };
 
-type RankedChunk = (Uuid, f32, repositories::ChunkRow);
-type ModelSelection = (String, String, Option<Uuid>);
 type UsageTokens = (Option<i32>, Option<i32>, Option<i32>);
-
-struct QueryExecutionResult {
-    provider_kind: String,
-    model_name: String,
-    provider_account_id: Option<Uuid>,
-    output_text: String,
-    usage_json: serde_json::Value,
-    matched_chunks: Vec<repositories::ChunkRow>,
-    references: Vec<String>,
-    top_k: i32,
-    lexical_chunk_count: usize,
-    semantic_chunk_count: usize,
-}
 
 #[derive(Serialize)]
 pub struct RetrievalRunSummary {
@@ -63,22 +58,46 @@ pub struct RetrievalRunDetail {
     pub references: Vec<String>,
     pub matched_chunk_ids: Vec<Uuid>,
     pub warning: Option<String>,
+    pub warning_kind: Option<String>,
     pub debug_json: serde_json::Value,
 }
 
 #[derive(Serialize)]
 pub struct QueryResponse {
     pub retrieval_run_id: Uuid,
+    pub query_id: Uuid,
     pub project_id: Uuid,
     pub session_id: Uuid,
     pub user_message_id: Uuid,
     pub assistant_message_id: Uuid,
     pub answer: String,
     pub references: Vec<String>,
+    pub structured_references: Vec<StructuredReferenceResponse>,
     pub mode: String,
+    pub grounding_status: String,
+    pub provider: ProviderDescriptorResponse,
+    pub planning: QueryPlanningMetadata,
+    pub rerank: RerankMetadata,
+    pub context_assembly: ContextAssemblyMetadata,
     pub answer_status: String,
     pub weak_grounding: bool,
     pub warning: Option<String>,
+    pub warning_kind: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct StructuredReferenceResponse {
+    pub kind: String,
+    pub reference_id: Uuid,
+    pub excerpt: Option<String>,
+    pub rank: usize,
+    pub score: Option<f32>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct ProviderDescriptorResponse {
+    pub provider_kind: String,
+    pub model_name: String,
 }
 
 #[derive(Deserialize)]
@@ -100,6 +119,7 @@ pub struct QueryRequest {
     pub project_id: Uuid,
     pub session_id: Option<Uuid>,
     pub query_text: String,
+    pub mode: Option<RuntimeQueryMode>,
     pub model_profile_id: Option<Uuid>,
     pub embedding_model_profile_id: Option<Uuid>,
     pub top_k: Option<i32>,
@@ -166,7 +186,7 @@ async fn list_retrieval_runs(
     }
     .into_iter()
     .map(|row| {
-        let (answer_status, weak_grounding, _, _, _warning) =
+        let (answer_status, weak_grounding, _, _, _warning, _warning_kind) =
             extract_retrieval_debug(&row.debug_json);
         RetrievalRunSummary {
             id: row.id,
@@ -258,7 +278,7 @@ async fn create_retrieval_run(
         ApiError::Internal
     })?;
 
-    let (answer_status, weak_grounding, _, _, _) = extract_retrieval_debug(&row.debug_json);
+    let (answer_status, weak_grounding, _, _, _, _) = extract_retrieval_debug(&row.debug_json);
 
     info!(
         auth_token_id = %auth.token_id,
@@ -308,7 +328,7 @@ async fn get_retrieval_run_detail(
     let project =
         load_project_and_authorize(&auth, &state, row.project_id, POLICY_QUERY_READ).await?;
 
-    let (answer_status, weak_grounding, references, matched_chunk_ids, warning) =
+    let (answer_status, weak_grounding, references, matched_chunk_ids, warning, warning_kind) =
         extract_retrieval_debug(&row.debug_json);
 
     info!(
@@ -338,6 +358,7 @@ async fn get_retrieval_run_detail(
         references,
         matched_chunk_ids,
         warning,
+        warning_kind,
         debug_json: row.debug_json,
     }))
 }
@@ -349,11 +370,20 @@ async fn run_query(
 ) -> Result<Json<QueryResponse>, ApiError> {
     let project =
         load_project_and_authorize(&auth, &state, payload.project_id, POLICY_QUERY_RUN).await?;
+    Ok(Json(run_query_with_workspace(&state, project.workspace_id, &payload, auth.token_id).await?))
+}
+
+pub(crate) async fn run_query_with_workspace(
+    state: &AppState,
+    workspace_id: Uuid,
+    payload: &QueryRequest,
+    auth_token_id: Uuid,
+) -> Result<QueryResponse, ApiError> {
     let top_k = payload.top_k.unwrap_or(8);
-    if let Err(error) = validate_query_payload(&payload) {
+    if let Err(error) = validate_query_payload(payload) {
         warn!(
-            auth_token_id = %auth.token_id,
-            workspace_id = %project.workspace_id,
+            auth_token_id = %auth_token_id,
+            workspace_id = %workspace_id,
             project_id = %payload.project_id,
             model_profile_id = ?payload.model_profile_id,
             embedding_model_profile_id = ?payload.embedding_model_profile_id,
@@ -367,8 +397,8 @@ async fn run_query(
     let started_at = Instant::now();
 
     info!(
-        auth_token_id = %auth.token_id,
-        workspace_id = %project.workspace_id,
+        auth_token_id = %auth_token_id,
+        workspace_id = %workspace_id,
         project_id = %payload.project_id,
         model_profile_id = ?payload.model_profile_id,
         embedding_model_profile_id = ?payload.embedding_model_profile_id,
@@ -377,46 +407,91 @@ async fn run_query(
         "accepted query request",
     );
 
-    let query_result = match execute_query(&state, &payload).await {
-        Ok(result) => result,
-        Err(error) => {
-            log_query_request_failure(
-                project.workspace_id,
-                &payload,
-                top_k,
-                started_at.elapsed().as_millis(),
-                "execute_query",
-                auth.token_id,
-                &error,
-            );
-            return Err(error);
-        }
-    };
-
-    let session = match resolve_query_session(&state, project.workspace_id, &payload).await {
+    let session = match resolve_query_session(state, workspace_id, payload).await {
         Ok(session) => session,
         Err(error) => {
             log_query_request_failure(
-                project.workspace_id,
-                &payload,
+                workspace_id,
+                payload,
                 top_k,
                 started_at.elapsed().as_millis(),
                 "resolve_query_session",
-                auth.token_id,
+                auth_token_id,
                 &error,
             );
             return Err(error);
         }
     };
 
-    let matched_chunk_count = query_result.matched_chunks.len();
+    let runtime_request = RuntimeQueryRequest {
+        library_id: payload.project_id,
+        question: payload.query_text.trim().to_string(),
+        mode: payload.mode.unwrap_or(RuntimeQueryMode::Hybrid),
+        top_k: usize::try_from(top_k).unwrap_or(8).clamp(1, 12),
+        include_debug: true,
+    };
+
+    let query_result = match execute_answer_query(state, &runtime_request).await {
+        Ok(result) => result,
+        Err(error) => {
+            let error_chain = error
+                .chain()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" | caused by: ");
+            error!(
+                auth_token_id = %auth_token_id,
+                workspace_id = %workspace_id,
+                project_id = %payload.project_id,
+                session_id = ?payload.session_id,
+                mode = %runtime_request.mode.as_str(),
+                top_k = runtime_request.top_k,
+                question_len = runtime_request.question.chars().count(),
+                raw_error = %error,
+                error_chain,
+                "runtime answer query execution failed before api mapping",
+            );
+            let api_error = map_runtime_query_error(&error);
+            log_query_request_failure(
+                workspace_id,
+                payload,
+                top_k,
+                started_at.elapsed().as_millis(),
+                "execute_answer_query",
+                auth_token_id,
+                &api_error,
+            );
+            return Err(api_error);
+        }
+    };
+
+    let persisted_query =
+        match persist_answer_query_result(state, &runtime_request, &query_result).await {
+            Ok(persisted) => persisted,
+            Err(error) => {
+                let api_error = map_runtime_query_error(&error);
+                log_query_request_failure(
+                    workspace_id,
+                    payload,
+                    top_k,
+                    started_at.elapsed().as_millis(),
+                    "persist_answer_query_result",
+                    auth_token_id,
+                    &api_error,
+                );
+                return Err(api_error);
+            }
+        };
+
+    let structured_reference_count = query_result.structured.references.len();
     let (prompt_tokens, completion_tokens, total_tokens) =
         extract_usage_tokens(&query_result.usage_json);
-    let response = match persist_query_artifacts(
-        &state,
-        project.workspace_id,
-        &payload,
+    let response = match persist_runtime_query_artifacts(
+        state,
+        workspace_id,
+        payload,
         &query_result,
+        &persisted_query,
         session.id,
     )
     .await
@@ -424,12 +499,12 @@ async fn run_query(
         Ok(response) => response,
         Err(error) => {
             log_query_request_failure(
-                project.workspace_id,
-                &payload,
+                workspace_id,
+                payload,
                 top_k,
                 started_at.elapsed().as_millis(),
-                "persist_query_artifacts",
-                auth.token_id,
+                "persist_runtime_query_artifacts",
+                auth_token_id,
                 &error,
             );
             return Err(error);
@@ -438,18 +513,19 @@ async fn run_query(
 
     if response.0.weak_grounding {
         warn!(
-            auth_token_id = %auth.token_id,
-            workspace_id = %project.workspace_id,
+            auth_token_id = %auth_token_id,
+            workspace_id = %workspace_id,
             project_id = %payload.project_id,
             retrieval_run_id = %response.0.retrieval_run_id,
+            query_id = %response.0.query_id,
             session_id = %response.0.session_id,
-            provider_kind = %query_result.provider_kind,
-            model_name = %query_result.model_name,
+            provider_kind = %query_result.provider.provider_kind.as_str(),
+            model_name = %query_result.provider.model_name,
             answer_status = %response.0.answer_status,
-            lexical_chunk_count = query_result.lexical_chunk_count,
-            semantic_chunk_count = query_result.semantic_chunk_count,
-            matched_chunk_count,
+            mode = %response.0.mode,
+            grounding_status = %response.0.grounding_status,
             reference_count = response.0.references.len(),
+            structured_reference_count,
             prompt_tokens,
             completion_tokens,
             total_tokens,
@@ -458,18 +534,19 @@ async fn run_query(
         );
     } else {
         info!(
-            auth_token_id = %auth.token_id,
-            workspace_id = %project.workspace_id,
+            auth_token_id = %auth_token_id,
+            workspace_id = %workspace_id,
             project_id = %payload.project_id,
             retrieval_run_id = %response.0.retrieval_run_id,
+            query_id = %response.0.query_id,
             session_id = %response.0.session_id,
-            provider_kind = %query_result.provider_kind,
-            model_name = %query_result.model_name,
+            provider_kind = %query_result.provider.provider_kind.as_str(),
+            model_name = %query_result.provider.model_name,
             answer_status = %response.0.answer_status,
-            lexical_chunk_count = query_result.lexical_chunk_count,
-            semantic_chunk_count = query_result.semantic_chunk_count,
-            matched_chunk_count,
+            mode = %response.0.mode,
+            grounding_status = %response.0.grounding_status,
             reference_count = response.0.references.len(),
+            structured_reference_count,
             prompt_tokens,
             completion_tokens,
             total_tokens,
@@ -478,7 +555,7 @@ async fn run_query(
         );
     }
 
-    Ok(response)
+    Ok(response.0)
 }
 
 fn validate_query_payload(payload: &QueryRequest) -> Result<(), ApiError> {
@@ -536,6 +613,43 @@ fn log_query_request_failure(
     }
 }
 
+fn llm_provider_label(provider_kind: &str) -> &str {
+    match provider_kind {
+        "openai" => "OpenAI",
+        "deepseek" => "DeepSeek",
+        "qwen" => "Qwen",
+        _ => provider_kind,
+    }
+}
+
+fn map_llm_gateway_error(error: &anyhow::Error, provider_kind: &str) -> ApiError {
+    let message = error.to_string();
+    let provider_label = llm_provider_label(provider_kind);
+
+    if message.contains("missing OpenAI API key")
+        || message.contains("missing DeepSeek API key")
+        || message.contains("missing Qwen API key")
+    {
+        return ApiError::Conflict(format!(
+            "AI assistant is unavailable because the {provider_label} API key is not configured",
+        ));
+    }
+
+    if message.contains("unsupported provider kind:") {
+        return ApiError::Conflict(format!(
+            "AI assistant is unavailable because provider `{provider_kind}` is not supported",
+        ));
+    }
+
+    if message.contains("status=401") || message.contains("status=403") {
+        return ApiError::Conflict(format!(
+            "AI assistant is unavailable because the {provider_label} credentials are invalid or expired",
+        ));
+    }
+
+    ApiError::Internal
+}
+
 async fn resolve_query_session(
     state: &AppState,
     workspace_id: Uuid,
@@ -574,157 +688,124 @@ async fn resolve_query_session(
     }
 }
 
-async fn execute_query(
-    state: &AppState,
-    payload: &QueryRequest,
-) -> Result<QueryExecutionResult, ApiError> {
-    let top_k = payload.top_k.unwrap_or(8);
-    let (provider_kind, model_name, provider_account_id) =
-        resolve_chat_model(state, payload.model_profile_id).await?;
-    let lexical_chunks = repositories::search_chunks_by_project(
-        &state.persistence.postgres,
-        payload.project_id,
-        &payload.query_text,
-        top_k,
-    )
-    .await
-    .map_err(|error| {
-        error!(
-            project_id = %payload.project_id,
-            top_k,
-            ?error,
-            "failed to search lexical retrieval chunks",
-        );
-        ApiError::Internal
-    })?;
-    let lexical_chunk_count = lexical_chunks.len();
-    let (embedding_provider_kind, embedding_model_name, _) =
-        resolve_embedding_model(state, payload.embedding_model_profile_id).await?;
-    let query_embedding = state
-        .llm_gateway
-        .embed(EmbeddingRequest {
-            provider_kind: embedding_provider_kind.clone(),
-            model_name: embedding_model_name.clone(),
-            input: payload.query_text.clone(),
-        })
-        .await
-        .map_err(|error| {
-            error!(
-                project_id = %payload.project_id,
-                provider_kind = %embedding_provider_kind,
-                model_name = %embedding_model_name,
-                ?error,
-                "failed to generate query embedding",
-            );
-            ApiError::Internal
-        })?;
-    let semantic_chunks = vector_search::search_chunks_by_project_embedding(
-        &state.persistence.postgres,
-        payload.project_id,
-        query_embedding.embedding.as_slice(),
-        top_k,
-    )
-    .await
-    .map_err(|error| {
-        error!(
-            project_id = %payload.project_id,
-            top_k,
-            ?error,
-            "failed to search semantic retrieval chunks",
-        );
-        ApiError::Internal
-    })?;
-    let semantic_chunk_count = semantic_chunks.len();
+fn map_runtime_query_error(error: &anyhow::Error) -> ApiError {
+    let message = error.to_string();
 
-    let mut ranked: Vec<RankedChunk> =
-        lexical_chunks.into_iter().map(|chunk| (chunk.id, 1.0, chunk)).collect();
-    for item in semantic_chunks {
-        let score = item.cosine_similarity_score();
-        let chunk = item.into_chunk();
-        if let Some(existing) = ranked.iter_mut().find(|(chunk_id, _, _)| *chunk_id == chunk.id) {
-            existing.1 = existing.1.max(score);
-        } else {
-            ranked.push((chunk.id, score, chunk));
+    if message.contains("missing OpenAI API key") {
+        return map_llm_gateway_error(error, "openai");
+    }
+    if message.contains("missing DeepSeek API key") {
+        return map_llm_gateway_error(error, "deepseek");
+    }
+    if message.contains("missing Qwen API key") {
+        return map_llm_gateway_error(error, "qwen");
+    }
+    if message.contains("unsupported provider kind:") {
+        return ApiError::Conflict(message);
+    }
+    if message.contains("status=401") || message.contains("status=403") {
+        if message.to_ascii_lowercase().contains("deepseek") {
+            return map_llm_gateway_error(error, "deepseek");
         }
+        if message.to_ascii_lowercase().contains("qwen") {
+            return map_llm_gateway_error(error, "qwen");
+        }
+        return map_llm_gateway_error(error, "openai");
     }
-    ranked.sort_by(|left, right| right.1.partial_cmp(&left.1).unwrap_or(std::cmp::Ordering::Equal));
-    ranked.truncate(top_k as usize);
-
-    let matched_chunks: Vec<repositories::ChunkRow> =
-        ranked.into_iter().map(|(_, _, chunk)| chunk).collect();
-    if matched_chunks.is_empty() {
-        warn!(
-            project_id = %payload.project_id,
-            provider_kind = %provider_kind,
-            model_name = %model_name,
-            embedding_provider_kind = %embedding_provider_kind,
-            embedding_model_name = %embedding_model_name,
-            top_k,
-            "query has no retrieval evidence; generating answer without matched chunks",
-        );
+    if message.contains("failed to generate grounded answer")
+        || message.contains("failed to embed runtime query")
+    {
+        return ApiError::Conflict(message);
     }
-    info!(
-        project_id = %payload.project_id,
-        provider_kind = %provider_kind,
-        model_name = %model_name,
-        embedding_provider_kind = %embedding_provider_kind,
-        embedding_model_name = %embedding_model_name,
-        top_k,
-        lexical_chunk_count,
-        semantic_chunk_count,
-        matched_chunk_count = matched_chunks.len(),
-        "retrieval evidence prepared",
-    );
-    let context_block = build_context_block(&matched_chunks);
 
-    let gateway_response = state
-        .llm_gateway
-        .generate(ChatRequest {
-            provider_kind: provider_kind.clone(),
-            model_name: model_name.clone(),
-            prompt: format!("{context_block}User question: {}", payload.query_text),
-        })
-        .await
-        .map_err(|error| {
-            error!(
-                project_id = %payload.project_id,
-                provider_kind = %provider_kind,
-                model_name = %model_name,
-                matched_chunk_count = matched_chunks.len(),
-                ?error,
-                "llm query generation failed",
-            );
-            ApiError::Internal
-        })?;
-    let references = build_references(&matched_chunks);
-
-    Ok(QueryExecutionResult {
-        provider_kind,
-        model_name,
-        provider_account_id,
-        output_text: gateway_response.output_text,
-        usage_json: gateway_response.usage_json,
-        matched_chunks,
-        references,
-        top_k,
-        lexical_chunk_count,
-        semantic_chunk_count,
-    })
+    ApiError::Internal
 }
 
-async fn persist_query_artifacts(
+fn answer_status_for_grounding(grounding_status: &str) -> (&'static str, bool, Option<String>) {
+    match grounding_status {
+        "grounded" => ("grounded", false, None),
+        "partial" => (
+            "partially_grounded",
+            true,
+            Some(
+                "The answer is only partially grounded. Inspect the references before using it as a source of truth."
+                    .to_string(),
+            ),
+        ),
+        "weak" => (
+            "weakly_grounded",
+            true,
+            Some(
+                "The answer was generated with limited graph evidence; inspect references and graph coverage."
+                    .to_string(),
+            ),
+        ),
+        _ => (
+            "ungrounded",
+            true,
+            Some(
+                "No grounded evidence was available in the active library yet. The answer may be incomplete."
+                    .to_string(),
+            ),
+        ),
+    }
+}
+
+fn map_structured_references(
+    references: &[RuntimeQueryReference],
+) -> Vec<StructuredReferenceResponse> {
+    references
+        .iter()
+        .map(|reference| StructuredReferenceResponse {
+            kind: reference.kind.clone(),
+            reference_id: reference.reference_id,
+            excerpt: reference.excerpt.clone(),
+            rank: reference.rank,
+            score: reference.score,
+        })
+        .collect()
+}
+
+fn format_reference_label(reference: &StructuredReferenceResponse) -> String {
+    let label = match reference.kind.as_str() {
+        "chunk" => "Chunk",
+        "node" => "Node",
+        "edge" => "Edge",
+        _ => "Reference",
+    };
+
+    match reference.excerpt.as_deref() {
+        Some(excerpt) if !excerpt.trim().is_empty() => {
+            format!("{label} {} · {}", reference.rank, excerpt.trim())
+        }
+        _ => format!("{label} {} · {}", reference.rank, reference.reference_id),
+    }
+}
+
+fn collect_matched_chunk_ids(references: &[StructuredReferenceResponse]) -> Vec<Uuid> {
+    references
+        .iter()
+        .filter(|reference| reference.kind == "chunk")
+        .map(|reference| reference.reference_id)
+        .collect()
+}
+
+async fn persist_runtime_query_artifacts(
     state: &AppState,
     workspace_id: Uuid,
     payload: &QueryRequest,
-    query_result: &QueryExecutionResult,
+    query_result: &RuntimeAnswerQueryResult,
+    persisted_query: &PersistedRuntimeQuery,
     session_id: Uuid,
 ) -> Result<Json<QueryResponse>, ApiError> {
-    let weak_grounding =
-        query_result.references.is_empty() || query_result.matched_chunks.len() < 2;
-    let answer_status = if weak_grounding { "weakly_grounded" } else { "grounded" };
-    let warning = weak_grounding.then_some(
-        "The answer was generated with limited retrieval evidence; inspect references and project readiness.".to_string(),
-    );
+    let grounding_status = query_result.structured.grounding_status.clone().as_str().to_string();
+    let (answer_status, weak_grounding, derived_warning) =
+        answer_status_for_grounding(&grounding_status);
+    let warning = query_result.warning.clone().or(derived_warning);
+    let warning_kind = query_result.warning_kind.clone();
+    let structured_references = map_structured_references(&query_result.structured.references);
+    let references = structured_references.iter().map(format_reference_label).collect::<Vec<_>>();
+    let matched_chunk_ids = collect_matched_chunk_ids(&structured_references);
 
     let user_message = repositories::create_chat_message(
         &state.persistence.postgres,
@@ -751,19 +832,28 @@ async fn persist_query_artifacts(
         Some(session_id),
         &payload.query_text,
         payload.model_profile_id,
-        query_result.top_k,
-        Some(query_result.output_text.as_str()),
+        payload.top_k.unwrap_or(8),
+        Some(query_result.answer.as_str()),
         serde_json::json!({
-            "mode": "gateway_live",
-            "provider_kind": query_result.provider_kind,
-            "model_name": query_result.model_name,
-            "usage": query_result.usage_json,
-            "matched_chunk_ids": query_result.matched_chunks.iter().map(|chunk| chunk.id).collect::<Vec<_>>(),
-            "references": query_result.references,
+            "mode": query_result.structured.planned_mode.as_str(),
+            "requested_mode": query_result.structured.mode.as_str(),
+            "provider_kind": query_result.provider.provider_kind.as_str(),
+            "model_name": &query_result.provider.model_name,
+            "usage": query_result.usage_json.clone(),
+            "query_id": persisted_query.execution.id,
+            "grounding_status": grounding_status.clone(),
+            "structured_references": &structured_references,
+            "references": &references,
+            "matched_chunk_ids": &matched_chunk_ids,
+            "planning": &query_result.structured.enrichment.planning,
+            "rerank": &query_result.structured.enrichment.rerank,
+            "context_assembly": &query_result.structured.enrichment.context_assembly,
             "answer_status": answer_status,
             "weak_grounding": weak_grounding,
-            "warning": warning,
+            "warning": warning.clone(),
+            "warning_kind": warning_kind.clone(),
             "session_id": session_id,
+            "runtime_debug": query_result.structured.debug_json.clone(),
         }),
     )
     .await
@@ -771,9 +861,9 @@ async fn persist_query_artifacts(
         error!(
             project_id = %payload.project_id,
             model_profile_id = ?payload.model_profile_id,
-            provider_kind = %query_result.provider_kind,
-            model_name = %query_result.model_name,
-            matched_chunk_count = query_result.matched_chunks.len(),
+            provider_kind = %query_result.provider.provider_kind.as_str(),
+            model_name = %query_result.provider.model_name,
+            query_id = %persisted_query.execution.id,
             ?error,
             "failed to persist retrieval run artifacts",
         );
@@ -785,7 +875,7 @@ async fn persist_query_artifacts(
         session_id,
         payload.project_id,
         "assistant",
-        query_result.output_text.as_str(),
+        query_result.answer.as_str(),
         Some(row.id),
     )
     .await
@@ -807,9 +897,9 @@ async fn persist_query_artifacts(
         &repositories::NewUsageEvent {
             workspace_id: Some(workspace_id),
             project_id: Some(payload.project_id),
-            provider_account_id: query_result.provider_account_id,
+            provider_account_id: None,
             model_profile_id: payload.model_profile_id,
-            usage_kind: "query".to_string(),
+            usage_kind: "runtime_query".to_string(),
             prompt_tokens,
             completion_tokens,
             total_tokens,
@@ -821,35 +911,28 @@ async fn persist_query_artifacts(
         error!(
             workspace_id = %workspace_id,
             project_id = %payload.project_id,
-            provider_account_id = ?query_result.provider_account_id,
             model_profile_id = ?payload.model_profile_id,
+            query_id = %persisted_query.execution.id,
             ?error,
             "failed to create query usage event",
         );
         ApiError::Internal
     })?;
 
-    let (input_price_per_1m, output_price_per_1m) =
-        usage_prices(state, &query_result.provider_kind);
-    let estimated_cost = estimate_query_cost(
-        prompt_tokens,
-        completion_tokens,
-        input_price_per_1m,
-        output_price_per_1m,
-    );
-
-    repositories::create_cost_ledger(
-        &state.persistence.postgres,
-        Some(workspace_id),
-        Some(payload.project_id),
-        usage_event.id,
-        &query_result.provider_kind,
-        &query_result.model_name,
-        Decimal::from_f64_retain(estimated_cost).unwrap_or(Decimal::ZERO),
-        serde_json::json!({
-            "input_price_per_1m": input_price_per_1m,
-            "output_price_per_1m": output_price_per_1m,
-        }),
+    let provider_kind = query_result.provider.provider_kind.as_str();
+    let pricing_resolution = pricing_catalog::resolve_usage_cost(
+        state,
+        pricing_catalog::UsageCostLookupRequest {
+            workspace_id: Some(workspace_id),
+            provider_kind: provider_kind.to_string(),
+            model_name: query_result.provider.model_name.clone(),
+            capability: "answer".to_string(),
+            billing_unit: "per_1m_tokens".to_string(),
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            at: usage_event.created_at,
+        },
     )
     .await
     .map_err(|error| {
@@ -857,175 +940,98 @@ async fn persist_query_artifacts(
             workspace_id = %workspace_id,
             project_id = %payload.project_id,
             usage_event_id = %usage_event.id,
-            provider_kind = %query_result.provider_kind,
-            model_name = %query_result.model_name,
-            estimated_cost_usd = estimated_cost,
+            provider_kind,
+            model_name = %query_result.provider.model_name,
             ?error,
-            "failed to create query cost ledger entry",
+            "failed to resolve query pricing",
         );
         ApiError::Internal
     })?;
+
+    if let Some(estimated_cost) = pricing_resolution.estimated_cost {
+        repositories::create_cost_ledger(
+            &state.persistence.postgres,
+            Some(workspace_id),
+            Some(payload.project_id),
+            usage_event.id,
+            provider_kind,
+            &query_result.provider.model_name,
+            estimated_cost,
+            pricing_resolution.pricing_snapshot_json.clone(),
+        )
+        .await
+        .map_err(|error| {
+            error!(
+                workspace_id = %workspace_id,
+                project_id = %payload.project_id,
+                usage_event_id = %usage_event.id,
+                provider_kind,
+                model_name = %query_result.provider.model_name,
+                ?error,
+                "failed to create query cost ledger entry",
+            );
+            ApiError::Internal
+        })?;
+    } else {
+        warn!(
+            workspace_id = %workspace_id,
+            project_id = %payload.project_id,
+            usage_event_id = %usage_event.id,
+            provider_kind,
+            model_name = %query_result.provider.model_name,
+            pricing_status = pricing_catalog::pricing_status_label(&pricing_resolution.status),
+            "skipping query cost ledger because pricing could not be resolved",
+        );
+    }
 
     info!(
         workspace_id = %workspace_id,
         project_id = %payload.project_id,
         session_id = %session_id,
         retrieval_run_id = %row.id,
+        query_id = %persisted_query.execution.id,
         usage_event_id = %usage_event.id,
-        provider_kind = %query_result.provider_kind,
-        model_name = %query_result.model_name,
+        provider_kind,
+        model_name = %query_result.provider.model_name,
         answer_status,
         weak_grounding,
         prompt_tokens,
         completion_tokens,
         total_tokens,
-        estimated_cost_usd = estimated_cost,
-        "persisted query artifacts",
+        pricing_status = pricing_catalog::pricing_status_label(&pricing_resolution.status),
+        estimated_cost = ?pricing_resolution.estimated_cost,
+        "persisted runtime query artifacts",
     );
 
     Ok(Json(QueryResponse {
         retrieval_run_id: row.id,
+        query_id: persisted_query.execution.id,
         project_id: row.project_id,
         session_id,
         user_message_id: user_message.id,
         assistant_message_id: assistant_message.id,
-        answer: query_result.output_text.clone(),
-        references: query_result.references.clone(),
-        mode: "gateway_live".into(),
+        answer: query_result.answer.clone(),
+        references,
+        structured_references,
+        mode: query_result.structured.planned_mode.as_str().to_string(),
+        grounding_status,
+        provider: ProviderDescriptorResponse {
+            provider_kind: provider_kind.to_string(),
+            model_name: query_result.provider.model_name.clone(),
+        },
+        planning: query_result.structured.enrichment.planning.clone(),
+        rerank: query_result.structured.enrichment.rerank.clone(),
+        context_assembly: query_result.structured.enrichment.context_assembly.clone(),
         answer_status: answer_status.to_string(),
         weak_grounding,
         warning,
+        warning_kind,
     }))
-}
-
-async fn resolve_chat_model(
-    state: &AppState,
-    model_profile_id: Option<Uuid>,
-) -> Result<ModelSelection, ApiError> {
-    match model_profile_id {
-        Some(model_profile_id) => {
-            let profile = repositories::get_model_profile_by_id(
-                &state.persistence.postgres,
-                model_profile_id,
-            )
-            .await
-            .map_err(|error| {
-                error!(model_profile_id = %model_profile_id, ?error, "failed to load chat model profile");
-                ApiError::Internal
-            })?
-            .ok_or_else(|| ApiError::NotFound("model_profile not found".into()))?;
-            let provider = repositories::get_provider_account_by_id(
-                &state.persistence.postgres,
-                profile.provider_account_id,
-            )
-            .await
-            .map_err(|error| {
-                error!(
-                    provider_account_id = %profile.provider_account_id,
-                    model_profile_id = %model_profile_id,
-                    ?error,
-                    "failed to load chat provider account",
-                );
-                ApiError::Internal
-            })?
-            .ok_or_else(|| ApiError::NotFound("provider_account not found".into()))?;
-
-            info!(
-                provider_account_id = %provider.id,
-                model_profile_id = %profile.id,
-                provider_kind = %provider.provider_kind,
-                model_name = %profile.model_name,
-                "resolved chat model from profile",
-            );
-
-            Ok((provider.provider_kind, profile.model_name, Some(provider.id)))
-        }
-        None => {
-            info!(provider_kind = "openai", model_name = "gpt-4o-mini", "using default chat model");
-            Ok(("openai".into(), "gpt-4o-mini".into(), None))
-        }
-    }
-}
-
-async fn resolve_embedding_model(
-    state: &AppState,
-    embedding_model_profile_id: Option<Uuid>,
-) -> Result<ModelSelection, ApiError> {
-    match embedding_model_profile_id {
-        Some(model_profile_id) => {
-            let profile = repositories::get_model_profile_by_id(
-                &state.persistence.postgres,
-                model_profile_id,
-            )
-            .await
-            .map_err(|error| {
-                error!(model_profile_id = %model_profile_id, ?error, "failed to load embedding model profile");
-                ApiError::Internal
-            })?
-            .ok_or_else(|| ApiError::NotFound("embedding model_profile not found".into()))?;
-            let provider = repositories::get_provider_account_by_id(
-                &state.persistence.postgres,
-                profile.provider_account_id,
-            )
-            .await
-            .map_err(|error| {
-                error!(
-                    provider_account_id = %profile.provider_account_id,
-                    model_profile_id = %model_profile_id,
-                    ?error,
-                    "failed to load embedding provider account",
-                );
-                ApiError::Internal
-            })?
-            .ok_or_else(|| ApiError::NotFound("embedding provider_account not found".into()))?;
-
-            info!(
-                provider_account_id = %provider.id,
-                model_profile_id = %profile.id,
-                provider_kind = %provider.provider_kind,
-                model_name = %profile.model_name,
-                "resolved embedding model from profile",
-            );
-
-            Ok((provider.provider_kind, profile.model_name, Some(provider.id)))
-        }
-        None => {
-            info!(
-                provider_kind = "openai",
-                model_name = "text-embedding-3-small",
-                "using default embedding model",
-            );
-            Ok(("openai".into(), "text-embedding-3-small".into(), None))
-        }
-    }
-}
-
-fn build_context_block(chunks: &[repositories::ChunkRow]) -> String {
-    if chunks.is_empty() {
-        return "You are answering a question without retrieved context. Acknowledge uncertainty when necessary.\n\n".to_string();
-    }
-
-    let mut block = String::from(
-        "Use the following retrieved context to answer the user question. Cite the referenced chunk labels when relevant.\n\n",
-    );
-    for (index, chunk) in chunks.iter().enumerate() {
-        let label = index + 1;
-        block.push_str(&format!("[Chunk {label}] {}\n\n", chunk.content));
-    }
-    block
-}
-
-fn build_references(chunks: &[repositories::ChunkRow]) -> Vec<String> {
-    chunks
-        .iter()
-        .enumerate()
-        .map(|(index, chunk)| format!("Chunk {} · {}", index + 1, chunk.id))
-        .collect()
 }
 
 fn extract_retrieval_debug(
     debug_json: &serde_json::Value,
-) -> (String, bool, Vec<String>, Vec<Uuid>, Option<String>) {
+) -> (String, bool, Vec<String>, Vec<Uuid>, Option<String>, Option<String>) {
     let answer_status = debug_json
         .get("answer_status")
         .and_then(serde_json::Value::as_str)
@@ -1057,8 +1063,10 @@ fn extract_retrieval_debug(
         .unwrap_or_default();
     let warning =
         debug_json.get("warning").and_then(serde_json::Value::as_str).map(ToOwned::to_owned);
+    let warning_kind =
+        debug_json.get("warning_kind").and_then(serde_json::Value::as_str).map(ToOwned::to_owned);
 
-    (answer_status, weak_grounding, references, matched_chunk_ids, warning)
+    (answer_status, weak_grounding, references, matched_chunk_ids, warning, warning_kind)
 }
 
 fn extract_usage_tokens(usage_json: &serde_json::Value) -> UsageTokens {
@@ -1082,27 +1090,58 @@ fn extract_usage_tokens(usage_json: &serde_json::Value) -> UsageTokens {
     (prompt_tokens, completion_tokens, total_tokens)
 }
 
-fn usage_prices(state: &AppState, provider_kind: &str) -> (f64, f64) {
-    match provider_kind {
-        "openai" => {
-            (state.settings.openai_input_price_per_1m, state.settings.openai_output_price_per_1m)
-        }
-        "deepseek" => (
-            state.settings.deepseek_input_price_per_1m,
-            state.settings.deepseek_output_price_per_1m,
-        ),
-        _ => (0.0, 0.0),
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn estimate_query_cost(
-    prompt_tokens: Option<i32>,
-    completion_tokens: Option<i32>,
-    input_price_per_1m: f64,
-    output_price_per_1m: f64,
-) -> f64 {
-    let prompt_cost = prompt_tokens.unwrap_or_default() as f64 / 1_000_000.0 * input_price_per_1m;
-    let completion_cost =
-        completion_tokens.unwrap_or_default() as f64 / 1_000_000.0 * output_price_per_1m;
-    prompt_cost + completion_cost
+    #[test]
+    fn maps_missing_openai_key_to_conflict() {
+        let error = anyhow::anyhow!("missing OpenAI API key");
+
+        let api_error = map_llm_gateway_error(&error, "openai");
+
+        assert!(matches!(
+            api_error,
+            ApiError::Conflict(message)
+                if message == "AI assistant is unavailable because the OpenAI API key is not configured"
+        ));
+    }
+
+    #[test]
+    fn maps_invalid_provider_credentials_to_conflict() {
+        let error = anyhow::anyhow!(
+            "provider request failed: provider=openai status=401 Unauthorized body={{}}",
+        );
+
+        let api_error = map_llm_gateway_error(&error, "openai");
+
+        assert!(matches!(
+            api_error,
+            ApiError::Conflict(message)
+                if message
+                    == "AI assistant is unavailable because the OpenAI credentials are invalid or expired"
+        ));
+    }
+
+    #[test]
+    fn maps_missing_qwen_key_to_conflict() {
+        let error = anyhow::anyhow!("missing Qwen API key");
+
+        let api_error = map_llm_gateway_error(&error, "qwen");
+
+        assert!(matches!(
+            api_error,
+            ApiError::Conflict(message)
+                if message == "AI assistant is unavailable because the Qwen API key is not configured"
+        ));
+    }
+
+    #[test]
+    fn keeps_unknown_gateway_failures_internal() {
+        let error = anyhow::anyhow!("request timed out");
+
+        let api_error = map_llm_gateway_error(&error, "openai");
+
+        assert!(matches!(api_error, ApiError::Internal));
+    }
 }

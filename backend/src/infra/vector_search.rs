@@ -2,7 +2,9 @@ use pgvector::Vector;
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
-use crate::infra::repositories::ChunkRow;
+use crate::infra::repositories::{
+    ChunkRow, RuntimeVectorTargetRow, list_runtime_vector_targets_by_project_and_kind,
+};
 
 #[derive(Debug, Clone, FromRow)]
 pub struct ScoredChunkRow {
@@ -88,4 +90,87 @@ pub async fn search_chunks_by_project_embedding(
     .bind(top_k)
     .fetch_all(pool)
     .await
+}
+
+#[derive(Debug, Clone)]
+pub struct ScoredRuntimeVectorTargetRow {
+    pub row: RuntimeVectorTargetRow,
+    pub score: f32,
+}
+
+/// Searches canonical entity or relation embeddings for one project/provider tuple.
+///
+/// This currently computes cosine similarity in Rust from the persisted JSON embedding payload.
+///
+/// # Errors
+/// Returns any `SQLx` query error raised while loading vector targets.
+pub async fn search_runtime_vector_targets(
+    pool: &PgPool,
+    project_id: Uuid,
+    target_kind: &str,
+    provider_kind: &str,
+    model_name: &str,
+    embedding: &[f32],
+    top_k: usize,
+) -> Result<Vec<ScoredRuntimeVectorTargetRow>, sqlx::Error> {
+    let mut rows = list_runtime_vector_targets_by_project_and_kind(
+        pool,
+        project_id,
+        target_kind,
+        provider_kind,
+        model_name,
+    )
+    .await?
+    .into_iter()
+    .filter_map(|row| {
+        let candidate = serde_json::from_value::<Vec<f32>>(row.embedding_json.clone()).ok()?;
+        let score = cosine_similarity(embedding, &candidate)?;
+        Some(ScoredRuntimeVectorTargetRow { row, score })
+    })
+    .collect::<Vec<_>>();
+
+    rows.sort_by(|left, right| right.score.total_cmp(&left.score));
+    rows.truncate(top_k);
+    Ok(rows)
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> Option<f32> {
+    if left.is_empty() || right.is_empty() || left.len() != right.len() {
+        return None;
+    }
+
+    let mut dot = 0.0_f32;
+    let mut left_norm = 0.0_f32;
+    let mut right_norm = 0.0_f32;
+    for (lhs, rhs) in left.iter().zip(right.iter()) {
+        dot += lhs * rhs;
+        left_norm += lhs * lhs;
+        right_norm += rhs * rhs;
+    }
+
+    let denominator = left_norm.sqrt() * right_norm.sqrt();
+    if denominator <= f32::EPSILON {
+        return None;
+    }
+
+    Some(dot / denominator)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cosine_similarity_rejects_shape_mismatch() {
+        assert_eq!(cosine_similarity(&[1.0, 0.0], &[1.0]), None);
+    }
+
+    #[test]
+    fn cosine_similarity_scores_identical_vectors_highest() {
+        let identical = cosine_similarity(&[1.0, 0.0], &[1.0, 0.0]).expect("identical score");
+        let orthogonal = cosine_similarity(&[1.0, 0.0], &[0.0, 1.0]).expect("orthogonal score");
+
+        assert!(identical > orthogonal);
+        assert!((identical - 1.0).abs() < f32::EPSILON);
+    }
 }

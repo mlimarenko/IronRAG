@@ -138,9 +138,9 @@ createQuasarApp(createApp, quasarUserOptions)
 
     return Promise[ method ]([
       
-      import('boot/chunk-recovery'),
+      import('boot/axios'),
       
-      import('boot/api'),
+      import('boot/pinia'),
       
       import('boot/i18n')
       

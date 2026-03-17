@@ -4,3376 +4,6447 @@
  */
 
 export interface paths {
-  '/v1/health': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /** Health check */
-    get: operations['getHealth']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/ready': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /** Readiness check */
-    get: operations['getReadiness']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/version': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /** Service version */
-    get: operations['getVersion']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/auth/tokens': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * List API tokens
-     * @description Requires `workspace:admin` scope or an `instance_admin` token. Instance admin callers may optionally filter by `workspace_id`; workspace-scoped tokens are implicitly limited to their own workspace even if the query parameter is omitted.
-     */
-    get: operations['listTokens']
-    put?: never
-    /**
-     * Mint an API token
-     * @description Requires `workspace:admin` scope or an `instance_admin` token. Workspace-scoped tokens may mint tokens only for their own workspace. Global tokens without `workspace_id` require an `instance_admin` caller.
-     */
-    post: operations['createToken']
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/auth/bootstrap-token': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    get?: never
-    put?: never
-    /**
-     * Mint an API token using the bootstrap secret
-     * @description Requires a `bootstrap_secret` field in the request body matching the backend
-     *     `RJUSTRAG_BOOTSTRAP_TOKEN` or `RUSTRAG_BOOTSTRAP_TOKEN` environment variable.
-     *     This route is intended for initial setup when no regular API token exists yet.
-     */
-    post: operations['createBootstrapToken']
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/auth/tokens/{id}': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * Get API token summary
-     * @description Requires `workspace:admin` scope or an `instance_admin` token. Workspace-scoped tokens may only access tokens from their own workspace.
-     */
-    get: operations['getToken']
-    put?: never
-    post?: never
-    /**
-     * Revoke API token
-     * @description Requires `workspace:admin` scope or an `instance_admin` token. Workspace-scoped tokens may only revoke tokens from their own workspace.
-     */
-    delete: operations['revokeToken']
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/workspaces': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /** List workspaces */
-    get: operations['listWorkspaces']
-    put?: never
-    /**
-     * Create workspace
-     * @description Requires `workspace:admin` scope or an `instance_admin` token.
-     */
-    post: operations['createWorkspace']
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/workspaces/{id}/governance': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * Get workspace governance summary
-     * @description Requires `workspace:admin`, `usage:read`, `providers:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access their own workspace.
-     */
-    get: operations['getWorkspaceGovernance']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/projects': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /** List projects */
-    get: operations['listProjects']
-    put?: never
-    /**
-     * Create project
-     * @description Requires `projects:write`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only create projects in their own workspace.
-     */
-    post: operations['createProject']
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/projects/{id}/readiness': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * Get project readiness summary
-     * @description Requires `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
-     */
-    get: operations['getProjectReadiness']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/provider-accounts': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /** List provider accounts */
-    get: operations['listProviderAccounts']
-    put?: never
-    /**
-     * Create provider account
-     * @description Requires `providers:admin`, `workspace:admin`, or an `instance_admin` token.
-     */
-    post: operations['createProviderAccount']
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/model-profiles': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /** List model profiles */
-    get: operations['listModelProfiles']
-    put?: never
-    /**
-     * Create model profile
-     * @description Requires `providers:admin`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only create profiles in their own workspace, and the provider account must belong to that workspace.
-     */
-    post: operations['createModelProfile']
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/provider-governance/{workspace_id}': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * Get provider governance summary
-     * @description Requires `providers:admin`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access their own workspace.
-     */
-    get: operations['getProviderGovernance']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/provider-defaults/{workspace_id}': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * Get onboarding provider defaults summary
-     * @description Requires `providers:admin`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access their own workspace.
-     */
-    get: operations['getProviderDefaultsSummary']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/projects/{project_id}/defaults': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * Get project provider defaults
-     * @description Requires one of `projects:write`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
-     */
-    get: operations['getProjectDefaults']
-    /**
-     * Update project provider defaults
-     * @description Requires `projects:write`, `workspace:admin`, or an `instance_admin` token. Validates that any referenced provider account and model profiles belong to the project's workspace. The backend currently persists only chat and embedding default profile ids on the project row; provider account, rerank model, and retrieval/chunk settings are validated and echoed in the response but are not persisted.
-     */
-    put: operations['updateProjectDefaults']
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/integrations/{workspace_id}': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * Get integrations workspace summary
-     * @description Requires `providers:admin`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access their own workspace. Returns up to 5 example projects and all workspace API tokens.
-     */
-    get: operations['getIntegrationsWorkspaceSummary']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/integrations/{workspace_id}/examples': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * List example projects for integrations setup
-     * @description Requires `providers:admin`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access their own workspace.
-     */
-    get: operations['listWorkspaceExampleProjects']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/integrations/{workspace_id}/tokens/{id}': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    get?: never
-    put?: never
-    post?: never
-    /**
-     * Revoke a workspace API token from the integrations surface
-     * @description Requires `workspace:admin` scope or an `instance_admin` token. The token must belong to the specified workspace.
-     */
-    delete: operations['revokeWorkspaceToken']
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/integrations-products/{workspace_id}': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * Get integrations product snapshot
-     * @description Requires `providers:admin`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access their own workspace. Response wraps the snapshot under a top-level `snapshot` field.
-     */
-    get: operations['getIntegrationsProduct']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/sources': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /** List sources */
-    get: operations['listSources']
-    put?: never
-    /**
-     * Create source
-     * @description Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
-     */
-    post: operations['createSource']
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/ingestion-jobs': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /** List ingestion jobs */
-    get: operations['listIngestionJobs']
-    put?: never
-    /**
-     * Create ingestion job
-     * @description Requires `documents:write`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only create jobs for projects in their own workspace.
-     */
-    post: operations['createIngestionJob']
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/ingestion-jobs/{id}': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * Get ingestion job detail
-     * @description Requires `documents:read`, `documents:write`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access jobs in their own workspace.
-     */
-    get: operations['getIngestionJobDetail']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/ingestion-jobs/{id}/retry': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    get?: never
-    put?: never
-    /**
-     * Retry an ingestion job
-     * @description Requires `documents:write`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only retry jobs in their own workspace.
-     */
-    post: operations['retryIngestionJob']
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/documents': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /** List documents */
-    get: operations['listDocuments']
-    put?: never
-    /**
-     * Create document metadata record
-     * @description Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
-     */
-    post: operations['createDocument']
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/content/ingest-text': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    get?: never
-    put?: never
-    /**
-     * Queue plain text for ingestion
-     * @description Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
-     *
-     *     The current backend enqueues an ingestion job and returns its queued lifecycle state; it does not synchronously create a document/chunk result in this response.
-     *     Workspace-scoped tokens may only queue jobs for projects in their own workspace.
-     */
-    post: operations['ingestText']
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/content/search-chunks': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    get?: never
-    put?: never
-    /**
-     * Lexically search chunks within a project
-     * @description Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token.
-     */
-    post: operations['searchChunks']
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/content/embed-project': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    get?: never
-    put?: never
-    /**
-     * Generate embeddings for project chunks
-     * @description Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
-     *
-     *     If `embedding_model_profile_id` is provided, the backend resolves provider/model from that profile;
-     *     otherwise it uses `provider_kind` and `model_name` directly.
-     */
-    post: operations['embedProjectChunks']
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/chunks': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * List chunks by document or project
-     * @description Requires `documents:read`, `workspace:admin`, or an `instance_admin` token.
-     */
-    get: operations['listChunks']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/uploads/ingest': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    get?: never
-    put?: never
-    /**
-     * Upload a file and queue ingestion when a supported adapter exists
-     * @description Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
-     *
-     *     Current implementation supports UTF-8 text-like uploads only. The backend classifies the selected file, rejects PDF/image uploads with explicit "planned" validation errors, decodes accepted text-like content as UTF-8 text, enqueues an ingestion job, and returns queued job metadata rather than a completed document/chunk result.
-     *     Workspace-scoped tokens may only queue jobs for projects in their own workspace.
-     *
-     *     Expected multipart fields:
-     *     - `project_id` (required)
-     *     - `source_id` (optional)
-     *     - `title` (optional)
-     *     - `file` (required)
-     */
-    post: operations['uploadAndIngest']
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/retrieval-runs': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /** List retrieval runs */
-    get: operations['listRetrievalRuns']
-    put?: never
-    /**
-     * Create a retrieval run record manually
-     * @description Requires `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only create runs for projects in their own workspace.
-     */
-    post: operations['createRetrievalRun']
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/retrieval-runs/{id}': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * Get retrieval run detail
-     * @description Requires `query:run`, `workspace:admin`, `documents:read`, or an `instance_admin` token. Workspace-scoped tokens may only access runs in their own workspace.
-     */
-    get: operations['getRetrievalRunDetail']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/chat/sessions': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * List chat sessions for a project
-     * @description Requires `query:run`, `workspace:admin`, `documents:read`, or an `instance_admin` token. Workspace-scoped tokens may only access sessions in their own workspace.
-     */
-    get: operations['listChatSessions']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/chat/sessions/{id}/messages': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * List messages for a chat session
-     * @description Requires `query:run`, `workspace:admin`, `documents:read`, or an `instance_admin` token. Workspace-scoped tokens may only access sessions in their own workspace.
-     */
-    get: operations['listChatMessages']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/query': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    get?: never
-    put?: never
-    /**
-     * Run live retrieval + generation query
-     * @description Requires `query:run`, `workspace:admin`, or an `instance_admin` token.
-     *
-     *     The backend combines lexical matching with optional semantic matching based on stored chunk embeddings,
-     *     then calls the configured LLM gateway to produce the final answer.
-     */
-    post: operations['runQuery']
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/product/projects/{id}': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * Get product-oriented project overview
-     * @description Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
-     */
-    get: operations['getProductProjectOverview']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/product/projects/{id}/diagnostics': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * Get project diagnostics
-     * @description Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
-     */
-    get: operations['getProductProjectDiagnostics']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/product/projects/{id}/query-contract': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * Get product query contract description
-     * @description Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
-     */
-    get: operations['getProductProjectQueryContract']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/product/documents/{id}': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * Get product-oriented document overview
-     * @description Requires `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access documents in their own workspace. Usage and cost attribution are currently exposed at project scope because per-document attribution is not persisted yet.
-     */
-    get: operations['getProductDocumentOverview']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/product/documents/{id}/diagnostics': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * Get document diagnostics
-     * @description Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access documents in their own workspace.
-     */
-    get: operations['getProductDocumentDiagnostics']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/graph-products/{project_id}': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * Get graph product snapshot
-     * @description Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
-     */
-    get: operations['getGraphProduct']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/graph-products/{project_id}/summary': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * Get graph project summary
-     * @description Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
-     */
-    get: operations['getGraphSummary']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/graph-products/{project_id}/diagnostics': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * Get graph project diagnostics
-     * @description Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Returns persisted content counts, graph provenance coverage, and concrete readiness blockers/next steps without mutating runtime state.
-     */
-    get: operations['getGraphDiagnostics']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/graph-products/{project_id}/search': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * Search graph entities and relations
-     * @description Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Query parameter `q` must be non-empty.
-     */
-    get: operations['searchGraph']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/graph-products/{project_id}/entities/{entity_id}': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * Get graph entity detail
-     * @description Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
-     */
-    get: operations['getGraphEntityDetail']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/graph-products/{project_id}/entities/{entity_id}/subgraph': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * Get a bounded subgraph around an entity
-     * @description Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Depth defaults to 1 and must be <= 3.
-     */
-    get: operations['getGraphSubgraph']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/usage-events': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * List usage events
-     * @description Requires `usage:read`, `workspace:admin`, or an `instance_admin` token.
-     */
-    get: operations['listUsageEvents']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
-  '/v1/cost-ledger': {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    /**
-     * List cost ledger entries
-     * @description Requires `usage:read`, `workspace:admin`, or an `instance_admin` token.
-     */
-    get: operations['listCostLedger']
-    put?: never
-    post?: never
-    delete?: never
-    options?: never
-    head?: never
-    patch?: never
-    trace?: never
-  }
+    "/v1/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Health check */
+        get: operations["getHealth"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ready": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Readiness check */
+        get: operations["getReadiness"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/version": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Service version */
+        get: operations["getVersion"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List API tokens
+         * @description Requires `workspace:admin` scope or an `instance_admin` token. Instance admin callers may optionally filter by `workspace_id`; workspace-scoped tokens are implicitly limited to their own workspace even if the query parameter is omitted.
+         */
+        get: operations["listTokens"];
+        put?: never;
+        /**
+         * Mint an API token
+         * @description Requires `workspace:admin` scope or an `instance_admin` token. Workspace-scoped tokens may mint tokens only for their own workspace. Global tokens without `workspace_id` require an `instance_admin` caller.
+         */
+        post: operations["createToken"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/bootstrap-token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mint an API token using the bootstrap secret
+         * @description Requires a `bootstrap_secret` field in the request body matching the backend
+         *     `RJUSTRAG_BOOTSTRAP_TOKEN` or `RUSTRAG_BOOTSTRAP_TOKEN` environment variable.
+         *     This route is intended for initial setup when no regular API token exists yet.
+         */
+        post: operations["createBootstrapToken"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/tokens/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get API token summary
+         * @description Requires `workspace:admin` scope or an `instance_admin` token. Workspace-scoped tokens may only access tokens from their own workspace.
+         */
+        get: operations["getToken"];
+        put?: never;
+        post?: never;
+        /**
+         * Revoke API token
+         * @description Requires `workspace:admin` scope or an `instance_admin` token. Workspace-scoped tokens may only revoke tokens from their own workspace.
+         */
+        delete: operations["revokeToken"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/auth/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Sign in with login and password for a browser UI session */
+        post: operations["uiLogin"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/auth/session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get the current authenticated UI session */
+        get: operations["getUiSession"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/auth/logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** End the current browser UI session */
+        post: operations["uiLogout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/context": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get the current authenticated shell context */
+        get: operations["getUiContext"];
+        /** Update the active workspace, library, or locale for the UI session */
+        put: operations["updateUiContext"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/workspaces": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List workspaces visible to the current UI session */
+        get: operations["listUiWorkspaces"];
+        put?: never;
+        /** Create a workspace from the authenticated shell */
+        post: operations["createUiWorkspace"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/libraries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List libraries visible in the selected workspace */
+        get: operations["listUiLibraries"];
+        put?: never;
+        /** Create a library inside the selected workspace */
+        post: operations["createUiLibrary"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/documents/surface": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get the complete Documents screen model for the active library */
+        get: operations["getUiDocumentsSurface"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/documents/upload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Upload one or more files into the active library */
+        post: operations["uploadUiDocuments"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/documents/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get a document row detail payload */
+        get: operations["getUiDocumentDetail"];
+        put?: never;
+        post?: never;
+        /** Remove a document item from the active library */
+        delete: operations["deleteUiDocument"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/documents/{id}/content": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Download extracted plain text for a processed document */
+        get: operations["downloadUiDocumentContent"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/documents/{id}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Retry processing for a failed or retryable document item */
+        post: operations["retryUiDocument"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/documents/{id}/reprocess": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reprocess a completed or failed document item */
+        post: operations["reprocessUiDocument"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/graph/surface": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get the graph workspace payload for the active library */
+        get: operations["getUiGraphSurface"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/graph/diagnostics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get graph readiness and rebuild diagnostics for the active library */
+        get: operations["getUiGraphDiagnostics"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/graph/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Search graph nodes inside the active library */
+        get: operations["searchUiGraphNodes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/graph/nodes/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get focus detail for a graph node */
+        get: operations["getUiGraphNodeDetail"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/graph/ask": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Ask a question from the graph assistant panel */
+        post: operations["askUiGraphAssistant"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/admin/overview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get admin tab counts and availability for the active workspace */
+        get: operations["getUiAdminOverview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/admin/api-tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List API tokens for the active workspace admin surface */
+        get: operations["listUiAdminApiTokens"];
+        put?: never;
+        /** Create a new API token from the admin surface */
+        post: operations["createUiAdminApiToken"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/admin/api-tokens/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Revoke an API token from the admin surface */
+        delete: operations["revokeUiAdminApiToken"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/admin/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List workspace members for the admin Members tab */
+        get: operations["listUiAdminMembers"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/admin/library-access": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List library access rows for the admin tab */
+        get: operations["listUiAdminLibraryAccess"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/admin/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get admin settings, provider profile, and validation state */
+        get: operations["getUiAdminSettings"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/admin/settings/provider-profile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update the active library provider profile from the admin surface */
+        put: operations["updateUiAdminProviderProfile"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ui/admin/settings/provider-profile/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Run live validation for the active library provider profile */
+        post: operations["validateUiAdminProviderProfile"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List workspaces */
+        get: operations["listWorkspaces"];
+        put?: never;
+        /**
+         * Create workspace
+         * @description Requires `workspace:admin` scope or an `instance_admin` token.
+         */
+        post: operations["createWorkspace"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{id}/governance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get workspace governance summary
+         * @description Requires `workspace:admin`, `usage:read`, `providers:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access their own workspace.
+         */
+        get: operations["getWorkspaceGovernance"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/projects": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List projects */
+        get: operations["listProjects"];
+        put?: never;
+        /**
+         * Create project
+         * @description Requires `projects:write`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only create projects in their own workspace.
+         */
+        post: operations["createProject"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/projects/{id}/readiness": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get project readiness summary
+         * @description Requires `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
+         */
+        get: operations["getProjectReadiness"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/provider-accounts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List provider accounts */
+        get: operations["listProviderAccounts"];
+        put?: never;
+        /**
+         * Create provider account
+         * @description Requires `providers:admin`, `workspace:admin`, or an `instance_admin` token.
+         */
+        post: operations["createProviderAccount"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/model-profiles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List model profiles */
+        get: operations["listModelProfiles"];
+        put?: never;
+        /**
+         * Create model profile
+         * @description Requires `providers:admin`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only create profiles in their own workspace, and the provider account must belong to that workspace.
+         */
+        post: operations["createModelProfile"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/provider-governance/{workspace_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get provider governance summary
+         * @description Requires `providers:admin`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access their own workspace.
+         */
+        get: operations["getProviderGovernance"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/provider-defaults/{workspace_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get onboarding provider defaults summary
+         * @description Requires `providers:admin`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access their own workspace.
+         */
+        get: operations["getProviderDefaultsSummary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/projects/{project_id}/defaults": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get project provider defaults
+         * @description Requires one of `projects:write`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
+         */
+        get: operations["getProjectDefaults"];
+        /**
+         * Update project provider defaults
+         * @description Requires `projects:write`, `workspace:admin`, or an `instance_admin` token. Validates that any referenced provider account and model profiles belong to the project's workspace. The backend currently persists only chat and embedding default profile ids on the project row; provider account, rerank model, and retrieval/chunk settings are validated and echoed in the response but are not persisted.
+         */
+        put: operations["updateProjectDefaults"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/integrations/{workspace_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get integrations workspace summary
+         * @description Requires `providers:admin`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access their own workspace. Returns up to 5 example projects and all workspace API tokens.
+         */
+        get: operations["getIntegrationsWorkspaceSummary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/integrations/{workspace_id}/examples": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List example projects for integrations setup
+         * @description Requires `providers:admin`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access their own workspace.
+         */
+        get: operations["listWorkspaceExampleProjects"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/integrations/{workspace_id}/tokens/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke a workspace API token from the integrations surface
+         * @description Requires `workspace:admin` scope or an `instance_admin` token. The token must belong to the specified workspace.
+         */
+        delete: operations["revokeWorkspaceToken"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/integrations-products/{workspace_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get integrations product snapshot
+         * @description Requires `providers:admin`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access their own workspace. Response wraps the snapshot under a top-level `snapshot` field.
+         */
+        get: operations["getIntegrationsProduct"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/sources": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List sources */
+        get: operations["listSources"];
+        put?: never;
+        /**
+         * Create source
+         * @description Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
+         */
+        post: operations["createSource"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ingestion-jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List ingestion jobs */
+        get: operations["listIngestionJobs"];
+        put?: never;
+        /**
+         * Create ingestion job
+         * @description Requires `documents:write`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only create jobs for projects in their own workspace.
+         */
+        post: operations["createIngestionJob"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ingestion-jobs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get ingestion job detail
+         * @description Requires `documents:read`, `documents:write`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access jobs in their own workspace.
+         */
+        get: operations["getIngestionJobDetail"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ingestion-jobs/{id}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Retry an ingestion job
+         * @description Requires `documents:write`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only retry jobs in their own workspace.
+         */
+        post: operations["retryIngestionJob"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/documents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List documents */
+        get: operations["listDocuments"];
+        put?: never;
+        /**
+         * Create document metadata record
+         * @description Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
+         */
+        post: operations["createDocument"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/content/ingest-text": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Queue plain text for ingestion
+         * @description Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
+         *
+         *     The current backend enqueues an ingestion job and returns its queued lifecycle state; it does not synchronously create a document/chunk result in this response.
+         *     Workspace-scoped tokens may only queue jobs for projects in their own workspace.
+         */
+        post: operations["ingestText"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/content/search-chunks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Lexically search chunks within a project
+         * @description Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token.
+         */
+        post: operations["searchChunks"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/content/embed-project": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Generate embeddings for project chunks
+         * @description Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
+         *
+         *     If `embedding_model_profile_id` is provided, the backend resolves provider/model from that profile;
+         *     otherwise it uses `provider_kind` and `model_name` directly.
+         */
+        post: operations["embedProjectChunks"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/chunks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List chunks by document or project
+         * @description Requires `documents:read`, `workspace:admin`, or an `instance_admin` token.
+         */
+        get: operations["listChunks"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/uploads/ingest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upload a file and queue ingestion when a supported adapter exists
+         * @description Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
+         *
+         *     Current implementation supports UTF-8 text-like uploads only. The backend classifies the selected file, rejects PDF/image uploads with explicit "planned" validation errors, decodes accepted text-like content as UTF-8 text, enqueues an ingestion job, and returns queued job metadata rather than a completed document/chunk result.
+         *     Workspace-scoped tokens may only queue jobs for projects in their own workspace.
+         *
+         *     Expected multipart fields:
+         *     - `project_id` (required)
+         *     - `source_id` (optional)
+         *     - `title` (optional)
+         *     - `file` (required)
+         */
+        post: operations["uploadAndIngest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/retrieval-runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List retrieval runs */
+        get: operations["listRetrievalRuns"];
+        put?: never;
+        /**
+         * Create a retrieval run record manually
+         * @description Requires `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only create runs for projects in their own workspace.
+         */
+        post: operations["createRetrievalRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/retrieval-runs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get retrieval run detail
+         * @description Requires `query:run`, `workspace:admin`, `documents:read`, or an `instance_admin` token. Workspace-scoped tokens may only access runs in their own workspace.
+         */
+        get: operations["getRetrievalRunDetail"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/chat/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List chat sessions for a project
+         * @description Requires `query:run`, `workspace:admin`, `documents:read`, or an `instance_admin` token. Workspace-scoped tokens may only access sessions in their own workspace.
+         */
+        get: operations["listChatSessions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/chat/sessions/{id}/messages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List messages for a chat session
+         * @description Requires `query:run`, `workspace:admin`, `documents:read`, or an `instance_admin` token. Workspace-scoped tokens may only access sessions in their own workspace.
+         */
+        get: operations["listChatMessages"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run live retrieval + generation query
+         * @description Requires `query:run`, `workspace:admin`, or an `instance_admin` token.
+         *
+         *     The backend combines lexical matching with optional semantic matching based on stored chunk embeddings,
+         *     then calls the configured LLM gateway to produce the final answer.
+         */
+        post: operations["runQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/product/projects/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get product-oriented project overview
+         * @description Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
+         */
+        get: operations["getProductProjectOverview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/product/projects/{id}/diagnostics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get project diagnostics
+         * @description Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
+         */
+        get: operations["getProductProjectDiagnostics"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/product/projects/{id}/query-contract": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get product query contract description
+         * @description Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
+         */
+        get: operations["getProductProjectQueryContract"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/product/documents/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get product-oriented document overview
+         * @description Requires `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access documents in their own workspace. Usage and cost attribution are currently exposed at project scope because per-document attribution is not persisted yet.
+         */
+        get: operations["getProductDocumentOverview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/product/documents/{id}/diagnostics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get document diagnostics
+         * @description Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access documents in their own workspace.
+         */
+        get: operations["getProductDocumentDiagnostics"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/graph-products/{project_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get graph product snapshot
+         * @description Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
+         */
+        get: operations["getGraphProduct"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/graph-products/{project_id}/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get graph project summary
+         * @description Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
+         */
+        get: operations["getGraphSummary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/graph-products/{project_id}/diagnostics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get graph project diagnostics
+         * @description Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Returns persisted content counts, graph provenance coverage, and concrete readiness blockers/next steps without mutating runtime state.
+         */
+        get: operations["getGraphDiagnostics"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/graph-products/{project_id}/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Search graph entities and relations
+         * @description Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Query parameter `q` must be non-empty.
+         */
+        get: operations["searchGraph"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/graph-products/{project_id}/entities/{entity_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get graph entity detail
+         * @description Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
+         */
+        get: operations["getGraphEntityDetail"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/graph-products/{project_id}/entities/{entity_id}/subgraph": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get a bounded subgraph around an entity
+         * @description Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Depth defaults to 1 and must be <= 3.
+         */
+        get: operations["getGraphSubgraph"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/usage-events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List usage events
+         * @description Requires `usage:read`, `workspace:admin`, or an `instance_admin` token.
+         */
+        get: operations["listUsageEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/cost-ledger": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List cost ledger entries
+         * @description Requires `usage:read`, `workspace:admin`, or an `instance_admin` token.
+         */
+        get: operations["listCostLedger"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runtime/providers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List configured runtime providers and allowed models */
+        get: operations["listRuntimeProviders"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runtime/providers/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Validate one provider and model combination */
+        post: operations["validateRuntimeProvider"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runtime/libraries/{libraryId}/provider-profile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get the effective runtime provider profile for one library */
+        get: operations["getRuntimeProviderProfile"];
+        /** Update the effective runtime provider profile for one library */
+        put: operations["updateRuntimeProviderProfile"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runtime/libraries/{libraryId}/documents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List runtime ingestion rows for one library */
+        get: operations["listRuntimeDocuments"];
+        put?: never;
+        /** Upload one or more documents into a library runtime queue */
+        post: operations["uploadRuntimeDocuments"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runtime/libraries/{libraryId}/documents/{documentId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get one runtime document detail */
+        get: operations["getRuntimeDocument"];
+        put?: never;
+        post?: never;
+        /** Delete one runtime document and trigger graph rebuild work */
+        delete: operations["deleteRuntimeDocument"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runtime/libraries/{libraryId}/documents/{documentId}/append": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Append plain text to an existing logical document */
+        post: operations["appendRuntimeDocument"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runtime/libraries/{libraryId}/documents/{documentId}/replace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Replace an existing logical document with a new file revision */
+        post: operations["replaceRuntimeDocument"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runtime/libraries/{libraryId}/documents/{documentId}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Retry a failed runtime document */
+        post: operations["retryRuntimeDocument"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runtime/libraries/{libraryId}/documents/{documentId}/reprocess": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reprocess a previously completed runtime document */
+        post: operations["reprocessRuntimeDocument"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runtime/libraries/{libraryId}/graph/surface": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get the runtime graph surface for one library */
+        get: operations["getRuntimeGraphSurface"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runtime/libraries/{libraryId}/graph/nodes/{nodeId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get runtime graph node detail for one library */
+        get: operations["getRuntimeGraphNodeDetail"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runtime/libraries/{libraryId}/graph/diagnostics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get runtime graph diagnostics for one library */
+        get: operations["getRuntimeGraphDiagnostics"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runtime/libraries/{libraryId}/queries/answer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Execute a grounded answer query against one library */
+        post: operations["runRuntimeAnswerQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runtime/libraries/{libraryId}/queries/data": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Execute a structured runtime query against one library */
+        post: operations["runRuntimeStructuredQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runtime/libraries/{libraryId}/queries/{queryId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get one persisted runtime query execution */
+        get: operations["getRuntimeQueryExecution"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runtime/admin/model-pricing": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List effective-dated model pricing catalog entries */
+        get: operations["listRuntimeModelPricing"];
+        put?: never;
+        /** Create a new effective-dated pricing catalog entry */
+        post: operations["createRuntimeModelPricing"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runtime/admin/model-pricing/{pricingId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update an existing pricing catalog entry without changing identity fields */
+        put: operations["updateRuntimeModelPricing"];
+        post?: never;
+        /** Deactivate a pricing catalog entry */
+        delete: operations["deleteRuntimeModelPricing"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
-export type webhooks = Record<string, never>
+export type webhooks = Record<string, never>;
 export interface components {
-  schemas: {
-    ApiErrorBody: {
-      error: string
-    }
-    HealthResponse: {
-      /** @example ok */
-      status: string
-      /** @example rustrag-backend */
-      service: string
-      /** @example local */
-      environment: string
-    }
-    ReadinessResponse: {
-      /** @enum {string} */
-      status: 'ready' | 'degraded'
-      /** @enum {string} */
-      postgres: 'ok' | 'down'
-      /** @enum {string} */
-      redis: 'ok' | 'down'
-    }
-    /** @enum {string} */
-    HealthState: 'healthy' | 'degraded' | 'failed' | 'unknown'
-    VersionResponse: {
-      service: string
-      /** @example 0.1.0 */
-      version: string
-      environment: string
-    }
-    CreateTokenRequest: {
-      /** Format: uuid */
-      workspace_id?: string | null
-      /** @example workspace_api */
-      token_kind: string
-      /** @example frontend-local */
-      label: string
-      /**
-       * @example [
-       *       "documents:read",
-       *       "query:run"
-       *     ]
-       */
-      scopes: string[]
-    }
-    TokenCreateResponse: {
-      /** Format: uuid */
-      id: string
-      /** Format: uuid */
-      workspace_id?: string | null
-      token_kind: string
-      label: string
-      /** @description Plaintext token shown only at creation time. */
-      token: string
-      scopes: string[]
-    }
-    WorkspaceSummary: {
-      /** Format: uuid */
-      id: string
-      slug: string
-      name: string
-      /** @example active */
-      status: string
-    }
-    WorkspaceGovernanceSummary: {
-      /** Format: uuid */
-      id: string
-      slug: string
-      name: string
-      status: string
-      projects: number
-      provider_accounts: number
-      model_profiles: number
-      api_tokens: number
-      health_state: components['schemas']['HealthState']
-      usage: components['schemas']['UsageGovernanceSummary']
-    }
-    CreateWorkspaceRequest: {
-      slug: string
-      name: string
-    }
-    ProjectSummary: {
-      /** Format: uuid */
-      id: string
-      /** Format: uuid */
-      workspace_id: string
-      slug: string
-      name: string
-      description?: string | null
-    }
-    CreateProjectRequest: {
-      /** Format: uuid */
-      workspace_id: string
-      slug: string
-      name: string
-      description?: string | null
-    }
-    ProjectReadinessSummary: {
-      /** Format: uuid */
-      id: string
-      /** Format: uuid */
-      workspace_id: string
-      slug: string
-      name: string
-      ingestion_jobs: number
-      sources: number
-      documents: number
-      ready_for_query: boolean
-      /** @example indexed */
-      indexing_state: string
-      latest_ingestion_status?: string | null
-      active_ingestion_jobs?: number
-      completed_ingestion_jobs?: number
-      failed_ingestion_jobs?: number
-    }
-    ProviderAccountSummary: {
-      /** Format: uuid */
-      id: string
-      /** Format: uuid */
-      workspace_id: string
-      /** @example openai */
-      provider_kind: string
-      label: string
-      /** @example active */
-      status: string
-    }
-    CreateProviderAccountRequest: {
-      /** Format: uuid */
-      workspace_id: string
-      provider_kind: string
-      label: string
-      /** Format: uri */
-      api_base_url?: string | null
-    }
-    ModelProfileSummary: {
-      /** Format: uuid */
-      id: string
-      /** Format: uuid */
-      workspace_id: string
-      /** Format: uuid */
-      provider_account_id: string
-      /** @example chat */
-      profile_kind: string
-      /** @example gpt-4.1-mini */
-      model_name: string
-    }
-    CreateModelProfileRequest: {
-      /** Format: uuid */
-      workspace_id: string
-      /** Format: uuid */
-      provider_account_id: string
-      profile_kind: string
-      model_name: string
-      temperature?: number | null
-      /** Format: int32 */
-      max_output_tokens?: number | null
-    }
-    ProviderGovernanceSummary: {
-      /** Format: uuid */
-      workspace_id: string
-      provider_accounts: components['schemas']['ProviderAccountSummary'][]
-      model_profiles: components['schemas']['ModelProfileSummary'][]
-      warning?: string | null
-    }
-    SourceSummary: {
-      /** Format: uuid */
-      id: string
-      /** Format: uuid */
-      project_id: string
-      /** @example upload */
-      source_kind: string
-      label: string
-      /** @example active */
-      status: string
-    }
-    CreateSourceRequest: {
-      /** Format: uuid */
-      project_id: string
-      source_kind: string
-      label: string
-    }
-    IngestionJobSummary: {
-      /** Format: uuid */
-      id: string
-      /** Format: uuid */
-      project_id: string
-      /** Format: uuid */
-      source_id?: string | null
-      trigger_kind: string
-      /** @example queued */
-      status: string
-      /** @example created */
-      stage: string
-    }
-    CreateIngestionJobRequest: {
-      /** Format: uuid */
-      project_id: string
-      /** Format: uuid */
-      source_id?: string | null
-      trigger_kind: string
-      requested_by?: string | null
-    }
-    /** @enum {string} */
-    IngestionLifecycleState:
-      | 'queued'
-      | 'validating'
-      | 'running'
-      | 'partial'
-      | 'completed'
-      | 'retryable_failed'
-      | 'canceled'
-      | 'failed'
-    IngestionJobDetail: {
-      /** Format: uuid */
-      id: string
-      /** Format: uuid */
-      project_id: string
-      /** Format: uuid */
-      source_id?: string | null
-      trigger_kind: string
-      status: string
-      stage: string
-      requested_by?: string | null
-      error_message?: string | null
-      /** Format: date-time */
-      started_at?: string | null
-      /** Format: date-time */
-      finished_at?: string | null
-      retryable: boolean
-      lifecycle: components['schemas']['IngestionLifecycleState']
-    }
-    DocumentSummary: {
-      /** Format: uuid */
-      id: string
-      /** Format: uuid */
-      project_id: string
-      /** Format: uuid */
-      source_id?: string | null
-      external_key: string
-      title?: string | null
-      mime_type?: string | null
-      checksum?: string | null
-    }
-    CreateDocumentRequest: {
-      /** Format: uuid */
-      project_id: string
-      /** Format: uuid */
-      source_id?: string | null
-      external_key: string
-      title?: string | null
-      mime_type?: string | null
-      checksum?: string | null
-    }
-    IngestTextRequest: {
-      /** Format: uuid */
-      project_id: string
-      /** Format: uuid */
-      source_id?: string | null
-      external_key: string
-      title?: string | null
-      text: string
-    }
-    IngestTextResponse: {
-      /** Format: uuid */
-      ingestion_job_id: string
-      /** @description Current ingestion job status, initially `queued`. */
-      status: string
-      /** @description Current ingestion job stage, initially `queued`. */
-      stage: string
-    }
-    SearchChunksRequest: {
-      /** Format: uuid */
-      project_id: string
-      /** Format: uuid */
-      session_id?: string | null
-      query_text: string
-      /** Format: int32 */
-      top_k?: number | null
-    }
-    ChunkResult: {
-      /** Format: uuid */
-      id: string
-      /** Format: uuid */
-      document_id: string
-      /** Format: int32 */
-      ordinal: number
-      content: string
-    }
-    EmbedProjectChunksRequest: {
-      /** Format: uuid */
-      project_id: string
-      provider_kind: string
-      model_name: string
-      /** Format: uuid */
-      embedding_model_profile_id?: string | null
-      /** Format: int64 */
-      limit?: number | null
-    }
-    EmbedProjectChunksResponse: {
-      /** Format: uuid */
-      project_id: string
-      embedded_chunks: number
-      provider_kind: string
-      model_name: string
-    }
-    ChunkSummary: {
-      /** Format: uuid */
-      id: string
-      /** Format: uuid */
-      document_id: string
-      /** Format: uuid */
-      project_id: string
-      /** Format: int32 */
-      ordinal: number
-      content: string
-      /** Format: int32 */
-      token_count?: number | null
-    }
-    UploadIngestResponse: {
-      /** Format: uuid */
-      ingestion_job_id: string
-      external_key: string
-      /** @description Current ingestion job status, initially `queued`. */
-      status: string
-      /** @description Current ingestion job stage, initially `queued`. */
-      stage: string
-      mime_type?: string | null
-      /**
-       * @description Backend-classified file kind. Current successful uploads return `text_like`.
-       * @enum {string}
-       */
-      file_kind: 'text_like' | 'pdf' | 'image' | 'binary'
-      /**
-       * @description Adapter availability for the classified file kind. Current successful uploads return `supported_now`.
-       * @enum {string}
-       */
-      adapter_status: 'supported_now' | 'planned'
-      /** @description Backend pipeline mode used for the accepted upload, currently `multipart_text_upload_v1`. */
-      ingest_mode: string
-    }
-    RetrievalRunSummary: {
-      /** Format: uuid */
-      id: string
-      /** Format: uuid */
-      project_id: string
-      query_text: string
-      /** Format: uuid */
-      model_profile_id?: string | null
-      /** Format: int32 */
-      top_k: number
-      response_text?: string | null
-      /** @example grounded */
-      answer_status: string
-      weak_grounding: boolean
-    }
-    RetrievalRunDetail: {
-      /** Format: uuid */
-      id: string
-      /** Format: uuid */
-      project_id: string
-      query_text: string
-      /** Format: uuid */
-      model_profile_id?: string | null
-      /** Format: int32 */
-      top_k: number
-      response_text?: string | null
-      answer_status: string
-      weak_grounding: boolean
-      references: string[]
-      matched_chunk_ids: string[]
-      warning?: string | null
-      debug_json: {
-        [key: string]: unknown
-      }
-    }
-    ChatSessionSummary: {
-      /** Format: uuid */
-      id: string
-      /** Format: uuid */
-      workspace_id: string
-      /** Format: uuid */
-      project_id: string
-      title: string
-      /** Format: date-time */
-      created_at: string
-      /** Format: date-time */
-      updated_at: string
-      /** Format: int64 */
-      message_count: number
-      last_message_preview?: string | null
-    }
-    ChatMessageItem: {
-      /** Format: uuid */
-      id: string
-      /** Format: uuid */
-      session_id: string
-      /** Format: uuid */
-      project_id: string
-      role: string
-      content: string
-      /** Format: uuid */
-      retrieval_run_id?: string | null
-      /** Format: date-time */
-      created_at: string
-    }
-    CreateRetrievalRunRequest: {
-      /** Format: uuid */
-      project_id: string
-      query_text: string
-      /** Format: uuid */
-      model_profile_id?: string | null
-      /** Format: int32 */
-      top_k?: number | null
-      response_text?: string | null
-    }
-    QueryRequest: {
-      /** Format: uuid */
-      project_id: string
-      query_text: string
-      /** Format: uuid */
-      model_profile_id?: string | null
-      /** Format: uuid */
-      embedding_model_profile_id?: string | null
-      /** Format: int32 */
-      top_k?: number | null
-    }
-    QueryResponse: {
-      /** Format: uuid */
-      retrieval_run_id: string
-      /** Format: uuid */
-      project_id: string
-      answer: string
-      /**
-       * @example [
-       *       "document:01958f52-1b41-7e1a-81f0-68bb2ac6df54:chunk:0"
-       *     ]
-       */
-      references: string[]
-      /** @example gateway_live */
-      mode: string
-      /** @example grounded */
-      answer_status: string
-      weak_grounding: boolean
-      warning?: string | null
-    }
-    UsageGovernanceSummary: {
-      /** Format: int64 */
-      usage_events: number
-      /** Format: int64 */
-      prompt_tokens: number
-      /** Format: int64 */
-      completion_tokens: number
-      /** Format: int64 */
-      total_tokens: number
-      /** Format: double */
-      estimated_cost: number
-    }
-    UsageEventSummary: {
-      /** Format: uuid */
-      id: string
-      /** Format: uuid */
-      project_id?: string | null
-      /** Format: uuid */
-      model_profile_id?: string | null
-      /** @example query */
-      usage_kind: string
-      /** Format: int32 */
-      prompt_tokens?: number | null
-      /** Format: int32 */
-      completion_tokens?: number | null
-      /** Format: int32 */
-      total_tokens?: number | null
-      raw_usage_json: {
-        [key: string]: unknown
-      }
-    }
-    CostLedgerSummary: {
-      /** Format: uuid */
-      id: string
-      /** Format: uuid */
-      project_id?: string | null
-      /** Format: uuid */
-      usage_event_id: string
-      provider_kind: string
-      model_name: string
-      /** @example USD */
-      currency: string
-      /** Format: double */
-      estimated_cost: number
-      pricing_snapshot_json: {
-        [key: string]: unknown
-      }
-    }
-    BootstrapTokenRequest: {
-      /** Format: uuid */
-      workspace_id?: string | null
-      /** @example workspace_token */
-      token_kind: string
-      /** @example bootstrap-local */
-      label: string
-      scopes: string[]
-      /** @description Must match the backend bootstrap token environment variable. */
-      bootstrap_secret?: string | null
-    }
-    TokenSummary: {
-      /** Format: uuid */
-      id: string
-      /** Format: uuid */
-      workspace_id?: string | null
-      token_kind: string
-      label: string
-      /** @example active */
-      status: string
-      scopes: string[]
-      /** Format: date-time */
-      last_used_at?: string | null
-      /** Format: date-time */
-      created_at: string
-      /** Format: date-time */
-      updated_at: string
-    }
-    IntegrationExampleProjectSummary: {
-      /** Format: uuid */
-      id: string
-      /** Format: uuid */
-      workspace_id: string
-      slug: string
-      name: string
-    }
-    IntegrationTokenSummary: components['schemas']['TokenSummary']
-    IntegrationsWorkspaceSummary: {
-      /** Format: uuid */
-      workspace_id: string
-      example_projects: components['schemas']['IntegrationExampleProjectSummary'][]
-      api_tokens: components['schemas']['IntegrationTokenSummary'][]
-    }
-    ProviderDefaultProfileDto: {
-      /** @enum {string} */
-      profile_kind: 'chat' | 'embedding' | 'rerank'
-      model_name: string
-      temperature?: number | null
-      /** Format: int32 */
-      max_output_tokens?: number | null
-    }
-    ProviderDefaultTemplateDto: {
-      /** @enum {string} */
-      provider_kind: 'open_ai' | 'deep_seek' | 'open_ai_compatible'
-      label: string
-      /** Format: uri */
-      api_base_url?: string | null
-      chat_profile: components['schemas']['ProviderDefaultProfileDto']
-      embedding_profile?: components['schemas']['ProviderDefaultProfileDto'] | null
-      rerank_profile?: components['schemas']['ProviderDefaultProfileDto'] | null
-    }
-    OnboardingDefaultsSummary: {
-      /** Format: uuid */
-      workspace_id: string
-      provider_defaults: components['schemas']['ProviderDefaultTemplateDto'][]
-      project_defaults: components['schemas']['ProjectDefaultsDto']
-      persistence_state: string
-      warning?: string | null
-    }
-    ProjectDefaultsUpsertRequest: {
-      /** Format: uuid */
-      provider_account_id?: string | null
-      /** Format: uuid */
-      chat_model_profile_id?: string | null
-      /** Format: uuid */
-      embedding_model_profile_id?: string | null
-      /** Format: uuid */
-      rerank_model_profile_id?: string | null
-      /** Format: int32 */
-      retrieval_top_k?: number | null
-      /** Format: int32 */
-      chunk_size?: number | null
-      /** Format: int32 */
-      chunk_overlap?: number | null
-    }
-    ProjectDefaultsDto: {
-      /** Format: uuid */
-      workspace_id: string
-      /** Format: uuid */
-      project_id?: string | null
-      /** Format: uuid */
-      provider_account_id?: string | null
-      /** Format: uuid */
-      chat_model_profile_id?: string | null
-      /** Format: uuid */
-      embedding_model_profile_id?: string | null
-      /** Format: uuid */
-      rerank_model_profile_id?: string | null
-      /** Format: int32 */
-      retrieval_top_k: number
-      /** Format: int32 */
-      chunk_size: number
-      /** Format: int32 */
-      chunk_overlap: number
-    }
-    PlaceholderCapabilityDto: {
-      implemented: boolean
-      /** @enum {string} */
-      status: 'ready' | 'partial' | 'planned'
-      reason: string
-    }
-    CitationReferenceDto: {
-      kind: string
-      label: string
-      /** Format: uuid */
-      chunk_id?: string | null
-      /** Format: uuid */
-      document_id?: string | null
-      /** Format: uuid */
-      source_id?: string | null
-      /** Format: double */
-      score?: number | null
-    }
-    RetrievalDebugMetadataDto: {
-      matched_chunk_ids: string[]
-      references: string[]
-      warning?: string | null
-      answer_status: string
-      weak_grounding: boolean
-    }
-    OperationalObservabilityDto: {
-      trace_hint: string
-      metrics_hint: string
-      logging_hint: string
-    }
-    ProductProjectReadinessDto: {
-      /** Format: uuid */
-      project_id: string
-      /** Format: uuid */
-      workspace_id: string
-      documents: number
-      sources: number
-      ingestion_jobs: number
-      ready_for_query: boolean
-      indexing_state: string
-    }
-    ProductQueryContractDto: {
-      route: string
-      method: string
-      request_fields: string[]
-      response_fields: string[]
-      citation_fields: string[]
-      debug_fields: string[]
-    }
-    ProductProjectCapabilitiesDto: {
-      query_contract: components['schemas']['PlaceholderCapabilityDto']
-      citations: components['schemas']['PlaceholderCapabilityDto']
-      retrieval_debug_metadata: components['schemas']['PlaceholderCapabilityDto']
-      diagnostics: components['schemas']['PlaceholderCapabilityDto']
-    }
-    ProductProjectOverviewDto: {
-      /** Format: uuid */
-      id: string
-      /** Format: uuid */
-      workspace_id: string
-      slug: string
-      name: string
-      description?: string | null
-      readiness: components['schemas']['ProductProjectReadinessDto']
-      query_contract: components['schemas']['ProductQueryContractDto']
-      citations: components['schemas']['CitationReferenceDto'][]
-      retrieval_debug?: components['schemas']['RetrievalDebugMetadataDto'] | null
-      observability: components['schemas']['OperationalObservabilityDto']
-      capabilities: components['schemas']['ProductProjectCapabilitiesDto']
-    }
-    ProductProjectDiagnosticsDto: {
-      /** Format: uuid */
-      project_id: string
-      /** Format: uuid */
-      workspace_id: string
-      latest_ingestion_job?: components['schemas']['IngestionJobSummary'] | null
-      latest_retrieval_run?: components['schemas']['RetrievalRunSummary'] | null
-      retrieval_debug?: components['schemas']['RetrievalDebugMetadataDto'] | null
-      observability: components['schemas']['OperationalObservabilityDto']
-    }
-    ProductDocumentCapabilitiesDto: {
-      provider_usage_attribution: components['schemas']['PlaceholderCapabilityDto']
-      cost_accounting: components['schemas']['PlaceholderCapabilityDto']
-      workspace_project_attribution: components['schemas']['PlaceholderCapabilityDto']
-      citations: components['schemas']['PlaceholderCapabilityDto']
-    }
-    ProductDocumentOverviewDto: {
-      /** Format: uuid */
-      id: string
-      /** Format: uuid */
-      project_id: string
-      /** Format: uuid */
-      source_id?: string | null
-      external_key: string
-      title?: string | null
-      mime_type?: string | null
-      checksum?: string | null
-      usage: components['schemas']['UsageEventSummary'][]
-      costs: components['schemas']['CostLedgerSummary'][]
-      capabilities: components['schemas']['ProductDocumentCapabilitiesDto']
-    }
-    ProductDocumentDiagnosticsDto: {
-      /** Format: uuid */
-      document_id: string
-      /** Format: uuid */
-      project_id: string
-      /** Format: uuid */
-      project_workspace_id: string
-      ingestion_jobs: components['schemas']['IngestionJobSummary'][]
-      citations: components['schemas']['CitationReferenceDto'][]
-      usage: components['schemas']['UsageEventSummary'][]
-      costs: components['schemas']['CostLedgerSummary'][]
-    }
-    GraphCoverageSummary: {
-      /** Format: uuid */
-      project_id: string
-      entity_count: number
-      relation_count: number
-      extraction_runs: number
-      status: string
-      warning?: string | null
-    }
-    GraphEntitySummary: {
-      /** Format: uuid */
-      id: string
-      /** Format: uuid */
-      project_id: string
-      canonical_name: string
-      entity_type?: string | null
-      source_chunk_count: number
-    }
-    GraphRelationSummary: {
-      /** Format: uuid */
-      id: string
-      /** Format: uuid */
-      project_id: string
-      relation_type: string
-      /** Format: uuid */
-      from_entity_id: string
-      /** Format: uuid */
-      to_entity_id: string
-      source_chunk_count: number
-    }
-    GraphProductSnapshot: {
-      /** Format: uuid */
-      project_id: string
-      coverage: components['schemas']['GraphCoverageSummary']
-      entities: components['schemas']['GraphEntitySummary'][]
-      relations: components['schemas']['GraphRelationSummary'][]
-      /** Format: date-time */
-      generated_at: string
-    }
-    GraphProductResponse: {
-      snapshot: components['schemas']['GraphProductSnapshot']
-    }
-    GraphKindCount: {
-      name: string
-      count: number
-    }
-    GraphProjectSummaryResponse: {
-      /** Format: uuid */
-      project_id: string
-      coverage: components['schemas']['GraphCoverageSummary']
-      entity_kinds: components['schemas']['GraphKindCount'][]
-      relation_kinds: components['schemas']['GraphKindCount'][]
-      top_entities: components['schemas']['GraphEntitySummary'][]
-      sample_relations: components['schemas']['GraphRelationSummary'][]
-      /** Format: date-time */
-      generated_at: string
-    }
-    GraphContentSummary: {
-      persisted_document_count: number
-      persisted_chunk_count: number
-      embedded_chunk_count: number
-      retrieval_run_count: number
-      referenced_document_count: number
-      referenced_chunk_count: number
-    }
-    GraphProvenanceSummary: {
-      entities_with_document_refs: number
-      entities_with_chunk_refs: number
-      entities_without_chunk_refs: number
-      relations_with_document_refs: number
-      relations_with_chunk_refs: number
-      relations_without_chunk_refs: number
-    }
-    GraphReadinessSummary: {
-      /** @example awaiting_graph_rows */
-      status: string
-      blockers: string[]
-      next_steps: string[]
-    }
-    GraphProjectDiagnosticsResponse: {
-      /** Format: uuid */
-      project_id: string
-      coverage: components['schemas']['GraphCoverageSummary']
-      content: components['schemas']['GraphContentSummary']
-      provenance: components['schemas']['GraphProvenanceSummary']
-      readiness: components['schemas']['GraphReadinessSummary']
-      /** Format: date-time */
-      generated_at: string
-    }
-    GraphEntitySearchHit: {
-      entity: components['schemas']['GraphEntitySummary']
-      match_reasons: string[]
-    }
-    GraphRelationSearchHit: {
-      relation: components['schemas']['GraphRelationSummary']
-      from_entity_name: string
-      to_entity_name: string
-      match_reasons: string[]
-    }
-    GraphSearchResponse: {
-      /** Format: uuid */
-      project_id: string
-      query: string
-      searched_fields: string[]
-      result_count: number
-      entity_results: components['schemas']['GraphEntitySearchHit'][]
-      relation_results: components['schemas']['GraphRelationSearchHit'][]
-      /** Format: date-time */
-      generated_at: string
-      warning?: string | null
-    }
-    GraphRelationDetail: {
-      relation: components['schemas']['GraphRelationSummary']
-      from_entity_name: string
-      to_entity_name: string
-    }
-    GraphEntityDetailResponse: {
-      /** Format: uuid */
-      project_id: string
-      entity: components['schemas']['GraphEntitySummary']
-      aliases: string[]
-      source_document_ids: string[]
-      source_chunk_ids: string[]
-      observed_relation_count: number
-      incoming_relations: components['schemas']['GraphRelationDetail'][]
-      outgoing_relations: components['schemas']['GraphRelationDetail'][]
-      /** Format: date-time */
-      generated_at: string
-      warning?: string | null
-    }
-    GraphSubgraphResponse: {
-      /** Format: uuid */
-      project_id: string
-      /** Format: uuid */
-      focus_entity_id: string
-      depth: number
-      entity_count: number
-      relation_count: number
-      entities: components['schemas']['GraphEntitySummary'][]
-      relations: components['schemas']['GraphRelationDetail'][]
-      /** Format: date-time */
-      generated_at: string
-      warning?: string | null
-    }
-    IntegrationsProductSnapshot: {
-      /** Format: uuid */
-      workspace_id: string
-      provider_accounts: components['schemas']['ProviderAccountSummary'][]
-      model_profiles: components['schemas']['ModelProfileSummary'][]
-      projects: components['schemas']['ProjectSummary'][]
-      available_scopes: string[]
-      /** Format: date-time */
-      generated_at: string
-      warning?: string | null
-    }
-    IntegrationsProductResponse: {
-      snapshot: components['schemas']['IntegrationsProductSnapshot']
-    }
-  }
-  responses: {
-    /** @description Bad request */
-    BadRequest: {
-      headers: {
-        [name: string]: unknown
-      }
-      content: {
-        'application/json': components['schemas']['ApiErrorBody']
-      }
-    }
-    /** @description Unauthorized */
-    Unauthorized: {
-      headers: {
-        'WWW-Authenticate'?: string
-        [name: string]: unknown
-      }
-      content: {
-        'application/json': components['schemas']['ApiErrorBody']
-        'text/plain': string
-      }
-    }
-    /** @description Resource not found */
-    NotFound: {
-      headers: {
-        [name: string]: unknown
-      }
-      content: {
-        'application/json': components['schemas']['ApiErrorBody']
-      }
-    }
-    /** @description Conflict */
-    Conflict: {
-      headers: {
-        [name: string]: unknown
-      }
-      content: {
-        'application/json': components['schemas']['ApiErrorBody']
-      }
-    }
-    /** @description Internal server error */
-    InternalError: {
-      headers: {
-        [name: string]: unknown
-      }
-      content: {
-        'application/json': components['schemas']['ApiErrorBody']
-        'text/plain': string
-      }
-    }
-  }
-  parameters: {
-    id: string
-    workspaceId: string
-    projectIdOptional: string
-    documentId: string
-    limit: number
-  }
-  requestBodies: never
-  headers: never
-  pathItems: never
+    schemas: {
+        ApiErrorBody: {
+            error: string;
+            errorKind?: string | null;
+            requestId?: string | null;
+        };
+        ApiWarningBody: {
+            warning: string;
+            /** @enum {string} */
+            warningKind: "blocked_activity" | "stalled_activity" | "partial_accounting" | "partial_convergence";
+        };
+        HealthResponse: {
+            /** @example ok */
+            status: string;
+            /** @example rustrag-backend */
+            service: string;
+            /** @example local */
+            environment: string;
+        };
+        ReadinessResponse: {
+            /** @enum {string} */
+            status: "ready" | "degraded";
+            /** @enum {string} */
+            postgres: "ok" | "down";
+            /** @enum {string} */
+            redis: "ok" | "down";
+        };
+        /** @enum {string} */
+        HealthState: "healthy" | "degraded" | "failed" | "unknown";
+        VersionResponse: {
+            service: string;
+            /** @example 0.1.0 */
+            version: string;
+            environment: string;
+        };
+        CreateTokenRequest: {
+            /** Format: uuid */
+            workspace_id?: string | null;
+            /** @example workspace_api */
+            token_kind: string;
+            /** @example frontend-local */
+            label: string;
+            /**
+             * @example [
+             *       "documents:read",
+             *       "query:run"
+             *     ]
+             */
+            scopes: string[];
+        };
+        TokenCreateResponse: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            workspace_id?: string | null;
+            token_kind: string;
+            label: string;
+            /** @description Plaintext token shown only at creation time. */
+            token: string;
+            scopes: string[];
+        };
+        WorkspaceSummary: {
+            /** Format: uuid */
+            id: string;
+            slug: string;
+            name: string;
+            /** @example active */
+            status: string;
+        };
+        WorkspaceGovernanceSummary: {
+            /** Format: uuid */
+            id: string;
+            slug: string;
+            name: string;
+            status: string;
+            projects: number;
+            provider_accounts: number;
+            model_profiles: number;
+            api_tokens: number;
+            health_state: components["schemas"]["HealthState"];
+            usage: components["schemas"]["UsageGovernanceSummary"];
+        };
+        CreateWorkspaceRequest: {
+            slug: string;
+            name: string;
+        };
+        ProjectSummary: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            workspace_id: string;
+            slug: string;
+            name: string;
+            description?: string | null;
+        };
+        CreateProjectRequest: {
+            /** Format: uuid */
+            workspace_id: string;
+            slug: string;
+            name: string;
+            description?: string | null;
+        };
+        ProjectReadinessSummary: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            workspace_id: string;
+            slug: string;
+            name: string;
+            ingestion_jobs: number;
+            sources: number;
+            documents: number;
+            ready_for_query: boolean;
+            /** @example indexed */
+            indexing_state: string;
+            latest_ingestion_status?: string | null;
+            active_ingestion_jobs?: number;
+            completed_ingestion_jobs?: number;
+            failed_ingestion_jobs?: number;
+        };
+        ProviderAccountSummary: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            workspace_id: string;
+            /** @example openai */
+            provider_kind: string;
+            label: string;
+            /** @example active */
+            status: string;
+        };
+        CreateProviderAccountRequest: {
+            /** Format: uuid */
+            workspace_id: string;
+            provider_kind: string;
+            label: string;
+            /** Format: uri */
+            api_base_url?: string | null;
+        };
+        ModelProfileSummary: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            workspace_id: string;
+            /** Format: uuid */
+            provider_account_id: string;
+            /** @example chat */
+            profile_kind: string;
+            /** @example gpt-5.4 */
+            model_name: string;
+        };
+        CreateModelProfileRequest: {
+            /** Format: uuid */
+            workspace_id: string;
+            /** Format: uuid */
+            provider_account_id: string;
+            profile_kind: string;
+            model_name: string;
+            temperature?: number | null;
+            /** Format: int32 */
+            max_output_tokens?: number | null;
+        };
+        ProviderGovernanceSummary: {
+            /** Format: uuid */
+            workspace_id: string;
+            provider_accounts: components["schemas"]["ProviderAccountSummary"][];
+            model_profiles: components["schemas"]["ModelProfileSummary"][];
+            warning?: string | null;
+        };
+        SourceSummary: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            project_id: string;
+            /** @example upload */
+            source_kind: string;
+            label: string;
+            /** @example active */
+            status: string;
+        };
+        CreateSourceRequest: {
+            /** Format: uuid */
+            project_id: string;
+            source_kind: string;
+            label: string;
+        };
+        IngestionJobSummary: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            project_id: string;
+            /** Format: uuid */
+            source_id?: string | null;
+            trigger_kind: string;
+            /** @example queued */
+            status: string;
+            /** @example created */
+            stage: string;
+        };
+        CreateIngestionJobRequest: {
+            /** Format: uuid */
+            project_id: string;
+            /** Format: uuid */
+            source_id?: string | null;
+            trigger_kind: string;
+            requested_by?: string | null;
+        };
+        /** @enum {string} */
+        IngestionLifecycleState: "queued" | "validating" | "running" | "partial" | "completed" | "retryable_failed" | "canceled" | "failed";
+        IngestionJobDetail: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            project_id: string;
+            /** Format: uuid */
+            source_id?: string | null;
+            trigger_kind: string;
+            status: string;
+            stage: string;
+            requested_by?: string | null;
+            error_message?: string | null;
+            /** Format: date-time */
+            started_at?: string | null;
+            /** Format: date-time */
+            finished_at?: string | null;
+            retryable: boolean;
+            lifecycle: components["schemas"]["IngestionLifecycleState"];
+        };
+        DocumentSummary: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            project_id: string;
+            /** Format: uuid */
+            source_id?: string | null;
+            external_key: string;
+            title?: string | null;
+            mime_type?: string | null;
+            checksum?: string | null;
+        };
+        CreateDocumentRequest: {
+            /** Format: uuid */
+            project_id: string;
+            /** Format: uuid */
+            source_id?: string | null;
+            external_key: string;
+            title?: string | null;
+            mime_type?: string | null;
+            checksum?: string | null;
+        };
+        IngestTextRequest: {
+            /** Format: uuid */
+            project_id: string;
+            /** Format: uuid */
+            source_id?: string | null;
+            external_key: string;
+            title?: string | null;
+            text: string;
+        };
+        IngestTextResponse: {
+            /** Format: uuid */
+            ingestion_job_id: string;
+            /** @description Current ingestion job status, initially `queued`. */
+            status: string;
+            /** @description Current ingestion job stage, initially `queued`. */
+            stage: string;
+        };
+        SearchChunksRequest: {
+            /** Format: uuid */
+            project_id: string;
+            /** Format: uuid */
+            session_id?: string | null;
+            query_text: string;
+            /** Format: int32 */
+            top_k?: number | null;
+        };
+        ChunkResult: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            document_id: string;
+            /** Format: int32 */
+            ordinal: number;
+            content: string;
+        };
+        EmbedProjectChunksRequest: {
+            /** Format: uuid */
+            project_id: string;
+            provider_kind: string;
+            model_name: string;
+            /** Format: uuid */
+            embedding_model_profile_id?: string | null;
+            /** Format: int64 */
+            limit?: number | null;
+        };
+        EmbedProjectChunksResponse: {
+            /** Format: uuid */
+            project_id: string;
+            embedded_chunks: number;
+            provider_kind: string;
+            model_name: string;
+        };
+        ChunkSummary: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            document_id: string;
+            /** Format: uuid */
+            project_id: string;
+            /** Format: int32 */
+            ordinal: number;
+            content: string;
+            /** Format: int32 */
+            token_count?: number | null;
+        };
+        UploadIngestResponse: {
+            /** Format: uuid */
+            ingestion_job_id: string;
+            external_key: string;
+            /** @description Current ingestion job status, initially `queued`. */
+            status: string;
+            /** @description Current ingestion job stage, initially `queued`. */
+            stage: string;
+            mime_type?: string | null;
+            /**
+             * @description Backend-classified file kind. Current successful uploads return `text_like`.
+             * @enum {string}
+             */
+            file_kind: "text_like" | "pdf" | "image" | "binary";
+            /**
+             * @description Adapter availability for the classified file kind. Current successful uploads return `supported_now`.
+             * @enum {string}
+             */
+            adapter_status: "supported_now" | "planned";
+            /** @description Backend pipeline mode used for the accepted upload, currently `multipart_text_upload_v1`. */
+            ingest_mode: string;
+        };
+        RetrievalRunSummary: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            project_id: string;
+            query_text: string;
+            /** Format: uuid */
+            model_profile_id?: string | null;
+            /** Format: int32 */
+            top_k: number;
+            response_text?: string | null;
+            /** @example grounded */
+            answer_status: string;
+            weak_grounding: boolean;
+        };
+        RetrievalRunDetail: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            project_id: string;
+            query_text: string;
+            /** Format: uuid */
+            model_profile_id?: string | null;
+            /** Format: int32 */
+            top_k: number;
+            response_text?: string | null;
+            answer_status: string;
+            weak_grounding: boolean;
+            references: string[];
+            matched_chunk_ids: string[];
+            warning?: string | null;
+            debug_json: {
+                [key: string]: unknown;
+            };
+        };
+        ChatSessionSummary: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            workspace_id: string;
+            /** Format: uuid */
+            project_id: string;
+            title: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+            /** Format: int64 */
+            message_count: number;
+            last_message_preview?: string | null;
+        };
+        ChatMessageItem: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            session_id: string;
+            /** Format: uuid */
+            project_id: string;
+            role: string;
+            content: string;
+            /** Format: uuid */
+            retrieval_run_id?: string | null;
+            /** Format: date-time */
+            created_at: string;
+        };
+        CreateRetrievalRunRequest: {
+            /** Format: uuid */
+            project_id: string;
+            query_text: string;
+            /** Format: uuid */
+            model_profile_id?: string | null;
+            /** Format: int32 */
+            top_k?: number | null;
+            response_text?: string | null;
+        };
+        QueryRequest: {
+            /** Format: uuid */
+            project_id: string;
+            query_text: string;
+            /** Format: uuid */
+            model_profile_id?: string | null;
+            /** Format: uuid */
+            embedding_model_profile_id?: string | null;
+            /** Format: int32 */
+            top_k?: number | null;
+        };
+        QueryResponse: {
+            /** Format: uuid */
+            retrieval_run_id: string;
+            /** Format: uuid */
+            project_id: string;
+            answer: string;
+            /**
+             * @example [
+             *       "document:01958f52-1b41-7e1a-81f0-68bb2ac6df54:chunk:0"
+             *     ]
+             */
+            references: string[];
+            /** @example gateway_live */
+            mode: string;
+            /** @example grounded */
+            answer_status: string;
+            weak_grounding: boolean;
+            warning?: string | null;
+        };
+        UsageGovernanceSummary: {
+            /** Format: int64 */
+            usage_events: number;
+            /** Format: int64 */
+            prompt_tokens: number;
+            /** Format: int64 */
+            completion_tokens: number;
+            /** Format: int64 */
+            total_tokens: number;
+            /** Format: double */
+            estimated_cost: number;
+        };
+        UsageEventSummary: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            project_id?: string | null;
+            /** Format: uuid */
+            model_profile_id?: string | null;
+            /** @example query */
+            usage_kind: string;
+            /** Format: int32 */
+            prompt_tokens?: number | null;
+            /** Format: int32 */
+            completion_tokens?: number | null;
+            /** Format: int32 */
+            total_tokens?: number | null;
+            raw_usage_json: {
+                [key: string]: unknown;
+            };
+        };
+        CostLedgerSummary: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            project_id?: string | null;
+            /** Format: uuid */
+            usage_event_id: string;
+            provider_kind: string;
+            model_name: string;
+            /** @example USD */
+            currency: string;
+            /** Format: double */
+            estimated_cost: number;
+            pricing_snapshot_json: {
+                [key: string]: unknown;
+            };
+        };
+        BootstrapTokenRequest: {
+            /** Format: uuid */
+            workspace_id?: string | null;
+            /** @example workspace_token */
+            token_kind: string;
+            /** @example bootstrap-local */
+            label: string;
+            scopes: string[];
+            /** @description Must match the backend bootstrap token environment variable. */
+            bootstrap_secret?: string | null;
+        };
+        TokenSummary: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            workspace_id?: string | null;
+            token_kind: string;
+            label: string;
+            /** @example active */
+            status: string;
+            scopes: string[];
+            /** Format: date-time */
+            last_used_at?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        IntegrationExampleProjectSummary: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            workspace_id: string;
+            slug: string;
+            name: string;
+        };
+        IntegrationTokenSummary: components["schemas"]["TokenSummary"];
+        IntegrationsWorkspaceSummary: {
+            /** Format: uuid */
+            workspace_id: string;
+            example_projects: components["schemas"]["IntegrationExampleProjectSummary"][];
+            api_tokens: components["schemas"]["IntegrationTokenSummary"][];
+        };
+        ProviderDefaultProfileDto: {
+            /** @enum {string} */
+            profile_kind: "chat" | "embedding" | "rerank";
+            model_name: string;
+            temperature?: number | null;
+            /** Format: int32 */
+            max_output_tokens?: number | null;
+        };
+        ProviderDefaultTemplateDto: {
+            /** @enum {string} */
+            provider_kind: "open_ai" | "deep_seek" | "open_ai_compatible";
+            label: string;
+            /** Format: uri */
+            api_base_url?: string | null;
+            chat_profile: components["schemas"]["ProviderDefaultProfileDto"];
+            embedding_profile?: components["schemas"]["ProviderDefaultProfileDto"] | null;
+            rerank_profile?: components["schemas"]["ProviderDefaultProfileDto"] | null;
+        };
+        OnboardingDefaultsSummary: {
+            /** Format: uuid */
+            workspace_id: string;
+            provider_defaults: components["schemas"]["ProviderDefaultTemplateDto"][];
+            project_defaults: components["schemas"]["ProjectDefaultsDto"];
+            persistence_state: string;
+            warning?: string | null;
+        };
+        ProjectDefaultsUpsertRequest: {
+            /** Format: uuid */
+            provider_account_id?: string | null;
+            /** Format: uuid */
+            chat_model_profile_id?: string | null;
+            /** Format: uuid */
+            embedding_model_profile_id?: string | null;
+            /** Format: uuid */
+            rerank_model_profile_id?: string | null;
+            /** Format: int32 */
+            retrieval_top_k?: number | null;
+            /** Format: int32 */
+            chunk_size?: number | null;
+            /** Format: int32 */
+            chunk_overlap?: number | null;
+        };
+        ProjectDefaultsDto: {
+            /** Format: uuid */
+            workspace_id: string;
+            /** Format: uuid */
+            project_id?: string | null;
+            /** Format: uuid */
+            provider_account_id?: string | null;
+            /** Format: uuid */
+            chat_model_profile_id?: string | null;
+            /** Format: uuid */
+            embedding_model_profile_id?: string | null;
+            /** Format: uuid */
+            rerank_model_profile_id?: string | null;
+            /** Format: int32 */
+            retrieval_top_k: number;
+            /** Format: int32 */
+            chunk_size: number;
+            /** Format: int32 */
+            chunk_overlap: number;
+        };
+        PlaceholderCapabilityDto: {
+            implemented: boolean;
+            /** @enum {string} */
+            status: "ready" | "partial" | "planned";
+            reason: string;
+        };
+        CitationReferenceDto: {
+            kind: string;
+            label: string;
+            /** Format: uuid */
+            chunk_id?: string | null;
+            /** Format: uuid */
+            document_id?: string | null;
+            /** Format: uuid */
+            source_id?: string | null;
+            /** Format: double */
+            score?: number | null;
+        };
+        RetrievalDebugMetadataDto: {
+            matched_chunk_ids: string[];
+            references: string[];
+            warning?: string | null;
+            answer_status: string;
+            weak_grounding: boolean;
+        };
+        OperationalObservabilityDto: {
+            trace_hint: string;
+            metrics_hint: string;
+            logging_hint: string;
+        };
+        ProductProjectReadinessDto: {
+            /** Format: uuid */
+            project_id: string;
+            /** Format: uuid */
+            workspace_id: string;
+            documents: number;
+            sources: number;
+            ingestion_jobs: number;
+            ready_for_query: boolean;
+            indexing_state: string;
+        };
+        ProductQueryContractDto: {
+            route: string;
+            method: string;
+            request_fields: string[];
+            response_fields: string[];
+            citation_fields: string[];
+            debug_fields: string[];
+        };
+        ProductProjectCapabilitiesDto: {
+            query_contract: components["schemas"]["PlaceholderCapabilityDto"];
+            citations: components["schemas"]["PlaceholderCapabilityDto"];
+            retrieval_debug_metadata: components["schemas"]["PlaceholderCapabilityDto"];
+            diagnostics: components["schemas"]["PlaceholderCapabilityDto"];
+        };
+        ProductProjectOverviewDto: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            workspace_id: string;
+            slug: string;
+            name: string;
+            description?: string | null;
+            readiness: components["schemas"]["ProductProjectReadinessDto"];
+            query_contract: components["schemas"]["ProductQueryContractDto"];
+            citations: components["schemas"]["CitationReferenceDto"][];
+            retrieval_debug?: components["schemas"]["RetrievalDebugMetadataDto"] | null;
+            observability: components["schemas"]["OperationalObservabilityDto"];
+            capabilities: components["schemas"]["ProductProjectCapabilitiesDto"];
+        };
+        ProductProjectDiagnosticsDto: {
+            /** Format: uuid */
+            project_id: string;
+            /** Format: uuid */
+            workspace_id: string;
+            latest_ingestion_job?: components["schemas"]["IngestionJobSummary"] | null;
+            latest_retrieval_run?: components["schemas"]["RetrievalRunSummary"] | null;
+            retrieval_debug?: components["schemas"]["RetrievalDebugMetadataDto"] | null;
+            observability: components["schemas"]["OperationalObservabilityDto"];
+        };
+        ProductDocumentCapabilitiesDto: {
+            provider_usage_attribution: components["schemas"]["PlaceholderCapabilityDto"];
+            cost_accounting: components["schemas"]["PlaceholderCapabilityDto"];
+            workspace_project_attribution: components["schemas"]["PlaceholderCapabilityDto"];
+            citations: components["schemas"]["PlaceholderCapabilityDto"];
+        };
+        ProductDocumentOverviewDto: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            project_id: string;
+            /** Format: uuid */
+            source_id?: string | null;
+            external_key: string;
+            title?: string | null;
+            mime_type?: string | null;
+            checksum?: string | null;
+            usage: components["schemas"]["UsageEventSummary"][];
+            costs: components["schemas"]["CostLedgerSummary"][];
+            capabilities: components["schemas"]["ProductDocumentCapabilitiesDto"];
+        };
+        ProductDocumentDiagnosticsDto: {
+            /** Format: uuid */
+            document_id: string;
+            /** Format: uuid */
+            project_id: string;
+            /** Format: uuid */
+            project_workspace_id: string;
+            ingestion_jobs: components["schemas"]["IngestionJobSummary"][];
+            citations: components["schemas"]["CitationReferenceDto"][];
+            usage: components["schemas"]["UsageEventSummary"][];
+            costs: components["schemas"]["CostLedgerSummary"][];
+        };
+        GraphCoverageSummary: {
+            /** Format: uuid */
+            project_id: string;
+            entity_count: number;
+            relation_count: number;
+            extraction_runs: number;
+            status: string;
+            warning?: string | null;
+        };
+        GraphEntitySummary: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            project_id: string;
+            canonical_name: string;
+            entity_type?: string | null;
+            source_chunk_count: number;
+        };
+        GraphRelationSummary: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            project_id: string;
+            relation_type: string;
+            /** Format: uuid */
+            from_entity_id: string;
+            /** Format: uuid */
+            to_entity_id: string;
+            source_chunk_count: number;
+        };
+        GraphProductSnapshot: {
+            /** Format: uuid */
+            project_id: string;
+            coverage: components["schemas"]["GraphCoverageSummary"];
+            entities: components["schemas"]["GraphEntitySummary"][];
+            relations: components["schemas"]["GraphRelationSummary"][];
+            /** Format: date-time */
+            generated_at: string;
+        };
+        GraphProductResponse: {
+            snapshot: components["schemas"]["GraphProductSnapshot"];
+        };
+        GraphKindCount: {
+            name: string;
+            count: number;
+        };
+        GraphProjectSummaryResponse: {
+            /** Format: uuid */
+            project_id: string;
+            coverage: components["schemas"]["GraphCoverageSummary"];
+            entity_kinds: components["schemas"]["GraphKindCount"][];
+            relation_kinds: components["schemas"]["GraphKindCount"][];
+            top_entities: components["schemas"]["GraphEntitySummary"][];
+            sample_relations: components["schemas"]["GraphRelationSummary"][];
+            /** Format: date-time */
+            generated_at: string;
+        };
+        GraphContentSummary: {
+            persisted_document_count: number;
+            persisted_chunk_count: number;
+            embedded_chunk_count: number;
+            retrieval_run_count: number;
+            referenced_document_count: number;
+            referenced_chunk_count: number;
+        };
+        GraphProvenanceSummary: {
+            entities_with_document_refs: number;
+            entities_with_chunk_refs: number;
+            entities_without_chunk_refs: number;
+            relations_with_document_refs: number;
+            relations_with_chunk_refs: number;
+            relations_without_chunk_refs: number;
+        };
+        GraphReadinessSummary: {
+            /** @example awaiting_graph_rows */
+            status: string;
+            blockers: string[];
+            next_steps: string[];
+        };
+        GraphProjectDiagnosticsResponse: {
+            /** Format: uuid */
+            project_id: string;
+            coverage: components["schemas"]["GraphCoverageSummary"];
+            content: components["schemas"]["GraphContentSummary"];
+            provenance: components["schemas"]["GraphProvenanceSummary"];
+            readiness: components["schemas"]["GraphReadinessSummary"];
+            /** Format: date-time */
+            generated_at: string;
+        };
+        GraphEntitySearchHit: {
+            entity: components["schemas"]["GraphEntitySummary"];
+            match_reasons: string[];
+        };
+        GraphRelationSearchHit: {
+            relation: components["schemas"]["GraphRelationSummary"];
+            from_entity_name: string;
+            to_entity_name: string;
+            match_reasons: string[];
+        };
+        GraphSearchResponse: {
+            /** Format: uuid */
+            project_id: string;
+            query: string;
+            searched_fields: string[];
+            result_count: number;
+            entity_results: components["schemas"]["GraphEntitySearchHit"][];
+            relation_results: components["schemas"]["GraphRelationSearchHit"][];
+            /** Format: date-time */
+            generated_at: string;
+            warning?: string | null;
+        };
+        GraphRelationDetail: {
+            relation: components["schemas"]["GraphRelationSummary"];
+            from_entity_name: string;
+            to_entity_name: string;
+        };
+        GraphEntityDetailResponse: {
+            /** Format: uuid */
+            project_id: string;
+            entity: components["schemas"]["GraphEntitySummary"];
+            aliases: string[];
+            source_document_ids: string[];
+            source_chunk_ids: string[];
+            observed_relation_count: number;
+            incoming_relations: components["schemas"]["GraphRelationDetail"][];
+            outgoing_relations: components["schemas"]["GraphRelationDetail"][];
+            /** Format: date-time */
+            generated_at: string;
+            warning?: string | null;
+        };
+        GraphSubgraphResponse: {
+            /** Format: uuid */
+            project_id: string;
+            /** Format: uuid */
+            focus_entity_id: string;
+            depth: number;
+            entity_count: number;
+            relation_count: number;
+            entities: components["schemas"]["GraphEntitySummary"][];
+            relations: components["schemas"]["GraphRelationDetail"][];
+            /** Format: date-time */
+            generated_at: string;
+            warning?: string | null;
+        };
+        IntegrationsProductSnapshot: {
+            /** Format: uuid */
+            workspace_id: string;
+            provider_accounts: components["schemas"]["ProviderAccountSummary"][];
+            model_profiles: components["schemas"]["ModelProfileSummary"][];
+            projects: components["schemas"]["ProjectSummary"][];
+            available_scopes: string[];
+            /** Format: date-time */
+            generated_at: string;
+            warning?: string | null;
+        };
+        IntegrationsProductResponse: {
+            snapshot: components["schemas"]["IntegrationsProductSnapshot"];
+        };
+        UiLoginRequest: {
+            login: string;
+            password: string;
+            remember_me?: boolean;
+            /** @enum {string} */
+            locale?: "en" | "ru";
+        };
+        UiSessionUser: {
+            /** Format: uuid */
+            id: string;
+            /** Format: email */
+            email: string;
+            display_name: string;
+            role_label: string;
+            initials: string;
+        };
+        UiSessionResponse: {
+            /** Format: uuid */
+            session_id: string;
+            /** @enum {string} */
+            locale: "en" | "ru";
+            /** Format: uuid */
+            active_workspace_id?: string | null;
+            /** Format: uuid */
+            active_library_id?: string | null;
+            /** Format: date-time */
+            expires_at: string;
+            user: components["schemas"]["UiSessionUser"];
+        };
+        UiOkResponse: {
+            ok: boolean;
+        };
+        UiWorkspaceOption: {
+            /** Format: uuid */
+            id: string;
+            slug: string;
+            name: string;
+        };
+        UiLibraryOption: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            workspace_id: string;
+            slug: string;
+            name: string;
+        };
+        UiShellUser: {
+            /** Format: uuid */
+            id: string;
+            /** Format: email */
+            email: string;
+            display_name: string;
+            role_label: string;
+            initials: string;
+        };
+        UiShellContextResponse: {
+            /** @enum {string} */
+            locale: "en" | "ru";
+            admin_enabled: boolean;
+            current_user: components["schemas"]["UiShellUser"];
+            active_workspace: components["schemas"]["UiWorkspaceOption"];
+            active_library: components["schemas"]["UiLibraryOption"];
+            workspaces: components["schemas"]["UiWorkspaceOption"][];
+            libraries: components["schemas"]["UiLibraryOption"][];
+        };
+        UiUpdateContextRequest: {
+            /** Format: uuid */
+            workspace_id?: string;
+            /** Format: uuid */
+            library_id?: string;
+            /** @enum {string} */
+            locale?: "en" | "ru";
+        };
+        UiCreateWorkspaceRequest: {
+            name: string;
+        };
+        UiCreateLibraryRequest: {
+            /** Format: uuid */
+            workspace_id: string;
+            name: string;
+            description?: string | null;
+        };
+        UiDocumentSummaryCounters: {
+            queued: number;
+            processing: number;
+            ready: number;
+            failed: number;
+        };
+        UiDocumentFilterValues: {
+            statuses: string[];
+            file_types: string[];
+        };
+        UiDocumentMutationState: {
+            kind?: string | null;
+            status?: string | null;
+            warning?: string | null;
+        };
+        UiDocumentRevisionHistoryItem: {
+            id: string;
+            revision_no: number;
+            revision_kind: string;
+            status: string;
+            source_file_name: string;
+            appended_text_excerpt?: string | null;
+            /** Format: date-time */
+            accepted_at: string;
+            /** Format: date-time */
+            activated_at?: string | null;
+            /** Format: date-time */
+            superseded_at?: string | null;
+            is_active: boolean;
+        };
+        UiDocumentRow: {
+            id: string;
+            logical_document_id?: string | null;
+            file_name: string;
+            file_type: string;
+            file_size_label: string;
+            /** Format: date-time */
+            uploaded_at: string;
+            library_name: string;
+            stage: string;
+            /** @enum {string} */
+            status: "queued" | "processing" | "ready" | "ready_no_graph" | "failed";
+            progress_percent?: number | null;
+            active_revision_no?: number | null;
+            active_revision_kind?: string | null;
+            mutation: components["schemas"]["UiDocumentMutationState"];
+            can_retry: boolean;
+            can_append: boolean;
+            can_replace: boolean;
+            can_remove: boolean;
+            detail_available: boolean;
+        };
+        UiDocumentsSurfaceResponse: {
+            accepted_formats: string[];
+            max_size_mb: number;
+            /** @enum {string} */
+            graph_status: "empty" | "building" | "ready" | "partial" | "failed" | "stale";
+            graph_warning?: string | null;
+            rebuild_backlog_count: number;
+            counters: components["schemas"]["UiDocumentSummaryCounters"];
+            filters: components["schemas"]["UiDocumentFilterValues"];
+            rows: components["schemas"]["UiDocumentRow"][];
+        };
+        UiUploadDocumentsResponse: {
+            accepted_rows: components["schemas"]["UiDocumentRow"][];
+        };
+        UiDocumentHistoryItem: {
+            attempt_no: number;
+            status: string;
+            stage: string;
+            error_message?: string | null;
+            /** Format: date-time */
+            started_at: string;
+            /** Format: date-time */
+            finished_at?: string | null;
+        };
+        UiDocumentExtractedStats: {
+            chunk_count?: number | null;
+            document_id?: string | null;
+            checksum?: string | null;
+            page_count?: number | null;
+            extraction_kind?: string | null;
+            warnings: string[];
+        };
+        UiDocumentGraphStats: {
+            node_count: number;
+            edge_count: number;
+            evidence_count: number;
+        };
+        UiDocumentDetailResponse: {
+            id: string;
+            logical_document_id?: string | null;
+            file_name: string;
+            file_type: string;
+            file_size_label: string;
+            /** Format: date-time */
+            uploaded_at: string;
+            library_name: string;
+            stage: string;
+            /** @enum {string} */
+            status: "queued" | "processing" | "ready" | "ready_no_graph" | "failed";
+            progress_percent?: number | null;
+            active_revision_no?: number | null;
+            active_revision_kind?: string | null;
+            active_revision_status?: string | null;
+            mutation: components["schemas"]["UiDocumentMutationState"];
+            requested_by?: string | null;
+            error_message?: string | null;
+            summary: string;
+            graph_node_id?: string | null;
+            can_download_text: boolean;
+            can_append: boolean;
+            can_replace: boolean;
+            can_remove: boolean;
+            extracted_stats: components["schemas"]["UiDocumentExtractedStats"];
+            graph_stats: components["schemas"]["UiDocumentGraphStats"];
+            revision_history: components["schemas"]["UiDocumentRevisionHistoryItem"][];
+            processing_history: components["schemas"]["UiDocumentHistoryItem"][];
+        };
+        UiDocumentDeleteResponse: {
+            ok: boolean;
+            /** Format: uuid */
+            mutationId?: string | null;
+        };
+        UiGraphNode: {
+            id: string;
+            label: string;
+            /** @enum {string} */
+            node_type: "document" | "entity" | "topic";
+            secondary_label?: string | null;
+            support_count: number;
+        };
+        UiGraphEdge: {
+            id: string;
+            source: string;
+            target: string;
+            relation_type: string;
+            support_count: number;
+        };
+        UiGraphLegendItem: {
+            key: string;
+            label: string;
+        };
+        UiGraphAssistantProvider: {
+            provider_kind: string;
+            model_name: string;
+        };
+        UiGraphAssistantReference: {
+            kind: string;
+            reference_id: string;
+            excerpt?: string | null;
+            rank: number;
+            /** Format: float */
+            score?: number | null;
+        };
+        UiGraphAssistantMessage: {
+            id: string;
+            role: string;
+            content: string;
+            /** Format: date-time */
+            created_at: string;
+            query_id?: string | null;
+            /** @enum {string|null} */
+            mode?: "document" | "local" | "global" | "hybrid" | "mix" | "null" | null;
+            /** @enum {string|null} */
+            grounding_status?: "grounded" | "partial" | "weak" | "none" | "null" | null;
+            provider?: components["schemas"]["UiGraphAssistantProvider"] | null;
+            references: components["schemas"]["UiGraphAssistantReference"][];
+            warning?: string | null;
+        };
+        UiGraphAssistant: {
+            title: string;
+            subtitle: string;
+            prompts: string[];
+            disclaimer: string;
+            session_id?: string | null;
+            messages: components["schemas"]["UiGraphAssistantMessage"][];
+        };
+        UiGraphSurfaceResponse: {
+            /** @enum {string} */
+            graph_status: "empty" | "building" | "ready" | "partial" | "failed" | "stale";
+            projection_version: number;
+            node_count: number;
+            relation_count: number;
+            /** Format: date-time */
+            last_built_at?: string | null;
+            warning?: string | null;
+            nodes: components["schemas"]["UiGraphNode"][];
+            edges: components["schemas"]["UiGraphEdge"][];
+            legend: components["schemas"]["UiGraphLegendItem"][];
+            assistant: components["schemas"]["UiGraphAssistant"];
+        };
+        UiGraphSearchHit: {
+            id: string;
+            label: string;
+            /** @enum {string} */
+            node_type: "document" | "entity" | "topic";
+            secondary_label?: string | null;
+        };
+        UiGraphProperty: [
+            string,
+            string
+        ];
+        UiGraphRelatedEdge: {
+            id: string;
+            relation_type: string;
+            other_node_id: string;
+            other_node_label: string;
+            support_count: number;
+        };
+        UiGraphEvidence: {
+            id: string;
+            document_id?: string | null;
+            document_label?: string | null;
+            chunk_id?: string | null;
+            page_ref?: string | null;
+            evidence_text: string;
+            /** Format: float */
+            confidence_score?: number | null;
+            /** Format: date-time */
+            created_at: string;
+            active_provenance_only: boolean;
+        };
+        UiGraphNodeDetail: {
+            id: string;
+            label: string;
+            /** @enum {string} */
+            node_type: "document" | "entity" | "topic";
+            summary: string;
+            properties: components["schemas"]["UiGraphProperty"][];
+            related_documents: components["schemas"]["UiGraphSearchHit"][];
+            connected_nodes: components["schemas"]["UiGraphSearchHit"][];
+            related_edges: components["schemas"]["UiGraphRelatedEdge"][];
+            evidence: components["schemas"]["UiGraphEvidence"][];
+            relation_count: number;
+            reconciliation_status?: string | null;
+            pending_update_count: number;
+            pending_delete_count: number;
+            active_provenance_only: boolean;
+            warning?: string | null;
+        };
+        UiGraphDiagnostics: {
+            graph_status: string;
+            reconciliation_status: string;
+            projection_version: number;
+            node_count: number;
+            edge_count: number;
+            projection_freshness: string;
+            rebuild_backlog_count: number;
+            ready_no_graph_count: number;
+            pending_update_count: number;
+            pending_delete_count: number;
+            /** Format: float */
+            provenance_coverage_percent?: number | null;
+            /** Format: date-time */
+            last_built_at?: string | null;
+            last_error_message?: string | null;
+            last_mutation_warning?: string | null;
+            active_provenance_only: boolean;
+            blockers: string[];
+            warning?: string | null;
+            graph_backend: string;
+        };
+        UiGraphAskRequest: {
+            question: string;
+            session_id?: string | null;
+            node_id?: string | null;
+            /** @enum {string|null} */
+            mode?: "document" | "local" | "global" | "hybrid" | "mix" | "null" | null;
+        };
+        UiGraphAssistantAnswer: {
+            session_id: string;
+            user_message_id: string;
+            assistant_message_id: string;
+            query_id: string;
+            answer: string;
+            references: string[];
+            structured_references: components["schemas"]["UiGraphAssistantReference"][];
+            /** @enum {string} */
+            mode: "document" | "local" | "global" | "hybrid" | "mix";
+            /** @enum {string} */
+            grounding_status: "grounded" | "partial" | "weak" | "none";
+            provider: components["schemas"]["UiGraphAssistantProvider"];
+            warning?: string | null;
+        };
+        UiAdminTabCounts: {
+            api_tokens: number;
+            members: number;
+            library_access: number;
+            settings: number;
+        };
+        UiAdminTabAvailability: {
+            api_tokens: boolean;
+            members: boolean;
+            library_access: boolean;
+            settings: boolean;
+        };
+        UiAdminOverview: {
+            /** @enum {string} */
+            active_tab: "api_tokens" | "members" | "library_access" | "settings";
+            workspace_name: string;
+            counts: components["schemas"]["UiAdminTabCounts"];
+            availability: components["schemas"]["UiAdminTabAvailability"];
+        };
+        UiAdminApiTokenRow: {
+            id: string;
+            label: string;
+            masked_token: string;
+            scopes: string[];
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            last_used_at?: string | null;
+            /** Format: date-time */
+            expires_at?: string | null;
+            can_revoke: boolean;
+        };
+        UiAdminApiTokensResponse: {
+            rows: components["schemas"]["UiAdminApiTokenRow"][];
+        };
+        UiAdminCreateApiTokenRequest: {
+            label: string;
+            scopes: string[];
+            expires_in_days?: number | null;
+        };
+        UiAdminCreateApiTokenResult: {
+            row: components["schemas"]["UiAdminApiTokenRow"];
+            plaintext_token: string;
+        };
+        UiAdminMemberRow: {
+            id: string;
+            display_name: string;
+            /** Format: email */
+            email: string;
+            role_label: string;
+        };
+        UiAdminMembersResponse: {
+            rows: components["schemas"]["UiAdminMemberRow"][];
+        };
+        UiAdminLibraryAccessRow: {
+            id: string;
+            library_name: string;
+            principal_label: string;
+            access_level: string;
+        };
+        UiAdminLibraryAccessResponse: {
+            rows: components["schemas"]["UiAdminLibraryAccessRow"][];
+        };
+        UiAdminSettingItem: {
+            id: string;
+            label: string;
+            value: string;
+        };
+        UiAdminPricingCatalogEntry: {
+            id: string;
+            workspace_id?: string | null;
+            provider_kind: string;
+            model_name: string;
+            capability: string;
+            billing_unit: string;
+            input_price?: string | null;
+            output_price?: string | null;
+            currency: string;
+            status: string;
+            source_kind: string;
+            note?: string | null;
+            /** Format: date-time */
+            effective_from: string;
+            /** Format: date-time */
+            effective_to?: string | null;
+        };
+        UiAdminProviderCatalogItem: {
+            provider_kind: string;
+            supported_capabilities: string[];
+            default_models: {
+                [key: string]: string;
+            };
+            available_models: {
+                [key: string]: string[];
+            };
+            is_configured: boolean;
+        };
+        UiAdminProviderProfile: {
+            library_id: string;
+            library_name: string;
+            indexing_provider_kind: string;
+            indexing_model_name: string;
+            embedding_provider_kind: string;
+            embedding_model_name: string;
+            answer_provider_kind: string;
+            answer_model_name: string;
+            vision_provider_kind: string;
+            vision_model_name: string;
+            /** Format: date-time */
+            last_validated_at?: string | null;
+            last_validation_status?: string | null;
+            last_validation_error?: string | null;
+        };
+        UiAdminProviderValidationCheck: {
+            provider_kind: string;
+            model_name: string;
+            capability: string;
+            status: string;
+            /** Format: date-time */
+            checked_at: string;
+            error?: string | null;
+        };
+        UiAdminProviderValidation: {
+            status?: string | null;
+            /** Format: date-time */
+            checked_at?: string | null;
+            error?: string | null;
+            checks: components["schemas"]["UiAdminProviderValidationCheck"][];
+        };
+        UiPricingCoverageWarning: {
+            provider_kind: string;
+            model_name: string;
+            capability: string;
+            billing_unit: string;
+            message: string;
+        };
+        UiPricingCoverageSummary: {
+            /** @enum {string} */
+            status: "covered" | "partial" | "missing";
+            covered_targets: number;
+            missing_targets: number;
+            warnings: components["schemas"]["UiPricingCoverageWarning"][];
+        };
+        UiAdminSettingsResponse: {
+            items: components["schemas"]["UiAdminSettingItem"][];
+            provider_catalog: components["schemas"]["UiAdminProviderCatalogItem"][];
+            provider_profile: components["schemas"]["UiAdminProviderProfile"];
+            provider_validation: components["schemas"]["UiAdminProviderValidation"];
+            pricing_catalog: components["schemas"]["UiAdminPricingCatalogEntry"][];
+            pricing_coverage: components["schemas"]["UiPricingCoverageSummary"];
+            live_validation_enabled: boolean;
+            supported_provider_kinds: string[];
+        };
+        UiAdminProviderProfileUpdateRequest: {
+            indexingProviderKind: string;
+            indexingModelName: string;
+            embeddingProviderKind: string;
+            embeddingModelName: string;
+            answerProviderKind: string;
+            answerModelName: string;
+            visionProviderKind: string;
+            visionModelName: string;
+        };
+        UiAdminProviderProfileResponse: {
+            profile: components["schemas"]["UiAdminProviderProfile"];
+        };
+        UiAdminProviderValidationResponse: {
+            profile: components["schemas"]["UiAdminProviderProfile"];
+            validation: components["schemas"]["UiAdminProviderValidation"];
+        };
+        /** @enum {string} */
+        RuntimeQueryMode: "document" | "local" | "global" | "hybrid" | "mix";
+        RuntimeProviderDescriptor: {
+            providerKind: string;
+            modelName: string;
+        };
+        RuntimeProviderCatalogResponse: {
+            providers: components["schemas"]["RuntimeSupportedProvider"][];
+        };
+        RuntimeSupportedProvider: {
+            providerKind: string;
+            supportedCapabilities: string[];
+            defaultModels: {
+                [key: string]: string;
+            };
+            availableModels: {
+                [key: string]: string[];
+            };
+            isConfigured: boolean;
+        };
+        RuntimeLibraryProviderProfile: {
+            /** Format: uuid */
+            libraryId: string;
+            indexingProviderKind: string;
+            indexingModelName: string;
+            embeddingProviderKind: string;
+            embeddingModelName: string;
+            answerProviderKind: string;
+            answerModelName: string;
+            visionProviderKind: string;
+            visionModelName: string;
+            /** Format: date-time */
+            lastValidatedAt?: string | null;
+            lastValidationStatus?: string | null;
+            lastValidationError?: string | null;
+        };
+        RuntimeLibraryProviderProfileUpdate: {
+            indexingProviderKind: string;
+            indexingModelName: string;
+            embeddingProviderKind: string;
+            embeddingModelName: string;
+            answerProviderKind: string;
+            answerModelName: string;
+            visionProviderKind: string;
+            visionModelName: string;
+        };
+        RuntimeProviderValidationRequest: {
+            providerKind: string;
+            modelName: string;
+            capability: string;
+            /** Format: uuid */
+            libraryId?: string | null;
+        };
+        RuntimeProviderValidationResponse: {
+            providerKind: string;
+            modelName: string;
+            capability: string;
+            status: string;
+            /** Format: date-time */
+            checkedAt: string;
+            error?: string | null;
+        };
+        RuntimeDocumentSummary: {
+            queued: number;
+            processing: number;
+            ready: number;
+            readyNoGraph: number;
+            failed: number;
+        };
+        RuntimeDocumentRow: {
+            /** Format: uuid */
+            id: string;
+            trackId: string;
+            fileName: string;
+            fileType: string;
+            /** @enum {string} */
+            status: "queued" | "processing" | "ready" | "ready_no_graph" | "failed";
+            stage: string;
+            progressPercent?: number | null;
+            /** @enum {string} */
+            activityStatus: "queued" | "active" | "blocked" | "retrying" | "stalled" | "ready" | "failed";
+            /** Format: date-time */
+            lastActivityAt?: string | null;
+            stalledReason?: string | null;
+            chunkCount?: number | null;
+            graphNodeCount?: number | null;
+            graphEdgeCount?: number | null;
+            latestError?: string | null;
+            activeRevisionNo?: number | null;
+            latestAttemptNo: number;
+            /** Format: double */
+            totalCost?: number | null;
+            currency?: string | null;
+            /** @enum {string} */
+            accountingStatus: "priced" | "partial" | "unpriced";
+            partialHistory: boolean;
+            partialHistoryReason?: string | null;
+        };
+        RuntimeUploadAcceptedResponse: {
+            /** Format: uuid */
+            uploadBatchId: string;
+            accepted: components["schemas"]["RuntimeDocumentRow"][];
+        };
+        RuntimeDocumentSurfaceResponse: {
+            summary: components["schemas"]["RuntimeDocumentSummary"];
+            warnings: components["schemas"]["ApiWarningBody"][];
+            rows: components["schemas"]["RuntimeDocumentRow"][];
+        };
+        RuntimeExtractionDetail: {
+            extractionKind: string;
+            pageCount?: number | null;
+            charCount?: number | null;
+            warnings: string[];
+        };
+        RuntimeGraphContributionSummary: {
+            nodeCount: number;
+            edgeCount: number;
+            evidenceCount: number;
+        };
+        RuntimeStageEventResponse: {
+            stage: string;
+            status: string;
+            message?: string | null;
+            /** Format: date-time */
+            timestamp: string;
+        };
+        RuntimeDocumentDetailResponse: components["schemas"]["RuntimeDocumentRow"] & {
+            warnings: components["schemas"]["ApiWarningBody"][];
+            extraction?: components["schemas"]["RuntimeExtractionDetail"] | null;
+            graph: components["schemas"]["RuntimeGraphContributionSummary"];
+            stageHistory: components["schemas"]["RuntimeStageEventResponse"][];
+            revisions: components["schemas"]["RuntimeRevisionResponse"][];
+            attempts: components["schemas"]["RuntimeAttemptResponse"][];
+        };
+        RuntimeMutationAccepted: {
+            accepted: boolean;
+            operation: string;
+            trackId?: string | null;
+            /** Format: uuid */
+            revisionId?: string | null;
+            /** Format: uuid */
+            mutationId?: string | null;
+            attemptNo?: number | null;
+        };
+        RuntimeAppendDocumentRequest: {
+            content: string;
+        };
+        RuntimeRevisionResponse: {
+            /** Format: uuid */
+            id: string;
+            revisionNo: number;
+            revisionKind: string;
+            status: string;
+            sourceFileName: string;
+            /** Format: date-time */
+            acceptedAt: string;
+            /** Format: date-time */
+            activatedAt?: string | null;
+            /** Format: date-time */
+            supersededAt?: string | null;
+            isActive: boolean;
+        };
+        RuntimeAttemptResponse: {
+            attemptNo: number;
+            revisionNo?: number | null;
+            /** Format: uuid */
+            revisionId?: string | null;
+            attemptKind?: string | null;
+            status: string;
+            /** @enum {string} */
+            activityStatus: "queued" | "active" | "blocked" | "retrying" | "stalled" | "ready" | "failed";
+            /** Format: date-time */
+            lastActivityAt?: string | null;
+            chunkCount?: number | null;
+            graphNodeCount?: number | null;
+            graphEdgeCount?: number | null;
+            /** Format: int64 */
+            queueElapsedMs?: number | null;
+            /** Format: int64 */
+            totalElapsedMs?: number | null;
+            /** Format: date-time */
+            startedAt?: string | null;
+            /** Format: date-time */
+            finishedAt?: string | null;
+            partialHistory: boolean;
+            partialHistoryReason?: string | null;
+            costSummary: components["schemas"]["RuntimeAttemptCostSummaryResponse"];
+            stageBenchmarks: components["schemas"]["RuntimeStageBenchmarkResponse"][];
+            warnings: components["schemas"]["ApiWarningBody"][];
+        };
+        RuntimeAttemptCostSummaryResponse: {
+            /** Format: double */
+            totalEstimatedCost?: number | null;
+            currency?: string | null;
+            pricedStageCount: number;
+            unpricedStageCount: number;
+            /** @enum {string} */
+            accountingStatus: "priced" | "partial" | "unpriced";
+        };
+        RuntimeStageBenchmarkResponse: {
+            stage: string;
+            status: string;
+            message?: string | null;
+            providerKind?: string | null;
+            modelName?: string | null;
+            /** Format: date-time */
+            startedAt: string;
+            /** Format: date-time */
+            finishedAt?: string | null;
+            /** Format: int64 */
+            elapsedMs?: number | null;
+            accounting?: components["schemas"]["RuntimeStageAccountingResponse"] | null;
+        };
+        RuntimeStageAccountingResponse: {
+            /** @enum {string} */
+            pricingStatus: "priced" | "usage_missing" | "price_missing" | "unpriced";
+            /** Format: uuid */
+            usageEventId?: string | null;
+            /** Format: uuid */
+            costLedgerId?: string | null;
+            /** Format: uuid */
+            pricingCatalogEntryId?: string | null;
+            /** Format: double */
+            estimatedCost?: number | null;
+            currency?: string | null;
+            /** @enum {string} */
+            attributionSource: "stage_native" | "reconciled";
+        };
+        RuntimePricingCatalogResponse: {
+            rows: components["schemas"]["RuntimePricingCatalogEntryResponse"][];
+        };
+        RuntimePricingCatalogEntryResponse: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            workspaceId?: string | null;
+            providerKind: string;
+            modelName: string;
+            capability: string;
+            billingUnit: string;
+            inputPrice?: string | null;
+            outputPrice?: string | null;
+            currency: string;
+            status: string;
+            sourceKind: string;
+            note?: string | null;
+            /** Format: date-time */
+            effectiveFrom: string;
+            /** Format: date-time */
+            effectiveTo?: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        RuntimePricingCatalogUpsertRequest: {
+            /** Format: uuid */
+            workspaceId?: string | null;
+            providerKind: string;
+            modelName: string;
+            capability: string;
+            billingUnit: string;
+            /** Format: double */
+            inputPrice?: number | null;
+            /** Format: double */
+            outputPrice?: number | null;
+            currency: string;
+            note?: string | null;
+            /** Format: date-time */
+            effectiveFrom: string;
+        };
+        RuntimeGraphLegendItem: {
+            key: string;
+            label: string;
+        };
+        RuntimeGraphSurfaceNode: {
+            id: string;
+            label: string;
+            nodeType: string;
+            secondaryLabel?: string | null;
+            supportCount: number;
+        };
+        RuntimeGraphSurfaceEdge: {
+            id: string;
+            source: string;
+            target: string;
+            relationType: string;
+            supportCount: number;
+        };
+        RuntimeGraphSurfaceResponse: {
+            libraryId: string;
+            graphStatus: string;
+            /** @enum {string} */
+            convergenceStatus: "partial" | "current" | "degraded";
+            projectionVersion: number;
+            nodeCount: number;
+            relationCount: number;
+            filteredArtifactCount: number;
+            /** Format: date-time */
+            lastBuiltAt?: string | null;
+            warning?: string | null;
+            warnings: components["schemas"]["ApiWarningBody"][];
+            nodes: components["schemas"]["RuntimeGraphSurfaceNode"][];
+            edges: components["schemas"]["RuntimeGraphSurfaceEdge"][];
+            legend: components["schemas"]["RuntimeGraphLegendItem"][];
+        };
+        RuntimeGraphSearchHit: {
+            id: string;
+            label: string;
+            nodeType: string;
+            secondaryLabel?: string | null;
+        };
+        RuntimeGraphRelatedEdge: {
+            id: string;
+            relationType: string;
+            otherNodeId: string;
+            otherNodeLabel: string;
+            supportCount: number;
+        };
+        RuntimeGraphEvidence: {
+            id: string;
+            documentId?: string | null;
+            documentLabel?: string | null;
+            chunkId?: string | null;
+            pageRef?: string | null;
+            evidenceText: string;
+            /** Format: float */
+            confidenceScore?: number | null;
+            createdAt: string;
+            activeProvenanceOnly: boolean;
+        };
+        RuntimeGraphNodeDetailResponse: {
+            id: string;
+            label: string;
+            nodeType: string;
+            summary: string;
+            properties: [
+                string,
+                string
+            ][];
+            relatedDocuments: components["schemas"]["RuntimeGraphSearchHit"][];
+            connectedNodes: components["schemas"]["RuntimeGraphSearchHit"][];
+            relatedEdges: components["schemas"]["RuntimeGraphRelatedEdge"][];
+            evidence: components["schemas"]["RuntimeGraphEvidence"][];
+            relationCount: number;
+            reconciliationStatus?: string | null;
+            /** @enum {string} */
+            convergenceStatus: "partial" | "current" | "degraded";
+            pendingUpdateCount: number;
+            pendingDeleteCount: number;
+            activeProvenanceOnly: boolean;
+            filteredArtifactCount: number;
+            warning?: string | null;
+            warnings: components["schemas"]["ApiWarningBody"][];
+        };
+        RuntimeGraphDiagnosticsResponse: {
+            libraryId: string;
+            graphStatus: string;
+            reconciliationStatus: string;
+            /** @enum {string} */
+            convergenceStatus: "partial" | "current" | "degraded";
+            projectionVersion: number;
+            nodeCount: number;
+            edgeCount: number;
+            projectionFreshness: string;
+            rebuildBacklogCount: number;
+            readyNoGraphCount: number;
+            pendingUpdateCount: number;
+            pendingDeleteCount: number;
+            filteredArtifactCount: number;
+            filteredEmptyRelationCount: number;
+            filteredDegenerateLoopCount: number;
+            /** Format: float */
+            provenanceCoveragePercent?: number | null;
+            /** Format: date-time */
+            lastBuiltAt?: string | null;
+            lastErrorMessage?: string | null;
+            lastMutationWarning?: string | null;
+            activeProvenanceOnly: boolean;
+            blockers: string[];
+            warning?: string | null;
+            warnings: components["schemas"]["ApiWarningBody"][];
+            graphBackend: string;
+        };
+        RuntimeQueryRequest: {
+            question: string;
+            mode: components["schemas"]["RuntimeQueryMode"];
+            topK?: number | null;
+            includeDebug?: boolean | null;
+        };
+        RuntimeQueryReference: {
+            kind: string;
+            /** Format: uuid */
+            referenceId: string;
+            excerpt?: string | null;
+            rank: number;
+            /** Format: float */
+            score?: number | null;
+        };
+        RuntimeMatchedEntity: {
+            /** Format: uuid */
+            nodeId: string;
+            label: string;
+            nodeType: string;
+            /** Format: float */
+            score?: number | null;
+        };
+        RuntimeMatchedRelationship: {
+            /** Format: uuid */
+            edgeId: string;
+            relationType: string;
+            /** Format: uuid */
+            fromNodeId: string;
+            /** Format: uuid */
+            toNodeId: string;
+            /** Format: float */
+            score?: number | null;
+        };
+        RuntimeMatchedChunk: {
+            /** Format: uuid */
+            chunkId: string;
+            /** Format: uuid */
+            documentId: string;
+            excerpt: string;
+            /** Format: float */
+            score?: number | null;
+        };
+        RuntimeAnswerQueryResponse: {
+            /** Format: uuid */
+            queryId: string;
+            mode: components["schemas"]["RuntimeQueryMode"];
+            answer: string;
+            /** @enum {string} */
+            groundingStatus: "grounded" | "partial" | "weak" | "none";
+            references: components["schemas"]["RuntimeQueryReference"][];
+            provider: components["schemas"]["RuntimeProviderDescriptor"];
+        };
+        RuntimeStructuredQueryResponse: {
+            /** Format: uuid */
+            queryId: string;
+            mode: components["schemas"]["RuntimeQueryMode"];
+            entities: components["schemas"]["RuntimeMatchedEntity"][];
+            relationships: components["schemas"]["RuntimeMatchedRelationship"][];
+            chunks: components["schemas"]["RuntimeMatchedChunk"][];
+            references: components["schemas"]["RuntimeQueryReference"][];
+            provider: components["schemas"]["RuntimeProviderDescriptor"];
+        };
+        RuntimeQueryExecutionDetailResponse: {
+            /** Format: uuid */
+            queryId: string;
+            mode: components["schemas"]["RuntimeQueryMode"];
+            question: string;
+            answer?: string | null;
+            /** @enum {string} */
+            groundingStatus: "grounded" | "partial" | "weak" | "none";
+            references: components["schemas"]["RuntimeQueryReference"][];
+            provider: components["schemas"]["RuntimeProviderDescriptor"];
+        };
+    };
+    responses: {
+        /** @description Bad request */
+        BadRequest: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ApiErrorBody"];
+            };
+        };
+        /** @description Unauthorized */
+        Unauthorized: {
+            headers: {
+                "WWW-Authenticate"?: string;
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ApiErrorBody"];
+                "text/plain": string;
+            };
+        };
+        /** @description Resource not found */
+        NotFound: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ApiErrorBody"];
+            };
+        };
+        /** @description Conflict */
+        Conflict: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ApiErrorBody"];
+            };
+        };
+        /** @description Internal server error */
+        InternalError: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ApiErrorBody"];
+                "text/plain": string;
+            };
+        };
+    };
+    parameters: {
+        id: string;
+        workspaceId: string;
+        projectIdOptional: string;
+        documentId: string;
+        limit: number;
+        libraryId: string;
+        runtimeDocumentId: string;
+        pricingId: string;
+        runtimeNodeId: string;
+        runtimeQueryId: string;
+    };
+    requestBodies: never;
+    headers: never;
+    pathItems: never;
 }
-export type $defs = Record<string, never>
+export type $defs = Record<string, never>;
 export interface operations {
-  getHealth: {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Service health */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['HealthResponse']
-        }
-      }
-    }
-  }
-  getReadiness: {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Readiness probe result */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['ReadinessResponse']
-        }
-      }
-    }
-  }
-  getVersion: {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Service version metadata */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['VersionResponse']
-        }
-      }
-    }
-  }
-  listTokens: {
-    parameters: {
-      query?: {
-        workspace_id?: components['parameters']['workspaceId']
-      }
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Visible API token summaries */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['TokenSummary'][]
-        }
-      }
-      401: components['responses']['Unauthorized']
-      500: components['responses']['InternalError']
-    }
-  }
-  createToken: {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['CreateTokenRequest']
-      }
-    }
-    responses: {
-      /** @description Newly minted API token */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['TokenCreateResponse']
-        }
-      }
-      400: components['responses']['BadRequest']
-      500: components['responses']['InternalError']
-    }
-  }
-  createBootstrapToken: {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['BootstrapTokenRequest']
-      }
-    }
-    responses: {
-      /** @description Newly minted API token */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['TokenCreateResponse']
-        }
-      }
-      400: components['responses']['BadRequest']
-      401: components['responses']['Unauthorized']
-      500: components['responses']['InternalError']
-    }
-  }
-  getToken: {
-    parameters: {
-      query?: never
-      header?: never
-      path: {
-        id: components['parameters']['id']
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Token summary */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['TokenSummary']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  revokeToken: {
-    parameters: {
-      query?: never
-      header?: never
-      path: {
-        id: components['parameters']['id']
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Token revoked */
-      204: {
-        headers: {
-          [name: string]: unknown
-        }
-        content?: never
-      }
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  listWorkspaces: {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Workspace list */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['WorkspaceSummary'][]
-        }
-      }
-      500: components['responses']['InternalError']
-    }
-  }
-  createWorkspace: {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['CreateWorkspaceRequest']
-      }
-    }
-    responses: {
-      /** @description Created workspace */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['WorkspaceSummary']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      500: components['responses']['InternalError']
-    }
-  }
-  getWorkspaceGovernance: {
-    parameters: {
-      query?: never
-      header?: never
-      path: {
-        id: components['parameters']['id']
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Workspace governance summary */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['WorkspaceGovernanceSummary']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  listProjects: {
-    parameters: {
-      query?: {
-        workspace_id?: components['parameters']['workspaceId']
-      }
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Project list */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['ProjectSummary'][]
-        }
-      }
-      500: components['responses']['InternalError']
-    }
-  }
-  createProject: {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['CreateProjectRequest']
-      }
-    }
-    responses: {
-      /** @description Created project */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['ProjectSummary']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      500: components['responses']['InternalError']
-    }
-  }
-  getProjectReadiness: {
-    parameters: {
-      query?: never
-      header?: never
-      path: {
-        id: components['parameters']['id']
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Project readiness summary */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['ProjectReadinessSummary']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  listProviderAccounts: {
-    parameters: {
-      query?: {
-        workspace_id?: components['parameters']['workspaceId']
-      }
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Provider account list */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['ProviderAccountSummary'][]
-        }
-      }
-      500: components['responses']['InternalError']
-    }
-  }
-  createProviderAccount: {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['CreateProviderAccountRequest']
-      }
-    }
-    responses: {
-      /** @description Created provider account */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['ProviderAccountSummary']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      500: components['responses']['InternalError']
-    }
-  }
-  listModelProfiles: {
-    parameters: {
-      query?: {
-        workspace_id?: components['parameters']['workspaceId']
-      }
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Model profile list */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['ModelProfileSummary'][]
-        }
-      }
-      500: components['responses']['InternalError']
-    }
-  }
-  createModelProfile: {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['CreateModelProfileRequest']
-      }
-    }
-    responses: {
-      /** @description Created model profile */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['ModelProfileSummary']
-        }
-      }
-      400: components['responses']['BadRequest']
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  getProviderGovernance: {
-    parameters: {
-      query?: never
-      header?: never
-      path: {
-        workspace_id: string
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Provider governance summary */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['ProviderGovernanceSummary']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      500: components['responses']['InternalError']
-    }
-  }
-  getProviderDefaultsSummary: {
-    parameters: {
-      query?: never
-      header?: never
-      path: {
-        workspace_id: string
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Workspace onboarding defaults summary */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['OnboardingDefaultsSummary']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      500: components['responses']['InternalError']
-    }
-  }
-  getProjectDefaults: {
-    parameters: {
-      query?: never
-      header?: never
-      path: {
-        project_id: string
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Project defaults */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['ProjectDefaultsDto']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  updateProjectDefaults: {
-    parameters: {
-      query?: never
-      header?: never
-      path: {
-        project_id: string
-      }
-      cookie?: never
-    }
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['ProjectDefaultsUpsertRequest']
-      }
-    }
-    responses: {
-      /** @description Updated project defaults */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['ProjectDefaultsDto']
-        }
-      }
-      400: components['responses']['BadRequest']
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  getIntegrationsWorkspaceSummary: {
-    parameters: {
-      query?: never
-      header?: never
-      path: {
-        workspace_id: string
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Workspace integrations summary */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['IntegrationsWorkspaceSummary']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  listWorkspaceExampleProjects: {
-    parameters: {
-      query?: {
-        limit?: number
-      }
-      header?: never
-      path: {
-        workspace_id: string
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Example project list */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['IntegrationExampleProjectSummary'][]
-        }
-      }
-      401: components['responses']['Unauthorized']
-      500: components['responses']['InternalError']
-    }
-  }
-  revokeWorkspaceToken: {
-    parameters: {
-      query?: never
-      header?: never
-      path: {
-        workspace_id: string
-        id: components['parameters']['id']
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Token revoked */
-      204: {
-        headers: {
-          [name: string]: unknown
-        }
-        content?: never
-      }
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  getIntegrationsProduct: {
-    parameters: {
-      query?: never
-      header?: never
-      path: {
-        workspace_id: string
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Integrations product snapshot */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['IntegrationsProductResponse']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  listSources: {
-    parameters: {
-      query?: {
-        project_id?: components['parameters']['projectIdOptional']
-      }
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Source list */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['SourceSummary'][]
-        }
-      }
-      500: components['responses']['InternalError']
-    }
-  }
-  createSource: {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['CreateSourceRequest']
-      }
-    }
-    responses: {
-      /** @description Created source */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['SourceSummary']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      500: components['responses']['InternalError']
-    }
-  }
-  listIngestionJobs: {
-    parameters: {
-      query?: {
-        project_id?: components['parameters']['projectIdOptional']
-      }
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Ingestion job list */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['IngestionJobSummary'][]
-        }
-      }
-      500: components['responses']['InternalError']
-    }
-  }
-  createIngestionJob: {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['CreateIngestionJobRequest']
-      }
-    }
-    responses: {
-      /** @description Created ingestion job */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['IngestionJobSummary']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  getIngestionJobDetail: {
-    parameters: {
-      query?: never
-      header?: never
-      path: {
-        id: components['parameters']['id']
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Ingestion job detail */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['IngestionJobDetail']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  retryIngestionJob: {
-    parameters: {
-      query?: never
-      header?: never
-      path: {
-        id: components['parameters']['id']
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Newly created retry ingestion job detail */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['IngestionJobDetail']
-        }
-      }
-      400: components['responses']['BadRequest']
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  listDocuments: {
-    parameters: {
-      query?: {
-        project_id?: components['parameters']['projectIdOptional']
-      }
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Document list */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['DocumentSummary'][]
-        }
-      }
-      500: components['responses']['InternalError']
-    }
-  }
-  createDocument: {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['CreateDocumentRequest']
-      }
-    }
-    responses: {
-      /** @description Created document */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['DocumentSummary']
-        }
-      }
-      400: components['responses']['BadRequest']
-      401: components['responses']['Unauthorized']
-      500: components['responses']['InternalError']
-    }
-  }
-  ingestText: {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['IngestTextRequest']
-      }
-    }
-    responses: {
-      /** @description Ingestion job accepted and queued */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['IngestTextResponse']
-        }
-      }
-      400: components['responses']['BadRequest']
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      409: components['responses']['Conflict']
-      500: components['responses']['InternalError']
-    }
-  }
-  searchChunks: {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['SearchChunksRequest']
-      }
-    }
-    responses: {
-      /** @description Matching chunk list */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['ChunkResult'][]
-        }
-      }
-      400: components['responses']['BadRequest']
-      401: components['responses']['Unauthorized']
-      500: components['responses']['InternalError']
-    }
-  }
-  embedProjectChunks: {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['EmbedProjectChunksRequest']
-      }
-    }
-    responses: {
-      /** @description Embedding job result summary */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['EmbedProjectChunksResponse']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  listChunks: {
-    parameters: {
-      query?: {
-        project_id?: components['parameters']['projectIdOptional']
-        document_id?: components['parameters']['documentId']
-        limit?: components['parameters']['limit']
-      }
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Chunk list */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['ChunkSummary'][]
-        }
-      }
-      400: components['responses']['BadRequest']
-      401: components['responses']['Unauthorized']
-      500: components['responses']['InternalError']
-    }
-  }
-  uploadAndIngest: {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody: {
-      content: {
-        'multipart/form-data': {
-          /** Format: uuid */
-          project_id: string
-          /** Format: uuid */
-          source_id?: string
-          title?: string
-          /** Format: binary */
-          file: string
-        }
-      }
-    }
-    responses: {
-      /** @description Ingestion job accepted and queued for the uploaded file */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['UploadIngestResponse']
-        }
-      }
-      400: components['responses']['BadRequest']
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      409: components['responses']['Conflict']
-      500: components['responses']['InternalError']
-    }
-  }
-  listRetrievalRuns: {
-    parameters: {
-      query?: {
-        project_id?: components['parameters']['projectIdOptional']
-      }
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Retrieval run list */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['RetrievalRunSummary'][]
-        }
-      }
-      500: components['responses']['InternalError']
-    }
-  }
-  createRetrievalRun: {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['CreateRetrievalRunRequest']
-      }
-    }
-    responses: {
-      /** @description Created retrieval run */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['RetrievalRunSummary']
-        }
-      }
-      400: components['responses']['BadRequest']
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  getRetrievalRunDetail: {
-    parameters: {
-      query?: never
-      header?: never
-      path: {
-        id: components['parameters']['id']
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Retrieval run detail */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['RetrievalRunDetail']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  listChatSessions: {
-    parameters: {
-      query: {
-        project_id: string
-      }
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Chat sessions */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['ChatSessionSummary'][]
-        }
-      }
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  listChatMessages: {
-    parameters: {
-      query?: never
-      header?: never
-      path: {
-        id: components['parameters']['id']
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Chat messages */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['ChatMessageItem'][]
-        }
-      }
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  runQuery: {
-    parameters: {
-      query?: never
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['QueryRequest']
-      }
-    }
-    responses: {
-      /** @description Query result */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['QueryResponse']
-        }
-      }
-      400: components['responses']['BadRequest']
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  getProductProjectOverview: {
-    parameters: {
-      query?: never
-      header?: never
-      path: {
-        id: components['parameters']['id']
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Project overview with readiness, query contract, citations, and capability hints */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['ProductProjectOverviewDto']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  getProductProjectDiagnostics: {
-    parameters: {
-      query?: never
-      header?: never
-      path: {
-        id: components['parameters']['id']
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Project diagnostics */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['ProductProjectDiagnosticsDto']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  getProductProjectQueryContract: {
-    parameters: {
-      query?: never
-      header?: never
-      path: {
-        id: components['parameters']['id']
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Query contract descriptor */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['ProductQueryContractDto']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  getProductDocumentOverview: {
-    parameters: {
-      query?: never
-      header?: never
-      path: {
-        id: components['parameters']['id']
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Document overview */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['ProductDocumentOverviewDto']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  getProductDocumentDiagnostics: {
-    parameters: {
-      query?: never
-      header?: never
-      path: {
-        id: components['parameters']['id']
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Document diagnostics */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['ProductDocumentDiagnosticsDto']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  getGraphProduct: {
-    parameters: {
-      query?: never
-      header?: never
-      path: {
-        project_id: string
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Graph snapshot */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['GraphProductResponse']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  getGraphSummary: {
-    parameters: {
-      query?: never
-      header?: never
-      path: {
-        project_id: string
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Graph summary */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['GraphProjectSummaryResponse']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  getGraphDiagnostics: {
-    parameters: {
-      query?: never
-      header?: never
-      path: {
-        project_id: string
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Graph diagnostics */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['GraphProjectDiagnosticsResponse']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  searchGraph: {
-    parameters: {
-      query: {
-        q: string
-        limit?: number
-      }
-      header?: never
-      path: {
-        project_id: string
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Graph search results */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['GraphSearchResponse']
-        }
-      }
-      400: components['responses']['BadRequest']
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  getGraphEntityDetail: {
-    parameters: {
-      query?: never
-      header?: never
-      path: {
-        project_id: string
-        entity_id: string
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Graph entity detail */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['GraphEntityDetailResponse']
-        }
-      }
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  getGraphSubgraph: {
-    parameters: {
-      query?: {
-        depth?: number
-      }
-      header?: never
-      path: {
-        project_id: string
-        entity_id: string
-      }
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Graph subgraph response */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['GraphSubgraphResponse']
-        }
-      }
-      400: components['responses']['BadRequest']
-      401: components['responses']['Unauthorized']
-      404: components['responses']['NotFound']
-      500: components['responses']['InternalError']
-    }
-  }
-  listUsageEvents: {
-    parameters: {
-      query?: {
-        project_id?: components['parameters']['projectIdOptional']
-      }
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Usage event list */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['UsageEventSummary'][]
-        }
-      }
-      401: components['responses']['Unauthorized']
-      500: components['responses']['InternalError']
-    }
-  }
-  listCostLedger: {
-    parameters: {
-      query?: {
-        project_id?: components['parameters']['projectIdOptional']
-      }
-      header?: never
-      path?: never
-      cookie?: never
-    }
-    requestBody?: never
-    responses: {
-      /** @description Cost ledger entry list */
-      200: {
-        headers: {
-          [name: string]: unknown
-        }
-        content: {
-          'application/json': components['schemas']['CostLedgerSummary'][]
-        }
-      }
-      401: components['responses']['Unauthorized']
-      500: components['responses']['InternalError']
-    }
-  }
+    getHealth: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Service health */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HealthResponse"];
+                };
+            };
+        };
+    };
+    getReadiness: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Readiness probe result */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReadinessResponse"];
+                };
+            };
+        };
+    };
+    getVersion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Service version metadata */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VersionResponse"];
+                };
+            };
+        };
+    };
+    listTokens: {
+        parameters: {
+            query?: {
+                workspace_id?: components["parameters"]["workspaceId"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Visible API token summaries */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenSummary"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateTokenRequest"];
+            };
+        };
+        responses: {
+            /** @description Newly minted API token */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenCreateResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createBootstrapToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BootstrapTokenRequest"];
+            };
+        };
+        responses: {
+            /** @description Newly minted API token */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenCreateResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Token summary */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenSummary"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    revokeToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Token revoked */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    uiLogin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UiLoginRequest"];
+            };
+        };
+        responses: {
+            /** @description Current UI session */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiSessionResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getUiSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current UI session */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiSessionResponse"];
+                };
+            };
+            /** @description No active UI session */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    uiLogout: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Logout acknowledgement */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiOkResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getUiContext: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Active workspace, library, locale, and user chip data */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiShellContextResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    updateUiContext: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UiUpdateContextRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated shell context */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiShellContextResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listUiWorkspaces: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Visible workspace options */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiWorkspaceOption"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createUiWorkspace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UiCreateWorkspaceRequest"];
+            };
+        };
+        responses: {
+            /** @description Created workspace option */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiWorkspaceOption"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listUiLibraries: {
+        parameters: {
+            query?: {
+                workspace_id?: components["parameters"]["workspaceId"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Visible library options */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiLibraryOption"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createUiLibrary: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UiCreateLibraryRequest"];
+            };
+        };
+        responses: {
+            /** @description Created library option */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiLibraryOption"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getUiDocumentsSurface: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Documents workspace payload */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiDocumentsSurfaceResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    uploadUiDocuments: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": {
+                    /** Format: binary */
+                    file?: string;
+                    files?: string[];
+                };
+            };
+        };
+        responses: {
+            /** @description Accepted queue items for the uploaded files */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiUploadDocumentsResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getUiDocumentDetail: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Detailed document drawer payload */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiDocumentDetailResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    deleteUiDocument: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Delete acknowledgement */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiDocumentDeleteResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    downloadUiDocumentContent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Extracted plain text download */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    retryUiDocument: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Replacement queued row */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiDocumentRow"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    reprocessUiDocument: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Replacement queued row */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiDocumentRow"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getUiGraphSurface: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Graph workspace payload */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiGraphSurfaceResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getUiGraphDiagnostics: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Graph diagnostics payload */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiGraphDiagnostics"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    searchUiGraphNodes: {
+        parameters: {
+            query: {
+                q: string;
+                limit?: components["parameters"]["limit"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Focus-friendly graph search hits */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiGraphSearchHit"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getUiGraphNodeDetail: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Selected node detail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiGraphNodeDetail"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    askUiGraphAssistant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UiGraphAskRequest"];
+            };
+        };
+        responses: {
+            /** @description Assistant answer and continuation metadata */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiGraphAssistantAnswer"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getUiAdminOverview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Admin tab overview */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiAdminOverview"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listUiAdminApiTokens: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Admin API token rows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiAdminApiTokensResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createUiAdminApiToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UiAdminCreateApiTokenRequest"];
+            };
+        };
+        responses: {
+            /** @description Created admin API token row and one-time plaintext token */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiAdminCreateApiTokenResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    revokeUiAdminApiToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Revoked admin API token row */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiAdminApiTokenRow"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listUiAdminMembers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Admin member rows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiAdminMembersResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listUiAdminLibraryAccess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Admin library access rows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiAdminLibraryAccessResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getUiAdminSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Admin settings items */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiAdminSettingsResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    updateUiAdminProviderProfile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UiAdminProviderProfileUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated provider profile */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiAdminProviderProfileResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    validateUiAdminProviderProfile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Provider validation result */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UiAdminProviderValidationResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listWorkspaces: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Workspace list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceSummary"][];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createWorkspace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateWorkspaceRequest"];
+            };
+        };
+        responses: {
+            /** @description Created workspace */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceSummary"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getWorkspaceGovernance: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Workspace governance summary */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceGovernanceSummary"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listProjects: {
+        parameters: {
+            query?: {
+                workspace_id?: components["parameters"]["workspaceId"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Project list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectSummary"][];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createProject: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateProjectRequest"];
+            };
+        };
+        responses: {
+            /** @description Created project */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectSummary"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getProjectReadiness: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Project readiness summary */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectReadinessSummary"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listProviderAccounts: {
+        parameters: {
+            query?: {
+                workspace_id?: components["parameters"]["workspaceId"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Provider account list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderAccountSummary"][];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createProviderAccount: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateProviderAccountRequest"];
+            };
+        };
+        responses: {
+            /** @description Created provider account */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderAccountSummary"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listModelProfiles: {
+        parameters: {
+            query?: {
+                workspace_id?: components["parameters"]["workspaceId"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Model profile list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelProfileSummary"][];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createModelProfile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateModelProfileRequest"];
+            };
+        };
+        responses: {
+            /** @description Created model profile */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelProfileSummary"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getProviderGovernance: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Provider governance summary */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderGovernanceSummary"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getProviderDefaultsSummary: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Workspace onboarding defaults summary */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OnboardingDefaultsSummary"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getProjectDefaults: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Project defaults */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectDefaultsDto"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    updateProjectDefaults: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProjectDefaultsUpsertRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated project defaults */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectDefaultsDto"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getIntegrationsWorkspaceSummary: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Workspace integrations summary */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IntegrationsWorkspaceSummary"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listWorkspaceExampleProjects: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Example project list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IntegrationExampleProjectSummary"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    revokeWorkspaceToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Token revoked */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getIntegrationsProduct: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Integrations product snapshot */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IntegrationsProductResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listSources: {
+        parameters: {
+            query?: {
+                project_id?: components["parameters"]["projectIdOptional"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Source list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceSummary"][];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createSource: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateSourceRequest"];
+            };
+        };
+        responses: {
+            /** @description Created source */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceSummary"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listIngestionJobs: {
+        parameters: {
+            query?: {
+                project_id?: components["parameters"]["projectIdOptional"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Ingestion job list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IngestionJobSummary"][];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createIngestionJob: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateIngestionJobRequest"];
+            };
+        };
+        responses: {
+            /** @description Created ingestion job */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IngestionJobSummary"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getIngestionJobDetail: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Ingestion job detail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IngestionJobDetail"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    retryIngestionJob: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Newly created retry ingestion job detail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IngestionJobDetail"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listDocuments: {
+        parameters: {
+            query?: {
+                project_id?: components["parameters"]["projectIdOptional"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Document list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentSummary"][];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createDocument: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateDocumentRequest"];
+            };
+        };
+        responses: {
+            /** @description Created document */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentSummary"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    ingestText: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IngestTextRequest"];
+            };
+        };
+        responses: {
+            /** @description Ingestion job accepted and queued */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IngestTextResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    searchChunks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SearchChunksRequest"];
+            };
+        };
+        responses: {
+            /** @description Matching chunk list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChunkResult"][];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    embedProjectChunks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EmbedProjectChunksRequest"];
+            };
+        };
+        responses: {
+            /** @description Embedding job result summary */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EmbedProjectChunksResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listChunks: {
+        parameters: {
+            query?: {
+                project_id?: components["parameters"]["projectIdOptional"];
+                document_id?: components["parameters"]["documentId"];
+                limit?: components["parameters"]["limit"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Chunk list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChunkSummary"][];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    uploadAndIngest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": {
+                    /** Format: uuid */
+                    project_id: string;
+                    /** Format: uuid */
+                    source_id?: string;
+                    title?: string;
+                    /** Format: binary */
+                    file: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Ingestion job accepted and queued for the uploaded file */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UploadIngestResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listRetrievalRuns: {
+        parameters: {
+            query?: {
+                project_id?: components["parameters"]["projectIdOptional"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Retrieval run list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RetrievalRunSummary"][];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createRetrievalRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateRetrievalRunRequest"];
+            };
+        };
+        responses: {
+            /** @description Created retrieval run */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RetrievalRunSummary"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getRetrievalRunDetail: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Retrieval run detail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RetrievalRunDetail"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listChatSessions: {
+        parameters: {
+            query: {
+                project_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Chat sessions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChatSessionSummary"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listChatMessages: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Chat messages */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChatMessageItem"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    runQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["QueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Query result */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QueryResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getProductProjectOverview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Project overview with readiness, query contract, citations, and capability hints */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProductProjectOverviewDto"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getProductProjectDiagnostics: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Project diagnostics */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProductProjectDiagnosticsDto"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getProductProjectQueryContract: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Query contract descriptor */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProductQueryContractDto"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getProductDocumentOverview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Document overview */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProductDocumentOverviewDto"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getProductDocumentDiagnostics: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Document diagnostics */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProductDocumentDiagnosticsDto"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getGraphProduct: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Graph snapshot */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GraphProductResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getGraphSummary: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Graph summary */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GraphProjectSummaryResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getGraphDiagnostics: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Graph diagnostics */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GraphProjectDiagnosticsResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    searchGraph: {
+        parameters: {
+            query: {
+                q: string;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Graph search results */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GraphSearchResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getGraphEntityDetail: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+                entity_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Graph entity detail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GraphEntityDetailResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getGraphSubgraph: {
+        parameters: {
+            query?: {
+                depth?: number;
+            };
+            header?: never;
+            path: {
+                project_id: string;
+                entity_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Graph subgraph response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GraphSubgraphResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listUsageEvents: {
+        parameters: {
+            query?: {
+                project_id?: components["parameters"]["projectIdOptional"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Usage event list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UsageEventSummary"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listCostLedger: {
+        parameters: {
+            query?: {
+                project_id?: components["parameters"]["projectIdOptional"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Cost ledger entry list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CostLedgerSummary"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listRuntimeProviders: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Runtime provider catalog */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeProviderCatalogResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    validateRuntimeProvider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RuntimeProviderValidationRequest"];
+            };
+        };
+        responses: {
+            /** @description Runtime provider validation result */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeProviderValidationResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getRuntimeProviderProfile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: components["parameters"]["libraryId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Active runtime provider profile */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeLibraryProviderProfile"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    updateRuntimeProviderProfile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: components["parameters"]["libraryId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RuntimeLibraryProviderProfileUpdate"];
+            };
+        };
+        responses: {
+            /** @description Updated runtime provider profile */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeLibraryProviderProfile"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listRuntimeDocuments: {
+        parameters: {
+            query?: {
+                status?: string;
+                fileType?: string;
+                q?: string;
+            };
+            header?: never;
+            path: {
+                libraryId: components["parameters"]["libraryId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Runtime document surface payload */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeDocumentSurfaceResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    uploadRuntimeDocuments: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: components["parameters"]["libraryId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": {
+                    /** Format: binary */
+                    file?: string;
+                    files?: string[];
+                };
+            };
+        };
+        responses: {
+            /** @description Upload accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeUploadAcceptedResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getRuntimeDocument: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: components["parameters"]["libraryId"];
+                documentId: components["parameters"]["runtimeDocumentId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Runtime document detail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeDocumentDetailResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    deleteRuntimeDocument: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: components["parameters"]["libraryId"];
+                documentId: components["parameters"]["runtimeDocumentId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Delete accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeMutationAccepted"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    appendRuntimeDocument: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: components["parameters"]["libraryId"];
+                documentId: components["parameters"]["runtimeDocumentId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RuntimeAppendDocumentRequest"];
+            };
+        };
+        responses: {
+            /** @description Append accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeMutationAccepted"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    replaceRuntimeDocument: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: components["parameters"]["libraryId"];
+                documentId: components["parameters"]["runtimeDocumentId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": {
+                    /** Format: binary */
+                    file?: string;
+                    files?: string[];
+                };
+            };
+        };
+        responses: {
+            /** @description Replace accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeMutationAccepted"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    retryRuntimeDocument: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: components["parameters"]["libraryId"];
+                documentId: components["parameters"]["runtimeDocumentId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Retry accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeMutationAccepted"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    reprocessRuntimeDocument: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: components["parameters"]["libraryId"];
+                documentId: components["parameters"]["runtimeDocumentId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Reprocess accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeMutationAccepted"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getRuntimeGraphSurface: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: components["parameters"]["libraryId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Runtime graph surface */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeGraphSurfaceResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getRuntimeGraphNodeDetail: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: components["parameters"]["libraryId"];
+                nodeId: components["parameters"]["runtimeNodeId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Runtime graph node detail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeGraphNodeDetailResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getRuntimeGraphDiagnostics: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: components["parameters"]["libraryId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Runtime graph diagnostics */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeGraphDiagnosticsResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    runRuntimeAnswerQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: components["parameters"]["libraryId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RuntimeQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Runtime answer query result */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeAnswerQueryResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    runRuntimeStructuredQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: components["parameters"]["libraryId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RuntimeQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Runtime structured query result */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeStructuredQueryResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getRuntimeQueryExecution: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: components["parameters"]["libraryId"];
+                queryId: components["parameters"]["runtimeQueryId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Runtime query execution detail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeQueryExecutionDetailResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listRuntimeModelPricing: {
+        parameters: {
+            query?: {
+                workspaceId?: string;
+                providerKind?: string;
+                modelName?: string;
+                capability?: string;
+                status?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Pricing catalog payload */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimePricingCatalogResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createRuntimeModelPricing: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RuntimePricingCatalogUpsertRequest"];
+            };
+        };
+        responses: {
+            /** @description Created pricing catalog entry */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimePricingCatalogEntryResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    updateRuntimeModelPricing: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pricingId: components["parameters"]["pricingId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RuntimePricingCatalogUpsertRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated pricing catalog entry */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimePricingCatalogEntryResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    deleteRuntimeModelPricing: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pricingId: components["parameters"]["pricingId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deactivated pricing catalog entry */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimePricingCatalogEntryResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
 }

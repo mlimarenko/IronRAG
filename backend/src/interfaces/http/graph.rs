@@ -18,6 +18,10 @@ use crate::{
         auth::AuthContext,
         authorization::{POLICY_QUERY_READ, load_project_and_authorize},
         router_support::ApiError,
+        runtime_graph::{
+            load_runtime_graph_diagnostics as load_runtime_graph_runtime_diagnostics,
+            load_runtime_graph_surface as load_runtime_graph_runtime_surface,
+        },
     },
 };
 
@@ -241,7 +245,7 @@ async fn get_graph_product(
 ) -> Result<Json<GraphProductResponse>, ApiError> {
     let project = load_project_and_authorize(&auth, &state, project_id, POLICY_QUERY_READ).await?;
 
-    let snapshot = load_graph_snapshot(&state.persistence.postgres, project_id).await?;
+    let snapshot = load_runtime_graph_snapshot(&state, project_id).await?;
 
     info!(
         auth_token_id = %auth.token_id,
@@ -263,9 +267,9 @@ async fn get_graph_summary(
 ) -> Result<Json<GraphProjectSummaryResponse>, ApiError> {
     let project = load_project_and_authorize(&auth, &state, project_id, POLICY_QUERY_READ).await?;
 
-    let snapshot = load_graph_snapshot(&state.persistence.postgres, project_id).await?;
-    let entities = load_entities(&state.persistence.postgres, project_id).await?;
-    let relations = load_relations(&state.persistence.postgres, project_id).await?;
+    let snapshot = load_runtime_graph_snapshot(&state, project_id).await?;
+    let entities = snapshot.entities.clone();
+    let relations = snapshot.relations.clone();
 
     info!(
         auth_token_id = %auth.token_id,
@@ -280,20 +284,10 @@ async fn get_graph_summary(
     Ok(Json(GraphProjectSummaryResponse {
         project_id,
         coverage: snapshot.coverage,
-        entity_kinds: summarize_entity_kinds(&entities),
-        relation_kinds: summarize_relation_kinds(&relations),
-        top_entities: sort_entity_summaries(
-            entities.iter().map(entity_summary).collect::<Vec<_>>(),
-        )
-        .into_iter()
-        .take(8)
-        .collect(),
-        sample_relations: sort_relation_summaries(
-            relations.iter().map(relation_summary).collect::<Vec<_>>(),
-        )
-        .into_iter()
-        .take(8)
-        .collect(),
+        entity_kinds: summarize_runtime_entity_kinds(&entities),
+        relation_kinds: summarize_runtime_relation_kinds(&relations),
+        top_entities: sort_entity_summaries(entities).into_iter().take(8).collect(),
+        sample_relations: sort_relation_summaries(relations).into_iter().take(8).collect(),
         generated_at: Utc::now(),
     }))
 }
@@ -305,10 +299,85 @@ async fn get_graph_diagnostics(
 ) -> Result<Json<GraphProjectDiagnosticsResponse>, ApiError> {
     let project = load_project_and_authorize(&auth, &state, project_id, POLICY_QUERY_READ).await?;
 
-    let entities = load_entities(&state.persistence.postgres, project_id).await?;
-    let relations = load_relations(&state.persistence.postgres, project_id).await?;
     let counts = load_graph_project_counts(&state.persistence.postgres, project_id).await?;
-    let diagnostics = build_graph_diagnostics(project_id, &counts, &entities, &relations);
+    let runtime_diagnostics = load_runtime_graph_runtime_diagnostics(&state, project_id).await?;
+    let snapshot = load_runtime_graph_snapshot(&state, project_id).await?;
+    let diagnostics = GraphProjectDiagnosticsResponse {
+        project_id,
+        coverage: snapshot.coverage,
+        content: GraphContentSummary {
+            persisted_document_count: counts.document_count,
+            persisted_chunk_count: counts.chunk_count,
+            embedded_chunk_count: counts.embedded_chunk_count,
+            retrieval_run_count: counts.retrieval_run_count,
+            referenced_document_count: count_runtime_evidence_refs(
+                &state.persistence.postgres,
+                project_id,
+                "document_id",
+            )
+            .await?,
+            referenced_chunk_count: count_runtime_evidence_refs(
+                &state.persistence.postgres,
+                project_id,
+                "chunk_id",
+            )
+            .await?,
+        },
+        provenance: GraphProvenanceSummary {
+            entities_with_document_refs: count_runtime_evidence_targets(
+                &state.persistence.postgres,
+                project_id,
+                "node",
+                "document_id",
+            )
+            .await?,
+            entities_with_chunk_refs: count_runtime_evidence_targets(
+                &state.persistence.postgres,
+                project_id,
+                "node",
+                "chunk_id",
+            )
+            .await?,
+            entities_without_chunk_refs: runtime_diagnostics.node_count.saturating_sub(
+                count_runtime_evidence_targets(
+                    &state.persistence.postgres,
+                    project_id,
+                    "node",
+                    "chunk_id",
+                )
+                .await?,
+            ),
+            relations_with_document_refs: count_runtime_evidence_targets(
+                &state.persistence.postgres,
+                project_id,
+                "edge",
+                "document_id",
+            )
+            .await?,
+            relations_with_chunk_refs: count_runtime_evidence_targets(
+                &state.persistence.postgres,
+                project_id,
+                "edge",
+                "chunk_id",
+            )
+            .await?,
+            relations_without_chunk_refs: runtime_diagnostics.edge_count.saturating_sub(
+                count_runtime_evidence_targets(
+                    &state.persistence.postgres,
+                    project_id,
+                    "edge",
+                    "chunk_id",
+                )
+                .await?,
+            ),
+        },
+        readiness: GraphReadinessSummary {
+            status: runtime_diagnostics.graph_status.clone(),
+            blockers: runtime_diagnostics.blockers.clone(),
+            next_steps: build_runtime_next_steps(&runtime_diagnostics),
+        },
+        generated_at: Utc::now(),
+    };
 
     info!(
         auth_token_id = %auth.token_id,
@@ -580,6 +649,7 @@ async fn get_graph_subgraph(
     }))
 }
 
+#[allow(dead_code)]
 async fn load_graph_snapshot(
     pool: &PgPool,
     project_id: Uuid,
@@ -595,6 +665,145 @@ async fn load_graph_snapshot(
         relations: sort_relation_summaries(relations.iter().map(relation_summary).collect()),
         generated_at: Utc::now(),
     })
+}
+
+async fn load_runtime_graph_snapshot(
+    state: &AppState,
+    project_id: Uuid,
+) -> Result<GraphProductSnapshot, ApiError> {
+    let surface = load_runtime_graph_runtime_surface(state, project_id, false).await?;
+    let extraction_runs = load_project_count(
+        &state.persistence.postgres,
+        project_id,
+        "select count(*) from runtime_graph_extraction where project_id = $1 and status = 'ready'",
+        "runtime_graph_extraction",
+    )
+    .await?;
+    let node_index =
+        surface.nodes.iter().map(|node| (node.id.clone(), node)).collect::<HashMap<_, _>>();
+    let entities = sort_entity_summaries(
+        surface
+            .nodes
+            .iter()
+            .filter(|node| node.node_type != "document")
+            .filter_map(|node| {
+                Some(GraphEntitySummary {
+                    id: Uuid::parse_str(&node.id).ok()?,
+                    project_id,
+                    canonical_name: node.label.clone(),
+                    entity_type: (node.node_type != "entity").then(|| node.node_type.clone()),
+                    source_chunk_count: usize::try_from(node.support_count).unwrap_or_default(),
+                })
+            })
+            .collect(),
+    );
+    let relations = sort_relation_summaries(
+        surface
+            .edges
+            .iter()
+            .filter_map(|edge| {
+                let source = node_index.get(&edge.source)?;
+                let target = node_index.get(&edge.target)?;
+                if source.node_type == "document" || target.node_type == "document" {
+                    return None;
+                }
+                Some(GraphRelationSummary {
+                    id: Uuid::parse_str(&edge.id).ok()?,
+                    project_id,
+                    relation_type: edge.relation_type.clone(),
+                    from_entity_id: Uuid::parse_str(&edge.source).ok()?,
+                    to_entity_id: Uuid::parse_str(&edge.target).ok()?,
+                    source_chunk_count: usize::try_from(edge.support_count).unwrap_or_default(),
+                })
+            })
+            .collect(),
+    );
+
+    Ok(GraphProductSnapshot {
+        project_id,
+        coverage: GraphCoverageSummary {
+            project_id,
+            entity_count: entities.len(),
+            relation_count: relations.len(),
+            extraction_runs,
+            status: surface.graph_status,
+            warning: surface.warning,
+        },
+        entities,
+        relations,
+        generated_at: Utc::now(),
+    })
+}
+
+async fn count_runtime_evidence_refs(
+    pool: &PgPool,
+    project_id: Uuid,
+    column: &str,
+) -> Result<usize, ApiError> {
+    let query = match column {
+        "document_id" => {
+            "select count(distinct document_id) from runtime_graph_evidence where project_id = $1 and document_id is not null and is_active = true"
+        }
+        "chunk_id" => {
+            "select count(distinct chunk_id) from runtime_graph_evidence where project_id = $1 and chunk_id is not null and is_active = true"
+        }
+        _ => return Err(ApiError::BadRequest(format!("unsupported evidence column {column}"))),
+    };
+    load_project_count(pool, project_id, query, column).await
+}
+
+async fn count_runtime_evidence_targets(
+    pool: &PgPool,
+    project_id: Uuid,
+    target_kind: &str,
+    column: &str,
+) -> Result<usize, ApiError> {
+    let query = match column {
+        "document_id" => {
+            "select count(distinct target_id) from runtime_graph_evidence where project_id = $1 and target_kind = $2 and document_id is not null and is_active = true"
+        }
+        "chunk_id" => {
+            "select count(distinct target_id) from runtime_graph_evidence where project_id = $1 and target_kind = $2 and chunk_id is not null and is_active = true"
+        }
+        _ => return Err(ApiError::BadRequest(format!("unsupported evidence column {column}"))),
+    };
+    let count = sqlx::query_scalar::<_, i64>(query)
+        .bind(project_id)
+        .bind(target_kind)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| {
+            error!(
+                project_id = %project_id,
+                target_kind = %target_kind,
+                column = %column,
+                ?error,
+                "failed to load runtime evidence target count",
+            );
+            ApiError::Internal
+        })?;
+    usize::try_from(count).map_err(|_| ApiError::Internal)
+}
+
+fn build_runtime_next_steps(
+    diagnostics: &crate::interfaces::http::runtime_graph::RuntimeGraphDiagnosticsResponse,
+) -> Vec<String> {
+    if diagnostics.graph_status == "failed" {
+        return vec![
+            "Retry ingestion or reprocess the affected documents.".to_string(),
+            "Inspect provider configuration and runtime graph diagnostics.".to_string(),
+        ];
+    }
+    if diagnostics.graph_status == "empty" {
+        return vec!["Upload and process documents to build the first graph snapshot.".to_string()];
+    }
+    if diagnostics.graph_status == "building" || diagnostics.graph_status == "partial" {
+        return vec!["Wait for the worker to finish graph extraction and projection.".to_string()];
+    }
+    if diagnostics.graph_status == "stale" {
+        return vec!["Reprocess documents to refresh the projected graph snapshot.".to_string()];
+    }
+    Vec::new()
 }
 
 async fn load_graph_project_counts(
@@ -729,6 +938,7 @@ fn entity_name_map(entities: &[EntityRow]) -> HashMap<Uuid, String> {
     entities.iter().map(|row| (row.id, row.canonical_name.clone())).collect()
 }
 
+#[allow(dead_code)]
 fn summarize_entity_kinds(entities: &[EntityRow]) -> Vec<GraphKindCount> {
     summarize_kind_counts(
         entities
@@ -738,8 +948,22 @@ fn summarize_entity_kinds(entities: &[EntityRow]) -> Vec<GraphKindCount> {
     )
 }
 
+fn summarize_runtime_entity_kinds(entities: &[GraphEntitySummary]) -> Vec<GraphKindCount> {
+    summarize_kind_counts(
+        entities
+            .iter()
+            .map(|entity| entity.entity_type.clone().unwrap_or_else(|| "entity".to_string()))
+            .collect(),
+    )
+}
+
+#[allow(dead_code)]
 fn summarize_relation_kinds(relations: &[RelationRow]) -> Vec<GraphKindCount> {
     summarize_kind_counts(relations.iter().map(|row| row.relation_type.clone()).collect())
+}
+
+fn summarize_runtime_relation_kinds(relations: &[GraphRelationSummary]) -> Vec<GraphKindCount> {
+    summarize_kind_counts(relations.iter().map(|relation| relation.relation_type.clone()).collect())
 }
 
 fn summarize_kind_counts(items: Vec<String>) -> Vec<GraphKindCount> {
@@ -756,6 +980,7 @@ fn summarize_kind_counts(items: Vec<String>) -> Vec<GraphKindCount> {
     values
 }
 
+#[allow(dead_code)]
 fn build_graph_coverage(
     project_id: Uuid,
     entity_count: usize,
@@ -779,6 +1004,7 @@ fn build_graph_coverage(
     }
 }
 
+#[allow(dead_code)]
 fn build_graph_diagnostics(
     project_id: Uuid,
     counts: &GraphProjectCounts,
@@ -856,6 +1082,7 @@ fn build_graph_diagnostics(
     }
 }
 
+#[allow(dead_code)]
 fn build_graph_readiness(
     coverage: &GraphCoverageSummary,
     content: &GraphContentSummary,

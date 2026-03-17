@@ -11,6 +11,9 @@ pub const SCOPE_PROJECTS_WRITE: &str = "projects:write";
 pub const SCOPE_PROVIDERS_ADMIN: &str = "providers:admin";
 pub const SCOPE_DOCUMENTS_READ: &str = "documents:read";
 pub const SCOPE_DOCUMENTS_WRITE: &str = "documents:write";
+pub const SCOPE_GRAPH_READ: &str = "graph:read";
+pub const SCOPE_QUERY_READ: &str = "query:read";
+pub const SCOPE_QUERY_WRITE: &str = "query:write";
 pub const SCOPE_QUERY_RUN: &str = "query:run";
 pub const SCOPE_USAGE_READ: &str = "usage:read";
 
@@ -19,9 +22,17 @@ pub const POLICY_PROJECTS_WRITE: &[&str] = &[SCOPE_PROJECTS_WRITE, SCOPE_WORKSPA
 pub const POLICY_PROVIDERS_ADMIN: &[&str] = &[SCOPE_PROVIDERS_ADMIN, SCOPE_WORKSPACE_ADMIN];
 pub const POLICY_DOCUMENTS_READ: &[&str] = &[SCOPE_DOCUMENTS_READ, SCOPE_WORKSPACE_ADMIN];
 pub const POLICY_DOCUMENTS_WRITE: &[&str] = &[SCOPE_DOCUMENTS_WRITE, SCOPE_WORKSPACE_ADMIN];
-pub const POLICY_QUERY_READ: &[&str] =
-    &[SCOPE_QUERY_RUN, SCOPE_DOCUMENTS_READ, SCOPE_WORKSPACE_ADMIN];
-pub const POLICY_QUERY_RUN: &[&str] = &[SCOPE_QUERY_RUN, SCOPE_WORKSPACE_ADMIN];
+pub const POLICY_GRAPH_READ: &[&str] =
+    &[SCOPE_GRAPH_READ, SCOPE_DOCUMENTS_READ, SCOPE_WORKSPACE_ADMIN];
+pub const POLICY_QUERY_READ: &[&str] = &[
+    SCOPE_QUERY_READ,
+    SCOPE_QUERY_WRITE,
+    SCOPE_QUERY_RUN,
+    SCOPE_GRAPH_READ,
+    SCOPE_DOCUMENTS_READ,
+    SCOPE_WORKSPACE_ADMIN,
+];
+pub const POLICY_QUERY_RUN: &[&str] = &[SCOPE_QUERY_WRITE, SCOPE_QUERY_RUN, SCOPE_WORKSPACE_ADMIN];
 pub const POLICY_USAGE_READ: &[&str] = &[SCOPE_USAGE_READ, SCOPE_WORKSPACE_ADMIN];
 
 pub async fn authorize_workspace_scope(

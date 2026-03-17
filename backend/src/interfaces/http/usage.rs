@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
+    domains::usage_governance::UsageStageOwnership,
     infra::repositories,
     interfaces::http::{
         auth::AuthContext,
@@ -33,6 +34,7 @@ pub struct UsageEventSummary {
     pub completion_tokens: Option<i32>,
     pub total_tokens: Option<i32>,
     pub raw_usage_json: serde_json::Value,
+    pub stage_ownership: Option<UsageStageOwnership>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -46,7 +48,11 @@ pub struct CostLedgerSummary {
     pub model_name: String,
     pub currency: String,
     pub estimated_cost: f64,
+    pub pricing_status: Option<String>,
+    pub pricing_catalog_entry_id: Option<Uuid>,
+    pub pricing_resolved_at: Option<String>,
     pub pricing_snapshot_json: serde_json::Value,
+    pub stage_ownership: Option<UsageStageOwnership>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -188,6 +194,7 @@ async fn get_usage_summary(
 }
 
 fn map_usage_event(row: repositories::UsageEventRow) -> UsageEventSummary {
+    let stage_ownership = stage_ownership_from_value(&row.raw_usage_json);
     UsageEventSummary {
         id: row.id,
         workspace_id: row.workspace_id,
@@ -199,11 +206,13 @@ fn map_usage_event(row: repositories::UsageEventRow) -> UsageEventSummary {
         completion_tokens: row.completion_tokens,
         total_tokens: row.total_tokens,
         raw_usage_json: row.raw_usage_json,
+        stage_ownership,
         created_at: row.created_at,
     }
 }
 
 fn map_cost_ledger(row: repositories::CostLedgerRow) -> CostLedgerSummary {
+    let stage_ownership = stage_ownership_from_value(&row.pricing_snapshot_json);
     CostLedgerSummary {
         id: row.id,
         workspace_id: row.workspace_id,
@@ -213,11 +222,33 @@ fn map_cost_ledger(row: repositories::CostLedgerRow) -> CostLedgerSummary {
         model_name: row.model_name,
         currency: row.currency,
         estimated_cost: decimal_to_f64(row.estimated_cost),
+        pricing_status: pricing_snapshot_string(&row.pricing_snapshot_json, "pricing_status"),
+        pricing_catalog_entry_id: pricing_catalog_entry_id(&row.pricing_snapshot_json),
+        pricing_resolved_at: pricing_snapshot_string(&row.pricing_snapshot_json, "resolved_at"),
         pricing_snapshot_json: row.pricing_snapshot_json,
+        stage_ownership,
         created_at: row.created_at,
     }
 }
 
 fn decimal_to_f64(value: rust_decimal::Decimal) -> f64 {
     value.to_f64().unwrap_or_default()
+}
+
+fn pricing_snapshot_string(snapshot: &serde_json::Value, key: &str) -> Option<String> {
+    snapshot.get(key).and_then(serde_json::Value::as_str).map(ToOwned::to_owned)
+}
+
+fn pricing_catalog_entry_id(snapshot: &serde_json::Value) -> Option<Uuid> {
+    snapshot
+        .get("catalog_entry")
+        .and_then(|value| value.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| value.parse::<Uuid>().ok())
+}
+
+fn stage_ownership_from_value(value: &serde_json::Value) -> Option<UsageStageOwnership> {
+    value
+        .get("stage_ownership")
+        .and_then(|ownership| serde_json::from_value::<UsageStageOwnership>(ownership.clone()).ok())
 }

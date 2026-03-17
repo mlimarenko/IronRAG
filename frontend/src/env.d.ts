@@ -1,5 +1,6 @@
 /// <reference types="vite/client" />
+/// <reference types="@quasar/app-vite" />
 
-declare module 'quasar/wrappers' {
-  export function configure<T>(fn: () => T): T
+interface ImportMetaEnv {
+  readonly VITE_API_BASE_URL?: string
 }

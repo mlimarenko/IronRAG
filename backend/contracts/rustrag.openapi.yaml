@@ -16,6 +16,16 @@ security:
 tags:
   - name: system
   - name: auth
+  - name: ui-auth
+  - name: ui-shell
+  - name: ui-documents
+  - name: ui-graph
+  - name: ui-admin
+  - name: runtime-documents
+  - name: runtime-pricing
+  - name: runtime-graph
+  - name: runtime-query
+  - name: runtime-providers
   - name: workspaces
   - name: projects
   - name: providers
@@ -174,6 +184,664 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/auth/login:
+    post:
+      tags: [ui-auth]
+      summary: Sign in with login and password for a browser UI session
+      operationId: uiLogin
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UiLoginRequest"
+      responses:
+        "200":
+          description: Current UI session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiSessionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/auth/session:
+    get:
+      tags: [ui-auth]
+      summary: Get the current authenticated UI session
+      operationId: getUiSession
+      security:
+        - uiSessionCookie: []
+      responses:
+        "200":
+          description: Current UI session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiSessionResponse"
+        "204":
+          description: No active UI session
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/auth/logout:
+    post:
+      tags: [ui-auth]
+      summary: End the current browser UI session
+      operationId: uiLogout
+      security:
+        - uiSessionCookie: []
+      responses:
+        "200":
+          description: Logout acknowledgement
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiOkResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/context:
+    get:
+      tags: [ui-shell]
+      summary: Get the current authenticated shell context
+      operationId: getUiContext
+      security:
+        - uiSessionCookie: []
+      responses:
+        "200":
+          description: Active workspace, library, locale, and user chip data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiShellContextResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    put:
+      tags: [ui-shell]
+      summary: Update the active workspace, library, or locale for the UI session
+      operationId: updateUiContext
+      security:
+        - uiSessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UiUpdateContextRequest"
+      responses:
+        "200":
+          description: Updated shell context
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiShellContextResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/workspaces:
+    get:
+      tags: [ui-shell]
+      summary: List workspaces visible to the current UI session
+      operationId: listUiWorkspaces
+      security:
+        - uiSessionCookie: []
+      responses:
+        "200":
+          description: Visible workspace options
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/UiWorkspaceOption"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      tags: [ui-shell]
+      summary: Create a workspace from the authenticated shell
+      operationId: createUiWorkspace
+      security:
+        - uiSessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UiCreateWorkspaceRequest"
+      responses:
+        "200":
+          description: Created workspace option
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiWorkspaceOption"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/libraries:
+    get:
+      tags: [ui-shell]
+      summary: List libraries visible in the selected workspace
+      operationId: listUiLibraries
+      security:
+        - uiSessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/workspaceId"
+      responses:
+        "200":
+          description: Visible library options
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/UiLibraryOption"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      tags: [ui-shell]
+      summary: Create a library inside the selected workspace
+      operationId: createUiLibrary
+      security:
+        - uiSessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UiCreateLibraryRequest"
+      responses:
+        "200":
+          description: Created library option
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiLibraryOption"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/documents/surface:
+    get:
+      tags: [ui-documents]
+      summary: Get the complete Documents screen model for the active library
+      operationId: getUiDocumentsSurface
+      security:
+        - uiSessionCookie: []
+      responses:
+        "200":
+          description: Documents workspace payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiDocumentsSurfaceResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/documents/upload:
+    post:
+      tags: [ui-documents]
+      summary: Upload one or more files into the active library
+      operationId: uploadUiDocuments
+      security:
+        - uiSessionCookie: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                files:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+      responses:
+        "200":
+          description: Accepted queue items for the uploaded files
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiUploadDocumentsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/documents/{id}:
+    get:
+      tags: [ui-documents]
+      summary: Get a document row detail payload
+      operationId: getUiDocumentDetail
+      security:
+        - uiSessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/id"
+      responses:
+        "200":
+          description: Detailed document drawer payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiDocumentDetailResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags: [ui-documents]
+      summary: Remove a document item from the active library
+      operationId: deleteUiDocument
+      security:
+        - uiSessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/id"
+      responses:
+        "200":
+          description: Delete acknowledgement
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiDocumentDeleteResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/documents/{id}/content:
+    get:
+      tags: [ui-documents]
+      summary: Download extracted plain text for a processed document
+      operationId: downloadUiDocumentContent
+      security:
+        - uiSessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/id"
+      responses:
+        "200":
+          description: Extracted plain text download
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/documents/{id}/retry:
+    post:
+      tags: [ui-documents]
+      summary: Retry processing for a failed or retryable document item
+      operationId: retryUiDocument
+      security:
+        - uiSessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/id"
+      responses:
+        "200":
+          description: Replacement queued row
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiDocumentRow"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/documents/{id}/reprocess:
+    post:
+      tags: [ui-documents]
+      summary: Reprocess a completed or failed document item
+      operationId: reprocessUiDocument
+      security:
+        - uiSessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/id"
+      responses:
+        "200":
+          description: Replacement queued row
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiDocumentRow"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/graph/surface:
+    get:
+      tags: [ui-graph]
+      summary: Get the graph workspace payload for the active library
+      operationId: getUiGraphSurface
+      security:
+        - uiSessionCookie: []
+      responses:
+        "200":
+          description: Graph workspace payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiGraphSurfaceResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/graph/diagnostics:
+    get:
+      tags: [ui-graph]
+      summary: Get graph readiness and rebuild diagnostics for the active library
+      operationId: getUiGraphDiagnostics
+      security:
+        - uiSessionCookie: []
+      responses:
+        "200":
+          description: Graph diagnostics payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiGraphDiagnostics"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/graph/search:
+    get:
+      tags: [ui-graph]
+      summary: Search graph nodes inside the active library
+      operationId: searchUiGraphNodes
+      security:
+        - uiSessionCookie: []
+      parameters:
+        - in: query
+          name: q
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/limit"
+      responses:
+        "200":
+          description: Focus-friendly graph search hits
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/UiGraphSearchHit"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/graph/nodes/{id}:
+    get:
+      tags: [ui-graph]
+      summary: Get focus detail for a graph node
+      operationId: getUiGraphNodeDetail
+      security:
+        - uiSessionCookie: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Selected node detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiGraphNodeDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/graph/ask:
+    post:
+      tags: [ui-graph]
+      summary: Ask a question from the graph assistant panel
+      operationId: askUiGraphAssistant
+      security:
+        - uiSessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UiGraphAskRequest"
+      responses:
+        "200":
+          description: Assistant answer and continuation metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiGraphAssistantAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/admin/overview:
+    get:
+      tags: [ui-admin]
+      summary: Get admin tab counts and availability for the active workspace
+      operationId: getUiAdminOverview
+      security:
+        - uiSessionCookie: []
+      responses:
+        "200":
+          description: Admin tab overview
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiAdminOverview"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/admin/api-tokens:
+    get:
+      tags: [ui-admin]
+      summary: List API tokens for the active workspace admin surface
+      operationId: listUiAdminApiTokens
+      security:
+        - uiSessionCookie: []
+      responses:
+        "200":
+          description: Admin API token rows
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiAdminApiTokensResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      tags: [ui-admin]
+      summary: Create a new API token from the admin surface
+      operationId: createUiAdminApiToken
+      security:
+        - uiSessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UiAdminCreateApiTokenRequest"
+      responses:
+        "200":
+          description: Created admin API token row and one-time plaintext token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiAdminCreateApiTokenResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/admin/api-tokens/{id}:
+    delete:
+      tags: [ui-admin]
+      summary: Revoke an API token from the admin surface
+      operationId: revokeUiAdminApiToken
+      security:
+        - uiSessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/id"
+      responses:
+        "200":
+          description: Revoked admin API token row
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiAdminApiTokenRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/admin/members:
+    get:
+      tags: [ui-admin]
+      summary: List workspace members for the admin Members tab
+      operationId: listUiAdminMembers
+      security:
+        - uiSessionCookie: []
+      responses:
+        "200":
+          description: Admin member rows
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiAdminMembersResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/admin/library-access:
+    get:
+      tags: [ui-admin]
+      summary: List library access rows for the admin tab
+      operationId: listUiAdminLibraryAccess
+      security:
+        - uiSessionCookie: []
+      responses:
+        "200":
+          description: Admin library access rows
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiAdminLibraryAccessResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/admin/settings:
+    get:
+      tags: [ui-admin]
+      summary: Get admin settings, provider profile, and validation state
+      operationId: getUiAdminSettings
+      security:
+        - uiSessionCookie: []
+      responses:
+        "200":
+          description: Admin settings items
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiAdminSettingsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/admin/settings/provider-profile:
+    put:
+      tags: [ui-admin]
+      summary: Update the active library provider profile from the admin surface
+      operationId: updateUiAdminProviderProfile
+      security:
+        - uiSessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UiAdminProviderProfileUpdateRequest"
+      responses:
+        "200":
+          description: Updated provider profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiAdminProviderProfileResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ui/admin/settings/provider-profile/validate:
+    post:
+      tags: [ui-admin]
+      summary: Run live validation for the active library provider profile
+      operationId: validateUiAdminProviderProfile
+      security:
+        - uiSessionCookie: []
+      responses:
+        "200":
+          description: Provider validation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UiAdminProviderValidationResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/InternalError"
   /v1/workspaces:
@@ -1425,6 +2093,567 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/InternalError"
+  /v1/runtime/providers:
+    get:
+      tags: [runtime-providers]
+      summary: List configured runtime providers and allowed models
+      operationId: listRuntimeProviders
+      responses:
+        "200":
+          description: Runtime provider catalog
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeProviderCatalogResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/runtime/providers/validate:
+    post:
+      tags: [runtime-providers]
+      summary: Validate one provider and model combination
+      operationId: validateRuntimeProvider
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuntimeProviderValidationRequest"
+      responses:
+        "200":
+          description: Runtime provider validation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeProviderValidationResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/runtime/libraries/{libraryId}/provider-profile:
+    get:
+      tags: [runtime-providers]
+      summary: Get the effective runtime provider profile for one library
+      operationId: getRuntimeProviderProfile
+      parameters:
+        - $ref: "#/components/parameters/libraryId"
+      responses:
+        "200":
+          description: Active runtime provider profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeLibraryProviderProfile"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    put:
+      tags: [runtime-providers]
+      summary: Update the effective runtime provider profile for one library
+      operationId: updateRuntimeProviderProfile
+      parameters:
+        - $ref: "#/components/parameters/libraryId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuntimeLibraryProviderProfileUpdate"
+      responses:
+        "200":
+          description: Updated runtime provider profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeLibraryProviderProfile"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/runtime/libraries/{libraryId}/documents:
+    get:
+      tags: [runtime-documents]
+      summary: List runtime ingestion rows for one library
+      operationId: listRuntimeDocuments
+      parameters:
+        - $ref: "#/components/parameters/libraryId"
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: fileType
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: q
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Runtime document surface payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeDocumentSurfaceResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      tags: [runtime-documents]
+      summary: Upload one or more documents into a library runtime queue
+      operationId: uploadRuntimeDocuments
+      parameters:
+        - $ref: "#/components/parameters/libraryId"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                files:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+      responses:
+        "202":
+          description: Upload accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeUploadAcceptedResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/runtime/libraries/{libraryId}/documents/{documentId}:
+    get:
+      tags: [runtime-documents]
+      summary: Get one runtime document detail
+      operationId: getRuntimeDocument
+      parameters:
+        - $ref: "#/components/parameters/libraryId"
+        - $ref: "#/components/parameters/runtimeDocumentId"
+      responses:
+        "200":
+          description: Runtime document detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeDocumentDetailResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags: [runtime-documents]
+      summary: Delete one runtime document and trigger graph rebuild work
+      operationId: deleteRuntimeDocument
+      parameters:
+        - $ref: "#/components/parameters/libraryId"
+        - $ref: "#/components/parameters/runtimeDocumentId"
+      responses:
+        "202":
+          description: Delete accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeMutationAccepted"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/runtime/libraries/{libraryId}/documents/{documentId}/append:
+    post:
+      tags: [runtime-documents]
+      summary: Append plain text to an existing logical document
+      operationId: appendRuntimeDocument
+      parameters:
+        - $ref: "#/components/parameters/libraryId"
+        - $ref: "#/components/parameters/runtimeDocumentId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuntimeAppendDocumentRequest"
+      responses:
+        "202":
+          description: Append accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeMutationAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/runtime/libraries/{libraryId}/documents/{documentId}/replace:
+    post:
+      tags: [runtime-documents]
+      summary: Replace an existing logical document with a new file revision
+      operationId: replaceRuntimeDocument
+      parameters:
+        - $ref: "#/components/parameters/libraryId"
+        - $ref: "#/components/parameters/runtimeDocumentId"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                files:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+      responses:
+        "202":
+          description: Replace accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeMutationAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/runtime/libraries/{libraryId}/documents/{documentId}/retry:
+    post:
+      tags: [runtime-documents]
+      summary: Retry a failed runtime document
+      operationId: retryRuntimeDocument
+      parameters:
+        - $ref: "#/components/parameters/libraryId"
+        - $ref: "#/components/parameters/runtimeDocumentId"
+      responses:
+        "202":
+          description: Retry accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeMutationAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/runtime/libraries/{libraryId}/documents/{documentId}/reprocess:
+    post:
+      tags: [runtime-documents]
+      summary: Reprocess a previously completed runtime document
+      operationId: reprocessRuntimeDocument
+      parameters:
+        - $ref: "#/components/parameters/libraryId"
+        - $ref: "#/components/parameters/runtimeDocumentId"
+      responses:
+        "202":
+          description: Reprocess accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeMutationAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/runtime/libraries/{libraryId}/graph/surface:
+    get:
+      tags: [runtime-graph]
+      summary: Get the runtime graph surface for one library
+      operationId: getRuntimeGraphSurface
+      parameters:
+        - $ref: "#/components/parameters/libraryId"
+      responses:
+        "200":
+          description: Runtime graph surface
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeGraphSurfaceResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/runtime/libraries/{libraryId}/graph/nodes/{nodeId}:
+    get:
+      tags: [runtime-graph]
+      summary: Get runtime graph node detail for one library
+      operationId: getRuntimeGraphNodeDetail
+      parameters:
+        - $ref: "#/components/parameters/libraryId"
+        - $ref: "#/components/parameters/runtimeNodeId"
+      responses:
+        "200":
+          description: Runtime graph node detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeGraphNodeDetailResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/runtime/libraries/{libraryId}/graph/diagnostics:
+    get:
+      tags: [runtime-graph]
+      summary: Get runtime graph diagnostics for one library
+      operationId: getRuntimeGraphDiagnostics
+      parameters:
+        - $ref: "#/components/parameters/libraryId"
+      responses:
+        "200":
+          description: Runtime graph diagnostics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeGraphDiagnosticsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/runtime/libraries/{libraryId}/queries/answer:
+    post:
+      tags: [runtime-query]
+      summary: Execute a grounded answer query against one library
+      operationId: runRuntimeAnswerQuery
+      parameters:
+        - $ref: "#/components/parameters/libraryId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuntimeQueryRequest"
+      responses:
+        "200":
+          description: Runtime answer query result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeAnswerQueryResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/runtime/libraries/{libraryId}/queries/data:
+    post:
+      tags: [runtime-query]
+      summary: Execute a structured runtime query against one library
+      operationId: runRuntimeStructuredQuery
+      parameters:
+        - $ref: "#/components/parameters/libraryId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuntimeQueryRequest"
+      responses:
+        "200":
+          description: Runtime structured query result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeStructuredQueryResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/runtime/libraries/{libraryId}/queries/{queryId}:
+    get:
+      tags: [runtime-query]
+      summary: Get one persisted runtime query execution
+      operationId: getRuntimeQueryExecution
+      parameters:
+        - $ref: "#/components/parameters/libraryId"
+        - $ref: "#/components/parameters/runtimeQueryId"
+      responses:
+        "200":
+          description: Runtime query execution detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeQueryExecutionDetailResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/runtime/admin/model-pricing:
+    get:
+      tags: [runtime-pricing]
+      summary: List effective-dated model pricing catalog entries
+      operationId: listRuntimeModelPricing
+      parameters:
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: providerKind
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: modelName
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: capability
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Pricing catalog payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimePricingCatalogResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      tags: [runtime-pricing]
+      summary: Create a new effective-dated pricing catalog entry
+      operationId: createRuntimeModelPricing
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuntimePricingCatalogUpsertRequest"
+      responses:
+        "201":
+          description: Created pricing catalog entry
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimePricingCatalogEntryResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/runtime/admin/model-pricing/{pricingId}:
+    put:
+      tags: [runtime-pricing]
+      summary: Update an existing pricing catalog entry without changing identity fields
+      operationId: updateRuntimeModelPricing
+      parameters:
+        - $ref: "#/components/parameters/pricingId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuntimePricingCatalogUpsertRequest"
+      responses:
+        "200":
+          description: Updated pricing catalog entry
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimePricingCatalogEntryResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags: [runtime-pricing]
+      summary: Deactivate a pricing catalog entry
+      operationId: deleteRuntimeModelPricing
+      parameters:
+        - $ref: "#/components/parameters/pricingId"
+      responses:
+        "200":
+          description: Deactivated pricing catalog entry
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimePricingCatalogEntryResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
 components:
   securitySchemes:
     bearerAuth:
@@ -1434,6 +2663,11 @@ components:
       description: |
         Bearer token minted by `POST /v1/auth/tokens`.
         Note: some read/list endpoints are currently public and do not require auth.
+    uiSessionCookie:
+      type: apiKey
+      in: cookie
+      name: rustrag_ui_session
+      description: Browser session cookie used by the `/v1/ui/*` authenticated shell.
   parameters:
     id:
       in: path
@@ -1470,6 +2704,41 @@ components:
       schema:
         type: integer
         format: int64
+    libraryId:
+      in: path
+      name: libraryId
+      required: true
+      schema:
+        type: string
+        format: uuid
+    runtimeDocumentId:
+      in: path
+      name: documentId
+      required: true
+      schema:
+        type: string
+        format: uuid
+    pricingId:
+      in: path
+      name: pricingId
+      required: true
+      schema:
+        type: string
+        format: uuid
+    runtimeNodeId:
+      in: path
+      name: nodeId
+      required: true
+      schema:
+        type: string
+        format: uuid
+    runtimeQueryId:
+      in: path
+      name: queryId
+      required: true
+      schema:
+        type: string
+        format: uuid
   responses:
     BadRequest:
       description: Bad request
@@ -1526,6 +2795,21 @@ components:
       properties:
         error:
           type: string
+        errorKind:
+          type: [string, "null"]
+        requestId:
+          type: [string, "null"]
+
+    ApiWarningBody:
+      type: object
+      required: [warning, warningKind]
+      properties:
+        warning:
+          type: string
+        warningKind:
+          type: string
+          enum:
+            [blocked_activity, stalled_activity, partial_accounting, partial_convergence]
 
     HealthResponse:
       type: object
@@ -1813,7 +3097,7 @@ components:
           example: chat
         model_name:
           type: string
-          example: gpt-4.1-mini
+          example: gpt-5.4
 
     CreateModelProfileRequest:
       type: object
@@ -2362,6 +3646,11 @@ components:
             - document:01958f52-1b41-7e1a-81f0-68bb2ac6df54:chunk:0
         mode:
           type: string
+        warning:
+          type: [string, "null"]
+        warning_kind:
+          type: [string, "null"]
+          enum: [partial_convergence, "null"]
           example: gateway_live
         answer_status:
           type: string
@@ -3427,3 +4716,2377 @@ components:
       properties:
         snapshot:
           $ref: "#/components/schemas/IntegrationsProductSnapshot"
+
+    UiLoginRequest:
+      type: object
+      required: [login, password]
+      properties:
+        login:
+          type: string
+        password:
+          type: string
+        remember_me:
+          type: boolean
+        locale:
+          type: string
+          enum: [en, ru]
+
+    UiSessionUser:
+      type: object
+      required: [id, email, display_name, role_label, initials]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        display_name:
+          type: string
+        role_label:
+          type: string
+        initials:
+          type: string
+
+    UiSessionResponse:
+      type: object
+      required: [session_id, locale, expires_at, user]
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        locale:
+          type: string
+          enum: [en, ru]
+        active_workspace_id:
+          type: [string, "null"]
+          format: uuid
+        active_library_id:
+          type: [string, "null"]
+          format: uuid
+        expires_at:
+          type: string
+          format: date-time
+        user:
+          $ref: "#/components/schemas/UiSessionUser"
+
+    UiOkResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+
+    UiWorkspaceOption:
+      type: object
+      required: [id, slug, name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        slug:
+          type: string
+        name:
+          type: string
+
+    UiLibraryOption:
+      type: object
+      required: [id, workspace_id, slug, name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        slug:
+          type: string
+        name:
+          type: string
+
+    UiShellUser:
+      type: object
+      required: [id, email, display_name, role_label, initials]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        display_name:
+          type: string
+        role_label:
+          type: string
+        initials:
+          type: string
+
+    UiShellContextResponse:
+      type: object
+      required:
+        [
+          locale,
+          admin_enabled,
+          current_user,
+          active_workspace,
+          active_library,
+          workspaces,
+          libraries,
+        ]
+      properties:
+        locale:
+          type: string
+          enum: [en, ru]
+        admin_enabled:
+          type: boolean
+        current_user:
+          $ref: "#/components/schemas/UiShellUser"
+        active_workspace:
+          $ref: "#/components/schemas/UiWorkspaceOption"
+        active_library:
+          $ref: "#/components/schemas/UiLibraryOption"
+        workspaces:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiWorkspaceOption"
+        libraries:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiLibraryOption"
+
+    UiUpdateContextRequest:
+      type: object
+      properties:
+        workspace_id:
+          type: string
+          format: uuid
+        library_id:
+          type: string
+          format: uuid
+        locale:
+          type: string
+          enum: [en, ru]
+
+    UiCreateWorkspaceRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+
+    UiCreateLibraryRequest:
+      type: object
+      required: [workspace_id, name]
+      properties:
+        workspace_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: [string, "null"]
+
+    UiDocumentSummaryCounters:
+      type: object
+      required: [queued, processing, ready, failed]
+      properties:
+        queued:
+          type: integer
+          minimum: 0
+        processing:
+          type: integer
+          minimum: 0
+        ready:
+          type: integer
+          minimum: 0
+        failed:
+          type: integer
+          minimum: 0
+
+    UiDocumentFilterValues:
+      type: object
+      required: [statuses, file_types]
+      properties:
+        statuses:
+          type: array
+          items:
+            type: string
+        file_types:
+          type: array
+          items:
+            type: string
+
+    UiDocumentMutationState:
+      type: object
+      properties:
+        kind:
+          type: [string, "null"]
+        status:
+          type: [string, "null"]
+        warning:
+          type: [string, "null"]
+
+    UiDocumentRevisionHistoryItem:
+      type: object
+      required:
+        [id, revision_no, revision_kind, status, source_file_name, accepted_at, is_active]
+      properties:
+        id:
+          type: string
+        revision_no:
+          type: integer
+        revision_kind:
+          type: string
+        status:
+          type: string
+        source_file_name:
+          type: string
+        appended_text_excerpt:
+          type: [string, "null"]
+        accepted_at:
+          type: string
+          format: date-time
+        activated_at:
+          type: [string, "null"]
+          format: date-time
+        superseded_at:
+          type: [string, "null"]
+          format: date-time
+        is_active:
+          type: boolean
+
+    UiDocumentRow:
+      type: object
+      required:
+        [
+          id,
+          file_name,
+          file_type,
+          file_size_label,
+          uploaded_at,
+          library_name,
+          stage,
+          status,
+          mutation,
+          can_retry,
+          can_append,
+          can_replace,
+          can_remove,
+          detail_available,
+        ]
+      properties:
+        id:
+          type: string
+        logical_document_id:
+          type: [string, "null"]
+        file_name:
+          type: string
+        file_type:
+          type: string
+        file_size_label:
+          type: string
+        uploaded_at:
+          type: string
+          format: date-time
+        library_name:
+          type: string
+        stage:
+          type: string
+        status:
+          type: string
+          enum: [queued, processing, ready, ready_no_graph, failed]
+        progress_percent:
+          type: [integer, "null"]
+          minimum: 0
+          maximum: 100
+        active_revision_no:
+          type: [integer, "null"]
+        active_revision_kind:
+          type: [string, "null"]
+        mutation:
+          $ref: "#/components/schemas/UiDocumentMutationState"
+        can_retry:
+          type: boolean
+        can_append:
+          type: boolean
+        can_replace:
+          type: boolean
+        can_remove:
+          type: boolean
+        detail_available:
+          type: boolean
+
+    UiDocumentsSurfaceResponse:
+      type: object
+      required:
+        [accepted_formats, max_size_mb, graph_status, rebuild_backlog_count, counters, filters, rows]
+      properties:
+        accepted_formats:
+          type: array
+          items:
+            type: string
+        max_size_mb:
+          type: integer
+          minimum: 1
+        graph_status:
+          type: string
+          enum: [empty, building, ready, partial, failed, stale]
+        graph_warning:
+          type: [string, "null"]
+        rebuild_backlog_count:
+          type: integer
+          minimum: 0
+        counters:
+          $ref: "#/components/schemas/UiDocumentSummaryCounters"
+        filters:
+          $ref: "#/components/schemas/UiDocumentFilterValues"
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiDocumentRow"
+
+    UiUploadDocumentsResponse:
+      type: object
+      required: [accepted_rows]
+      properties:
+        accepted_rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiDocumentRow"
+
+    UiDocumentHistoryItem:
+      type: object
+      required: [attempt_no, status, stage, started_at]
+      properties:
+        attempt_no:
+          type: integer
+        status:
+          type: string
+        stage:
+          type: string
+        error_message:
+          type: [string, "null"]
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: [string, "null"]
+          format: date-time
+
+    UiDocumentExtractedStats:
+      type: object
+      required: [warnings]
+      properties:
+        chunk_count:
+          type: [integer, "null"]
+          minimum: 0
+        document_id:
+          type: [string, "null"]
+        checksum:
+          type: [string, "null"]
+        page_count:
+          type: [integer, "null"]
+        extraction_kind:
+          type: [string, "null"]
+        warnings:
+          type: array
+          items:
+            type: string
+
+    UiDocumentGraphStats:
+      type: object
+      required: [node_count, edge_count, evidence_count]
+      properties:
+        node_count:
+          type: integer
+          minimum: 0
+        edge_count:
+          type: integer
+          minimum: 0
+        evidence_count:
+          type: integer
+          minimum: 0
+
+    UiDocumentDetailResponse:
+      type: object
+      required:
+        [
+          id,
+          file_name,
+          file_type,
+          file_size_label,
+          uploaded_at,
+          library_name,
+          stage,
+          status,
+          mutation,
+          summary,
+          can_download_text,
+          can_append,
+          can_replace,
+          can_remove,
+          extracted_stats,
+          graph_stats,
+          revision_history,
+          processing_history,
+        ]
+      properties:
+        id:
+          type: string
+        logical_document_id:
+          type: [string, "null"]
+        file_name:
+          type: string
+        file_type:
+          type: string
+        file_size_label:
+          type: string
+        uploaded_at:
+          type: string
+          format: date-time
+        library_name:
+          type: string
+        stage:
+          type: string
+        status:
+          type: string
+          enum: [queued, processing, ready, ready_no_graph, failed]
+        progress_percent:
+          type: [integer, "null"]
+          minimum: 0
+          maximum: 100
+        active_revision_no:
+          type: [integer, "null"]
+        active_revision_kind:
+          type: [string, "null"]
+        active_revision_status:
+          type: [string, "null"]
+        mutation:
+          $ref: "#/components/schemas/UiDocumentMutationState"
+        requested_by:
+          type: [string, "null"]
+        error_message:
+          type: [string, "null"]
+        summary:
+          type: string
+        graph_node_id:
+          type: [string, "null"]
+        can_download_text:
+          type: boolean
+        can_append:
+          type: boolean
+        can_replace:
+          type: boolean
+        can_remove:
+          type: boolean
+        extracted_stats:
+          $ref: "#/components/schemas/UiDocumentExtractedStats"
+        graph_stats:
+          $ref: "#/components/schemas/UiDocumentGraphStats"
+        revision_history:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiDocumentRevisionHistoryItem"
+        processing_history:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiDocumentHistoryItem"
+
+    UiDocumentDeleteResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+        mutationId:
+          type: [string, "null"]
+          format: uuid
+
+    UiGraphNode:
+      type: object
+      required: [id, label, node_type, support_count]
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        node_type:
+          type: string
+          enum: [document, entity, topic]
+        secondary_label:
+          type: [string, "null"]
+        support_count:
+          type: integer
+
+    UiGraphEdge:
+      type: object
+      required: [id, source, target, relation_type, support_count]
+      properties:
+        id:
+          type: string
+        source:
+          type: string
+        target:
+          type: string
+        relation_type:
+          type: string
+        support_count:
+          type: integer
+
+    UiGraphLegendItem:
+      type: object
+      required: [key, label]
+      properties:
+        key:
+          type: string
+        label:
+          type: string
+
+    UiGraphAssistantProvider:
+      type: object
+      required: [provider_kind, model_name]
+      properties:
+        provider_kind:
+          type: string
+        model_name:
+          type: string
+
+    UiGraphAssistantReference:
+      type: object
+      required: [kind, reference_id, rank]
+      properties:
+        kind:
+          type: string
+        reference_id:
+          type: string
+        excerpt:
+          type: [string, "null"]
+        rank:
+          type: integer
+        score:
+          type: [number, "null"]
+          format: float
+
+    UiGraphAssistantMessage:
+      type: object
+      required: [id, role, content, created_at, references]
+      properties:
+        id:
+          type: string
+        role:
+          type: string
+        content:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        query_id:
+          type: [string, "null"]
+        mode:
+          type: [string, "null"]
+          enum: [document, local, global, hybrid, mix, "null"]
+        grounding_status:
+          type: [string, "null"]
+          enum: [grounded, partial, weak, none, "null"]
+        provider:
+          anyOf:
+            - $ref: "#/components/schemas/UiGraphAssistantProvider"
+            - type: "null"
+        references:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiGraphAssistantReference"
+        warning:
+          type: [string, "null"]
+        warning_kind:
+          type: [string, "null"]
+          enum: [partial_convergence, "null"]
+
+    UiGraphAssistant:
+      type: object
+      required: [title, subtitle, prompts, disclaimer, messages]
+      properties:
+        title:
+          type: string
+        subtitle:
+          type: string
+        prompts:
+          type: array
+          items:
+            type: string
+        disclaimer:
+          type: string
+        session_id:
+          type: [string, "null"]
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiGraphAssistantMessage"
+
+    UiGraphSurfaceResponse:
+      type: object
+      required:
+        [graph_status, projection_version, node_count, relation_count, nodes, edges, legend, assistant]
+      properties:
+        graph_status:
+          type: string
+          enum: [empty, building, ready, partial, failed, stale]
+        projection_version:
+          type: integer
+        node_count:
+          type: integer
+          minimum: 0
+        relation_count:
+          type: integer
+          minimum: 0
+        last_built_at:
+          type: [string, "null"]
+          format: date-time
+        warning:
+          type: [string, "null"]
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiGraphNode"
+        edges:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiGraphEdge"
+        legend:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiGraphLegendItem"
+        assistant:
+          $ref: "#/components/schemas/UiGraphAssistant"
+
+    UiGraphSearchHit:
+      type: object
+      required: [id, label, node_type]
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        node_type:
+          type: string
+          enum: [document, entity, topic]
+        secondary_label:
+          type: [string, "null"]
+
+    UiGraphProperty:
+      type: array
+      prefixItems:
+        - type: string
+        - type: string
+      minItems: 2
+      maxItems: 2
+
+    UiGraphRelatedEdge:
+      type: object
+      required: [id, relation_type, other_node_id, other_node_label, support_count]
+      properties:
+        id:
+          type: string
+        relation_type:
+          type: string
+        other_node_id:
+          type: string
+        other_node_label:
+          type: string
+        support_count:
+          type: integer
+
+    UiGraphEvidence:
+      type: object
+      required: [id, evidence_text, created_at, active_provenance_only]
+      properties:
+        id:
+          type: string
+        document_id:
+          type: [string, "null"]
+        document_label:
+          type: [string, "null"]
+        chunk_id:
+          type: [string, "null"]
+        page_ref:
+          type: [string, "null"]
+        evidence_text:
+          type: string
+        confidence_score:
+          type: [number, "null"]
+          format: float
+        created_at:
+          type: string
+          format: date-time
+        active_provenance_only:
+          type: boolean
+
+    UiGraphNodeDetail:
+      type: object
+      required:
+        [
+          id,
+          label,
+          node_type,
+          summary,
+          properties,
+          related_documents,
+          connected_nodes,
+          related_edges,
+          evidence,
+          relation_count,
+          pending_update_count,
+          pending_delete_count,
+          active_provenance_only,
+        ]
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        node_type:
+          type: string
+          enum: [document, entity, topic]
+        summary:
+          type: string
+        properties:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiGraphProperty"
+        related_documents:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiGraphSearchHit"
+        connected_nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiGraphSearchHit"
+        related_edges:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiGraphRelatedEdge"
+        evidence:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiGraphEvidence"
+        relation_count:
+          type: integer
+          minimum: 0
+        reconciliation_status:
+          type: [string, "null"]
+        pending_update_count:
+          type: integer
+          minimum: 0
+        pending_delete_count:
+          type: integer
+          minimum: 0
+        active_provenance_only:
+          type: boolean
+        warning:
+          type: [string, "null"]
+
+    UiGraphDiagnostics:
+      type: object
+      required:
+        [
+          graph_status,
+          reconciliation_status,
+          projection_version,
+          node_count,
+          edge_count,
+          projection_freshness,
+          rebuild_backlog_count,
+          ready_no_graph_count,
+          pending_update_count,
+          pending_delete_count,
+          active_provenance_only,
+          blockers,
+          graph_backend,
+        ]
+      properties:
+        graph_status:
+          type: string
+        reconciliation_status:
+          type: string
+        projection_version:
+          type: integer
+        node_count:
+          type: integer
+        edge_count:
+          type: integer
+        projection_freshness:
+          type: string
+        rebuild_backlog_count:
+          type: integer
+        ready_no_graph_count:
+          type: integer
+        pending_update_count:
+          type: integer
+        pending_delete_count:
+          type: integer
+        provenance_coverage_percent:
+          type: [number, "null"]
+          format: float
+        last_built_at:
+          type: [string, "null"]
+          format: date-time
+        last_error_message:
+          type: [string, "null"]
+        last_mutation_warning:
+          type: [string, "null"]
+        active_provenance_only:
+          type: boolean
+        blockers:
+          type: array
+          items:
+            type: string
+        warning:
+          type: [string, "null"]
+        graph_backend:
+          type: string
+
+    UiGraphAskRequest:
+      type: object
+      required: [question]
+      properties:
+        question:
+          type: string
+        session_id:
+          type: [string, "null"]
+        node_id:
+          type: [string, "null"]
+        mode:
+          type: [string, "null"]
+          enum: [document, local, global, hybrid, mix, "null"]
+
+    UiGraphAssistantAnswer:
+      type: object
+      required:
+        [
+          session_id,
+          user_message_id,
+          assistant_message_id,
+          query_id,
+          answer,
+          references,
+          structured_references,
+          mode,
+          grounding_status,
+          provider,
+        ]
+      properties:
+        session_id:
+          type: string
+        user_message_id:
+          type: string
+        assistant_message_id:
+          type: string
+        query_id:
+          type: string
+        answer:
+          type: string
+        references:
+          type: array
+          items:
+            type: string
+        structured_references:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiGraphAssistantReference"
+        mode:
+          type: string
+          enum: [document, local, global, hybrid, mix]
+        grounding_status:
+          type: string
+          enum: [grounded, partial, weak, none]
+        provider:
+          $ref: "#/components/schemas/UiGraphAssistantProvider"
+        warning:
+          type: [string, "null"]
+        warning_kind:
+          type: [string, "null"]
+          enum: [partial_convergence, "null"]
+
+    UiAdminTabCounts:
+      type: object
+      required: [api_tokens, members, library_access, settings]
+      properties:
+        api_tokens:
+          type: integer
+          minimum: 0
+        members:
+          type: integer
+          minimum: 0
+        library_access:
+          type: integer
+          minimum: 0
+        settings:
+          type: integer
+          minimum: 0
+
+    UiAdminTabAvailability:
+      type: object
+      required: [api_tokens, members, library_access, settings]
+      properties:
+        api_tokens:
+          type: boolean
+        members:
+          type: boolean
+        library_access:
+          type: boolean
+        settings:
+          type: boolean
+
+    UiAdminOverview:
+      type: object
+      required: [active_tab, workspace_name, counts, availability]
+      properties:
+        active_tab:
+          type: string
+          enum: [api_tokens, members, library_access, settings]
+        workspace_name:
+          type: string
+        counts:
+          $ref: "#/components/schemas/UiAdminTabCounts"
+        availability:
+          $ref: "#/components/schemas/UiAdminTabAvailability"
+
+    UiAdminApiTokenRow:
+      type: object
+      required: [id, label, masked_token, scopes, created_at, can_revoke]
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        masked_token:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: [string, "null"]
+          format: date-time
+        expires_at:
+          type: [string, "null"]
+          format: date-time
+        can_revoke:
+          type: boolean
+
+    UiAdminApiTokensResponse:
+      type: object
+      required: [rows]
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiAdminApiTokenRow"
+
+    UiAdminCreateApiTokenRequest:
+      type: object
+      required: [label, scopes]
+      properties:
+        label:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+        expires_in_days:
+          type: [integer, "null"]
+
+    UiAdminCreateApiTokenResult:
+      type: object
+      required: [row, plaintext_token]
+      properties:
+        row:
+          $ref: "#/components/schemas/UiAdminApiTokenRow"
+        plaintext_token:
+          type: string
+
+    UiAdminMemberRow:
+      type: object
+      required: [id, display_name, email, role_label]
+      properties:
+        id:
+          type: string
+        display_name:
+          type: string
+        email:
+          type: string
+          format: email
+        role_label:
+          type: string
+
+    UiAdminMembersResponse:
+      type: object
+      required: [rows]
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiAdminMemberRow"
+
+    UiAdminLibraryAccessRow:
+      type: object
+      required: [id, library_name, principal_label, access_level]
+      properties:
+        id:
+          type: string
+        library_name:
+          type: string
+        principal_label:
+          type: string
+        access_level:
+          type: string
+
+    UiAdminLibraryAccessResponse:
+      type: object
+      required: [rows]
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiAdminLibraryAccessRow"
+
+    UiAdminSettingItem:
+      type: object
+      required: [id, label, value]
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        value:
+          type: string
+
+    UiAdminPricingCatalogEntry:
+      type: object
+      required:
+        [id, provider_kind, model_name, capability, billing_unit, currency, status, source_kind, effective_from]
+      properties:
+        id:
+          type: string
+        workspace_id:
+          type: [string, "null"]
+        provider_kind:
+          type: string
+        model_name:
+          type: string
+        capability:
+          type: string
+        billing_unit:
+          type: string
+        input_price:
+          type: [string, "null"]
+        output_price:
+          type: [string, "null"]
+        currency:
+          type: string
+        status:
+          type: string
+        source_kind:
+          type: string
+        note:
+          type: [string, "null"]
+        effective_from:
+          type: string
+          format: date-time
+        effective_to:
+          type: [string, "null"]
+          format: date-time
+
+    UiAdminProviderCatalogItem:
+      type: object
+      required:
+        [provider_kind, supported_capabilities, default_models, available_models, is_configured]
+      properties:
+        provider_kind:
+          type: string
+        supported_capabilities:
+          type: array
+          items:
+            type: string
+        default_models:
+          type: object
+          additionalProperties:
+            type: string
+        available_models:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+        is_configured:
+          type: boolean
+
+    UiAdminProviderProfile:
+      type: object
+      required:
+        [
+          library_id,
+          library_name,
+          indexing_provider_kind,
+          indexing_model_name,
+          embedding_provider_kind,
+          embedding_model_name,
+          answer_provider_kind,
+          answer_model_name,
+          vision_provider_kind,
+          vision_model_name,
+        ]
+      properties:
+        library_id:
+          type: string
+        library_name:
+          type: string
+        indexing_provider_kind:
+          type: string
+        indexing_model_name:
+          type: string
+        embedding_provider_kind:
+          type: string
+        embedding_model_name:
+          type: string
+        answer_provider_kind:
+          type: string
+        answer_model_name:
+          type: string
+        vision_provider_kind:
+          type: string
+        vision_model_name:
+          type: string
+        last_validated_at:
+          type: [string, "null"]
+          format: date-time
+        last_validation_status:
+          type: [string, "null"]
+        last_validation_error:
+          type: [string, "null"]
+
+    UiAdminProviderValidationCheck:
+      type: object
+      required: [provider_kind, model_name, capability, status, checked_at]
+      properties:
+        provider_kind:
+          type: string
+        model_name:
+          type: string
+        capability:
+          type: string
+        status:
+          type: string
+        checked_at:
+          type: string
+          format: date-time
+        error:
+          type: [string, "null"]
+
+    UiAdminProviderValidation:
+      type: object
+      required: [checks]
+      properties:
+        status:
+          type: [string, "null"]
+        checked_at:
+          type: [string, "null"]
+          format: date-time
+        error:
+          type: [string, "null"]
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiAdminProviderValidationCheck"
+
+    UiPricingCoverageWarning:
+      type: object
+      required: [provider_kind, model_name, capability, billing_unit, message]
+      properties:
+        provider_kind:
+          type: string
+        model_name:
+          type: string
+        capability:
+          type: string
+        billing_unit:
+          type: string
+        message:
+          type: string
+
+    UiPricingCoverageSummary:
+      type: object
+      required: [status, covered_targets, missing_targets, warnings]
+      properties:
+        status:
+          type: string
+          enum: [covered, partial, missing]
+        covered_targets:
+          type: integer
+        missing_targets:
+          type: integer
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiPricingCoverageWarning"
+
+    UiAdminSettingsResponse:
+      type: object
+      required:
+        [items, provider_catalog, provider_profile, provider_validation, pricing_catalog, pricing_coverage, live_validation_enabled, supported_provider_kinds]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiAdminSettingItem"
+        provider_catalog:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiAdminProviderCatalogItem"
+        provider_profile:
+          $ref: "#/components/schemas/UiAdminProviderProfile"
+        provider_validation:
+          $ref: "#/components/schemas/UiAdminProviderValidation"
+        pricing_catalog:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiAdminPricingCatalogEntry"
+        pricing_coverage:
+          $ref: "#/components/schemas/UiPricingCoverageSummary"
+        live_validation_enabled:
+          type: boolean
+        supported_provider_kinds:
+          type: array
+          items:
+            type: string
+
+    UiAdminProviderProfileUpdateRequest:
+      type: object
+      required:
+        [
+          indexingProviderKind,
+          indexingModelName,
+          embeddingProviderKind,
+          embeddingModelName,
+          answerProviderKind,
+          answerModelName,
+          visionProviderKind,
+          visionModelName,
+        ]
+      properties:
+        indexingProviderKind:
+          type: string
+        indexingModelName:
+          type: string
+        embeddingProviderKind:
+          type: string
+        embeddingModelName:
+          type: string
+        answerProviderKind:
+          type: string
+        answerModelName:
+          type: string
+        visionProviderKind:
+          type: string
+        visionModelName:
+          type: string
+
+    UiAdminProviderProfileResponse:
+      type: object
+      required: [profile]
+      properties:
+        profile:
+          $ref: "#/components/schemas/UiAdminProviderProfile"
+
+    UiAdminProviderValidationResponse:
+      type: object
+      required: [profile, validation]
+      properties:
+        profile:
+          $ref: "#/components/schemas/UiAdminProviderProfile"
+        validation:
+          $ref: "#/components/schemas/UiAdminProviderValidation"
+
+    RuntimeQueryMode:
+      type: string
+      enum: [document, local, global, hybrid, mix]
+
+    RuntimeProviderDescriptor:
+      type: object
+      required: [providerKind, modelName]
+      properties:
+        providerKind:
+          type: string
+        modelName:
+          type: string
+
+    RuntimeProviderCatalogResponse:
+      type: object
+      required: [providers]
+      properties:
+        providers:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeSupportedProvider"
+
+    RuntimeSupportedProvider:
+      type: object
+      required:
+        [providerKind, supportedCapabilities, defaultModels, availableModels, isConfigured]
+      properties:
+        providerKind:
+          type: string
+        supportedCapabilities:
+          type: array
+          items:
+            type: string
+        defaultModels:
+          type: object
+          additionalProperties:
+            type: string
+        availableModels:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+        isConfigured:
+          type: boolean
+
+    RuntimeLibraryProviderProfile:
+      type: object
+      required:
+        [
+          libraryId,
+          indexingProviderKind,
+          indexingModelName,
+          embeddingProviderKind,
+          embeddingModelName,
+          answerProviderKind,
+          answerModelName,
+          visionProviderKind,
+          visionModelName,
+        ]
+      properties:
+        libraryId:
+          type: string
+          format: uuid
+        indexingProviderKind:
+          type: string
+        indexingModelName:
+          type: string
+        embeddingProviderKind:
+          type: string
+        embeddingModelName:
+          type: string
+        answerProviderKind:
+          type: string
+        answerModelName:
+          type: string
+        visionProviderKind:
+          type: string
+        visionModelName:
+          type: string
+        lastValidatedAt:
+          type: [string, "null"]
+          format: date-time
+        lastValidationStatus:
+          type: [string, "null"]
+        lastValidationError:
+          type: [string, "null"]
+
+    RuntimeLibraryProviderProfileUpdate:
+      type: object
+      required:
+        [
+          indexingProviderKind,
+          indexingModelName,
+          embeddingProviderKind,
+          embeddingModelName,
+          answerProviderKind,
+          answerModelName,
+          visionProviderKind,
+          visionModelName,
+        ]
+      properties:
+        indexingProviderKind:
+          type: string
+        indexingModelName:
+          type: string
+        embeddingProviderKind:
+          type: string
+        embeddingModelName:
+          type: string
+        answerProviderKind:
+          type: string
+        answerModelName:
+          type: string
+        visionProviderKind:
+          type: string
+        visionModelName:
+          type: string
+
+    RuntimeProviderValidationRequest:
+      type: object
+      required: [providerKind, modelName, capability]
+      properties:
+        providerKind:
+          type: string
+        modelName:
+          type: string
+        capability:
+          type: string
+        libraryId:
+          type: [string, "null"]
+          format: uuid
+
+    RuntimeProviderValidationResponse:
+      type: object
+      required: [providerKind, modelName, capability, status, checkedAt]
+      properties:
+        providerKind:
+          type: string
+        modelName:
+          type: string
+        capability:
+          type: string
+        status:
+          type: string
+        checkedAt:
+          type: string
+          format: date-time
+        error:
+          type: [string, "null"]
+
+    RuntimeDocumentSummary:
+      type: object
+      required: [queued, processing, ready, readyNoGraph, failed]
+      properties:
+        queued:
+          type: integer
+        processing:
+          type: integer
+        ready:
+          type: integer
+        readyNoGraph:
+          type: integer
+        failed:
+          type: integer
+
+    RuntimeDocumentRow:
+      type: object
+      required:
+        [
+          id,
+          trackId,
+          fileName,
+          fileType,
+          status,
+          stage,
+          activityStatus,
+          latestAttemptNo,
+          accountingStatus,
+          partialHistory,
+        ]
+      properties:
+        id:
+          type: string
+          format: uuid
+        trackId:
+          type: string
+        fileName:
+          type: string
+        fileType:
+          type: string
+        status:
+          type: string
+          enum: [queued, processing, ready, ready_no_graph, failed]
+        stage:
+          type: string
+        progressPercent:
+          type: [integer, "null"]
+        activityStatus:
+          type: string
+          enum: [queued, active, blocked, retrying, stalled, ready, failed]
+        lastActivityAt:
+          type: [string, "null"]
+          format: date-time
+        stalledReason:
+          type: [string, "null"]
+        chunkCount:
+          type: [integer, "null"]
+        graphNodeCount:
+          type: [integer, "null"]
+        graphEdgeCount:
+          type: [integer, "null"]
+        latestError:
+          type: [string, "null"]
+        activeRevisionNo:
+          type: [integer, "null"]
+        latestAttemptNo:
+          type: integer
+        totalCost:
+          type: [number, "null"]
+          format: double
+        currency:
+          type: [string, "null"]
+        accountingStatus:
+          type: string
+          enum: [priced, partial, unpriced]
+        partialHistory:
+          type: boolean
+        partialHistoryReason:
+          type: [string, "null"]
+
+    RuntimeUploadAcceptedResponse:
+      type: object
+      required: [uploadBatchId, accepted]
+      properties:
+        uploadBatchId:
+          type: string
+          format: uuid
+        accepted:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeDocumentRow"
+
+    RuntimeDocumentSurfaceResponse:
+      type: object
+      required: [summary, warnings, rows]
+      properties:
+        summary:
+          $ref: "#/components/schemas/RuntimeDocumentSummary"
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ApiWarningBody"
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeDocumentRow"
+
+    RuntimeExtractionDetail:
+      type: object
+      required: [extractionKind, warnings]
+      properties:
+        extractionKind:
+          type: string
+        pageCount:
+          type: [integer, "null"]
+        charCount:
+          type: [integer, "null"]
+        warnings:
+          type: array
+          items:
+            type: string
+
+    RuntimeGraphContributionSummary:
+      type: object
+      required: [nodeCount, edgeCount, evidenceCount]
+      properties:
+        nodeCount:
+          type: integer
+        edgeCount:
+          type: integer
+        evidenceCount:
+          type: integer
+
+    RuntimeStageEventResponse:
+      type: object
+      required: [stage, status, timestamp]
+      properties:
+        stage:
+          type: string
+        status:
+          type: string
+        message:
+          type: [string, "null"]
+        timestamp:
+          type: string
+          format: date-time
+
+    RuntimeDocumentDetailResponse:
+      allOf:
+        - $ref: "#/components/schemas/RuntimeDocumentRow"
+        - type: object
+          required: [warnings, graph, stageHistory, revisions, attempts]
+          properties:
+            warnings:
+              type: array
+              items:
+                $ref: "#/components/schemas/ApiWarningBody"
+            extraction:
+              anyOf:
+                - $ref: "#/components/schemas/RuntimeExtractionDetail"
+                - type: "null"
+            graph:
+              $ref: "#/components/schemas/RuntimeGraphContributionSummary"
+            stageHistory:
+              type: array
+              items:
+                $ref: "#/components/schemas/RuntimeStageEventResponse"
+            revisions:
+              type: array
+              items:
+                $ref: "#/components/schemas/RuntimeRevisionResponse"
+            attempts:
+              type: array
+              items:
+                $ref: "#/components/schemas/RuntimeAttemptResponse"
+
+    RuntimeMutationAccepted:
+      type: object
+      required: [accepted, operation]
+      properties:
+        accepted:
+          type: boolean
+        operation:
+          type: string
+        trackId:
+          type: [string, "null"]
+        revisionId:
+          type: [string, "null"]
+          format: uuid
+        mutationId:
+          type: [string, "null"]
+          format: uuid
+        attemptNo:
+          type: [integer, "null"]
+
+    RuntimeAppendDocumentRequest:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: string
+
+    RuntimeRevisionResponse:
+      type: object
+      required:
+        [id, revisionNo, revisionKind, status, sourceFileName, acceptedAt, isActive]
+      properties:
+        id:
+          type: string
+          format: uuid
+        revisionNo:
+          type: integer
+        revisionKind:
+          type: string
+        status:
+          type: string
+        sourceFileName:
+          type: string
+        acceptedAt:
+          type: string
+          format: date-time
+        activatedAt:
+          type: [string, "null"]
+          format: date-time
+        supersededAt:
+          type: [string, "null"]
+          format: date-time
+        isActive:
+          type: boolean
+
+    RuntimeAttemptResponse:
+      type: object
+      required:
+        [
+          attemptNo,
+          status,
+          activityStatus,
+          partialHistory,
+          costSummary,
+          stageBenchmarks,
+          warnings,
+        ]
+      properties:
+        attemptNo:
+          type: integer
+        revisionNo:
+          type: [integer, "null"]
+        revisionId:
+          type: [string, "null"]
+          format: uuid
+        attemptKind:
+          type: [string, "null"]
+        status:
+          type: string
+        activityStatus:
+          type: string
+          enum: [queued, active, blocked, retrying, stalled, ready, failed]
+        lastActivityAt:
+          type: [string, "null"]
+          format: date-time
+        chunkCount:
+          type: [integer, "null"]
+        graphNodeCount:
+          type: [integer, "null"]
+        graphEdgeCount:
+          type: [integer, "null"]
+        queueElapsedMs:
+          type: [integer, "null"]
+          format: int64
+        totalElapsedMs:
+          type: [integer, "null"]
+          format: int64
+        startedAt:
+          type: [string, "null"]
+          format: date-time
+        finishedAt:
+          type: [string, "null"]
+          format: date-time
+        partialHistory:
+          type: boolean
+        partialHistoryReason:
+          type: [string, "null"]
+        costSummary:
+          $ref: "#/components/schemas/RuntimeAttemptCostSummaryResponse"
+        stageBenchmarks:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeStageBenchmarkResponse"
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ApiWarningBody"
+
+    RuntimeAttemptCostSummaryResponse:
+      type: object
+      required: [pricedStageCount, unpricedStageCount, accountingStatus]
+      properties:
+        totalEstimatedCost:
+          type: [number, "null"]
+          format: double
+        currency:
+          type: [string, "null"]
+        pricedStageCount:
+          type: integer
+        unpricedStageCount:
+          type: integer
+        accountingStatus:
+          type: string
+          enum: [priced, partial, unpriced]
+
+    RuntimeStageBenchmarkResponse:
+      type: object
+      required: [stage, status, startedAt]
+      properties:
+        stage:
+          type: string
+        status:
+          type: string
+        message:
+          type: [string, "null"]
+        providerKind:
+          type: [string, "null"]
+        modelName:
+          type: [string, "null"]
+        startedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: [string, "null"]
+          format: date-time
+        elapsedMs:
+          type: [integer, "null"]
+          format: int64
+        accounting:
+          anyOf:
+            - $ref: "#/components/schemas/RuntimeStageAccountingResponse"
+            - type: "null"
+
+    RuntimeStageAccountingResponse:
+      type: object
+      required: [pricingStatus, attributionSource]
+      properties:
+        pricingStatus:
+          type: string
+          enum: [priced, usage_missing, price_missing, unpriced]
+        usageEventId:
+          type: [string, "null"]
+          format: uuid
+        costLedgerId:
+          type: [string, "null"]
+          format: uuid
+        pricingCatalogEntryId:
+          type: [string, "null"]
+          format: uuid
+        estimatedCost:
+          type: [number, "null"]
+          format: double
+        currency:
+          type: [string, "null"]
+        attributionSource:
+          type: string
+          enum: [stage_native, reconciled]
+
+    RuntimePricingCatalogResponse:
+      type: object
+      required: [rows]
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimePricingCatalogEntryResponse"
+
+    RuntimePricingCatalogEntryResponse:
+      type: object
+      required:
+        [
+          id,
+          providerKind,
+          modelName,
+          capability,
+          billingUnit,
+          currency,
+          status,
+          sourceKind,
+          effectiveFrom,
+          createdAt,
+          updatedAt,
+        ]
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspaceId:
+          type: [string, "null"]
+          format: uuid
+        providerKind:
+          type: string
+        modelName:
+          type: string
+        capability:
+          type: string
+        billingUnit:
+          type: string
+        inputPrice:
+          type: [string, "null"]
+        outputPrice:
+          type: [string, "null"]
+        currency:
+          type: string
+        status:
+          type: string
+        sourceKind:
+          type: string
+        note:
+          type: [string, "null"]
+        effectiveFrom:
+          type: string
+          format: date-time
+        effectiveTo:
+          type: [string, "null"]
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    RuntimePricingCatalogUpsertRequest:
+      type: object
+      required:
+        [
+          providerKind,
+          modelName,
+          capability,
+          billingUnit,
+          currency,
+          effectiveFrom,
+        ]
+      properties:
+        workspaceId:
+          type: [string, "null"]
+          format: uuid
+        providerKind:
+          type: string
+        modelName:
+          type: string
+        capability:
+          type: string
+        billingUnit:
+          type: string
+        inputPrice:
+          type: [number, "null"]
+          format: double
+        outputPrice:
+          type: [number, "null"]
+          format: double
+        currency:
+          type: string
+        note:
+          type: [string, "null"]
+        effectiveFrom:
+          type: string
+          format: date-time
+
+    RuntimeGraphLegendItem:
+      type: object
+      required: [key, label]
+      properties:
+        key:
+          type: string
+        label:
+          type: string
+
+    RuntimeGraphSurfaceNode:
+      type: object
+      required: [id, label, nodeType, supportCount]
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        nodeType:
+          type: string
+        secondaryLabel:
+          type: [string, "null"]
+        supportCount:
+          type: integer
+
+    RuntimeGraphSurfaceEdge:
+      type: object
+      required: [id, source, target, relationType, supportCount]
+      properties:
+        id:
+          type: string
+        source:
+          type: string
+        target:
+          type: string
+        relationType:
+          type: string
+        supportCount:
+          type: integer
+
+    RuntimeGraphSurfaceResponse:
+      type: object
+      required:
+        [
+          libraryId,
+          graphStatus,
+          convergenceStatus,
+          projectionVersion,
+          nodeCount,
+          relationCount,
+          filteredArtifactCount,
+          warnings,
+          nodes,
+          edges,
+          legend,
+        ]
+      properties:
+        libraryId:
+          type: string
+        graphStatus:
+          type: string
+        convergenceStatus:
+          type: string
+          enum: [partial, current, degraded]
+        projectionVersion:
+          type: integer
+        nodeCount:
+          type: integer
+        relationCount:
+          type: integer
+        filteredArtifactCount:
+          type: integer
+        lastBuiltAt:
+          type: [string, "null"]
+          format: date-time
+        warning:
+          type: [string, "null"]
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ApiWarningBody"
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeGraphSurfaceNode"
+        edges:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeGraphSurfaceEdge"
+        legend:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeGraphLegendItem"
+
+    RuntimeGraphSearchHit:
+      type: object
+      required: [id, label, nodeType]
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        nodeType:
+          type: string
+        secondaryLabel:
+          type: [string, "null"]
+
+    RuntimeGraphRelatedEdge:
+      type: object
+      required: [id, relationType, otherNodeId, otherNodeLabel, supportCount]
+      properties:
+        id:
+          type: string
+        relationType:
+          type: string
+        otherNodeId:
+          type: string
+        otherNodeLabel:
+          type: string
+        supportCount:
+          type: integer
+
+    RuntimeGraphEvidence:
+      type: object
+      required: [id, evidenceText, createdAt, activeProvenanceOnly]
+      properties:
+        id:
+          type: string
+        documentId:
+          type: [string, "null"]
+        documentLabel:
+          type: [string, "null"]
+        chunkId:
+          type: [string, "null"]
+        pageRef:
+          type: [string, "null"]
+        evidenceText:
+          type: string
+        confidenceScore:
+          type: [number, "null"]
+          format: float
+        createdAt:
+          type: string
+        activeProvenanceOnly:
+          type: boolean
+
+    RuntimeGraphNodeDetailResponse:
+      type: object
+      required:
+        [
+          id,
+          label,
+          nodeType,
+          summary,
+          properties,
+          relatedDocuments,
+          connectedNodes,
+          relatedEdges,
+          evidence,
+          relationCount,
+          convergenceStatus,
+          pendingUpdateCount,
+          pendingDeleteCount,
+          activeProvenanceOnly,
+          filteredArtifactCount,
+          warnings,
+        ]
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        nodeType:
+          type: string
+        summary:
+          type: string
+        properties:
+          type: array
+          items:
+            type: array
+            prefixItems:
+              - type: string
+              - type: string
+            minItems: 2
+            maxItems: 2
+        relatedDocuments:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeGraphSearchHit"
+        connectedNodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeGraphSearchHit"
+        relatedEdges:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeGraphRelatedEdge"
+        evidence:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeGraphEvidence"
+        relationCount:
+          type: integer
+        reconciliationStatus:
+          type: [string, "null"]
+        convergenceStatus:
+          type: string
+          enum: [partial, current, degraded]
+        pendingUpdateCount:
+          type: integer
+        pendingDeleteCount:
+          type: integer
+        activeProvenanceOnly:
+          type: boolean
+        filteredArtifactCount:
+          type: integer
+        warning:
+          type: [string, "null"]
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ApiWarningBody"
+
+    RuntimeGraphDiagnosticsResponse:
+      type: object
+      required:
+        [
+          libraryId,
+          graphStatus,
+          reconciliationStatus,
+          convergenceStatus,
+          projectionVersion,
+          nodeCount,
+          edgeCount,
+          projectionFreshness,
+          rebuildBacklogCount,
+          readyNoGraphCount,
+          pendingUpdateCount,
+          pendingDeleteCount,
+          filteredArtifactCount,
+          filteredEmptyRelationCount,
+          filteredDegenerateLoopCount,
+          activeProvenanceOnly,
+          blockers,
+          warnings,
+          graphBackend,
+        ]
+      properties:
+        libraryId:
+          type: string
+        graphStatus:
+          type: string
+        reconciliationStatus:
+          type: string
+        convergenceStatus:
+          type: string
+          enum: [partial, current, degraded]
+        projectionVersion:
+          type: integer
+        nodeCount:
+          type: integer
+        edgeCount:
+          type: integer
+        projectionFreshness:
+          type: string
+        rebuildBacklogCount:
+          type: integer
+        readyNoGraphCount:
+          type: integer
+        pendingUpdateCount:
+          type: integer
+        pendingDeleteCount:
+          type: integer
+        filteredArtifactCount:
+          type: integer
+        filteredEmptyRelationCount:
+          type: integer
+        filteredDegenerateLoopCount:
+          type: integer
+        provenanceCoveragePercent:
+          type: [number, "null"]
+          format: float
+        lastBuiltAt:
+          type: [string, "null"]
+          format: date-time
+        lastErrorMessage:
+          type: [string, "null"]
+        lastMutationWarning:
+          type: [string, "null"]
+        activeProvenanceOnly:
+          type: boolean
+        blockers:
+          type: array
+          items:
+            type: string
+        warning:
+          type: [string, "null"]
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ApiWarningBody"
+        graphBackend:
+          type: string
+
+    RuntimeQueryRequest:
+      type: object
+      required: [question, mode]
+      properties:
+        question:
+          type: string
+        mode:
+          $ref: "#/components/schemas/RuntimeQueryMode"
+        topK:
+          type: [integer, "null"]
+        includeDebug:
+          type: [boolean, "null"]
+
+    RuntimeQueryReference:
+      type: object
+      required: [kind, referenceId, rank]
+      properties:
+        kind:
+          type: string
+        referenceId:
+          type: string
+          format: uuid
+        excerpt:
+          type: [string, "null"]
+        rank:
+          type: integer
+        score:
+          type: [number, "null"]
+          format: float
+
+    RuntimeMatchedEntity:
+      type: object
+      required: [nodeId, label, nodeType]
+      properties:
+        nodeId:
+          type: string
+          format: uuid
+        label:
+          type: string
+        nodeType:
+          type: string
+        score:
+          type: [number, "null"]
+          format: float
+
+    RuntimeMatchedRelationship:
+      type: object
+      required: [edgeId, relationType, fromNodeId, toNodeId]
+      properties:
+        edgeId:
+          type: string
+          format: uuid
+        relationType:
+          type: string
+        fromNodeId:
+          type: string
+          format: uuid
+        toNodeId:
+          type: string
+          format: uuid
+        score:
+          type: [number, "null"]
+          format: float
+
+    RuntimeMatchedChunk:
+      type: object
+      required: [chunkId, documentId, excerpt]
+      properties:
+        chunkId:
+          type: string
+          format: uuid
+        documentId:
+          type: string
+          format: uuid
+        excerpt:
+          type: string
+        score:
+          type: [number, "null"]
+          format: float
+
+    RuntimeAnswerQueryResponse:
+      type: object
+      required: [queryId, mode, answer, groundingStatus, references, provider]
+      properties:
+        queryId:
+          type: string
+          format: uuid
+        mode:
+          $ref: "#/components/schemas/RuntimeQueryMode"
+        answer:
+          type: string
+        groundingStatus:
+          type: string
+          enum: [grounded, partial, weak, none]
+        references:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeQueryReference"
+        provider:
+          $ref: "#/components/schemas/RuntimeProviderDescriptor"
+        warning:
+          type: [string, "null"]
+        warningKind:
+          type: [string, "null"]
+          enum: [partial_convergence, "null"]
+
+    RuntimeStructuredQueryResponse:
+      type: object
+      required: [queryId, mode, entities, relationships, chunks, references, provider]
+      properties:
+        queryId:
+          type: string
+          format: uuid
+        mode:
+          $ref: "#/components/schemas/RuntimeQueryMode"
+        entities:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeMatchedEntity"
+        relationships:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeMatchedRelationship"
+        chunks:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeMatchedChunk"
+        references:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeQueryReference"
+        provider:
+          $ref: "#/components/schemas/RuntimeProviderDescriptor"
+
+    RuntimeQueryExecutionDetailResponse:
+      type: object
+      required: [queryId, mode, question, groundingStatus, references, provider]
+      properties:
+        queryId:
+          type: string
+          format: uuid
+        mode:
+          $ref: "#/components/schemas/RuntimeQueryMode"
+        question:
+          type: string
+        answer:
+          type: [string, "null"]
+        groundingStatus:
+          type: string
+          enum: [grounded, partial, weak, none]
+        references:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeQueryReference"
+        provider:
+          $ref: "#/components/schemas/RuntimeProviderDescriptor"
+        warning:
+          type: [string, "null"]
+        warningKind:
+          type: [string, "null"]
+          enum: [partial_convergence, "null"]

@@ -125,6 +125,17 @@ pub fn mint_plaintext_token() -> String {
     format!("rtrg_{}", Uuid::now_v7().simple())
 }
 
+#[must_use]
+pub fn preview_token(raw: &str) -> String {
+    if raw.len() <= 10 {
+        return raw.to_string();
+    }
+
+    let prefix = &raw[..5];
+    let suffix = &raw[raw.len().saturating_sub(4)..];
+    format!("{prefix}***{suffix}")
+}
+
 /// Creates a new API token and returns the plaintext token once.
 ///
 /// # Errors
@@ -443,6 +454,7 @@ async fn mint_token_response(
     let normalized_label = label.trim();
     let plaintext = mint_plaintext_token();
     let token_hash = hash_token(&plaintext);
+    let token_preview = preview_token(&plaintext);
     let scope_json = serde_json::to_value(&scopes).map_err(|error| {
         error!(
             workspace_id = ?workspace_id,
@@ -469,7 +481,9 @@ async fn mint_token_response(
         normalized_token_kind,
         normalized_label,
         &token_hash,
+        Some(&token_preview),
         scope_json,
+        None,
     )
     .await
     .map_err(|error| {
@@ -631,9 +645,11 @@ mod tests {
             token_kind: "workspace_token".into(),
             label: "ops".into(),
             token_hash: "hash".into(),
+            token_preview: Some("rtrg_***abcd".into()),
             scope_json: serde_json::json!({"oops": true}),
             status: "active".into(),
             last_used_at: None,
+            expires_at: None,
             created_at: now,
             updated_at: now,
         };

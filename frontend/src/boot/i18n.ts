@@ -1,27 +1,6 @@
-import { watch } from 'vue'
-import type { App as VueApp } from 'vue'
-import { createI18n } from 'vue-i18n'
+import { boot } from 'quasar/wrappers'
+import { i18n } from 'src/lib/i18n'
 
-import { messages, defaultLocale } from 'src/i18n/messages'
-import { resolveInitialLocale, syncDocumentLocale } from 'src/i18n/runtime'
-
-const initialLocale = resolveInitialLocale()
-
-export const i18n = createI18n({
-  legacy: false,
-  locale: initialLocale,
-  fallbackLocale: defaultLocale,
-  messages,
-})
-
-watch(
-  () => i18n.global.locale.value,
-  (locale) => {
-    syncDocumentLocale(locale)
-  },
-  { immediate: true },
-)
-
-export default ({ app }: { app: VueApp }) => {
+export default boot(({ app }) => {
   app.use(i18n)
-}
+})

@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     infra::repositories,
+    integrations::provider_catalog::supported_provider_catalog,
     interfaces::http::{auth::AuthContext, router_support::ApiError},
 };
 
@@ -96,6 +97,18 @@ async fn create_provider_account(
 ) -> Result<Json<ProviderAccountSummary>, ApiError> {
     auth.require_any_scope(&["providers:admin", "workspace:admin"])?;
     auth.require_workspace_access(payload.workspace_id)?;
+    let supported_kinds =
+        supported_provider_catalog(&state.settings, &state.runtime_provider_defaults)
+            .into_iter()
+            .map(|entry| entry.provider_kind.as_str())
+            .collect::<Vec<_>>();
+    if !supported_kinds.iter().any(|kind| kind == &payload.provider_kind.trim()) {
+        return Err(ApiError::BadRequest(format!(
+            "unsupported provider kind: {}",
+            payload.provider_kind
+        )));
+    }
+
     let row = repositories::create_provider_account(
         &state.persistence.postgres,
         payload.workspace_id,
@@ -214,10 +227,23 @@ async fn get_provider_governance(
             })
             .collect::<Vec<_>>();
 
+    let supported_provider_kinds =
+        supported_provider_catalog(&state.settings, &state.runtime_provider_defaults)
+            .into_iter()
+            .map(|entry| entry.provider_kind.as_str().to_string())
+            .collect::<Vec<_>>();
     let warning = if provider_accounts.is_empty() {
         Some("No provider accounts configured for this workspace yet".to_string())
     } else if model_profiles.is_empty() {
         Some("Provider accounts exist, but no model profiles are configured yet".to_string())
+    } else if provider_accounts
+        .iter()
+        .any(|row| !supported_provider_kinds.iter().any(|kind| kind == &row.provider_kind))
+    {
+        Some(format!(
+            "Only {} providers are supported by the runtime graph pipeline",
+            supported_provider_kinds.join(", ")
+        ))
     } else {
         None
     };
