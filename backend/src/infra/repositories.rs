@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, PgPool};
+use sqlx::{FromRow, PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 use crate::domains::{
@@ -1502,6 +1504,9 @@ pub struct ChatSessionRow {
     pub workspace_id: Uuid,
     pub project_id: Uuid,
     pub title: String,
+    pub system_prompt: String,
+    pub prompt_state: String,
+    pub preferred_mode: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1512,6 +1517,23 @@ pub struct ChatSessionListRow {
     pub workspace_id: Uuid,
     pub project_id: Uuid,
     pub title: String,
+    pub prompt_state: String,
+    pub preferred_mode: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub message_count: i64,
+    pub last_message_preview: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ChatSessionDetailRow {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub project_id: Uuid,
+    pub title: String,
+    pub system_prompt: String,
+    pub prompt_state: String,
+    pub preferred_mode: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub message_count: i64,
@@ -1527,6 +1549,18 @@ pub struct ChatMessageRow {
     pub content: String,
     pub retrieval_run_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ChatThreadMessageRow {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub project_id: Uuid,
+    pub role: String,
+    pub content: String,
+    pub retrieval_run_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+    pub retrieval_debug_json: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -1611,7 +1645,7 @@ pub async fn create_chat_session(
     sqlx::query_as::<_, ChatSessionRow>(
         "insert into chat_session (id, workspace_id, project_id, title)
          values ($1, $2, $3, $4)
-         returning id, workspace_id, project_id, title, created_at, updated_at",
+         returning id, workspace_id, project_id, title, system_prompt, prompt_state, preferred_mode, created_at, updated_at",
     )
     .bind(Uuid::now_v7())
     .bind(workspace_id)
@@ -1621,13 +1655,79 @@ pub async fn create_chat_session(
     .await
 }
 
+pub async fn create_seeded_chat_session(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    title: &str,
+    system_prompt: &str,
+    prompt_state: &str,
+    preferred_mode: &str,
+) -> Result<ChatSessionRow, sqlx::Error> {
+    sqlx::query_as::<_, ChatSessionRow>(
+        "insert into chat_session (
+            id, workspace_id, project_id, title, system_prompt, prompt_state, preferred_mode
+         )
+         values ($1, $2, $3, $4, $5, $6, $7)
+         returning id, workspace_id, project_id, title, system_prompt, prompt_state, preferred_mode, created_at, updated_at",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(project_id)
+    .bind(title)
+    .bind(system_prompt)
+    .bind(prompt_state)
+    .bind(preferred_mode)
+    .fetch_one(pool)
+    .await
+}
+
 pub async fn get_chat_session_by_id(
     pool: &PgPool,
     id: Uuid,
 ) -> Result<Option<ChatSessionRow>, sqlx::Error> {
     sqlx::query_as::<_, ChatSessionRow>(
-        "select id, workspace_id, project_id, title, created_at, updated_at
+        "select id, workspace_id, project_id, title, system_prompt, prompt_state, preferred_mode, created_at, updated_at
          from chat_session where id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
+pub async fn get_chat_session_detail_by_id(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<Option<ChatSessionDetailRow>, sqlx::Error> {
+    sqlx::query_as::<_, ChatSessionDetailRow>(
+        "select
+            session.id,
+            session.workspace_id,
+            session.project_id,
+            session.title,
+            session.system_prompt,
+            session.prompt_state,
+            session.preferred_mode,
+            session.created_at,
+            session.updated_at,
+            count(message.id)::bigint as message_count,
+            (
+                array_agg(left(message.content, 180) order by message.created_at desc, message.id desc)
+                filter (where message.id is not null)
+            )[1] as last_message_preview
+         from chat_session session
+         left join chat_message message on message.session_id = session.id
+         where session.id = $1
+         group by
+            session.id,
+            session.workspace_id,
+            session.project_id,
+            session.title,
+            session.system_prompt,
+            session.prompt_state,
+            session.preferred_mode,
+            session.created_at,
+            session.updated_at",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -1644,6 +1744,8 @@ pub async fn list_chat_sessions_by_project(
             session.workspace_id,
             session.project_id,
             session.title,
+            session.prompt_state,
+            session.preferred_mode,
             session.created_at,
             session.updated_at,
             count(message.id)::bigint as message_count,
@@ -1654,7 +1756,15 @@ pub async fn list_chat_sessions_by_project(
          from chat_session session
          left join chat_message message on message.session_id = session.id
          where session.project_id = $1
-         group by session.id, session.workspace_id, session.project_id, session.title, session.created_at, session.updated_at
+         group by
+            session.id,
+            session.workspace_id,
+            session.project_id,
+            session.title,
+            session.prompt_state,
+            session.preferred_mode,
+            session.created_at,
+            session.updated_at
          order by session.updated_at desc, session.created_at desc",
     )
     .bind(project_id)
@@ -1700,6 +1810,68 @@ pub async fn list_chat_messages_by_session(
         "select id, session_id, project_id, role, content, retrieval_run_id, created_at
          from chat_message where session_id = $1
          order by created_at asc, id asc",
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn update_chat_session_settings(
+    pool: &PgPool,
+    id: Uuid,
+    system_prompt: &str,
+    prompt_state: &str,
+    preferred_mode: &str,
+) -> Result<Option<ChatSessionRow>, sqlx::Error> {
+    sqlx::query_as::<_, ChatSessionRow>(
+        "update chat_session
+         set system_prompt = $2,
+             prompt_state = $3,
+             preferred_mode = $4,
+             updated_at = now()
+         where id = $1
+         returning id, workspace_id, project_id, title, system_prompt, prompt_state, preferred_mode, created_at, updated_at",
+    )
+    .bind(id)
+    .bind(system_prompt)
+    .bind(prompt_state)
+    .bind(preferred_mode)
+    .fetch_optional(pool)
+    .await
+}
+
+pub async fn update_chat_session_title(
+    pool: &PgPool,
+    id: Uuid,
+    title: &str,
+) -> Result<bool, sqlx::Error> {
+    let result =
+        sqlx::query("update chat_session set title = $2, updated_at = now() where id = $1")
+            .bind(id)
+            .bind(title)
+            .execute(pool)
+            .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn list_chat_thread_messages_by_session(
+    pool: &PgPool,
+    session_id: Uuid,
+) -> Result<Vec<ChatThreadMessageRow>, sqlx::Error> {
+    sqlx::query_as::<_, ChatThreadMessageRow>(
+        "select
+            message.id,
+            message.session_id,
+            message.project_id,
+            message.role,
+            message.content,
+            message.retrieval_run_id,
+            message.created_at,
+            retrieval.debug_json as retrieval_debug_json
+         from chat_message message
+         left join retrieval_run retrieval on retrieval.id = message.retrieval_run_id
+         where message.session_id = $1
+         order by message.created_at asc, message.id asc",
     )
     .bind(session_id)
     .fetch_all(pool)
@@ -1848,6 +2020,16 @@ pub struct ChunkEmbeddingRow {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ChunkEmbeddingUpsertInput {
+    pub chunk_id: Uuid,
+    pub project_id: Uuid,
+    pub provider_kind: String,
+    pub model_name: String,
+    pub dimensions: i32,
+    pub embedding_json: serde_json::Value,
+}
+
 /// Database repository helper: `upsert_chunk_embedding`.
 ///
 /// # Errors
@@ -1880,6 +2062,59 @@ pub async fn upsert_chunk_embedding(
     .bind(embedding_json)
     .fetch_one(pool)
     .await
+}
+
+fn coalesce_chunk_embedding_upserts(
+    rows: &[ChunkEmbeddingUpsertInput],
+) -> Vec<ChunkEmbeddingUpsertInput> {
+    let mut deduped = BTreeMap::new();
+    for row in rows {
+        deduped.insert(row.chunk_id, row.clone());
+    }
+    deduped.into_values().collect()
+}
+
+/// Database repository helper: `upsert_chunk_embeddings`.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while executing the underlying batch upsert.
+pub async fn upsert_chunk_embeddings(
+    pool: &PgPool,
+    rows: &[ChunkEmbeddingUpsertInput],
+) -> Result<(), sqlx::Error> {
+    let rows = coalesce_chunk_embedding_upserts(rows);
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "insert into chunk_embedding (
+            chunk_id, project_id, provider_kind, model_name, dimensions, embedding_json
+         ) ",
+    );
+    builder.push_values(rows.iter(), |mut row_builder, row| {
+        row_builder
+            .push_bind(row.chunk_id)
+            .push_bind(row.project_id)
+            .push_bind(&row.provider_kind)
+            .push_bind(&row.model_name)
+            .push_bind(row.dimensions)
+            .push_bind(&row.embedding_json);
+    });
+    builder.push(
+        " on conflict (chunk_id) do update set
+            provider_kind = excluded.provider_kind,
+            model_name = excluded.model_name,
+            dimensions = excluded.dimensions,
+            embedding_json = excluded.embedding_json,
+            updated_at = now()
+          where chunk_embedding.provider_kind is distinct from excluded.provider_kind
+             or chunk_embedding.model_name is distinct from excluded.model_name
+             or chunk_embedding.dimensions is distinct from excluded.dimensions
+             or chunk_embedding.embedding_json is distinct from excluded.embedding_json",
+    );
+    builder.build().execute(pool).await?;
+    Ok(())
 }
 
 /// Database repository helper: `list_chunk_embeddings_by_project`.
@@ -2917,6 +3152,67 @@ pub struct AttemptStageCostSummaryRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct RuntimeCollectionResolvedStageAccountingRow {
+    pub ingestion_run_id: Uuid,
+    pub file_type: String,
+    pub stage: String,
+    pub accounting_scope: String,
+    pub pricing_status: String,
+    pub estimated_cost: Option<Decimal>,
+    pub currency: Option<String>,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct RuntimeCollectionProgressRollupRow {
+    pub accepted_count: i64,
+    pub content_extracted_count: i64,
+    pub chunked_count: i64,
+    pub embedded_count: i64,
+    pub extracting_graph_count: i64,
+    pub graph_ready_count: i64,
+    pub ready_count: i64,
+    pub failed_count: i64,
+    pub queue_backlog_count: i64,
+    pub processing_backlog_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct RuntimeCollectionStageRollupRow {
+    pub stage: String,
+    pub active_count: i64,
+    pub completed_count: i64,
+    pub failed_count: i64,
+    pub avg_elapsed_ms: Option<i64>,
+    pub max_elapsed_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct RuntimeCollectionFormatRollupRow {
+    pub file_type: String,
+    pub document_count: i64,
+    pub queued_count: i64,
+    pub processing_count: i64,
+    pub ready_count: i64,
+    pub ready_no_graph_count: i64,
+    pub failed_count: i64,
+    pub content_extracted_count: i64,
+    pub chunked_count: i64,
+    pub embedded_count: i64,
+    pub extracting_graph_count: i64,
+    pub graph_ready_count: i64,
+    pub avg_queue_elapsed_ms: Option<i64>,
+    pub max_queue_elapsed_ms: Option<i64>,
+    pub avg_total_elapsed_ms: Option<i64>,
+    pub max_total_elapsed_ms: Option<i64>,
+    pub bottleneck_stage: Option<String>,
+    pub bottleneck_avg_elapsed_ms: Option<i64>,
+    pub bottleneck_max_elapsed_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct RuntimeExtractedContentRow {
     pub id: Uuid,
     pub ingestion_run_id: Uuid,
@@ -3349,6 +3645,17 @@ pub struct RuntimeVectorTargetRow {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RuntimeVectorTargetUpsertInput {
+    pub project_id: Uuid,
+    pub target_kind: String,
+    pub target_id: Uuid,
+    pub provider_kind: String,
+    pub model_name: String,
+    pub dimensions: Option<i32>,
+    pub embedding_json: serde_json::Value,
+}
+
 /// Creates a runtime ingestion run.
 ///
 /// # Errors
@@ -3661,6 +3968,49 @@ pub async fn update_runtime_ingestion_run_processing_stage(
     .bind(last_activity_at)
     .bind(latest_error_message)
     .fetch_one(pool)
+    .await
+}
+
+/// Advances a processing-stage progress checkpoint only when the visible progress marker or
+/// activity heartbeat meaningfully changes.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while updating the runtime ingestion run.
+pub async fn update_runtime_ingestion_run_processing_stage_checkpoint(
+    pool: &PgPool,
+    id: Uuid,
+    current_stage: &str,
+    progress_percent: i32,
+    last_activity_at: DateTime<Utc>,
+) -> Result<Option<RuntimeIngestionRunRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeIngestionRunRow>(
+        "update runtime_ingestion_run
+         set status = 'processing',
+             current_stage = $2,
+             progress_percent = greatest(coalesce(progress_percent, $3), $3),
+             activity_status = 'active',
+             last_activity_at = $4,
+             last_heartbeat_at = coalesce(last_heartbeat_at, $4),
+             updated_at = now()
+         where id = $1
+           and status = 'processing'
+           and current_stage = $2
+           and (
+                coalesce(progress_percent, -1) < $3
+                or last_activity_at is null
+                or last_activity_at <= ($4 - interval '30 seconds')
+           )
+         returning id, project_id, document_id, revision_id, upload_batch_id, track_id, file_name, file_type, mime_type,
+            file_size_bytes, status, current_stage, progress_percent, activity_status,
+            last_activity_at, last_heartbeat_at, provider_profile_snapshot_json,
+            latest_error_message, current_attempt_no, attempt_kind, queue_started_at, started_at, finished_at,
+            queue_elapsed_ms, total_elapsed_ms, created_at, updated_at",
+    )
+    .bind(id)
+    .bind(current_stage)
+    .bind(progress_percent)
+    .bind(last_activity_at)
+    .fetch_optional(pool)
     .await
 }
 
@@ -4354,7 +4704,7 @@ pub async fn create_attempt_stage_accounting(
             $1, $2, $3, $4, $5, $6, $7,
             $8, $9, $10, $11, $12, $13,
             $14, $15, $16, $17, $18,
-            $19
+            $19, $20
          )
          on conflict (stage_event_id, accounting_scope, call_sequence_no) do update
          set ingestion_run_id = excluded.ingestion_run_id,
@@ -4587,6 +4937,482 @@ pub async fn get_attempt_stage_cost_summary_by_run(
     )
     .bind(ingestion_run_id)
     .fetch_optional(pool)
+    .await
+}
+
+/// Lists resolved current-attempt billable accounting rows for one project.
+///
+/// This returns at most one logical row per ingestion run and billable stage, preferring a
+/// settled `stage_rollup` when present and otherwise aggregating in-flight `provider_call` rows.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while loading the collection accounting rows.
+pub async fn list_runtime_collection_resolved_stage_accounting(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<Vec<RuntimeCollectionResolvedStageAccountingRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeCollectionResolvedStageAccountingRow>(
+        "with current_runs as (
+            select id as ingestion_run_id, file_type, current_attempt_no
+            from runtime_ingestion_run
+            where project_id = $1
+         ),
+         billable_stages as (
+            select distinct current_runs.ingestion_run_id, current_runs.file_type, stage_event.stage
+            from runtime_ingestion_stage_event as stage_event
+            join current_runs
+              on current_runs.ingestion_run_id = stage_event.ingestion_run_id
+             and current_runs.current_attempt_no = stage_event.attempt_no
+            where stage_event.stage in ('extracting_content', 'embedding_chunks', 'extracting_graph')
+         ),
+         stage_rollups as (
+            select
+                accounting.ingestion_run_id,
+                current_runs.file_type,
+                accounting.stage,
+                max(accounting.estimated_cost) as estimated_cost,
+                max(accounting.currency) as currency,
+                (array_agg(accounting.pricing_status order by accounting.created_at desc))[1] as pricing_status,
+                max(coalesce(usage_event.prompt_tokens, 0))::bigint as prompt_tokens,
+                max(coalesce(usage_event.completion_tokens, 0))::bigint as completion_tokens,
+                max(coalesce(usage_event.total_tokens, 0))::bigint as total_tokens
+            from runtime_attempt_stage_accounting as accounting
+            join runtime_ingestion_stage_event as stage_event
+              on stage_event.id = accounting.stage_event_id
+            join current_runs
+              on current_runs.ingestion_run_id = accounting.ingestion_run_id
+             and current_runs.current_attempt_no = stage_event.attempt_no
+            left join usage_event
+              on usage_event.id = accounting.usage_event_id
+            where accounting.accounting_scope = 'stage_rollup'
+              and accounting.stage in ('extracting_content', 'embedding_chunks', 'extracting_graph')
+            group by accounting.ingestion_run_id, current_runs.file_type, accounting.stage
+         ),
+         provider_calls as (
+            select
+                accounting.ingestion_run_id,
+                current_runs.file_type,
+                accounting.stage,
+                sum(accounting.estimated_cost) as estimated_cost,
+                max(accounting.currency) as currency,
+                count(*) filter (where accounting.pricing_status = 'priced')::integer as priced_call_count,
+                count(*) filter (where accounting.pricing_status <> 'priced')::integer as unpriced_call_count,
+                sum(coalesce(usage_event.prompt_tokens, 0))::bigint as prompt_tokens,
+                sum(coalesce(usage_event.completion_tokens, 0))::bigint as completion_tokens,
+                sum(coalesce(usage_event.total_tokens, 0))::bigint as total_tokens
+            from runtime_attempt_stage_accounting as accounting
+            join runtime_ingestion_stage_event as stage_event
+              on stage_event.id = accounting.stage_event_id
+            join current_runs
+              on current_runs.ingestion_run_id = accounting.ingestion_run_id
+             and current_runs.current_attempt_no = stage_event.attempt_no
+            left join usage_event
+              on usage_event.id = accounting.usage_event_id
+            where accounting.accounting_scope = 'provider_call'
+              and accounting.stage in ('extracting_content', 'embedding_chunks', 'extracting_graph')
+            group by accounting.ingestion_run_id, current_runs.file_type, accounting.stage
+         )
+         select
+            billable_stages.ingestion_run_id,
+            billable_stages.file_type,
+            billable_stages.stage,
+            case
+                when stage_rollups.stage is not null then 'stage_rollup'
+                when provider_calls.stage is not null then 'provider_call'
+                else 'missing'
+            end as accounting_scope,
+            case
+                when stage_rollups.stage is not null then stage_rollups.pricing_status
+                when provider_calls.stage is not null
+                 and provider_calls.priced_call_count > 0
+                 and provider_calls.unpriced_call_count = 0 then 'priced'
+                when provider_calls.stage is not null
+                 and provider_calls.priced_call_count > 0 then 'partial'
+                when provider_calls.stage is not null then 'unpriced'
+                else 'unpriced'
+            end as pricing_status,
+            coalesce(stage_rollups.estimated_cost, provider_calls.estimated_cost) as estimated_cost,
+            coalesce(stage_rollups.currency, provider_calls.currency) as currency,
+            coalesce(stage_rollups.prompt_tokens, provider_calls.prompt_tokens, 0)::bigint as prompt_tokens,
+            coalesce(stage_rollups.completion_tokens, provider_calls.completion_tokens, 0)::bigint as completion_tokens,
+            coalesce(stage_rollups.total_tokens, provider_calls.total_tokens, 0)::bigint as total_tokens
+         from billable_stages
+         left join stage_rollups
+           on stage_rollups.ingestion_run_id = billable_stages.ingestion_run_id
+          and stage_rollups.file_type = billable_stages.file_type
+          and stage_rollups.stage = billable_stages.stage
+         left join provider_calls
+           on provider_calls.ingestion_run_id = billable_stages.ingestion_run_id
+          and provider_calls.file_type = billable_stages.file_type
+          and provider_calls.stage = billable_stages.stage
+         order by billable_stages.file_type asc, billable_stages.ingestion_run_id asc, billable_stages.stage asc",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Loads milestone and backlog counters for one project's current runtime collection state.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while loading the collection progress rollup.
+pub async fn load_runtime_collection_progress_rollup(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<RuntimeCollectionProgressRollupRow, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeCollectionProgressRollupRow>(
+        "with current_runs as (
+            select
+                run.id as ingestion_run_id,
+                run.document_id,
+                run.status,
+                run.current_stage,
+                run.current_attempt_no
+            from runtime_ingestion_run as run
+            where run.project_id = $1
+         ),
+         extracted as (
+            select distinct extraction.ingestion_run_id
+            from runtime_extracted_content as extraction
+            join current_runs
+              on current_runs.ingestion_run_id = extraction.ingestion_run_id
+         ),
+         latest_stage_status as (
+            select ingestion_run_id, stage, status
+            from (
+                select
+                    stage_event.ingestion_run_id,
+                    stage_event.stage,
+                    stage_event.status,
+                    row_number() over (
+                        partition by stage_event.ingestion_run_id, stage_event.stage
+                        order by stage_event.created_at desc, stage_event.id desc
+                    ) as status_rank
+                from runtime_ingestion_stage_event as stage_event
+                join current_runs
+                  on current_runs.ingestion_run_id = stage_event.ingestion_run_id
+                 and current_runs.current_attempt_no = stage_event.attempt_no
+            ) as ranked_stage_status
+            where status_rank = 1
+         ),
+         stage_flags as (
+            select
+                latest_stage_status.ingestion_run_id,
+                bool_or(
+                    latest_stage_status.stage = 'extracting_content'
+                    and latest_stage_status.status = 'completed'
+                ) as content_extracted_complete,
+                bool_or(
+                    latest_stage_status.stage = 'chunking'
+                    and latest_stage_status.status = 'completed'
+                ) as chunking_complete,
+                bool_or(
+                    latest_stage_status.stage = 'embedding_chunks'
+                    and latest_stage_status.status = 'completed'
+                ) as embedding_complete,
+                bool_or(
+                    latest_stage_status.stage = 'extracting_graph'
+                    and latest_stage_status.status = 'completed'
+                ) as graph_ready_complete
+            from latest_stage_status
+            group by latest_stage_status.ingestion_run_id
+         ),
+         contribution as (
+            select
+                current_runs.ingestion_run_id,
+                summary.chunk_count
+            from current_runs
+            left join runtime_document_contribution_summary as summary
+              on summary.document_id = current_runs.document_id
+         )
+         select
+            count(*)::bigint as accepted_count,
+            count(*) filter (
+                where extracted.ingestion_run_id is not null
+                   or coalesce(stage_flags.content_extracted_complete, false)
+            )::bigint as content_extracted_count,
+            count(*) filter (
+                where coalesce(contribution.chunk_count, 0) > 0
+                   or coalesce(stage_flags.chunking_complete, false)
+            )::bigint as chunked_count,
+            count(*) filter (
+                where coalesce(stage_flags.embedding_complete, false)
+                   or current_runs.current_stage in (
+                        'extracting_graph',
+                        'merging_graph',
+                        'projecting_graph',
+                        'finalizing'
+                   )
+                   or current_runs.status in ('ready', 'ready_no_graph')
+            )::bigint as embedded_count,
+            count(*) filter (
+                where current_runs.status = 'processing'
+                  and current_runs.current_stage = 'extracting_graph'
+            )::bigint as extracting_graph_count,
+            count(*) filter (
+                where coalesce(stage_flags.graph_ready_complete, false)
+                   or current_runs.current_stage in (
+                        'merging_graph',
+                        'projecting_graph',
+                        'finalizing'
+                   )
+                   or current_runs.status in ('ready', 'ready_no_graph')
+            )::bigint as graph_ready_count,
+            count(*) filter (where current_runs.status = 'ready')::bigint as ready_count,
+            count(*) filter (where current_runs.status = 'failed')::bigint as failed_count,
+            count(*) filter (where current_runs.status = 'queued')::bigint as queue_backlog_count,
+            count(*) filter (where current_runs.status = 'processing')::bigint as processing_backlog_count
+         from current_runs
+         left join extracted
+           on extracted.ingestion_run_id = current_runs.ingestion_run_id
+         left join stage_flags
+           on stage_flags.ingestion_run_id = current_runs.ingestion_run_id
+         left join contribution
+           on contribution.ingestion_run_id = current_runs.ingestion_run_id",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await
+}
+
+/// Lists elapsed-time and status rollups for current-attempt stage events in one project.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while loading the collection stage rollups.
+pub async fn list_runtime_collection_stage_rollups(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<Vec<RuntimeCollectionStageRollupRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeCollectionStageRollupRow>(
+        "with current_runs as (
+            select id as ingestion_run_id, current_attempt_no
+            from runtime_ingestion_run
+            where project_id = $1
+         ),
+         latest_stage_status as (
+            select stage, status, elapsed_ms
+            from (
+                select
+                    stage_event.ingestion_run_id,
+                    stage_event.stage,
+                    stage_event.status,
+                    stage_event.elapsed_ms,
+                    row_number() over (
+                        partition by stage_event.ingestion_run_id, stage_event.stage
+                        order by stage_event.created_at desc, stage_event.id desc
+                    ) as status_rank
+                from runtime_ingestion_stage_event as stage_event
+                join current_runs
+                  on current_runs.ingestion_run_id = stage_event.ingestion_run_id
+                 and current_runs.current_attempt_no = stage_event.attempt_no
+            ) as ranked_stage_status
+            where status_rank = 1
+         )
+         select
+            latest_stage_status.stage,
+            count(*) filter (where latest_stage_status.status = 'started')::bigint as active_count,
+            count(*) filter (where latest_stage_status.status = 'completed')::bigint as completed_count,
+            count(*) filter (where latest_stage_status.status = 'failed')::bigint as failed_count,
+            (
+                avg(latest_stage_status.elapsed_ms) filter (
+                where latest_stage_status.status in ('completed', 'failed')
+                  and latest_stage_status.elapsed_ms is not null
+                )
+            )::bigint as avg_elapsed_ms,
+            max(latest_stage_status.elapsed_ms) filter (
+                where latest_stage_status.status in ('completed', 'failed')
+            ) as max_elapsed_ms
+         from latest_stage_status
+         group by latest_stage_status.stage
+         order by latest_stage_status.stage asc",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Lists per-format progress, backlog, and elapsed-time rollups for one project's current runs.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while loading the collection format diagnostics.
+pub async fn list_runtime_collection_format_rollups(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<Vec<RuntimeCollectionFormatRollupRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeCollectionFormatRollupRow>(
+        "with current_runs as (
+            select
+                run.id as ingestion_run_id,
+                run.document_id,
+                run.file_type,
+                run.status,
+                run.current_stage,
+                run.current_attempt_no,
+                run.queue_elapsed_ms,
+                run.total_elapsed_ms
+            from runtime_ingestion_run as run
+            where run.project_id = $1
+         ),
+         extracted as (
+            select distinct extraction.ingestion_run_id
+            from runtime_extracted_content as extraction
+            join current_runs
+              on current_runs.ingestion_run_id = extraction.ingestion_run_id
+         ),
+         latest_stage_status as (
+            select ingestion_run_id, file_type, stage, status, elapsed_ms
+            from (
+                select
+                    stage_event.ingestion_run_id,
+                    current_runs.file_type,
+                    stage_event.stage,
+                    stage_event.status,
+                    stage_event.elapsed_ms,
+                    row_number() over (
+                        partition by stage_event.ingestion_run_id, stage_event.stage
+                        order by stage_event.created_at desc, stage_event.id desc
+                    ) as status_rank
+                from runtime_ingestion_stage_event as stage_event
+                join current_runs
+                  on current_runs.ingestion_run_id = stage_event.ingestion_run_id
+                 and current_runs.current_attempt_no = stage_event.attempt_no
+            ) as ranked_stage_status
+            where status_rank = 1
+         ),
+         stage_flags as (
+            select
+                latest_stage_status.ingestion_run_id,
+                bool_or(
+                    latest_stage_status.stage = 'extracting_content'
+                    and latest_stage_status.status = 'completed'
+                ) as content_extracted_complete,
+                bool_or(
+                    latest_stage_status.stage = 'chunking'
+                    and latest_stage_status.status = 'completed'
+                ) as chunking_complete,
+                bool_or(
+                    latest_stage_status.stage = 'embedding_chunks'
+                    and latest_stage_status.status = 'completed'
+                ) as embedding_complete,
+                bool_or(
+                    latest_stage_status.stage = 'extracting_graph'
+                    and latest_stage_status.status = 'completed'
+                ) as graph_ready_complete
+            from latest_stage_status
+            group by latest_stage_status.ingestion_run_id
+         ),
+         contribution as (
+            select
+                current_runs.ingestion_run_id,
+                summary.chunk_count
+            from current_runs
+            left join runtime_document_contribution_summary as summary
+              on summary.document_id = current_runs.document_id
+         ),
+         format_stage_elapsed as (
+            select
+                latest_stage_status.file_type,
+                latest_stage_status.stage,
+                (
+                    avg(latest_stage_status.elapsed_ms) filter (
+                    where latest_stage_status.status in ('completed', 'failed')
+                      and latest_stage_status.elapsed_ms is not null
+                    )
+                )::bigint as avg_elapsed_ms,
+                max(latest_stage_status.elapsed_ms) filter (
+                    where latest_stage_status.status in ('completed', 'failed')
+                ) as max_elapsed_ms
+            from latest_stage_status
+            group by latest_stage_status.file_type, latest_stage_status.stage
+         ),
+         ranked_format_bottleneck as (
+            select
+                format_stage_elapsed.file_type,
+                format_stage_elapsed.stage,
+                format_stage_elapsed.avg_elapsed_ms,
+                format_stage_elapsed.max_elapsed_ms,
+                row_number() over (
+                    partition by format_stage_elapsed.file_type
+                    order by
+                        format_stage_elapsed.avg_elapsed_ms desc nulls last,
+                        format_stage_elapsed.max_elapsed_ms desc nulls last,
+                        format_stage_elapsed.stage asc
+                ) as bottleneck_rank
+            from format_stage_elapsed
+         )
+         select
+            current_runs.file_type,
+            count(*)::bigint as document_count,
+            count(*) filter (where current_runs.status = 'queued')::bigint as queued_count,
+            count(*) filter (where current_runs.status = 'processing')::bigint as processing_count,
+            count(*) filter (where current_runs.status = 'ready')::bigint as ready_count,
+            count(*) filter (where current_runs.status = 'ready_no_graph')::bigint as ready_no_graph_count,
+            count(*) filter (where current_runs.status = 'failed')::bigint as failed_count,
+            count(*) filter (
+                where extracted.ingestion_run_id is not null
+                   or coalesce(stage_flags.content_extracted_complete, false)
+            )::bigint as content_extracted_count,
+            count(*) filter (
+                where coalesce(contribution.chunk_count, 0) > 0
+                   or coalesce(stage_flags.chunking_complete, false)
+            )::bigint as chunked_count,
+            count(*) filter (
+                where coalesce(stage_flags.embedding_complete, false)
+                   or current_runs.current_stage in (
+                        'extracting_graph',
+                        'merging_graph',
+                        'projecting_graph',
+                        'finalizing'
+                   )
+                   or current_runs.status in ('ready', 'ready_no_graph')
+            )::bigint as embedded_count,
+            count(*) filter (
+                where current_runs.status = 'processing'
+                  and current_runs.current_stage = 'extracting_graph'
+            )::bigint as extracting_graph_count,
+            count(*) filter (
+                where coalesce(stage_flags.graph_ready_complete, false)
+                   or current_runs.current_stage in (
+                        'merging_graph',
+                        'projecting_graph',
+                        'finalizing'
+                   )
+                   or current_runs.status in ('ready', 'ready_no_graph')
+            )::bigint as graph_ready_count,
+            (
+                avg(current_runs.queue_elapsed_ms) filter (
+                    where current_runs.queue_elapsed_ms is not null
+                )
+            )::bigint as avg_queue_elapsed_ms,
+            max(current_runs.queue_elapsed_ms) as max_queue_elapsed_ms,
+            (
+                avg(current_runs.total_elapsed_ms) filter (
+                    where current_runs.total_elapsed_ms is not null
+                )
+            )::bigint as avg_total_elapsed_ms,
+            max(current_runs.total_elapsed_ms) as max_total_elapsed_ms,
+            ranked_format_bottleneck.stage as bottleneck_stage,
+            ranked_format_bottleneck.avg_elapsed_ms as bottleneck_avg_elapsed_ms,
+            ranked_format_bottleneck.max_elapsed_ms as bottleneck_max_elapsed_ms
+         from current_runs
+         left join extracted
+           on extracted.ingestion_run_id = current_runs.ingestion_run_id
+         left join stage_flags
+           on stage_flags.ingestion_run_id = current_runs.ingestion_run_id
+         left join contribution
+           on contribution.ingestion_run_id = current_runs.ingestion_run_id
+         left join ranked_format_bottleneck
+           on ranked_format_bottleneck.file_type = current_runs.file_type
+          and ranked_format_bottleneck.bottleneck_rank = 1
+         group by
+            current_runs.file_type,
+            ranked_format_bottleneck.stage,
+            ranked_format_bottleneck.avg_elapsed_ms,
+            ranked_format_bottleneck.max_elapsed_ms
+         order by current_runs.file_type asc",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
     .await
 }
 
@@ -5146,6 +5972,49 @@ pub async fn list_admitted_runtime_graph_nodes_by_projection(
     .await
 }
 
+/// Lists admitted runtime graph nodes by id for one projection version.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while querying admitted graph nodes.
+pub async fn list_admitted_runtime_graph_nodes_by_ids(
+    pool: &PgPool,
+    project_id: Uuid,
+    projection_version: i64,
+    node_ids: &[Uuid],
+) -> Result<Vec<RuntimeGraphNodeRow>, sqlx::Error> {
+    if node_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, RuntimeGraphNodeRow>(
+        "select node.id, node.project_id, node.canonical_key, node.label, node.node_type,
+            node.aliases_json, node.summary, node.metadata_json, node.support_count,
+            node.projection_version, node.created_at, node.updated_at
+         from runtime_graph_node as node
+         where node.project_id = $1
+           and node.projection_version = $2
+           and node.id = any($3)
+           and (
+                node.node_type = 'document'
+                or exists (
+                    select 1
+                    from runtime_graph_edge as edge
+                    where edge.project_id = node.project_id
+                      and edge.projection_version = node.projection_version
+                      and (edge.from_node_id = node.id or edge.to_node_id = node.id)
+                      and btrim(edge.relation_type) <> ''
+                      and edge.from_node_id <> edge.to_node_id
+                )
+           )
+         order by node.node_type asc, node.label asc, node.created_at asc",
+    )
+    .bind(project_id)
+    .bind(projection_version)
+    .bind(node_ids)
+    .fetch_all(pool)
+    .await
+}
+
 /// Lists admitted runtime graph edges for one projection version.
 ///
 /// # Errors
@@ -5167,6 +6036,38 @@ pub async fn list_admitted_runtime_graph_edges_by_projection(
     )
     .bind(project_id)
     .bind(projection_version)
+    .fetch_all(pool)
+    .await
+}
+
+/// Lists admitted runtime graph edges by id for one projection version.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while querying admitted graph edges.
+pub async fn list_admitted_runtime_graph_edges_by_ids(
+    pool: &PgPool,
+    project_id: Uuid,
+    projection_version: i64,
+    edge_ids: &[Uuid],
+) -> Result<Vec<RuntimeGraphEdgeRow>, sqlx::Error> {
+    if edge_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, RuntimeGraphEdgeRow>(
+        "select id, project_id, from_node_id, to_node_id, relation_type, canonical_key,
+            summary, weight, support_count, metadata_json, projection_version, created_at, updated_at
+         from runtime_graph_edge
+         where project_id = $1
+           and projection_version = $2
+           and id = any($3)
+           and btrim(relation_type) <> ''
+           and from_node_id <> to_node_id
+         order by relation_type asc, created_at asc",
+    )
+    .bind(project_id)
+    .bind(projection_version)
+    .bind(edge_ids)
     .fetch_all(pool)
     .await
 }
@@ -5936,6 +6837,66 @@ pub async fn upsert_runtime_vector_target(
     .await
 }
 
+fn coalesce_runtime_vector_target_upserts(
+    rows: &[RuntimeVectorTargetUpsertInput],
+) -> Vec<RuntimeVectorTargetUpsertInput> {
+    let mut deduped = BTreeMap::new();
+    for row in rows {
+        deduped.insert(
+            (
+                row.project_id,
+                row.target_kind.clone(),
+                row.target_id,
+                row.provider_kind.clone(),
+                row.model_name.clone(),
+            ),
+            row.clone(),
+        );
+    }
+    deduped.into_values().collect()
+}
+
+/// Upserts many embedding targets for canonical graph nodes or relations.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while inserting or updating the targets.
+pub async fn upsert_runtime_vector_targets(
+    pool: &PgPool,
+    rows: &[RuntimeVectorTargetUpsertInput],
+) -> Result<(), sqlx::Error> {
+    let rows = coalesce_runtime_vector_target_upserts(rows);
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "insert into runtime_vector_target (
+            id, project_id, target_kind, target_id, provider_kind, model_name, dimensions, embedding_json
+         ) ",
+    );
+    builder.push_values(rows.iter(), |mut row_builder, row| {
+        row_builder
+            .push_bind(Uuid::now_v7())
+            .push_bind(row.project_id)
+            .push_bind(&row.target_kind)
+            .push_bind(row.target_id)
+            .push_bind(&row.provider_kind)
+            .push_bind(&row.model_name)
+            .push_bind(row.dimensions)
+            .push_bind(&row.embedding_json);
+    });
+    builder.push(
+        " on conflict (project_id, target_kind, target_id, provider_kind, model_name) do update
+          set dimensions = excluded.dimensions,
+              embedding_json = excluded.embedding_json,
+              updated_at = now()
+          where runtime_vector_target.dimensions is distinct from excluded.dimensions
+             or runtime_vector_target.embedding_json is distinct from excluded.embedding_json",
+    );
+    builder.build().execute(pool).await?;
+    Ok(())
+}
+
 /// Lists runtime vector targets for one project/kind/provider tuple.
 ///
 /// # Errors
@@ -6463,4 +7424,67 @@ pub async fn list_runtime_query_references_by_execution(
     .bind(query_execution_id)
     .fetch_all(pool)
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn chunk_embedding_batch_coalesces_duplicate_chunk_ids_last_write_wins() {
+        let chunk_id = Uuid::now_v7();
+        let rows = coalesce_chunk_embedding_upserts(&[
+            ChunkEmbeddingUpsertInput {
+                chunk_id,
+                project_id: Uuid::now_v7(),
+                provider_kind: "openai".to_string(),
+                model_name: "text-embedding-3-small".to_string(),
+                dimensions: 1536,
+                embedding_json: json!([0.1, 0.2]),
+            },
+            ChunkEmbeddingUpsertInput {
+                chunk_id,
+                project_id: Uuid::now_v7(),
+                provider_kind: "openai".to_string(),
+                model_name: "text-embedding-3-large".to_string(),
+                dimensions: 3072,
+                embedding_json: json!([0.3, 0.4]),
+            },
+        ]);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].model_name, "text-embedding-3-large");
+        assert_eq!(rows[0].dimensions, 3072);
+        assert_eq!(rows[0].embedding_json, json!([0.3, 0.4]));
+    }
+
+    #[test]
+    fn runtime_vector_target_batch_coalesces_duplicate_keys_last_write_wins() {
+        let project_id = Uuid::now_v7();
+        let target_id = Uuid::now_v7();
+        let rows = coalesce_runtime_vector_target_upserts(&[
+            RuntimeVectorTargetUpsertInput {
+                project_id,
+                target_kind: "entity".to_string(),
+                target_id,
+                provider_kind: "openai".to_string(),
+                model_name: "text-embedding-3-small".to_string(),
+                dimensions: Some(1536),
+                embedding_json: json!([0.1, 0.2]),
+            },
+            RuntimeVectorTargetUpsertInput {
+                project_id,
+                target_kind: "entity".to_string(),
+                target_id,
+                provider_kind: "openai".to_string(),
+                model_name: "text-embedding-3-small".to_string(),
+                dimensions: Some(1536),
+                embedding_json: json!([0.9, 1.0]),
+            },
+        ]);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].embedding_json, json!([0.9, 1.0]));
+    }
 }

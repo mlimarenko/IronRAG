@@ -9,6 +9,8 @@ use serde::Serialize;
 
 pub const UI_ACCEPTED_UPLOAD_FORMATS: &[&str] = &["PDF", "DOCX", "TXT", "MD", "Images"];
 pub const MULTIPART_UPLOAD_MODE: &str = "multipart_upload_v2";
+pub const EXTRACTED_CONTENT_PREVIEW_LIMIT: usize = 1_600;
+const EXTRACTION_QUALITY_KEY: &str = "content_quality";
 
 const TEXT_LIKE_EXTENSIONS: &[&str] = &[
     "txt", "md", "markdown", "csv", "json", "yaml", "yml", "xml", "html", "htm", "log", "rst",
@@ -53,6 +55,55 @@ impl UploadFileKind {
             Self::Binary => "Binary",
         }
     }
+
+    #[must_use]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "text_like" => Some(Self::TextLike),
+            "pdf" => Some(Self::Pdf),
+            "image" => Some(Self::Image),
+            "office_document" => Some(Self::OfficeDocument),
+            "binary" => Some(Self::Binary),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtractionNormalizationStatus {
+    Verbatim,
+    Normalized,
+}
+
+impl ExtractionNormalizationStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Verbatim => "verbatim",
+            Self::Normalized => "normalized",
+        }
+    }
+
+    #[must_use]
+    pub fn from_source_map(value: Option<&str>) -> Self {
+        match value {
+            Some("normalized") => Self::Normalized,
+            _ => Self::Verbatim,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractedContentQuality {
+    pub normalization_status: ExtractionNormalizationStatus,
+    pub ocr_source: Option<String>,
+    pub warning_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractedContentPreview {
+    pub text: Option<String>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -352,6 +403,49 @@ pub fn detect_upload_file_kind(
     UploadFileKind::Binary
 }
 
+#[must_use]
+pub fn build_extracted_content_preview(
+    content_text: Option<&str>,
+    limit: usize,
+) -> ExtractedContentPreview {
+    let Some(content_text) = content_text.map(str::trim).filter(|value| !value.is_empty()) else {
+        return ExtractedContentPreview { text: None, truncated: false };
+    };
+    let char_count = content_text.chars().count();
+    if char_count <= limit {
+        return ExtractedContentPreview { text: Some(content_text.to_string()), truncated: false };
+    }
+
+    let preview = content_text.chars().take(limit).collect::<String>();
+    ExtractedContentPreview { text: Some(preview.trim_end().to_string()), truncated: true }
+}
+
+#[must_use]
+pub fn extraction_quality_from_source_map(
+    source_map: &serde_json::Value,
+    extraction_kind: &str,
+    warning_count: usize,
+) -> ExtractedContentQuality {
+    let quality = source_map.get(EXTRACTION_QUALITY_KEY);
+    let normalization_status = ExtractionNormalizationStatus::from_source_map(
+        quality
+            .and_then(|item| item.get("normalization_status"))
+            .and_then(serde_json::Value::as_str),
+    );
+    let ocr_source = quality
+        .and_then(|item| item.get("ocr_source"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| extraction_kind.starts_with("vision_").then_some("vision_llm".to_string()));
+    let warning_count = quality
+        .and_then(|item| item.get("warning_count"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(warning_count);
+
+    ExtractedContentQuality { normalization_status, ocr_source, warning_count }
+}
+
 pub fn build_file_extraction_plan(
     file_name: Option<&str>,
     mime_type: Option<&str>,
@@ -436,7 +530,15 @@ fn build_plan_from_extraction(
         provider_kind,
         model_name,
     } = output;
-    let extracted_text = if content_text.trim().is_empty() { None } else { Some(content_text) };
+    let normalized = normalize_extracted_content(file_kind, &content_text);
+    let has_content = !normalized.content_text.trim().is_empty();
+    let source_map = with_extraction_quality_markers(
+        source_map,
+        &normalized,
+        warnings.len(),
+        provider_kind.as_deref(),
+    );
+    let extracted_text = has_content.then_some(normalized.content_text);
 
     FileExtractionPlan {
         file_kind,
@@ -452,6 +554,136 @@ fn build_plan_from_extraction(
         extraction_version: Some("runtime_extraction_v1".to_string()),
         ingest_mode: MULTIPART_UPLOAD_MODE.to_string(),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalizedExtractedContent {
+    content_text: String,
+    normalization_status: ExtractionNormalizationStatus,
+    ocr_source: Option<String>,
+}
+
+fn normalize_extracted_content(
+    file_kind: UploadFileKind,
+    content_text: &str,
+) -> NormalizedExtractedContent {
+    match file_kind {
+        UploadFileKind::Image => {
+            let normalized_text = normalize_image_ocr_text(content_text);
+            let normalization_status = if normalized_text.trim() == content_text.trim() {
+                ExtractionNormalizationStatus::Verbatim
+            } else {
+                ExtractionNormalizationStatus::Normalized
+            };
+            NormalizedExtractedContent {
+                content_text: normalized_text,
+                normalization_status,
+                ocr_source: Some("vision_llm".to_string()),
+            }
+        }
+        _ => NormalizedExtractedContent {
+            content_text: content_text.to_string(),
+            normalization_status: ExtractionNormalizationStatus::Verbatim,
+            ocr_source: None,
+        },
+    }
+}
+
+fn normalize_image_ocr_text(content_text: &str) -> String {
+    let normalized_newlines = content_text.replace("\r\n", "\n").replace('\r', "\n");
+    let lines = normalized_newlines.lines().map(str::trim).collect::<Vec<_>>();
+    if lines.is_empty() {
+        return String::new();
+    }
+
+    let mut start = 0usize;
+    while start < lines.len() {
+        let line = lines[start];
+        if line.is_empty() {
+            start += 1;
+            continue;
+        }
+        if is_ocr_wrapper_line(line) {
+            start += 1;
+            continue;
+        }
+        break;
+    }
+
+    let cleaned = lines[start..]
+        .iter()
+        .map(|line| strip_wrapper_label_prefix(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let cleaned = cleaned.trim().trim_matches('`').trim().to_string();
+    if cleaned.is_empty() { content_text.trim().to_string() } else { cleaned }
+}
+
+fn is_ocr_wrapper_line(line: &str) -> bool {
+    let normalized = line.trim().trim_matches(':').to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "transcription"
+            | "ocr"
+            | "ocr text"
+            | "recognized text"
+            | "recognized text from the image"
+            | "extracted text"
+            | "extracted text from the image"
+            | "text from the image"
+            | "visible text"
+    ) || (normalized.contains("image")
+        && (normalized.contains("extracted")
+            || normalized.contains("transcription")
+            || normalized.contains("recognized")
+            || normalized.contains("visible text")
+            || normalized.contains("readable text")
+            || normalized.contains("ocr")))
+}
+
+fn strip_wrapper_label_prefix(line: &str) -> String {
+    let trimmed = line.trim();
+    let lowercase = trimmed.to_ascii_lowercase();
+    for prefix in [
+        "transcription:",
+        "ocr:",
+        "ocr text:",
+        "recognized text:",
+        "recognized text from the image:",
+        "extracted text:",
+        "extracted text from the image:",
+        "text from the image:",
+        "visible text:",
+    ] {
+        if lowercase.starts_with(prefix) {
+            return trimmed[prefix.len()..].trim().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+fn with_extraction_quality_markers(
+    source_map: serde_json::Value,
+    normalized: &NormalizedExtractedContent,
+    warning_count: usize,
+    provider_kind: Option<&str>,
+) -> serde_json::Value {
+    let mut source_map = match source_map {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    source_map.insert(
+        EXTRACTION_QUALITY_KEY.to_string(),
+        serde_json::json!({
+            "normalization_status": normalized.normalization_status.as_str(),
+            "ocr_source": normalized
+                .ocr_source
+                .as_deref()
+                .or(provider_kind.map(|_| "vision_llm")),
+            "warning_count": warning_count,
+        }),
+    );
+    serde_json::Value::Object(source_map)
 }
 
 #[cfg(test)]
@@ -493,7 +725,9 @@ mod tests {
             Ok(VisionResponse {
                 provider_kind: request.provider_kind,
                 model_name: request.model_name,
-                output_text: "ocr text".to_string(),
+                output_text:
+                    "Below is the extracted text from the image.\n\nTranscription:\nAcme Corp\nBudget 2026"
+                        .to_string(),
                 usage_json: serde_json::json!({}),
             })
         }
@@ -672,6 +906,21 @@ mod tests {
         assert_eq!(result.extraction_kind, "vision_image");
         assert_eq!(result.provider_kind.as_deref(), Some("openai"));
         assert_eq!(result.model_name.as_deref(), Some("gpt-5-mini"));
-        assert_eq!(result.extracted_text.as_deref(), Some("ocr text"));
+        assert_eq!(result.extracted_text.as_deref(), Some("Acme Corp\nBudget 2026"));
+        let quality = extraction_quality_from_source_map(
+            &result.source_map,
+            &result.extraction_kind,
+            result.extraction_warnings.len(),
+        );
+        assert_eq!(quality.normalization_status, ExtractionNormalizationStatus::Normalized);
+        assert_eq!(quality.ocr_source.as_deref(), Some("vision_llm"));
+    }
+
+    #[test]
+    fn builds_truncated_content_preview_without_mutating_body() {
+        let preview = build_extracted_content_preview(Some("Alpha Beta Gamma"), 5);
+
+        assert_eq!(preview.text.as_deref(), Some("Alpha"));
+        assert!(preview.truncated);
     }
 }

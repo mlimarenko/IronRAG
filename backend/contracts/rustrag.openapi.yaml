@@ -37,6 +37,7 @@ tags:
   - name: graph
   - name: integrations
   - name: usage
+  - name: chat
 paths:
   /v1/health:
     get:
@@ -1699,6 +1700,81 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+    post:
+      tags: [chat]
+      summary: Create a new empty chat session
+      operationId: createChatSession
+      description: Requires `query:run`, `workspace:admin`, `documents:read`, or an `instance_admin` token. Workspace-scoped tokens may only create sessions in their own workspace.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatSessionCreateRequest"
+      responses:
+        "200":
+          description: Newly created chat session envelope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatSessionEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/chat/sessions/{id}:
+    get:
+      tags: [chat]
+      summary: Get one chat session and editable settings
+      operationId: getChatSession
+      description: Requires `query:run`, `workspace:admin`, `documents:read`, or an `instance_admin` token. Workspace-scoped tokens may only access sessions in their own workspace.
+      parameters:
+        - $ref: "#/components/parameters/id"
+      responses:
+        "200":
+          description: Chat session envelope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatSessionEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    patch:
+      tags: [chat]
+      summary: Update one chat session settings
+      operationId: updateChatSession
+      description: Requires `query:run`, `workspace:admin`, `documents:read`, or an `instance_admin` token. Workspace-scoped tokens may only update sessions in their own workspace.
+      parameters:
+        - $ref: "#/components/parameters/id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatSessionUpdateRequest"
+      responses:
+        "200":
+          description: Updated chat session envelope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatSessionEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/chat/sessions/{id}/messages:
     get:
       tags: [chat]
@@ -1715,7 +1791,7 @@ paths:
               schema:
                 type: array
                 items:
-                  $ref: "#/components/schemas/ChatMessageItem"
+                  $ref: "#/components/schemas/ChatThreadMessage"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -2245,6 +2321,26 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/runtime/libraries/{libraryId}/documents/diagnostics:
+    get:
+      tags: [runtime-documents]
+      summary: Get collection-level runtime document diagnostics for one library
+      operationId: getRuntimeDocumentDiagnostics
+      parameters:
+        - $ref: "#/components/parameters/libraryId"
+      responses:
+        "200":
+          description: Runtime collection diagnostics payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeCollectionDiagnosticsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
   /v1/runtime/libraries/{libraryId}/documents/{documentId}:
@@ -3531,55 +3627,259 @@ components:
 
     ChatSessionSummary:
       type: object
-      required: [id, workspace_id, project_id, title, created_at, updated_at, message_count]
+      required:
+        [
+          session_id,
+          title,
+          message_count,
+          updated_at,
+          prompt_state,
+          preferred_mode,
+          is_empty,
+        ]
       properties:
-        id:
-          type: string
-          format: uuid
-        workspace_id:
-          type: string
-          format: uuid
-        project_id:
+        session_id:
           type: string
           format: uuid
         title:
           type: string
+        message_count:
+          type: integer
+          format: int64
+          minimum: 0
+        last_message_preview:
+          type: [string, "null"]
+        updated_at:
+          type: string
+          format: date-time
+        prompt_state:
+          type: string
+          enum: [default, customized]
+        preferred_mode:
+          type: string
+          enum: [document, local, global, hybrid, mix]
+        is_empty:
+          type: boolean
+    ChatSessionDetail:
+      type: object
+      required:
+        [
+          session_id,
+          title,
+          message_count,
+          created_at,
+          updated_at,
+          prompt_state,
+          preferred_mode,
+          is_empty,
+        ]
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        message_count:
+          type: integer
+          format: int64
+          minimum: 0
+        last_message_preview:
+          type: [string, "null"]
         created_at:
           type: string
           format: date-time
         updated_at:
           type: string
           format: date-time
-        message_count:
-          type: integer
-          format: int64
-        last_message_preview:
+        prompt_state:
           type: string
-          nullable: true
-    ChatMessageItem:
+          enum: [default, customized]
+        preferred_mode:
+          type: string
+          enum: [document, local, global, hybrid, mix]
+        is_empty:
+          type: boolean
+    ChatSessionSettings:
       type: object
-      required: [id, session_id, project_id, role, content, created_at]
+      required:
+        [
+          session_id,
+          system_prompt,
+          prompt_state,
+          preferred_mode,
+          default_prompt_available,
+        ]
       properties:
-        id:
-          type: string
-          format: uuid
         session_id:
           type: string
           format: uuid
+        system_prompt:
+          type: string
+        prompt_state:
+          type: string
+          enum: [default, customized]
+        preferred_mode:
+          type: string
+          enum: [document, local, global, hybrid, mix]
+        default_prompt_available:
+          type: boolean
+    ChatSessionEnvelope:
+      type: object
+      required: [session, settings]
+      properties:
+        session:
+          $ref: "#/components/schemas/ChatSessionDetail"
+        settings:
+          $ref: "#/components/schemas/ChatSessionSettings"
+    ChatSessionCreateRequest:
+      type: object
+      required: [project_id]
+      properties:
         project_id:
           type: string
           format: uuid
+        title:
+          type: [string, "null"]
+        system_prompt:
+          type: [string, "null"]
+        preferred_mode:
+          type: [string, "null"]
+          enum: [document, local, global, hybrid, mix, "null"]
+    ChatSessionUpdateRequest:
+      type: object
+      properties:
+        title:
+          type: [string, "null"]
+        system_prompt:
+          type: [string, "null"]
+        prompt_state:
+          type: [string, "null"]
+          enum: [default, customized, "null"]
+        preferred_mode:
+          type: [string, "null"]
+          enum: [document, local, global, hybrid, mix, "null"]
+        restore_default:
+          type: [boolean, "null"]
+    UiQueryIntentKeywords:
+      type: object
+      required: [highLevel, lowLevel]
+      properties:
+        highLevel:
+          type: array
+          items:
+            type: string
+        lowLevel:
+          type: array
+          items:
+            type: string
+    UiQueryPlanningMetadata:
+      type: object
+      required: [requestedMode, plannedMode, intentCacheStatus, keywords, warnings]
+      properties:
+        requestedMode:
+          type: string
+          enum: [document, local, global, hybrid, mix]
+        plannedMode:
+          type: string
+          enum: [document, local, global, hybrid, mix]
+        intentCacheStatus:
+          type: string
+        keywords:
+          $ref: "#/components/schemas/UiQueryIntentKeywords"
+        warnings:
+          type: array
+          items:
+            type: string
+    UiRerankMetadata:
+      type: object
+      required: [status, candidateCount]
+      properties:
+        status:
+          type: string
+        candidateCount:
+          type: integer
+          minimum: 0
+        reorderedCount:
+          type: [integer, "null"]
+          minimum: 0
+    UiContextAssemblyMetadata:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+        warning:
+          type: [string, "null"]
+    ChatThreadProvider:
+      type: object
+      required: [provider_kind, model_name]
+      properties:
+        provider_kind:
+          type: string
+        model_name:
+          type: string
+    ChatThreadReference:
+      type: object
+      required: [kind, reference_id, rank]
+      properties:
+        kind:
+          type: string
+        reference_id:
+          type: string
+        excerpt:
+          type: [string, "null"]
+        rank:
+          type: integer
+          minimum: 0
+        score:
+          type: [number, "null"]
+          format: float
+    ChatThreadMessage:
+      type: object
+      required: [id, role, content, created_at, references]
+      properties:
+        id:
+          type: string
         role:
           type: string
+          enum: [user, assistant]
         content:
           type: string
-        retrieval_run_id:
-          type: string
-          format: uuid
-          nullable: true
         created_at:
           type: string
           format: date-time
+        query_id:
+          type: [string, "null"]
+        mode:
+          type: [string, "null"]
+          enum: [document, local, global, hybrid, mix, "null"]
+        grounding_status:
+          type: [string, "null"]
+          enum: [grounded, partial, weak, none, "null"]
+        provider:
+          anyOf:
+            - $ref: "#/components/schemas/ChatThreadProvider"
+            - type: "null"
+        references:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatThreadReference"
+        planning:
+          anyOf:
+            - $ref: "#/components/schemas/UiQueryPlanningMetadata"
+            - type: "null"
+        rerank:
+          anyOf:
+            - $ref: "#/components/schemas/UiRerankMetadata"
+            - type: "null"
+        context_assembly:
+          anyOf:
+            - $ref: "#/components/schemas/UiContextAssemblyMetadata"
+            - type: "null"
+        warning:
+          type: [string, "null"]
+        warning_kind:
+          type: [string, "null"]
     CreateRetrievalRunRequest:
       type: object
       required: [project_id, query_text]
@@ -3657,8 +3957,6 @@ components:
           example: grounded
         weak_grounding:
           type: boolean
-        warning:
-          type: [string, "null"]
 
     UsageGovernanceSummary:
       type: object
@@ -4888,7 +5186,7 @@ components:
 
     UiDocumentSummaryCounters:
       type: object
-      required: [queued, processing, ready, failed]
+      required: [queued, processing, ready, ready_no_graph, failed]
       properties:
         queued:
           type: integer
@@ -4897,6 +5195,9 @@ components:
           type: integer
           minimum: 0
         ready:
+          type: integer
+          minimum: 0
+        ready_no_graph:
           type: integer
           minimum: 0
         failed:
@@ -4925,6 +5226,221 @@ components:
           type: [string, "null"]
         warning:
           type: [string, "null"]
+
+    UiDocumentCollectionAccountingSummary:
+      type: object
+      required:
+        [
+          prompt_tokens,
+          completion_tokens,
+          total_tokens,
+          priced_stage_count,
+          unpriced_stage_count,
+          in_flight_stage_count,
+          missing_stage_count,
+          accounting_status,
+        ]
+      properties:
+        total_estimated_cost:
+          type: [number, "null"]
+          format: double
+        settled_estimated_cost:
+          type: [number, "null"]
+          format: double
+        in_flight_estimated_cost:
+          type: [number, "null"]
+          format: double
+        currency:
+          type: [string, "null"]
+        prompt_tokens:
+          type: integer
+        completion_tokens:
+          type: integer
+        total_tokens:
+          type: integer
+        priced_stage_count:
+          type: integer
+        unpriced_stage_count:
+          type: integer
+        in_flight_stage_count:
+          type: integer
+        missing_stage_count:
+          type: integer
+        accounting_status:
+          type: string
+          enum: [priced, partial, unpriced, in_flight_unsettled]
+
+    UiDocumentCollectionProgressCounters:
+      type: object
+      required:
+        [accepted, content_extracted, chunked, embedded, extracting_graph, graph_ready, ready, failed]
+      properties:
+        accepted:
+          type: integer
+        content_extracted:
+          type: integer
+        chunked:
+          type: integer
+        embedded:
+          type: integer
+        extracting_graph:
+          type: integer
+        graph_ready:
+          type: integer
+        ready:
+          type: integer
+        failed:
+          type: integer
+
+    UiDocumentCollectionStageDiagnostics:
+      type: object
+      required:
+        [
+          stage,
+          active_count,
+          completed_count,
+          failed_count,
+          prompt_tokens,
+          completion_tokens,
+          total_tokens,
+          accounting_status,
+        ]
+      properties:
+        stage:
+          type: string
+        active_count:
+          type: integer
+        completed_count:
+          type: integer
+        failed_count:
+          type: integer
+        avg_elapsed_ms:
+          type: [integer, "null"]
+        max_elapsed_ms:
+          type: [integer, "null"]
+        total_estimated_cost:
+          type: [number, "null"]
+          format: double
+        settled_estimated_cost:
+          type: [number, "null"]
+          format: double
+        in_flight_estimated_cost:
+          type: [number, "null"]
+          format: double
+        currency:
+          type: [string, "null"]
+        prompt_tokens:
+          type: integer
+        completion_tokens:
+          type: integer
+        total_tokens:
+          type: integer
+        accounting_status:
+          type: string
+          enum: [priced, partial, unpriced, in_flight_unsettled]
+
+    UiDocumentCollectionFormatDiagnostics:
+      type: object
+      required:
+        [
+          file_type,
+          document_count,
+          queued_count,
+          processing_count,
+          ready_count,
+          ready_no_graph_count,
+          failed_count,
+          content_extracted_count,
+          chunked_count,
+          embedded_count,
+          extracting_graph_count,
+          graph_ready_count,
+          prompt_tokens,
+          completion_tokens,
+          total_tokens,
+          accounting_status,
+        ]
+      properties:
+        file_type:
+          type: string
+        document_count:
+          type: integer
+        queued_count:
+          type: integer
+        processing_count:
+          type: integer
+        ready_count:
+          type: integer
+        ready_no_graph_count:
+          type: integer
+        failed_count:
+          type: integer
+        content_extracted_count:
+          type: integer
+        chunked_count:
+          type: integer
+        embedded_count:
+          type: integer
+        extracting_graph_count:
+          type: integer
+        graph_ready_count:
+          type: integer
+        avg_queue_elapsed_ms:
+          type: [integer, "null"]
+        max_queue_elapsed_ms:
+          type: [integer, "null"]
+        avg_total_elapsed_ms:
+          type: [integer, "null"]
+        max_total_elapsed_ms:
+          type: [integer, "null"]
+        bottleneck_stage:
+          type: [string, "null"]
+        bottleneck_avg_elapsed_ms:
+          type: [integer, "null"]
+        bottleneck_max_elapsed_ms:
+          type: [integer, "null"]
+        total_estimated_cost:
+          type: [number, "null"]
+          format: double
+        settled_estimated_cost:
+          type: [number, "null"]
+          format: double
+        in_flight_estimated_cost:
+          type: [number, "null"]
+          format: double
+        currency:
+          type: [string, "null"]
+        prompt_tokens:
+          type: integer
+        completion_tokens:
+          type: integer
+        total_tokens:
+          type: integer
+        accounting_status:
+          type: string
+          enum: [priced, partial, unpriced, in_flight_unsettled]
+
+    UiDocumentCollectionDiagnostics:
+      type: object
+      required:
+        [progress, queue_backlog_count, processing_backlog_count, active_backlog_count, per_stage, per_format]
+      properties:
+        progress:
+          $ref: "#/components/schemas/UiDocumentCollectionProgressCounters"
+        queue_backlog_count:
+          type: integer
+        processing_backlog_count:
+          type: integer
+        active_backlog_count:
+          type: integer
+        per_stage:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiDocumentCollectionStageDiagnostics"
+        per_format:
+          type: array
+          items:
+            $ref: "#/components/schemas/UiDocumentCollectionFormatDiagnostics"
 
     UiDocumentRevisionHistoryItem:
       type: object
@@ -5019,7 +5535,7 @@ components:
     UiDocumentsSurfaceResponse:
       type: object
       required:
-        [accepted_formats, max_size_mb, graph_status, rebuild_backlog_count, counters, filters, rows]
+        [accepted_formats, max_size_mb, graph_status, rebuild_backlog_count, counters, filters, accounting, diagnostics, rows]
       properties:
         accepted_formats:
           type: array
@@ -5040,6 +5556,10 @@ components:
           $ref: "#/components/schemas/UiDocumentSummaryCounters"
         filters:
           $ref: "#/components/schemas/UiDocumentFilterValues"
+        accounting:
+          $ref: "#/components/schemas/UiDocumentCollectionAccountingSummary"
+        diagnostics:
+          $ref: "#/components/schemas/UiDocumentCollectionDiagnostics"
         rows:
           type: array
           items:
@@ -5296,15 +5816,39 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/UiGraphAssistantReference"
+        planning:
+          anyOf:
+            - $ref: "#/components/schemas/UiQueryPlanningMetadata"
+            - type: "null"
+        rerank:
+          anyOf:
+            - $ref: "#/components/schemas/UiRerankMetadata"
+            - type: "null"
+        context_assembly:
+          anyOf:
+            - $ref: "#/components/schemas/UiContextAssemblyMetadata"
+            - type: "null"
         warning:
           type: [string, "null"]
         warning_kind:
           type: [string, "null"]
-          enum: [partial_convergence, "null"]
+
+    UiGraphAssistantFocusContext:
+      type: object
+      required: [node_id, label, summary, removable]
+      properties:
+        node_id:
+          type: string
+        label:
+          type: string
+        summary:
+          type: string
+        removable:
+          type: boolean
 
     UiGraphAssistant:
       type: object
-      required: [title, subtitle, prompts, disclaimer, messages]
+      required: [title, subtitle, prompts, disclaimer, recent_sessions, messages]
       properties:
         title:
           type: string
@@ -5318,6 +5862,22 @@ components:
           type: string
         session_id:
           type: [string, "null"]
+        recent_sessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatSessionSummary"
+        active_session:
+          anyOf:
+            - $ref: "#/components/schemas/ChatSessionDetail"
+            - type: "null"
+        settings_summary:
+          anyOf:
+            - $ref: "#/components/schemas/ChatSessionSettings"
+            - type: "null"
+        focus_context:
+          anyOf:
+            - $ref: "#/components/schemas/UiGraphAssistantFocusContext"
+            - type: "null"
         messages:
           type: array
           items:
@@ -5326,11 +5886,23 @@ components:
     UiGraphSurfaceResponse:
       type: object
       required:
-        [graph_status, projection_version, node_count, relation_count, nodes, edges, legend, assistant]
+        [
+          graph_status,
+          projection_version,
+          node_count,
+          relation_count,
+          nodes,
+          edges,
+          legend,
+          assistant,
+        ]
       properties:
         graph_status:
           type: string
           enum: [empty, building, ready, partial, failed, stale]
+        convergence_status:
+          type: [string, "null"]
+          enum: [current, partial, degraded, "null"]
         projection_version:
           type: integer
         node_count:
@@ -5338,6 +5910,9 @@ components:
           minimum: 0
         relation_count:
           type: integer
+          minimum: 0
+        filtered_artifact_count:
+          type: [integer, "null"]
           minimum: 0
         last_built_at:
           type: [string, "null"]
@@ -5567,12 +6142,18 @@ components:
           user_message_id,
           assistant_message_id,
           query_id,
+          effective_mode,
+          user_message,
+          assistant_message,
           answer,
           references,
           structured_references,
           mode,
           grounding_status,
           provider,
+          planning,
+          rerank,
+          context_assembly,
         ]
       properties:
         session_id:
@@ -5583,6 +6164,21 @@ components:
           type: string
         query_id:
           type: string
+        effective_mode:
+          type: string
+          enum: [document, local, global, hybrid, mix]
+        session_summary:
+          anyOf:
+            - $ref: "#/components/schemas/ChatSessionDetail"
+            - type: "null"
+        settings_summary:
+          anyOf:
+            - $ref: "#/components/schemas/ChatSessionSettings"
+            - type: "null"
+        user_message:
+          $ref: "#/components/schemas/UiGraphAssistantMessage"
+        assistant_message:
+          $ref: "#/components/schemas/UiGraphAssistantMessage"
         answer:
           type: string
         references:
@@ -5601,11 +6197,16 @@ components:
           enum: [grounded, partial, weak, none]
         provider:
           $ref: "#/components/schemas/UiGraphAssistantProvider"
+        planning:
+          $ref: "#/components/schemas/UiQueryPlanningMetadata"
+        rerank:
+          $ref: "#/components/schemas/UiRerankMetadata"
+        context_assembly:
+          $ref: "#/components/schemas/UiContextAssemblyMetadata"
         warning:
           type: [string, "null"]
         warning_kind:
           type: [string, "null"]
-          enum: [partial_convergence, "null"]
 
     UiAdminTabCounts:
       type: object
@@ -6267,6 +6868,224 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/RuntimeDocumentRow"
+
+    RuntimeCollectionProgressCountersResponse:
+      type: object
+      required:
+        [accepted, contentExtracted, chunked, embedded, extractingGraph, graphReady, ready, failed]
+      properties:
+        accepted:
+          type: integer
+        contentExtracted:
+          type: integer
+        chunked:
+          type: integer
+        embedded:
+          type: integer
+        extractingGraph:
+          type: integer
+        graphReady:
+          type: integer
+        ready:
+          type: integer
+        failed:
+          type: integer
+
+    RuntimeCollectionStageDiagnosticsResponse:
+      type: object
+      required:
+        [
+          stage,
+          activeCount,
+          completedCount,
+          failedCount,
+          promptTokens,
+          completionTokens,
+          totalTokens,
+          accountingStatus,
+        ]
+      properties:
+        stage:
+          type: string
+        activeCount:
+          type: integer
+        completedCount:
+          type: integer
+        failedCount:
+          type: integer
+        avgElapsedMs:
+          type: [integer, "null"]
+        maxElapsedMs:
+          type: [integer, "null"]
+        totalEstimatedCost:
+          type: [number, "null"]
+          format: double
+        settledEstimatedCost:
+          type: [number, "null"]
+          format: double
+        inFlightEstimatedCost:
+          type: [number, "null"]
+          format: double
+        currency:
+          type: [string, "null"]
+        promptTokens:
+          type: integer
+        completionTokens:
+          type: integer
+        totalTokens:
+          type: integer
+        accountingStatus:
+          type: string
+          enum: [priced, partial, unpriced, in_flight_unsettled]
+
+    RuntimeCollectionFormatDiagnosticsResponse:
+      type: object
+      required:
+        [
+          fileType,
+          documentCount,
+          queuedCount,
+          processingCount,
+          readyCount,
+          readyNoGraphCount,
+          failedCount,
+          contentExtractedCount,
+          chunkedCount,
+          embeddedCount,
+          extractingGraphCount,
+          graphReadyCount,
+          promptTokens,
+          completionTokens,
+          totalTokens,
+          accountingStatus,
+        ]
+      properties:
+        fileType:
+          type: string
+        documentCount:
+          type: integer
+        queuedCount:
+          type: integer
+        processingCount:
+          type: integer
+        readyCount:
+          type: integer
+        readyNoGraphCount:
+          type: integer
+        failedCount:
+          type: integer
+        contentExtractedCount:
+          type: integer
+        chunkedCount:
+          type: integer
+        embeddedCount:
+          type: integer
+        extractingGraphCount:
+          type: integer
+        graphReadyCount:
+          type: integer
+        avgQueueElapsedMs:
+          type: [integer, "null"]
+        maxQueueElapsedMs:
+          type: [integer, "null"]
+        avgTotalElapsedMs:
+          type: [integer, "null"]
+        maxTotalElapsedMs:
+          type: [integer, "null"]
+        bottleneckStage:
+          type: [string, "null"]
+        bottleneckAvgElapsedMs:
+          type: [integer, "null"]
+        bottleneckMaxElapsedMs:
+          type: [integer, "null"]
+        totalEstimatedCost:
+          type: [number, "null"]
+          format: double
+        settledEstimatedCost:
+          type: [number, "null"]
+          format: double
+        inFlightEstimatedCost:
+          type: [number, "null"]
+          format: double
+        currency:
+          type: [string, "null"]
+        promptTokens:
+          type: integer
+        completionTokens:
+          type: integer
+        totalTokens:
+          type: integer
+        accountingStatus:
+          type: string
+          enum: [priced, partial, unpriced, in_flight_unsettled]
+
+    RuntimeCollectionDiagnosticsResponse:
+      type: object
+      required:
+        [
+          documentCount,
+          progress,
+          queueBacklogCount,
+          processingBacklogCount,
+          activeBacklogCount,
+          promptTokens,
+          completionTokens,
+          totalTokens,
+          pricedStageCount,
+          unpricedStageCount,
+          inFlightStageCount,
+          missingStageCount,
+          accountingStatus,
+          perStage,
+          perFormat,
+        ]
+      properties:
+        documentCount:
+          type: integer
+        progress:
+          $ref: "#/components/schemas/RuntimeCollectionProgressCountersResponse"
+        queueBacklogCount:
+          type: integer
+        processingBacklogCount:
+          type: integer
+        activeBacklogCount:
+          type: integer
+        totalEstimatedCost:
+          type: [number, "null"]
+          format: double
+        settledEstimatedCost:
+          type: [number, "null"]
+          format: double
+        inFlightEstimatedCost:
+          type: [number, "null"]
+          format: double
+        currency:
+          type: [string, "null"]
+        promptTokens:
+          type: integer
+        completionTokens:
+          type: integer
+        totalTokens:
+          type: integer
+        pricedStageCount:
+          type: integer
+        unpricedStageCount:
+          type: integer
+        inFlightStageCount:
+          type: integer
+        missingStageCount:
+          type: integer
+        accountingStatus:
+          type: string
+          enum: [priced, partial, unpriced, in_flight_unsettled]
+        perStage:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeCollectionStageDiagnosticsResponse"
+        perFormat:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeCollectionFormatDiagnosticsResponse"
 
     RuntimeExtractionDetail:
       type: object

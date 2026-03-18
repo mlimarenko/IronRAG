@@ -16,7 +16,7 @@ pub async fn extract_image_with_provider(
         .vision_extract(VisionRequest {
             provider_kind: provider_kind.to_string(),
             model_name: model_name.to_string(),
-            prompt: "Extract all meaningful text and graph-relevant entities from this image."
+            prompt: "Return only the text visible in this image as plain text. Do not add headings, explanations, summaries, entity lists, markdown, or quotes. If no readable text is visible, return an empty string."
                 .to_string(),
             image_bytes: file_bytes.to_vec(),
             mime_type: mime_type.to_string(),

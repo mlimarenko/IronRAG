@@ -72,6 +72,10 @@ function formatMoney(value: number | null, currency: string | null): string {
   }
 }
 
+function formatCount(value: number): string {
+  return new Intl.NumberFormat().format(value)
+}
+
 function stageLabel(stage: string): string {
   const key = `documents.stage.${stage}`
   return i18n.te(key) ? i18n.t(key) : stage
@@ -94,6 +98,19 @@ function activityTone(activityStatus: DocumentActivityStatus): DocumentActivityS
 function accountingLabel(status: string): string {
   const key = `documents.accounting.${status}`
   return i18n.te(key) ? i18n.t(key) : status
+}
+
+function normalizationLabel(status: string): string {
+  const key = `documents.normalization.${status}`
+  return i18n.te(key) ? i18n.t(key) : status
+}
+
+function ocrSourceLabel(value: string | null): string | null {
+  if (!value) {
+    return null
+  }
+  const key = `documents.ocrSource.${value}`
+  return i18n.te(key) ? i18n.t(key) : value
 }
 
 function attributionSourceLabel(value: 'stage_native' | 'reconciled' | null): string | null {
@@ -137,6 +154,8 @@ function accountingTone(status: string): DocumentStatus {
   switch (status) {
     case 'priced':
       return 'ready'
+    case 'in_flight_unsettled':
+      return 'processing'
     case 'partial':
       return 'ready_no_graph'
     default:
@@ -235,6 +254,24 @@ const headlineCards = computed(() => {
     },
   ] satisfies { key: string; tone: DocumentStatus; value: string; label: string }[]
 
+  if (detail.settledEstimatedCost !== null) {
+    cards.splice(1, 0, {
+      key: 'settled-cost',
+      tone: 'ready',
+      value: formatMoney(detail.settledEstimatedCost, detail.currency),
+      label: i18n.t('documents.details.settledCost'),
+    })
+  }
+
+  if (detail.inFlightEstimatedCost !== null || detail.inFlightStageCount > 0) {
+    cards.splice(2, 0, {
+      key: 'in-flight-cost',
+      tone: 'processing',
+      value: formatMoney(detail.inFlightEstimatedCost, detail.currency),
+      label: i18n.t('documents.details.inFlightCost'),
+    })
+  }
+
   if (eyebrowStageLabel.value) {
     cards.splice(2, 0, {
       key: 'stage',
@@ -284,9 +321,8 @@ const metadataRows = computed(() => {
 
   return [
     { key: 'type', label: i18n.t('documents.headers.type'), value: detail.fileType },
+    { key: 'size', label: i18n.t('documents.headers.size'), value: detail.fileSizeLabel },
     { key: 'uploaded', label: i18n.t('documents.headers.uploaded'), value: formatDate(detail.uploadedAt) },
-    { key: 'workspace', label: i18n.t('documents.details.workspace'), value: props.workspaceName ?? '—' },
-    { key: 'library', label: i18n.t('documents.headers.library'), value: detail.libraryName },
     { key: 'lastActivity', label: i18n.t('documents.details.lastActivity'), value: formatDate(detail.lastActivityAt) },
     { key: 'extractor', label: i18n.t('documents.details.extractionKind'), value: detail.extractedStats.extractionKind ?? '—' },
     { key: 'revisionStatus', label: i18n.t('documents.details.activeRevisionStatus'), value: detail.activeRevisionStatus ?? '—' },
@@ -347,6 +383,32 @@ const attemptSections = computed(() => {
         attempt.summary.totalEstimatedCost,
         attempt.summary.currency,
       )}`,
+      ...(attempt.summary.settledEstimatedCost !== null
+        ? [
+            `${i18n.t('documents.details.settledCost')}: ${formatMoney(
+              attempt.summary.settledEstimatedCost,
+              attempt.summary.currency,
+            )}`,
+          ]
+        : []),
+      ...(attempt.summary.inFlightEstimatedCost !== null || attempt.summary.inFlightStageCount > 0
+        ? [
+            `${i18n.t('documents.details.inFlightCost')}: ${formatMoney(
+              attempt.summary.inFlightEstimatedCost,
+              attempt.summary.currency,
+            )}`,
+            `${i18n.t('documents.details.inFlightStages')}: ${formatCount(
+              attempt.summary.inFlightStageCount,
+            )}`,
+          ]
+        : []),
+      ...(attempt.summary.missingStageCount > 0
+        ? [
+            `${i18n.t('documents.details.missingAccountingStages')}: ${formatCount(
+              attempt.summary.missingStageCount,
+            )}`,
+          ]
+        : []),
     ],
     partialHistoryReason: attempt.partialHistory ? attempt.partialHistoryReason : null,
     benchmarks: attempt.benchmarks.map((benchmark, index) => ({
@@ -366,7 +428,17 @@ const attemptSections = computed(() => {
         ? [
             accountingLabel(benchmark.accounting.pricingStatus),
             attributionSourceLabel(benchmark.accounting.attributionSource),
-            formatMoney(benchmark.accounting.estimatedCost, benchmark.accounting.currency),
+            benchmark.accounting.inFlightEstimatedCost !== null
+              ? `${i18n.t('documents.details.inFlightCost')}: ${formatMoney(
+                  benchmark.accounting.inFlightEstimatedCost,
+                  benchmark.accounting.currency,
+                )}`
+              : benchmark.accounting.settledEstimatedCost !== null
+                ? `${i18n.t('documents.details.settledCost')}: ${formatMoney(
+                    benchmark.accounting.settledEstimatedCost,
+                    benchmark.accounting.currency,
+                  )}`
+                : formatMoney(benchmark.accounting.estimatedCost, benchmark.accounting.currency),
           ]
             .filter(Boolean)
             .join(' · ')
@@ -440,7 +512,6 @@ const heroMetaLine = computed(() => {
   return [
     detail.fileType,
     detail.fileSizeLabel,
-    detail.libraryName,
     formatDate(detail.uploadedAt),
   ]
     .filter(Boolean)
@@ -466,6 +537,59 @@ const eyebrowStageLabel = computed(() => {
 
 const showRevisionHistory = computed(() => revisionTimeline.value.length > 0)
 const showAttemptSections = computed(() => attemptSections.value.length > 0)
+const showExtractedPreview = computed(() => Boolean(props.detail?.extractedStats.previewText))
+const showGraphProgressCard = computed(() => {
+  const detail = props.detail
+  return (
+    Boolean(detail) &&
+    detail?.status === 'processing' &&
+    detail.stage === 'extracting_graph' &&
+    detail.progressPercent !== null
+  )
+})
+const graphProgressSummary = computed(() => {
+  const detail = props.detail
+  const progressPercent = detail?.progressPercent
+  if (!detail || progressPercent === null || progressPercent === undefined) {
+    return null
+  }
+
+  return i18n.t('documents.details.graphProgress.summary', {
+    progress: progressPercent,
+    chunks: detail.extractedStats.chunkCount ?? 0,
+  })
+})
+const graphProgressMeta = computed(() => {
+  const detail = props.detail
+  const progressPercent = detail?.progressPercent
+  if (!detail || progressPercent === null || progressPercent === undefined) {
+    return []
+  }
+
+  return [
+    `${i18n.t('documents.details.graphProgress.stage')}: ${stageLabel(detail.stage)}`,
+    `${i18n.t('documents.details.graphProgress.percent')}: ${String(progressPercent)}%`,
+    detail.lastActivityAt
+      ? `${i18n.t('documents.details.lastActivity')}: ${formatDate(detail.lastActivityAt)}`
+      : null,
+  ].filter((value): value is string => Boolean(value))
+})
+const extractedMetaLines = computed(() => {
+  const detail = props.detail
+  if (!detail) {
+    return []
+  }
+
+  return [
+    `${i18n.t('documents.details.normalizationStatus')}: ${normalizationLabel(
+      detail.extractedStats.normalizationStatus,
+    )}`,
+    `${i18n.t('documents.details.warningCount')}: ${formatCount(detail.extractedStats.warningCount)}`,
+    detail.extractedStats.ocrSource
+      ? `${i18n.t('documents.details.ocrSource')}: ${ocrSourceLabel(detail.extractedStats.ocrSource) ?? detail.extractedStats.ocrSource}`
+      : null,
+  ].filter((value): value is string => Boolean(value))
+})
 </script>
 
 <template>
@@ -627,6 +751,34 @@ const showAttemptSections = computed(() => attemptSections.value.length > 0)
           >
             <h4>{{ $t('documents.details.mutationWarning') }}</h4>
             <p>{{ props.detail.mutation.warning }}</p>
+          </section>
+
+          <section
+            v-if="showGraphProgressCard"
+            class="rr-documents-drawer__soft-card"
+          >
+            <h4>{{ $t('documents.details.graphProgress.title') }}</h4>
+            <p>{{ graphProgressSummary }}</p>
+            <p class="rr-documents-drawer__microcopy">
+              {{ graphProgressMeta.join(' · ') }}
+            </p>
+          </section>
+
+          <section
+            v-if="showExtractedPreview"
+            class="rr-documents-drawer__soft-card"
+          >
+            <h4>{{ $t('documents.details.preview') }}</h4>
+            <p class="rr-documents-drawer__microcopy">
+              {{ extractedMetaLines.join(' · ') }}
+            </p>
+            <pre class="rr-documents-drawer__preview">{{ props.detail.extractedStats.previewText }}</pre>
+            <p
+              v-if="props.detail.extractedStats.previewTruncated"
+              class="rr-documents-drawer__microcopy"
+            >
+              {{ $t('documents.details.previewTruncated') }}
+            </p>
           </section>
 
           <section
@@ -831,6 +983,14 @@ const showAttemptSections = computed(() => attemptSections.value.length > 0)
         <div class="rr-documents-drawer__rail-card">
           <span>{{ $t('documents.details.accountingStatus') }}</span>
           <strong :title="accountingLabel(props.detail.accountingStatus)">{{ accountingLabel(props.detail.accountingStatus) }}</strong>
+        </div>
+        <div class="rr-documents-drawer__rail-card">
+          <span>{{ $t('documents.details.inFlightStages') }}</span>
+          <strong>{{ formatCount(props.detail.inFlightStageCount) }}</strong>
+        </div>
+        <div class="rr-documents-drawer__rail-card">
+          <span>{{ $t('documents.details.missingAccountingStages') }}</span>
+          <strong>{{ formatCount(props.detail.missingStageCount) }}</strong>
         </div>
         <div class="rr-documents-drawer__rail-card">
           <span>{{ $t('documents.details.checksum') }}</span>

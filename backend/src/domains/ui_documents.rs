@@ -50,7 +50,11 @@ pub struct DocumentListItem {
     pub latest_attempt_no: i32,
     pub accounting_status: String,
     pub total_estimated_cost: Option<f64>,
+    pub settled_estimated_cost: Option<f64>,
+    pub in_flight_estimated_cost: Option<f64>,
     pub currency: Option<String>,
+    pub in_flight_stage_count: i32,
+    pub missing_stage_count: i32,
     pub partial_history: bool,
     pub partial_history_reason: Option<String>,
     pub mutation: DocumentMutationState,
@@ -71,6 +75,93 @@ pub struct DocumentFilterValues {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct DocumentCollectionAccountingSummary {
+    pub total_estimated_cost: Option<f64>,
+    pub settled_estimated_cost: Option<f64>,
+    pub in_flight_estimated_cost: Option<f64>,
+    pub currency: Option<String>,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub priced_stage_count: i32,
+    pub unpriced_stage_count: i32,
+    pub in_flight_stage_count: i32,
+    pub missing_stage_count: i32,
+    pub accounting_status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentCollectionProgressCounters {
+    pub accepted: usize,
+    pub content_extracted: usize,
+    pub chunked: usize,
+    pub embedded: usize,
+    pub extracting_graph: usize,
+    pub graph_ready: usize,
+    pub ready: usize,
+    pub failed: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentCollectionStageDiagnostics {
+    pub stage: String,
+    pub active_count: usize,
+    pub completed_count: usize,
+    pub failed_count: usize,
+    pub avg_elapsed_ms: Option<i64>,
+    pub max_elapsed_ms: Option<i64>,
+    pub total_estimated_cost: Option<f64>,
+    pub settled_estimated_cost: Option<f64>,
+    pub in_flight_estimated_cost: Option<f64>,
+    pub currency: Option<String>,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub accounting_status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentCollectionFormatDiagnostics {
+    pub file_type: String,
+    pub document_count: usize,
+    pub queued_count: usize,
+    pub processing_count: usize,
+    pub ready_count: usize,
+    pub ready_no_graph_count: usize,
+    pub failed_count: usize,
+    pub content_extracted_count: usize,
+    pub chunked_count: usize,
+    pub embedded_count: usize,
+    pub extracting_graph_count: usize,
+    pub graph_ready_count: usize,
+    pub avg_queue_elapsed_ms: Option<i64>,
+    pub max_queue_elapsed_ms: Option<i64>,
+    pub avg_total_elapsed_ms: Option<i64>,
+    pub max_total_elapsed_ms: Option<i64>,
+    pub bottleneck_stage: Option<String>,
+    pub bottleneck_avg_elapsed_ms: Option<i64>,
+    pub bottleneck_max_elapsed_ms: Option<i64>,
+    pub total_estimated_cost: Option<f64>,
+    pub settled_estimated_cost: Option<f64>,
+    pub in_flight_estimated_cost: Option<f64>,
+    pub currency: Option<String>,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub accounting_status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentCollectionDiagnostics {
+    pub progress: DocumentCollectionProgressCounters,
+    pub queue_backlog_count: usize,
+    pub processing_backlog_count: usize,
+    pub active_backlog_count: usize,
+    pub per_stage: Vec<DocumentCollectionStageDiagnostics>,
+    pub per_format: Vec<DocumentCollectionFormatDiagnostics>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct DocumentHistoryItem {
     pub attempt_no: i32,
     pub status: String,
@@ -82,11 +173,14 @@ pub struct DocumentHistoryItem {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DocumentStageAccountingItem {
+    pub accounting_scope: String,
     pub pricing_status: String,
     pub usage_event_id: Option<String>,
     pub cost_ledger_id: Option<String>,
     pub pricing_catalog_entry_id: Option<String>,
     pub estimated_cost: Option<f64>,
+    pub settled_estimated_cost: Option<f64>,
+    pub in_flight_estimated_cost: Option<f64>,
     pub currency: Option<String>,
     pub attribution_source: Option<String>,
 }
@@ -107,9 +201,13 @@ pub struct DocumentStageBenchmarkItem {
 #[derive(Debug, Clone, Serialize)]
 pub struct DocumentAttemptSummary {
     pub total_estimated_cost: Option<f64>,
+    pub settled_estimated_cost: Option<f64>,
+    pub in_flight_estimated_cost: Option<f64>,
     pub currency: Option<String>,
     pub priced_stage_count: i32,
     pub unpriced_stage_count: i32,
+    pub in_flight_stage_count: i32,
+    pub missing_stage_count: i32,
     pub accounting_status: String,
 }
 
@@ -139,6 +237,11 @@ pub struct DocumentExtractedStats {
     pub checksum: Option<String>,
     pub page_count: Option<i32>,
     pub extraction_kind: Option<String>,
+    pub preview_text: Option<String>,
+    pub preview_truncated: bool,
+    pub warning_count: usize,
+    pub normalization_status: String,
+    pub ocr_source: Option<String>,
     pub warnings: Vec<String>,
 }
 
@@ -170,7 +273,11 @@ pub struct DocumentDetailModel {
     pub latest_attempt_no: i32,
     pub accounting_status: String,
     pub total_estimated_cost: Option<f64>,
+    pub settled_estimated_cost: Option<f64>,
+    pub in_flight_estimated_cost: Option<f64>,
     pub currency: Option<String>,
+    pub in_flight_stage_count: i32,
+    pub missing_stage_count: i32,
     pub partial_history: bool,
     pub partial_history_reason: Option<String>,
     pub mutation: DocumentMutationState,
@@ -198,5 +305,7 @@ pub struct DocumentSurfaceModel {
     pub rebuild_backlog_count: usize,
     pub counters: DocumentSummaryCounters,
     pub filters: DocumentFilterValues,
+    pub accounting: DocumentCollectionAccountingSummary,
+    pub diagnostics: DocumentCollectionDiagnostics,
     pub rows: Vec<DocumentListItem>,
 }

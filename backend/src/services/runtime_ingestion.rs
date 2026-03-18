@@ -26,7 +26,7 @@ use crate::{
         RuntimeProviderProfileRow,
     },
     infra::vector_search,
-    integrations::llm::EmbeddingBatchRequest,
+    integrations::llm::{EmbeddingBatchRequest, EmbeddingBatchResponse},
     services::{
         document_reconciliation::{DeleteDocumentRequest, delete_document_and_reconcile},
         graph_projection::mark_graph_snapshot_stale,
@@ -35,7 +35,7 @@ use crate::{
     },
     shared::file_extract::{
         FileExtractionPlan, UploadAdmissionError, UploadFileKind,
-        build_runtime_file_extraction_plan,
+        build_runtime_file_extraction_plan, extraction_quality_from_source_map,
     },
 };
 
@@ -86,6 +86,19 @@ pub struct RuntimeDocumentActivityView {
 struct InitialDocumentSnapshot {
     document: repositories::DocumentRow,
     revision: repositories::DocumentRevisionRow,
+}
+
+#[derive(Debug, Clone)]
+struct PersistedExtractedContentInput {
+    extraction_kind: String,
+    content_text: Option<String>,
+    page_count: Option<i32>,
+    char_count: Option<i32>,
+    extraction_warnings_json: serde_json::Value,
+    source_map_json: serde_json::Value,
+    provider_kind: Option<String>,
+    model_name: Option<String>,
+    extraction_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -489,22 +502,20 @@ pub async fn persist_extracted_content_from_plan(
     document_id: Option<Uuid>,
     extraction_plan: &FileExtractionPlan,
 ) -> anyhow::Result<RuntimeExtractedContentRow> {
+    let persisted = persisted_extracted_content_from_plan(extraction_plan);
     repositories::upsert_runtime_extracted_content(
         &state.persistence.postgres,
         ingestion_run_id,
         document_id,
-        &extraction_plan.extraction_kind,
-        extraction_plan.extracted_text.as_deref(),
-        extraction_plan.page_count.and_then(|value| i32::try_from(value).ok()),
-        extraction_plan
-            .extracted_text
-            .as_ref()
-            .and_then(|value| i32::try_from(value.chars().count()).ok()),
-        serde_json::to_value(&extraction_plan.extraction_warnings).unwrap_or_else(|_| json!([])),
-        extraction_plan.source_map.clone(),
-        extraction_plan.provider_kind.as_deref(),
-        extraction_plan.model_name.as_deref(),
-        extraction_plan.extraction_version.as_deref(),
+        &persisted.extraction_kind,
+        persisted.content_text.as_deref(),
+        persisted.page_count,
+        persisted.char_count,
+        persisted.extraction_warnings_json,
+        persisted.source_map_json,
+        persisted.provider_kind.as_deref(),
+        persisted.model_name.as_deref(),
+        persisted.extraction_version.as_deref(),
     )
     .await
     .context("failed to persist runtime extracted content")
@@ -516,25 +527,118 @@ pub async fn persist_extracted_content_from_payload(
     document_id: Option<Uuid>,
     payload: &IngestionExecutionPayload,
 ) -> anyhow::Result<RuntimeExtractedContentRow> {
+    let persisted = persisted_extracted_content_from_payload(payload);
     repositories::upsert_runtime_extracted_content(
         &state.persistence.postgres,
         ingestion_run_id,
         document_id,
+        &persisted.extraction_kind,
+        persisted.content_text.as_deref(),
+        persisted.page_count,
+        persisted.char_count,
+        persisted.extraction_warnings_json,
+        persisted.source_map_json,
+        persisted.provider_kind.as_deref(),
+        persisted.model_name.as_deref(),
+        persisted.extraction_version.as_deref(),
+    )
+    .await
+    .context("failed to persist runtime extracted content from payload")
+}
+
+fn persisted_extracted_content_from_plan(
+    extraction_plan: &FileExtractionPlan,
+) -> PersistedExtractedContentInput {
+    persisted_extracted_content(
+        Some(extraction_plan.file_kind),
+        &extraction_plan.extraction_kind,
+        extraction_plan.extracted_text.clone(),
+        extraction_plan.page_count.and_then(|value| i32::try_from(value).ok()),
+        extraction_plan.extraction_warnings.clone(),
+        extraction_plan.source_map.clone(),
+        extraction_plan.provider_kind.clone(),
+        extraction_plan.model_name.clone(),
+        extraction_plan.extraction_version.clone(),
+    )
+}
+
+fn persisted_extracted_content_from_payload(
+    payload: &IngestionExecutionPayload,
+) -> PersistedExtractedContentInput {
+    persisted_extracted_content(
+        payload.file_kind.as_deref().and_then(UploadFileKind::from_str),
         payload
             .extraction_kind
             .as_deref()
             .unwrap_or_else(|| payload.file_kind.as_deref().unwrap_or("unknown")),
-        payload.text.as_deref(),
+        payload.text.clone(),
         payload.page_count.and_then(|value| i32::try_from(value).ok()),
-        payload.text.as_ref().and_then(|value| i32::try_from(value.chars().count()).ok()),
-        serde_json::to_value(&payload.extraction_warnings).unwrap_or_else(|_| json!([])),
+        payload.extraction_warnings.clone(),
         payload.source_map.clone(),
-        payload.extraction_provider_kind.as_deref(),
-        payload.extraction_model_name.as_deref(),
-        payload.extraction_version.as_deref(),
+        payload.extraction_provider_kind.clone(),
+        payload.extraction_model_name.clone(),
+        payload.extraction_version.clone(),
     )
-    .await
-    .context("failed to persist runtime extracted content from payload")
+}
+
+fn persisted_extracted_content(
+    file_kind: Option<UploadFileKind>,
+    extraction_kind: &str,
+    content_text: Option<String>,
+    page_count: Option<i32>,
+    warnings: Vec<String>,
+    source_map: serde_json::Value,
+    provider_kind: Option<String>,
+    model_name: Option<String>,
+    extraction_version: Option<String>,
+) -> PersistedExtractedContentInput {
+    let source_map_json = normalize_persisted_extraction_source_map(
+        file_kind,
+        extraction_kind,
+        warnings.len(),
+        source_map,
+    );
+    let content_text = content_text.and_then(|value| (!value.trim().is_empty()).then_some(value));
+    let char_count =
+        content_text.as_ref().and_then(|value| i32::try_from(value.chars().count()).ok());
+
+    PersistedExtractedContentInput {
+        extraction_kind: extraction_kind.to_string(),
+        content_text,
+        page_count,
+        char_count,
+        extraction_warnings_json: serde_json::to_value(&warnings).unwrap_or_else(|_| json!([])),
+        source_map_json,
+        provider_kind,
+        model_name,
+        extraction_version,
+    }
+}
+
+fn normalize_persisted_extraction_source_map(
+    file_kind: Option<UploadFileKind>,
+    extraction_kind: &str,
+    warning_count: usize,
+    source_map: serde_json::Value,
+) -> serde_json::Value {
+    let quality = extraction_quality_from_source_map(&source_map, extraction_kind, warning_count);
+    let mut source_map = match source_map {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    let ocr_source = quality
+        .ocr_source
+        .as_deref()
+        .or_else(|| matches!(file_kind, Some(UploadFileKind::Image)).then_some("vision_llm"));
+    source_map.insert(
+        "content_quality".to_string(),
+        json!({
+            "normalization_status": quality.normalization_status.as_str(),
+            "ocr_source": ocr_source,
+            "warning_count": quality.warning_count,
+        }),
+    );
+    serde_json::Value::Object(source_map)
 }
 
 pub fn validate_runtime_extraction_plan(
@@ -1149,6 +1253,78 @@ fn activity_status_label(status: RuntimeDocumentActivityStatus) -> &'static str 
     }
 }
 
+fn build_chunk_embedding_upsert_inputs(
+    chunks: &[repositories::ChunkRow],
+    batch_response: &EmbeddingBatchResponse,
+) -> Vec<repositories::ChunkEmbeddingUpsertInput> {
+    chunks
+        .iter()
+        .zip(batch_response.embeddings.iter())
+        .map(|(chunk, embedding)| repositories::ChunkEmbeddingUpsertInput {
+            chunk_id: chunk.id,
+            project_id: chunk.project_id,
+            provider_kind: batch_response.provider_kind.clone(),
+            model_name: batch_response.model_name.clone(),
+            dimensions: i32::try_from(embedding.len()).unwrap_or(i32::MAX),
+            embedding_json: serde_json::to_value(embedding).unwrap_or_else(|_| json!([])),
+        })
+        .collect()
+}
+
+fn build_chunk_embedding_vector_write_inputs(
+    chunks: &[repositories::ChunkRow],
+    embeddings: &[Vec<f32>],
+) -> Vec<vector_search::ChunkEmbeddingVectorWriteInput> {
+    chunks
+        .iter()
+        .zip(embeddings.iter())
+        .filter_map(|(chunk, embedding)| {
+            (embedding.len() == 1536).then(|| vector_search::ChunkEmbeddingVectorWriteInput {
+                chunk_id: chunk.id,
+                embedding: embedding.clone(),
+            })
+        })
+        .collect()
+}
+
+fn build_runtime_graph_node_vector_target_inputs(
+    nodes: &[&RuntimeGraphNodeRow],
+    batch_response: &EmbeddingBatchResponse,
+) -> Vec<repositories::RuntimeVectorTargetUpsertInput> {
+    nodes
+        .iter()
+        .zip(batch_response.embeddings.iter())
+        .map(|(node, embedding)| repositories::RuntimeVectorTargetUpsertInput {
+            project_id: node.project_id,
+            target_kind: "entity".to_string(),
+            target_id: node.id,
+            provider_kind: batch_response.provider_kind.clone(),
+            model_name: batch_response.model_name.clone(),
+            dimensions: i32::try_from(embedding.len()).ok(),
+            embedding_json: serde_json::to_value(embedding).unwrap_or_else(|_| json!([])),
+        })
+        .collect()
+}
+
+fn build_runtime_graph_edge_vector_target_inputs(
+    edges: &[RuntimeGraphEdgeRow],
+    batch_response: &EmbeddingBatchResponse,
+) -> Vec<repositories::RuntimeVectorTargetUpsertInput> {
+    edges
+        .iter()
+        .zip(batch_response.embeddings.iter())
+        .map(|(edge, embedding)| repositories::RuntimeVectorTargetUpsertInput {
+            project_id: edge.project_id,
+            target_kind: "relation".to_string(),
+            target_id: edge.id,
+            provider_kind: batch_response.provider_kind.clone(),
+            model_name: batch_response.model_name.clone(),
+            dimensions: i32::try_from(embedding.len()).ok(),
+            embedding_json: serde_json::to_value(embedding).unwrap_or_else(|_| json!([])),
+        })
+        .collect()
+}
+
 pub async fn embed_runtime_chunks(
     state: &AppState,
     provider_profile: &EffectiveProviderProfile,
@@ -1186,30 +1362,29 @@ pub async fn embed_runtime_chunks(
             );
         }
 
-        for (chunk, embedding) in chunk_batch.iter().zip(batch_response.embeddings.iter()) {
-            repositories::upsert_chunk_embedding(
-                &state.persistence.postgres,
-                chunk.id,
-                chunk.project_id,
-                &batch_response.provider_kind,
-                &batch_response.model_name,
-                i32::try_from(embedding.len()).unwrap_or(i32::MAX),
-                serde_json::to_value(embedding).unwrap_or_else(|_| json!([])),
+        repositories::upsert_chunk_embeddings(
+            &state.persistence.postgres,
+            &build_chunk_embedding_upsert_inputs(chunk_batch, &batch_response),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to persist chunk embedding batch starting with {}",
+                chunk_batch.first().map(|chunk| chunk.id).unwrap_or_default()
             )
-            .await
-            .with_context(|| format!("failed to persist chunk embedding {}", chunk.id))?;
+        })?;
 
-            if embedding.len() == 1536 {
-                vector_search::set_chunk_embedding_vector(
-                    &state.persistence.postgres,
-                    chunk.id,
-                    embedding,
-                )
+        let vector_rows =
+            build_chunk_embedding_vector_write_inputs(chunk_batch, &batch_response.embeddings);
+        if !vector_rows.is_empty() {
+            vector_search::set_chunk_embedding_vectors(&state.persistence.postgres, &vector_rows)
                 .await
                 .with_context(|| {
-                    format!("failed to write pgvector embedding for chunk {}", chunk.id)
+                    format!(
+                        "failed to write pgvector chunk batch starting with {}",
+                        chunk_batch.first().map(|chunk| chunk.id).unwrap_or_default()
+                    )
                 })?;
-            }
         }
 
         usage.absorb_usage_json(&batch_response.usage_json);
@@ -1260,20 +1435,17 @@ pub async fn embed_runtime_graph_nodes(
             );
         }
 
-        for (node, embedding) in node_batch.iter().zip(batch_response.embeddings.iter()) {
-            repositories::upsert_runtime_vector_target(
-                &state.persistence.postgres,
-                node.project_id,
-                "entity",
-                node.id,
-                &batch_response.provider_kind,
-                &batch_response.model_name,
-                i32::try_from(embedding.len()).ok(),
-                serde_json::to_value(embedding).unwrap_or_else(|_| json!([])),
+        repositories::upsert_runtime_vector_targets(
+            &state.persistence.postgres,
+            &build_runtime_graph_node_vector_target_inputs(node_batch, &batch_response),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to persist graph node embedding batch starting with {}",
+                node_batch.first().map(|node| node.id).unwrap_or_default()
             )
-            .await
-            .with_context(|| format!("failed to persist graph node embedding {}", node.id))?;
-        }
+        })?;
         usage.absorb_usage_json(&batch_response.usage_json);
     }
 
@@ -1322,20 +1494,17 @@ pub async fn embed_runtime_graph_edges(
             );
         }
 
-        for (edge, embedding) in edge_batch.iter().zip(batch_response.embeddings.iter()) {
-            repositories::upsert_runtime_vector_target(
-                &state.persistence.postgres,
-                edge.project_id,
-                "relation",
-                edge.id,
-                &batch_response.provider_kind,
-                &batch_response.model_name,
-                i32::try_from(embedding.len()).ok(),
-                serde_json::to_value(embedding).unwrap_or_else(|_| json!([])),
+        repositories::upsert_runtime_vector_targets(
+            &state.persistence.postgres,
+            &build_runtime_graph_edge_vector_target_inputs(edge_batch, &batch_response),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to persist graph edge embedding batch starting with {}",
+                edge_batch.first().map(|edge| edge.id).unwrap_or_default()
             )
-            .await
-            .with_context(|| format!("failed to persist graph edge embedding {}", edge.id))?;
-        }
+        })?;
         usage.absorb_usage_json(&batch_response.usage_json);
     }
 
@@ -1451,5 +1620,111 @@ mod tests {
         assert_eq!(usage.completion_tokens(), Some(5));
         assert_eq!(usage.total_tokens(), Some(155));
         assert!(usage.has_token_usage());
+    }
+
+    #[test]
+    fn persisted_plan_keeps_normalized_text_separate_from_warnings() {
+        let plan = FileExtractionPlan {
+            file_kind: UploadFileKind::Image,
+            adapter_status: "ready".to_string(),
+            extracted_text: Some("Acme Corp\nBudget 2026".to_string()),
+            extraction_error: None,
+            extraction_kind: "vision_image".to_string(),
+            page_count: Some(1),
+            extraction_warnings: vec!["Low contrast OCR".to_string()],
+            source_map: json!({
+                "mime_type": "image/png",
+                "content_quality": {
+                    "normalization_status": "normalized",
+                    "ocr_source": "vision_llm",
+                    "warning_count": 1,
+                },
+            }),
+            provider_kind: Some("openai".to_string()),
+            model_name: Some("gpt-5-mini".to_string()),
+            extraction_version: Some("runtime_extraction_v1".to_string()),
+            ingest_mode: "runtime_upload".to_string(),
+        };
+
+        let persisted = persisted_extracted_content_from_plan(&plan);
+
+        assert_eq!(persisted.content_text.as_deref(), Some("Acme Corp\nBudget 2026"));
+        assert_eq!(persisted.extraction_warnings_json, json!(["Low contrast OCR"]));
+        assert_eq!(
+            persisted.source_map_json["content_quality"]["normalization_status"],
+            json!("normalized")
+        );
+        assert_eq!(persisted.source_map_json["content_quality"]["warning_count"], json!(1));
+    }
+
+    #[test]
+    fn chunk_vector_batch_only_keeps_pgvector_compatible_dimensions() {
+        let project_id = Uuid::now_v7();
+        let document_id = Uuid::now_v7();
+        let chunks = vec![
+            repositories::ChunkRow {
+                id: Uuid::now_v7(),
+                document_id,
+                project_id,
+                ordinal: 0,
+                content: "alpha".to_string(),
+                token_count: Some(1),
+                metadata_json: json!({}),
+                created_at: Utc::now(),
+            },
+            repositories::ChunkRow {
+                id: Uuid::now_v7(),
+                document_id,
+                project_id,
+                ordinal: 1,
+                content: "beta".to_string(),
+                token_count: Some(1),
+                metadata_json: json!({}),
+                created_at: Utc::now(),
+            },
+        ];
+
+        let vector_rows = build_chunk_embedding_vector_write_inputs(
+            &chunks,
+            &[vec![0.0; 1536], vec![0.1, 0.2, 0.3]],
+        );
+
+        assert_eq!(vector_rows.len(), 1);
+        assert_eq!(vector_rows[0].chunk_id, chunks[0].id);
+    }
+
+    #[test]
+    fn graph_target_batches_keep_target_identity() {
+        let project_id = Uuid::now_v7();
+        let nodes = vec![RuntimeGraphNodeRow {
+            id: Uuid::now_v7(),
+            project_id,
+            canonical_key: "entity::acme-corp".to_string(),
+            label: "Acme Corp".to_string(),
+            node_type: "entity".to_string(),
+            aliases_json: json!([]),
+            summary: Some("Budget owner".to_string()),
+            metadata_json: json!({}),
+            support_count: 1,
+            projection_version: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }];
+        let batch_response = EmbeddingBatchResponse {
+            provider_kind: "openai".to_string(),
+            model_name: "text-embedding-3-small".to_string(),
+            dimensions: 1536,
+            embeddings: vec![vec![0.2; 1536]],
+            usage_json: json!({}),
+        };
+
+        let node_refs = nodes.iter().collect::<Vec<_>>();
+        let target_rows =
+            build_runtime_graph_node_vector_target_inputs(node_refs.as_slice(), &batch_response);
+
+        assert_eq!(target_rows.len(), 1);
+        assert_eq!(target_rows[0].target_kind, "entity");
+        assert_eq!(target_rows[0].target_id, nodes[0].id);
+        assert_eq!(target_rows[0].dimensions, Some(1536));
     }
 }

@@ -21,6 +21,7 @@ use crate::{
         router_support::ApiError,
     },
     services::{
+        chat_sessions::ChatSessionsService,
         pricing_catalog,
         query_runtime::{
             PersistedRuntimeQuery, RuntimeAnswerQueryResult, RuntimeQueryRequest,
@@ -426,7 +427,10 @@ pub(crate) async fn run_query_with_workspace(
     let runtime_request = RuntimeQueryRequest {
         library_id: payload.project_id,
         question: payload.query_text.trim().to_string(),
-        mode: payload.mode.unwrap_or(RuntimeQueryMode::Hybrid),
+        system_prompt: Some(session.system_prompt.clone()),
+        mode: payload.mode.unwrap_or_else(|| {
+            session.preferred_mode.parse::<RuntimeQueryMode>().unwrap_or(RuntimeQueryMode::Hybrid)
+        }),
         top_k: usize::try_from(top_k).unwrap_or(8).clamp(1, 12),
         include_debug: true,
     };
@@ -510,6 +514,30 @@ pub(crate) async fn run_query_with_workspace(
             return Err(error);
         }
     };
+
+    let chat_sessions = ChatSessionsService::new();
+    if chat_sessions.is_placeholder_title(&session.title) {
+        let next_title = chat_sessions.derive_title_from_question(&payload.query_text);
+        if next_title != session.title {
+            repositories::update_chat_session_title(
+                &state.persistence.postgres,
+                session.id,
+                &next_title,
+            )
+            .await
+            .map_err(|error| {
+                error!(
+                    auth_token_id = %auth_token_id,
+                    workspace_id = %workspace_id,
+                    project_id = %payload.project_id,
+                    session_id = %session.id,
+                    ?error,
+                    "failed to update chat session title after first question",
+                );
+                ApiError::Internal
+            })?;
+        }
+    }
 
     if response.0.weak_grounding {
         warn!(
@@ -655,6 +683,7 @@ async fn resolve_query_session(
     workspace_id: Uuid,
     payload: &QueryRequest,
 ) -> Result<repositories::ChatSessionRow, ApiError> {
+    let chat_sessions = ChatSessionsService::new();
     match payload.session_id {
         Some(session_id) => {
             let session = repositories::get_chat_session_by_id(&state.persistence.postgres, session_id)
@@ -674,11 +703,16 @@ async fn resolve_query_session(
             }
             Ok(session)
         }
-        None => repositories::create_chat_session(
+        None => repositories::create_seeded_chat_session(
             &state.persistence.postgres,
             workspace_id,
             payload.project_id,
-            payload.query_text.trim(),
+            chat_sessions.placeholder_title(),
+            &chat_sessions.default_system_prompt(),
+            chat_sessions
+                .derive_prompt_state(&chat_sessions.default_system_prompt())
+                .as_str(),
+            chat_sessions.recommended_mode().as_str(),
         )
         .await
         .map_err(|error| {

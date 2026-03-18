@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import type {
+  GraphAssistantState,
   GraphAssistantConfig,
   GraphConvergenceStatus,
   GraphDiagnostics,
@@ -10,6 +11,24 @@ import type {
   GraphSearchHit,
   GraphSurfaceResponse,
 } from 'src/models/ui/graph'
+import type {
+  ChatSettingsDraft,
+  ChatSessionSettings,
+  ChatSessionSummary,
+  ChatThreadMessage,
+} from 'src/models/ui/chat'
+import {
+  buildChatSettingsDraft,
+  decorateChatThreadMessage,
+  updateChatSettingsDraft,
+} from 'src/models/ui/chat'
+import {
+  createChatSession,
+  fetchChatSession,
+  fetchChatSessionMessages,
+  listChatSessions,
+  updateChatSession,
+} from 'src/services/api/chat'
 import {
   askGraphAssistant,
   fetchGraphAssistantConfig,
@@ -46,6 +65,15 @@ interface GraphState {
   assistantDraft: string
   assistantMode: GraphQueryMode
   assistantSubmitting: boolean
+  activeSessionId: string | null
+  recentSessions: ChatSessionSummary[]
+  sessionLoading: boolean
+  sessionError: string | null
+  assistantSettingsOpen: boolean
+  assistantSettingsSaving: boolean
+  assistantSettings: ChatSessionSettings | null
+  assistantSettingsDraft: ChatSettingsDraft | null
+  sourceDisclosureState: Record<string, boolean>
   controls: GraphCanvasControls
 }
 
@@ -54,6 +82,44 @@ const WATCH_REFRESH_INTERVAL_MS = 4_000
 const BACKLOG_REFRESH_INTERVAL_MS = 8_000
 const WATCH_BACKLOG_THRESHOLD = 8
 const THROTTLED_BACKLOG_THRESHOLD = 24
+
+function syncAssistantState(
+  state: GraphState,
+  assistant: GraphAssistantState | null,
+  options?: { preserveDraft?: boolean },
+): void {
+  state.activeSessionId = assistant?.activeSession?.sessionId ?? assistant?.sessionId ?? null
+  state.recentSessions = assistant?.recentSessions ?? []
+  state.assistantSettings = assistant?.settingsSummary ?? null
+  if (assistant?.settingsSummary) {
+    state.assistantMode = assistant.settingsSummary.preferredMode
+  }
+  if (!options?.preserveDraft) {
+    state.assistantSettingsDraft = assistant?.settingsSummary
+      ? buildChatSettingsDraft(assistant.settingsSummary)
+      : null
+  }
+}
+
+function createPendingAssistantMessage(): ChatThreadMessage {
+  return decorateChatThreadMessage({
+    id: `pending-assistant-${String(Date.now())}`,
+    role: 'assistant',
+    content: '',
+    createdAt: new Date().toISOString(),
+    queryId: null,
+    mode: null,
+    groundingStatus: null,
+    provider: null,
+    references: [],
+    planning: null,
+    rerank: null,
+    contextAssembly: null,
+    warning: null,
+    warningKind: null,
+    pending: true,
+  })
+}
 
 function resolveRefreshInterval(
   surface: GraphSurfaceResponse | null,
@@ -120,6 +186,15 @@ export const useGraphStore = defineStore('graph', {
     assistantDraft: '',
     assistantMode: 'hybrid',
     assistantSubmitting: false,
+    activeSessionId: null,
+    recentSessions: [],
+    sessionLoading: false,
+    sessionError: null,
+    assistantSettingsOpen: false,
+    assistantSettingsSaving: false,
+    assistantSettings: null,
+    assistantSettingsDraft: null,
+    sourceDisclosureState: {},
     controls: {
       fitViewport: null,
       zoomIn: null,
@@ -184,6 +259,7 @@ export const useGraphStore = defineStore('graph', {
       this.error = null
       if (!options?.preserveUi) {
         this.assistantError = null
+        this.sessionError = null
         this.searchHits = []
         this.assistantDraft = ''
       }
@@ -194,14 +270,35 @@ export const useGraphStore = defineStore('graph', {
           fetchGraphDiagnostics(),
         ])
         await assistantConfigPromise
+        if (options?.preserveUi && this.surface && this.activeSessionId) {
+          surface.assistant = {
+            ...surface.assistant,
+            sessionId: this.surface.assistant.sessionId,
+            recentSessions: this.recentSessions,
+            activeSession: this.surface.assistant.activeSession,
+            settingsSummary: this.assistantSettings,
+            focusContext: this.surface.assistant.focusContext,
+            messages: this.surface.assistant.messages,
+          }
+        }
         this.surface = surface
         this.diagnostics = diagnostics
+        syncAssistantState(this, surface.assistant, {
+          preserveDraft: this.assistantSettingsOpen,
+        })
         if (this.focusedNodeId) {
-          try {
-            await this.focusNode(this.focusedNodeId)
-          } catch {
-            this.focusedNodeId = null
-            this.focusedDetail = null
+          const shouldRefreshFocusedDetail =
+            previousLibraryId !== libraryId ||
+            !options?.preserveUi ||
+            this.focusedDetail?.id !== this.focusedNodeId
+
+          if (shouldRefreshFocusedDetail) {
+            try {
+              await this.focusNode(this.focusedNodeId)
+            } catch {
+              this.focusedNodeId = null
+              this.focusedDetail = null
+            }
           }
         } else {
           this.focusedDetail = null
@@ -274,6 +371,154 @@ export const useGraphStore = defineStore('graph', {
     },
     setAssistantMode(mode: GraphQueryMode): void {
       this.assistantMode = mode
+      if (this.assistantSettingsDraft) {
+        this.assistantSettingsDraft = updateChatSettingsDraft(this.assistantSettingsDraft, {
+          preferredMode: mode,
+        })
+      }
+    },
+    async loadRecentChats(): Promise<void> {
+      if (!this.activeLibraryId) {
+        return
+      }
+      this.sessionLoading = true
+      this.sessionError = null
+      try {
+        const sessions = await listChatSessions(this.activeLibraryId)
+        this.recentSessions = sessions
+        if (this.surface) {
+          this.surface.assistant.recentSessions = sessions
+        }
+      } catch (error) {
+        this.sessionError = error instanceof Error ? error.message : 'Failed to load recent chats'
+      } finally {
+        this.sessionLoading = false
+      }
+    },
+    async loadChatSession(sessionId: string): Promise<void> {
+      if (!this.surface) {
+        return
+      }
+      this.sessionLoading = true
+      this.sessionError = null
+      try {
+        const [envelope, messages] = await Promise.all([
+          fetchChatSession(sessionId),
+          fetchChatSessionMessages(sessionId),
+        ])
+
+        this.activeSessionId = envelope.session.sessionId
+        this.assistantMode = envelope.settings.preferredMode
+        this.assistantSettings = envelope.settings
+        this.assistantSettingsDraft = buildChatSettingsDraft(envelope.settings)
+        this.surface.assistant = {
+          ...this.surface.assistant,
+          sessionId: envelope.session.sessionId,
+          activeSession: envelope.session,
+          settingsSummary: envelope.settings,
+          messages: messages.map((message) => decorateChatThreadMessage(message)),
+        }
+        await this.loadRecentChats()
+      } catch (error) {
+        this.sessionError =
+          error instanceof Error ? error.message : 'Failed to load chat session history'
+      } finally {
+        this.sessionLoading = false
+      }
+    },
+    async createNewChat(): Promise<void> {
+      if (!this.activeLibraryId || !this.surface) {
+        return
+      }
+      this.sessionLoading = true
+      this.sessionError = null
+      this.assistantError = null
+      try {
+        const envelope = await createChatSession(this.activeLibraryId)
+        this.assistantDraft = ''
+        this.activeSessionId = envelope.session.sessionId
+        this.assistantMode = envelope.settings.preferredMode
+        this.assistantSettings = envelope.settings
+        this.assistantSettingsDraft = buildChatSettingsDraft(envelope.settings)
+        this.surface.assistant = {
+          ...this.surface.assistant,
+          sessionId: envelope.session.sessionId,
+          activeSession: envelope.session,
+          settingsSummary: envelope.settings,
+          messages: [],
+        }
+        await this.loadRecentChats()
+      } catch (error) {
+        this.sessionError = error instanceof Error ? error.message : 'Failed to create chat'
+      } finally {
+        this.sessionLoading = false
+      }
+    },
+    openAssistantSettings(): void {
+      if (this.assistantSettings) {
+        this.assistantSettingsDraft = buildChatSettingsDraft(this.assistantSettings)
+      }
+      this.assistantSettingsOpen = true
+    },
+    closeAssistantSettings(): void {
+      this.assistantSettingsOpen = false
+      if (this.assistantSettings) {
+        this.assistantSettingsDraft = buildChatSettingsDraft(this.assistantSettings)
+      }
+    },
+    updateAssistantSettingsDraft(
+      patch: Partial<Pick<ChatSettingsDraft, 'systemPrompt' | 'preferredMode'>>,
+    ): void {
+      this.assistantSettingsDraft ??=
+        this.assistantSettings
+          ? buildChatSettingsDraft(this.assistantSettings)
+          : {
+              systemPrompt: '',
+              preferredMode: this.assistantMode,
+              initialSystemPrompt: '',
+              initialPreferredMode: this.assistantMode,
+              isDirty: false,
+              canRestoreDefault: true,
+              validationError: null,
+            }
+      this.assistantSettingsDraft = updateChatSettingsDraft(this.assistantSettingsDraft, patch)
+    },
+    async saveAssistantSettings(options?: { restoreDefault?: boolean }): Promise<void> {
+      if (!this.activeSessionId || !this.assistantSettingsDraft || !this.surface) {
+        return
+      }
+      if (this.assistantSettingsDraft.validationError) {
+        this.sessionError = this.assistantSettingsDraft.validationError
+        return
+      }
+      this.assistantSettingsSaving = true
+      this.sessionError = null
+      try {
+        const envelope = await updateChatSession(this.activeSessionId, {
+          system_prompt: this.assistantSettingsDraft.systemPrompt,
+          prompt_state: this.assistantSettings?.promptState,
+          preferred_mode: this.assistantSettingsDraft.preferredMode,
+          restore_default: options?.restoreDefault ?? false,
+        })
+        this.assistantSettings = envelope.settings
+        this.assistantSettingsDraft = buildChatSettingsDraft(envelope.settings)
+        this.assistantMode = envelope.settings.preferredMode
+        this.surface.assistant = {
+          ...this.surface.assistant,
+          activeSession: envelope.session,
+          settingsSummary: envelope.settings,
+        }
+        this.assistantSettingsOpen = false
+        await this.loadRecentChats()
+      } catch (error) {
+        this.sessionError =
+          error instanceof Error ? error.message : 'Failed to update chat settings'
+      } finally {
+        this.assistantSettingsSaving = false
+      }
+    },
+    toggleMessageSources(messageId: string): void {
+      this.sourceDisclosureState[messageId] = !this.sourceDisclosureState[messageId]
     },
     async submitAssistantPrompt(question: string): Promise<void> {
       if (!this.surface || !question.trim()) {
@@ -282,52 +527,76 @@ export const useGraphStore = defineStore('graph', {
 
       this.assistantSubmitting = true
       this.assistantError = null
+      const trimmedQuestion = question.trim()
+      const optimisticUserMessage = decorateChatThreadMessage({
+        id: `pending-user-${String(Date.now())}`,
+        role: 'user',
+        content: trimmedQuestion,
+        createdAt: new Date().toISOString(),
+        queryId: null,
+        mode: this.assistantMode,
+        groundingStatus: null,
+        provider: null,
+        references: [],
+        planning: null,
+        rerank: null,
+        contextAssembly: null,
+        warning: null,
+        warningKind: null,
+      })
+      const pendingAssistantMessage = createPendingAssistantMessage()
+      const threadBeforeSubmit = [...this.surface.assistant.messages]
+      this.surface.assistant.messages = [
+        ...threadBeforeSubmit,
+        optimisticUserMessage,
+        pendingAssistantMessage,
+      ]
       try {
         const answer = await askGraphAssistant(
-          question.trim(),
-          this.surface.assistant.sessionId,
+          trimmedQuestion,
+          this.activeSessionId ?? this.surface.assistant.sessionId,
           this.focusedNodeId,
           this.assistantMode,
         )
 
         this.surface.assistant.sessionId = answer.sessionId
+        this.activeSessionId = answer.sessionId
         this.surface.assistant.messages = [
-          ...this.surface.assistant.messages,
-          {
-            id: answer.userMessageId,
-            role: 'user',
-            content: question.trim(),
-            createdAt: new Date().toISOString(),
-            queryId: null,
-            mode: this.assistantMode,
-            groundingStatus: null,
-            provider: null,
-            references: [],
-            planning: null,
-            rerank: null,
-            contextAssembly: null,
-            warning: null,
-            warningKind: null,
-          },
-          {
-            id: answer.assistantMessageId,
-            role: 'assistant',
-            content: answer.answer,
-            createdAt: new Date().toISOString(),
-            queryId: answer.queryId,
-            mode: answer.mode,
-            groundingStatus: answer.groundingStatus,
-            provider: answer.provider,
-            references: answer.structuredReferences,
-            planning: answer.planning,
-            rerank: answer.rerank,
-            contextAssembly: answer.contextAssembly,
-            warning: answer.warning,
-            warningKind: answer.warningKind,
-          },
+          ...threadBeforeSubmit,
+          decorateChatThreadMessage(answer.userMessage),
+          decorateChatThreadMessage(answer.assistantMessage),
         ]
+        if (answer.sessionSummary) {
+          this.surface.assistant.activeSession = answer.sessionSummary
+        }
+        if (answer.settingsSummary) {
+          this.assistantSettings = answer.settingsSummary
+          this.assistantSettingsDraft = buildChatSettingsDraft(answer.settingsSummary)
+          this.surface.assistant.settingsSummary = answer.settingsSummary
+        } else {
+          const sessionEnvelope = await fetchChatSession(answer.sessionId)
+          this.assistantSettings = sessionEnvelope.settings
+          this.assistantSettingsDraft = buildChatSettingsDraft(sessionEnvelope.settings)
+          this.surface.assistant.activeSession = sessionEnvelope.session
+          this.surface.assistant.settingsSummary = sessionEnvelope.settings
+        }
+        this.assistantMode = answer.effectiveMode
+        await this.loadRecentChats()
         this.assistantDraft = ''
       } catch (error) {
+        this.surface.assistant.messages = [
+          ...threadBeforeSubmit,
+          optimisticUserMessage,
+          decorateChatThreadMessage({
+            ...pendingAssistantMessage,
+            id: pendingAssistantMessage.id,
+            content:
+              error instanceof Error ? error.message : 'Failed to ask the graph assistant',
+            warning: error instanceof Error ? error.message : 'Failed to ask the graph assistant',
+            warningKind: 'request_failed',
+            pending: false,
+          }),
+        ]
         this.assistantError =
           error instanceof Error ? error.message : 'Failed to ask the graph assistant'
       } finally {

@@ -1095,11 +1095,39 @@ export interface paths {
          */
         get: operations["listChatSessions"];
         put?: never;
-        post?: never;
+        /**
+         * Create a new empty chat session
+         * @description Requires `query:run`, `workspace:admin`, `documents:read`, or an `instance_admin` token. Workspace-scoped tokens may only create sessions in their own workspace.
+         */
+        post: operations["createChatSession"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/v1/chat/sessions/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get one chat session and editable settings
+         * @description Requires `query:run`, `workspace:admin`, `documents:read`, or an `instance_admin` token. Workspace-scoped tokens may only access sessions in their own workspace.
+         */
+        get: operations["getChatSession"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update one chat session settings
+         * @description Requires `query:run`, `workspace:admin`, `documents:read`, or an `instance_admin` token. Workspace-scoped tokens may only update sessions in their own workspace.
+         */
+        patch: operations["updateChatSession"];
         trace?: never;
     };
     "/v1/chat/sessions/{id}/messages": {
@@ -1469,6 +1497,23 @@ export interface paths {
         put?: never;
         /** Upload one or more documents into a library runtime queue */
         post: operations["uploadRuntimeDocuments"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runtime/libraries/{libraryId}/documents/diagnostics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get collection-level runtime document diagnostics for one library */
+        get: operations["getRuntimeDocumentDiagnostics"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2076,33 +2121,120 @@ export interface components {
         };
         ChatSessionSummary: {
             /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            workspace_id: string;
-            /** Format: uuid */
-            project_id: string;
+            session_id: string;
             title: string;
+            /** Format: int64 */
+            message_count: number;
+            last_message_preview?: string | null;
+            /** Format: date-time */
+            updated_at: string;
+            /** @enum {string} */
+            prompt_state: "default" | "customized";
+            /** @enum {string} */
+            preferred_mode: "document" | "local" | "global" | "hybrid" | "mix";
+            is_empty: boolean;
+        };
+        ChatSessionDetail: {
+            /** Format: uuid */
+            session_id: string;
+            title: string;
+            /** Format: int64 */
+            message_count: number;
+            last_message_preview?: string | null;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
             updated_at: string;
-            /** Format: int64 */
-            message_count: number;
-            last_message_preview?: string | null;
+            /** @enum {string} */
+            prompt_state: "default" | "customized";
+            /** @enum {string} */
+            preferred_mode: "document" | "local" | "global" | "hybrid" | "mix";
+            is_empty: boolean;
         };
-        ChatMessageItem: {
-            /** Format: uuid */
-            id: string;
+        ChatSessionSettings: {
             /** Format: uuid */
             session_id: string;
+            system_prompt: string;
+            /** @enum {string} */
+            prompt_state: "default" | "customized";
+            /** @enum {string} */
+            preferred_mode: "document" | "local" | "global" | "hybrid" | "mix";
+            default_prompt_available: boolean;
+        };
+        ChatSessionEnvelope: {
+            session: components["schemas"]["ChatSessionDetail"];
+            settings: components["schemas"]["ChatSessionSettings"];
+        };
+        ChatSessionCreateRequest: {
             /** Format: uuid */
             project_id: string;
-            role: string;
+            title?: string | null;
+            system_prompt?: string | null;
+            /** @enum {string|null} */
+            preferred_mode?: "document" | "local" | "global" | "hybrid" | "mix" | "null" | null;
+        };
+        ChatSessionUpdateRequest: {
+            title?: string | null;
+            system_prompt?: string | null;
+            /** @enum {string|null} */
+            prompt_state?: "default" | "customized" | "null" | null;
+            /** @enum {string|null} */
+            preferred_mode?: "document" | "local" | "global" | "hybrid" | "mix" | "null" | null;
+            restore_default?: boolean | null;
+        };
+        UiQueryIntentKeywords: {
+            highLevel: string[];
+            lowLevel: string[];
+        };
+        UiQueryPlanningMetadata: {
+            /** @enum {string} */
+            requestedMode: "document" | "local" | "global" | "hybrid" | "mix";
+            /** @enum {string} */
+            plannedMode: "document" | "local" | "global" | "hybrid" | "mix";
+            intentCacheStatus: string;
+            keywords: components["schemas"]["UiQueryIntentKeywords"];
+            warnings: string[];
+        };
+        UiRerankMetadata: {
+            status: string;
+            candidateCount: number;
+            reorderedCount?: number | null;
+        };
+        UiContextAssemblyMetadata: {
+            status: string;
+            warning?: string | null;
+        };
+        ChatThreadProvider: {
+            provider_kind: string;
+            model_name: string;
+        };
+        ChatThreadReference: {
+            kind: string;
+            reference_id: string;
+            excerpt?: string | null;
+            rank: number;
+            /** Format: float */
+            score?: number | null;
+        };
+        ChatThreadMessage: {
+            id: string;
+            /** @enum {string} */
+            role: "user" | "assistant";
             content: string;
-            /** Format: uuid */
-            retrieval_run_id?: string | null;
             /** Format: date-time */
             created_at: string;
+            query_id?: string | null;
+            /** @enum {string|null} */
+            mode?: "document" | "local" | "global" | "hybrid" | "mix" | "null" | null;
+            /** @enum {string|null} */
+            grounding_status?: "grounded" | "partial" | "weak" | "none" | "null" | null;
+            provider?: components["schemas"]["ChatThreadProvider"] | null;
+            references: components["schemas"]["ChatThreadReference"][];
+            planning?: components["schemas"]["UiQueryPlanningMetadata"] | null;
+            rerank?: components["schemas"]["UiRerankMetadata"] | null;
+            context_assembly?: components["schemas"]["UiContextAssemblyMetadata"] | null;
+            warning?: string | null;
+            warning_kind?: string | null;
         };
         CreateRetrievalRunRequest: {
             /** Format: uuid */
@@ -2137,12 +2269,16 @@ export interface components {
              *     ]
              */
             references: string[];
-            /** @example gateway_live */
             mode: string;
+            warning?: string | null;
+            /**
+             * @example gateway_live
+             * @enum {string|null}
+             */
+            warning_kind?: "partial_convergence" | "null" | null;
             /** @example grounded */
             answer_status: string;
             weak_grounding: boolean;
-            warning?: string | null;
         };
         UsageGovernanceSummary: {
             /** Format: int64 */
@@ -2654,6 +2790,7 @@ export interface components {
             queued: number;
             processing: number;
             ready: number;
+            ready_no_graph: number;
             failed: number;
         };
         UiDocumentFilterValues: {
@@ -2664,6 +2801,95 @@ export interface components {
             kind?: string | null;
             status?: string | null;
             warning?: string | null;
+        };
+        UiDocumentCollectionAccountingSummary: {
+            /** Format: double */
+            total_estimated_cost?: number | null;
+            /** Format: double */
+            settled_estimated_cost?: number | null;
+            /** Format: double */
+            in_flight_estimated_cost?: number | null;
+            currency?: string | null;
+            prompt_tokens: number;
+            completion_tokens: number;
+            total_tokens: number;
+            priced_stage_count: number;
+            unpriced_stage_count: number;
+            in_flight_stage_count: number;
+            missing_stage_count: number;
+            /** @enum {string} */
+            accounting_status: "priced" | "partial" | "unpriced" | "in_flight_unsettled";
+        };
+        UiDocumentCollectionProgressCounters: {
+            accepted: number;
+            content_extracted: number;
+            chunked: number;
+            embedded: number;
+            extracting_graph: number;
+            graph_ready: number;
+            ready: number;
+            failed: number;
+        };
+        UiDocumentCollectionStageDiagnostics: {
+            stage: string;
+            active_count: number;
+            completed_count: number;
+            failed_count: number;
+            avg_elapsed_ms?: number | null;
+            max_elapsed_ms?: number | null;
+            /** Format: double */
+            total_estimated_cost?: number | null;
+            /** Format: double */
+            settled_estimated_cost?: number | null;
+            /** Format: double */
+            in_flight_estimated_cost?: number | null;
+            currency?: string | null;
+            prompt_tokens: number;
+            completion_tokens: number;
+            total_tokens: number;
+            /** @enum {string} */
+            accounting_status: "priced" | "partial" | "unpriced" | "in_flight_unsettled";
+        };
+        UiDocumentCollectionFormatDiagnostics: {
+            file_type: string;
+            document_count: number;
+            queued_count: number;
+            processing_count: number;
+            ready_count: number;
+            ready_no_graph_count: number;
+            failed_count: number;
+            content_extracted_count: number;
+            chunked_count: number;
+            embedded_count: number;
+            extracting_graph_count: number;
+            graph_ready_count: number;
+            avg_queue_elapsed_ms?: number | null;
+            max_queue_elapsed_ms?: number | null;
+            avg_total_elapsed_ms?: number | null;
+            max_total_elapsed_ms?: number | null;
+            bottleneck_stage?: string | null;
+            bottleneck_avg_elapsed_ms?: number | null;
+            bottleneck_max_elapsed_ms?: number | null;
+            /** Format: double */
+            total_estimated_cost?: number | null;
+            /** Format: double */
+            settled_estimated_cost?: number | null;
+            /** Format: double */
+            in_flight_estimated_cost?: number | null;
+            currency?: string | null;
+            prompt_tokens: number;
+            completion_tokens: number;
+            total_tokens: number;
+            /** @enum {string} */
+            accounting_status: "priced" | "partial" | "unpriced" | "in_flight_unsettled";
+        };
+        UiDocumentCollectionDiagnostics: {
+            progress: components["schemas"]["UiDocumentCollectionProgressCounters"];
+            queue_backlog_count: number;
+            processing_backlog_count: number;
+            active_backlog_count: number;
+            per_stage: components["schemas"]["UiDocumentCollectionStageDiagnostics"][];
+            per_format: components["schemas"]["UiDocumentCollectionFormatDiagnostics"][];
         };
         UiDocumentRevisionHistoryItem: {
             id: string;
@@ -2711,6 +2937,8 @@ export interface components {
             rebuild_backlog_count: number;
             counters: components["schemas"]["UiDocumentSummaryCounters"];
             filters: components["schemas"]["UiDocumentFilterValues"];
+            accounting: components["schemas"]["UiDocumentCollectionAccountingSummary"];
+            diagnostics: components["schemas"]["UiDocumentCollectionDiagnostics"];
             rows: components["schemas"]["UiDocumentRow"][];
         };
         UiUploadDocumentsResponse: {
@@ -2818,7 +3046,17 @@ export interface components {
             grounding_status?: "grounded" | "partial" | "weak" | "none" | "null" | null;
             provider?: components["schemas"]["UiGraphAssistantProvider"] | null;
             references: components["schemas"]["UiGraphAssistantReference"][];
+            planning?: components["schemas"]["UiQueryPlanningMetadata"] | null;
+            rerank?: components["schemas"]["UiRerankMetadata"] | null;
+            context_assembly?: components["schemas"]["UiContextAssemblyMetadata"] | null;
             warning?: string | null;
+            warning_kind?: string | null;
+        };
+        UiGraphAssistantFocusContext: {
+            node_id: string;
+            label: string;
+            summary: string;
+            removable: boolean;
         };
         UiGraphAssistant: {
             title: string;
@@ -2826,14 +3064,21 @@ export interface components {
             prompts: string[];
             disclaimer: string;
             session_id?: string | null;
+            recent_sessions: components["schemas"]["ChatSessionSummary"][];
+            active_session?: components["schemas"]["ChatSessionDetail"] | null;
+            settings_summary?: components["schemas"]["ChatSessionSettings"] | null;
+            focus_context?: components["schemas"]["UiGraphAssistantFocusContext"] | null;
             messages: components["schemas"]["UiGraphAssistantMessage"][];
         };
         UiGraphSurfaceResponse: {
             /** @enum {string} */
             graph_status: "empty" | "building" | "ready" | "partial" | "failed" | "stale";
+            /** @enum {string|null} */
+            convergence_status?: "current" | "partial" | "degraded" | "null" | null;
             projection_version: number;
             node_count: number;
             relation_count: number;
+            filtered_artifact_count?: number | null;
             /** Format: date-time */
             last_built_at?: string | null;
             warning?: string | null;
@@ -2925,6 +3170,12 @@ export interface components {
             user_message_id: string;
             assistant_message_id: string;
             query_id: string;
+            /** @enum {string} */
+            effective_mode: "document" | "local" | "global" | "hybrid" | "mix";
+            session_summary?: components["schemas"]["ChatSessionDetail"] | null;
+            settings_summary?: components["schemas"]["ChatSessionSettings"] | null;
+            user_message: components["schemas"]["UiGraphAssistantMessage"];
+            assistant_message: components["schemas"]["UiGraphAssistantMessage"];
             answer: string;
             references: string[];
             structured_references: components["schemas"]["UiGraphAssistantReference"][];
@@ -2933,7 +3184,11 @@ export interface components {
             /** @enum {string} */
             grounding_status: "grounded" | "partial" | "weak" | "none";
             provider: components["schemas"]["UiGraphAssistantProvider"];
+            planning: components["schemas"]["UiQueryPlanningMetadata"];
+            rerank: components["schemas"]["UiRerankMetadata"];
+            context_assembly: components["schemas"]["UiContextAssemblyMetadata"];
             warning?: string | null;
+            warning_kind?: string | null;
         };
         UiAdminTabCounts: {
             api_tokens: number;
@@ -3212,6 +3467,94 @@ export interface components {
             summary: components["schemas"]["RuntimeDocumentSummary"];
             warnings: components["schemas"]["ApiWarningBody"][];
             rows: components["schemas"]["RuntimeDocumentRow"][];
+        };
+        RuntimeCollectionProgressCountersResponse: {
+            accepted: number;
+            contentExtracted: number;
+            chunked: number;
+            embedded: number;
+            extractingGraph: number;
+            graphReady: number;
+            ready: number;
+            failed: number;
+        };
+        RuntimeCollectionStageDiagnosticsResponse: {
+            stage: string;
+            activeCount: number;
+            completedCount: number;
+            failedCount: number;
+            avgElapsedMs?: number | null;
+            maxElapsedMs?: number | null;
+            /** Format: double */
+            totalEstimatedCost?: number | null;
+            /** Format: double */
+            settledEstimatedCost?: number | null;
+            /** Format: double */
+            inFlightEstimatedCost?: number | null;
+            currency?: string | null;
+            promptTokens: number;
+            completionTokens: number;
+            totalTokens: number;
+            /** @enum {string} */
+            accountingStatus: "priced" | "partial" | "unpriced" | "in_flight_unsettled";
+        };
+        RuntimeCollectionFormatDiagnosticsResponse: {
+            fileType: string;
+            documentCount: number;
+            queuedCount: number;
+            processingCount: number;
+            readyCount: number;
+            readyNoGraphCount: number;
+            failedCount: number;
+            contentExtractedCount: number;
+            chunkedCount: number;
+            embeddedCount: number;
+            extractingGraphCount: number;
+            graphReadyCount: number;
+            avgQueueElapsedMs?: number | null;
+            maxQueueElapsedMs?: number | null;
+            avgTotalElapsedMs?: number | null;
+            maxTotalElapsedMs?: number | null;
+            bottleneckStage?: string | null;
+            bottleneckAvgElapsedMs?: number | null;
+            bottleneckMaxElapsedMs?: number | null;
+            /** Format: double */
+            totalEstimatedCost?: number | null;
+            /** Format: double */
+            settledEstimatedCost?: number | null;
+            /** Format: double */
+            inFlightEstimatedCost?: number | null;
+            currency?: string | null;
+            promptTokens: number;
+            completionTokens: number;
+            totalTokens: number;
+            /** @enum {string} */
+            accountingStatus: "priced" | "partial" | "unpriced" | "in_flight_unsettled";
+        };
+        RuntimeCollectionDiagnosticsResponse: {
+            documentCount: number;
+            progress: components["schemas"]["RuntimeCollectionProgressCountersResponse"];
+            queueBacklogCount: number;
+            processingBacklogCount: number;
+            activeBacklogCount: number;
+            /** Format: double */
+            totalEstimatedCost?: number | null;
+            /** Format: double */
+            settledEstimatedCost?: number | null;
+            /** Format: double */
+            inFlightEstimatedCost?: number | null;
+            currency?: string | null;
+            promptTokens: number;
+            completionTokens: number;
+            totalTokens: number;
+            pricedStageCount: number;
+            unpricedStageCount: number;
+            inFlightStageCount: number;
+            missingStageCount: number;
+            /** @enum {string} */
+            accountingStatus: "priced" | "partial" | "unpriced" | "in_flight_unsettled";
+            perStage: components["schemas"]["RuntimeCollectionStageDiagnosticsResponse"][];
+            perFormat: components["schemas"]["RuntimeCollectionFormatDiagnosticsResponse"][];
         };
         RuntimeExtractionDetail: {
             extractionKind: string;
@@ -3541,6 +3884,9 @@ export interface components {
             groundingStatus: "grounded" | "partial" | "weak" | "none";
             references: components["schemas"]["RuntimeQueryReference"][];
             provider: components["schemas"]["RuntimeProviderDescriptor"];
+            warning?: string | null;
+            /** @enum {string|null} */
+            warningKind?: "partial_convergence" | "null" | null;
         };
         RuntimeStructuredQueryResponse: {
             /** Format: uuid */
@@ -3562,6 +3908,9 @@ export interface components {
             groundingStatus: "grounded" | "partial" | "weak" | "none";
             references: components["schemas"]["RuntimeQueryReference"][];
             provider: components["schemas"]["RuntimeProviderDescriptor"];
+            warning?: string | null;
+            /** @enum {string|null} */
+            warningKind?: "partial_convergence" | "null" | null;
         };
     };
     responses: {
@@ -5452,6 +5801,89 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    createChatSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChatSessionCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Newly created chat session envelope */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChatSessionEnvelope"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getChatSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Chat session envelope */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChatSessionEnvelope"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    updateChatSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChatSessionUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated chat session envelope */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChatSessionEnvelope"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     listChatMessages: {
         parameters: {
             query?: never;
@@ -5469,7 +5901,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ChatMessageItem"][];
+                    "application/json": components["schemas"]["ChatThreadMessage"][];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -5999,6 +6431,31 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getRuntimeDocumentDiagnostics: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: components["parameters"]["libraryId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Runtime collection diagnostics payload */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeCollectionDiagnosticsResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
             500: components["responses"]["InternalError"];
         };
     };

@@ -50,6 +50,7 @@ const ru = {
     allMutations: 'Все состояния мутаций',
     allTypes: 'Все типы',
     attemptShort: 'Попытка #{number}',
+    averageCostHint: 'Средняя стоимость: {value}',
     loadingDetail: 'Загрузка деталей документа…',
     uploadQueuedHint: 'Принятые файлы сразу ставятся в очередь и продолжают обрабатываться в фоне.',
     uploadReport: {
@@ -90,6 +91,7 @@ const ru = {
       priced: 'Полностью оценено',
       partial: 'Частично оценено',
       unpriced: 'Без оценки',
+      in_flight_unsettled: 'В процессе',
     },
     attribution: {
       stage_native: 'Родной этап',
@@ -171,15 +173,19 @@ const ru = {
     },
     importGuide: {
       title: 'Прогресс библиотеки',
-      active: 'Ещё {count} документ(ов) в работе. Пока backlog не опустеет, граф и стоимость нужно считать частичными.',
+      active:
+        'Ещё {count} документ(ов) в работе. Пока backlog не опустеет, граф и стоимость нужно считать частичными.',
       activeWithBacklog:
         'Ещё {count} документ(ов) в работе, и {backlog} задач(и) по графу всё ещё догоняют изменения.',
+      extractedOnly:
+        'У {count} документ(ов) уже есть извлечённый текст, но чанкинг или графовые этапы ещё не завершены.',
       partial: 'Основной ingest почти завершён, но сходимость графа ещё догоняет.',
       reconciling:
         'Основной ingest почти завершён, но {count} графовых задач(и) ещё должны досвести библиотеку до актуального состояния.',
       readyNoGraph:
         'У {count} обработанных документов всё ещё нет подтверждённых графовых связей, поэтому библиотека ещё не полностью сошлась.',
-      ready: 'У активной библиотеки нет видимого backlog. Документы и граф вышли в стабильное состояние.',
+      ready:
+        'У активной библиотеки нет видимого backlog. Документы и граф вышли в стабильное состояние.',
     },
     contributionSummary: '{chunks} чанков · {nodes} узлов · {edges} связей',
     dialogs: {
@@ -213,6 +219,10 @@ const ru = {
       lastActivity: 'Последняя активность',
       latestAttempt: 'Последняя попытка',
       totalCost: 'Последняя итоговая стоимость',
+      settledCost: 'Подтвержденная стоимость',
+      inFlightCost: 'Стоимость в работе',
+      inFlightStages: 'Активных billable этапов',
+      missingAccountingStages: 'Этапов без учета',
       accountingStatus: 'Статус учета',
       fileSize: 'Размер файла',
       actionsTitle: 'Действия',
@@ -222,7 +232,8 @@ const ru = {
       downloadText: 'Скачать текст',
       summary: {
         ready: 'Документ обработан, получено чанков: {count}, граф готов.',
-        readyNoGraph: 'Документ обработан, получено чанков: {count}, но графовые связи пока не найдены.',
+        readyNoGraph:
+          'Документ обработан, получено чанков: {count}, но графовые связи пока не найдены.',
         failed: 'Обработка завершилась ошибкой и может потребовать повторного запуска.',
         processing: 'Документ сейчас обрабатывается.',
         queued: 'Документ ожидает своей очереди на обработку.',
@@ -233,7 +244,18 @@ const ru = {
       checksum: 'Контрольная сумма',
       pageCount: 'Страниц',
       extractionKind: 'Тип извлечения',
+      preview: 'Предпросмотр извлечённого текста',
+      previewTruncated: 'Предпросмотр обрезан. Используйте «Скачать текст», чтобы посмотреть всё нормализованное содержимое.',
+      normalizationStatus: 'Нормализация',
+      ocrSource: 'Источник OCR',
+      warningCount: 'Количество предупреждений',
       warnings: 'Предупреждения',
+      graphProgress: {
+        title: 'Прогресс извлечения графа',
+        summary: 'Извлечение графа ещё выполняется: {progress}% по {chunks} чанкам.',
+        stage: 'Этап',
+        percent: 'Видимый прогресс',
+      },
       graphStats: 'Вклад в граф',
       graphNodes: 'Узлы',
       graphEdges: 'Связи',
@@ -253,6 +275,42 @@ const ru = {
       mutationWarning: 'Предупреждение по мутации',
       history: 'История обработки',
     },
+    normalization: {
+      verbatim: 'Без нормализации',
+      normalized: 'Нормализовано',
+    },
+    ocrSource: {
+      vision_llm: 'OCR через vision-модель',
+    },
+    collectionAccounting: {
+      title: 'Учет по коллекции',
+      totalCost: 'Итог по коллекции',
+      settledCost: 'Подтверждено',
+      inFlightCost: 'В работе',
+      inFlightBanner: 'Уже видимые расходы LLM в работе: {cost} по {count} активным этапам.',
+      missingBanner: 'У {count} billable этапов пока нет сохраненного учета.',
+    },
+    diagnostics: {
+      title: 'Диагностика коллекции',
+      backlog: 'Очередь: {queued} · В обработке: {processing}',
+      tableTitle: 'Очередь обработки',
+      tableSummary: 'Ещё {active} документ(ов) требуют внимания оператора.',
+      tableSummaryWithBottleneck:
+        'Ещё {active} документ(ов) активны; самый медленный формат сейчас {fileType} на этапе {stage}.',
+      stageSummary: 'Активно {active} · Завершено {completed} · С ошибкой {failed}',
+      timing: 'Среднее {avg} · Максимум {max}',
+      formatSummary: 'Документов {documents} · Готово {ready} · Ошибок {failed}',
+      queueTiming: 'Очередь {avg} в среднем · Полное время {total} в среднем',
+      bottleneck: 'Узкое место: {stage} · Среднее {avg}',
+      progress: {
+        accepted: 'Принято',
+        contentExtracted: 'Текст извлечён',
+        chunked: 'Чанкинг завершён',
+        embedded: 'Эмбеддинги готовы',
+        extractingGraph: 'Граф извлекается',
+        graphReady: 'Граф готов',
+      },
+    },
   },
   graph: {
     title: 'Граф',
@@ -268,6 +326,8 @@ const ru = {
     relations: 'связей',
     legend: 'Легенда',
     fit: 'Вписать',
+    zoomIn: 'Приблизить',
+    zoomOut: 'Отдалить',
     layouts: {
       cloud: 'Облако',
       circle: 'Круг',
@@ -289,6 +349,45 @@ const ru = {
     assistantDisclaimer:
       'AI-ответы строятся по активной библиотеке и могут быть неполными, пока покрытие графа ещё достраивается.',
     assistantEmpty: 'Спрашивайте о документах, сущностях и связях в этой библиотеке.',
+    chat: {
+      recentChats: 'Недавние чаты',
+      historyButton: 'История ({count})',
+      closeHistory: 'Закрыть историю',
+      emptyHistory: 'Сохранённых чатов пока нет.',
+      emptyChat: 'Пустой чат',
+      newChat: 'Новый чат',
+      newChatAction: 'Новый чат',
+      settingsButton: 'Настройки',
+      updatedLabel: 'Обновлён {value}',
+      justNow: 'только что',
+      thinking: 'AI думает…',
+      settingsTitle: 'Настройки чата',
+      settingsDescription:
+        'Отредактируйте системный промпт и предпочитаемый режим поиска для этого чата.',
+      systemPrompt: 'Системный промпт',
+      systemPromptHelp:
+        'Держите промпт grounded на активной библиотеке. Просите ассистента переходить к полному документу, когда фрагментов недостаточно.',
+      preferredMode: 'Предпочитаемый режим',
+      restoreDefault: 'Вернуть дефолт',
+      cancel: 'Отмена',
+      save: 'Сохранить',
+      unsavedChanges: 'Есть несохранённые изменения',
+      defaultBadge: 'Дефолтный промпт',
+      customizedBadge: 'Изменённый промпт',
+      resizePanel: 'Изменить ширину панели чата',
+      focusedOn: 'Фокус на узле',
+      removeFocus: 'Убрать фокус',
+      warningState: {
+        info: 'Контекстная пометка',
+        warning: 'Предупреждение о покрытии',
+        critical: 'Риск слабой опоры',
+      },
+      sourceCount: '{count} источников',
+      validation: {
+        empty: 'Системный промпт не может быть пустым.',
+        too_long: 'Системный промпт слишком длинный.',
+      },
+    },
     defaultPrompts: {
       connectedEntities: 'Кратко опиши самые связанные сущности в этой библиотеке.',
       topEvidence: 'Какие документы дают больше всего доказательств для графа?',
@@ -302,9 +401,11 @@ const ru = {
     },
     queryModeHelp: {
       document: {
-        description: 'Ищет прямо по фрагментам документов и держит ответ максимально близко к исходному тексту.',
+        description:
+          'Ищет прямо по фрагментам документов и держит ответ максимально близко к исходному тексту.',
         bestFor: 'Поиска точного упоминания или проверки, где именно это написано.',
-        caution: 'Может не показать связи, которые собираются только через граф из нескольких документов.',
+        caution:
+          'Может не показать связи, которые собираются только через граф из нескольких документов.',
         example: 'В каком документе упоминаются Sarah Chen и согласование бюджета?',
       },
       local: {
@@ -369,6 +470,9 @@ const ru = {
     toolbarBacklog: '{count} в backlog',
     toolbarReadyNoGraph: '{count} без графа',
     toolbarFilteredArtifacts: '{count} отфильтровано',
+    artifacts: 'Артефакты',
+    artifactsHidden: 'Скрыты',
+    artifactsShown: 'Показаны',
     showFilteredArtifacts: 'Показать артефакты ({count})',
     hideFilteredArtifacts: 'Скрыть артефакты',
     showingFilteredArtifactsHint:
@@ -418,7 +522,8 @@ const ru = {
     },
     convergenceDescriptions: {
       current: 'Покрытие графа сейчас соответствует активной подтверждённой истине.',
-      partial: 'Граф уже полезен, но активная библиотека ещё сходится, поэтому ответы могут измениться.',
+      partial:
+        'Граф уже полезен, но активная библиотека ещё сходится, поэтому ответы могут измениться.',
       degraded: 'Истина графа временно деградирована из-за устаревшей или неуспешной проекции.',
     },
     statusDescriptions: {
@@ -579,10 +684,12 @@ const ru = {
     },
     pricing: {
       title: 'Каталог цен моделей',
-      subtitle: 'Управляйте effective-dated ценами, которые используются для новых попыток обработки.',
+      subtitle:
+        'Управляйте effective-dated ценами, которые используются для новых попыток обработки.',
       createTitle: 'Создать запись цены',
       editTitle: 'Создать новую версию цены',
-      formSubtitle: 'Новые цены влияют только на будущие попытки и не меняют исторические snapshots.',
+      formSubtitle:
+        'Новые цены влияют только на будущие попытки и не меняют исторические snapshots.',
       coverageTitle: 'Проверка покрытия',
       coverageSubtitle: 'Предупреждения ниже рассчитаны для текущего стека моделей библиотеки.',
       coverageWarningsTitle: 'Цели без активной цены',

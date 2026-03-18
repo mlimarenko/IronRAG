@@ -14,7 +14,7 @@ use crate::{
         GraphNodeDetailModel, GraphNodeModel, GraphRelatedEdgeModel, GraphSearchHitModel,
         GraphSurfaceModel,
     },
-    infra::ui_queries,
+    infra::{repositories, ui_queries},
     interfaces::http::{
         retrieval::{QueryRequest, run_query_with_workspace},
         router_support::ApiError,
@@ -136,6 +136,70 @@ fn map_runtime_diagnostics(diagnostics: RuntimeGraphDiagnosticsResponse) -> Grap
         blockers: diagnostics.blockers,
         warning: diagnostics.warning,
         graph_backend: diagnostics.graph_backend,
+    }
+}
+
+fn map_chat_session_detail(
+    detail: repositories::ChatSessionDetailRow,
+) -> crate::domains::ui_chat::ChatSessionDetailModel {
+    crate::domains::ui_chat::ChatSessionDetailModel {
+        session_id: detail.id.to_string(),
+        title: detail.title,
+        message_count: detail.message_count,
+        last_message_preview: detail
+            .last_message_preview
+            .map(|value| value.split_whitespace().collect::<Vec<_>>().join(" ")),
+        created_at: detail.created_at.to_rfc3339(),
+        updated_at: detail.updated_at.to_rfc3339(),
+        prompt_state: detail.prompt_state,
+        preferred_mode: detail.preferred_mode,
+        is_empty: detail.message_count == 0,
+    }
+}
+
+fn map_chat_session_settings(
+    detail: &repositories::ChatSessionDetailRow,
+) -> crate::domains::ui_chat::ChatSessionSettingsModel {
+    crate::domains::ui_chat::ChatSessionSettingsModel {
+        session_id: detail.id.to_string(),
+        system_prompt: detail.system_prompt.clone(),
+        prompt_state: detail.prompt_state.clone(),
+        preferred_mode: detail.preferred_mode.clone(),
+        default_prompt_available: true,
+    }
+}
+
+fn map_graph_assistant_message(
+    id: String,
+    role: &str,
+    content: String,
+    created_at: String,
+    query_id: Option<String>,
+    mode: Option<String>,
+    grounding_status: Option<String>,
+    provider: Option<GraphAssistantProviderModel>,
+    references: Vec<GraphAssistantReferenceModel>,
+    planning: Option<crate::domains::query_intelligence::QueryPlanningMetadata>,
+    rerank: Option<crate::domains::query_intelligence::RerankMetadata>,
+    context_assembly: Option<crate::domains::query_intelligence::ContextAssemblyMetadata>,
+    warning: Option<String>,
+    warning_kind: Option<String>,
+) -> crate::domains::ui_graph::GraphAssistantMessageModel {
+    crate::domains::ui_graph::GraphAssistantMessageModel {
+        id,
+        role: role.to_string(),
+        content,
+        created_at,
+        query_id,
+        mode,
+        grounding_status,
+        provider,
+        references,
+        planning,
+        rerank,
+        context_assembly,
+        warning,
+        warning_kind,
     }
 }
 
@@ -318,24 +382,74 @@ async fn ask_graph_assistant(
         "completed ui graph assistant request"
     );
 
+    let session_detail = repositories::get_chat_session_detail_by_id(
+        &state.persistence.postgres,
+        response.session_id,
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    let session_summary = session_detail.clone().map(map_chat_session_detail);
+    let settings_summary = session_detail.as_ref().map(map_chat_session_settings);
+    let structured_references = response
+        .structured_references
+        .iter()
+        .map(|reference| GraphAssistantReferenceModel {
+            kind: reference.kind.clone(),
+            reference_id: reference.reference_id.to_string(),
+            excerpt: reference.excerpt.clone(),
+            rank: reference.rank,
+            score: reference.score,
+        })
+        .collect::<Vec<_>>();
+    let user_message = map_graph_assistant_message(
+        response.user_message_id.to_string(),
+        "user",
+        question.to_string(),
+        chrono::Utc::now().to_rfc3339(),
+        None,
+        Some(response.mode.clone()),
+        None,
+        None,
+        Vec::new(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    let assistant_message = map_graph_assistant_message(
+        response.assistant_message_id.to_string(),
+        "assistant",
+        response.answer.clone(),
+        chrono::Utc::now().to_rfc3339(),
+        Some(response.query_id.to_string()),
+        Some(response.mode.clone()),
+        Some(response.grounding_status.clone()),
+        Some(GraphAssistantProviderModel {
+            provider_kind: response.provider.provider_kind.clone(),
+            model_name: response.provider.model_name.clone(),
+        }),
+        structured_references.clone(),
+        Some(response.planning.clone()),
+        Some(response.rerank.clone()),
+        Some(response.context_assembly.clone()),
+        response.warning.clone(),
+        response.warning_kind.clone(),
+    );
+
     Ok(Json(GraphAssistantAnswerModel {
         session_id: response.session_id.to_string(),
         user_message_id: response.user_message_id.to_string(),
         assistant_message_id: response.assistant_message_id.to_string(),
         query_id: response.query_id.to_string(),
+        effective_mode: response.mode.clone(),
+        session_summary,
+        settings_summary,
+        user_message,
+        assistant_message,
         answer: response.answer,
         references: response.references,
-        structured_references: response
-            .structured_references
-            .into_iter()
-            .map(|reference| GraphAssistantReferenceModel {
-                kind: reference.kind,
-                reference_id: reference.reference_id.to_string(),
-                excerpt: reference.excerpt,
-                rank: reference.rank,
-                score: reference.score,
-            })
-            .collect(),
+        structured_references,
         mode: response.mode,
         grounding_status: response.grounding_status,
         provider: GraphAssistantProviderModel {

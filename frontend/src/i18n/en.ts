@@ -50,8 +50,10 @@ const en = {
     allMutations: 'All mutation states',
     allTypes: 'All types',
     attemptShort: 'Attempt #{number}',
+    averageCostHint: 'Average cost: {value}',
     loadingDetail: 'Loading document detail…',
-    uploadQueuedHint: 'Accepted files are queued immediately and continue processing in the background.',
+    uploadQueuedHint:
+      'Accepted files are queued immediately and continue processing in the background.',
     uploadReport: {
       title: 'Upload report',
       summary: '{count} file(s) were rejected during upload.',
@@ -90,6 +92,7 @@ const en = {
       priced: 'Priced',
       partial: 'Partial',
       unpriced: 'Unpriced',
+      in_flight_unsettled: 'In flight',
     },
     attribution: {
       stage_native: 'Native stage',
@@ -171,15 +174,19 @@ const en = {
     },
     importGuide: {
       title: 'Library progress',
-      active: '{count} document(s) are still in flight. Treat graph and cost surfaces as partial until the backlog clears.',
+      active:
+        '{count} document(s) are still in flight. Treat graph and cost surfaces as partial until the backlog clears.',
       activeWithBacklog:
         '{count} document(s) are still in flight and {backlog} graph follow-up task(s) are still reconciling.',
+      extractedOnly:
+        '{count} document(s) already have extracted text, but chunking or graph work has not finished yet.',
       partial: 'Document ingestion is mostly done, but graph convergence is still catching up.',
       reconciling:
         'Document ingestion is mostly done, but {count} graph follow-up task(s) still need to converge before the library is current.',
       readyNoGraph:
         '{count} processed document(s) still have no admitted graph evidence, so the library is not fully converged yet.',
-      ready: 'The active library has no visible backlog. Document and graph surfaces are in their steady state.',
+      ready:
+        'The active library has no visible backlog. Document and graph surfaces are in their steady state.',
     },
     contributionSummary: '{chunks} chunks · {nodes} nodes · {edges} edges',
     dialogs: {
@@ -213,6 +220,10 @@ const en = {
       lastActivity: 'Last activity',
       latestAttempt: 'Latest attempt',
       totalCost: 'Latest total cost',
+      settledCost: 'Settled cost',
+      inFlightCost: 'In-flight cost',
+      inFlightStages: 'In-flight stages',
+      missingAccountingStages: 'Missing accounting stages',
       accountingStatus: 'Accounting status',
       fileSize: 'File size',
       actionsTitle: 'Actions',
@@ -222,7 +233,8 @@ const en = {
       downloadText: 'Download text',
       summary: {
         ready: 'Document processed into {count} chunks and is graph-ready.',
-        readyNoGraph: 'Document processed into {count} chunks, but no graph evidence was linked yet.',
+        readyNoGraph:
+          'Document processed into {count} chunks, but no graph evidence was linked yet.',
         failed: 'Processing failed and may need another attempt.',
         processing: 'Document is being processed right now.',
         queued: 'Document is waiting in the processing queue.',
@@ -233,7 +245,18 @@ const en = {
       checksum: 'Checksum',
       pageCount: 'Page count',
       extractionKind: 'Extraction kind',
+      preview: 'Extracted text preview',
+      previewTruncated: 'Preview is truncated. Use Download text to inspect the full normalized body.',
+      normalizationStatus: 'Normalization',
+      ocrSource: 'OCR source',
+      warningCount: 'Warning count',
       warnings: 'Warnings',
+      graphProgress: {
+        title: 'Graph extraction progress',
+        summary: 'Graph extraction is still running: {progress}% across {chunks} chunk(s).',
+        stage: 'Stage',
+        percent: 'Visible progress',
+      },
       graphStats: 'Graph contribution',
       graphNodes: 'Nodes',
       graphEdges: 'Edges',
@@ -253,6 +276,42 @@ const en = {
       mutationWarning: 'Mutation warning',
       history: 'Processing history',
     },
+    normalization: {
+      verbatim: 'Verbatim',
+      normalized: 'Normalized',
+    },
+    ocrSource: {
+      vision_llm: 'Vision model OCR',
+    },
+    collectionAccounting: {
+      title: 'Collection accounting',
+      totalCost: 'Collection total',
+      settledCost: 'Settled',
+      inFlightCost: 'In flight',
+      inFlightBanner: 'Visible in-flight LLM spend: {cost} across {count} active stage(s).',
+      missingBanner: '{count} billable stage(s) still have no persisted accounting.',
+    },
+    diagnostics: {
+      title: 'Collection diagnostics',
+      backlog: 'Queue backlog: {queued} · Processing backlog: {processing}',
+      tableTitle: 'Processing queue',
+      tableSummary: '{active} active document(s) still need operator attention.',
+      tableSummaryWithBottleneck:
+        '{active} active document(s); slowest format right now is {fileType} in {stage}.',
+      stageSummary: 'Active {active} · Completed {completed} · Failed {failed}',
+      timing: 'Avg {avg} · Max {max}',
+      formatSummary: '{documents} document(s) · {ready} ready · {failed} failed',
+      queueTiming: 'Queue {avg} avg · Total {total} avg',
+      bottleneck: 'Bottleneck: {stage} · Avg {avg}',
+      progress: {
+        accepted: 'Accepted',
+        contentExtracted: 'Text extracted',
+        chunked: 'Chunked',
+        embedded: 'Embedded',
+        extractingGraph: 'Graph running',
+        graphReady: 'Graph ready',
+      },
+    },
   },
   graph: {
     title: 'Graph',
@@ -268,6 +327,8 @@ const en = {
     relations: 'relations',
     legend: 'Legend',
     fit: 'Fit',
+    zoomIn: 'Zoom in',
+    zoomOut: 'Zoom out',
     layouts: {
       cloud: 'Cloud',
       circle: 'Circle',
@@ -289,6 +350,44 @@ const en = {
     assistantDisclaimer:
       'AI answers are generated from the active library and may be incomplete if graph coverage is still building.',
     assistantEmpty: 'Ask about documents, entities, and relationships in this library.',
+    chat: {
+      recentChats: 'Recent chats',
+      historyButton: 'History ({count})',
+      closeHistory: 'Close history',
+      emptyHistory: 'No saved chats yet.',
+      emptyChat: 'Empty chat',
+      newChat: 'New chat',
+      newChatAction: 'New chat',
+      settingsButton: 'Settings',
+      updatedLabel: 'Updated {value}',
+      justNow: 'just now',
+      thinking: 'AI is thinking…',
+      settingsTitle: 'Chat settings',
+      settingsDescription: 'Edit the system prompt and preferred retrieval mode for this chat.',
+      systemPrompt: 'System prompt',
+      systemPromptHelp:
+        'Keep the prompt grounded in the active library. Ask the assistant to broaden to full-document context when fragments are not enough.',
+      preferredMode: 'Preferred mode',
+      restoreDefault: 'Restore default',
+      cancel: 'Cancel',
+      save: 'Save',
+      unsavedChanges: 'Unsaved changes',
+      defaultBadge: 'Default prompt',
+      customizedBadge: 'Customized prompt',
+      resizePanel: 'Resize chat panel',
+      focusedOn: 'Focused on',
+      removeFocus: 'Remove focus',
+      warningState: {
+        info: 'Context note',
+        warning: 'Coverage warning',
+        critical: 'Grounding risk',
+      },
+      sourceCount: '{count} sources',
+      validation: {
+        empty: 'The system prompt cannot be empty.',
+        too_long: 'The system prompt is too long.',
+      },
+    },
     defaultPrompts: {
       connectedEntities: 'Summarize the most connected entities in this library.',
       topEvidence: 'Which documents contribute the most graph evidence?',
@@ -302,34 +401,41 @@ const en = {
     },
     queryModeHelp: {
       document: {
-        description: 'Searches direct document chunks and keeps the answer closest to the source text.',
+        description:
+          'Searches direct document chunks and keeps the answer closest to the source text.',
         bestFor: 'Finding where something is written or checking exact mentions.',
         caution: 'It can miss graph relationships that are implied across multiple documents.',
         example: 'Which document mentions Sarah Chen and budget approval?',
       },
       local: {
-        description: 'Starts from the nearest entities and expands around their local graph neighborhood.',
+        description:
+          'Starts from the nearest entities and expands around their local graph neighborhood.',
         bestFor: 'Questions about one person, company, topic, or node and its nearby links.',
         caution: 'It can stay too narrow when you really need a cross-library overview.',
         example: 'Tell me about Sarah Chen and the entities directly linked to her.',
       },
       global: {
         description: 'Looks for broader relationship patterns and themes across the graph.',
-        bestFor: 'Questions about the overall network, major themes, or the most connected relationships.',
+        bestFor:
+          'Questions about the overall network, major themes, or the most connected relationships.',
         caution: 'It is less useful when you need a precise supporting quote from one document.',
         example: 'What relationship patterns are most visible across this library?',
       },
       hybrid: {
         description: 'Combines graph-local retrieval with direct document support.',
-        bestFor: 'Balanced answers that should explain something and also stay close to source evidence.',
-        caution: 'It can still be narrower than Mix when the question spans both local and global patterns.',
+        bestFor:
+          'Balanced answers that should explain something and also stay close to source evidence.',
+        caution:
+          'It can still be narrower than Mix when the question spans both local and global patterns.',
         example: 'What do we know about the budget review process and where is it supported?',
       },
       mix: {
-        description: 'Uses local graph context, global graph context, and document chunks together.',
+        description:
+          'Uses local graph context, global graph context, and document chunks together.',
         bestFor: 'Broad questions where you want the widest grounded search before answering.',
         caution: 'It can surface more context than you need for a very exact document lookup.',
-        example: 'How are the main people, topics, and documents connected around the rollout plan?',
+        example:
+          'How are the main people, topics, and documents connected around the rollout plan?',
       },
     },
     assistantMeta: {
@@ -369,6 +475,9 @@ const en = {
     toolbarBacklog: '{count} in backlog',
     toolbarReadyNoGraph: '{count} without graph',
     toolbarFilteredArtifacts: '{count} filtered',
+    artifacts: 'Artifacts',
+    artifactsHidden: 'Hidden',
+    artifactsShown: 'Shown',
     showFilteredArtifacts: 'Show artifacts ({count})',
     hideFilteredArtifacts: 'Hide artifacts',
     showingFilteredArtifactsHint:
@@ -418,7 +527,8 @@ const en = {
     },
     convergenceDescriptions: {
       current: 'Graph coverage currently matches the active admitted truth.',
-      partial: 'Graph coverage is usable, but the active library is still converging and answers can change.',
+      partial:
+        'Graph coverage is usable, but the active library is still converging and answers can change.',
       degraded: 'Graph truth is temporarily degraded by stale or failed projection state.',
     },
     statusDescriptions: {
@@ -566,7 +676,8 @@ const en = {
       },
       pricingCoverage: {
         title: 'Pricing coverage',
-        subtitle: 'Coverage is calculated from the current provider profile and active pricing rows.',
+        subtitle:
+          'Coverage is calculated from the current provider profile and active pricing rows.',
         covered: 'Covered targets',
         missing: 'Missing targets',
         warningTitle: 'Missing active prices',
@@ -582,9 +693,11 @@ const en = {
       subtitle: 'Manage effective-dated prices used for all new document attempts.',
       createTitle: 'Create pricing entry',
       editTitle: 'Supersede pricing entry',
-      formSubtitle: 'New prices apply only to future attempts and keep historical snapshots intact.',
+      formSubtitle:
+        'New prices apply only to future attempts and keep historical snapshots intact.',
       coverageTitle: 'Coverage review',
-      coverageSubtitle: 'These warnings reflect the current library model stack and active pricing windows.',
+      coverageSubtitle:
+        'These warnings reflect the current library model stack and active pricing windows.',
       coverageWarningsTitle: 'Targets still missing active prices',
       rowsTitle: 'Catalog rows',
       rowsSubtitle: 'Active and inactive pricing windows ordered by effective date.',

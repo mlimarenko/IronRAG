@@ -2,42 +2,54 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use chrono::{DateTime, Utc};
 use rust_decimal::prelude::ToPrimitive;
+use serde::Deserialize;
 use serde_json::Value;
-use sqlx::{FromRow, PgPool};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
     domains::{
-        pricing_catalog::{PricingBillingUnit, PricingCapability},
         query_modes::RuntimeQueryMode,
         ui_admin::{
             AdminMemberModel, AdminOverviewModel, AdminSettingItemModel, AdminTabAvailability,
             AdminTabCounts, ApiTokenRowModel, LibraryAccessRowModel,
         },
+        ui_chat::{ChatSessionDetailModel, ChatSessionSettingsModel, ChatSessionSummaryModel},
         ui_documents::{
-            DocumentAttemptGroup, DocumentAttemptSummary, DocumentDetailModel,
-            DocumentExtractedStats, DocumentFilterValues, DocumentGraphStats, DocumentHistoryItem,
-            DocumentListItem, DocumentMutationState, DocumentRevisionHistoryItem,
-            DocumentStageAccountingItem, DocumentStageBenchmarkItem, DocumentSummaryCounters,
-            DocumentSurfaceModel,
+            DocumentAttemptGroup, DocumentAttemptSummary, DocumentCollectionAccountingSummary,
+            DocumentCollectionDiagnostics, DocumentCollectionFormatDiagnostics,
+            DocumentCollectionProgressCounters, DocumentCollectionStageDiagnostics,
+            DocumentDetailModel, DocumentExtractedStats, DocumentFilterValues, DocumentGraphStats,
+            DocumentHistoryItem, DocumentListItem, DocumentMutationState,
+            DocumentRevisionHistoryItem, DocumentStageAccountingItem, DocumentStageBenchmarkItem,
+            DocumentSummaryCounters, DocumentSurfaceModel,
         },
         ui_graph::{
             GraphAssistantMessageModel, GraphAssistantModel, GraphAssistantProviderModel,
             GraphAssistantReferenceModel,
         },
         ui_identity::{UiSession, UiUser},
-        usage_governance::{RuntimeStageBillingPolicy, runtime_stage_billing_policy},
     },
     infra::repositories::{
         self, ApiTokenRow, AttemptStageAccountingRow, DocumentRevisionRow,
         IngestionExecutionPayload, IngestionJobRow, LogicalDocumentProjectionRow, ProjectRow,
+        RuntimeCollectionFormatRollupRow, RuntimeCollectionProgressRollupRow,
+        RuntimeCollectionResolvedStageAccountingRow, RuntimeCollectionStageRollupRow,
         RuntimeDocumentContributionSummaryRow, RuntimeExtractedContentRow, RuntimeIngestionRunRow,
         RuntimeIngestionStageEventRow, UiSessionRow, UiUserRow, WorkspaceRow,
     },
     services::{
+        document_accounting::{
+            ResolvedStageAccountingView, resolve_attempt_stage_accounting,
+            summarize_resolved_attempt_stage_accounting,
+        },
         ingest_activity::IngestActivityService,
         query_runtime::{parse_runtime_query_enrichment, parse_runtime_query_warning},
         runtime_ingestion::classify_runtime_document_activity_with_service,
+    },
+    shared::file_extract::{
+        EXTRACTED_CONTENT_PREVIEW_LIMIT, build_extracted_content_preview,
+        extraction_quality_from_source_map,
     },
 };
 
@@ -51,18 +63,13 @@ pub struct ResolvedShellContext {
     pub active_project: ProjectRow,
 }
 
-#[derive(Debug, Clone, FromRow)]
-struct RecentRuntimeQueryExecutionRow {
-    id: Uuid,
-    mode: String,
-    question: String,
-    status: String,
-    answer_text: Option<String>,
-    grounding_status: String,
-    provider_kind: String,
-    model_name: String,
-    debug_json: Value,
-    created_at: DateTime<Utc>,
+#[derive(Debug, Clone, Deserialize)]
+struct StructuredReferencePayload {
+    kind: String,
+    reference_id: Uuid,
+    excerpt: Option<String>,
+    rank: usize,
+    score: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -180,6 +187,14 @@ pub async fn load_documents_surface(
     }
 
     let counters = build_document_counters(&runs);
+    let accounting_rows =
+        repositories::list_runtime_collection_resolved_stage_accounting(pool, project_id).await?;
+    let progress_rollup =
+        repositories::load_runtime_collection_progress_rollup(pool, project_id).await?;
+    let stage_rollups =
+        repositories::list_runtime_collection_stage_rollups(pool, project_id).await?;
+    let format_rollups =
+        repositories::list_runtime_collection_format_rollups(pool, project_id).await?;
     let snapshot = repositories::get_runtime_graph_snapshot(pool, project_id).await?;
     let graph_status = resolve_graph_status(snapshot.as_ref(), &counters);
     let rebuild_backlog_count = counters.queued + counters.processing + counters.ready_no_graph;
@@ -205,6 +220,13 @@ pub async fn load_documents_surface(
                 .into_iter()
                 .collect(),
         },
+        accounting: summarize_collection_accounting(&accounting_rows),
+        diagnostics: build_collection_diagnostics(
+            &progress_rollup,
+            &stage_rollups,
+            &format_rollups,
+            &accounting_rows,
+        ),
         rows,
     })
 }
@@ -253,7 +275,21 @@ pub async fn load_document_row(
         total_estimated_cost: latest_summary
             .as_ref()
             .and_then(|item| item.total_estimated_cost.and_then(|value| value.to_f64())),
+        settled_estimated_cost: latest_summary
+            .as_ref()
+            .and_then(|item| item.settled_estimated_cost.and_then(|value| value.to_f64())),
+        in_flight_estimated_cost: latest_summary
+            .as_ref()
+            .and_then(|item| item.in_flight_estimated_cost.and_then(|value| value.to_f64())),
         currency: latest_summary.as_ref().and_then(|item| item.currency.clone()),
+        in_flight_stage_count: latest_summary
+            .as_ref()
+            .map(|item| item.in_flight_stage_count)
+            .unwrap_or(0),
+        missing_stage_count: latest_summary
+            .as_ref()
+            .map(|item| item.missing_stage_count)
+            .unwrap_or(0),
         partial_history,
         partial_history_reason: partial_history
             .then_some("Legacy runtime history is incomplete for this attempt.".to_string()),
@@ -347,7 +383,21 @@ pub async fn load_document_detail(
         total_estimated_cost: latest_summary
             .as_ref()
             .and_then(|item| item.total_estimated_cost.and_then(|value| value.to_f64())),
+        settled_estimated_cost: latest_summary
+            .as_ref()
+            .and_then(|item| item.settled_estimated_cost.and_then(|value| value.to_f64())),
+        in_flight_estimated_cost: latest_summary
+            .as_ref()
+            .and_then(|item| item.in_flight_estimated_cost.and_then(|value| value.to_f64())),
         currency: latest_summary.as_ref().and_then(|item| item.currency.clone()),
+        in_flight_stage_count: latest_summary
+            .as_ref()
+            .map(|item| item.in_flight_stage_count)
+            .unwrap_or(0),
+        missing_stage_count: latest_summary
+            .as_ref()
+            .map(|item| item.missing_stage_count)
+            .unwrap_or(0),
         partial_history,
         partial_history_reason,
         mutation: build_mutation_state(projection.as_ref()),
@@ -405,68 +455,126 @@ pub async fn load_graph_assistant(
     pool: &PgPool,
     project_id: Uuid,
 ) -> Result<GraphAssistantModel, sqlx::Error> {
-    let executions = list_recent_runtime_query_executions(pool, project_id, 3).await?;
-    let mut messages = Vec::new();
+    let session_rows = repositories::list_chat_sessions_by_project(pool, project_id).await?;
+    let recent_sessions = session_rows
+        .iter()
+        .cloned()
+        .map(|row| ChatSessionSummaryModel {
+            session_id: row.id.to_string(),
+            title: row.title,
+            message_count: row.message_count,
+            last_message_preview: row
+                .last_message_preview
+                .map(|value| value.split_whitespace().collect::<Vec<_>>().join(" ")),
+            updated_at: row.updated_at.to_rfc3339(),
+            prompt_state: row.prompt_state,
+            preferred_mode: row.preferred_mode,
+            is_empty: row.message_count == 0,
+        })
+        .collect::<Vec<_>>();
 
-    for execution in executions.into_iter().rev() {
-        let parsed_mode = execution.mode.parse::<RuntimeQueryMode>().ok();
-        let enrichment =
-            parsed_mode.map(|mode| parse_runtime_query_enrichment(&execution.debug_json, mode));
-        let (warning, warning_kind) = parse_runtime_query_warning(&execution.debug_json);
-        messages.push(GraphAssistantMessageModel {
-            id: format!("{}:user", execution.id),
-            role: "user".to_string(),
-            content: execution.question.clone(),
-            created_at: execution.created_at.to_rfc3339(),
-            query_id: Some(execution.id.to_string()),
-            mode: Some(execution.mode.clone()),
-            grounding_status: None,
-            provider: None,
-            references: Vec::new(),
-            planning: None,
-            rerank: None,
-            context_assembly: None,
-            warning: None,
-            warning_kind: None,
-        });
+    let active_detail = match session_rows.first() {
+        Some(session) => repositories::get_chat_session_detail_by_id(pool, session.id).await?,
+        None => None,
+    };
+    let settings_summary = active_detail.as_ref().map(|detail| ChatSessionSettingsModel {
+        session_id: detail.id.to_string(),
+        system_prompt: detail.system_prompt.clone(),
+        prompt_state: detail.prompt_state.clone(),
+        preferred_mode: detail.preferred_mode.clone(),
+        default_prompt_available: true,
+    });
+    let active_session = active_detail.as_ref().map(|detail| ChatSessionDetailModel {
+        session_id: detail.id.to_string(),
+        title: detail.title.clone(),
+        message_count: detail.message_count,
+        last_message_preview: detail
+            .last_message_preview
+            .as_ref()
+            .map(|value| value.split_whitespace().collect::<Vec<_>>().join(" ")),
+        created_at: detail.created_at.to_rfc3339(),
+        updated_at: detail.updated_at.to_rfc3339(),
+        prompt_state: detail.prompt_state.clone(),
+        preferred_mode: detail.preferred_mode.clone(),
+        is_empty: detail.message_count == 0,
+    });
 
-        if execution.status == "completed" {
-            let references =
-                repositories::list_runtime_query_references_by_execution(pool, execution.id)
-                    .await?
+    let messages = match active_detail.as_ref() {
+        Some(detail) => repositories::list_chat_thread_messages_by_session(pool, detail.id)
+            .await?
+            .into_iter()
+            .map(|row| {
+                let debug_json = row.retrieval_debug_json.unwrap_or_else(|| serde_json::json!({}));
+                let fallback_mode = debug_json
+                    .get("mode")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("hybrid")
+                    .parse::<RuntimeQueryMode>()
+                    .unwrap_or(RuntimeQueryMode::Hybrid);
+                let enrichment = if row.retrieval_run_id.is_some() {
+                    Some(parse_runtime_query_enrichment(&debug_json, fallback_mode))
+                } else {
+                    None
+                };
+                let references = debug_json
+                    .get("structured_references")
+                    .cloned()
+                    .map(serde_json::from_value::<Vec<StructuredReferencePayload>>)
+                    .transpose()
+                    .map_err(|error| sqlx::Error::Decode(Box::new(error)))?
+                    .unwrap_or_default()
                     .into_iter()
                     .map(|reference| GraphAssistantReferenceModel {
-                        kind: reference.reference_kind,
+                        kind: reference.kind,
                         reference_id: reference.reference_id.to_string(),
                         excerpt: reference.excerpt,
-                        rank: usize::try_from(reference.rank).unwrap_or_default(),
-                        score: reference.score.and_then(|value| {
-                            if value.is_finite() { Some(value as f32) } else { None }
-                        }),
+                        rank: reference.rank,
+                        score: reference.score,
                     })
                     .collect::<Vec<_>>();
+                let (warning, warning_kind) = parse_runtime_query_warning(&debug_json);
 
-            messages.push(GraphAssistantMessageModel {
-                id: format!("{}:assistant", execution.id),
-                role: "assistant".to_string(),
-                content: execution.answer_text.unwrap_or_default(),
-                created_at: execution.created_at.to_rfc3339(),
-                query_id: Some(execution.id.to_string()),
-                mode: Some(execution.mode),
-                grounding_status: Some(execution.grounding_status),
-                provider: Some(GraphAssistantProviderModel {
-                    provider_kind: execution.provider_kind,
-                    model_name: execution.model_name,
-                }),
-                references,
-                planning: enrichment.as_ref().map(|value| value.planning.clone()),
-                rerank: enrichment.as_ref().map(|value| value.rerank.clone()),
-                context_assembly: enrichment.as_ref().map(|value| value.context_assembly.clone()),
-                warning,
-                warning_kind,
-            });
-        }
-    }
+                Ok(GraphAssistantMessageModel {
+                    id: row.id.to_string(),
+                    role: row.role,
+                    content: row.content,
+                    created_at: row.created_at.to_rfc3339(),
+                    query_id: debug_json
+                        .get("query_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned),
+                    mode: debug_json
+                        .get("mode")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned),
+                    grounding_status: debug_json
+                        .get("grounding_status")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned),
+                    provider: debug_json
+                        .get("provider_kind")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|provider_kind| GraphAssistantProviderModel {
+                            provider_kind: provider_kind.to_string(),
+                            model_name: debug_json
+                                .get("model_name")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                        }),
+                    references,
+                    planning: enrichment.as_ref().map(|value| value.planning.clone()),
+                    rerank: enrichment.as_ref().map(|value| value.rerank.clone()),
+                    context_assembly: enrichment
+                        .as_ref()
+                        .map(|value| value.context_assembly.clone()),
+                    warning,
+                    warning_kind,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()?,
+        None => Vec::new(),
+    };
 
     Ok(GraphAssistantModel {
         title: "Ask AI".to_string(),
@@ -478,7 +586,11 @@ pub async fn load_graph_assistant(
         ],
         disclaimer: "Answers use the active library and its current graph projection.".to_string(),
         config: None,
-        session_id: None,
+        session_id: active_session.as_ref().map(|session| session.session_id.clone()),
+        recent_sessions,
+        active_session,
+        settings_summary,
+        focus_context: None,
         messages,
     })
 }
@@ -765,15 +877,38 @@ fn build_extracted_stats(
     extracted: Option<&RuntimeExtractedContentRow>,
     chunk_count: Option<usize>,
 ) -> DocumentExtractedStats {
+    let warnings = extracted
+        .and_then(|item| value_to_string_vec(&item.extraction_warnings_json))
+        .unwrap_or_default();
+    let quality = extracted.map(|item| {
+        extraction_quality_from_source_map(
+            &item.source_map_json,
+            &item.extraction_kind,
+            warnings.len(),
+        )
+    });
+    let preview = extracted.map(|item| {
+        build_extracted_content_preview(
+            item.content_text.as_deref(),
+            EXTRACTED_CONTENT_PREVIEW_LIMIT,
+        )
+    });
+
     DocumentExtractedStats {
         chunk_count,
         document_id: projection.map(|item| item.id.to_string()),
         checksum: projection.and_then(|item| item.checksum.clone()),
         page_count: extracted.and_then(|item| item.page_count),
         extraction_kind: extracted.map(|item| item.extraction_kind.clone()),
-        warnings: extracted
-            .and_then(|item| value_to_string_vec(&item.extraction_warnings_json))
-            .unwrap_or_default(),
+        preview_text: preview.as_ref().and_then(|item| item.text.clone()),
+        preview_truncated: preview.as_ref().is_some_and(|item| item.truncated),
+        warning_count: quality.as_ref().map(|item| item.warning_count).unwrap_or(0),
+        normalization_status: quality
+            .as_ref()
+            .map(|item| item.normalization_status.as_str().to_string())
+            .unwrap_or_else(|| "verbatim".to_string()),
+        ocr_source: quality.and_then(|item| item.ocr_source),
+        warnings,
     }
 }
 
@@ -831,11 +966,6 @@ fn build_document_attempts(
     let payload_by_attempt = map_attempt_payloads(&attempt_nos, jobs);
     let job_by_attempt = map_attempt_jobs(&attempt_nos, jobs);
     let stage_events_by_attempt = group_stage_events_by_attempt(stage_events);
-    let accounting_by_event = stage_accounting
-        .iter()
-        .cloned()
-        .map(|row| (row.stage_event_id, row))
-        .collect::<HashMap<_, _>>();
 
     attempt_nos
         .into_iter()
@@ -843,6 +973,12 @@ fn build_document_attempts(
         .map(|attempt_no| {
             let attempt_stage_events =
                 stage_events_by_attempt.get(&attempt_no).cloned().unwrap_or_default();
+            let resolved_stage_accounting =
+                resolve_attempt_stage_accounting(&attempt_stage_events, stage_accounting);
+            let accounting_by_event = resolved_stage_accounting
+                .iter()
+                .filter_map(|row| row.anchor_event_id.map(|event_id| (event_id, row.clone())))
+                .collect::<HashMap<_, _>>();
             let payload = payload_by_attempt.get(&attempt_no);
             let job = job_by_attempt.get(&attempt_no);
             let revision_no = payload
@@ -865,13 +1001,12 @@ fn build_document_attempts(
                     started_at: event.started_at.to_rfc3339(),
                     finished_at: event.finished_at.map(|value| value.to_rfc3339()),
                     elapsed_ms: event.elapsed_ms,
-                    accounting: accounting_by_event.get(&event.id).and_then(|row| {
-                        stage_accounting_belongs_to_billable_stage(row, &event.stage)
-                            .then(|| map_document_stage_accounting(row, event))
-                    }),
+                    accounting: accounting_by_event
+                        .get(&event.id)
+                        .map(map_document_stage_accounting),
                 })
                 .collect::<Vec<_>>();
-            let summary = summarize_attempt_accounting(&attempt_stage_events, stage_accounting);
+            let summary = summarize_attempt_accounting(&resolved_stage_accounting);
             let attempt_status = attempt_status(run, job.copied(), &attempt_stage_events);
             let partial_history_reason =
                 attempt_partial_history_reason(attempt_no, run, &attempt_stage_events, payload);
@@ -951,63 +1086,244 @@ fn build_document_attempts(
         .collect()
 }
 
-fn map_document_stage_accounting(
-    row: &AttemptStageAccountingRow,
-    event: &RuntimeIngestionStageEventRow,
-) -> DocumentStageAccountingItem {
+fn map_document_stage_accounting(row: &ResolvedStageAccountingView) -> DocumentStageAccountingItem {
     DocumentStageAccountingItem {
+        accounting_scope: row.accounting_scope.clone(),
         pricing_status: row.pricing_status.clone(),
         usage_event_id: row.usage_event_id.map(|value| value.to_string()),
         cost_ledger_id: row.cost_ledger_id.map(|value| value.to_string()),
         pricing_catalog_entry_id: row.pricing_catalog_entry_id.map(|value| value.to_string()),
         estimated_cost: row.estimated_cost.and_then(|value| value.to_f64()),
+        settled_estimated_cost: row.settled_estimated_cost.and_then(|value| value.to_f64()),
+        in_flight_estimated_cost: row.in_flight_estimated_cost.and_then(|value| value.to_f64()),
         currency: row.currency.clone(),
-        attribution_source: Some(stage_attribution_source(row, &event.stage).to_string()),
+        attribution_source: Some(row.attribution_source.clone()),
     }
 }
 
-fn summarize_attempt_accounting(
-    attempt_stage_events: &[RuntimeIngestionStageEventRow],
-    stage_accounting: &[AttemptStageAccountingRow],
-) -> DocumentAttemptSummary {
-    let stage_event_ids =
-        attempt_stage_events.iter().map(|event| event.id).collect::<BTreeSet<_>>();
-    let attempt_rows = stage_accounting
-        .iter()
-        .filter(|row| {
-            stage_event_ids.contains(&row.stage_event_id)
-                && attempt_stage_events.iter().any(|event| {
-                    event.id == row.stage_event_id
-                        && stage_accounting_belongs_to_billable_stage(row, &event.stage)
-                })
-        })
-        .collect::<Vec<_>>();
-    let total_estimated_cost = attempt_rows
+fn summarize_collection_accounting(
+    rows: &[RuntimeCollectionResolvedStageAccountingRow],
+) -> DocumentCollectionAccountingSummary {
+    let total_estimated_cost = rows
         .iter()
         .filter_map(|row| row.estimated_cost)
         .fold(rust_decimal::Decimal::ZERO, |acc, value| acc + value);
-    let priced_stage_count =
-        i32::try_from(attempt_rows.iter().filter(|row| row.pricing_status == "priced").count())
+    let settled_estimated_cost = rows
+        .iter()
+        .filter(|row| row.accounting_scope == "stage_rollup")
+        .filter_map(|row| row.estimated_cost)
+        .fold(rust_decimal::Decimal::ZERO, |acc, value| acc + value);
+    let in_flight_estimated_cost = rows
+        .iter()
+        .filter(|row| row.accounting_scope == "provider_call")
+        .filter_map(|row| row.estimated_cost)
+        .fold(rust_decimal::Decimal::ZERO, |acc, value| acc + value);
+    let priced_stage_count = i32::try_from(
+        rows.iter()
+            .filter(|row| row.accounting_scope == "stage_rollup" && row.pricing_status == "priced")
+            .count(),
+    )
+    .unwrap_or(i32::MAX);
+    let unpriced_stage_count = i32::try_from(
+        rows.iter()
+            .filter(|row| row.accounting_scope == "stage_rollup" && row.pricing_status != "priced")
+            .count(),
+    )
+    .unwrap_or(i32::MAX);
+    let in_flight_stage_count =
+        i32::try_from(rows.iter().filter(|row| row.accounting_scope == "provider_call").count())
             .unwrap_or(i32::MAX);
-    let unpriced_stage_count =
-        i32::try_from(attempt_rows.iter().filter(|row| row.pricing_status != "priced").count())
+    let missing_stage_count =
+        i32::try_from(rows.iter().filter(|row| row.accounting_scope == "missing").count())
             .unwrap_or(i32::MAX);
-    DocumentAttemptSummary {
-        total_estimated_cost: if attempt_rows.iter().any(|row| row.estimated_cost.is_some()) {
-            total_estimated_cost.to_f64()
-        } else {
-            None
-        },
-        currency: attempt_rows.iter().find_map(|row| row.currency.clone()),
+
+    DocumentCollectionAccountingSummary {
+        total_estimated_cost: rows
+            .iter()
+            .any(|row| row.estimated_cost.is_some())
+            .then_some(total_estimated_cost)
+            .and_then(|value| value.to_f64()),
+        settled_estimated_cost: rows
+            .iter()
+            .any(|row| row.accounting_scope == "stage_rollup" && row.estimated_cost.is_some())
+            .then_some(settled_estimated_cost)
+            .and_then(|value| value.to_f64()),
+        in_flight_estimated_cost: rows
+            .iter()
+            .any(|row| row.accounting_scope == "provider_call" && row.estimated_cost.is_some())
+            .then_some(in_flight_estimated_cost)
+            .and_then(|value| value.to_f64()),
+        currency: rows.iter().find_map(|row| row.currency.clone()),
+        prompt_tokens: rows.iter().map(|row| row.prompt_tokens).sum(),
+        completion_tokens: rows.iter().map(|row| row.completion_tokens).sum(),
+        total_tokens: rows.iter().map(|row| row.total_tokens).sum(),
         priced_stage_count,
         unpriced_stage_count,
-        accounting_status: if priced_stage_count > 0 && unpriced_stage_count == 0 {
+        in_flight_stage_count,
+        missing_stage_count,
+        accounting_status: if in_flight_stage_count > 0 {
+            "in_flight_unsettled".to_string()
+        } else if priced_stage_count > 0 && unpriced_stage_count == 0 && missing_stage_count == 0 {
             "priced".to_string()
         } else if priced_stage_count > 0 {
             "partial".to_string()
         } else {
             "unpriced".to_string()
         },
+    }
+}
+
+fn build_collection_diagnostics(
+    progress_rollup: &RuntimeCollectionProgressRollupRow,
+    stage_rollups: &[RuntimeCollectionStageRollupRow],
+    format_rollups: &[RuntimeCollectionFormatRollupRow],
+    accounting_rows: &[RuntimeCollectionResolvedStageAccountingRow],
+) -> DocumentCollectionDiagnostics {
+    DocumentCollectionDiagnostics {
+        progress: DocumentCollectionProgressCounters {
+            accepted: usize::try_from(progress_rollup.accepted_count).unwrap_or(usize::MAX),
+            content_extracted: usize::try_from(progress_rollup.content_extracted_count)
+                .unwrap_or(usize::MAX),
+            chunked: usize::try_from(progress_rollup.chunked_count).unwrap_or(usize::MAX),
+            embedded: usize::try_from(progress_rollup.embedded_count).unwrap_or(usize::MAX),
+            extracting_graph: usize::try_from(progress_rollup.extracting_graph_count)
+                .unwrap_or(usize::MAX),
+            graph_ready: usize::try_from(progress_rollup.graph_ready_count).unwrap_or(usize::MAX),
+            ready: usize::try_from(progress_rollup.ready_count).unwrap_or(usize::MAX),
+            failed: usize::try_from(progress_rollup.failed_count).unwrap_or(usize::MAX),
+        },
+        queue_backlog_count: usize::try_from(progress_rollup.queue_backlog_count)
+            .unwrap_or(usize::MAX),
+        processing_backlog_count: usize::try_from(progress_rollup.processing_backlog_count)
+            .unwrap_or(usize::MAX),
+        active_backlog_count: usize::try_from(
+            progress_rollup.queue_backlog_count + progress_rollup.processing_backlog_count,
+        )
+        .unwrap_or(usize::MAX),
+        per_stage: build_collection_stage_diagnostics(stage_rollups, accounting_rows),
+        per_format: build_collection_format_diagnostics(format_rollups, accounting_rows),
+    }
+}
+
+fn build_collection_stage_diagnostics(
+    stage_rollups: &[RuntimeCollectionStageRollupRow],
+    accounting_rows: &[RuntimeCollectionResolvedStageAccountingRow],
+) -> Vec<DocumentCollectionStageDiagnostics> {
+    let mut rows_by_stage =
+        BTreeMap::<String, Vec<RuntimeCollectionResolvedStageAccountingRow>>::new();
+    for row in accounting_rows {
+        rows_by_stage.entry(row.stage.clone()).or_default().push(row.clone());
+    }
+
+    let mut diagnostics = stage_rollups
+        .iter()
+        .map(|rollup| {
+            let stage_rows = rows_by_stage.remove(&rollup.stage).unwrap_or_default();
+            let accounting = summarize_collection_accounting(&stage_rows);
+
+            DocumentCollectionStageDiagnostics {
+                stage: rollup.stage.clone(),
+                active_count: usize::try_from(rollup.active_count).unwrap_or(usize::MAX),
+                completed_count: usize::try_from(rollup.completed_count).unwrap_or(usize::MAX),
+                failed_count: usize::try_from(rollup.failed_count).unwrap_or(usize::MAX),
+                avg_elapsed_ms: rollup.avg_elapsed_ms,
+                max_elapsed_ms: rollup.max_elapsed_ms,
+                total_estimated_cost: accounting.total_estimated_cost,
+                settled_estimated_cost: accounting.settled_estimated_cost,
+                in_flight_estimated_cost: accounting.in_flight_estimated_cost,
+                currency: accounting.currency,
+                prompt_tokens: accounting.prompt_tokens,
+                completion_tokens: accounting.completion_tokens,
+                total_tokens: accounting.total_tokens,
+                accounting_status: accounting.accounting_status,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    diagnostics.sort_by_key(|item| stage_sort_key(&item.stage));
+    diagnostics
+}
+
+fn build_collection_format_diagnostics(
+    format_rollups: &[RuntimeCollectionFormatRollupRow],
+    accounting_rows: &[RuntimeCollectionResolvedStageAccountingRow],
+) -> Vec<DocumentCollectionFormatDiagnostics> {
+    let mut rows_by_format =
+        BTreeMap::<String, Vec<RuntimeCollectionResolvedStageAccountingRow>>::new();
+    for row in accounting_rows {
+        rows_by_format.entry(row.file_type.clone()).or_default().push(row.clone());
+    }
+
+    format_rollups
+        .iter()
+        .map(|rollup| {
+            let format_rows = rows_by_format.remove(&rollup.file_type).unwrap_or_default();
+            let accounting = summarize_collection_accounting(&format_rows);
+
+            DocumentCollectionFormatDiagnostics {
+                file_type: humanize_file_type(&rollup.file_type),
+                document_count: usize::try_from(rollup.document_count).unwrap_or(usize::MAX),
+                queued_count: usize::try_from(rollup.queued_count).unwrap_or(usize::MAX),
+                processing_count: usize::try_from(rollup.processing_count).unwrap_or(usize::MAX),
+                ready_count: usize::try_from(rollup.ready_count).unwrap_or(usize::MAX),
+                ready_no_graph_count: usize::try_from(rollup.ready_no_graph_count)
+                    .unwrap_or(usize::MAX),
+                failed_count: usize::try_from(rollup.failed_count).unwrap_or(usize::MAX),
+                content_extracted_count: usize::try_from(rollup.content_extracted_count)
+                    .unwrap_or(usize::MAX),
+                chunked_count: usize::try_from(rollup.chunked_count).unwrap_or(usize::MAX),
+                embedded_count: usize::try_from(rollup.embedded_count).unwrap_or(usize::MAX),
+                extracting_graph_count: usize::try_from(rollup.extracting_graph_count)
+                    .unwrap_or(usize::MAX),
+                graph_ready_count: usize::try_from(rollup.graph_ready_count).unwrap_or(usize::MAX),
+                avg_queue_elapsed_ms: rollup.avg_queue_elapsed_ms,
+                max_queue_elapsed_ms: rollup.max_queue_elapsed_ms,
+                avg_total_elapsed_ms: rollup.avg_total_elapsed_ms,
+                max_total_elapsed_ms: rollup.max_total_elapsed_ms,
+                bottleneck_stage: rollup.bottleneck_stage.clone(),
+                bottleneck_avg_elapsed_ms: rollup.bottleneck_avg_elapsed_ms,
+                bottleneck_max_elapsed_ms: rollup.bottleneck_max_elapsed_ms,
+                total_estimated_cost: accounting.total_estimated_cost,
+                settled_estimated_cost: accounting.settled_estimated_cost,
+                in_flight_estimated_cost: accounting.in_flight_estimated_cost,
+                currency: accounting.currency,
+                prompt_tokens: accounting.prompt_tokens,
+                completion_tokens: accounting.completion_tokens,
+                total_tokens: accounting.total_tokens,
+                accounting_status: accounting.accounting_status,
+            }
+        })
+        .collect()
+}
+
+fn stage_sort_key(stage: &str) -> usize {
+    match stage {
+        "extracting_content" => 0,
+        "chunking" => 1,
+        "embedding_chunks" => 2,
+        "extracting_graph" => 3,
+        "merging_graph" => 4,
+        "projecting_graph" => 5,
+        "finalizing" => 6,
+        "failed" => 7,
+        _ => 99,
+    }
+}
+
+fn summarize_attempt_accounting(
+    resolved_stage_accounting: &[ResolvedStageAccountingView],
+) -> DocumentAttemptSummary {
+    let summary = summarize_resolved_attempt_stage_accounting(resolved_stage_accounting);
+    DocumentAttemptSummary {
+        total_estimated_cost: summary.total_estimated_cost.and_then(|value| value.to_f64()),
+        settled_estimated_cost: summary.settled_estimated_cost.and_then(|value| value.to_f64()),
+        in_flight_estimated_cost: summary.in_flight_estimated_cost.and_then(|value| value.to_f64()),
+        currency: summary.currency,
+        priced_stage_count: summary.priced_stage_count,
+        unpriced_stage_count: summary.unpriced_stage_count,
+        in_flight_stage_count: summary.in_flight_stage_count,
+        missing_stage_count: summary.missing_stage_count,
+        accounting_status: summary.accounting_status,
     }
 }
 
@@ -1170,56 +1486,6 @@ fn attempt_last_activity_at(
     stage_events.iter().rev().find_map(|event| event.finished_at.or(Some(event.started_at)))
 }
 
-fn stage_attribution_source(row: &AttemptStageAccountingRow, event_stage: &str) -> &'static str {
-    let metadata_source = row
-        .pricing_snapshot_json
-        .get("stage_ownership")
-        .or_else(|| row.token_usage_json.get("stage_ownership"))
-        .and_then(|value| value.get("attribution_source"))
-        .and_then(Value::as_str);
-    match metadata_source {
-        Some("stage_native") => "stage_native",
-        Some("reconciled") => "reconciled",
-        _ if row.stage == event_stage => "stage_native",
-        _ => "reconciled",
-    }
-}
-
-fn stage_accounting_belongs_to_billable_stage(
-    row: &AttemptStageAccountingRow,
-    event_stage: &str,
-) -> bool {
-    if row.stage != event_stage {
-        return false;
-    }
-    match runtime_stage_billing_policy(event_stage) {
-        RuntimeStageBillingPolicy::Billable { capability, billing_unit } => {
-            row.capability == pricing_capability_label(&capability)
-                && row.billing_unit == pricing_billing_unit_label(&billing_unit)
-        }
-        RuntimeStageBillingPolicy::NonBillable => false,
-    }
-}
-
-fn pricing_capability_label(value: &PricingCapability) -> &'static str {
-    match value {
-        PricingCapability::Indexing => "indexing",
-        PricingCapability::Embedding => "embedding",
-        PricingCapability::Answer => "answer",
-        PricingCapability::Vision => "vision",
-        PricingCapability::GraphExtract => "graph_extract",
-    }
-}
-
-fn pricing_billing_unit_label(value: &PricingBillingUnit) -> &'static str {
-    match value {
-        PricingBillingUnit::Per1MInputTokens => "per_1m_input_tokens",
-        PricingBillingUnit::Per1MOutputTokens => "per_1m_output_tokens",
-        PricingBillingUnit::Per1MTokens => "per_1m_tokens",
-        PricingBillingUnit::FixedPerCall => "fixed_per_call",
-    }
-}
-
 fn value_to_string_vec(value: &Value) -> Option<Vec<String>> {
     value.as_array().map(|items| {
         items.iter().filter_map(|item| item.as_str().map(ToString::to_string)).collect::<Vec<_>>()
@@ -1354,22 +1620,4 @@ async fn load_document_graph_node_id(
     )
     .await?;
     Ok(node.map(|item| item.id.to_string()))
-}
-
-async fn list_recent_runtime_query_executions(
-    pool: &PgPool,
-    project_id: Uuid,
-    limit: i64,
-) -> Result<Vec<RecentRuntimeQueryExecutionRow>, sqlx::Error> {
-    sqlx::query_as::<_, RecentRuntimeQueryExecutionRow>(
-        "select id, mode, question, status, answer_text, grounding_status, provider_kind, model_name, debug_json, created_at
-         from runtime_query_execution
-         where project_id = $1
-         order by created_at desc
-         limit $2",
-    )
-    .bind(project_id)
-    .bind(limit)
-    .fetch_all(pool)
-    .await
 }

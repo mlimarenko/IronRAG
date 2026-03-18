@@ -1,5 +1,5 @@
 use pgvector::Vector;
-use sqlx::{FromRow, PgPool};
+use sqlx::{FromRow, PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 use crate::infra::repositories::{
@@ -17,6 +17,22 @@ pub struct ScoredChunkRow {
     pub metadata_json: serde_json::Value,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub distance: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChunkEmbeddingVectorWriteInput {
+    pub chunk_id: Uuid,
+    pub embedding: Vec<f32>,
+}
+
+fn coalesce_chunk_embedding_vector_writes(
+    rows: &[ChunkEmbeddingVectorWriteInput],
+) -> Vec<ChunkEmbeddingVectorWriteInput> {
+    let mut deduped = std::collections::BTreeMap::new();
+    for row in rows {
+        deduped.insert(row.chunk_id, row.clone());
+    }
+    deduped.into_values().collect()
 }
 
 impl ScoredChunkRow {
@@ -50,11 +66,41 @@ pub async fn set_chunk_embedding_vector(
     chunk_id: Uuid,
     embedding: &[f32],
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("update chunk set embedding = $2 where id = $1")
-        .bind(chunk_id)
-        .bind(Vector::from(embedding.to_vec()))
-        .execute(pool)
-        .await?;
+    set_chunk_embedding_vectors(
+        pool,
+        &[ChunkEmbeddingVectorWriteInput { chunk_id, embedding: embedding.to_vec() }],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Stores native pgvector embeddings for many chunk rows in one statement.
+///
+/// # Errors
+/// Returns any `SQLx` execution error raised while updating the `chunk`.`embedding` column.
+pub async fn set_chunk_embedding_vectors(
+    pool: &PgPool,
+    rows: &[ChunkEmbeddingVectorWriteInput],
+) -> Result<(), sqlx::Error> {
+    let rows = coalesce_chunk_embedding_vector_writes(rows);
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "update chunk as target
+         set embedding = source.embedding
+         from (",
+    );
+    builder.push_values(rows.iter(), |mut row_builder, row| {
+        row_builder.push_bind(row.chunk_id).push_bind(Vector::from(row.embedding.clone()));
+    });
+    builder.push(
+        ") as source(chunk_id, embedding)
+         where target.id = source.chunk_id
+           and target.embedding is distinct from source.embedding",
+    );
+    builder.build().execute(pool).await?;
     Ok(())
 }
 
@@ -172,5 +218,17 @@ mod tests {
 
         assert!(identical > orthogonal);
         assert!((identical - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn coalesces_duplicate_chunk_vector_writes_last_value_wins() {
+        let chunk_id = Uuid::now_v7();
+        let rows = coalesce_chunk_embedding_vector_writes(&[
+            ChunkEmbeddingVectorWriteInput { chunk_id, embedding: vec![1.0, 2.0] },
+            ChunkEmbeddingVectorWriteInput { chunk_id, embedding: vec![3.0, 4.0] },
+        ]);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].embedding, vec![3.0, 4.0]);
     }
 }

@@ -1,3 +1,4 @@
+pub mod chat_sessions;
 pub mod document_accounting;
 pub mod document_reconciliation;
 pub mod extraction_recovery;

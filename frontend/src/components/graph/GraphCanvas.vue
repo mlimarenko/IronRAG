@@ -25,6 +25,7 @@ const props = defineProps<{
   edges: GraphEdge[]
   filter: GraphNodeType | ''
   focusedNodeId: string | null
+  focusActive: boolean
   layoutMode: GraphLayoutMode
   surfaceVersion: number
 }>()
@@ -49,6 +50,11 @@ const ignoreStageClickUntil = ref(0)
 const suppressNodeSelectionUntil = ref(0)
 const didInitialFit = ref(false)
 const renderMode = ref<'sigma' | 'placeholder'>('sigma')
+const webglContextCleanup = ref<(() => void) | null>(null)
+const webglUnavailable = ref(false)
+const effectiveFocusedNodeId = computed(() =>
+  props.focusActive ? props.focusedNodeId : null,
+)
 
 const baseNodes = computed(() =>
   props.filter === '' ? props.nodes : props.nodes.filter((node) => node.nodeType === props.filter),
@@ -60,7 +66,7 @@ const filteredNodes = computed(() =>
   filterFocusedNodes(
     baseNodes.value,
     baseAggregatedEdges.value,
-    props.focusedNodeId,
+    effectiveFocusedNodeId.value,
     baseDegreeMap.value,
   ),
 )
@@ -83,7 +89,7 @@ function fitViewport(duration = 260): void {
   }
 
   sigma.setCustomBBox(null)
-  void sigma.getCamera().animate({ x: 0.5, y: 0.5, ratio: 1.02, angle: 0 }, { duration })
+  void sigma.getCamera().animatedReset({ duration })
 }
 
 function recoverInvalidNodePosition(
@@ -120,7 +126,7 @@ function createSigma(
   container: HTMLDivElement,
 ): Sigma<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes> {
   ensureFinitePositions(graph)
-  const denseOverview = !props.focusedNodeId && filteredNodes.value.length > 120
+  const denseOverview = !effectiveFocusedNodeId.value && filteredNodes.value.length > 120
   const settings = {
     allowInvalidContainer: true,
     defaultNodeType: 'default',
@@ -230,21 +236,11 @@ function zoomOut(): void {
   )
 }
 
-function focusNode(nodeId: string | null): void {
-  const sigma = sigmaRef.value
-  const graph = graphRef.value
-  if (!sigma || !graph || !nodeId || !graph.hasNode(nodeId)) {
-    fitViewport()
-    return
-  }
-
-  const { x, y } = graph.getNodeAttributes(nodeId)
-  const camera = sigma.getCamera()
-  const nextRatio = Math.max(0.32, Math.min(camera.ratio * 0.84, 0.76))
-  void camera.animate({ x, y, ratio: nextRatio, angle: 0 }, { duration: 220 })
-}
-
 function destroyGraph(): void {
+  if (webglContextCleanup.value) {
+    webglContextCleanup.value()
+    webglContextCleanup.value = null
+  }
   if (sigmaRef.value) {
     sigmaRef.value.kill()
     sigmaRef.value = null
@@ -256,9 +252,36 @@ function destroyGraph(): void {
   renderMode.value = 'sigma'
 }
 
+function registerWebglContextLossHandler(container: HTMLDivElement): void {
+  if (webglContextCleanup.value) {
+    webglContextCleanup.value()
+    webglContextCleanup.value = null
+  }
+
+  const canvas = container.querySelector('canvas')
+  if (!(canvas instanceof HTMLCanvasElement)) {
+    return
+  }
+
+  const handleContextLost = (event: Event) => {
+    event.preventDefault()
+    webglUnavailable.value = true
+    destroyGraph()
+    renderMode.value = 'placeholder'
+  }
+
+  canvas.addEventListener('webglcontextlost', handleContextLost, false)
+  webglContextCleanup.value = () => {
+    canvas.removeEventListener('webglcontextlost', handleContextLost, false)
+  }
+}
+
 function registerSigmaInteractions(
   sigma: Sigma<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes>,
 ): void {
+  const shouldStartNodeDrag = (event: SigmaNodeEventPayload['event']): boolean =>
+    event.original.shiftKey
+
   const findNearestNodeAtViewportPoint = (x: number, y: number): string | null => {
     const graph = graphRef.value
     if (!graph) {
@@ -319,6 +342,9 @@ function registerSigmaInteractions(
   })
 
   sigma.on('downNode', ({ node, event }: SigmaNodeEventPayload) => {
+    if (!shouldStartNodeDrag(event)) {
+      return
+    }
     draggedNodeId.value = node
     dragStartViewport.value = { x: event.x, y: event.y }
     dragMoved.value = false
@@ -389,6 +415,7 @@ function mountSigmaGraph(
   }
 
   if (!supportsWebGL()) {
+    webglUnavailable.value = true
     renderMode.value = 'placeholder'
     emit('ready', {
       fitViewport: () => {
@@ -425,6 +452,8 @@ function mountSigmaGraph(
 
   graphRef.value = graph
   sigmaRef.value = sigma
+  webglUnavailable.value = false
+  registerWebglContextLossHandler(canvasRef.value)
   registerSigmaInteractions(sigma)
 
   emit('ready', {
@@ -444,14 +473,17 @@ function mountSigmaGraph(
       fitViewport(0)
       didInitialFit.value = true
     }
-    if (props.focusedNodeId) {
-      focusNode(props.focusedNodeId)
+    if (effectiveFocusedNodeId.value) {
+      fitViewport(0)
     }
   }, 0)
 }
 
 function rebuildGraph(): void {
   if (!canvasRef.value) {
+    if (webglUnavailable.value) {
+      return
+    }
     if (renderMode.value !== 'sigma') {
       renderMode.value = 'sigma'
       void nextTick().then(() => {
@@ -466,7 +498,7 @@ function rebuildGraph(): void {
     createGraphModel(
       filteredNodes.value,
       aggregatedEdges.value,
-      props.focusedNodeId,
+      effectiveFocusedNodeId.value,
       props.layoutMode,
     ),
   )
@@ -487,7 +519,7 @@ function syncGraphData(): void {
   const targetGraph = createGraphModel(
     filteredNodes.value,
     aggregatedEdges.value,
-    props.focusedNodeId,
+    effectiveFocusedNodeId.value,
     props.layoutMode,
   )
 
@@ -536,7 +568,7 @@ function relayoutGraph(): void {
   const targetGraph = createGraphModel(
     filteredNodes.value,
     aggregatedEdges.value,
-    props.focusedNodeId,
+    effectiveFocusedNodeId.value,
     props.layoutMode,
   )
   const positions = targetGraph.reduceNodes<Record<string, { x: number; y: number }>>(
@@ -552,17 +584,17 @@ function relayoutGraph(): void {
   animateNodes(graph, positions, { duration: 260 })
   window.setTimeout(() => {
     safeRefreshAll()
-    if (props.focusedNodeId) {
-      focusNode(props.focusedNodeId)
+    if (effectiveFocusedNodeId.value) {
+      fitViewport(0)
     }
   }, 280)
 }
 
 watch(
-  () => [props.filter, props.focusedNodeId] as const,
+  () => props.filter,
   async () => {
     await nextTick()
-    rebuildGraph()
+    syncGraphData()
   },
   { immediate: true },
 )
@@ -584,10 +616,28 @@ watch(
 )
 
 watch(
-  () => props.focusedNodeId,
-  async (nodeId) => {
+  () => props.focusActive,
+  async () => {
     await nextTick()
-    focusNode(nodeId)
+    rebuildGraph()
+    if (props.focusActive) {
+      window.setTimeout(() => {
+        fitViewport(0)
+      }, 0)
+    }
+  },
+)
+
+watch(
+  () => props.focusedNodeId,
+  async () => {
+    await nextTick()
+    if (props.focusActive) {
+      rebuildGraph()
+      window.setTimeout(() => {
+        fitViewport(0)
+      }, 0)
+    }
   },
 )
 

@@ -2,6 +2,8 @@ import type {
   DocumentAccountingStatus,
   DocumentActivityStatus,
   DocumentAttemptGroup,
+  DocumentCollectionAccountingSummary,
+  DocumentCollectionDiagnostics,
   DocumentDetail,
   DocumentMutationAccepted,
   DocumentUploadFailure,
@@ -32,7 +34,11 @@ interface RawDocumentRow {
   latest_attempt_no: number
   accounting_status: DocumentAccountingStatus
   total_estimated_cost: number | null
+  settled_estimated_cost?: number | null
+  in_flight_estimated_cost?: number | null
   currency: string | null
+  in_flight_stage_count?: number
+  missing_stage_count?: number
   partial_history: boolean
   partial_history_reason: string | null
   mutation: {
@@ -67,6 +73,80 @@ interface RawDocumentsSurfaceResponse {
     statuses: ('queued' | 'processing' | 'ready' | 'ready_no_graph' | 'failed')[]
     file_types: string[]
   }
+  accounting?: {
+    total_estimated_cost: number | null
+    settled_estimated_cost: number | null
+    in_flight_estimated_cost: number | null
+    currency: string | null
+    prompt_tokens: number
+    completion_tokens: number
+    total_tokens: number
+    priced_stage_count: number
+    unpriced_stage_count: number
+    in_flight_stage_count: number
+    missing_stage_count: number
+    accounting_status: DocumentAccountingStatus
+  } | null
+  diagnostics?: {
+    progress: {
+      accepted: number
+      content_extracted: number
+      chunked: number
+      embedded: number
+      extracting_graph: number
+      graph_ready: number
+      ready: number
+      failed: number
+    }
+    queue_backlog_count: number
+    processing_backlog_count: number
+    active_backlog_count: number
+    per_stage: {
+      stage: string
+      active_count: number
+      completed_count: number
+      failed_count: number
+      avg_elapsed_ms: number | null
+      max_elapsed_ms: number | null
+      total_estimated_cost: number | null
+      settled_estimated_cost: number | null
+      in_flight_estimated_cost: number | null
+      currency: string | null
+      prompt_tokens: number
+      completion_tokens: number
+      total_tokens: number
+      accounting_status: DocumentAccountingStatus
+    }[]
+    per_format: {
+      file_type: string
+      document_count: number
+      queued_count: number
+      processing_count: number
+      ready_count: number
+      ready_no_graph_count: number
+      failed_count: number
+      content_extracted_count: number
+      chunked_count: number
+      embedded_count: number
+      extracting_graph_count: number
+      graph_ready_count: number
+      avg_queue_elapsed_ms: number | null
+      max_queue_elapsed_ms: number | null
+      avg_total_elapsed_ms: number | null
+      max_total_elapsed_ms: number | null
+      bottleneck_stage: string | null
+      bottleneck_avg_elapsed_ms: number | null
+      bottleneck_max_elapsed_ms: number | null
+      total_estimated_cost: number | null
+      settled_estimated_cost: number | null
+      in_flight_estimated_cost: number | null
+      currency: string | null
+      prompt_tokens: number
+      completion_tokens: number
+      total_tokens: number
+      accounting_status: DocumentAccountingStatus
+    }[]
+  } | null
   rows: RawDocumentRow[]
 }
 
@@ -90,7 +170,11 @@ interface RawDocumentDetail {
   latest_attempt_no: number
   accounting_status: DocumentAccountingStatus
   total_estimated_cost: number | null
+  settled_estimated_cost?: number | null
+  in_flight_estimated_cost?: number | null
   currency: string | null
+  in_flight_stage_count?: number
+  missing_stage_count?: number
   partial_history: boolean
   partial_history_reason: string | null
   mutation: {
@@ -112,6 +196,11 @@ interface RawDocumentDetail {
     checksum: string | null
     page_count: number | null
     extraction_kind: string | null
+    preview_text?: string | null
+    preview_truncated?: boolean
+    warning_count?: number
+    normalization_status?: string
+    ocr_source?: string | null
     warnings: string[]
   }
   graph_stats: {
@@ -155,9 +244,13 @@ interface RawDocumentDetail {
     partial_history_reason: string | null
     summary: {
       total_estimated_cost: number | null
+      settled_estimated_cost?: number | null
+      in_flight_estimated_cost?: number | null
       currency: string | null
       priced_stage_count: number
       unpriced_stage_count: number
+      in_flight_stage_count?: number
+      missing_stage_count?: number
       accounting_status: DocumentAccountingStatus
     }
     benchmarks: {
@@ -170,11 +263,14 @@ interface RawDocumentDetail {
       finished_at: string | null
       elapsed_ms: number | null
       accounting: {
+        accounting_scope?: 'stage_rollup' | 'provider_call' | 'missing'
         pricing_status: string
         usage_event_id: string | null
         cost_ledger_id: string | null
         pricing_catalog_entry_id: string | null
         estimated_cost: number | null
+        settled_estimated_cost?: number | null
+        in_flight_estimated_cost?: number | null
         currency: string | null
         attribution_source?: 'stage_native' | 'reconciled' | null
       } | null
@@ -326,7 +422,11 @@ function mapRow(row: RawDocumentRow): DocumentRow {
     latestAttemptNo: row.latest_attempt_no,
     accountingStatus: row.accounting_status,
     totalEstimatedCost: row.total_estimated_cost,
+    settledEstimatedCost: row.settled_estimated_cost ?? null,
+    inFlightEstimatedCost: row.in_flight_estimated_cost ?? null,
     currency: row.currency,
+    inFlightStageCount: row.in_flight_stage_count ?? 0,
+    missingStageCount: row.missing_stage_count ?? 0,
     partialHistory: row.partial_history,
     partialHistoryReason: row.partial_history_reason,
     mutation: {
@@ -359,18 +459,22 @@ function mapAttemptGroup(attempt: RawDocumentDetail['attempts'][number]): Docume
     lastActivityAt,
     queueElapsedMs: attempt.queue_elapsed_ms,
     totalElapsedMs: attempt.total_elapsed_ms,
-    startedAt: attempt.started_at,
-    finishedAt: attempt.finished_at,
-    partialHistory: attempt.partial_history,
-    partialHistoryReason: attempt.partial_history_reason,
-    summary: {
-      totalEstimatedCost: attempt.summary.total_estimated_cost,
-      currency: attempt.summary.currency,
-      pricedStageCount: attempt.summary.priced_stage_count,
-      unpricedStageCount: attempt.summary.unpriced_stage_count,
-      accountingStatus: attempt.summary.accounting_status,
-    },
-    benchmarks: attempt.benchmarks.map((benchmark) => ({
+      startedAt: attempt.started_at,
+      finishedAt: attempt.finished_at,
+      partialHistory: attempt.partial_history,
+      partialHistoryReason: attempt.partial_history_reason,
+      summary: {
+        totalEstimatedCost: attempt.summary.total_estimated_cost,
+        settledEstimatedCost: attempt.summary.settled_estimated_cost ?? null,
+        inFlightEstimatedCost: attempt.summary.in_flight_estimated_cost ?? null,
+        currency: attempt.summary.currency,
+        pricedStageCount: attempt.summary.priced_stage_count,
+        unpricedStageCount: attempt.summary.unpriced_stage_count,
+        inFlightStageCount: attempt.summary.in_flight_stage_count ?? 0,
+        missingStageCount: attempt.summary.missing_stage_count ?? 0,
+        accountingStatus: attempt.summary.accounting_status,
+      },
+      benchmarks: attempt.benchmarks.map((benchmark) => ({
       stage: benchmark.stage,
       status: benchmark.status,
       message: benchmark.message,
@@ -380,12 +484,15 @@ function mapAttemptGroup(attempt: RawDocumentDetail['attempts'][number]): Docume
       finishedAt: benchmark.finished_at,
       elapsedMs: benchmark.elapsed_ms,
       accounting: benchmark.accounting
-          ? {
+        ? {
+            accountingScope: benchmark.accounting.accounting_scope ?? 'stage_rollup',
             pricingStatus: benchmark.accounting.pricing_status,
             usageEventId: benchmark.accounting.usage_event_id,
             costLedgerId: benchmark.accounting.cost_ledger_id,
             pricingCatalogEntryId: benchmark.accounting.pricing_catalog_entry_id,
             estimatedCost: benchmark.accounting.estimated_cost,
+            settledEstimatedCost: benchmark.accounting.settled_estimated_cost ?? null,
+            inFlightEstimatedCost: benchmark.accounting.in_flight_estimated_cost ?? null,
             currency: benchmark.accounting.currency,
             attributionSource: benchmark.accounting.attribution_source ?? null,
           }
@@ -436,7 +543,11 @@ function mapDetail(detail: RawDocumentDetail): DocumentDetail {
     latestAttemptNo: detail.latest_attempt_no,
     accountingStatus: detail.accounting_status,
     totalEstimatedCost: detail.total_estimated_cost,
+    settledEstimatedCost: detail.settled_estimated_cost ?? null,
+    inFlightEstimatedCost: detail.in_flight_estimated_cost ?? null,
     currency: detail.currency,
+    inFlightStageCount: detail.in_flight_stage_count ?? 0,
+    missingStageCount: detail.missing_stage_count ?? 0,
     partialHistory: detail.partial_history,
     partialHistoryReason: detail.partial_history_reason,
     mutation: {
@@ -458,6 +569,11 @@ function mapDetail(detail: RawDocumentDetail): DocumentDetail {
       checksum: detail.extracted_stats.checksum,
       pageCount: detail.extracted_stats.page_count,
       extractionKind: detail.extracted_stats.extraction_kind,
+      previewText: detail.extracted_stats.preview_text ?? null,
+      previewTruncated: detail.extracted_stats.preview_truncated ?? false,
+      warningCount: detail.extracted_stats.warning_count ?? detail.extracted_stats.warnings.length,
+      normalizationStatus: detail.extracted_stats.normalization_status ?? 'verbatim',
+      ocrSource: detail.extracted_stats.ocr_source ?? null,
       warnings: detail.extracted_stats.warnings,
     },
     graphStats: {
@@ -521,7 +637,130 @@ export async function fetchDocumentsSurface(): Promise<DocumentsSurfaceResponse>
       accountingStatuses,
       mutationStatuses,
     },
+    accounting: mapCollectionAccounting(response.accounting),
+    diagnostics: mapCollectionDiagnostics(response.diagnostics),
     rows: response.rows.map(mapRow),
+  }
+}
+
+function mapCollectionAccounting(
+  accounting: RawDocumentsSurfaceResponse['accounting'],
+): DocumentCollectionAccountingSummary {
+  if (!accounting) {
+    return {
+      totalEstimatedCost: null,
+      settledEstimatedCost: null,
+      inFlightEstimatedCost: null,
+      currency: null,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      pricedStageCount: 0,
+      unpricedStageCount: 0,
+      inFlightStageCount: 0,
+      missingStageCount: 0,
+      accountingStatus: 'unpriced',
+    }
+  }
+
+  return {
+    totalEstimatedCost: accounting.total_estimated_cost,
+    settledEstimatedCost: accounting.settled_estimated_cost,
+    inFlightEstimatedCost: accounting.in_flight_estimated_cost,
+    currency: accounting.currency,
+    promptTokens: accounting.prompt_tokens,
+    completionTokens: accounting.completion_tokens,
+    totalTokens: accounting.total_tokens,
+    pricedStageCount: accounting.priced_stage_count,
+    unpricedStageCount: accounting.unpriced_stage_count,
+    inFlightStageCount: accounting.in_flight_stage_count,
+    missingStageCount: accounting.missing_stage_count,
+    accountingStatus: accounting.accounting_status,
+  }
+}
+
+function mapCollectionDiagnostics(
+  diagnostics: RawDocumentsSurfaceResponse['diagnostics'],
+): DocumentCollectionDiagnostics {
+  if (!diagnostics) {
+    return {
+      progress: {
+        accepted: 0,
+        contentExtracted: 0,
+        chunked: 0,
+        embedded: 0,
+        extractingGraph: 0,
+        graphReady: 0,
+        ready: 0,
+        failed: 0,
+      },
+      queueBacklogCount: 0,
+      processingBacklogCount: 0,
+      activeBacklogCount: 0,
+      perStage: [],
+      perFormat: [],
+    }
+  }
+
+  return {
+    progress: {
+      accepted: diagnostics.progress.accepted,
+      contentExtracted: diagnostics.progress.content_extracted,
+      chunked: diagnostics.progress.chunked,
+      embedded: diagnostics.progress.embedded,
+      extractingGraph: diagnostics.progress.extracting_graph,
+      graphReady: diagnostics.progress.graph_ready,
+      ready: diagnostics.progress.ready,
+      failed: diagnostics.progress.failed,
+    },
+    queueBacklogCount: diagnostics.queue_backlog_count,
+    processingBacklogCount: diagnostics.processing_backlog_count,
+    activeBacklogCount: diagnostics.active_backlog_count,
+    perStage: diagnostics.per_stage.map((stage) => ({
+      stage: stage.stage,
+      activeCount: stage.active_count,
+      completedCount: stage.completed_count,
+      failedCount: stage.failed_count,
+      avgElapsedMs: stage.avg_elapsed_ms,
+      maxElapsedMs: stage.max_elapsed_ms,
+      totalEstimatedCost: stage.total_estimated_cost,
+      settledEstimatedCost: stage.settled_estimated_cost,
+      inFlightEstimatedCost: stage.in_flight_estimated_cost,
+      currency: stage.currency,
+      promptTokens: stage.prompt_tokens,
+      completionTokens: stage.completion_tokens,
+      totalTokens: stage.total_tokens,
+      accountingStatus: stage.accounting_status,
+    })),
+    perFormat: diagnostics.per_format.map((format) => ({
+      fileType: format.file_type,
+      documentCount: format.document_count,
+      queuedCount: format.queued_count,
+      processingCount: format.processing_count,
+      readyCount: format.ready_count,
+      readyNoGraphCount: format.ready_no_graph_count,
+      failedCount: format.failed_count,
+      contentExtractedCount: format.content_extracted_count,
+      chunkedCount: format.chunked_count,
+      embeddedCount: format.embedded_count,
+      extractingGraphCount: format.extracting_graph_count,
+      graphReadyCount: format.graph_ready_count,
+      avgQueueElapsedMs: format.avg_queue_elapsed_ms,
+      maxQueueElapsedMs: format.max_queue_elapsed_ms,
+      avgTotalElapsedMs: format.avg_total_elapsed_ms,
+      maxTotalElapsedMs: format.max_total_elapsed_ms,
+      bottleneckStage: format.bottleneck_stage,
+      bottleneckAvgElapsedMs: format.bottleneck_avg_elapsed_ms,
+      bottleneckMaxElapsedMs: format.bottleneck_max_elapsed_ms,
+      totalEstimatedCost: format.total_estimated_cost,
+      settledEstimatedCost: format.settled_estimated_cost,
+      inFlightEstimatedCost: format.in_flight_estimated_cost,
+      currency: format.currency,
+      promptTokens: format.prompt_tokens,
+      completionTokens: format.completion_tokens,
+      totalTokens: format.total_tokens,
+      accountingStatus: format.accounting_status,
+    })),
   }
 }
 

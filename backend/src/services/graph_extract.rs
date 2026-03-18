@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, anyhow};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::time::Instant;
 
 use crate::{
     app::state::AppState,
@@ -67,6 +69,18 @@ pub struct GraphExtractionUsageCall {
     pub provider_attempt_no: i32,
     pub prompt_hash: String,
     pub usage_json: serde_json::Value,
+    pub timing: GraphExtractionCallTiming,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GraphExtractionCallTiming {
+    pub started_at: DateTime<Utc>,
+    pub finished_at: DateTime<Utc>,
+    pub elapsed_ms: i64,
+    pub input_char_count: i32,
+    pub output_char_count: i32,
+    pub chars_per_second: Option<f64>,
+    pub tokens_per_second: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +91,7 @@ struct RawGraphExtractionResponse {
     output_text: String,
     usage_json: serde_json::Value,
     lifecycle: GraphExtractionLifecycle,
+    timing: GraphExtractionCallTiming,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +100,7 @@ struct GraphExtractionRecoveryAttempt {
     prompt_hash: String,
     output_text: String,
     usage_json: serde_json::Value,
+    timing: GraphExtractionCallTiming,
     parse_error: Option<String>,
     normalization_path: String,
     repair_candidate: Option<String>,
@@ -160,6 +176,7 @@ pub async fn extract_chunk_graph(
             resolved.usage_json.clone(),
             &resolved.lifecycle,
             &resolved.recovery,
+            &resolved.usage_calls,
         ),
         usage_json: resolved.usage_json.clone(),
         usage_calls: resolved.usage_calls,
@@ -189,6 +206,7 @@ pub async fn extract_and_persist_chunk_graph(
                 resolved.usage_json,
                 &resolved.lifecycle,
                 &resolved.recovery,
+                &resolved.usage_calls,
             ),
             serde_json::to_value(resolved.normalized).unwrap_or_else(|_| serde_json::json!({})),
             i32::try_from(resolved.recovery.provider_attempt_count).unwrap_or(i32::MAX),
@@ -232,6 +250,7 @@ pub async fn extract_and_persist_chunk_graph_result(
                     resolved.usage_json.clone(),
                     &resolved.lifecycle,
                     &resolved.recovery,
+                    &resolved.usage_calls,
                 ),
                 usage_json: resolved.usage_json.clone(),
                 usage_calls: resolved.usage_calls.clone(),
@@ -356,12 +375,13 @@ async fn resolve_graph_extraction_with_gateway(
                     model_name: model_name.clone(),
                     prompt_hash: sha256_hex(&build_graph_extraction_prompt(request)),
                     provider_attempt_count: trace.provider_attempt_count,
-                    raw_output_json: serde_json::json!({
-                        "output_text": previous_invalid_output,
-                        "usage": aggregate_provider_usage_json(&provider_kind, &model_name, &usage_samples),
-                        "lifecycle": lifecycle,
-                        "recovery": trace,
-                    }),
+                    raw_output_json: build_raw_output_json(
+                        previous_invalid_output.as_deref().unwrap_or_default(),
+                        aggregate_provider_usage_json(&provider_kind, &model_name, &usage_samples),
+                        &lifecycle,
+                        &trace,
+                        &usage_calls,
+                    ),
                     error_message: if provider_attempt_no == 1 {
                         format!(
                             "graph extraction provider call failed before normalization retry: {error:#}"
@@ -382,6 +402,7 @@ async fn resolve_graph_extraction_with_gateway(
             provider_attempt_no: i32::try_from(provider_attempt_no).unwrap_or(i32::MAX),
             prompt_hash: raw.prompt_hash.clone(),
             usage_json: raw.usage_json.clone(),
+            timing: raw.timing.clone(),
         });
         match normalize_graph_extraction_output_with_repair(&raw.output_text) {
             Ok((normalized, normalization_path, repair_candidate)) => {
@@ -393,6 +414,7 @@ async fn resolve_graph_extraction_with_gateway(
                     prompt_hash: raw.prompt_hash.clone(),
                     output_text: raw.output_text.clone(),
                     usage_json: raw.usage_json.clone(),
+                    timing: raw.timing.clone(),
                     parse_error: None,
                     normalization_path: normalization_path.to_string(),
                     repair_candidate,
@@ -420,6 +442,7 @@ async fn resolve_graph_extraction_with_gateway(
                     prompt_hash: raw.prompt_hash.clone(),
                     output_text: raw.output_text.clone(),
                     usage_json: raw.usage_json.clone(),
+                    timing: raw.timing.clone(),
                     parse_error: Some(parse_error.clone()),
                     normalization_path: "failed".to_string(),
                     repair_candidate: repair_graph_extraction_output(&raw.output_text),
@@ -444,6 +467,7 @@ async fn resolve_graph_extraction_with_gateway(
                             ),
                             &raw.lifecycle,
                             &trace,
+                            &usage_calls,
                         ),
                         error_message: format!(
                             "failed to normalize graph extraction output after {} provider attempt(s): {}",
@@ -462,11 +486,13 @@ async fn resolve_graph_extraction_with_gateway(
         model_name,
         prompt_hash: sha256_hex(&build_graph_extraction_prompt(request)),
         provider_attempt_count: trace.provider_attempt_count,
-        raw_output_json: serde_json::json!({
-            "usage": aggregate_usage,
-            "lifecycle": lifecycle,
-            "recovery": trace,
-        }),
+        raw_output_json: build_raw_output_json(
+            "",
+            aggregate_usage,
+            &lifecycle,
+            &trace,
+            &usage_calls,
+        ),
         error_message: "graph extraction retry loop ended without a terminal outcome".to_string(),
     })
 }
@@ -516,26 +542,39 @@ async fn request_graph_extraction_with_prompt(
     let prompt_hash = sha256_hex(&prompt);
     let provider_kind = provider_profile.indexing.provider_kind.as_str().to_string();
     let model_name = provider_profile.indexing.model_name.clone();
+    let started_at = Utc::now();
+    let started = Instant::now();
     let response = gateway
         .generate(ChatRequest {
             provider_kind: provider_kind.clone(),
             model_name: model_name.clone(),
-            prompt,
+            prompt: prompt.clone(),
         })
         .await
         .context("graph extraction provider call failed")?;
+    let finished_at = Utc::now();
+    let output_text = response.output_text;
+    let usage_json = build_provider_usage_json(
+        provider_profile.indexing.provider_kind.as_str(),
+        &provider_profile.indexing.model_name,
+        response.usage_json,
+    );
 
     Ok(RawGraphExtractionResponse {
         provider_kind,
         model_name,
         prompt_hash,
-        output_text: response.output_text,
-        usage_json: build_provider_usage_json(
-            provider_profile.indexing.provider_kind.as_str(),
-            &provider_profile.indexing.model_name,
-            response.usage_json,
-        ),
+        output_text: output_text.clone(),
+        usage_json: usage_json.clone(),
         lifecycle,
+        timing: build_graph_extraction_call_timing(
+            started_at,
+            finished_at,
+            started.elapsed(),
+            &prompt,
+            &output_text,
+            &usage_json,
+        ),
     })
 }
 
@@ -567,13 +606,54 @@ fn build_raw_output_json(
     usage_json: serde_json::Value,
     lifecycle: &GraphExtractionLifecycle,
     recovery: &GraphExtractionRecoveryTrace,
+    usage_calls: &[GraphExtractionUsageCall],
 ) -> serde_json::Value {
     serde_json::json!({
         "output_text": output_text,
         "usage": usage_json,
+        "provider_calls": usage_calls,
         "lifecycle": lifecycle,
         "recovery": recovery,
     })
+}
+
+fn build_graph_extraction_call_timing(
+    started_at: DateTime<Utc>,
+    finished_at: DateTime<Utc>,
+    elapsed: std::time::Duration,
+    prompt: &str,
+    output_text: &str,
+    usage_json: &serde_json::Value,
+) -> GraphExtractionCallTiming {
+    let elapsed_ms = i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX);
+    let input_char_count = i32::try_from(prompt.chars().count()).unwrap_or(i32::MAX);
+    let output_char_count = i32::try_from(output_text.chars().count()).unwrap_or(i32::MAX);
+    let total_tokens =
+        usage_json.get("total_tokens").and_then(serde_json::Value::as_i64).or_else(|| {
+            let prompt_tokens =
+                usage_json.get("prompt_tokens").and_then(serde_json::Value::as_i64)?;
+            let completion_tokens = usage_json
+                .get("completion_tokens")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
+            Some(prompt_tokens.saturating_add(completion_tokens))
+        });
+    let seconds = (elapsed_ms > 0).then_some(elapsed_ms as f64 / 1000.0);
+
+    GraphExtractionCallTiming {
+        started_at,
+        finished_at,
+        elapsed_ms,
+        input_char_count,
+        output_char_count,
+        chars_per_second: seconds.and_then(|value| {
+            (value > 0.0)
+                .then_some(f64::from(input_char_count.saturating_add(output_char_count)) / value)
+        }),
+        tokens_per_second: seconds.and_then(|value| {
+            total_tokens.filter(|tokens| *tokens > 0).map(|tokens| tokens as f64 / value)
+        }),
+    }
 }
 
 fn build_provider_usage_json(
@@ -1284,6 +1364,25 @@ mod tests {
             resolved.usage_json.get("total_tokens").and_then(serde_json::Value::as_i64),
             Some(25)
         );
+        let raw_output_json = build_raw_output_json(
+            &resolved.output_text,
+            resolved.usage_json.clone(),
+            &resolved.lifecycle,
+            &resolved.recovery,
+            &resolved.usage_calls,
+        );
+        let provider_calls = raw_output_json
+            .get("provider_calls")
+            .and_then(serde_json::Value::as_array)
+            .expect("provider calls are persisted");
+        assert_eq!(provider_calls.len(), 2);
+        assert!(
+            provider_calls[0]
+                .get("timing")
+                .and_then(|value| value.get("elapsed_ms"))
+                .and_then(serde_json::Value::as_i64)
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -1322,6 +1421,14 @@ mod tests {
                 .raw_output_json
                 .get("recovery")
                 .and_then(|value| value.get("attempts"))
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(
+            failure
+                .raw_output_json
+                .get("provider_calls")
                 .and_then(serde_json::Value::as_array)
                 .map(Vec::len),
             Some(2)

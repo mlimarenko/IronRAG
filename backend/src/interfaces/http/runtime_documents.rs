@@ -12,11 +12,12 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::usage_governance::{RuntimeStageBillingPolicy, runtime_stage_billing_policy},
     infra::repositories::{
         self, AttemptStageAccountingRow, DocumentRevisionRow, IngestionExecutionPayload,
-        IngestionJobRow, LogicalDocumentProjectionRow, RuntimeExtractedContentRow,
-        RuntimeIngestionRunRow, RuntimeIngestionStageEventRow,
+        IngestionJobRow, LogicalDocumentProjectionRow, RuntimeCollectionFormatRollupRow,
+        RuntimeCollectionProgressRollupRow, RuntimeCollectionResolvedStageAccountingRow,
+        RuntimeCollectionStageRollupRow, RuntimeExtractedContentRow, RuntimeIngestionRunRow,
+        RuntimeIngestionStageEventRow,
     },
     interfaces::http::{
         auth::AuthContext,
@@ -29,6 +30,10 @@ use crate::{
         runtime_support::load_library_and_authorize,
         upload_support::{MultipartUploadFileInput, build_runtime_upload_requests},
     },
+    services::document_accounting::{
+        ResolvedStageAccountingView, resolve_attempt_stage_accounting,
+        summarize_resolved_attempt_stage_accounting,
+    },
     services::document_reconciliation::{
         AppendDocumentRequest, ReplaceDocumentRequest, queue_append_document_mutation,
         queue_replace_document_mutation,
@@ -37,7 +42,10 @@ use crate::{
         RuntimeUploadFileInput, classify_runtime_document_activity, delete_runtime_run_and_rebuild,
         queue_new_runtime_upload, reprocess_runtime_run_and_rebuild, requeue_runtime_run,
     },
-    shared::file_extract::UploadAdmissionError,
+    shared::file_extract::{
+        EXTRACTED_CONTENT_PREVIEW_LIMIT, UploadAdmissionError, build_extracted_content_preview,
+        extraction_quality_from_source_map,
+    },
 };
 
 #[derive(Debug, Deserialize)]
@@ -67,6 +75,94 @@ struct RuntimeDocumentSurfaceResponse {
     summary: RuntimeDocumentSummary,
     warnings: Vec<ApiWarningBody>,
     rows: Vec<RuntimeDocumentRow>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeCollectionDiagnosticsResponse {
+    document_count: usize,
+    progress: RuntimeCollectionProgressCountersResponse,
+    queue_backlog_count: usize,
+    processing_backlog_count: usize,
+    active_backlog_count: usize,
+    total_estimated_cost: Option<f64>,
+    settled_estimated_cost: Option<f64>,
+    in_flight_estimated_cost: Option<f64>,
+    currency: Option<String>,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    total_tokens: i64,
+    priced_stage_count: i32,
+    unpriced_stage_count: i32,
+    in_flight_stage_count: i32,
+    missing_stage_count: i32,
+    accounting_status: String,
+    per_stage: Vec<RuntimeCollectionStageDiagnosticsResponse>,
+    per_format: Vec<RuntimeCollectionFormatDiagnosticsResponse>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeCollectionProgressCountersResponse {
+    accepted: usize,
+    content_extracted: usize,
+    chunked: usize,
+    embedded: usize,
+    extracting_graph: usize,
+    graph_ready: usize,
+    ready: usize,
+    failed: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeCollectionStageDiagnosticsResponse {
+    stage: String,
+    active_count: usize,
+    completed_count: usize,
+    failed_count: usize,
+    avg_elapsed_ms: Option<i64>,
+    max_elapsed_ms: Option<i64>,
+    total_estimated_cost: Option<f64>,
+    settled_estimated_cost: Option<f64>,
+    in_flight_estimated_cost: Option<f64>,
+    currency: Option<String>,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    total_tokens: i64,
+    accounting_status: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeCollectionFormatDiagnosticsResponse {
+    file_type: String,
+    document_count: usize,
+    queued_count: usize,
+    processing_count: usize,
+    ready_count: usize,
+    ready_no_graph_count: usize,
+    failed_count: usize,
+    content_extracted_count: usize,
+    chunked_count: usize,
+    embedded_count: usize,
+    extracting_graph_count: usize,
+    graph_ready_count: usize,
+    avg_queue_elapsed_ms: Option<i64>,
+    max_queue_elapsed_ms: Option<i64>,
+    avg_total_elapsed_ms: Option<i64>,
+    max_total_elapsed_ms: Option<i64>,
+    bottleneck_stage: Option<String>,
+    bottleneck_avg_elapsed_ms: Option<i64>,
+    bottleneck_max_elapsed_ms: Option<i64>,
+    total_estimated_cost: Option<f64>,
+    settled_estimated_cost: Option<f64>,
+    in_flight_estimated_cost: Option<f64>,
+    currency: Option<String>,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    total_tokens: i64,
+    accounting_status: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,8 +195,12 @@ struct RuntimeDocumentRow {
     active_revision_no: Option<i32>,
     latest_attempt_no: i32,
     total_cost: Option<f64>,
+    settled_total_cost: Option<f64>,
+    in_flight_total_cost: Option<f64>,
     currency: Option<String>,
     accounting_status: String,
+    in_flight_stage_count: i32,
+    missing_stage_count: i32,
     partial_history: bool,
     partial_history_reason: Option<String>,
 }
@@ -124,6 +224,11 @@ struct RuntimeExtractionDetail {
     extraction_kind: String,
     page_count: Option<i32>,
     char_count: Option<i32>,
+    preview_text: Option<String>,
+    preview_truncated: bool,
+    warning_count: usize,
+    normalization_status: String,
+    ocr_source: Option<String>,
     warnings: Vec<String>,
 }
 
@@ -186,9 +291,13 @@ struct RuntimeAttemptResponse {
 #[serde(rename_all = "camelCase")]
 struct RuntimeAttemptCostSummaryResponse {
     total_estimated_cost: Option<f64>,
+    settled_estimated_cost: Option<f64>,
+    in_flight_estimated_cost: Option<f64>,
     currency: Option<String>,
     priced_stage_count: i32,
     unpriced_stage_count: i32,
+    in_flight_stage_count: i32,
+    missing_stage_count: i32,
     accounting_status: String,
 }
 
@@ -209,11 +318,14 @@ struct RuntimeStageBenchmarkResponse {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeStageAccountingResponse {
+    accounting_scope: String,
     pricing_status: String,
     usage_event_id: Option<Uuid>,
     cost_ledger_id: Option<Uuid>,
     pricing_catalog_entry_id: Option<Uuid>,
     estimated_cost: Option<f64>,
+    settled_estimated_cost: Option<f64>,
+    in_flight_estimated_cost: Option<f64>,
     currency: Option<String>,
     attribution_source: String,
 }
@@ -241,6 +353,10 @@ pub fn router() -> Router<crate::app::state::AppState> {
         .route(
             "/runtime/libraries/{library_id}/documents",
             axum::routing::post(upload_runtime_documents).get(list_runtime_documents),
+        )
+        .route(
+            "/runtime/libraries/{library_id}/documents/diagnostics",
+            axum::routing::get(get_runtime_collection_diagnostics),
         )
         .route(
             "/runtime/libraries/{library_id}/documents/{document_id}",
@@ -463,6 +579,46 @@ async fn get_runtime_document(
             .collect(),
         attempts,
     }))
+}
+
+async fn get_runtime_collection_diagnostics(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(library_id): Path<Uuid>,
+) -> Result<Json<RuntimeCollectionDiagnosticsResponse>, ApiError> {
+    let project =
+        load_library_and_authorize(&auth, &state, library_id, POLICY_DOCUMENTS_READ).await?;
+    let progress_rollup = repositories::load_runtime_collection_progress_rollup(
+        &state.persistence.postgres,
+        project.id,
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    let stage_rollups = repositories::list_runtime_collection_stage_rollups(
+        &state.persistence.postgres,
+        project.id,
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    let format_rollups = repositories::list_runtime_collection_format_rollups(
+        &state.persistence.postgres,
+        project.id,
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    let resolved_stage_rows = repositories::list_runtime_collection_resolved_stage_accounting(
+        &state.persistence.postgres,
+        project.id,
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?;
+
+    Ok(Json(build_runtime_collection_diagnostics(
+        &progress_rollup,
+        &stage_rollups,
+        &format_rollups,
+        &resolved_stage_rows,
+    )))
 }
 
 async fn retry_runtime_document(
@@ -812,11 +968,25 @@ async fn load_runtime_document_row(
         total_cost: latest_summary
             .as_ref()
             .and_then(|item| decimal_to_f64(item.total_estimated_cost)),
+        settled_total_cost: latest_summary
+            .as_ref()
+            .and_then(|item| decimal_to_f64(item.settled_estimated_cost)),
+        in_flight_total_cost: latest_summary
+            .as_ref()
+            .and_then(|item| decimal_to_f64(item.in_flight_estimated_cost)),
         currency: latest_summary.as_ref().and_then(|item| item.currency.clone()),
         accounting_status: latest_summary
             .as_ref()
             .map(|item| item.accounting_status.clone())
             .unwrap_or_else(|| "unpriced".to_string()),
+        in_flight_stage_count: latest_summary
+            .as_ref()
+            .map(|item| item.in_flight_stage_count)
+            .unwrap_or(0),
+        missing_stage_count: latest_summary
+            .as_ref()
+            .map(|item| item.missing_stage_count)
+            .unwrap_or(0),
         partial_history,
         partial_history_reason: partial_history
             .then_some("Legacy runtime history is incomplete for this attempt.".to_string()),
@@ -824,11 +994,28 @@ async fn load_runtime_document_row(
 }
 
 fn map_runtime_extraction_detail(row: RuntimeExtractedContentRow) -> RuntimeExtractionDetail {
+    let warnings =
+        serde_json::from_value::<Vec<String>>(row.extraction_warnings_json).unwrap_or_default();
+    let quality = extraction_quality_from_source_map(
+        &row.source_map_json,
+        &row.extraction_kind,
+        warnings.len(),
+    );
+    let preview = build_extracted_content_preview(
+        row.content_text.as_deref(),
+        EXTRACTED_CONTENT_PREVIEW_LIMIT,
+    );
+
     RuntimeExtractionDetail {
         extraction_kind: row.extraction_kind,
         page_count: row.page_count,
         char_count: row.char_count,
-        warnings: serde_json::from_value(row.extraction_warnings_json).unwrap_or_default(),
+        preview_text: preview.text,
+        preview_truncated: preview.truncated,
+        warning_count: quality.warning_count,
+        normalization_status: quality.normalization_status.as_str().to_string(),
+        ocr_source: quality.ocr_source,
+        warnings,
     }
 }
 
@@ -901,11 +1088,6 @@ fn build_runtime_attempts(
     let payload_by_attempt = map_attempt_payloads(&attempt_nos, jobs);
     let job_by_attempt = map_attempt_jobs(&attempt_nos, jobs);
     let stage_events_by_attempt = group_stage_events_by_attempt(stage_events);
-    let accounting_by_event = stage_accounting
-        .iter()
-        .cloned()
-        .map(|row| (row.stage_event_id, row))
-        .collect::<HashMap<_, _>>();
 
     attempt_nos
         .into_iter()
@@ -913,6 +1095,12 @@ fn build_runtime_attempts(
         .map(|attempt_no| {
             let attempt_stage_events =
                 stage_events_by_attempt.get(&attempt_no).cloned().unwrap_or_default();
+            let resolved_stage_accounting =
+                resolve_attempt_stage_accounting(&attempt_stage_events, stage_accounting);
+            let accounting_by_event = resolved_stage_accounting
+                .iter()
+                .filter_map(|row| row.anchor_event_id.map(|event_id| (event_id, row.clone())))
+                .collect::<HashMap<_, _>>();
             let payload = payload_by_attempt.get(&attempt_no);
             let job = job_by_attempt.get(&attempt_no);
             let revision_no = payload
@@ -935,14 +1123,12 @@ fn build_runtime_attempts(
                     started_at: event.started_at,
                     finished_at: event.finished_at,
                     elapsed_ms: event.elapsed_ms,
-                    accounting: accounting_by_event.get(&event.id).and_then(|row| {
-                        stage_accounting_belongs_to_billable_stage(row, &event.stage)
-                            .then(|| map_stage_accounting_response(row, event))
-                    }),
+                    accounting: accounting_by_event
+                        .get(&event.id)
+                        .map(map_stage_accounting_response),
                 })
                 .collect::<Vec<_>>();
-            let cost_summary =
-                summarize_attempt_accounting(&attempt_stage_events, stage_accounting);
+            let cost_summary = summarize_attempt_accounting(&resolved_stage_accounting);
             let started_at = attempt_started_at(&attempt_stage_events).or(
                 if attempt_no == runtime_run.current_attempt_no {
                     runtime_run.started_at
@@ -1041,105 +1227,285 @@ fn build_runtime_attempts(
 }
 
 fn summarize_attempt_accounting(
-    attempt_stage_events: &[RuntimeIngestionStageEventRow],
-    stage_accounting: &[AttemptStageAccountingRow],
+    resolved_stage_accounting: &[ResolvedStageAccountingView],
 ) -> RuntimeAttemptCostSummaryResponse {
-    let stage_event_ids =
-        attempt_stage_events.iter().map(|event| event.id).collect::<BTreeSet<_>>();
-    let attempt_rows = stage_accounting
+    let summary = summarize_resolved_attempt_stage_accounting(resolved_stage_accounting);
+    RuntimeAttemptCostSummaryResponse {
+        total_estimated_cost: decimal_to_f64(summary.total_estimated_cost),
+        settled_estimated_cost: decimal_to_f64(summary.settled_estimated_cost),
+        in_flight_estimated_cost: decimal_to_f64(summary.in_flight_estimated_cost),
+        currency: summary.currency,
+        priced_stage_count: summary.priced_stage_count,
+        unpriced_stage_count: summary.unpriced_stage_count,
+        in_flight_stage_count: summary.in_flight_stage_count,
+        missing_stage_count: summary.missing_stage_count,
+        accounting_status: summary.accounting_status,
+    }
+}
+
+fn map_stage_accounting_response(
+    row: &ResolvedStageAccountingView,
+) -> RuntimeStageAccountingResponse {
+    RuntimeStageAccountingResponse {
+        accounting_scope: row.accounting_scope.clone(),
+        pricing_status: row.pricing_status.clone(),
+        usage_event_id: row.usage_event_id,
+        cost_ledger_id: row.cost_ledger_id,
+        pricing_catalog_entry_id: row.pricing_catalog_entry_id,
+        estimated_cost: decimal_to_f64(row.estimated_cost),
+        settled_estimated_cost: decimal_to_f64(row.settled_estimated_cost),
+        in_flight_estimated_cost: decimal_to_f64(row.in_flight_estimated_cost),
+        currency: row.currency.clone(),
+        attribution_source: row.attribution_source.clone(),
+    }
+}
+
+fn build_runtime_collection_diagnostics(
+    progress_rollup: &RuntimeCollectionProgressRollupRow,
+    stage_rollups: &[RuntimeCollectionStageRollupRow],
+    format_rollups: &[RuntimeCollectionFormatRollupRow],
+    resolved_stage_rows: &[RuntimeCollectionResolvedStageAccountingRow],
+) -> RuntimeCollectionDiagnosticsResponse {
+    let overall = summarize_collection_cost_group(
+        usize::try_from(progress_rollup.accepted_count).unwrap_or(usize::MAX),
+        resolved_stage_rows,
+    );
+
+    let per_stage = build_runtime_stage_diagnostics(stage_rollups, resolved_stage_rows);
+    let per_format = build_runtime_format_diagnostics(format_rollups, resolved_stage_rows);
+
+    RuntimeCollectionDiagnosticsResponse {
+        document_count: overall.document_count,
+        progress: RuntimeCollectionProgressCountersResponse {
+            accepted: usize::try_from(progress_rollup.accepted_count).unwrap_or(usize::MAX),
+            content_extracted: usize::try_from(progress_rollup.content_extracted_count)
+                .unwrap_or(usize::MAX),
+            chunked: usize::try_from(progress_rollup.chunked_count).unwrap_or(usize::MAX),
+            embedded: usize::try_from(progress_rollup.embedded_count).unwrap_or(usize::MAX),
+            extracting_graph: usize::try_from(progress_rollup.extracting_graph_count)
+                .unwrap_or(usize::MAX),
+            graph_ready: usize::try_from(progress_rollup.graph_ready_count).unwrap_or(usize::MAX),
+            ready: usize::try_from(progress_rollup.ready_count).unwrap_or(usize::MAX),
+            failed: usize::try_from(progress_rollup.failed_count).unwrap_or(usize::MAX),
+        },
+        queue_backlog_count: usize::try_from(progress_rollup.queue_backlog_count)
+            .unwrap_or(usize::MAX),
+        processing_backlog_count: usize::try_from(progress_rollup.processing_backlog_count)
+            .unwrap_or(usize::MAX),
+        active_backlog_count: usize::try_from(
+            progress_rollup.queue_backlog_count + progress_rollup.processing_backlog_count,
+        )
+        .unwrap_or(usize::MAX),
+        total_estimated_cost: overall.total_estimated_cost,
+        settled_estimated_cost: overall.settled_estimated_cost,
+        in_flight_estimated_cost: overall.in_flight_estimated_cost,
+        currency: overall.currency,
+        prompt_tokens: overall.prompt_tokens,
+        completion_tokens: overall.completion_tokens,
+        total_tokens: overall.total_tokens,
+        priced_stage_count: overall.priced_stage_count,
+        unpriced_stage_count: overall.unpriced_stage_count,
+        in_flight_stage_count: overall.in_flight_stage_count,
+        missing_stage_count: overall.missing_stage_count,
+        accounting_status: overall.accounting_status,
+        per_stage,
+        per_format,
+    }
+}
+
+fn build_runtime_stage_diagnostics(
+    stage_rollups: &[RuntimeCollectionStageRollupRow],
+    resolved_stage_rows: &[RuntimeCollectionResolvedStageAccountingRow],
+) -> Vec<RuntimeCollectionStageDiagnosticsResponse> {
+    let mut rows_by_stage =
+        BTreeMap::<String, Vec<RuntimeCollectionResolvedStageAccountingRow>>::new();
+    for row in resolved_stage_rows {
+        rows_by_stage.entry(row.stage.clone()).or_default().push(row.clone());
+    }
+
+    let mut per_stage = stage_rollups
         .iter()
-        .filter(|row| {
-            stage_event_ids.contains(&row.stage_event_id)
-                && attempt_stage_events.iter().any(|event| {
-                    event.id == row.stage_event_id
-                        && stage_accounting_belongs_to_billable_stage(row, &event.stage)
-                })
+        .map(|rollup| {
+            let stage_rows = rows_by_stage.remove(&rollup.stage).unwrap_or_default();
+            let document_count =
+                stage_rows.iter().map(|row| row.ingestion_run_id).collect::<BTreeSet<_>>().len();
+            let summary = summarize_collection_cost_group(document_count, &stage_rows);
+            RuntimeCollectionStageDiagnosticsResponse {
+                stage: rollup.stage.clone(),
+                active_count: usize::try_from(rollup.active_count).unwrap_or(usize::MAX),
+                completed_count: usize::try_from(rollup.completed_count).unwrap_or(usize::MAX),
+                failed_count: usize::try_from(rollup.failed_count).unwrap_or(usize::MAX),
+                avg_elapsed_ms: rollup.avg_elapsed_ms,
+                max_elapsed_ms: rollup.max_elapsed_ms,
+                total_estimated_cost: summary.total_estimated_cost,
+                settled_estimated_cost: summary.settled_estimated_cost,
+                in_flight_estimated_cost: summary.in_flight_estimated_cost,
+                currency: summary.currency,
+                prompt_tokens: summary.prompt_tokens,
+                completion_tokens: summary.completion_tokens,
+                total_tokens: summary.total_tokens,
+                accounting_status: summary.accounting_status,
+            }
         })
         .collect::<Vec<_>>();
-    let total_estimated_cost = attempt_rows
+    per_stage.sort_by_key(|row| stage_sort_key(&row.stage));
+    per_stage
+}
+
+fn build_runtime_format_diagnostics(
+    format_rollups: &[RuntimeCollectionFormatRollupRow],
+    resolved_stage_rows: &[RuntimeCollectionResolvedStageAccountingRow],
+) -> Vec<RuntimeCollectionFormatDiagnosticsResponse> {
+    let mut rows_by_format =
+        BTreeMap::<String, Vec<RuntimeCollectionResolvedStageAccountingRow>>::new();
+    for row in resolved_stage_rows {
+        rows_by_format.entry(row.file_type.clone()).or_default().push(row.clone());
+    }
+
+    format_rollups
+        .iter()
+        .map(|rollup| {
+            let format_rows = rows_by_format.remove(&rollup.file_type).unwrap_or_default();
+            let summary = summarize_collection_cost_group(
+                usize::try_from(rollup.document_count).unwrap_or(usize::MAX),
+                &format_rows,
+            );
+            RuntimeCollectionFormatDiagnosticsResponse {
+                file_type: rollup.file_type.clone(),
+                document_count: usize::try_from(rollup.document_count).unwrap_or(usize::MAX),
+                queued_count: usize::try_from(rollup.queued_count).unwrap_or(usize::MAX),
+                processing_count: usize::try_from(rollup.processing_count).unwrap_or(usize::MAX),
+                ready_count: usize::try_from(rollup.ready_count).unwrap_or(usize::MAX),
+                ready_no_graph_count: usize::try_from(rollup.ready_no_graph_count)
+                    .unwrap_or(usize::MAX),
+                failed_count: usize::try_from(rollup.failed_count).unwrap_or(usize::MAX),
+                content_extracted_count: usize::try_from(rollup.content_extracted_count)
+                    .unwrap_or(usize::MAX),
+                chunked_count: usize::try_from(rollup.chunked_count).unwrap_or(usize::MAX),
+                embedded_count: usize::try_from(rollup.embedded_count).unwrap_or(usize::MAX),
+                extracting_graph_count: usize::try_from(rollup.extracting_graph_count)
+                    .unwrap_or(usize::MAX),
+                graph_ready_count: usize::try_from(rollup.graph_ready_count).unwrap_or(usize::MAX),
+                avg_queue_elapsed_ms: rollup.avg_queue_elapsed_ms,
+                max_queue_elapsed_ms: rollup.max_queue_elapsed_ms,
+                avg_total_elapsed_ms: rollup.avg_total_elapsed_ms,
+                max_total_elapsed_ms: rollup.max_total_elapsed_ms,
+                bottleneck_stage: rollup.bottleneck_stage.clone(),
+                bottleneck_avg_elapsed_ms: rollup.bottleneck_avg_elapsed_ms,
+                bottleneck_max_elapsed_ms: rollup.bottleneck_max_elapsed_ms,
+                total_estimated_cost: summary.total_estimated_cost,
+                settled_estimated_cost: summary.settled_estimated_cost,
+                in_flight_estimated_cost: summary.in_flight_estimated_cost,
+                currency: summary.currency,
+                prompt_tokens: summary.prompt_tokens,
+                completion_tokens: summary.completion_tokens,
+                total_tokens: summary.total_tokens,
+                accounting_status: summary.accounting_status,
+            }
+        })
+        .collect()
+}
+
+fn stage_sort_key(stage: &str) -> usize {
+    match stage {
+        "extracting_content" => 0,
+        "chunking" => 1,
+        "embedding_chunks" => 2,
+        "extracting_graph" => 3,
+        "merging_graph" => 4,
+        "projecting_graph" => 5,
+        "finalizing" => 6,
+        "failed" => 7,
+        _ => 99,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CollectionCostGroupSummary {
+    document_count: usize,
+    total_estimated_cost: Option<f64>,
+    settled_estimated_cost: Option<f64>,
+    in_flight_estimated_cost: Option<f64>,
+    currency: Option<String>,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    total_tokens: i64,
+    priced_stage_count: i32,
+    unpriced_stage_count: i32,
+    in_flight_stage_count: i32,
+    missing_stage_count: i32,
+    accounting_status: String,
+}
+
+fn summarize_collection_cost_group(
+    document_count: usize,
+    rows: &[RuntimeCollectionResolvedStageAccountingRow],
+) -> CollectionCostGroupSummary {
+    let total_estimated_cost = rows
         .iter()
         .filter_map(|row| row.estimated_cost)
         .fold(rust_decimal::Decimal::ZERO, |acc, value| acc + value);
-    let priced_stage_count =
-        i32::try_from(attempt_rows.iter().filter(|row| row.pricing_status == "priced").count())
+    let settled_estimated_cost = rows
+        .iter()
+        .filter(|row| row.accounting_scope == "stage_rollup")
+        .filter_map(|row| row.estimated_cost)
+        .fold(rust_decimal::Decimal::ZERO, |acc, value| acc + value);
+    let in_flight_estimated_cost = rows
+        .iter()
+        .filter(|row| row.accounting_scope == "provider_call")
+        .filter_map(|row| row.estimated_cost)
+        .fold(rust_decimal::Decimal::ZERO, |acc, value| acc + value);
+    let priced_stage_count = i32::try_from(
+        rows.iter()
+            .filter(|row| row.accounting_scope == "stage_rollup" && row.pricing_status == "priced")
+            .count(),
+    )
+    .unwrap_or(i32::MAX);
+    let unpriced_stage_count = i32::try_from(
+        rows.iter()
+            .filter(|row| row.accounting_scope == "stage_rollup" && row.pricing_status != "priced")
+            .count(),
+    )
+    .unwrap_or(i32::MAX);
+    let in_flight_stage_count =
+        i32::try_from(rows.iter().filter(|row| row.accounting_scope == "provider_call").count())
             .unwrap_or(i32::MAX);
-    let unpriced_stage_count =
-        i32::try_from(attempt_rows.iter().filter(|row| row.pricing_status != "priced").count())
+    let missing_stage_count =
+        i32::try_from(rows.iter().filter(|row| row.accounting_scope == "missing").count())
             .unwrap_or(i32::MAX);
-    RuntimeAttemptCostSummaryResponse {
-        total_estimated_cost: if attempt_rows.iter().any(|row| row.estimated_cost.is_some()) {
-            decimal_to_f64(Some(total_estimated_cost))
-        } else {
-            None
-        },
-        currency: attempt_rows.iter().find_map(|row| row.currency.clone()),
+
+    CollectionCostGroupSummary {
+        document_count,
+        total_estimated_cost: decimal_to_f64(
+            rows.iter().any(|row| row.estimated_cost.is_some()).then_some(total_estimated_cost),
+        ),
+        settled_estimated_cost: decimal_to_f64(
+            rows.iter()
+                .any(|row| row.accounting_scope == "stage_rollup" && row.estimated_cost.is_some())
+                .then_some(settled_estimated_cost),
+        ),
+        in_flight_estimated_cost: decimal_to_f64(
+            rows.iter()
+                .any(|row| row.accounting_scope == "provider_call" && row.estimated_cost.is_some())
+                .then_some(in_flight_estimated_cost),
+        ),
+        currency: rows.iter().find_map(|row| row.currency.clone()),
+        prompt_tokens: rows.iter().map(|row| row.prompt_tokens).sum(),
+        completion_tokens: rows.iter().map(|row| row.completion_tokens).sum(),
+        total_tokens: rows.iter().map(|row| row.total_tokens).sum(),
         priced_stage_count,
         unpriced_stage_count,
-        accounting_status: if priced_stage_count > 0 && unpriced_stage_count == 0 {
+        in_flight_stage_count,
+        missing_stage_count,
+        accounting_status: if in_flight_stage_count > 0 {
+            "in_flight_unsettled".to_string()
+        } else if priced_stage_count > 0 && unpriced_stage_count == 0 && missing_stage_count == 0 {
             "priced".to_string()
         } else if priced_stage_count > 0 {
             "partial".to_string()
         } else {
             "unpriced".to_string()
         },
-    }
-}
-
-fn map_stage_accounting_response(
-    row: &AttemptStageAccountingRow,
-    event: &RuntimeIngestionStageEventRow,
-) -> RuntimeStageAccountingResponse {
-    RuntimeStageAccountingResponse {
-        pricing_status: row.pricing_status.clone(),
-        usage_event_id: row.usage_event_id,
-        cost_ledger_id: row.cost_ledger_id,
-        pricing_catalog_entry_id: row.pricing_catalog_entry_id,
-        estimated_cost: decimal_to_f64(row.estimated_cost),
-        currency: row.currency.clone(),
-        attribution_source: stage_attribution_source(row, &event.stage).to_string(),
-    }
-}
-
-fn stage_accounting_belongs_to_billable_stage(
-    row: &AttemptStageAccountingRow,
-    event_stage: &str,
-) -> bool {
-    if row.stage != event_stage {
-        return false;
-    }
-    match runtime_stage_billing_policy(event_stage) {
-        RuntimeStageBillingPolicy::Billable { capability, billing_unit } => {
-            row.capability == pricing_capability_label(&capability)
-                && row.billing_unit == pricing_billing_unit_label(&billing_unit)
-        }
-        RuntimeStageBillingPolicy::NonBillable => false,
-    }
-}
-
-fn pricing_capability_label(
-    value: &crate::domains::pricing_catalog::PricingCapability,
-) -> &'static str {
-    match value {
-        crate::domains::pricing_catalog::PricingCapability::Indexing => "indexing",
-        crate::domains::pricing_catalog::PricingCapability::Embedding => "embedding",
-        crate::domains::pricing_catalog::PricingCapability::Answer => "answer",
-        crate::domains::pricing_catalog::PricingCapability::Vision => "vision",
-        crate::domains::pricing_catalog::PricingCapability::GraphExtract => "graph_extract",
-    }
-}
-
-fn pricing_billing_unit_label(
-    value: &crate::domains::pricing_catalog::PricingBillingUnit,
-) -> &'static str {
-    match value {
-        crate::domains::pricing_catalog::PricingBillingUnit::Per1MInputTokens => {
-            "per_1m_input_tokens"
-        }
-        crate::domains::pricing_catalog::PricingBillingUnit::Per1MOutputTokens => {
-            "per_1m_output_tokens"
-        }
-        crate::domains::pricing_catalog::PricingBillingUnit::Per1MTokens => "per_1m_tokens",
-        crate::domains::pricing_catalog::PricingBillingUnit::FixedPerCall => "fixed_per_call",
     }
 }
 
@@ -1304,21 +1670,6 @@ fn attempt_last_activity_at(
         return runtime_run.last_activity_at;
     }
     stage_events.iter().rev().find_map(|event| event.finished_at.or(Some(event.started_at)))
-}
-
-fn stage_attribution_source(row: &AttemptStageAccountingRow, event_stage: &str) -> &'static str {
-    let metadata_source = row
-        .pricing_snapshot_json
-        .get("stage_ownership")
-        .or_else(|| row.token_usage_json.get("stage_ownership"))
-        .and_then(|value| value.get("attribution_source"))
-        .and_then(serde_json::Value::as_str);
-    match metadata_source {
-        Some("stage_native") => "stage_native",
-        Some("reconciled") => "reconciled",
-        _ if row.stage == event_stage => "stage_native",
-        _ => "reconciled",
-    }
 }
 
 fn surface_warnings(rows: &[RuntimeDocumentRow]) -> Vec<ApiWarningBody> {

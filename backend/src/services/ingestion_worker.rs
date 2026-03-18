@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -37,6 +38,10 @@ const WORKER_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const DEFAULT_WORKER_LEASE_DURATION: Duration = Duration::from_secs(300);
 const DEFAULT_WORKER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const DEFAULT_STALE_WORKER_GRACE_SECONDS: i64 = 45;
+const EXTRACTING_GRAPH_PROGRESS_START_PERCENT: i32 = 82;
+const EXTRACTING_GRAPH_PROGRESS_END_PERCENT: i32 = 87;
+const MERGING_GRAPH_PROGRESS_START_PERCENT: i32 = 88;
+const GRAPH_PROGRESS_ACTIVITY_INTERVAL: Duration = Duration::from_secs(30);
 const RUNTIME_STAGE_SEQUENCE: [&str; 7] = [
     "extracting_content",
     "chunking",
@@ -63,6 +68,12 @@ struct RuntimeStageSpan {
     started_at: DateTime<Utc>,
     provider_kind: Option<String>,
     model_name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct GraphStageProgressTracker {
+    last_persisted_progress: i32,
+    last_persisted_at: Instant,
 }
 
 pub fn spawn_ingestion_worker(
@@ -580,7 +591,7 @@ async fn execute_job(
         runtime_ingestion_run_id,
         attempt_no,
         "extracting_graph",
-        Some(82),
+        Some(EXTRACTING_GRAPH_PROGRESS_START_PERCENT),
         Some(extracting_graph_stage_message(rebuild_follow_up)),
         job.id,
         Some(provider_profile.indexing.provider_kind.as_str()),
@@ -594,7 +605,11 @@ async fn execute_job(
         &provider_profile.indexing.model_name,
     );
     let mut graph_extract_call_sequence_no = 0_i32;
-    for chunk in &persisted_chunks {
+    let mut graph_progress_tracker = GraphStageProgressTracker {
+        last_persisted_progress: EXTRACTING_GRAPH_PROGRESS_START_PERCENT,
+        last_persisted_at: Instant::now(),
+    };
+    for (chunk_index, chunk) in persisted_chunks.iter().enumerate() {
         lease_heartbeat.maybe_renew(state.as_ref()).await?;
         let extracted = extract_and_persist_chunk_graph_result(
             state.as_ref(),
@@ -608,13 +623,11 @@ async fn execute_job(
             },
         )
         .await?;
-        if let (Some(runtime_ingestion_run_id), Some(extracting_graph_span)) = (
-            runtime_ingestion_run_id,
-            extracting_graph_span.as_ref(),
-        ) {
+        if let (Some(runtime_ingestion_run_id), Some(extracting_graph_span)) =
+            (runtime_ingestion_run_id, extracting_graph_span.as_ref())
+        {
             for usage_call in &extracted.usage_calls {
-                graph_extract_call_sequence_no =
-                    graph_extract_call_sequence_no.saturating_add(1);
+                graph_extract_call_sequence_no = graph_extract_call_sequence_no.saturating_add(1);
                 let _ = document_accounting::record_stage_usage_and_cost(
                     state.as_ref(),
                     document_accounting::StageUsageAccountingRequest {
@@ -657,6 +670,7 @@ async fn execute_job(
                             "usage": usage_call.usage_json,
                             "provider_kind": extracted.provider_kind,
                             "model_name": extracted.model_name,
+                            "timing": usage_call.timing,
                             "prompt_tokens": usage_call.usage_json.get("prompt_tokens").cloned().unwrap_or(serde_json::Value::Null),
                             "completion_tokens": usage_call.usage_json.get("completion_tokens").cloned().unwrap_or(serde_json::Value::Null),
                             "total_tokens": usage_call.usage_json.get("total_tokens").cloned().unwrap_or(serde_json::Value::Null),
@@ -670,6 +684,14 @@ async fn execute_job(
         if !extracted.normalized.entities.is_empty() || !extracted.normalized.relations.is_empty() {
             chunk_graph_results.push((chunk.clone(), extracted.normalized));
         }
+        maybe_persist_graph_progress_checkpoint(
+            state.as_ref(),
+            runtime_ingestion_run_id,
+            &mut graph_progress_tracker,
+            chunk_index + 1,
+            persisted_chunks.len(),
+        )
+        .await?;
     }
     if let Some(runtime_ingestion_run_id) = runtime_ingestion_run_id {
         let extracting_graph_event = complete_runtime_stage(
@@ -713,7 +735,7 @@ async fn execute_job(
         runtime_ingestion_run_id,
         attempt_no,
         "merging_graph",
-        Some(88),
+        Some(MERGING_GRAPH_PROGRESS_START_PERCENT),
         Some(merging_graph_stage_message(rebuild_follow_up)),
         job.id,
         None,
@@ -726,6 +748,8 @@ async fn execute_job(
             runtime_ingestion_run_id,
         );
     let mut graph_contribution_count = 0usize;
+    let mut changed_node_ids = BTreeSet::new();
+    let mut changed_edge_ids = BTreeSet::new();
     for (chunk, normalized) in &chunk_graph_results {
         let merge_outcome = merge_chunk_graph_candidates(
             &state.persistence.postgres,
@@ -737,6 +761,60 @@ async fn execute_job(
         )
         .await?;
         graph_contribution_count += merge_outcome.nodes.len() + merge_outcome.edges.len();
+        changed_node_ids.extend(merge_outcome.changed_node_ids());
+        changed_edge_ids.extend(merge_outcome.changed_edge_ids());
+    }
+
+    if graph_contribution_count > 0 {
+        let changed_edge_rows = repositories::list_admitted_runtime_graph_edges_by_ids(
+            &state.persistence.postgres,
+            payload.project_id,
+            projection_scope.projection_version,
+            &changed_edge_ids.iter().copied().collect::<Vec<_>>(),
+        )
+        .await
+        .context("failed to load changed graph edges after merge stage")?;
+        let changed_node_rows = repositories::list_admitted_runtime_graph_nodes_by_ids(
+            &state.persistence.postgres,
+            payload.project_id,
+            projection_scope.projection_version,
+            &changed_node_ids.iter().copied().collect::<Vec<_>>(),
+        )
+        .await
+        .context("failed to load changed graph nodes after merge stage")?;
+        let supporting_node_rows = if changed_edge_rows.is_empty() {
+            Vec::new()
+        } else {
+            let supporting_node_ids =
+                collect_graph_embedding_support_node_ids(&changed_node_ids, &changed_edge_rows);
+            repositories::list_admitted_runtime_graph_nodes_by_ids(
+                &state.persistence.postgres,
+                payload.project_id,
+                projection_scope.projection_version,
+                &supporting_node_ids,
+            )
+            .await
+            .context("failed to load supporting graph nodes after merge stage")?
+        };
+        if !changed_node_rows.is_empty() {
+            let _node_embedding_usage = embed_runtime_graph_nodes(
+                state.as_ref(),
+                &provider_profile,
+                &changed_node_rows,
+                Some(&mut lease_heartbeat),
+            )
+            .await?;
+        }
+        if !changed_edge_rows.is_empty() {
+            let _edge_embedding_usage = embed_runtime_graph_edges(
+                state.as_ref(),
+                &provider_profile,
+                &supporting_node_rows,
+                &changed_edge_rows,
+                Some(&mut lease_heartbeat),
+            )
+            .await?;
+        }
     }
 
     let merged_nodes = repositories::list_admitted_runtime_graph_nodes_by_projection(
@@ -753,24 +831,6 @@ async fn execute_job(
     )
     .await
     .context("failed to load merged graph edges after merge stage")?;
-
-    if graph_contribution_count > 0 {
-        let _node_embedding_usage = embed_runtime_graph_nodes(
-            state.as_ref(),
-            &provider_profile,
-            &merged_nodes,
-            Some(&mut lease_heartbeat),
-        )
-        .await?;
-        let _edge_embedding_usage = embed_runtime_graph_edges(
-            state.as_ref(),
-            &provider_profile,
-            &merged_nodes,
-            &merged_edges,
-            Some(&mut lease_heartbeat),
-        )
-        .await?;
-    }
     if let Some(runtime_ingestion_run_id) = runtime_ingestion_run_id {
         let _merging_graph_event = complete_runtime_stage(
             state.as_ref(),
@@ -1597,6 +1657,75 @@ fn finalizing_completed_message(rebuild_follow_up: bool, terminal_status: &str) 
     }
 }
 
+fn graph_stage_progress_percent(processed_chunks: usize, total_chunks: usize) -> Option<i32> {
+    if processed_chunks == 0 || total_chunks == 0 {
+        return None;
+    }
+
+    let spread = EXTRACTING_GRAPH_PROGRESS_END_PERCENT - EXTRACTING_GRAPH_PROGRESS_START_PERCENT;
+    let ratio = processed_chunks as f64 / total_chunks as f64;
+    let progress =
+        EXTRACTING_GRAPH_PROGRESS_START_PERCENT + (ratio * f64::from(spread)).ceil() as i32;
+
+    Some(
+        progress.clamp(
+            EXTRACTING_GRAPH_PROGRESS_START_PERCENT + 1,
+            EXTRACTING_GRAPH_PROGRESS_END_PERCENT,
+        ),
+    )
+}
+
+fn should_persist_graph_progress_checkpoint(
+    tracker: &GraphStageProgressTracker,
+    next_progress: i32,
+) -> bool {
+    next_progress > tracker.last_persisted_progress
+        || tracker.last_persisted_at.elapsed() >= GRAPH_PROGRESS_ACTIVITY_INTERVAL
+}
+
+async fn maybe_persist_graph_progress_checkpoint(
+    state: &AppState,
+    runtime_ingestion_run_id: Option<Uuid>,
+    tracker: &mut GraphStageProgressTracker,
+    processed_chunks: usize,
+    total_chunks: usize,
+) -> anyhow::Result<()> {
+    let Some(runtime_ingestion_run_id) = runtime_ingestion_run_id else {
+        return Ok(());
+    };
+    let Some(next_progress) = graph_stage_progress_percent(processed_chunks, total_chunks) else {
+        return Ok(());
+    };
+    if !should_persist_graph_progress_checkpoint(tracker, next_progress) {
+        return Ok(());
+    }
+
+    let persisted_at = Utc::now();
+    repositories::update_runtime_ingestion_run_processing_stage_checkpoint(
+        &state.persistence.postgres,
+        runtime_ingestion_run_id,
+        "extracting_graph",
+        next_progress,
+        persisted_at,
+    )
+    .await?;
+    tracker.last_persisted_progress = tracker.last_persisted_progress.max(next_progress);
+    tracker.last_persisted_at = Instant::now();
+    Ok(())
+}
+
+fn collect_graph_embedding_support_node_ids(
+    changed_node_ids: &BTreeSet<Uuid>,
+    changed_edges: &[repositories::RuntimeGraphEdgeRow],
+) -> Vec<Uuid> {
+    let mut node_ids = changed_node_ids.clone();
+    for edge in changed_edges {
+        node_ids.insert(edge.from_node_id);
+        node_ids.insert(edge.to_node_id);
+    }
+    node_ids.into_iter().collect()
+}
+
 async fn start_runtime_stage(
     state: &AppState,
     runtime_ingestion_run_id: Option<Uuid>,
@@ -1855,6 +1984,7 @@ async fn append_failed_runtime_stage_sequence(
         latest_runtime_stage_span(state, runtime_ingestion_run_id, attempt_no, current_stage)
             .await?;
     let failed_span = active_span.unwrap_or_else(|| RuntimeStageSpan {
+        stage_event_id: Uuid::nil(),
         stage: current_stage.to_string(),
         started_at: Utc::now(),
         provider_kind: None,
@@ -1881,6 +2011,7 @@ async fn append_failed_runtime_stage_sequence(
             continue;
         }
         let skipped_span = RuntimeStageSpan {
+            stage_event_id: Uuid::nil(),
             stage: stage.to_string(),
             started_at: failed_at,
             provider_kind: None,
@@ -1918,6 +2049,7 @@ async fn latest_runtime_stage_span(
             event.attempt_no == attempt_no && event.stage == stage_name && event.status == "started"
         })
         .map(|event| RuntimeStageSpan {
+            stage_event_id: event.id,
             stage: event.stage,
             started_at: event.started_at,
             provider_kind: event.provider_kind,
@@ -1980,6 +2112,62 @@ mod tests {
             projecting_graph_completed_message(true, "empty"),
             "projection skipped because the rebuild follow-up run produced no graph evidence"
         );
+    }
+
+    #[test]
+    fn graph_stage_progress_advances_with_chunk_completion() {
+        assert_eq!(graph_stage_progress_percent(0, 10), None);
+        assert_eq!(graph_stage_progress_percent(1, 10), Some(83));
+        assert_eq!(graph_stage_progress_percent(5, 10), Some(85));
+        assert_eq!(graph_stage_progress_percent(10, 10), Some(87));
+    }
+
+    #[test]
+    fn graph_progress_checkpoint_persists_on_progress_or_stale_activity() {
+        let tracker = GraphStageProgressTracker {
+            last_persisted_progress: EXTRACTING_GRAPH_PROGRESS_START_PERCENT,
+            last_persisted_at: Instant::now(),
+        };
+        assert!(should_persist_graph_progress_checkpoint(&tracker, 83));
+        assert!(!should_persist_graph_progress_checkpoint(&tracker, 82));
+
+        let stale_tracker = GraphStageProgressTracker {
+            last_persisted_progress: EXTRACTING_GRAPH_PROGRESS_END_PERCENT,
+            last_persisted_at: Instant::now() - GRAPH_PROGRESS_ACTIVITY_INTERVAL,
+        };
+        assert!(should_persist_graph_progress_checkpoint(
+            &stale_tracker,
+            EXTRACTING_GRAPH_PROGRESS_END_PERCENT,
+        ));
+    }
+
+    #[test]
+    fn graph_edge_embedding_support_nodes_include_changed_edge_endpoints() {
+        let changed_node_ids = BTreeSet::from([Uuid::now_v7()]);
+        let source_node_id = Uuid::now_v7();
+        let target_node_id = Uuid::now_v7();
+        let support_node_ids = collect_graph_embedding_support_node_ids(
+            &changed_node_ids,
+            &[repositories::RuntimeGraphEdgeRow {
+                id: Uuid::now_v7(),
+                project_id: Uuid::now_v7(),
+                from_node_id: source_node_id,
+                to_node_id: target_node_id,
+                relation_type: "mentions".to_string(),
+                canonical_key: "document--mentions--entity".to_string(),
+                summary: None,
+                weight: None,
+                support_count: 1,
+                metadata_json: serde_json::json!({}),
+                projection_version: 1,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }],
+        );
+
+        assert!(support_node_ids.contains(&source_node_id));
+        assert!(support_node_ids.contains(&target_node_id));
+        assert!(support_node_ids.iter().any(|id| changed_node_ids.contains(id)));
     }
 
     #[tokio::test]

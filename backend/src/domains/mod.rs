@@ -17,6 +17,7 @@ pub mod runtime_graph;
 pub mod runtime_ingestion;
 pub mod runtime_query;
 pub mod ui_admin;
+pub mod ui_chat;
 pub mod ui_documents;
 pub mod ui_graph;
 pub mod ui_identity;

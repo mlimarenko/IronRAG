@@ -14,7 +14,11 @@ export type DocumentActivityStatus =
   | 'ready'
   | 'failed'
 
-export type DocumentAccountingStatus = 'priced' | 'partial' | 'unpriced'
+export type DocumentAccountingStatus =
+  | 'priced'
+  | 'partial'
+  | 'unpriced'
+  | 'in_flight_unsettled'
 
 export type DocumentMutationStatus = 'accepted' | 'reconciling' | 'completed' | 'failed'
 
@@ -70,7 +74,11 @@ export interface DocumentRow {
   latestAttemptNo: number
   accountingStatus: DocumentAccountingStatus
   totalEstimatedCost: number | null
+  settledEstimatedCost: number | null
+  inFlightEstimatedCost: number | null
   currency: string | null
+  inFlightStageCount: number
+  missingStageCount: number
   partialHistory: boolean
   partialHistoryReason: string | null
   mutation: DocumentMutationState
@@ -96,6 +104,11 @@ export interface DocumentExtractedStats {
   checksum: string | null
   pageCount: number | null
   extractionKind: string | null
+  previewText: string | null
+  previewTruncated: boolean
+  warningCount: number
+  normalizationStatus: string
+  ocrSource: string | null
   warnings: string[]
 }
 
@@ -119,11 +132,14 @@ export interface DocumentRevisionHistoryItem {
 }
 
 export interface DocumentStageAccountingItem {
+  accountingScope: 'stage_rollup' | 'provider_call' | 'missing'
   pricingStatus: string
   usageEventId: string | null
   costLedgerId: string | null
   pricingCatalogEntryId: string | null
   estimatedCost: number | null
+  settledEstimatedCost: number | null
+  inFlightEstimatedCost: number | null
   currency: string | null
   attributionSource: 'stage_native' | 'reconciled' | null
 }
@@ -142,9 +158,13 @@ export interface DocumentStageBenchmarkItem {
 
 export interface DocumentAttemptSummary {
   totalEstimatedCost: number | null
+  settledEstimatedCost: number | null
+  inFlightEstimatedCost: number | null
   currency: string | null
   pricedStageCount: number
   unpricedStageCount: number
+  inFlightStageCount: number
+  missingStageCount: number
   accountingStatus: DocumentAccountingStatus
 }
 
@@ -186,7 +206,11 @@ export interface DocumentDetail {
   latestAttemptNo: number
   accountingStatus: DocumentAccountingStatus
   totalEstimatedCost: number | null
+  settledEstimatedCost: number | null
+  inFlightEstimatedCost: number | null
   currency: string | null
+  inFlightStageCount: number
+  missingStageCount: number
   partialHistory: boolean
   partialHistoryReason: string | null
   mutation: DocumentMutationState
@@ -213,7 +237,91 @@ export interface DocumentsSurfaceResponse {
   rebuildBacklogCount: number
   counters: DocumentSummaryCounters
   filters: DocumentFilterValues
+  accounting: DocumentCollectionAccountingSummary
+  diagnostics: DocumentCollectionDiagnostics
   rows: DocumentRow[]
+}
+
+export interface DocumentCollectionAccountingSummary {
+  totalEstimatedCost: number | null
+  settledEstimatedCost: number | null
+  inFlightEstimatedCost: number | null
+  currency: string | null
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+  pricedStageCount: number
+  unpricedStageCount: number
+  inFlightStageCount: number
+  missingStageCount: number
+  accountingStatus: DocumentAccountingStatus
+}
+
+export interface DocumentCollectionProgressCounters {
+  accepted: number
+  contentExtracted: number
+  chunked: number
+  embedded: number
+  extractingGraph: number
+  graphReady: number
+  ready: number
+  failed: number
+}
+
+export interface DocumentCollectionStageDiagnostics {
+  stage: string
+  activeCount: number
+  completedCount: number
+  failedCount: number
+  avgElapsedMs: number | null
+  maxElapsedMs: number | null
+  totalEstimatedCost: number | null
+  settledEstimatedCost: number | null
+  inFlightEstimatedCost: number | null
+  currency: string | null
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+  accountingStatus: DocumentAccountingStatus
+}
+
+export interface DocumentCollectionFormatDiagnostics {
+  fileType: string
+  documentCount: number
+  queuedCount: number
+  processingCount: number
+  readyCount: number
+  readyNoGraphCount: number
+  failedCount: number
+  contentExtractedCount: number
+  chunkedCount: number
+  embeddedCount: number
+  extractingGraphCount: number
+  graphReadyCount: number
+  avgQueueElapsedMs: number | null
+  maxQueueElapsedMs: number | null
+  avgTotalElapsedMs: number | null
+  maxTotalElapsedMs: number | null
+  bottleneckStage: string | null
+  bottleneckAvgElapsedMs: number | null
+  bottleneckMaxElapsedMs: number | null
+  totalEstimatedCost: number | null
+  settledEstimatedCost: number | null
+  inFlightEstimatedCost: number | null
+  currency: string | null
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+  accountingStatus: DocumentAccountingStatus
+}
+
+export interface DocumentCollectionDiagnostics {
+  progress: DocumentCollectionProgressCounters
+  queueBacklogCount: number
+  processingBacklogCount: number
+  activeBacklogCount: number
+  perStage: DocumentCollectionStageDiagnostics[]
+  perFormat: DocumentCollectionFormatDiagnostics[]
 }
 
 export interface UploadDocumentsResponse {

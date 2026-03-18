@@ -265,6 +265,7 @@ fn normalize_runtime_query_request(
     Ok(RuntimeQueryRequest {
         library_id,
         question: question.to_string(),
+        system_prompt: None,
         mode: payload.mode,
         top_k: payload.top_k.unwrap_or(8).clamp(1, 12),
         include_debug: payload.include_debug.unwrap_or(false),

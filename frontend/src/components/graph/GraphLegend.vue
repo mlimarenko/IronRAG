@@ -6,6 +6,7 @@ defineProps<{
   convergenceStatus: GraphConvergenceStatus | null
   filteredArtifactCount: number
   activeProvenanceOnly: boolean
+  showFilteredArtifacts: boolean
 }>()
 </script>
 
@@ -37,7 +38,11 @@ defineProps<{
       v-if="filteredArtifactCount > 0"
       class="rr-graph-legend__note"
     >
-      {{ $t('graph.filteredArtifactsHint', { count: filteredArtifactCount }) }}
+      {{
+        showFilteredArtifacts
+          ? $t('graph.showingFilteredArtifactsHint')
+          : $t('graph.filteredArtifactsHint', { count: filteredArtifactCount })
+      }}
     </p>
   </div>
 </template>

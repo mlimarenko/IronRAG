@@ -90,11 +90,12 @@ function resolveRefreshInterval(
   rows: DocumentRow[],
   detail: DocumentDetail | null,
   detailOpen: boolean,
-  rebuildBacklogCount: number,
+  activeBacklogCount: number,
 ): number {
   const pollingRows = rows.filter(rowNeedsPolling)
   const pollDetail = detailOpen && detailNeedsPolling(detail)
-  if (pollingRows.length === 0 && !pollDetail) {
+  const effectiveBacklogCount = Math.max(activeBacklogCount, pollingRows.length)
+  if (effectiveBacklogCount === 0 && !pollDetail) {
     return 0
   }
   const watchCadence =
@@ -103,11 +104,11 @@ function resolveRefreshInterval(
   if (watchCadence) {
     return FAST_REFRESH_INTERVAL_MS
   }
-  const activeBacklogCount = pollingRows.length + (pollDetail ? 1 : 0) + rebuildBacklogCount
-  if (activeBacklogCount >= THROTTLED_BACKLOG_THRESHOLD) {
+  const backlogForCadence = effectiveBacklogCount + (pollDetail ? 1 : 0)
+  if (backlogForCadence >= THROTTLED_BACKLOG_THRESHOLD) {
     return BACKLOG_REFRESH_INTERVAL_MS
   }
-  if (activeBacklogCount >= WATCH_BACKLOG_THRESHOLD) {
+  if (backlogForCadence >= WATCH_BACKLOG_THRESHOLD) {
     return WATCH_REFRESH_INTERVAL_MS
   }
   return FAST_REFRESH_INTERVAL_MS
@@ -132,6 +133,37 @@ function createEmptySurface(): DocumentsSurfaceResponse {
       fileTypes: [],
       accountingStatuses: [],
       mutationStatuses: [],
+    },
+    accounting: {
+      totalEstimatedCost: null,
+      settledEstimatedCost: null,
+      inFlightEstimatedCost: null,
+      currency: null,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      pricedStageCount: 0,
+      unpricedStageCount: 0,
+      inFlightStageCount: 0,
+      missingStageCount: 0,
+      accountingStatus: 'unpriced',
+    },
+    diagnostics: {
+      progress: {
+        accepted: 0,
+        contentExtracted: 0,
+        chunked: 0,
+        embedded: 0,
+        extractingGraph: 0,
+        graphReady: 0,
+        ready: 0,
+        failed: 0,
+      },
+      queueBacklogCount: 0,
+      processingBacklogCount: 0,
+      activeBacklogCount: 0,
+      perStage: [],
+      perFormat: [],
     },
     rows: [],
   }
@@ -227,6 +259,13 @@ function syncDetailContributionSummaryFromRow(
   }
   return {
     ...detail,
+    accountingStatus: row.accountingStatus,
+    totalEstimatedCost: row.totalEstimatedCost,
+    settledEstimatedCost: row.settledEstimatedCost,
+    inFlightEstimatedCost: row.inFlightEstimatedCost,
+    currency: row.currency,
+    inFlightStageCount: row.inFlightStageCount,
+    missingStageCount: row.missingStageCount,
     extractedStats: {
       ...detail.extractedStats,
       chunkCount: row.chunkCount ?? detail.extractedStats.chunkCount,
@@ -289,7 +328,11 @@ function createLocalUploadRow(file: File, libraryName: string): DocumentRow {
     latestAttemptNo: 0,
     accountingStatus: 'unpriced',
     totalEstimatedCost: null,
+    settledEstimatedCost: null,
+    inFlightEstimatedCost: null,
     currency: null,
+    inFlightStageCount: 0,
+    missingStageCount: 0,
     partialHistory: false,
     partialHistoryReason: null,
     mutation: {
@@ -379,7 +422,7 @@ export const useDocumentsStore = defineStore('documents', {
         state.surface?.rows ?? [],
         state.detail,
         state.detailOpen,
-        state.surface?.rebuildBacklogCount ?? 0,
+        state.surface?.diagnostics.activeBacklogCount ?? 0,
       )
     },
   },

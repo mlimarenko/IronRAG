@@ -18,6 +18,13 @@ import type {
   GraphSearchHit,
   GraphSurfaceResponse,
 } from 'src/models/ui/graph'
+import type {
+  ChatFocusContext,
+  ChatSessionDetail,
+  ChatSessionSettings,
+  ChatSessionSummary,
+} from 'src/models/ui/chat'
+import { decorateChatThreadMessage } from 'src/models/ui/chat'
 import { apiHttp, unwrap } from './http'
 
 interface RawGraphNode {
@@ -58,6 +65,44 @@ interface RawGraphAssistantMessage {
   context_assembly: RawContextAssemblyMetadata | null
   warning: string | null
   warning_kind: string | null
+}
+
+interface RawChatSessionSummary {
+  session_id: string
+  title: string
+  message_count: number
+  last_message_preview: string | null
+  updated_at: string
+  prompt_state: 'default' | 'customized'
+  preferred_mode: GraphQueryMode
+  is_empty: boolean
+}
+
+interface RawChatSessionDetail {
+  session_id: string
+  title: string
+  message_count: number
+  last_message_preview: string | null
+  created_at: string
+  updated_at: string
+  prompt_state: 'default' | 'customized'
+  preferred_mode: GraphQueryMode
+  is_empty: boolean
+}
+
+interface RawChatSessionSettings {
+  session_id: string
+  system_prompt: string
+  prompt_state: 'default' | 'customized'
+  preferred_mode: GraphQueryMode
+  default_prompt_available: boolean
+}
+
+interface RawChatFocusContext {
+  node_id: string
+  label: string
+  summary: string
+  removable: boolean
 }
 
 interface RawGraphAssistantProvider {
@@ -106,6 +151,10 @@ interface RawGraphSurfaceResponse {
     prompts: string[]
     disclaimer: string
     session_id: string | null
+    recent_sessions?: RawChatSessionSummary[]
+    active_session?: RawChatSessionDetail | null
+    settings_summary?: RawChatSessionSettings | null
+    focus_context?: RawChatFocusContext | null
     messages: RawGraphAssistantMessage[]
   }
 }
@@ -151,6 +200,11 @@ interface RawGraphAssistantAnswer {
   user_message_id: string
   assistant_message_id: string
   query_id: string
+  effective_mode?: 'document' | 'local' | 'global' | 'hybrid' | 'mix'
+  session_summary?: RawChatSessionDetail | null
+  settings_summary?: RawChatSessionSettings | null
+  user_message?: RawGraphAssistantMessage | null
+  assistant_message?: RawGraphAssistantMessage | null
   answer: string
   references: string[]
   structured_references: RawGraphAssistantReference[]
@@ -289,9 +343,78 @@ function mapAssistantModeDescriptor(mode: RawGraphAssistantModeDescriptor) {
   }
 }
 
+function mapSessionSummary(summary: RawChatSessionSummary): ChatSessionSummary {
+  return {
+    sessionId: summary.session_id,
+    title: summary.title,
+    messageCount: summary.message_count,
+    lastMessagePreview: summary.last_message_preview,
+    updatedAt: summary.updated_at,
+    promptState: summary.prompt_state,
+    preferredMode: summary.preferred_mode,
+    isEmpty: summary.is_empty,
+  }
+}
+
+function mapSessionDetail(session: RawChatSessionDetail): ChatSessionDetail {
+  return {
+    sessionId: session.session_id,
+    title: session.title,
+    messageCount: session.message_count,
+    lastMessagePreview: session.last_message_preview,
+    createdAt: session.created_at,
+    updatedAt: session.updated_at,
+    promptState: session.prompt_state,
+    preferredMode: session.preferred_mode,
+    isEmpty: session.is_empty,
+  }
+}
+
+function mapSessionSettings(settings: RawChatSessionSettings): ChatSessionSettings {
+  return {
+    sessionId: settings.session_id,
+    systemPrompt: settings.system_prompt,
+    promptState: settings.prompt_state,
+    preferredMode: settings.preferred_mode,
+    defaultPromptAvailable: settings.default_prompt_available,
+  }
+}
+
+function mapFocusContext(focusContext: RawChatFocusContext): ChatFocusContext {
+  return {
+    nodeId: focusContext.node_id,
+    label: focusContext.label,
+    summary: focusContext.summary,
+    removable: focusContext.removable,
+  }
+}
+
+function mapAssistantMessage(message: RawGraphAssistantMessage) {
+  return decorateChatThreadMessage({
+    id: message.id,
+    role: message.role,
+    content: message.content,
+    createdAt: message.created_at,
+    queryId: message.query_id,
+    mode: message.mode,
+    groundingStatus: message.grounding_status,
+    provider: message.provider ? mapProvider(message.provider) : null,
+    references: message.references.map(mapReference),
+    planning: message.planning ? mapPlanningMetadata(message.planning) : null,
+    rerank: message.rerank ? mapRerankMetadata(message.rerank) : null,
+    contextAssembly: message.context_assembly
+      ? mapContextAssemblyMetadata(message.context_assembly)
+      : null,
+    warning: message.warning,
+    warningKind: message.warning_kind,
+  })
+}
+
 export async function fetchGraphAssistantConfig(libraryId: string): Promise<GraphAssistantConfig> {
   const response = await unwrap(
-    apiHttp.get<RawGraphAssistantConfigResponse>(`/ui/libraries/${libraryId}/graph/assistant/config`),
+    apiHttp.get<RawGraphAssistantConfigResponse>(
+      `/ui/libraries/${libraryId}/graph/assistant/config`,
+    ),
   )
   return {
     scopeHintKey: response.scope_hint_key,
@@ -335,24 +458,17 @@ export async function fetchGraphSurface(options?: {
       prompts: response.assistant.prompts,
       disclaimer: response.assistant.disclaimer,
       sessionId: response.assistant.session_id,
-      messages: response.assistant.messages.map((message) => ({
-        id: message.id,
-        role: message.role,
-        content: message.content,
-        createdAt: message.created_at,
-        queryId: message.query_id,
-        mode: message.mode,
-        groundingStatus: message.grounding_status,
-        provider: message.provider ? mapProvider(message.provider) : null,
-        references: message.references.map(mapReference),
-        planning: message.planning ? mapPlanningMetadata(message.planning) : null,
-        rerank: message.rerank ? mapRerankMetadata(message.rerank) : null,
-        contextAssembly: message.context_assembly
-          ? mapContextAssemblyMetadata(message.context_assembly)
-          : null,
-        warning: message.warning,
-        warningKind: message.warning_kind,
-      })),
+      recentSessions: (response.assistant.recent_sessions ?? []).map(mapSessionSummary),
+      activeSession: response.assistant.active_session
+        ? mapSessionDetail(response.assistant.active_session)
+        : null,
+      settingsSummary: response.assistant.settings_summary
+        ? mapSessionSettings(response.assistant.settings_summary)
+        : null,
+      focusContext: response.assistant.focus_context
+        ? mapFocusContext(response.assistant.focus_context)
+        : null,
+      messages: response.assistant.messages.map(mapAssistantMessage),
     },
   }
 }
@@ -472,6 +588,47 @@ export async function askGraphAssistant(
     userMessageId: response.user_message_id,
     assistantMessageId: response.assistant_message_id,
     queryId: response.query_id,
+    effectiveMode: response.effective_mode ?? response.mode,
+    sessionSummary: response.session_summary ? mapSessionDetail(response.session_summary) : null,
+    settingsSummary: response.settings_summary
+      ? mapSessionSettings(response.settings_summary)
+      : null,
+    userMessage: response.user_message
+      ? mapAssistantMessage(response.user_message)
+      : decorateChatThreadMessage({
+          id: response.user_message_id,
+          role: 'user',
+          content: question,
+          createdAt: new Date().toISOString(),
+          queryId: null,
+          mode,
+          groundingStatus: null,
+          provider: null,
+          references: [],
+          planning: null,
+          rerank: null,
+          contextAssembly: null,
+          warning: null,
+          warningKind: null,
+        }),
+    assistantMessage: response.assistant_message
+      ? mapAssistantMessage(response.assistant_message)
+      : decorateChatThreadMessage({
+          id: response.assistant_message_id,
+          role: 'assistant',
+          content: response.answer,
+          createdAt: new Date().toISOString(),
+          queryId: response.query_id,
+          mode: response.mode,
+          groundingStatus: response.grounding_status,
+          provider: mapProvider(response.provider),
+          references: response.structured_references.map(mapReference),
+          planning: mapPlanningMetadata(response.planning),
+          rerank: mapRerankMetadata(response.rerank),
+          contextAssembly: mapContextAssemblyMetadata(response.context_assembly),
+          warning: response.warning,
+          warningKind: response.warning_kind,
+        }),
     answer: response.answer,
     references: response.references,
     structuredReferences: response.structured_references.map(mapReference),

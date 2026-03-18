@@ -33,6 +33,7 @@ const MAX_CHUNK_SCAN_ROWS: i64 = 10_000;
 pub struct RuntimeQueryRequest {
     pub library_id: Uuid,
     pub question: String,
+    pub system_prompt: Option<String>,
     pub mode: RuntimeQueryMode,
     pub top_k: usize,
     pub include_debug: bool,
@@ -338,6 +339,7 @@ pub async fn execute_answer_query(
                     &request.question,
                     structured.planned_mode,
                     &structured.context_text,
+                    request.system_prompt.as_deref(),
                 ),
             })
             .await
@@ -1060,13 +1062,23 @@ fn append_context_section(
     }
 }
 
-fn build_answer_prompt(question: &str, mode: RuntimeQueryMode, context_text: &str) -> String {
+fn build_answer_prompt(
+    question: &str,
+    mode: RuntimeQueryMode,
+    context_text: &str,
+    system_prompt: Option<&str>,
+) -> String {
+    let instruction = system_prompt
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("You are answering a grounded knowledge-base question.");
     format!(
-        "You are answering a grounded knowledge-base question.\n\
+        "{}\n\
 Use only the provided context. If the context is insufficient, say so plainly.\n\
 Mode: {}\n\
 \nContext:\n{}\n\
 \nQuestion: {}",
+        instruction,
         mode.as_str(),
         context_text,
         question.trim()
@@ -1526,8 +1538,12 @@ mod tests {
             RuntimeQueryMode::Hybrid,
             RuntimeQueryMode::Mix,
         ] {
-            let prompt =
-                build_answer_prompt("What documents mention RustRAG?", mode, "Document context");
+            let prompt = build_answer_prompt(
+                "What documents mention RustRAG?",
+                mode,
+                "Document context",
+                None,
+            );
             assert!(prompt.contains(&format!("Mode: {}", mode.as_str())));
             assert!(prompt.contains("Question: What documents mention RustRAG?"));
         }

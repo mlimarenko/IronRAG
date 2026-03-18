@@ -1,13 +1,19 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import StatusPill from 'src/components/base/StatusPill.vue'
-import type { DocumentActivityStatus, DocumentRow } from 'src/models/ui/documents'
+import type {
+  DocumentActivityStatus,
+  DocumentCollectionDiagnostics,
+  DocumentRow,
+} from 'src/models/ui/documents'
 import DocumentProgressCell from './DocumentProgressCell.vue'
 import DocumentRowActions from './DocumentRowActions.vue'
 
-defineProps<{
+const props = defineProps<{
   rows: DocumentRow[]
   selectedId?: string | null
+  diagnostics?: DocumentCollectionDiagnostics | null
 }>()
 
 const emit = defineEmits<{
@@ -95,17 +101,6 @@ function mutationLabel(status: string | null): string | null {
   return i18n.te(key) ? i18n.t(key) : status
 }
 
-function accountingTone(status: string): DocumentRow['status'] {
-  switch (status) {
-    case 'priced':
-      return 'ready'
-    case 'partial':
-      return 'ready_no_graph'
-    default:
-      return 'failed'
-  }
-}
-
 function mutationTone(status: string | null): DocumentRow['status'] {
   switch (status) {
     case 'accepted':
@@ -154,6 +149,89 @@ function formatInlineCost(value: number | null, currency: string | null): string
   }
 }
 
+const averageEstimatedCost = computed(() => {
+  const values = props.rows
+    .map((row) => row.totalEstimatedCost)
+    .filter((value): value is number => value !== null)
+
+  if (!values.length) {
+    return null
+  }
+
+  return values.reduce((total, value) => total + value, 0) / values.length
+})
+
+const bottleneckFormat = computed<DocumentCollectionDiagnostics['perFormat'][number] | null>(() => {
+  const formats = props.diagnostics?.perFormat ?? []
+  return [...formats].sort((left, right) => {
+    const leftValue = left.bottleneckAvgElapsedMs ?? -1
+    const rightValue = right.bottleneckAvgElapsedMs ?? -1
+    return rightValue - leftValue
+  })[0] ?? null
+})
+
+const diagnosticsSummary = computed(() => {
+  if (!props.diagnostics) {
+    return null
+  }
+  if (bottleneckFormat.value?.bottleneckStage) {
+    return i18n.t('documents.diagnostics.tableSummaryWithBottleneck', {
+      active: props.diagnostics.activeBacklogCount,
+      fileType: bottleneckFormat.value.fileType,
+      stage: stageLabel(bottleneckFormat.value.bottleneckStage),
+    })
+  }
+  return i18n.t('documents.diagnostics.tableSummary', {
+    active: props.diagnostics.activeBacklogCount,
+  })
+})
+
+function accountingFillPercent(status: string): number {
+  switch (status) {
+    case 'priced':
+      return 100
+    case 'partial':
+      return 56
+    default:
+      return 0
+  }
+}
+
+function accountingVisualTone(row: DocumentRow): 'low' | 'mid' | 'high' | 'none' {
+  if (row.totalEstimatedCost === null) {
+    return 'none'
+  }
+
+  const average = averageEstimatedCost.value
+  if (average === null || average <= 0) {
+    return 'mid'
+  }
+
+  if (row.totalEstimatedCost <= average * 0.82) {
+    return 'low'
+  }
+  if (row.totalEstimatedCost >= average * 1.18) {
+    return 'high'
+  }
+  return 'mid'
+}
+
+function accountingDisplay(row: DocumentRow): string {
+  return formatInlineCost(row.totalEstimatedCost, row.currency) ?? accountingLabel(row.accountingStatus)
+}
+
+function accountingTitle(row: DocumentRow): string | null {
+  return cellTitle([
+    accountingDisplay(row),
+    accountingLabel(row.accountingStatus),
+    averageEstimatedCost.value !== null
+      ? i18n.t('documents.averageCostHint', {
+          value: formatInlineCost(averageEstimatedCost.value, row.currency ?? 'USD') ?? '—',
+        })
+      : null,
+  ])
+}
+
 function contributionSummary(row: DocumentRow): string | null {
   if (row.status !== 'ready' && row.status !== 'ready_no_graph') {
     return null
@@ -184,6 +262,13 @@ function cellTitle(parts: (string | null | undefined)[]): string | null {
 
 <template>
   <section class="rr-page-card rr-documents__table">
+    <header
+      v-if="diagnosticsSummary"
+      class="rr-documents__table-header"
+    >
+      <strong>{{ $t('documents.diagnostics.tableTitle') }}</strong>
+      <span>{{ diagnosticsSummary }}</span>
+    </header>
     <div class="rr-documents__table-scroll">
       <table>
         <colgroup>
@@ -194,7 +279,6 @@ function cellTitle(parts: (string | null | undefined)[]): string | null {
           <col class="rr-documents__col-revision">
           <col class="rr-documents__col-attempt">
           <col class="rr-documents__col-stage">
-          <col class="rr-documents__col-activity">
           <col class="rr-documents__col-accounting">
           <col class="rr-documents__col-status">
           <col class="rr-documents__col-progress">
@@ -209,7 +293,6 @@ function cellTitle(parts: (string | null | undefined)[]): string | null {
             <th class="rr-documents__col-revision">{{ $t('documents.headers.revision') }}</th>
             <th class="rr-documents__col-attempt">{{ $t('documents.headers.attempt') }}</th>
             <th class="rr-documents__col-stage">{{ $t('documents.headers.stage') }}</th>
-            <th class="rr-documents__col-activity">{{ $t('documents.headers.activity') }}</th>
             <th class="rr-documents__col-accounting">{{ $t('documents.headers.accounting') }}</th>
             <th class="rr-documents__col-status">{{ $t('documents.headers.status') }}</th>
             <th class="rr-documents__col-progress">{{ $t('documents.headers.progress') }}</th>
@@ -218,18 +301,17 @@ function cellTitle(parts: (string | null | undefined)[]): string | null {
         </thead>
         <tbody>
           <tr
-            v-for="row in rows"
+            v-for="row in props.rows"
             :key="row.id"
-            :class="{ 'is-selected': row.id === selectedId, 'is-clickable': row.detailAvailable }"
+            :class="{ 'is-selected': row.id === props.selectedId, 'is-clickable': row.detailAvailable }"
             @click="row.detailAvailable && emit('detail', row.id)"
           >
             <td class="rr-documents__cell-file">
               <div
                 class="rr-documents__file-cell"
-                :title="cellTitle([row.fileName, row.libraryName, contributionSummary(row)]) ?? undefined"
+                :title="cellTitle([row.fileName, contributionSummary(row)]) ?? undefined"
               >
                 <strong>{{ row.fileName }}</strong>
-                <span class="rr-documents__file-meta">{{ row.libraryName }}</span>
                 <span
                   v-if="contributionSummary(row)"
                   class="rr-documents__file-meta"
@@ -280,66 +362,63 @@ function cellTitle(parts: (string | null | undefined)[]): string | null {
                 </span>
               </div>
             </td>
-            <td class="rr-documents__cell-activity">
+            <td class="rr-documents__cell-accounting">
               <div
                 class="rr-documents__status-cell"
-                :title="cellTitle([activityLabel(row.activityStatus), activityHint(row)]) ?? undefined"
+                :title="accountingTitle(row) ?? undefined"
               >
-                <StatusPill
-                  v-if="showActivityPill(row)"
-                  :tone="activityTone(row.activityStatus)"
-                  :label="activityLabel(row.activityStatus)"
-                />
+                <span
+                  class="rr-documents__cost-pill"
+                  :class="[
+                    `is-${accountingVisualTone(row)}`,
+                    `is-${row.accountingStatus}`,
+                  ]"
+                  :style="{ '--rr-cost-fill': `${accountingFillPercent(row.accountingStatus)}%` }"
+                >
+                  <span class="rr-documents__cost-pill-copy">
+                    {{ accountingDisplay(row) }}
+                  </span>
+                </span>
+              </div>
+            </td>
+            <td class="rr-documents__cell-status">
+              <div
+                class="rr-documents__status-cell"
+                :title="
+                  cellTitle([
+                    activityLabel(row.activityStatus),
+                    statusLabel(row.status),
+                    mutationLabel(row.mutation.status),
+                    activityHint(row),
+                  ]) ?? undefined
+                "
+              >
+                <div class="rr-documents__status-cell--pills">
+                  <StatusPill
+                    v-if="showActivityPill(row)"
+                    :tone="activityTone(row.activityStatus)"
+                    :label="activityLabel(row.activityStatus)"
+                  />
+                  <StatusPill
+                    v-if="showPrimaryStatusPill(row)"
+                    :tone="row.status"
+                    :label="statusLabel(row.status)"
+                  />
+                  <StatusPill
+                    v-if="mutationLabel(row.mutation.status)"
+                    :tone="mutationTone(row.mutation.status)"
+                    :label="mutationLabel(row.mutation.status)!"
+                  />
+                  <span
+                    v-if="!showActivityPill(row) && !showPrimaryStatusPill(row) && !mutationLabel(row.mutation.status)"
+                  >—</span>
+                </div>
                 <span
                   v-if="activityNote(row)"
                   class="rr-documents__cell-note"
                 >
                   {{ activityNote(row) }}
                 </span>
-                <span
-                  v-else-if="!showActivityPill(row)"
-                  class="rr-documents__cell-note"
-                >
-                  —
-                </span>
-              </div>
-            </td>
-            <td class="rr-documents__cell-accounting">
-              <div
-                class="rr-documents__status-cell"
-                :title="cellTitle([
-                  accountingLabel(row.accountingStatus),
-                  row.totalEstimatedCost !== null ? `${row.totalEstimatedCost.toFixed(6)} ${row.currency ?? ''}` : null,
-                ]) ?? undefined"
-              >
-                <StatusPill
-                  :tone="accountingTone(row.accountingStatus)"
-                  :label="accountingLabel(row.accountingStatus)"
-                />
-                <span
-                  v-if="row.totalEstimatedCost !== null"
-                  class="rr-documents__cell-note"
-                >
-                  {{ formatInlineCost(row.totalEstimatedCost, row.currency) }}
-                </span>
-              </div>
-            </td>
-            <td class="rr-documents__cell-status">
-              <div
-                class="rr-documents__status-cell rr-documents__status-cell--pills"
-                :title="cellTitle([statusLabel(row.status), mutationLabel(row.mutation.status)]) ?? undefined"
-              >
-                <StatusPill
-                  v-if="showPrimaryStatusPill(row)"
-                  :tone="row.status"
-                  :label="statusLabel(row.status)"
-                />
-                <StatusPill
-                  v-if="mutationLabel(row.mutation.status)"
-                  :tone="mutationTone(row.mutation.status)"
-                  :label="mutationLabel(row.mutation.status)!"
-                />
-                <span v-if="!showPrimaryStatusPill(row) && !mutationLabel(row.mutation.status)">—</span>
               </div>
             </td>
             <td class="rr-documents__cell-progress">
@@ -347,7 +426,6 @@ function cellTitle(parts: (string | null | undefined)[]): string | null {
                 :progress-percent="row.progressPercent"
                 :status="row.status"
                 :activity-status="row.activityStatus"
-                :attempt-no="row.latestAttemptNo"
               />
             </td>
             <td class="rr-documents__cell-actions">

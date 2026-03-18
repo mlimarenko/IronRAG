@@ -1,17 +1,24 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import EmptyStateCard from 'src/components/base/EmptyStateCard.vue'
 import ErrorStateCard from 'src/components/base/ErrorStateCard.vue'
 import GraphAssistantPanel from 'src/components/graph/GraphAssistantPanel.vue'
+import GraphAssistantFocusChip from 'src/components/graph/assistant/GraphAssistantFocusChip.vue'
 import GraphCanvas from 'src/components/graph/GraphCanvas.vue'
 import GraphControls from 'src/components/graph/GraphControls.vue'
 import GraphLegend from 'src/components/graph/GraphLegend.vue'
-import GraphToolbar from 'src/components/graph/GraphToolbar.vue'
+import type { ChatFocusContext } from 'src/models/ui/chat'
 import { useGraphStore } from 'src/stores/graph'
 import { useShellStore } from 'src/stores/shell'
+
+const ASSISTANT_WIDTH_STORAGE_KEY = 'rr.graph.assistant.width'
+const ASSISTANT_WIDTH_DEFAULT = 520
+const ASSISTANT_WIDTH_MIN = 460
+const ASSISTANT_WIDTH_MAX = 760
+const CANVAS_MIN_WIDTH = 560
 
 const graphStore = useGraphStore()
 const shellStore = useShellStore()
@@ -23,12 +30,12 @@ const {
   assistantDraft,
   assistantError,
   assistantConfig,
-  assistantMode,
   assistantSubmitting,
+  assistantSettingsDraft,
+  assistantSettingsOpen,
+  assistantSettingsSaving,
   convergenceStatus,
   diagnostics,
-  detailLoading,
-  detailError,
   error,
   filteredArtifactCount,
   focusedDetail,
@@ -41,10 +48,25 @@ const {
   refreshIntervalMs,
   searchHits,
   searchQuery,
+  sessionError,
+  sessionLoading,
   showFilteredArtifacts,
+  sourceDisclosureState,
   surface,
 } = storeToRefs(graphStore)
 let refreshTimer: number | null = null
+const focusActive = ref(false)
+const layoutRef = ref<HTMLElement | null>(null)
+const assistantColumnWidth = ref(readAssistantWidthPreference())
+const assistantResizing = ref(false)
+
+function readAssistantWidthPreference(): number {
+  if (typeof window === 'undefined') {
+    return ASSISTANT_WIDTH_DEFAULT
+  }
+  const stored = Number(window.localStorage.getItem(ASSISTANT_WIDTH_STORAGE_KEY))
+  return Number.isFinite(stored) ? stored : ASSISTANT_WIDTH_DEFAULT
+}
 
 function stopPolling() {
   if (refreshTimer !== null) {
@@ -53,12 +75,115 @@ function stopPolling() {
   }
 }
 
+function resolveAssistantWidthBounds(): { min: number; max: number } {
+  const layoutWidth =
+    layoutRef.value?.clientWidth ??
+    (typeof window !== 'undefined' ? window.innerWidth - 36 : ASSISTANT_WIDTH_DEFAULT)
+  const max = Math.max(
+    ASSISTANT_WIDTH_MIN,
+    Math.min(ASSISTANT_WIDTH_MAX, layoutWidth - CANVAS_MIN_WIDTH),
+  )
+  return { min: ASSISTANT_WIDTH_MIN, max }
+}
+
+function clampAssistantWidth(width: number): number {
+  const { min, max } = resolveAssistantWidthBounds()
+  return Math.min(Math.max(width, min), max)
+}
+
+function persistAssistantWidthPreference(width: number): void {
+  if (typeof window === 'undefined') {
+    return
+  }
+  window.localStorage.setItem(ASSISTANT_WIDTH_STORAGE_KEY, String(Math.round(width)))
+}
+
+function setAssistantWidth(width: number): void {
+  const nextWidth = clampAssistantWidth(width)
+  assistantColumnWidth.value = nextWidth
+  persistAssistantWidthPreference(nextWidth)
+}
+
+function handleWindowResize(): void {
+  assistantColumnWidth.value = clampAssistantWidth(assistantColumnWidth.value)
+}
+
+function stopAssistantResize(): void {
+  if (!assistantResizing.value) {
+    return
+  }
+  assistantResizing.value = false
+  document.body.classList.remove('rr-is-resizing')
+  window.removeEventListener('pointermove', handleAssistantResizeMove)
+  window.removeEventListener('pointerup', stopAssistantResize)
+  window.removeEventListener('pointercancel', stopAssistantResize)
+}
+
+function handleAssistantResizeMove(event: PointerEvent): void {
+  if (!assistantResizing.value || !layoutRef.value) {
+    return
+  }
+  const layoutBounds = layoutRef.value.getBoundingClientRect()
+  setAssistantWidth(layoutBounds.right - event.clientX)
+}
+
+function handleAssistantResizeStart(event: PointerEvent): void {
+  if (typeof window === 'undefined' || window.innerWidth <= 1180) {
+    return
+  }
+  event.preventDefault()
+  assistantResizing.value = true
+  document.body.classList.add('rr-is-resizing')
+  const resizeHandle = event.currentTarget as HTMLButtonElement
+  resizeHandle.setPointerCapture(event.pointerId)
+  window.addEventListener('pointermove', handleAssistantResizeMove)
+  window.addEventListener('pointerup', stopAssistantResize)
+  window.addEventListener('pointercancel', stopAssistantResize)
+}
+
+function handleAssistantResizeKeydown(event: KeyboardEvent): void {
+  if (event.key === 'ArrowLeft') {
+    event.preventDefault()
+    setAssistantWidth(assistantColumnWidth.value + 24)
+  } else if (event.key === 'ArrowRight') {
+    event.preventDefault()
+    setAssistantWidth(assistantColumnWidth.value - 24)
+  } else if (event.key === 'Home') {
+    event.preventDefault()
+    setAssistantWidth(ASSISTANT_WIDTH_DEFAULT)
+  }
+}
+
+function resetAssistantWidth(): void {
+  setAssistantWidth(ASSISTANT_WIDTH_DEFAULT)
+}
+
 const focusedSurfaceNode = computed(
   () => surface.value?.nodes.find((node) => node.id === focusedNodeId.value) ?? null,
 )
 const focusLabel = computed(
   () => focusedDetail.value?.label ?? focusedSurfaceNode.value?.label ?? null,
 )
+const assistantLayoutStyle = computed(() => ({
+  '--rr-assistant-width': String(clampAssistantWidth(assistantColumnWidth.value)) + 'px',
+}))
+const assistantFocusContext = computed<ChatFocusContext | null>(() => {
+  if (surface.value?.assistant.focusContext) {
+    return surface.value.assistant.focusContext
+  }
+  if (!focusLabel.value && !focusedDetail.value) {
+    return null
+  }
+  const focusSummaryCandidate = focusedDetail.value?.summary.trim()
+  const focusSummary =
+    focusSummaryCandidate && focusSummaryCandidate.length > 0 ? focusSummaryCandidate : null
+  return {
+    nodeId: focusedDetail.value?.id ?? focusedNodeId.value ?? '',
+    label: focusedDetail.value?.label ?? focusLabel.value ?? '',
+    summary: focusSummary ?? t('graph.selectedNodePending'),
+    removable: true,
+  }
+})
 const pendingDeleteBanner = computed(() =>
   (diagnostics.value?.pendingDeleteCount ?? 0) > 0
     ? t('graph.pendingDeleteBanner', { count: diagnostics.value?.pendingDeleteCount ?? 0 })
@@ -70,9 +195,7 @@ const pendingUpdateBanner = computed(() =>
     : null,
 )
 const overviewHint = computed(() =>
-  !focusedNodeId.value && (surface.value?.nodeCount ?? 0) > 120
-    ? t('graph.overviewHint')
-    : null,
+  !focusedNodeId.value && (surface.value?.nodeCount ?? 0) > 120 ? t('graph.overviewHint') : null,
 )
 const visibilityHint = computed(() =>
   showFilteredArtifacts.value
@@ -114,7 +237,9 @@ watch(
       if (!activeLibraryId.value) {
         return
       }
-      void graphStore.loadSurface(activeLibraryId.value, { preserveUi: true }).catch(() => undefined)
+      void graphStore
+        .loadSurface(activeLibraryId.value, { preserveUi: true })
+        .catch(() => undefined)
     }, intervalMs)
   },
   { immediate: true },
@@ -122,6 +247,13 @@ watch(
 
 onBeforeUnmount(() => {
   stopPolling()
+  stopAssistantResize()
+  window.removeEventListener('resize', handleWindowResize)
+})
+
+onMounted(() => {
+  handleWindowResize()
+  window.addEventListener('resize', handleWindowResize)
 })
 
 watch(
@@ -131,6 +263,7 @@ watch(
       return
     }
     if (typeof nodeId !== 'string' || !nodeId.trim()) {
+      focusActive.value = false
       graphStore.clearFocus()
       return
     }
@@ -143,20 +276,28 @@ watch(
 )
 
 async function selectHit(id: string) {
-  await router.replace({ query: { ...route.query, node: id } })
-  await graphStore.focusNode(id)
+  await focusNode(id)
   graphStore.searchHits = []
 }
 
 async function focusNode(id: string) {
+  if (focusedNodeId.value === id) {
+    focusActive.value = true
+    return
+  }
+
+  if (!focusedNodeId.value) {
+    focusActive.value = false
+  }
+
   await router.replace({ query: { ...route.query, node: id } })
-  await graphStore.focusNode(id)
 }
 
 async function clearFocus() {
   const nextQuery = { ...route.query }
   delete nextQuery.node
   await router.replace({ query: nextQuery })
+  focusActive.value = false
   graphStore.clearFocus()
   graphStore.fitViewport()
 }
@@ -164,26 +305,6 @@ async function clearFocus() {
 
 <template>
   <div class="rr-graph-page">
-    <GraphToolbar
-      :query="searchQuery"
-      :filter="nodeTypeFilter"
-      :hits="searchHits"
-      :graph-status="surface?.graphStatus ?? diagnostics?.graphStatus ?? null"
-      :convergence-status="convergenceStatus"
-      :node-count="surface?.nodeCount ?? 0"
-      :relation-count="surface?.relationCount ?? 0"
-      :rebuild-backlog-count="diagnostics?.rebuildBacklogCount ?? 0"
-      :ready-no-graph-count="diagnostics?.readyNoGraphCount ?? 0"
-      :filtered-artifact-count="filteredArtifactCount"
-      :focus-label="focusLabel"
-      :show-filtered-artifacts="showFilteredArtifacts"
-      @update-query="graphStore.searchNodes"
-      @update-filter="graphStore.setNodeTypeFilter"
-      @select-hit="selectHit"
-      @clear-focus="clearFocus"
-      @toggle-filtered-artifacts="graphStore.setShowFilteredArtifacts(!showFilteredArtifacts)"
-    />
-
     <ErrorStateCard
       v-if="error && !surface"
       :title="$t('graph.title')"
@@ -192,16 +313,36 @@ async function clearFocus() {
 
     <div
       v-else-if="surface"
+      ref="layoutRef"
       class="rr-graph-page__layout"
+      :style="assistantLayoutStyle"
     >
       <div class="rr-graph-page__canvas-column">
         <div
-          v-if="surface.graphStatus !== 'empty' && (surface.warning || diagnostics?.warning || diagnostics?.lastErrorMessage || diagnostics?.rebuildBacklogCount || diagnostics?.readyNoGraphCount || pendingDeleteBanner || pendingUpdateBanner || diagnostics?.lastMutationWarning || convergenceBanner || filteredArtifactCount)"
+          v-if="
+            surface.graphStatus !== 'empty' &&
+              (surface.warning ||
+                diagnostics?.warning ||
+                diagnostics?.lastErrorMessage ||
+                diagnostics?.rebuildBacklogCount ||
+                diagnostics?.readyNoGraphCount ||
+                pendingDeleteBanner ||
+                pendingUpdateBanner ||
+                diagnostics?.lastMutationWarning ||
+                convergenceBanner)
+          "
           class="rr-graph-page__banner"
           :class="`is-${isPartiallyConverged ? 'partial' : surface.graphStatus}`"
         >
-          <strong>{{ convergenceBanner?.label ?? $t(`graph.statuses.${surface.graphStatus}`) }}</strong>
-          <p>{{ convergenceBanner?.description ?? $t(`graph.statusDescriptions.${surface.graphStatus}`) }}</p>
+          <strong>{{
+            convergenceBanner?.label ?? $t(`graph.statuses.${surface.graphStatus}`)
+          }}</strong>
+          <p>
+            {{
+              convergenceBanner?.description ??
+                $t(`graph.statusDescriptions.${surface.graphStatus}`)
+            }}
+          </p>
           <p
             v-if="diagnostics?.lastMutationWarning"
             class="rr-graph-page__hint"
@@ -244,12 +385,6 @@ async function clearFocus() {
           >
             {{ visibilityHint }}
           </p>
-          <p
-            v-if="filteredArtifactCount"
-            class="rr-graph-page__hint"
-          >
-            {{ $t('graph.filteredArtifactsHint', { count: filteredArtifactCount }) }}
-          </p>
         </div>
 
         <section class="rr-graph-workspace">
@@ -267,7 +402,9 @@ async function clearFocus() {
           <ErrorStateCard
             v-else-if="surface.graphStatus === 'failed' && surface.nodeCount === 0"
             :title="$t('graph.failedTitle')"
-            :description="diagnostics?.lastErrorMessage ?? surface.warning ?? $t('graph.failedDescription')"
+            :description="
+              diagnostics?.lastErrorMessage ?? surface.warning ?? $t('graph.failedDescription')
+            "
           />
           <template v-else>
             <GraphCanvas
@@ -275,6 +412,7 @@ async function clearFocus() {
               :edges="surface.edges"
               :filter="nodeTypeFilter"
               :focused-node-id="focusedNodeId"
+              :focus-active="focusActive"
               :layout-mode="layoutMode"
               :surface-version="surface.projectionVersion"
               @select-node="focusNode"
@@ -282,44 +420,93 @@ async function clearFocus() {
               @ready="graphStore.registerCanvasControls"
             />
             <GraphControls
+              :query="searchQuery"
+              :filter="nodeTypeFilter"
+              :hits="searchHits"
               :layout-mode="layoutMode"
               :can-clear-focus="Boolean(focusedNodeId)"
+              :graph-status="surface?.graphStatus ?? diagnostics?.graphStatus ?? null"
+              :convergence-status="convergenceStatus"
+              :node-count="surface?.nodeCount ?? 0"
+              :relation-count="surface?.relationCount ?? 0"
+              :rebuild-backlog-count="diagnostics?.rebuildBacklogCount ?? 0"
+              :ready-no-graph-count="diagnostics?.readyNoGraphCount ?? 0"
+              :filtered-artifact-count="filteredArtifactCount"
+              :show-filtered-artifacts="showFilteredArtifacts"
               @zoom-in="graphStore.zoomIn"
               @zoom-out="graphStore.zoomOut"
               @fit="graphStore.fitViewport"
               @set-layout="graphStore.setLayoutMode"
               @clear-focus="clearFocus"
+              @toggle-filtered-artifacts="graphStore.setShowFilteredArtifacts(!showFilteredArtifacts)"
+              @update-query="graphStore.searchNodes"
+              @update-filter="graphStore.setNodeTypeFilter"
+              @select-hit="selectHit"
             />
             <GraphLegend
               :items="surface.legend"
               :convergence-status="convergenceStatus"
               :filtered-artifact-count="filteredArtifactCount"
               :active-provenance-only="hasAdmittedOnlyTruth"
+              :show-filtered-artifacts="showFilteredArtifacts"
             />
           </template>
         </section>
       </div>
 
-      <GraphAssistantPanel
-        :assistant="surface.assistant"
-        :assistant-config="assistantConfig"
-        :draft="assistantDraft"
-        :mode="assistantMode"
-        :error="assistantError"
-        :submitting="assistantSubmitting"
-        :focused-node-id="focusedNodeId"
-        :focused-node-label="focusLabel"
-        :focused-detail="focusedDetail"
-        :detail-loading="detailLoading"
-        :detail-error="detailError"
-        :convergence-status="convergenceStatus"
-        :active-blockers="activeBlockers"
-        @update-draft="graphStore.assistantDraft = $event"
-        @update-mode="graphStore.setAssistantMode"
-        @submit="graphStore.submitAssistantPrompt"
-        @select-node="focusNode"
-        @clear-focus="clearFocus"
-      />
+      <button
+        type="button"
+        class="rr-graph-page__assistant-resizer"
+        :class="{ 'is-active': assistantResizing }"
+        :aria-label="$t('graph.chat.resizePanel')"
+        @pointerdown="handleAssistantResizeStart"
+        @keydown="handleAssistantResizeKeydown"
+        @dblclick="resetAssistantWidth"
+      >
+        <span />
+      </button>
+
+      <div class="rr-graph-page__assistant-column">
+        <div class="rr-graph-page__assistant-stack">
+          <GraphAssistantPanel
+            :assistant="surface.assistant"
+            :assistant-config="assistantConfig"
+            :draft="assistantDraft"
+            :error="assistantError"
+            :submitting="assistantSubmitting"
+            :session-loading="sessionLoading"
+            :session-error="sessionError"
+            :settings-open="assistantSettingsOpen"
+            :settings-saving="assistantSettingsSaving"
+            :settings-draft="assistantSettingsDraft"
+            :source-disclosure-state="sourceDisclosureState"
+            :convergence-status="convergenceStatus"
+            :active-blockers="activeBlockers"
+            @update-draft="graphStore.assistantDraft = $event"
+            @submit="graphStore.submitAssistantPrompt"
+            @select-node="focusNode"
+            @create-new-chat="graphStore.createNewChat"
+            @load-session="graphStore.loadChatSession"
+            @open-settings="graphStore.openAssistantSettings"
+            @close-settings="graphStore.closeAssistantSettings"
+            @save-settings="graphStore.saveAssistantSettings"
+            @restore-default-settings="graphStore.saveAssistantSettings({ restoreDefault: true })"
+            @update-settings-draft-system-prompt="
+              graphStore.updateAssistantSettingsDraft({ systemPrompt: $event })
+            "
+            @update-settings-draft-preferred-mode="
+              graphStore.updateAssistantSettingsDraft({ preferredMode: $event })
+            "
+            @toggle-sources="graphStore.toggleMessageSources"
+          />
+
+          <GraphAssistantFocusChip
+            :focus="assistantFocusContext"
+            class="rr-graph-page__assistant-focus-card"
+            @remove="clearFocus"
+          />
+        </div>
+      </div>
     </div>
   </div>
 </template>

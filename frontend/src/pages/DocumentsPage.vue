@@ -42,6 +42,59 @@ const {
   storeToRefs(documentsStore)
 let refreshTimer: number | null = null
 
+function formatMoney(value: number | null, currency: string | null): string {
+  if (value === null) {
+    return '—'
+  }
+  const normalizedCurrency = currency ?? 'USD'
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: 'currency',
+      currency: normalizedCurrency,
+      maximumFractionDigits: 6,
+    }).format(value)
+  } catch {
+    return `${value.toFixed(6)} ${normalizedCurrency}`
+  }
+}
+
+function formatDuration(value: number | null): string {
+  if (value === null) {
+    return '—'
+  }
+  const totalSeconds = Math.max(0, Math.round(value / 1000))
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  if (minutes >= 60) {
+    const hours = Math.floor(minutes / 60)
+    const restMinutes = minutes % 60
+    return `${String(hours)}h ${String(restMinutes)}m`
+  }
+  if (minutes > 0) {
+    return `${String(minutes)}m ${String(seconds)}s`
+  }
+  return `${String(totalSeconds)}s`
+}
+
+function stageLabel(stage: string): string {
+  const key = `documents.stage.${stage}`
+  const translated = t(key)
+  return translated === key ? stage : translated
+}
+
+function accountingTone(status: string): DocumentStatus {
+  switch (status) {
+    case 'priced':
+      return 'ready'
+    case 'in_flight_unsettled':
+      return 'processing'
+    case 'partial':
+      return 'ready_no_graph'
+    default:
+      return 'failed'
+  }
+}
+
 function stopPolling() {
   if (refreshTimer !== null) {
     window.clearInterval(refreshTimer)
@@ -101,6 +154,65 @@ const summaryCards = computed<{ tone: DocumentStatus; value: number; label: stri
   ]
 })
 
+const accountingCards = computed<{ tone: DocumentStatus; value: string; label: string }[]>(() => {
+  if (!surface.value) {
+    return []
+  }
+  const { accounting } = surface.value
+  return [
+    {
+      tone: accountingTone(accounting.accountingStatus),
+      value: formatMoney(accounting.totalEstimatedCost, accounting.currency),
+      label: t('documents.collectionAccounting.totalCost'),
+    },
+    {
+      tone: 'ready',
+      value: formatMoney(accounting.settledEstimatedCost, accounting.currency),
+      label: t('documents.collectionAccounting.settledCost'),
+    },
+    {
+      tone: 'processing',
+      value: formatMoney(accounting.inFlightEstimatedCost, accounting.currency),
+      label: t('documents.collectionAccounting.inFlightCost'),
+    },
+  ]
+})
+
+const progressCards = computed(() => {
+  const progress = surface.value?.diagnostics.progress
+  if (!progress) {
+    return []
+  }
+  return [
+    { label: t('documents.diagnostics.progress.accepted'), value: progress.accepted },
+    {
+      label: t('documents.diagnostics.progress.contentExtracted'),
+      value: progress.contentExtracted,
+    },
+    { label: t('documents.diagnostics.progress.chunked'), value: progress.chunked },
+    { label: t('documents.diagnostics.progress.embedded'), value: progress.embedded },
+    {
+      label: t('documents.diagnostics.progress.extractingGraph'),
+      value: progress.extractingGraph,
+    },
+    { label: t('documents.diagnostics.progress.graphReady'), value: progress.graphReady },
+  ]
+})
+
+const stageDiagnostics = computed(() =>
+  (surface.value?.diagnostics.perStage ?? []).filter(
+    (stage) => stage.activeCount > 0 || stage.completedCount > 0 || stage.failedCount > 0,
+  ),
+)
+
+const formatDiagnostics = computed(() =>
+  [...(surface.value?.diagnostics.perFormat ?? [])].sort((left, right) => {
+    const leftValue = left.bottleneckAvgElapsedMs ?? -1
+    const rightValue = right.bottleneckAvgElapsedMs ?? -1
+    return rightValue - leftValue
+  }),
+)
+
 const graphBannerMessage = computed(() => {
   if (!surface.value) {
     return null
@@ -129,19 +241,19 @@ const importProgressMessage = computed(() => {
   }
   const rebuildBacklogCount = surface.value.rebuildBacklogCount
   const readyNoGraphCount = surface.value.counters.readyNoGraph
-  const activeCount = surface.value.rows.filter(
-    (row) =>
-      row.activityStatus === 'queued' ||
-      row.activityStatus === 'active' ||
-      row.activityStatus === 'blocked' ||
-      row.activityStatus === 'retrying' ||
-      row.activityStatus === 'stalled',
-  ).length
+  const activeCount = surface.value.diagnostics.activeBacklogCount
+  const extractedOnlyCount = Math.max(
+    0,
+    surface.value.diagnostics.progress.contentExtracted - surface.value.diagnostics.progress.chunked,
+  )
   if (activeCount > 0 && rebuildBacklogCount > 0) {
     return t('documents.importGuide.activeWithBacklog', {
       count: activeCount,
       backlog: rebuildBacklogCount,
     })
+  }
+  if (extractedOnlyCount > 0) {
+    return t('documents.importGuide.extractedOnly', { count: extractedOnlyCount })
   }
   if (activeCount > 0) {
     return t('documents.importGuide.active', { count: activeCount })
@@ -157,6 +269,25 @@ const importProgressMessage = computed(() => {
   }
   if (surface.value.graphStatus === 'ready' && surface.value.counters.ready > 0) {
     return t('documents.importGuide.ready')
+  }
+  return null
+})
+
+const accountingBannerMessage = computed(() => {
+  const accounting = surface.value?.accounting
+  if (!accounting) {
+    return null
+  }
+  if (accounting.inFlightEstimatedCost !== null || accounting.inFlightStageCount > 0) {
+    return t('documents.collectionAccounting.inFlightBanner', {
+      cost: formatMoney(accounting.inFlightEstimatedCost, accounting.currency),
+      count: accounting.inFlightStageCount,
+    })
+  }
+  if (accounting.missingStageCount > 0) {
+    return t('documents.collectionAccounting.missingBanner', {
+      count: accounting.missingStageCount,
+    })
   }
   return null
 })
@@ -306,12 +437,160 @@ async function submitReplace(file: File) {
       </section>
 
       <section
+        v-if="accountingBannerMessage"
+        class="rr-documents__graph-banner is-progress"
+      >
+        <strong>{{ $t('documents.collectionAccounting.title') }}</strong>
+        <p>{{ accountingBannerMessage }}</p>
+      </section>
+
+      <section
         v-if="surface?.graphWarning || graphBannerMessage"
         class="rr-documents__graph-banner"
         :class="`is-${surface?.graphStatus ?? 'empty'}`"
       >
         <strong>{{ $t(`graph.statuses.${surface?.graphStatus ?? 'empty'}`) }}</strong>
         <p>{{ graphBannerMessage }}</p>
+      </section>
+
+      <section
+        v-if="accountingCards.length || progressCards.length || surface?.diagnostics"
+        class="rr-documents__insights"
+      >
+        <details
+          v-if="accountingCards.length"
+          class="rr-page-card rr-documents__insight-section"
+        >
+          <summary>
+            <strong>{{ $t('documents.collectionAccounting.title') }}</strong>
+            <span>{{ $t('documents.collectionAccounting.inFlightCost') }}</span>
+          </summary>
+          <div class="rr-documents__summary rr-documents__summary--compact">
+            <article
+              v-for="card in accountingCards"
+              :key="card.label"
+            >
+              <DocumentSummaryCard
+                :tone="card.tone"
+                :value="card.value"
+                :label="card.label"
+              />
+            </article>
+          </div>
+        </details>
+
+        <details
+          v-if="progressCards.length"
+          class="rr-page-card rr-documents__insight-section"
+        >
+          <summary>
+            <strong>{{ $t('documents.importGuide.title') }}</strong>
+            <span>{{ $t('documents.diagnostics.progress.graphReady') }}</span>
+          </summary>
+          <div class="rr-documents__summary rr-documents__summary--compact">
+            <article
+              v-for="card in progressCards"
+              :key="card.label"
+            >
+              <DocumentSummaryCard
+                tone="processing"
+                :value="card.value"
+                :label="card.label"
+              />
+            </article>
+          </div>
+        </details>
+
+        <details
+          v-if="surface?.diagnostics"
+          class="rr-page-card rr-documents__insight-section"
+        >
+          <summary>
+            <strong>{{ $t('documents.diagnostics.title') }}</strong>
+            <span>
+              {{
+                $t('documents.diagnostics.backlog', {
+                  queued: surface.diagnostics.queueBacklogCount,
+                  processing: surface.diagnostics.processingBacklogCount,
+                })
+              }}
+            </span>
+          </summary>
+
+          <section class="rr-documents__diagnostics">
+            <div
+              v-if="stageDiagnostics.length"
+              class="rr-documents__diagnostics-grid"
+            >
+              <article
+                v-for="stage in stageDiagnostics"
+                :key="stage.stage"
+                class="rr-documents__diagnostics-card"
+              >
+                <strong>{{ stageLabel(stage.stage) }}</strong>
+                <p>
+                  {{
+                    $t('documents.diagnostics.stageSummary', {
+                      active: stage.activeCount,
+                      completed: stage.completedCount,
+                      failed: stage.failedCount,
+                    })
+                  }}
+                </p>
+                <span>
+                  {{
+                    $t('documents.diagnostics.timing', {
+                      avg: formatDuration(stage.avgElapsedMs),
+                      max: formatDuration(stage.maxElapsedMs),
+                    })
+                  }}
+                </span>
+              </article>
+            </div>
+
+            <div
+              v-if="formatDiagnostics.length"
+              class="rr-documents__diagnostics-list"
+            >
+              <article
+                v-for="format in formatDiagnostics"
+                :key="format.fileType"
+                class="rr-documents__diagnostics-item"
+              >
+                <div>
+                  <strong>{{ format.fileType }}</strong>
+                  <p>
+                    {{
+                      $t('documents.diagnostics.formatSummary', {
+                        documents: format.documentCount,
+                        ready: format.readyCount,
+                        failed: format.failedCount,
+                      })
+                    }}
+                  </p>
+                </div>
+                <div class="rr-documents__diagnostics-meta">
+                  <span>
+                    {{
+                      $t('documents.diagnostics.queueTiming', {
+                        avg: formatDuration(format.avgQueueElapsedMs),
+                        total: formatDuration(format.avgTotalElapsedMs),
+                      })
+                    }}
+                  </span>
+                  <span v-if="format.bottleneckStage">
+                    {{
+                      $t('documents.diagnostics.bottleneck', {
+                        stage: stageLabel(format.bottleneckStage),
+                        avg: formatDuration(format.bottleneckAvgElapsedMs),
+                      })
+                    }}
+                  </span>
+                </div>
+              </article>
+            </div>
+          </section>
+        </details>
       </section>
 
       <DocumentsFiltersBar
@@ -340,6 +619,7 @@ async function submitReplace(file: File) {
       <DocumentsTable
         v-else-if="filteredRows.length"
         :rows="filteredRows"
+        :diagnostics="surface?.diagnostics ?? null"
         :selected-id="detailOpen ? detail?.id ?? null : null"
         @detail="documentsStore.openDetail"
         @append="documentsStore.openAppendDialog"

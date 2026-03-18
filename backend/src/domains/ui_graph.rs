@@ -3,6 +3,9 @@ use serde::Serialize;
 use crate::domains::query_intelligence::{
     ContextAssemblyMetadata, QueryPlanningMetadata, RerankMetadata,
 };
+use crate::domains::ui_chat::{
+    ChatSessionDetailModel, ChatSessionSettingsModel, ChatSessionSummaryModel,
+};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GraphNodeModel {
@@ -81,6 +84,14 @@ pub struct GraphAssistantMessageModel {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct GraphAssistantFocusContextModel {
+    pub node_id: String,
+    pub label: String,
+    pub summary: String,
+    pub removable: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct GraphAssistantModel {
     pub title: String,
     pub subtitle: String,
@@ -88,6 +99,10 @@ pub struct GraphAssistantModel {
     pub disclaimer: String,
     pub config: Option<GraphAssistantConfigModel>,
     pub session_id: Option<String>,
+    pub recent_sessions: Vec<ChatSessionSummaryModel>,
+    pub active_session: Option<ChatSessionDetailModel>,
+    pub settings_summary: Option<ChatSessionSettingsModel>,
+    pub focus_context: Option<GraphAssistantFocusContextModel>,
     pub messages: Vec<GraphAssistantMessageModel>,
 }
 
@@ -148,6 +163,11 @@ pub struct GraphAssistantAnswerModel {
     pub user_message_id: String,
     pub assistant_message_id: String,
     pub query_id: String,
+    pub effective_mode: String,
+    pub session_summary: Option<ChatSessionDetailModel>,
+    pub settings_summary: Option<ChatSessionSettingsModel>,
+    pub user_message: GraphAssistantMessageModel,
+    pub assistant_message: GraphAssistantMessageModel,
     pub answer: String,
     pub references: Vec<String>,
     pub structured_references: Vec<GraphAssistantReferenceModel>,

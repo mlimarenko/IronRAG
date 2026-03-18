@@ -39,6 +39,14 @@ export type UiGraphOperations = Pick<
   | 'getUiGraphNodeDetail'
   | 'askUiGraphAssistant'
 >
+export type ChatOperations = Pick<
+  operations,
+  | 'listChatSessions'
+  | 'createChatSession'
+  | 'getChatSession'
+  | 'updateChatSession'
+  | 'listChatMessages'
+>
 export type UiAdminOperations = Pick<
   operations,
   | 'getUiAdminOverview'
@@ -85,6 +93,9 @@ export type UiGraphSurfaceContract = JsonResponse<UiOperation<'getUiGraphSurface
 export type UiGraphDiagnosticsContract = JsonResponse<UiOperation<'getUiGraphDiagnostics'>, 200>
 export type UiGraphNodeDetailContract = JsonResponse<UiOperation<'getUiGraphNodeDetail'>, 200>
 export type UiGraphAssistantAnswerContract = JsonResponse<UiOperation<'askUiGraphAssistant'>, 200>
+export type ChatSessionListContract = JsonResponse<UiOperation<'listChatSessions'>, 200>
+export type ChatSessionEnvelopeContract = JsonResponse<UiOperation<'getChatSession'>, 200>
+export type ChatThreadMessagesContract = JsonResponse<UiOperation<'listChatMessages'>, 200>
 export type UiAdminOverviewContract = JsonResponse<UiOperation<'getUiAdminOverview'>, 200>
 export type UiAdminApiTokensContract = JsonResponse<UiOperation<'listUiAdminApiTokens'>, 200>
 export type UiAdminCreateApiTokenContract = JsonResponse<UiOperation<'createUiAdminApiToken'>, 200>

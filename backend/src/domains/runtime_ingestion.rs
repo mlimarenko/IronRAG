@@ -58,6 +58,14 @@ pub enum RuntimeStageAttributionSource {
     Reconciled,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeAccountingTruthStatus {
+    Priced,
+    Unpriced,
+    InFlightUnsettled,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeAttemptMetadata {
     pub logical_document_id: Option<Uuid>,
@@ -129,8 +137,13 @@ pub struct ExtractedContentArtifact {
     pub ingestion_run_id: Uuid,
     pub extraction_kind: String,
     pub content_text: Option<String>,
+    pub preview_text: Option<String>,
+    pub preview_truncated: bool,
     pub page_count: Option<u32>,
     pub warnings: Vec<String>,
+    pub warning_count: usize,
+    pub normalization_status: String,
+    pub ocr_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,11 +152,105 @@ pub struct RuntimeStageAccountingLine {
     pub stage: String,
     pub provider_kind: Option<String>,
     pub model_name: Option<String>,
+    pub accounting_scope: String,
     pub capability: String,
     pub billing_unit: String,
     pub pricing_catalog_entry_id: Option<Uuid>,
     pub pricing_status: String,
     pub estimated_cost: Option<Decimal>,
+    pub settled_estimated_cost: Option<Decimal>,
+    pub in_flight_estimated_cost: Option<Decimal>,
     pub currency: Option<String>,
     pub attribution_source: RuntimeStageAttributionSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeAttemptAccountingTruth {
+    pub total_estimated_cost: Option<Decimal>,
+    pub settled_estimated_cost: Option<Decimal>,
+    pub in_flight_estimated_cost: Option<Decimal>,
+    pub currency: Option<String>,
+    pub priced_stage_count: i32,
+    pub unpriced_stage_count: i32,
+    pub in_flight_stage_count: i32,
+    pub missing_stage_count: i32,
+    pub accounting_status: RuntimeAccountingTruthStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeCollectionAccountingTruth {
+    pub document_count: usize,
+    pub total_estimated_cost: Option<Decimal>,
+    pub settled_estimated_cost: Option<Decimal>,
+    pub in_flight_estimated_cost: Option<Decimal>,
+    pub currency: Option<String>,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub priced_stage_count: i32,
+    pub unpriced_stage_count: i32,
+    pub in_flight_stage_count: i32,
+    pub missing_stage_count: i32,
+    pub accounting_status: RuntimeAccountingTruthStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeCollectionProgressCounters {
+    pub accepted: usize,
+    pub content_extracted: usize,
+    pub chunked: usize,
+    pub embedded: usize,
+    pub extracting_graph: usize,
+    pub graph_ready: usize,
+    pub ready: usize,
+    pub failed: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeCollectionStageDiagnostics {
+    pub stage: String,
+    pub active_count: usize,
+    pub completed_count: usize,
+    pub failed_count: usize,
+    pub avg_elapsed_ms: Option<i64>,
+    pub max_elapsed_ms: Option<i64>,
+    pub total_estimated_cost: Option<Decimal>,
+    pub settled_estimated_cost: Option<Decimal>,
+    pub in_flight_estimated_cost: Option<Decimal>,
+    pub currency: Option<String>,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub accounting_status: RuntimeAccountingTruthStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeCollectionFormatDiagnostics {
+    pub file_type: String,
+    pub document_count: usize,
+    pub queued_count: usize,
+    pub processing_count: usize,
+    pub ready_count: usize,
+    pub ready_no_graph_count: usize,
+    pub failed_count: usize,
+    pub content_extracted_count: usize,
+    pub chunked_count: usize,
+    pub embedded_count: usize,
+    pub extracting_graph_count: usize,
+    pub graph_ready_count: usize,
+    pub avg_queue_elapsed_ms: Option<i64>,
+    pub max_queue_elapsed_ms: Option<i64>,
+    pub avg_total_elapsed_ms: Option<i64>,
+    pub max_total_elapsed_ms: Option<i64>,
+    pub bottleneck_stage: Option<String>,
+    pub bottleneck_avg_elapsed_ms: Option<i64>,
+    pub bottleneck_max_elapsed_ms: Option<i64>,
+    pub total_estimated_cost: Option<Decimal>,
+    pub settled_estimated_cost: Option<Decimal>,
+    pub in_flight_estimated_cost: Option<Decimal>,
+    pub currency: Option<String>,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub accounting_status: RuntimeAccountingTruthStatus,
 }

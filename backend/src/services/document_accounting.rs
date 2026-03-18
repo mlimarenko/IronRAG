@@ -12,7 +12,8 @@ use crate::{
         },
     },
     infra::repositories::{
-        self, AttemptStageAccountingRow, AttemptStageCostSummaryRow, CostLedgerRow, UsageEventRow,
+        self, AttemptStageAccountingRow, AttemptStageCostSummaryRow, CostLedgerRow,
+        RuntimeIngestionStageEventRow, UsageEventRow,
     },
     services::pricing_catalog,
 };
@@ -90,6 +91,35 @@ pub struct StageUsageAccountingResult {
     pub cost_ledger: Option<CostLedgerRow>,
     pub stage_accounting: AttemptStageAccountingRow,
     pub attempt_summary: AttemptStageCostSummaryRow,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedStageAccountingView {
+    pub stage: String,
+    pub anchor_event_id: Option<Uuid>,
+    pub accounting_scope: String,
+    pub pricing_status: String,
+    pub estimated_cost: Option<Decimal>,
+    pub settled_estimated_cost: Option<Decimal>,
+    pub in_flight_estimated_cost: Option<Decimal>,
+    pub currency: Option<String>,
+    pub usage_event_id: Option<Uuid>,
+    pub cost_ledger_id: Option<Uuid>,
+    pub pricing_catalog_entry_id: Option<Uuid>,
+    pub attribution_source: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AttemptAccountingSummaryView {
+    pub total_estimated_cost: Option<Decimal>,
+    pub settled_estimated_cost: Option<Decimal>,
+    pub in_flight_estimated_cost: Option<Decimal>,
+    pub currency: Option<String>,
+    pub priced_stage_count: i32,
+    pub unpriced_stage_count: i32,
+    pub in_flight_stage_count: i32,
+    pub missing_stage_count: i32,
+    pub accounting_status: String,
 }
 
 #[derive(Debug, Clone)]
@@ -301,6 +331,185 @@ pub async fn record_stage_accounting_gap(
     Ok((stage_accounting, attempt_summary))
 }
 
+#[must_use]
+pub fn resolve_attempt_stage_accounting(
+    attempt_stage_events: &[RuntimeIngestionStageEventRow],
+    stage_accounting: &[AttemptStageAccountingRow],
+) -> Vec<ResolvedStageAccountingView> {
+    let attempt_stage_event_ids = attempt_stage_events
+        .iter()
+        .map(|event| event.id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut billable_stage_names = attempt_stage_events
+        .iter()
+        .filter_map(|event| match runtime_stage_billing_policy(&event.stage) {
+            RuntimeStageBillingPolicy::Billable { .. } => Some(event.stage.clone()),
+            RuntimeStageBillingPolicy::NonBillable => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    billable_stage_names.sort();
+
+    billable_stage_names
+        .into_iter()
+        .map(|stage_name| {
+            let stage_rows = stage_accounting
+                .iter()
+                .filter(|row| {
+                    row.stage == stage_name && attempt_stage_event_ids.contains(&row.stage_event_id)
+                })
+                .collect::<Vec<_>>();
+            let anchor_event_id = attempt_stage_events
+                .iter()
+                .rev()
+                .find(|event| {
+                    event.stage == stage_name
+                        && matches!(event.status.as_str(), "completed" | "failed" | "skipped")
+                })
+                .or_else(|| {
+                    attempt_stage_events.iter().rev().find(|event| event.stage == stage_name)
+                })
+                .map(|event| event.id);
+            let stage_rollup =
+                stage_rows.iter().rev().find(|row| row.accounting_scope == "stage_rollup");
+            let provider_calls = stage_rows
+                .iter()
+                .filter(|row| row.accounting_scope == "provider_call")
+                .collect::<Vec<_>>();
+
+            if let Some(row) = stage_rollup {
+                ResolvedStageAccountingView {
+                    stage: stage_name,
+                    anchor_event_id,
+                    accounting_scope: "stage_rollup".to_string(),
+                    pricing_status: row.pricing_status.clone(),
+                    estimated_cost: row.estimated_cost,
+                    settled_estimated_cost: row.estimated_cost,
+                    in_flight_estimated_cost: None,
+                    currency: row.currency.clone(),
+                    usage_event_id: row.usage_event_id,
+                    cost_ledger_id: row.cost_ledger_id,
+                    pricing_catalog_entry_id: row.pricing_catalog_entry_id,
+                    attribution_source: stage_attribution_source(row, &row.stage).to_string(),
+                }
+            } else if !provider_calls.is_empty() {
+                let estimated_cost = provider_calls
+                    .iter()
+                    .filter_map(|row| row.estimated_cost)
+                    .fold(Decimal::ZERO, |acc, value| acc + value);
+                ResolvedStageAccountingView {
+                    stage: stage_name,
+                    anchor_event_id,
+                    accounting_scope: "provider_call".to_string(),
+                    pricing_status: "in_flight_unsettled".to_string(),
+                    estimated_cost: provider_calls
+                        .iter()
+                        .any(|row| row.estimated_cost.is_some())
+                        .then_some(estimated_cost),
+                    settled_estimated_cost: None,
+                    in_flight_estimated_cost: provider_calls
+                        .iter()
+                        .any(|row| row.estimated_cost.is_some())
+                        .then_some(estimated_cost),
+                    currency: provider_calls.iter().find_map(|row| row.currency.clone()),
+                    usage_event_id: None,
+                    cost_ledger_id: None,
+                    pricing_catalog_entry_id: None,
+                    attribution_source: "stage_native".to_string(),
+                }
+            } else {
+                ResolvedStageAccountingView {
+                    stage: stage_name,
+                    anchor_event_id,
+                    accounting_scope: "missing".to_string(),
+                    pricing_status: "unpriced".to_string(),
+                    estimated_cost: None,
+                    settled_estimated_cost: None,
+                    in_flight_estimated_cost: None,
+                    currency: None,
+                    usage_event_id: None,
+                    cost_ledger_id: None,
+                    pricing_catalog_entry_id: None,
+                    attribution_source: "stage_native".to_string(),
+                }
+            }
+        })
+        .collect()
+}
+
+#[must_use]
+pub fn summarize_resolved_attempt_stage_accounting(
+    resolved_stage_accounting: &[ResolvedStageAccountingView],
+) -> AttemptAccountingSummaryView {
+    let total_estimated_cost = resolved_stage_accounting
+        .iter()
+        .filter_map(|row| row.estimated_cost)
+        .fold(Decimal::ZERO, |acc, value| acc + value);
+    let settled_estimated_cost = resolved_stage_accounting
+        .iter()
+        .filter_map(|row| row.settled_estimated_cost)
+        .fold(Decimal::ZERO, |acc, value| acc + value);
+    let in_flight_estimated_cost = resolved_stage_accounting
+        .iter()
+        .filter_map(|row| row.in_flight_estimated_cost)
+        .fold(Decimal::ZERO, |acc, value| acc + value);
+    let priced_stage_count = i32::try_from(
+        resolved_stage_accounting
+            .iter()
+            .filter(|row| row.accounting_scope == "stage_rollup" && row.pricing_status == "priced")
+            .count(),
+    )
+    .unwrap_or(i32::MAX);
+    let unpriced_stage_count = i32::try_from(
+        resolved_stage_accounting
+            .iter()
+            .filter(|row| row.accounting_scope == "stage_rollup" && row.pricing_status != "priced")
+            .count(),
+    )
+    .unwrap_or(i32::MAX);
+    let in_flight_stage_count = i32::try_from(
+        resolved_stage_accounting
+            .iter()
+            .filter(|row| row.accounting_scope == "provider_call")
+            .count(),
+    )
+    .unwrap_or(i32::MAX);
+    let missing_stage_count = i32::try_from(
+        resolved_stage_accounting.iter().filter(|row| row.accounting_scope == "missing").count(),
+    )
+    .unwrap_or(i32::MAX);
+
+    AttemptAccountingSummaryView {
+        total_estimated_cost: resolved_stage_accounting
+            .iter()
+            .any(|row| row.estimated_cost.is_some())
+            .then_some(total_estimated_cost),
+        settled_estimated_cost: resolved_stage_accounting
+            .iter()
+            .any(|row| row.settled_estimated_cost.is_some())
+            .then_some(settled_estimated_cost),
+        in_flight_estimated_cost: resolved_stage_accounting
+            .iter()
+            .any(|row| row.in_flight_estimated_cost.is_some())
+            .then_some(in_flight_estimated_cost),
+        currency: resolved_stage_accounting.iter().find_map(|row| row.currency.clone()),
+        priced_stage_count,
+        unpriced_stage_count,
+        in_flight_stage_count,
+        missing_stage_count,
+        accounting_status: if in_flight_stage_count > 0 {
+            "in_flight_unsettled".to_string()
+        } else if priced_stage_count > 0 && unpriced_stage_count == 0 && missing_stage_count == 0 {
+            "priced".to_string()
+        } else if priced_stage_count > 0 {
+            "partial".to_string()
+        } else {
+            "unpriced".to_string()
+        },
+    }
+}
+
 trait AsRefStr {
     fn as_ref(&self) -> &'static str;
 }
@@ -452,9 +661,28 @@ fn validate_stage_accounting_request(
     }
 }
 
+fn stage_attribution_source(row: &AttemptStageAccountingRow, event_stage: &str) -> &'static str {
+    let metadata_source = row
+        .pricing_snapshot_json
+        .get("stage_ownership")
+        .or_else(|| row.token_usage_json.get("stage_ownership"))
+        .and_then(|value| value.get("attribution_source"))
+        .and_then(serde_json::Value::as_str);
+    match metadata_source {
+        Some("stage_native") => "stage_native",
+        Some("reconciled") => "reconciled",
+        _ if row.stage == event_stage => "stage_native",
+        _ => "reconciled",
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
+    use serde_json::json;
+
     use super::*;
+    use crate::infra::repositories::{AttemptStageAccountingRow, RuntimeIngestionStageEventRow};
 
     #[test]
     fn rejects_priced_non_billable_stage_accounting() {
@@ -493,5 +721,70 @@ mod tests {
             &PricingResolutionStatus::Unpriced,
         )
         .expect("non-billable unpriced gap remains representable");
+    }
+
+    #[test]
+    fn provider_call_accounting_is_visible_before_stage_rollup_exists() {
+        let stage_event_id = Uuid::now_v7();
+        let run_id = Uuid::now_v7();
+        let stage_events = vec![RuntimeIngestionStageEventRow {
+            id: stage_event_id,
+            ingestion_run_id: run_id,
+            attempt_no: 1,
+            stage: "extracting_graph".to_string(),
+            status: "started".to_string(),
+            message: None,
+            metadata_json: json!({}),
+            provider_kind: Some("openai".to_string()),
+            model_name: Some("gpt-5.4-mini".to_string()),
+            started_at: Utc::now(),
+            finished_at: None,
+            elapsed_ms: None,
+            created_at: Utc::now(),
+        }];
+        let stage_accounting = vec![AttemptStageAccountingRow {
+            id: Uuid::now_v7(),
+            ingestion_run_id: run_id,
+            stage_event_id,
+            stage: "extracting_graph".to_string(),
+            accounting_scope: "provider_call".to_string(),
+            call_sequence_no: 1,
+            workspace_id: None,
+            project_id: None,
+            provider_kind: Some("openai".to_string()),
+            model_name: Some("gpt-5.4-mini".to_string()),
+            capability: "graph_extract".to_string(),
+            billing_unit: "per_1m_tokens".to_string(),
+            usage_event_id: Some(Uuid::now_v7()),
+            cost_ledger_id: Some(Uuid::now_v7()),
+            pricing_catalog_entry_id: Some(Uuid::now_v7()),
+            pricing_status: "priced".to_string(),
+            estimated_cost: Some(Decimal::new(375, 5)),
+            currency: Some("USD".to_string()),
+            token_usage_json: json!({
+                "prompt_tokens": 1200,
+                "completion_tokens": 340,
+                "total_tokens": 1540,
+            }),
+            pricing_snapshot_json: json!({
+                "stage_ownership": {
+                    "attribution_source": "stage_native"
+                }
+            }),
+            created_at: Utc::now(),
+        }];
+
+        let resolved = resolve_attempt_stage_accounting(&stage_events, &stage_accounting);
+        let summary = summarize_resolved_attempt_stage_accounting(&resolved);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].accounting_scope, "provider_call");
+        assert_eq!(resolved[0].pricing_status, "in_flight_unsettled");
+        assert_eq!(resolved[0].estimated_cost, Some(Decimal::new(375, 5)));
+        assert_eq!(resolved[0].in_flight_estimated_cost, Some(Decimal::new(375, 5)));
+        assert_eq!(summary.accounting_status, "in_flight_unsettled");
+        assert_eq!(summary.in_flight_stage_count, 1);
+        assert_eq!(summary.total_estimated_cost, Some(Decimal::new(375, 5)));
+        assert_eq!(summary.in_flight_estimated_cost, Some(Decimal::new(375, 5)));
     }
 }

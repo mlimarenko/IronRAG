@@ -1,13 +1,11 @@
 export type GraphNodeType = 'document' | 'entity' | 'topic'
 export type GraphStatus = 'empty' | 'building' | 'ready' | 'partial' | 'failed' | 'stale'
-export type GraphQueryMode = 'document' | 'local' | 'global' | 'hybrid' | 'mix'
 export type GraphLayoutMode =
   | 'cloud'
   | 'circle'
   | 'rings'
   | 'lanes'
   | 'clusters'
-  | 'focus'
   | 'islands'
   | 'spiral'
 export type GraphGroundingStatus = 'grounded' | 'partial' | 'weak' | 'none'
@@ -19,6 +17,26 @@ export type GraphContextAssemblyStatus =
   | 'graph_only'
   | 'balanced_mixed'
   | 'mixed_skewed'
+
+import type {
+  ChatFocusContext,
+  ChatQueryMode,
+  ChatSessionDetail,
+  ChatSessionSettings,
+  ChatSessionSummary,
+  ChatThreadMessage,
+  ChatThreadProvider,
+  ChatThreadReference,
+} from './chat'
+
+export type {
+  ChatFocusContext,
+  ChatSessionDetail,
+  ChatSessionSettings,
+  ChatSessionSummary,
+} from './chat'
+
+export type GraphQueryMode = ChatQueryMode
 
 export interface QueryIntentKeywords {
   highLevel: string[]
@@ -67,23 +85,6 @@ export interface GraphLegendItem {
   label: string
 }
 
-export interface GraphAssistantMessage {
-  id: string
-  role: string
-  content: string
-  createdAt: string
-  queryId: string | null
-  mode: GraphQueryMode | null
-  groundingStatus: GraphGroundingStatus | null
-  provider: GraphAssistantProvider | null
-  references: GraphAssistantReference[]
-  planning: QueryPlanningMetadata | null
-  rerank: RerankMetadata | null
-  contextAssembly: ContextAssemblyMetadata | null
-  warning: string | null
-  warningKind: string | null
-}
-
 export interface GraphAssistantModeDescriptor {
   mode: GraphQueryMode
   labelKey: string
@@ -105,7 +106,11 @@ export interface GraphAssistantState {
   prompts: string[]
   disclaimer: string
   sessionId: string | null
-  messages: GraphAssistantMessage[]
+  recentSessions: ChatSessionSummary[]
+  activeSession: ChatSessionDetail | null
+  settingsSummary: ChatSessionSettings | null
+  focusContext: ChatFocusContext | null
+  messages: ChatThreadMessage[]
 }
 
 export interface GraphSurfaceResponse {
@@ -170,24 +175,20 @@ export interface GraphEvidence {
   activeProvenanceOnly: boolean
 }
 
-export interface GraphAssistantProvider {
-  providerKind: string
-  modelName: string
-}
-
-export interface GraphAssistantReference {
-  kind: string
-  referenceId: string
-  excerpt: string | null
-  rank: number
-  score: number | null
-}
+export type GraphAssistantMessage = ChatThreadMessage
+export type GraphAssistantProvider = ChatThreadProvider
+export type GraphAssistantReference = ChatThreadReference
 
 export interface GraphAssistantAnswer {
   sessionId: string
   userMessageId: string
   assistantMessageId: string
   queryId: string
+  effectiveMode: GraphQueryMode
+  sessionSummary: ChatSessionDetail | null
+  settingsSummary: ChatSessionSettings | null
+  userMessage: GraphAssistantMessage
+  assistantMessage: GraphAssistantMessage
   answer: string
   references: string[]
   structuredReferences: GraphAssistantReference[]
