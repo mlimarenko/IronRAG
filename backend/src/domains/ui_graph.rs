@@ -1,7 +1,10 @@
 use serde::Serialize;
 
+use crate::domains::graph_quality::{
+    CanonicalGraphSummary, ExtractionRecoverySummary, MutationImpactScopeSummary,
+};
 use crate::domains::query_intelligence::{
-    ContextAssemblyMetadata, QueryPlanningMetadata, RerankMetadata,
+    ContextAssemblyMetadata, GroupedReference, QueryPlanningMetadata, RerankMetadata,
 };
 use crate::domains::ui_chat::{
     ChatSessionDetailModel, ChatSessionSettingsModel, ChatSessionSummaryModel,
@@ -60,7 +63,9 @@ pub struct GraphAssistantModeDescriptorModel {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GraphAssistantConfigModel {
+    pub config_version: String,
     pub scope_hint_key: String,
+    pub grouped_reference_semantics_key: String,
     pub default_prompt_keys: Vec<String>,
     pub modes: Vec<GraphAssistantModeDescriptorModel>,
 }
@@ -79,6 +84,7 @@ pub struct GraphAssistantMessageModel {
     pub planning: Option<QueryPlanningMetadata>,
     pub rerank: Option<RerankMetadata>,
     pub context_assembly: Option<ContextAssemblyMetadata>,
+    pub grouped_references: Vec<GroupedReference>,
     pub warning: Option<String>,
     pub warning_kind: Option<String>,
 }
@@ -148,6 +154,9 @@ pub struct GraphNodeDetailModel {
     pub related_edges: Vec<GraphRelatedEdgeModel>,
     pub evidence: Vec<GraphEvidenceModel>,
     pub relation_count: usize,
+    pub canonical_summary: Option<CanonicalGraphSummary>,
+    pub extraction_recovery: Option<ExtractionRecoverySummary>,
+    pub reconciliation_scope: Option<MutationImpactScopeSummary>,
     pub reconciliation_status: Option<String>,
     pub convergence_status: Option<String>,
     pub pending_update_count: usize,
@@ -171,6 +180,7 @@ pub struct GraphAssistantAnswerModel {
     pub answer: String,
     pub references: Vec<String>,
     pub structured_references: Vec<GraphAssistantReferenceModel>,
+    pub grouped_references: Vec<GroupedReference>,
     pub mode: String,
     pub grounding_status: String,
     pub provider: GraphAssistantProviderModel,
@@ -191,6 +201,7 @@ pub struct GraphSurfaceModel {
     pub last_built_at: Option<String>,
     pub filtered_artifact_count: Option<usize>,
     pub warning: Option<String>,
+    pub warnings: Vec<String>,
     pub nodes: Vec<GraphNodeModel>,
     pub edges: Vec<GraphEdgeModel>,
     pub legend: Vec<GraphLegendItemModel>,
@@ -210,6 +221,7 @@ pub struct GraphDiagnosticsModel {
     pub ready_no_graph_count: usize,
     pub pending_update_count: usize,
     pub pending_delete_count: usize,
+    pub active_mutation_scope: Option<MutationImpactScopeSummary>,
     pub filtered_artifact_count: Option<usize>,
     pub filtered_empty_relation_count: Option<usize>,
     pub filtered_degenerate_loop_count: Option<usize>,

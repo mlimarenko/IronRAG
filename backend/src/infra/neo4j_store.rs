@@ -8,7 +8,8 @@ use uuid::Uuid;
 use crate::{
     app::config::Settings,
     infra::graph_store::{
-        GraphProjectionData, GraphProjectionEdgeWrite, GraphProjectionNodeWrite, GraphStore,
+        GraphProjectionData, GraphProjectionEdgeWrite, GraphProjectionNodeWrite,
+        GraphProjectionWriteError, GraphStore,
     },
 };
 
@@ -111,6 +112,23 @@ impl Neo4jStore {
         .await
         .with_context(|| format!("failed to project edge {}", edge.edge_id))
     }
+
+    fn classify_projection_write_error(
+        operation: &str,
+        error: impl std::fmt::Display,
+    ) -> GraphProjectionWriteError {
+        let message = format!("{operation}: {error}");
+        let normalized = message.to_ascii_lowercase();
+        if normalized.contains("deadlock")
+            || normalized.contains("lock")
+            || normalized.contains("transient")
+            || normalized.contains("concurrent")
+        {
+            GraphProjectionWriteError::ProjectionContention { message }
+        } else {
+            GraphProjectionWriteError::ProjectionFailure { message }
+        }
+    }
 }
 
 #[async_trait]
@@ -130,9 +148,11 @@ impl GraphStore for Neo4jStore {
         projection_version: i64,
         nodes: &[GraphProjectionNodeWrite],
         edges: &[GraphProjectionEdgeWrite],
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), GraphProjectionWriteError> {
         let library_id = library_id.to_string();
-        let mut txn = self.graph.start_txn().await?;
+        let mut txn = self.graph.start_txn().await.map_err(|error| {
+            Self::classify_projection_write_error("failed to start projection transaction", error)
+        })?;
 
         txn.run(
             query(
@@ -146,13 +166,26 @@ impl GraphStore for Neo4jStore {
             .param("projection_version", projection_version),
         )
         .await
-        .context("failed to clear target Neo4j projection version")?;
+        .map_err(|error| {
+            Self::classify_projection_write_error(
+                "failed to clear target Neo4j projection version",
+                error,
+            )
+        })?;
 
         for node in nodes {
-            Self::write_projection_node(&mut txn, &library_id, projection_version, node).await?;
+            Self::write_projection_node(&mut txn, &library_id, projection_version, node)
+                .await
+                .map_err(|error| {
+                    Self::classify_projection_write_error("failed to write projection node", error)
+                })?;
         }
         for edge in edges {
-            Self::write_projection_edge(&mut txn, &library_id, projection_version, edge).await?;
+            Self::write_projection_edge(&mut txn, &library_id, projection_version, edge)
+                .await
+                .map_err(|error| {
+                    Self::classify_projection_write_error("failed to write projection edge", error)
+                })?;
         }
 
         txn.run(
@@ -165,9 +198,111 @@ impl GraphStore for Neo4jStore {
             .param("projection_version", projection_version),
         )
         .await
-        .context("failed to purge stale Neo4j projection versions")?;
+        .map_err(|error| {
+            Self::classify_projection_write_error(
+                "failed to purge stale Neo4j projection versions",
+                error,
+            )
+        })?;
 
-        txn.commit().await.context("failed to commit Neo4j projection transaction")
+        txn.commit().await.map_err(|error| {
+            Self::classify_projection_write_error(
+                "failed to commit Neo4j projection transaction",
+                error,
+            )
+        })
+    }
+
+    async fn refresh_library_projection_targets(
+        &self,
+        library_id: Uuid,
+        projection_version: i64,
+        remove_node_ids: &[Uuid],
+        remove_edge_ids: &[Uuid],
+        nodes: &[GraphProjectionNodeWrite],
+        edges: &[GraphProjectionEdgeWrite],
+    ) -> Result<(), GraphProjectionWriteError> {
+        let library_id = library_id.to_string();
+        let mut txn = self.graph.start_txn().await.map_err(|error| {
+            Self::classify_projection_write_error(
+                "failed to start targeted projection transaction",
+                error,
+            )
+        })?;
+
+        if !remove_edge_ids.is_empty() {
+            txn.run(
+                query(
+                    "MATCH ()-[r:RUNTIME_RELATION {
+                        library_id: $library_id,
+                        projection_version: $projection_version
+                     }]->()
+                     WHERE r.edge_id IN $edge_ids
+                     DELETE r",
+                )
+                .param("library_id", library_id.clone())
+                .param("projection_version", projection_version)
+                .param("edge_ids", remove_edge_ids.iter().map(Uuid::to_string).collect::<Vec<_>>()),
+            )
+            .await
+            .map_err(|error| {
+                Self::classify_projection_write_error(
+                    "failed to delete targeted Neo4j projection edges",
+                    error,
+                )
+            })?;
+        }
+
+        if !remove_node_ids.is_empty() {
+            txn.run(
+                query(
+                    "MATCH (n:RustRAGNode {
+                        library_id: $library_id,
+                        projection_version: $projection_version
+                     })
+                     WHERE n.node_id IN $node_ids
+                     DETACH DELETE n",
+                )
+                .param("library_id", library_id.clone())
+                .param("projection_version", projection_version)
+                .param("node_ids", remove_node_ids.iter().map(Uuid::to_string).collect::<Vec<_>>()),
+            )
+            .await
+            .map_err(|error| {
+                Self::classify_projection_write_error(
+                    "failed to delete targeted Neo4j projection nodes",
+                    error,
+                )
+            })?;
+        }
+
+        for node in nodes {
+            Self::write_projection_node(&mut txn, &library_id, projection_version, node)
+                .await
+                .map_err(|error| {
+                    Self::classify_projection_write_error(
+                        "failed to write targeted projection node",
+                        error,
+                    )
+                })?;
+        }
+        for edge in edges {
+            Self::write_projection_edge(&mut txn, &library_id, projection_version, edge)
+                .await
+                .map_err(|error| {
+                    Self::classify_projection_write_error(
+                        "failed to write targeted projection edge",
+                        error,
+                    )
+                })?;
+        }
+
+        txn.commit().await.map_err(|error| {
+            Self::classify_projection_write_error(
+                "failed to commit targeted Neo4j projection transaction",
+                error,
+            )
+        })
     }
 
     async fn load_library_projection(

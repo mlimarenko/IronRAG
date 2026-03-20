@@ -13,9 +13,46 @@ pub struct UiBootstrapAdmin {
     pub password: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BootstrapSettings {
+    pub bootstrap_token: Option<String>,
+    pub bootstrap_claim_enabled: bool,
+    pub legacy_ui_bootstrap_enabled: bool,
+    pub legacy_bootstrap_token_endpoint_enabled: bool,
+    pub legacy_ui_bootstrap_admin: Option<UiBootstrapAdmin>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicOriginSettings {
+    pub raw_frontend_origin: String,
+    pub allowed_origins: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AiCatalogValidationSettings {
+    pub live_validation_enabled: bool,
+    pub seed_from_env: bool,
+    pub default_currency: String,
+    pub default_indexing_provider: String,
+    pub default_indexing_model: String,
+    pub default_embedding_provider: String,
+    pub default_embedding_model: String,
+    pub default_answer_provider: String,
+    pub default_answer_model: String,
+    pub default_vision_provider: String,
+    pub default_vision_model: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DestructiveFreshBootstrapSettings {
+    pub required: bool,
+    pub allow_legacy_startup_side_effects: bool,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct Settings {
     pub bind_addr: String,
+    pub service_role: String,
     pub database_url: String,
     pub database_max_connections: u32,
     pub redis_url: String,
@@ -32,6 +69,11 @@ pub struct Settings {
     pub qwen_api_key: Option<String>,
     pub qwen_api_base_url: String,
     pub bootstrap_token: Option<String>,
+    pub bootstrap_claim_enabled: bool,
+    pub legacy_ui_bootstrap_enabled: bool,
+    pub legacy_bootstrap_token_endpoint_enabled: bool,
+    pub destructive_fresh_bootstrap_required: bool,
+    pub destructive_allow_legacy_startup_side_effects: bool,
     pub frontend_origin: String,
     pub ui_session_secret: String,
     pub ui_default_locale: String,
@@ -45,6 +87,8 @@ pub struct Settings {
     pub ingestion_worker_lease_seconds: u64,
     pub ingestion_worker_heartbeat_interval_seconds: u64,
     pub llm_http_timeout_seconds: u64,
+    pub llm_transport_retry_attempts: usize,
+    pub llm_transport_retry_base_delay_ms: u64,
     pub runtime_default_indexing_provider: String,
     pub runtime_default_indexing_model: String,
     pub runtime_default_embedding_provider: String,
@@ -61,6 +105,8 @@ pub struct Settings {
     pub runtime_query_balanced_context_enabled: bool,
     pub runtime_graph_extract_recovery_enabled: bool,
     pub runtime_graph_extract_recovery_max_attempts: usize,
+    pub runtime_graph_extract_resume_downgrade_level_one_after_replays: usize,
+    pub runtime_graph_extract_resume_downgrade_level_two_after_replays: usize,
     pub runtime_graph_summary_refresh_batch_size: usize,
     pub runtime_graph_targeted_reconciliation_enabled: bool,
     pub runtime_graph_targeted_reconciliation_max_targets: usize,
@@ -69,6 +115,12 @@ pub struct Settings {
     pub runtime_graph_filter_empty_relations: bool,
     pub runtime_graph_filter_degenerate_self_loops: bool,
     pub runtime_graph_convergence_warning_backlog_threshold: usize,
+    pub mcp_memory_default_read_window_chars: usize,
+    pub mcp_memory_max_read_window_chars: usize,
+    pub mcp_memory_default_search_limit: usize,
+    pub mcp_memory_max_search_limit: usize,
+    pub mcp_memory_idempotency_retention_hours: u64,
+    pub mcp_memory_audit_enabled: bool,
     pub runtime_pricing_seed_from_env: bool,
     pub runtime_pricing_default_currency: String,
     pub openai_input_price_per_1m: f64,
@@ -91,6 +143,7 @@ impl Settings {
     pub fn from_env() -> Result<Self, config::ConfigError> {
         let cfg = config::Config::builder()
             .set_default("bind_addr", "0.0.0.0:8080")?
+            .set_default("service_role", "all")?
             .set_default("service_name", "rustrag-backend")?
             .set_default("environment", "local")?
             .set_default("database_url", "postgres://postgres:postgres@127.0.0.1:5432/rustrag")?
@@ -106,6 +159,11 @@ impl Settings {
                 "qwen_api_base_url",
                 "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
             )?
+            .set_default("bootstrap_claim_enabled", true)?
+            .set_default("legacy_ui_bootstrap_enabled", true)?
+            .set_default("legacy_bootstrap_token_endpoint_enabled", true)?
+            .set_default("destructive_fresh_bootstrap_required", false)?
+            .set_default("destructive_allow_legacy_startup_side_effects", true)?
             .set_default(
                 "frontend_origin",
                 "http://127.0.0.1:19000,http://localhost:19000,http://127.0.0.1:9000,http://localhost:9000,http://127.0.0.1:3000,http://localhost:3000",
@@ -118,6 +176,8 @@ impl Settings {
             .set_default("ingestion_worker_lease_seconds", 300)?
             .set_default("ingestion_worker_heartbeat_interval_seconds", 15)?
             .set_default("llm_http_timeout_seconds", 120)?
+            .set_default("llm_transport_retry_attempts", 3)?
+            .set_default("llm_transport_retry_base_delay_ms", 250)?
             .set_default("runtime_default_indexing_provider", "openai")?
             .set_default("runtime_default_indexing_model", "gpt-5-mini")?
             .set_default("runtime_default_embedding_provider", "openai")?
@@ -134,6 +194,8 @@ impl Settings {
             .set_default("runtime_query_balanced_context_enabled", true)?
             .set_default("runtime_graph_extract_recovery_enabled", true)?
             .set_default("runtime_graph_extract_recovery_max_attempts", 2)?
+            .set_default("runtime_graph_extract_resume_downgrade_level_one_after_replays", 3)?
+            .set_default("runtime_graph_extract_resume_downgrade_level_two_after_replays", 5)?
             .set_default("runtime_graph_summary_refresh_batch_size", 64)?
             .set_default("runtime_graph_targeted_reconciliation_enabled", true)?
             .set_default("runtime_graph_targeted_reconciliation_max_targets", 128)?
@@ -142,6 +204,12 @@ impl Settings {
             .set_default("runtime_graph_filter_empty_relations", true)?
             .set_default("runtime_graph_filter_degenerate_self_loops", true)?
             .set_default("runtime_graph_convergence_warning_backlog_threshold", 1)?
+            .set_default("mcp_memory_default_read_window_chars", 12_000)?
+            .set_default("mcp_memory_max_read_window_chars", 50_000)?
+            .set_default("mcp_memory_default_search_limit", 10)?
+            .set_default("mcp_memory_max_search_limit", 25)?
+            .set_default("mcp_memory_idempotency_retention_hours", 72)?
+            .set_default("mcp_memory_audit_enabled", true)?
             .set_default("runtime_pricing_seed_from_env", true)?
             .set_default("runtime_pricing_default_currency", "USD")?
             .set_default("openai_input_price_per_1m", 0.25)?
@@ -158,6 +226,11 @@ impl Settings {
             .build()?;
 
         let mut settings: Self = cfg.try_deserialize()?;
+        settings.service_role = settings.service_role.trim().to_ascii_lowercase();
+        settings.service_name = settings.service_name.trim().to_string();
+        validate_service_role(&settings).map_err(config::ConfigError::Message)?;
+        validate_service_name(&settings).map_err(config::ConfigError::Message)?;
+        validate_mcp_memory_settings(&settings).map_err(config::ConfigError::Message)?;
 
         if settings.openai_api_key.as_deref().is_none_or(|value| value.trim().is_empty()) {
             settings.openai_api_key = std::env::var("RUSTRAG_OPENAI_API_KEY")
@@ -191,11 +264,64 @@ impl Settings {
             .filter(|value| !value.is_empty())
             .map(std::string::ToString::to_string)
             .or_else(|| {
-                std::env::var("RJUSTRAG_BOOTSTRAP_TOKEN")
+                std::env::var("RUSTRAG_BOOTSTRAP_TOKEN")
                     .ok()
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty())
             })
+    }
+
+    #[must_use]
+    pub fn bootstrap_settings(&self) -> BootstrapSettings {
+        BootstrapSettings {
+            bootstrap_token: self.resolved_bootstrap_token(),
+            bootstrap_claim_enabled: self.bootstrap_claim_enabled,
+            legacy_ui_bootstrap_enabled: self.legacy_ui_bootstrap_enabled,
+            legacy_bootstrap_token_endpoint_enabled: self.legacy_bootstrap_token_endpoint_enabled,
+            legacy_ui_bootstrap_admin: self
+                .legacy_ui_bootstrap_enabled
+                .then(|| self.resolved_ui_bootstrap_admin())
+                .flatten(),
+        }
+    }
+
+    #[must_use]
+    pub fn public_origin_settings(&self) -> PublicOriginSettings {
+        PublicOriginSettings {
+            raw_frontend_origin: self.frontend_origin.clone(),
+            allowed_origins: self
+                .frontend_origin
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(std::string::ToString::to_string)
+                .collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn ai_catalog_validation_settings(&self) -> AiCatalogValidationSettings {
+        AiCatalogValidationSettings {
+            live_validation_enabled: self.runtime_live_validation_enabled,
+            seed_from_env: self.runtime_pricing_seed_from_env,
+            default_currency: self.runtime_pricing_default_currency.clone(),
+            default_indexing_provider: self.runtime_default_indexing_provider.clone(),
+            default_indexing_model: self.runtime_default_indexing_model.clone(),
+            default_embedding_provider: self.runtime_default_embedding_provider.clone(),
+            default_embedding_model: self.runtime_default_embedding_model.clone(),
+            default_answer_provider: self.runtime_default_answer_provider.clone(),
+            default_answer_model: self.runtime_default_answer_model.clone(),
+            default_vision_provider: self.runtime_default_vision_provider.clone(),
+            default_vision_model: self.runtime_default_vision_model.clone(),
+        }
+    }
+
+    #[must_use]
+    pub fn destructive_fresh_bootstrap_settings(&self) -> DestructiveFreshBootstrapSettings {
+        DestructiveFreshBootstrapSettings {
+            required: self.destructive_fresh_bootstrap_required,
+            allow_legacy_startup_side_effects: self.destructive_allow_legacy_startup_side_effects,
+        }
     }
 
     #[must_use]
@@ -245,6 +371,68 @@ impl Settings {
         .map(str::trim)
         .any(|value| !value.is_empty())
     }
+
+    #[must_use]
+    pub fn runs_http_api(&self) -> bool {
+        matches!(self.service_role.as_str(), "all" | "api")
+    }
+
+    #[must_use]
+    pub fn runs_ingestion_workers(&self) -> bool {
+        matches!(self.service_role.as_str(), "all" | "worker")
+    }
+}
+
+fn validate_service_role(settings: &Settings) -> Result<(), String> {
+    match settings.service_role.as_str() {
+        "all" | "api" | "worker" => Ok(()),
+        value => Err(format!("service_role must be one of all, api, worker; got {value}")),
+    }
+}
+
+fn validate_service_name(settings: &Settings) -> Result<(), String> {
+    let value = settings.service_name.as_str();
+    if value.is_empty() {
+        return Err("service_name must not be empty".into());
+    }
+    if value
+        .bytes()
+        .any(|byte| !matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'_' | b'-'))
+    {
+        return Err("service_name must contain only ASCII letters, digits, '.', '_' or '-'".into());
+    }
+    Ok(())
+}
+
+fn validate_mcp_memory_settings(settings: &Settings) -> Result<(), String> {
+    if settings.mcp_memory_default_read_window_chars == 0 {
+        return Err("mcp_memory_default_read_window_chars must be greater than zero".into());
+    }
+    if settings.mcp_memory_max_read_window_chars == 0 {
+        return Err("mcp_memory_max_read_window_chars must be greater than zero".into());
+    }
+    if settings.mcp_memory_default_read_window_chars > settings.mcp_memory_max_read_window_chars {
+        return Err(
+            "mcp_memory_default_read_window_chars must be less than or equal to mcp_memory_max_read_window_chars"
+                .into(),
+        );
+    }
+    if settings.mcp_memory_default_search_limit == 0 {
+        return Err("mcp_memory_default_search_limit must be greater than zero".into());
+    }
+    if settings.mcp_memory_max_search_limit == 0 {
+        return Err("mcp_memory_max_search_limit must be greater than zero".into());
+    }
+    if settings.mcp_memory_default_search_limit > settings.mcp_memory_max_search_limit {
+        return Err(
+            "mcp_memory_default_search_limit must be less than or equal to mcp_memory_max_search_limit"
+                .into(),
+        );
+    }
+    if settings.mcp_memory_idempotency_retention_hours == 0 {
+        return Err("mcp_memory_idempotency_retention_hours must be greater than zero".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -254,6 +442,7 @@ mod tests {
     fn sample_settings() -> Settings {
         Settings {
             bind_addr: "0.0.0.0:8080".into(),
+            service_role: "all".into(),
             database_url: "postgres://postgres:postgres@127.0.0.1:5432/rustrag".into(),
             database_max_connections: 20,
             redis_url: "redis://127.0.0.1:6379".into(),
@@ -270,6 +459,11 @@ mod tests {
             qwen_api_key: None,
             qwen_api_base_url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1".into(),
             bootstrap_token: None,
+            bootstrap_claim_enabled: true,
+            legacy_ui_bootstrap_enabled: true,
+            legacy_bootstrap_token_endpoint_enabled: true,
+            destructive_fresh_bootstrap_required: false,
+            destructive_allow_legacy_startup_side_effects: true,
             frontend_origin: "http://127.0.0.1:19000,http://localhost:19000,http://127.0.0.1:9000,http://localhost:9000,http://127.0.0.1:3000,http://localhost:3000".into(),
             ui_session_secret: "local-ui-session-secret".into(),
             ui_default_locale: "ru".into(),
@@ -283,6 +477,8 @@ mod tests {
             ingestion_worker_lease_seconds: 300,
             ingestion_worker_heartbeat_interval_seconds: 15,
             llm_http_timeout_seconds: 120,
+            llm_transport_retry_attempts: 3,
+            llm_transport_retry_base_delay_ms: 250,
             runtime_default_indexing_provider: "openai".into(),
             runtime_default_indexing_model: "gpt-5-mini".into(),
             runtime_default_embedding_provider: "openai".into(),
@@ -299,6 +495,8 @@ mod tests {
             runtime_query_balanced_context_enabled: true,
             runtime_graph_extract_recovery_enabled: true,
             runtime_graph_extract_recovery_max_attempts: 2,
+            runtime_graph_extract_resume_downgrade_level_one_after_replays: 3,
+            runtime_graph_extract_resume_downgrade_level_two_after_replays: 5,
             runtime_graph_summary_refresh_batch_size: 64,
             runtime_graph_targeted_reconciliation_enabled: true,
             runtime_graph_targeted_reconciliation_max_targets: 128,
@@ -307,6 +505,12 @@ mod tests {
             runtime_graph_filter_empty_relations: true,
             runtime_graph_filter_degenerate_self_loops: true,
             runtime_graph_convergence_warning_backlog_threshold: 1,
+            mcp_memory_default_read_window_chars: 12_000,
+            mcp_memory_max_read_window_chars: 50_000,
+            mcp_memory_default_search_limit: 10,
+            mcp_memory_max_search_limit: 25,
+            mcp_memory_idempotency_retention_hours: 72,
+            mcp_memory_audit_enabled: true,
             runtime_pricing_seed_from_env: true,
             runtime_pricing_default_currency: "USD".into(),
             openai_input_price_per_1m: 0.25,
@@ -326,6 +530,7 @@ mod tests {
         let settings = Settings::from_env().expect("settings should load with defaults");
 
         assert_eq!(settings.bind_addr, "0.0.0.0:8080");
+        assert_eq!(settings.service_role, "all");
         assert_eq!(settings.service_name, "rustrag-backend");
         assert_eq!(settings.environment, "local");
         assert_eq!(settings.database_max_connections, 20);
@@ -342,6 +547,12 @@ mod tests {
         assert!(settings.runtime_graph_filter_empty_relations);
         assert!(settings.runtime_graph_filter_degenerate_self_loops);
         assert_eq!(settings.runtime_graph_convergence_warning_backlog_threshold, 1);
+        assert_eq!(settings.mcp_memory_default_read_window_chars, 12_000);
+        assert_eq!(settings.mcp_memory_max_read_window_chars, 50_000);
+        assert_eq!(settings.mcp_memory_default_search_limit, 10);
+        assert_eq!(settings.mcp_memory_max_search_limit, 25);
+        assert_eq!(settings.mcp_memory_idempotency_retention_hours, 72);
+        assert!(settings.mcp_memory_audit_enabled);
     }
 
     #[test]
@@ -393,5 +604,111 @@ mod tests {
             })
         );
         assert!(settings.has_explicit_ui_bootstrap_admin());
+    }
+
+    #[test]
+    fn bootstrap_settings_expose_legacy_bootstrap_boundary() {
+        let settings = sample_settings();
+        let bootstrap = settings.bootstrap_settings();
+
+        assert!(bootstrap.bootstrap_claim_enabled);
+        assert!(bootstrap.legacy_ui_bootstrap_enabled);
+        assert!(bootstrap.legacy_bootstrap_token_endpoint_enabled);
+        assert_eq!(
+            bootstrap.legacy_ui_bootstrap_admin,
+            Some(UiBootstrapAdmin {
+                login: "admin".into(),
+                email: "admin@rustrag.local".into(),
+                display_name: "Admin".into(),
+                password: "rustrag".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn public_origin_settings_split_and_trim_allowed_origins() {
+        let mut settings = sample_settings();
+        settings.frontend_origin = " https://app.example.com , http://localhost:19000 ".into();
+
+        let origins = settings.public_origin_settings();
+
+        assert_eq!(
+            origins.raw_frontend_origin,
+            " https://app.example.com , http://localhost:19000 "
+        );
+        assert_eq!(
+            origins.allowed_origins,
+            vec!["https://app.example.com".to_string(), "http://localhost:19000".to_string()]
+        );
+    }
+
+    #[test]
+    fn ai_catalog_validation_settings_capture_runtime_defaults() {
+        let settings = sample_settings();
+        let ai_catalog = settings.ai_catalog_validation_settings();
+
+        assert!(!ai_catalog.live_validation_enabled);
+        assert!(ai_catalog.seed_from_env);
+        assert_eq!(ai_catalog.default_currency, "USD");
+        assert_eq!(ai_catalog.default_embedding_model, "text-embedding-3-large");
+        assert_eq!(ai_catalog.default_answer_model, "gpt-5.4");
+    }
+
+    #[test]
+    fn destructive_fresh_bootstrap_settings_preserve_legacy_boundary_flags() {
+        let settings = sample_settings();
+        let destructive = settings.destructive_fresh_bootstrap_settings();
+
+        assert!(!destructive.required);
+        assert!(destructive.allow_legacy_startup_side_effects);
+    }
+
+    #[test]
+    fn rejects_invalid_mcp_memory_ranges() {
+        let mut settings = sample_settings();
+        settings.mcp_memory_default_read_window_chars = 10_000;
+        settings.mcp_memory_max_read_window_chars = 100;
+
+        let error = validate_mcp_memory_settings(&settings).expect_err("range should fail");
+        assert!(error.contains("mcp_memory_default_read_window_chars"));
+    }
+
+    #[test]
+    fn service_role_helpers_match_role() {
+        let mut settings = sample_settings();
+
+        settings.service_role = "api".into();
+        assert!(settings.runs_http_api());
+        assert!(!settings.runs_ingestion_workers());
+
+        settings.service_role = "worker".into();
+        assert!(!settings.runs_http_api());
+        assert!(settings.runs_ingestion_workers());
+    }
+
+    #[test]
+    fn rejects_invalid_service_roles() {
+        let mut settings = sample_settings();
+        settings.service_role = "scheduler".into();
+
+        let error = validate_service_role(&settings).expect_err("invalid role should fail");
+        assert!(error.contains("service_role"));
+    }
+
+    #[test]
+    fn accepts_service_names_with_identity_safe_characters() {
+        let mut settings = sample_settings();
+        settings.service_name = "rustrag.worker_01-api".into();
+
+        validate_service_name(&settings).expect("valid service name should pass");
+    }
+
+    #[test]
+    fn rejects_invalid_service_names() {
+        let mut settings = sample_settings();
+        settings.service_name = "worker:api".into();
+
+        let error = validate_service_name(&settings).expect_err("invalid service name should fail");
+        assert!(error.contains("service_name"));
     }
 }

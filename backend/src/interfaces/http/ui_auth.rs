@@ -79,6 +79,12 @@ async fn ensure_default_workspace_and_library(
     user_id: Uuid,
     role_label: &str,
 ) -> Result<(repositories::WorkspaceRow, repositories::ProjectRow), ApiError> {
+    if !state.settings.destructive_fresh_bootstrap_settings().allow_legacy_startup_side_effects {
+        return Err(ApiError::forbidden(
+            "legacy default workspace bootstrap is disabled; use canonical catalog bootstrap flows",
+        ));
+    }
+
     let workspace = repositories::find_or_create_default_workspace(&state.persistence.postgres)
         .await
         .map_err(|_| ApiError::Internal)?;

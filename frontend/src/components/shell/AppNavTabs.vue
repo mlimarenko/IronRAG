@@ -18,6 +18,12 @@ import { useI18n } from 'vue-i18n'
     </RouterLink>
     <RouterLink
       class="rr-nav-tabs__link"
+      to="/swagger"
+    >
+      {{ useI18n().t('shell.swagger') }}
+    </RouterLink>
+    <RouterLink
+      class="rr-nav-tabs__link"
       to="/admin"
     >
       {{ useI18n().t('shell.admin') }}

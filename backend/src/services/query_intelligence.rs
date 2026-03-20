@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, anyhow};
 use chrono::{Duration, Utc};
@@ -10,8 +10,9 @@ use crate::{
     domains::{
         query_experience::{AssistantExperienceConfig, QueryModeDescriptor},
         query_intelligence::{
-            ContextAssemblyMetadata, ContextAssemblyStatus, IntentKeywords, QueryIntentCacheStatus,
-            QueryPlanningMetadata, RerankMetadata, RerankStatus,
+            ContextAssemblyMetadata, ContextAssemblyStatus, GroupedReference, GroupedReferenceKind,
+            IntentKeywords, QueryIntentCacheStatus, QueryPlanningMetadata, RerankMetadata,
+            RerankStatus,
         },
         query_modes::RuntimeQueryMode,
     },
@@ -54,7 +55,38 @@ pub struct RerankOutcome {
     pub metadata: RerankMetadata,
 }
 
+#[derive(Debug, Clone)]
+pub struct GroupedReferenceCandidate {
+    pub dedupe_key: String,
+    pub kind: GroupedReferenceKind,
+    pub rank: usize,
+    pub title: String,
+    pub excerpt: Option<String>,
+    pub support_id: String,
+}
+
 impl QueryIntelligenceService {
+    pub async fn invalidate_project_source_truth(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+    ) -> anyhow::Result<i64> {
+        let source_truth_version = repositories::touch_project_source_truth_version(
+            &state.persistence.postgres,
+            library_id,
+        )
+        .await
+        .context("failed to touch project source-truth version")?;
+        repositories::mark_query_intent_cache_entries_stale_for_project(
+            &state.persistence.postgres,
+            library_id,
+            source_truth_version,
+        )
+        .await
+        .context("failed to mark query intent cache rows stale after source-truth change")?;
+        Ok(source_truth_version)
+    }
+
     #[must_use]
     pub fn assistant_config(&self) -> AssistantExperienceConfig {
         AssistantExperienceConfig {
@@ -266,6 +298,68 @@ impl QueryIntelligenceService {
         };
         ContextAssemblyMetadata { status, warning }
     }
+
+    #[must_use]
+    pub fn group_visible_references(
+        &self,
+        candidates: &[GroupedReferenceCandidate],
+        limit: usize,
+    ) -> Vec<GroupedReference> {
+        let mut grouped = HashMap::<String, GroupAccumulator>::new();
+        for candidate in candidates {
+            let entry =
+                grouped.entry(candidate.dedupe_key.clone()).or_insert_with(|| GroupAccumulator {
+                    dedupe_key: candidate.dedupe_key.clone(),
+                    kind: candidate.kind.clone(),
+                    rank: candidate.rank,
+                    title: candidate.title.clone(),
+                    excerpt: candidate.excerpt.clone(),
+                    support_ids: Vec::new(),
+                });
+            if entry.kind != candidate.kind {
+                entry.kind = GroupedReferenceKind::Mixed;
+            }
+            if candidate.rank < entry.rank {
+                entry.rank = candidate.rank;
+                entry.title = candidate.title.clone();
+            }
+            if entry.excerpt.is_none() {
+                entry.excerpt = candidate.excerpt.clone();
+            }
+            if !entry.support_ids.iter().any(|value| value == &candidate.support_id) {
+                entry.support_ids.push(candidate.support_id.clone());
+            }
+        }
+
+        let mut grouped = grouped.into_values().collect::<Vec<_>>();
+        grouped.sort_by(|left, right| {
+            left.rank.cmp(&right.rank).then_with(|| left.title.cmp(&right.title))
+        });
+        grouped.truncate(limit);
+        grouped
+            .into_iter()
+            .enumerate()
+            .map(|(index, group)| GroupedReference {
+                id: group.dedupe_key,
+                kind: group.kind,
+                rank: index + 1,
+                title: group.title,
+                excerpt: group.excerpt,
+                evidence_count: group.support_ids.len(),
+                support_ids: group.support_ids,
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct GroupAccumulator {
+    dedupe_key: String,
+    kind: GroupedReferenceKind,
+    rank: usize,
+    title: String,
+    excerpt: Option<String>,
+    support_ids: Vec<String>,
 }
 
 fn build_fallback_metadata(
@@ -538,6 +632,66 @@ mod tests {
 
         assert_eq!(outcome.metadata.status, RerankStatus::Failed);
         assert_eq!(outcome.entities, vec!["dup".to_string(), "dup".to_string()]);
+    }
+
+    #[test]
+    fn group_visible_references_deduplicates_support_ids_by_key() {
+        let service = QueryIntelligenceService;
+        let grouped = service.group_visible_references(
+            &[
+                GroupedReferenceCandidate {
+                    dedupe_key: "document:1".to_string(),
+                    kind: GroupedReferenceKind::Document,
+                    rank: 2,
+                    title: "Roadmap".to_string(),
+                    excerpt: Some("Q2 delivery plan".to_string()),
+                    support_id: "chunk:1".to_string(),
+                },
+                GroupedReferenceCandidate {
+                    dedupe_key: "document:1".to_string(),
+                    kind: GroupedReferenceKind::Document,
+                    rank: 1,
+                    title: "Roadmap".to_string(),
+                    excerpt: Some("Q2 delivery plan".to_string()),
+                    support_id: "chunk:2".to_string(),
+                },
+            ],
+            8,
+        );
+
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].rank, 1);
+        assert_eq!(grouped[0].evidence_count, 2);
+        assert_eq!(grouped[0].support_ids, vec!["chunk:1".to_string(), "chunk:2".to_string()]);
+    }
+
+    #[test]
+    fn group_visible_references_marks_mixed_when_sources_collide() {
+        let service = QueryIntelligenceService;
+        let grouped = service.group_visible_references(
+            &[
+                GroupedReferenceCandidate {
+                    dedupe_key: "focus:alpha".to_string(),
+                    kind: GroupedReferenceKind::Entity,
+                    rank: 1,
+                    title: "Alpha".to_string(),
+                    excerpt: None,
+                    support_id: "node:1".to_string(),
+                },
+                GroupedReferenceCandidate {
+                    dedupe_key: "focus:alpha".to_string(),
+                    kind: GroupedReferenceKind::Relationship,
+                    rank: 2,
+                    title: "Alpha depends on Beta".to_string(),
+                    excerpt: None,
+                    support_id: "edge:1".to_string(),
+                },
+            ],
+            8,
+        );
+
+        assert_eq!(grouped[0].kind, GroupedReferenceKind::Mixed);
+        assert_eq!(grouped[0].evidence_count, 2);
     }
 }
 

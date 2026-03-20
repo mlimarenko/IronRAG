@@ -6,7 +6,7 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 smoke_require_commands docker jq curl zip magick libreoffice
 
 repo_root=$(smoke_repo_root)
-api_base=${RUSTRAG_SMOKE_API_BASE:-http://127.0.0.1:18080/v1}
+api_base=${RUSTRAG_SMOKE_API_BASE:-http://127.0.0.1:19000/v1}
 output_dir=${1:-"${repo_root}/docs/checkpoints/runtime-smoke/openai-$(date -u +%Y%m%dT%H%M%SZ)"}
 provider_kind=openai
 indexing_model=${RUSTRAG_OPENAI_INDEXING_MODEL:-gpt-5-mini}
@@ -19,7 +19,7 @@ mkdir -p "${output_dir}"
 
 (
   cd "${repo_root}"
-  docker compose up -d postgres redis neo4j backend frontend >/dev/null
+  docker compose up -d nginx >/dev/null
 )
 "${repo_root}/scripts/smoke/wait-for-runtime.sh" >/dev/null
 

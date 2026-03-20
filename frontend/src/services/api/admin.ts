@@ -1,455 +1,543 @@
 import type {
-  AdminMemberRow,
-  AdminOverviewResponse,
-  AdminPricingCatalogEntry,
-  AdminPricingCoverageSummary,
-  AdminProviderProfile,
-  AdminProviderValidation,
-  AdminProviderValidationCheck,
-  AdminSettingsResponse,
-  AdminSettingItem,
-  AdminSupportedProvider,
-  AdminUpsertPricingEntryPayload,
-  ApiTokenRow,
+  AdminAiConsoleState,
+  AdminApiTokenRow,
+  AdminAuditEvent,
+  AdminAuditEventSubject,
+  AdminBindingValidation,
+  AdminGrant,
+  AdminGrantResourceKind,
+  AdminModelPreset,
+  AdminPermissionKind,
+  AdminPrincipalSummary,
+  AdminProviderCatalogEntry,
+  AdminProviderCredential,
+  AdminLibraryBinding,
+  AdminModelCatalogEntry,
+  AdminPriceCatalogEntry,
+  AdminWorkspaceMembership,
+  CreateAdminCredentialPayload,
   CreateApiTokenPayload,
   CreateApiTokenResult,
-  LibraryAccessRow,
-  UpdateAdminProviderProfilePayload,
 } from 'src/models/ui/admin'
 import { apiHttp, unwrap } from './http'
 
-interface RawAdminOverviewResponse {
-  active_tab: 'api_tokens' | 'members' | 'library_access' | 'settings'
-  workspace_name: string
-  counts: {
-    api_tokens: number
-    members: number
-    library_access: number
-    settings: number
-  }
-  availability: {
-    api_tokens: boolean
-    members: boolean
-    library_access: boolean
-    settings: boolean
-  }
-}
-
-interface RawApiTokenRow {
-  id: string
+interface RawTokenResponse {
+  principalId: string
+  workspaceId: string | null
   label: string
-  masked_token: string
-  scopes: string[]
-  created_at: string
-  last_used_at: string | null
-  expires_at: string | null
-  can_revoke: boolean
-}
-
-interface RawApiTokensResponse {
-  rows: RawApiTokenRow[]
-}
-
-interface RawCreateApiTokenResult {
-  row: RawApiTokenRow
-  plaintext_token: string
-}
-
-interface RawMembersResponse {
-  rows: {
-    id: string
-    display_name: string
-    email: string
-    role_label: string
-  }[]
-}
-
-interface RawLibraryAccessResponse {
-  rows: {
-    id: string
-    library_name: string
-    principal_label: string
-    access_level: string
-  }[]
-}
-
-interface RawSettingsResponse {
-  items: {
-    id: string
-    label: string
-    value: string
-  }[]
-  provider_catalog: {
-    provider_kind: string
-    supported_capabilities: string[]
-    default_models: Record<string, string>
-    available_models: Record<string, string[]>
-    is_configured: boolean
-  }[]
-  provider_profile: {
-    library_id: string
-    library_name: string
-    indexing_provider_kind: string
-    indexing_model_name: string
-    embedding_provider_kind: string
-    embedding_model_name: string
-    answer_provider_kind: string
-    answer_model_name: string
-    vision_provider_kind: string
-    vision_model_name: string
-    last_validated_at: string | null
-    last_validation_status: string | null
-    last_validation_error: string | null
-  }
-  provider_validation: {
-    status: string | null
-    checked_at: string | null
-    error: string | null
-    checks: {
-      provider_kind: string
-      model_name: string
-      capability: string
-      status: string
-      checked_at: string
-      error: string | null
-    }[]
-  }
-  pricing_catalog: {
-    id: string
-    workspace_id: string | null
-    provider_kind: string
-    model_name: string
-    capability: string
-    billing_unit: string
-    input_price: string | null
-    output_price: string | null
-    currency: string
-    status: string
-    source_kind: string
-    note: string | null
-    effective_from: string
-    effective_to: string | null
-  }[]
-  pricing_coverage: {
-    status: 'covered' | 'partial' | 'missing'
-    covered_targets: number
-    missing_targets: number
-    warnings: {
-      provider_kind: string
-      model_name: string
-      capability: string
-      billing_unit: string
-      message: string
-    }[]
-  }
-  live_validation_enabled: boolean
-  supported_provider_kinds: string[]
-}
-
-interface RawProviderProfileResponse {
-  profile: RawSettingsResponse['provider_profile']
-}
-
-interface RawProviderValidationResponse {
-  profile: RawSettingsResponse['provider_profile']
-  validation: RawSettingsResponse['provider_validation']
-}
-
-interface RawPricingCatalogEntry {
-  id: string
-  workspace_id: string | null
-  provider_kind: string
-  model_name: string
-  capability: string
-  billing_unit: string
-  input_price: string | null
-  output_price: string | null
-  currency: string
+  tokenPrefix: string
   status: string
-  source_kind: string
-  note: string | null
-  effective_from: string
-  effective_to: string | null
+  expiresAt: string | null
+  revokedAt: string | null
+  issuedByPrincipalId: string | null
+  lastUsedAt: string | null
 }
 
-function mapTokenRow(row: RawApiTokenRow, plaintextToken: string | null = null): ApiTokenRow {
+interface RawMintTokenResponse {
+  token: string
+  apiToken: RawTokenResponse
+}
+
+interface RawGrantResponse {
+  id: string
+  principalId: string
+  resourceKind: AdminGrantResourceKind
+  resourceId: string
+  permissionKind: AdminPermissionKind
+  grantedByPrincipalId: string | null
+  grantedAt: string
+  expiresAt: string | null
+}
+
+interface RawModelPreset {
+  id: string
+  workspaceId: string
+  modelCatalogId: string
+  presetName: string
+  systemPrompt: string | null
+  temperature: number | null
+  topP: number | null
+  maxOutputTokensOverride: number | null
+  extraParametersJson: unknown
+  createdAt: string
+  updatedAt: string
+}
+
+interface RawWorkspaceMembershipResponse {
+  workspaceId: string
+  principalId: string
+  membershipState: string
+  joinedAt: string
+  endedAt: string | null
+}
+
+interface RawMeResponse {
+  principal: {
+    id: string
+    principalKind: string
+    status: string
+    displayLabel: string
+    createdAt: string
+    disabledAt: string | null
+  }
+  user: {
+    principalId: string
+    email: string
+    displayName: string
+    authProviderKind: string
+    externalSubject: string | null
+  } | null
+  workspaceMemberships: RawWorkspaceMembershipResponse[]
+  effectiveGrants: RawGrantResponse[]
+}
+
+interface RawProviderCatalogEntry {
+  id: string
+  providerKind: string
+  displayName: string
+  apiStyle: string
+  lifecycleState: string
+}
+
+interface RawModelCatalogEntry {
+  id: string
+  providerCatalogId: string
+  modelName: string
+  capabilityKind: string
+  modalityKind: string
+  contextWindow: number | null
+  maxOutputTokens: number | null
+}
+
+interface RawPriceCatalogEntry {
+  id: string
+  modelCatalogId: string
+  billingUnit: string
+  unitPrice: string | number
+  currencyCode: string
+  effectiveFrom: string
+}
+
+interface RawProviderCredential {
+  id: string
+  workspaceId: string
+  providerCatalogId: string
+  label: string
+  secretRef: string
+  credentialState: string
+  createdAt: string
+  updatedAt: string
+}
+
+interface RawLibraryBinding {
+  id: string
+  workspaceId: string
+  libraryId: string
+  bindingPurpose: string
+  providerCredentialId: string
+  modelPresetId: string
+  bindingState: string
+}
+
+interface RawBindingValidation {
+  id: string
+  bindingId: string
+  validationState: string
+  checkedAt: string
+  failureCode: string | null
+  message: string | null
+}
+
+interface RawAuditEventSubject {
+  auditEventId: string
+  subjectKind: string
+  subjectId: string
+  workspaceId: string | null
+  libraryId: string | null
+  documentId: string | null
+}
+
+interface RawAuditEvent {
+  id: string
+  actorPrincipalId: string | null
+  surfaceKind: string
+  actionKind: string
+  resultKind: string
+  requestId: string | null
+  traceId: string | null
+  createdAt: string
+  redactedMessage: string | null
+  internalMessage?: string | null
+  subjects: RawAuditEventSubject[]
+}
+
+function mapTokenRow(
+  row: RawTokenResponse,
+  plaintextToken: string | null = null,
+  grants: AdminGrant[] = [],
+): AdminApiTokenRow {
   return {
-    id: row.id,
+    principalId: row.principalId,
+    workspaceId: row.workspaceId,
     label: row.label,
-    maskedToken: row.masked_token,
-    scopes: row.scopes,
-    createdAt: row.created_at,
-    lastUsedAt: row.last_used_at,
-    expiresAt: row.expires_at,
-    canRevoke: row.can_revoke,
+    tokenPrefix: row.tokenPrefix,
+    status: row.status,
+    expiresAt: row.expiresAt,
+    revokedAt: row.revokedAt,
+    issuedByPrincipalId: row.issuedByPrincipalId,
+    lastUsedAt: row.lastUsedAt,
     plaintextToken,
+    grants,
   }
 }
 
-function mapSettingItem(item: RawSettingsResponse['items'][number]): AdminSettingItem {
-  return {
-    id: item.id,
-    label: item.label,
-    value: item.value,
-  }
-}
-
-function mapSupportedProvider(
-  provider: RawSettingsResponse['provider_catalog'][number],
-): AdminSupportedProvider {
-  return {
-    providerKind: provider.provider_kind,
-    supportedCapabilities: provider.supported_capabilities,
-    defaultModels: provider.default_models,
-    availableModels: provider.available_models,
-    isConfigured: provider.is_configured,
-  }
-}
-
-function mapProviderProfile(
-  profile: RawSettingsResponse['provider_profile'],
-): AdminProviderProfile {
-  return {
-    libraryId: profile.library_id,
-    libraryName: profile.library_name,
-    indexingProviderKind: profile.indexing_provider_kind,
-    indexingModelName: profile.indexing_model_name,
-    embeddingProviderKind: profile.embedding_provider_kind,
-    embeddingModelName: profile.embedding_model_name,
-    answerProviderKind: profile.answer_provider_kind,
-    answerModelName: profile.answer_model_name,
-    visionProviderKind: profile.vision_provider_kind,
-    visionModelName: profile.vision_model_name,
-    lastValidatedAt: profile.last_validated_at,
-    lastValidationStatus: profile.last_validation_status,
-    lastValidationError: profile.last_validation_error,
-  }
-}
-
-function mapProviderValidationCheck(
-  check: RawSettingsResponse['provider_validation']['checks'][number],
-): AdminProviderValidationCheck {
-  return {
-    providerKind: check.provider_kind,
-    modelName: check.model_name,
-    capability: check.capability,
-    status: check.status,
-    checkedAt: check.checked_at,
-    error: check.error,
-  }
-}
-
-function mapProviderValidation(
-  validation: RawSettingsResponse['provider_validation'],
-): AdminProviderValidation {
-  return {
-    status: validation.status,
-    checkedAt: validation.checked_at,
-    error: validation.error,
-    checks: validation.checks.map((check) => mapProviderValidationCheck(check)),
-  }
-}
-
-function mapPricingCatalogEntry(
-  row: RawPricingCatalogEntry,
-): AdminPricingCatalogEntry {
+function mapGrant(row: RawGrantResponse): AdminGrant {
   return {
     id: row.id,
-    workspaceId: row.workspace_id,
-    providerKind: row.provider_kind,
-    modelName: row.model_name,
-    capability: row.capability,
-    billingUnit: row.billing_unit,
-    inputPrice: row.input_price,
-    outputPrice: row.output_price,
-    currency: row.currency,
-    status: row.status,
-    sourceKind: row.source_kind,
-    note: row.note,
-    effectiveFrom: row.effective_from,
-    effectiveTo: row.effective_to,
+    principalId: row.principalId,
+    resourceKind: row.resourceKind,
+    resourceId: row.resourceId,
+    permissionKind: row.permissionKind,
+    grantedByPrincipalId: row.grantedByPrincipalId,
+    grantedAt: row.grantedAt,
+    expiresAt: row.expiresAt,
   }
 }
 
-function mapPricingCoverage(
-  coverage: RawSettingsResponse['pricing_coverage'],
-): AdminPricingCoverageSummary {
+function mapWorkspaceMembership(
+  row: RawWorkspaceMembershipResponse,
+): AdminWorkspaceMembership {
   return {
-    status: coverage.status,
-    coveredTargets: coverage.covered_targets,
-    missingTargets: coverage.missing_targets,
-    warnings: coverage.warnings.map((warning) => ({
-      providerKind: warning.provider_kind,
-      modelName: warning.model_name,
-      capability: warning.capability,
-      billingUnit: warning.billing_unit,
-      message: warning.message,
+    workspaceId: row.workspaceId,
+    principalId: row.principalId,
+    membershipState: row.membershipState,
+    joinedAt: row.joinedAt,
+    endedAt: row.endedAt,
+  }
+}
+
+function mapPrincipal(item: RawMeResponse): AdminPrincipalSummary {
+  return {
+    id: item.principal.id,
+    principalKind: item.principal.principalKind,
+    status: item.principal.status,
+    displayLabel: item.principal.displayLabel,
+    email: item.user?.email ?? null,
+    displayName: item.user?.displayName ?? null,
+    authProviderKind: item.user?.authProviderKind ?? null,
+    externalSubject: item.user?.externalSubject ?? null,
+    workspaceMemberships: item.workspaceMemberships.map((row) =>
+      mapWorkspaceMembership(row),
+    ),
+    effectiveGrants: item.effectiveGrants.map((row) => mapGrant(row)),
+  }
+}
+
+function mapProvider(row: RawProviderCatalogEntry): AdminProviderCatalogEntry {
+  return {
+    id: row.id,
+    providerKind: row.providerKind,
+    displayName: row.displayName,
+    apiStyle: row.apiStyle,
+    lifecycleState: row.lifecycleState,
+  }
+}
+
+function mapModel(row: RawModelCatalogEntry): AdminModelCatalogEntry {
+  return {
+    id: row.id,
+    providerCatalogId: row.providerCatalogId,
+    modelName: row.modelName,
+    capabilityKind: row.capabilityKind,
+    modalityKind: row.modalityKind,
+    contextWindow: row.contextWindow,
+    maxOutputTokens: row.maxOutputTokens,
+  }
+}
+
+function mapPrice(row: RawPriceCatalogEntry): AdminPriceCatalogEntry {
+  return {
+    id: row.id,
+    modelCatalogId: row.modelCatalogId,
+    billingUnit: row.billingUnit,
+    unitPrice: String(row.unitPrice),
+    currencyCode: row.currencyCode,
+    effectiveFrom: row.effectiveFrom,
+  }
+}
+
+function mapCredential(row: RawProviderCredential): AdminProviderCredential {
+  return {
+    id: row.id,
+    workspaceId: row.workspaceId,
+    providerCatalogId: row.providerCatalogId,
+    label: row.label,
+    secretRef: row.secretRef,
+    credentialState: row.credentialState,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  }
+}
+
+function mapModelPreset(row: RawModelPreset): AdminModelPreset {
+  return {
+    id: row.id,
+    workspaceId: row.workspaceId,
+    modelCatalogId: row.modelCatalogId,
+    presetName: row.presetName,
+    systemPrompt: row.systemPrompt,
+    temperature: row.temperature,
+    topP: row.topP,
+    maxOutputTokensOverride: row.maxOutputTokensOverride,
+    extraParametersJson: row.extraParametersJson,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  }
+}
+
+function mapBindingValidation(row: RawBindingValidation): AdminBindingValidation {
+  return {
+    id: row.id,
+    bindingId: row.bindingId,
+    validationState: row.validationState,
+    checkedAt: row.checkedAt,
+    failureCode: row.failureCode,
+    message: row.message,
+  }
+}
+
+function mapBinding(row: RawLibraryBinding): AdminLibraryBinding {
+  return {
+    id: row.id,
+    workspaceId: row.workspaceId,
+    libraryId: row.libraryId,
+    bindingPurpose: row.bindingPurpose,
+    providerCredentialId: row.providerCredentialId,
+    modelPresetId: row.modelPresetId,
+    bindingState: row.bindingState,
+    latestValidation: null,
+  }
+}
+
+function mapAuditSubject(
+  row: RawAuditEventSubject,
+): AdminAuditEventSubject {
+  return {
+    auditEventId: row.auditEventId,
+    subjectKind: row.subjectKind,
+    subjectId: row.subjectId,
+    workspaceId: row.workspaceId,
+    libraryId: row.libraryId,
+    documentId: row.documentId,
+  }
+}
+
+function mapAuditEvent(row: RawAuditEvent): AdminAuditEvent {
+  return {
+    id: row.id,
+    actorPrincipalId: row.actorPrincipalId,
+    surfaceKind: row.surfaceKind,
+    actionKind: row.actionKind,
+    resultKind: row.resultKind,
+    requestId: row.requestId,
+    traceId: row.traceId,
+    createdAt: row.createdAt,
+    redactedMessage: row.redactedMessage,
+    internalMessage: row.internalMessage ?? null,
+    subjects: row.subjects.map((subject) => mapAuditSubject(subject)),
+  }
+}
+
+function toExpiresAt(expiresInDays: number | null): string | null {
+  if (expiresInDays === null) {
+    return null
+  }
+  return new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000).toISOString()
+}
+
+export async function fetchAdminPrincipal(): Promise<AdminPrincipalSummary> {
+  return mapPrincipal(await unwrap(apiHttp.get<RawMeResponse>('/iam/me')))
+}
+
+export async function fetchAdminApiTokens(
+  workspaceId: string | null,
+): Promise<AdminApiTokenRow[]> {
+  const tokens = await unwrap(
+    apiHttp.get<RawTokenResponse[]>('/iam/tokens', {
+      params: workspaceId ? { workspaceId } : {},
+    }),
+  )
+
+  const grantRows = await Promise.all(
+    tokens.map(async (row) => ({
+      principalId: row.principalId,
+      grants: await unwrap(
+        apiHttp.get<RawGrantResponse[]>('/iam/grants', {
+          params: { principalId: row.principalId },
+        }),
+      ),
     })),
-  }
-}
+  )
 
-export async function fetchAdminOverview(): Promise<AdminOverviewResponse> {
-  const response = await unwrap(apiHttp.get<RawAdminOverviewResponse>('/ui/admin/overview'))
-  return {
-    activeTab: response.active_tab,
-    workspaceName: response.workspace_name,
-    counts: {
-      apiTokens: response.counts.api_tokens,
-      members: response.counts.members,
-      libraryAccess: response.counts.library_access,
-      settings: response.counts.settings,
-    },
-    availability: {
-      apiTokens: response.availability.api_tokens,
-      members: response.availability.members,
-      libraryAccess: response.availability.library_access,
-      settings: response.availability.settings,
-    },
-  }
-}
+  const grantsByPrincipal = new Map(
+    grantRows.map((entry) => [entry.principalId, entry.grants.map((row) => mapGrant(row))]),
+  )
 
-export async function fetchAdminApiTokens(): Promise<ApiTokenRow[]> {
-  const response = await unwrap(apiHttp.get<RawApiTokensResponse>('/ui/admin/api-tokens'))
-  return response.rows.map((row) => mapTokenRow(row))
+  return tokens.map((row) => mapTokenRow(row, null, grantsByPrincipal.get(row.principalId) ?? []))
 }
 
 export async function createAdminApiToken(
   payload: CreateApiTokenPayload,
 ): Promise<CreateApiTokenResult> {
   const response = await unwrap(
-    apiHttp.post<RawCreateApiTokenResult>('/ui/admin/api-tokens', {
+    apiHttp.post<RawMintTokenResponse>('/iam/tokens', {
+      workspaceId: payload.workspaceId,
       label: payload.label,
-      scopes: payload.scopes,
-      expires_in_days: payload.expiresInDays,
+      expiresAt: toExpiresAt(payload.expiresInDays),
     }),
   )
 
   return {
-    row: mapTokenRow(response.row, response.plaintext_token),
-    plaintextToken: response.plaintext_token,
+    row: mapTokenRow(response.apiToken, response.token),
+    plaintextToken: response.token,
   }
 }
 
-export async function revokeAdminApiToken(id: string): Promise<ApiTokenRow> {
-  return mapTokenRow(await unwrap(apiHttp.delete<RawApiTokenRow>(`/ui/admin/api-tokens/${id}`)))
-}
-
-export async function fetchAdminMembers(): Promise<AdminMemberRow[]> {
-  const response = await unwrap(apiHttp.get<RawMembersResponse>('/ui/admin/members'))
-  return response.rows.map((row) => ({
-    id: row.id,
-    displayName: row.display_name,
-    email: row.email,
-    roleLabel: row.role_label,
-  }))
-}
-
-export async function fetchAdminLibraryAccess(): Promise<LibraryAccessRow[]> {
-  const response = await unwrap(
-    apiHttp.get<RawLibraryAccessResponse>('/ui/admin/library-access'),
-  )
-  return response.rows.map((row) => ({
-    id: row.id,
-    libraryName: row.library_name,
-    principalLabel: row.principal_label,
-    accessLevel: row.access_level,
-  }))
-}
-
-export async function fetchAdminSettings(): Promise<AdminSettingsResponse> {
-  const response = await unwrap(apiHttp.get<RawSettingsResponse>('/ui/admin/settings'))
-  return {
-    items: response.items.map((item) => mapSettingItem(item)),
-    providerCatalog: response.provider_catalog.map((provider) => mapSupportedProvider(provider)),
-    providerProfile: mapProviderProfile(response.provider_profile),
-    providerValidation: mapProviderValidation(response.provider_validation),
-    pricingCatalog: response.pricing_catalog.map((row) => mapPricingCatalogEntry(row)),
-    pricingCoverage: mapPricingCoverage(response.pricing_coverage),
-    liveValidationEnabled: response.live_validation_enabled,
-    supportedProviderKinds: response.supported_provider_kinds,
-  }
-}
-
-export async function updateAdminProviderProfile(
-  payload: UpdateAdminProviderProfilePayload,
-): Promise<AdminProviderProfile> {
-  const response = await unwrap(
-    apiHttp.put<RawProviderProfileResponse>('/ui/admin/settings/provider-profile', {
-      indexingProviderKind: payload.indexingProviderKind,
-      indexingModelName: payload.indexingModelName,
-      embeddingProviderKind: payload.embeddingProviderKind,
-      embeddingModelName: payload.embeddingModelName,
-      answerProviderKind: payload.answerProviderKind,
-      answerModelName: payload.answerModelName,
-      visionProviderKind: payload.visionProviderKind,
-      visionModelName: payload.visionModelName,
-    }),
-  )
-
-  return mapProviderProfile(response.profile)
-}
-
-export async function validateAdminProviderProfile(): Promise<{
-  profile: AdminProviderProfile
-  validation: AdminProviderValidation
-}> {
-  const response = await unwrap(
-    apiHttp.post<RawProviderValidationResponse>('/ui/admin/settings/provider-profile/validate'),
-  )
-
-  return {
-    profile: mapProviderProfile(response.profile),
-    validation: mapProviderValidation(response.validation),
-  }
-}
-
-export async function createAdminPricingEntry(
-  payload: AdminUpsertPricingEntryPayload,
-): Promise<AdminPricingCatalogEntry> {
-  return mapPricingCatalogEntry(
+export async function createAdminGrant(payload: {
+  principalId: string
+  resourceKind: Extract<AdminGrantResourceKind, 'workspace' | 'library'>
+  resourceId: string
+  permissionKind: AdminPermissionKind
+}): Promise<AdminGrant> {
+  return mapGrant(
     await unwrap(
-      apiHttp.post<RawPricingCatalogEntry>('/runtime/admin/model-pricing', {
-        workspaceId: payload.workspaceId,
-        providerKind: payload.providerKind,
-        modelName: payload.modelName,
-        capability: payload.capability,
-        billingUnit: payload.billingUnit,
-        inputPrice: payload.inputPrice,
-        outputPrice: payload.outputPrice,
-        currency: payload.currency,
-        note: payload.note,
-        effectiveFrom: payload.effectiveFrom,
+      apiHttp.post<RawGrantResponse>('/iam/grants', {
+        principalId: payload.principalId,
+        resourceKind: payload.resourceKind,
+        resourceId: payload.resourceId,
+        permissionKind: payload.permissionKind,
       }),
     ),
   )
 }
 
-export async function updateAdminPricingEntry(
-  pricingId: string,
-  payload: AdminUpsertPricingEntryPayload,
-): Promise<AdminPricingCatalogEntry> {
-  return mapPricingCatalogEntry(
+export async function fetchAdminModelPresets(
+  workspaceId: string,
+): Promise<AdminModelPreset[]> {
+  return unwrap(
+    apiHttp.get<RawModelPreset[]>('/ai/model-presets', {
+      params: { workspaceId },
+    }),
+  ).then((rows) => rows.map((row) => mapModelPreset(row)))
+}
+
+export async function revokeAdminApiToken(principalId: string): Promise<void> {
+  await unwrap(apiHttp.post(`/iam/tokens/${principalId}/revoke`))
+}
+
+export async function fetchAdminProviders(): Promise<AdminProviderCatalogEntry[]> {
+  return unwrap(apiHttp.get<RawProviderCatalogEntry[]>('/ai/providers')).then((rows) =>
+    rows.map((row) => mapProvider(row)),
+  )
+}
+
+export async function fetchAdminModels(): Promise<AdminModelCatalogEntry[]> {
+  return unwrap(apiHttp.get<RawModelCatalogEntry[]>('/ai/models')).then((rows) =>
+    rows.map((row) => mapModel(row)),
+  )
+}
+
+export async function fetchAdminPrices(
+  workspaceId: string | null,
+): Promise<AdminPriceCatalogEntry[]> {
+  return unwrap(
+    apiHttp.get<RawPriceCatalogEntry[]>('/ai/prices', {
+      params: workspaceId ? { workspaceId } : {},
+    }),
+  ).then((rows) => rows.map((row) => mapPrice(row)))
+}
+
+export async function fetchAdminCredentials(
+  workspaceId: string,
+): Promise<AdminProviderCredential[]> {
+  return unwrap(
+    apiHttp.get<RawProviderCredential[]>('/ai/credentials', {
+      params: { workspaceId },
+    }),
+  ).then((rows) => rows.map((row) => mapCredential(row)))
+}
+
+export async function createAdminCredential(
+  payload: CreateAdminCredentialPayload,
+): Promise<AdminProviderCredential> {
+  return mapCredential(
     await unwrap(
-      apiHttp.put<RawPricingCatalogEntry>(`/runtime/admin/model-pricing/${pricingId}`, {
+      apiHttp.post<RawProviderCredential>('/ai/credentials', {
         workspaceId: payload.workspaceId,
-        providerKind: payload.providerKind,
-        modelName: payload.modelName,
-        capability: payload.capability,
-        billingUnit: payload.billingUnit,
-        inputPrice: payload.inputPrice,
-        outputPrice: payload.outputPrice,
-        currency: payload.currency,
-        note: payload.note,
-        effectiveFrom: payload.effectiveFrom,
+        providerCatalogId: payload.providerCatalogId,
+        label: payload.label,
+        secretRef: payload.secretRef,
       }),
     ),
   )
 }
 
-export async function deactivateAdminPricingEntry(
-  pricingId: string,
-): Promise<AdminPricingCatalogEntry> {
-  return mapPricingCatalogEntry(
-    await unwrap(apiHttp.delete<RawPricingCatalogEntry>(`/runtime/admin/model-pricing/${pricingId}`)),
+export async function fetchAdminLibraryBindings(
+  libraryId: string,
+): Promise<AdminLibraryBinding[]> {
+  return unwrap(
+    apiHttp.get<RawLibraryBinding[]>(`/ai/library-bindings/${libraryId}`),
+  ).then((rows) => rows.map((row) => mapBinding(row)))
+}
+
+export async function validateAdminLibraryBinding(
+  bindingId: string,
+): Promise<AdminBindingValidation> {
+  return mapBindingValidation(
+    await unwrap(
+      apiHttp.post<RawBindingValidation>(
+        `/ai/library-bindings/${bindingId}/validate`,
+      ),
+    ),
   )
+}
+
+export async function fetchAdminAuditEvents(params: {
+  workspaceId?: string
+  libraryId?: string
+}): Promise<AdminAuditEvent[]> {
+  return unwrap(
+    apiHttp.get<RawAuditEvent[]>('/audit/events', {
+      params,
+    }),
+  ).then((rows) => rows.map((row) => mapAuditEvent(row)))
+}
+
+export async function fetchAdminAiConsole(payload: {
+  workspaceId: string
+  workspaceName: string
+  libraryId: string
+  libraryName: string
+}): Promise<AdminAiConsoleState> {
+  const [providers, models, modelPresets, prices, credentials, bindings] = await Promise.all([
+    fetchAdminProviders(),
+    fetchAdminModels(),
+    fetchAdminModelPresets(payload.workspaceId),
+    fetchAdminPrices(payload.workspaceId),
+    fetchAdminCredentials(payload.workspaceId),
+    fetchAdminLibraryBindings(payload.libraryId),
+  ])
+
+  return {
+    workspaceId: payload.workspaceId,
+    workspaceName: payload.workspaceName,
+    libraryId: payload.libraryId,
+    libraryName: payload.libraryName,
+    providers,
+    models,
+    modelPresets,
+    prices,
+    credentials,
+    bindings,
+  }
 }

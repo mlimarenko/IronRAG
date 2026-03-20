@@ -62,8 +62,87 @@ pub enum RuntimeStageAttributionSource {
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeAccountingTruthStatus {
     Priced,
+    Partial,
     Unpriced,
     InFlightUnsettled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeQueueWaitingReason {
+    OrdinaryBacklog,
+    IsolatedCapacityWait,
+    Blocked,
+    Degraded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeCollectionProgressState {
+    LiveInFlight,
+    Settling,
+    FullySettled,
+    FailedWithResidualWork,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeCollectionTerminalState {
+    LiveInFlight,
+    FullySettled,
+    FailedWithResidualWork,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeCollectionResidualReason {
+    ProjectionContention,
+    GraphPersistenceIntegrity,
+    SettlementRefreshFailed,
+    ProviderFailure,
+    DiagnosticsUnavailable,
+    UploadLimitExceeded,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeGraphProgressCadence {
+    Fast,
+    Watch,
+    Calm,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeOperatorWarningKind {
+    OrdinaryBacklog,
+    IsolatedCapacityWait,
+    InFlightAccounting,
+    MissingAccounting,
+    LivenessLoss,
+    FailedWork,
+    DegradedExtraction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeOperatorWarningScope {
+    Library,
+    Collection,
+    Document,
+    Stage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeProviderFailureClass {
+    InternalRequestInvalid,
+    UpstreamProtocolFailure,
+    UpstreamTimeout,
+    UpstreamRejection,
+    InvalidModelOutput,
+    RecoveredAfterRetry,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +165,17 @@ pub struct RuntimeBenchmarkSummary {
     pub queue_elapsed_ms: Option<i64>,
     pub total_elapsed_ms: Option<i64>,
     pub last_activity_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeQueueIsolationSummary {
+    pub waiting_reason: RuntimeQueueWaitingReason,
+    pub queued_count: usize,
+    pub processing_count: usize,
+    pub isolated_capacity_count: usize,
+    pub available_capacity_count: usize,
+    pub last_claimed_at: Option<DateTime<Utc>>,
+    pub last_progress_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,6 +285,85 @@ pub struct RuntimeCollectionAccountingTruth {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeCollectionSettlementSummary {
+    pub progress_state: RuntimeCollectionProgressState,
+    pub live_total_estimated_cost: Option<Decimal>,
+    pub settled_total_estimated_cost: Option<Decimal>,
+    pub missing_total_estimated_cost: Option<Decimal>,
+    pub currency: Option<String>,
+    pub is_fully_settled: bool,
+    pub settled_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeCollectionTerminalOutcome {
+    pub terminal_state: RuntimeCollectionTerminalState,
+    pub residual_reason: Option<RuntimeCollectionResidualReason>,
+    pub queued_count: usize,
+    pub processing_count: usize,
+    pub pending_graph_count: usize,
+    pub failed_document_count: usize,
+    pub live_total_estimated_cost: Option<Decimal>,
+    pub settled_total_estimated_cost: Option<Decimal>,
+    pub missing_total_estimated_cost: Option<Decimal>,
+    pub currency: Option<String>,
+    pub settled_at: Option<DateTime<Utc>>,
+    pub last_transition_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeDocumentGraphThroughputSummary {
+    pub processed_chunks: usize,
+    pub total_chunks: usize,
+    pub progress_percent: Option<i32>,
+    pub provider_call_count: usize,
+    pub resumed_chunk_count: usize,
+    pub resume_hit_count: usize,
+    pub replayed_chunk_count: usize,
+    pub duplicate_work_ratio: Option<f64>,
+    pub max_downgrade_level: usize,
+    pub avg_call_elapsed_ms: Option<i64>,
+    pub avg_chunk_elapsed_ms: Option<i64>,
+    pub avg_chars_per_second: Option<f64>,
+    pub avg_tokens_per_second: Option<f64>,
+    pub last_provider_call_at: Option<DateTime<Utc>>,
+    pub last_checkpoint_at: DateTime<Utc>,
+    pub last_checkpoint_elapsed_ms: i64,
+    pub next_checkpoint_eta_ms: Option<i64>,
+    pub pressure_kind: Option<String>,
+    pub cadence: RuntimeGraphProgressCadence,
+    pub recommended_poll_interval_ms: i64,
+    pub bottleneck_rank: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeCollectionGraphThroughputSummary {
+    pub tracked_document_count: usize,
+    pub active_document_count: usize,
+    pub processed_chunks: usize,
+    pub total_chunks: usize,
+    pub progress_percent: Option<i32>,
+    pub provider_call_count: usize,
+    pub resumed_chunk_count: usize,
+    pub resume_hit_count: usize,
+    pub replayed_chunk_count: usize,
+    pub duplicate_work_ratio: Option<f64>,
+    pub max_downgrade_level: usize,
+    pub avg_call_elapsed_ms: Option<i64>,
+    pub avg_chunk_elapsed_ms: Option<i64>,
+    pub avg_chars_per_second: Option<f64>,
+    pub avg_tokens_per_second: Option<f64>,
+    pub last_provider_call_at: Option<DateTime<Utc>>,
+    pub last_checkpoint_at: DateTime<Utc>,
+    pub last_checkpoint_elapsed_ms: i64,
+    pub next_checkpoint_eta_ms: Option<i64>,
+    pub pressure_kind: Option<String>,
+    pub cadence: RuntimeGraphProgressCadence,
+    pub recommended_poll_interval_ms: i64,
+    pub bottleneck_rank: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeCollectionProgressCounters {
     pub accepted: usize,
     pub content_extracted: usize,
@@ -253,4 +422,26 @@ pub struct RuntimeCollectionFormatDiagnostics {
     pub completion_tokens: i64,
     pub total_tokens: i64,
     pub accounting_status: RuntimeAccountingTruthStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeCollectionWarning {
+    pub warning_kind: RuntimeOperatorWarningKind,
+    pub warning_scope: RuntimeOperatorWarningScope,
+    pub warning_message: String,
+    pub is_degraded: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeProviderFailureDetail {
+    pub failure_class: RuntimeProviderFailureClass,
+    pub provider_kind: Option<String>,
+    pub model_name: Option<String>,
+    pub request_shape_key: Option<String>,
+    pub request_size_bytes: Option<usize>,
+    pub chunk_count: Option<usize>,
+    pub upstream_status: Option<String>,
+    pub elapsed_ms: Option<i64>,
+    pub retry_decision: Option<String>,
+    pub usage_visible: bool,
 }

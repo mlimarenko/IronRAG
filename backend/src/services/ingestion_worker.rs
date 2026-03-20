@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -18,15 +18,23 @@ use crate::{
     infra::repositories::{self, IngestionJobRow},
     services::{
         document_accounting,
-        graph_extract::{GraphExtractionRequest, extract_and_persist_chunk_graph_result},
-        graph_merge::{GraphMergeScope, merge_chunk_graph_candidates},
-        graph_projection::{
-            ensure_empty_graph_snapshot, project_canonical_graph, resolve_projection_scope,
+        document_reconciliation::{advance_project_source_truth, persist_mutation_impact_scope},
+        graph_extract::{
+            GraphExtractionRecoveryRecord, GraphExtractionRequest, GraphExtractionResumeHint,
+            GraphExtractionTelemetrySummary, extract_and_persist_chunk_graph_result,
+            extraction_outcome_from_resume_state, summarize_graph_extraction_usage_calls,
         },
+        graph_merge::{
+            GraphMergeScope, merge_chunk_graph_candidates, reconcile_merge_support_counts,
+        },
+        graph_projection::{project_canonical_graph, resolve_projection_scope},
+        graph_summary::GraphSummaryRefreshRequest,
         runtime_ingestion::{
             JobLeaseHeartbeat, RuntimeStageUsageSummary, embed_runtime_chunks,
             embed_runtime_graph_edges, embed_runtime_graph_nodes,
-            persist_extracted_content_from_payload, resolve_runtime_run_provider_profile,
+            persist_extracted_content_from_payload, persist_library_queue_isolation_waiting_reason,
+            refresh_library_collection_settlement_snapshots, refresh_library_warning_snapshots,
+            release_library_queue_isolation_slot, resolve_runtime_run_provider_profile,
             upsert_runtime_document_chunk_contribution_summary,
             upsert_runtime_document_graph_contribution_summary,
         },
@@ -41,6 +49,7 @@ const DEFAULT_STALE_WORKER_GRACE_SECONDS: i64 = 45;
 const EXTRACTING_GRAPH_PROGRESS_START_PERCENT: i32 = 82;
 const EXTRACTING_GRAPH_PROGRESS_END_PERCENT: i32 = 87;
 const MERGING_GRAPH_PROGRESS_START_PERCENT: i32 = 88;
+#[cfg(test)]
 const GRAPH_PROGRESS_ACTIVITY_INTERVAL: Duration = Duration::from_secs(30);
 const RUNTIME_STAGE_SEQUENCE: [&str; 7] = [
     "extracting_content",
@@ -74,6 +83,89 @@ struct RuntimeStageSpan {
 struct GraphStageProgressTracker {
     last_persisted_progress: i32,
     last_persisted_at: Instant,
+    processed_chunks: usize,
+    provider_call_count: usize,
+    total_call_elapsed_ms: i64,
+    chars_per_second_sum: f64,
+    chars_per_second_samples: usize,
+    tokens_per_second_sum: f64,
+    tokens_per_second_samples: usize,
+    last_provider_call_at: Option<DateTime<Utc>>,
+}
+
+impl GraphStageProgressTracker {
+    fn record_extraction(&mut self, telemetry: &GraphExtractionTelemetrySummary) {
+        self.processed_chunks += 1;
+        self.provider_call_count += telemetry.provider_call_count;
+        self.total_call_elapsed_ms =
+            self.total_call_elapsed_ms.saturating_add(telemetry.total_call_elapsed_ms.max(0));
+        if let Some(value) = telemetry.avg_chars_per_second {
+            self.chars_per_second_sum += value;
+            self.chars_per_second_samples += 1;
+        }
+        if let Some(value) = telemetry.avg_tokens_per_second {
+            self.tokens_per_second_sum += value;
+            self.tokens_per_second_samples += 1;
+        }
+        if let Some(finished_at) = telemetry.last_provider_call_at {
+            self.last_provider_call_at = Some(
+                self.last_provider_call_at.map_or(finished_at, |current| current.max(finished_at)),
+            );
+        }
+    }
+
+    fn record_resumed_chunk(&mut self) {
+        self.processed_chunks += 1;
+    }
+
+    fn avg_call_elapsed_ms(&self) -> Option<i64> {
+        (self.provider_call_count > 0).then(|| {
+            self.total_call_elapsed_ms / i64::try_from(self.provider_call_count).unwrap_or(1)
+        })
+    }
+
+    fn avg_chunk_elapsed_ms(&self) -> Option<i64> {
+        (self.processed_chunks > 0)
+            .then(|| self.total_call_elapsed_ms / i64::try_from(self.processed_chunks).unwrap_or(1))
+    }
+
+    fn avg_chars_per_second(&self) -> Option<f64> {
+        (self.chars_per_second_samples > 0)
+            .then(|| self.chars_per_second_sum / self.chars_per_second_samples as f64)
+    }
+
+    fn avg_tokens_per_second(&self) -> Option<f64> {
+        (self.tokens_per_second_samples > 0)
+            .then(|| self.tokens_per_second_sum / self.tokens_per_second_samples as f64)
+    }
+
+    fn next_checkpoint_eta_ms(&self, total_chunks: usize) -> Option<i64> {
+        let remaining_chunks = total_chunks.saturating_sub(self.processed_chunks);
+        match (remaining_chunks, self.avg_chunk_elapsed_ms()) {
+            (0, _) => Some(0),
+            (_, Some(avg_chunk_elapsed_ms)) if avg_chunk_elapsed_ms > 0 => Some(
+                avg_chunk_elapsed_ms
+                    .saturating_mul(i64::try_from(remaining_chunks).unwrap_or(i64::MAX)),
+            ),
+            _ => None,
+        }
+    }
+}
+
+fn graph_extraction_downgrade_level(state: &AppState, replay_count: usize) -> usize {
+    let level_one =
+        state.resolve_settle_blockers.extraction_resume_downgrade_level_one_after_replays;
+    let level_two = state
+        .resolve_settle_blockers
+        .extraction_resume_downgrade_level_two_after_replays
+        .max(level_one.saturating_add(1));
+    if replay_count >= level_two {
+        2
+    } else if replay_count >= level_one {
+        1
+    } else {
+        0
+    }
 }
 
 pub fn spawn_ingestion_worker(
@@ -90,10 +182,14 @@ async fn run_ingestion_worker_pool(state: Arc<AppState>, shutdown: broadcast::Re
     info!(worker_concurrency, "starting ingestion worker pool");
 
     let mut handles = Vec::with_capacity(worker_concurrency + 1);
-    handles.push(tokio::spawn(run_lease_recovery_loop(state.clone(), shutdown.resubscribe())));
+    handles.push(tokio::spawn(run_lease_recovery_loop(
+        state.clone(),
+        shutdown.resubscribe(),
+        lease_recovery_worker_id(&state.settings.service_name),
+    )));
 
     for worker_index in 0..worker_concurrency {
-        let worker_id = format!("backend:{worker_index}:{}", Uuid::now_v7());
+        let worker_id = ingestion_worker_id(&state.settings.service_name, worker_index);
         handles.push(tokio::spawn(run_ingestion_worker_loop(
             state.clone(),
             shutdown.resubscribe(),
@@ -108,18 +204,30 @@ async fn run_ingestion_worker_pool(state: Arc<AppState>, shutdown: broadcast::Re
     }
 }
 
-async fn run_lease_recovery_loop(state: Arc<AppState>, mut shutdown: broadcast::Receiver<()>) {
-    info!("starting ingestion lease recovery loop");
+fn ingestion_worker_id(service_name: &str, worker_index: usize) -> String {
+    format!("{service_name}:{worker_index}:{}", Uuid::now_v7())
+}
+
+fn lease_recovery_worker_id(service_name: &str) -> String {
+    format!("{service_name}:lease-recovery")
+}
+
+async fn run_lease_recovery_loop(
+    state: Arc<AppState>,
+    mut shutdown: broadcast::Receiver<()>,
+    worker_id: String,
+) {
+    info!(%worker_id, "starting ingestion lease recovery loop");
 
     loop {
         tokio::select! {
             _ = shutdown.recv() => {
-                info!("stopping ingestion lease recovery loop");
+                info!(%worker_id, "stopping ingestion lease recovery loop");
                 break;
             }
             _ = time::sleep(WORKER_POLL_INTERVAL) => {
-                if let Err(error) = recover_expired_leases(state.as_ref(), "lease-recovery").await {
-                    warn!(?error, "failed to recover expired ingestion job leases");
+                if let Err(error) = recover_expired_leases(state.as_ref(), &worker_id).await {
+                    warn!(%worker_id, ?error, "failed to recover expired ingestion job leases");
                 }
             }
         }
@@ -144,6 +252,8 @@ async fn run_ingestion_worker_loop(
                     &state.persistence.postgres,
                     &worker_id,
                     worker_lease_duration(&state.settings),
+                    state.pipeline_hardening.total_worker_slots,
+                    state.pipeline_hardening.minimum_slice_capacity,
                 ).await {
                     Ok(Some(job)) => {
                         let job_id = job.id;
@@ -229,6 +339,9 @@ async fn execute_job(
         )
         .await
         .context("failed to mark runtime ingestion run as claimed")?;
+        persist_library_queue_isolation_waiting_reason(state.as_ref(), job.project_id)
+            .await
+            .context("failed to persist queue-isolation waiting reason after runtime claim")?;
     }
     let mutation_document = if let Some(document_id) =
         payload.logical_document_id.or(runtime_run.as_ref().and_then(|row| row.document_id))
@@ -539,6 +652,26 @@ async fn execute_job(
         )
         .await?;
     }
+
+    repositories::mark_ingestion_job_stage(
+        &state.persistence.postgres,
+        job.id,
+        worker_id,
+        "running",
+        "embedding_chunks",
+        None,
+    )
+    .await?;
+    repositories::mark_ingestion_job_attempt_stage(
+        &state.persistence.postgres,
+        job.id,
+        attempt_no,
+        worker_id,
+        "running",
+        "embedding_chunks",
+        None,
+    )
+    .await?;
     let embedding_chunks_span = start_runtime_stage(
         state.as_ref(),
         runtime_ingestion_run_id,
@@ -586,6 +719,25 @@ async fn execute_job(
         .await?;
     }
 
+    repositories::mark_ingestion_job_stage(
+        &state.persistence.postgres,
+        job.id,
+        worker_id,
+        "running",
+        "extracting_graph",
+        None,
+    )
+    .await?;
+    repositories::mark_ingestion_job_attempt_stage(
+        &state.persistence.postgres,
+        job.id,
+        attempt_no,
+        worker_id,
+        "running",
+        "extracting_graph",
+        None,
+    )
+    .await?;
     let extracting_graph_span = start_runtime_stage(
         state.as_ref(),
         runtime_ingestion_run_id,
@@ -608,21 +760,270 @@ async fn execute_job(
     let mut graph_progress_tracker = GraphStageProgressTracker {
         last_persisted_progress: EXTRACTING_GRAPH_PROGRESS_START_PERCENT,
         last_persisted_at: Instant::now(),
+        processed_chunks: 0,
+        provider_call_count: 0,
+        total_call_elapsed_ms: 0,
+        chars_per_second_sum: 0.0,
+        chars_per_second_samples: 0,
+        tokens_per_second_sum: 0.0,
+        tokens_per_second_samples: 0,
+        last_provider_call_at: None,
     };
+    let mut graph_resume_rows_by_ordinal = BTreeMap::new();
+    if let Some(runtime_ingestion_run_id) = runtime_ingestion_run_id {
+        for row in repositories::list_runtime_graph_extraction_resume_states_by_run(
+            &state.persistence.postgres,
+            runtime_ingestion_run_id,
+        )
+        .await?
+        {
+            graph_resume_rows_by_ordinal.insert(row.chunk_ordinal, row);
+        }
+    }
     for (chunk_index, chunk) in persisted_chunks.iter().enumerate() {
         lease_heartbeat.maybe_renew(state.as_ref()).await?;
-        let extracted = extract_and_persist_chunk_graph_result(
+        let chunk_content_hash = sha256_hex(&chunk.content);
+        if let (Some(runtime_ingestion_run_id), Some(existing_resume_row)) =
+            (runtime_ingestion_run_id, graph_resume_rows_by_ordinal.get(&chunk.ordinal))
+        {
+            if existing_resume_row.status == "ready"
+                && existing_resume_row.chunk_content_hash == chunk_content_hash
+            {
+                let resumed_row = repositories::increment_runtime_graph_extraction_resume_hit(
+                    &state.persistence.postgres,
+                    runtime_ingestion_run_id,
+                    chunk.ordinal,
+                )
+                .await?;
+                let extracted = extraction_outcome_from_resume_state(&resumed_row)
+                    .context("failed to rebuild graph extraction outcome from resume state")?;
+                graph_progress_tracker.record_resumed_chunk();
+                if !extracted.normalized.entities.is_empty()
+                    || !extracted.normalized.relations.is_empty()
+                {
+                    chunk_graph_results.push((
+                        chunk.clone(),
+                        extracted.normalized,
+                        extracted.recovery_summary,
+                    ));
+                }
+                maybe_persist_graph_progress_checkpoint(
+                    state.as_ref(),
+                    Some(runtime_ingestion_run_id),
+                    attempt_no,
+                    &mut graph_progress_tracker,
+                    chunk_index + 1,
+                    persisted_chunks.len(),
+                )
+                .await?;
+                continue;
+            }
+        }
+        let resume_hint = graph_resume_rows_by_ordinal
+            .get(&chunk.ordinal)
+            .filter(|row| row.chunk_content_hash == chunk_content_hash)
+            .map(|row| GraphExtractionResumeHint {
+                replay_count: usize::try_from(row.replay_count.max(0)).unwrap_or(usize::MAX),
+                downgrade_level: graph_extraction_downgrade_level(
+                    state.as_ref(),
+                    usize::try_from(row.replay_count.max(0)).unwrap_or(usize::MAX),
+                ),
+            });
+        let extraction_request = GraphExtractionRequest {
+            project_id: payload.project_id,
+            document: document_for_processing.clone(),
+            chunk: chunk.clone(),
+            revision_id: document_context.target_revision_id.or(document.current_revision_id),
+            activated_by_attempt_id: runtime_ingestion_run_id,
+            resume_hint,
+        };
+        let extracted = match extract_and_persist_chunk_graph_result(
             state.as_ref(),
             &provider_profile,
-            &GraphExtractionRequest {
-                project_id: payload.project_id,
-                document: document_for_processing.clone(),
-                chunk: chunk.clone(),
-                revision_id: document_context.target_revision_id.or(document.current_revision_id),
-                activated_by_attempt_id: runtime_ingestion_run_id,
-            },
+            &extraction_request,
         )
-        .await?;
+        .await
+        {
+            Ok(outcome) => {
+                persist_graph_extraction_recovery_attempts(
+                    state.as_ref(),
+                    workspace_id,
+                    payload.project_id,
+                    &document_for_processing,
+                    runtime_ingestion_run_id,
+                    attempt_no,
+                    chunk.id,
+                    document_context.target_revision_id.or(document.current_revision_id),
+                    &outcome.recovery_attempts,
+                )
+                .await?;
+                outcome
+            }
+            Err(error) => {
+                persist_graph_extraction_recovery_attempts(
+                    state.as_ref(),
+                    workspace_id,
+                    payload.project_id,
+                    &document_for_processing,
+                    runtime_ingestion_run_id,
+                    attempt_no,
+                    chunk.id,
+                    document_context.target_revision_id.or(document.current_revision_id),
+                    &error.recovery_attempts,
+                )
+                .await?;
+                if let (Some(run_id), Some(provider_failure)) =
+                    (runtime_ingestion_run_id, &error.provider_failure)
+                {
+                    repositories::record_runtime_graph_progress_failure_classification(
+                        &state.persistence.postgres,
+                        run_id,
+                        attempt_no,
+                        Some(match provider_failure.failure_class {
+                            crate::domains::runtime_ingestion::RuntimeProviderFailureClass::InternalRequestInvalid => "internal_request_invalid",
+                            crate::domains::runtime_ingestion::RuntimeProviderFailureClass::UpstreamProtocolFailure => "upstream_protocol_failure",
+                            crate::domains::runtime_ingestion::RuntimeProviderFailureClass::UpstreamTimeout => "upstream_timeout",
+                            crate::domains::runtime_ingestion::RuntimeProviderFailureClass::UpstreamRejection => "upstream_rejection",
+                            crate::domains::runtime_ingestion::RuntimeProviderFailureClass::InvalidModelOutput => "invalid_model_output",
+                            crate::domains::runtime_ingestion::RuntimeProviderFailureClass::RecoveredAfterRetry => "recovered_after_retry",
+                        }),
+                        Some(&error.request_shape_key),
+                        i64::try_from(error.request_size_bytes).ok(),
+                        provider_failure.upstream_status.as_deref(),
+                        provider_failure.retry_decision.as_deref(),
+                    )
+                    .await?;
+                }
+                if let Some(runtime_ingestion_run_id) = runtime_ingestion_run_id {
+                    let provider_failure_json = error
+                        .provider_failure
+                        .clone()
+                        .and_then(|value| serde_json::to_value(value).ok());
+                    let provider_failure_class = error.provider_failure.as_ref().map(|detail| {
+                        match detail.failure_class {
+                            crate::domains::runtime_ingestion::RuntimeProviderFailureClass::InternalRequestInvalid => "internal_request_invalid",
+                            crate::domains::runtime_ingestion::RuntimeProviderFailureClass::UpstreamProtocolFailure => "upstream_protocol_failure",
+                            crate::domains::runtime_ingestion::RuntimeProviderFailureClass::UpstreamTimeout => "upstream_timeout",
+                            crate::domains::runtime_ingestion::RuntimeProviderFailureClass::UpstreamRejection => "upstream_rejection",
+                            crate::domains::runtime_ingestion::RuntimeProviderFailureClass::InvalidModelOutput => "invalid_model_output",
+                            crate::domains::runtime_ingestion::RuntimeProviderFailureClass::RecoveredAfterRetry => "recovered_after_retry",
+                        }
+                    });
+                    let replay_count =
+                        i32::try_from(error.resume_state.replay_count).unwrap_or(i32::MAX);
+                    let downgrade_level =
+                        i32::try_from(error.resume_state.downgrade_level).unwrap_or(i32::MAX);
+                    let resume_row = repositories::upsert_runtime_graph_extraction_resume_state(
+                        &state.persistence.postgres,
+                        &repositories::UpsertRuntimeGraphExtractionResumeStateInput {
+                            ingestion_run_id: runtime_ingestion_run_id,
+                            chunk_ordinal: chunk.ordinal,
+                            chunk_content_hash: chunk_content_hash.clone(),
+                            status: "failed".to_string(),
+                            last_attempt_no: attempt_no,
+                            replay_count,
+                            resume_hit_count: graph_resume_rows_by_ordinal
+                                .get(&chunk.ordinal)
+                                .map(|row| row.resume_hit_count)
+                                .unwrap_or(0),
+                            downgrade_level,
+                            provider_kind: error
+                                .provider_failure
+                                .as_ref()
+                                .and_then(|value| value.provider_kind.clone()),
+                            model_name: error
+                                .provider_failure
+                                .as_ref()
+                                .and_then(|value| value.model_name.clone()),
+                            prompt_hash: None,
+                            request_shape_key: Some(error.request_shape_key.clone()),
+                            request_size_bytes: i64::try_from(error.request_size_bytes).ok(),
+                            provider_failure_class: provider_failure_class.map(str::to_string),
+                            provider_failure_json,
+                            recovery_summary_json: serde_json::to_value(&error.recovery_summary)
+                                .unwrap_or_else(|_| serde_json::json!({})),
+                            raw_output_json: serde_json::json!({}),
+                            normalized_output_json: serde_json::json!({ "entities": [], "relations": [] }),
+                            last_successful_at: None,
+                        },
+                    )
+                    .await?;
+                    graph_resume_rows_by_ordinal.insert(chunk.ordinal, resume_row);
+                }
+                return Err(anyhow::anyhow!(error.to_string()));
+            }
+        };
+        if let Some(runtime_ingestion_run_id) = runtime_ingestion_run_id {
+            let provider_failure_json = extracted
+                .provider_failure
+                .clone()
+                .and_then(|value| serde_json::to_value(value).ok());
+            let provider_failure_class = extracted.provider_failure.as_ref().map(|detail| {
+                match detail.failure_class {
+                    crate::domains::runtime_ingestion::RuntimeProviderFailureClass::InternalRequestInvalid => "internal_request_invalid",
+                    crate::domains::runtime_ingestion::RuntimeProviderFailureClass::UpstreamProtocolFailure => "upstream_protocol_failure",
+                    crate::domains::runtime_ingestion::RuntimeProviderFailureClass::UpstreamTimeout => "upstream_timeout",
+                    crate::domains::runtime_ingestion::RuntimeProviderFailureClass::UpstreamRejection => "upstream_rejection",
+                    crate::domains::runtime_ingestion::RuntimeProviderFailureClass::InvalidModelOutput => "invalid_model_output",
+                    crate::domains::runtime_ingestion::RuntimeProviderFailureClass::RecoveredAfterRetry => "recovered_after_retry",
+                }
+            });
+            let resume_row = repositories::upsert_runtime_graph_extraction_resume_state(
+                &state.persistence.postgres,
+                &repositories::UpsertRuntimeGraphExtractionResumeStateInput {
+                    ingestion_run_id: runtime_ingestion_run_id,
+                    chunk_ordinal: chunk.ordinal,
+                    chunk_content_hash: chunk_content_hash.clone(),
+                    status: "ready".to_string(),
+                    last_attempt_no: attempt_no,
+                    replay_count: i32::try_from(extracted.resume_state.replay_count)
+                        .unwrap_or(i32::MAX),
+                    resume_hit_count: graph_resume_rows_by_ordinal
+                        .get(&chunk.ordinal)
+                        .map(|row| row.resume_hit_count)
+                        .unwrap_or(0),
+                    downgrade_level: i32::try_from(extracted.resume_state.downgrade_level)
+                        .unwrap_or(i32::MAX),
+                    provider_kind: Some(extracted.provider_kind.clone()),
+                    model_name: Some(extracted.model_name.clone()),
+                    prompt_hash: Some(extracted.prompt_hash.clone()),
+                    request_shape_key: Some(extracted.request_shape_key.clone()),
+                    request_size_bytes: i64::try_from(extracted.request_size_bytes).ok(),
+                    provider_failure_class: provider_failure_class.map(str::to_string),
+                    provider_failure_json,
+                    recovery_summary_json: serde_json::to_value(&extracted.recovery_summary)
+                        .unwrap_or_else(|_| serde_json::json!({})),
+                    raw_output_json: extracted.raw_output_json.clone(),
+                    normalized_output_json: serde_json::to_value(&extracted.normalized)
+                        .unwrap_or_else(|_| serde_json::json!({ "entities": [], "relations": [] })),
+                    last_successful_at: Some(Utc::now()),
+                },
+            )
+            .await?;
+            graph_resume_rows_by_ordinal.insert(chunk.ordinal, resume_row);
+        }
+        if let (Some(run_id), Some(provider_failure)) =
+            (runtime_ingestion_run_id, &extracted.provider_failure)
+        {
+            repositories::record_runtime_graph_progress_failure_classification(
+                &state.persistence.postgres,
+                run_id,
+                attempt_no,
+                Some(match provider_failure.failure_class {
+                    crate::domains::runtime_ingestion::RuntimeProviderFailureClass::InternalRequestInvalid => "internal_request_invalid",
+                    crate::domains::runtime_ingestion::RuntimeProviderFailureClass::UpstreamProtocolFailure => "upstream_protocol_failure",
+                    crate::domains::runtime_ingestion::RuntimeProviderFailureClass::UpstreamTimeout => "upstream_timeout",
+                    crate::domains::runtime_ingestion::RuntimeProviderFailureClass::UpstreamRejection => "upstream_rejection",
+                    crate::domains::runtime_ingestion::RuntimeProviderFailureClass::InvalidModelOutput => "invalid_model_output",
+                    crate::domains::runtime_ingestion::RuntimeProviderFailureClass::RecoveredAfterRetry => "recovered_after_retry",
+                }),
+                Some(&extracted.request_shape_key),
+                i64::try_from(extracted.request_size_bytes).ok(),
+                provider_failure.upstream_status.as_deref(),
+                provider_failure.retry_decision.as_deref(),
+            )
+            .await?;
+        }
         if let (Some(runtime_ingestion_run_id), Some(extracting_graph_span)) =
             (runtime_ingestion_run_id, extracting_graph_span.as_ref())
         {
@@ -664,6 +1065,8 @@ async fn execute_job(
                             "provider_call_no": usage_call.provider_call_no,
                             "provider_attempt_no": usage_call.provider_attempt_no,
                             "graph_prompt_hash": usage_call.prompt_hash,
+                            "request_shape_key": usage_call.request_shape_key,
+                            "request_size_bytes": usage_call.request_size_bytes,
                             "chunk_id": chunk.id,
                             "chunk_ordinal": chunk.ordinal,
                             "document_id": document_for_processing.id,
@@ -681,12 +1084,19 @@ async fn execute_job(
             }
         }
         graph_extract_usage.absorb_usage_json(&extracted.usage_json);
+        graph_progress_tracker
+            .record_extraction(&summarize_graph_extraction_usage_calls(&extracted.usage_calls));
         if !extracted.normalized.entities.is_empty() || !extracted.normalized.relations.is_empty() {
-            chunk_graph_results.push((chunk.clone(), extracted.normalized));
+            chunk_graph_results.push((
+                chunk.clone(),
+                extracted.normalized,
+                extracted.recovery_summary,
+            ));
         }
         maybe_persist_graph_progress_checkpoint(
             state.as_ref(),
             runtime_ingestion_run_id,
+            attempt_no,
             &mut graph_progress_tracker,
             chunk_index + 1,
             persisted_chunks.len(),
@@ -748,9 +1158,10 @@ async fn execute_job(
             runtime_ingestion_run_id,
         );
     let mut graph_contribution_count = 0usize;
+    let mut merge_follow_up_required = false;
     let mut changed_node_ids = BTreeSet::new();
     let mut changed_edge_ids = BTreeSet::new();
-    for (chunk, normalized) in &chunk_graph_results {
+    for (chunk, normalized, recovery_summary) in &chunk_graph_results {
         let merge_outcome = merge_chunk_graph_candidates(
             &state.persistence.postgres,
             &state.bulk_ingest_hardening_services.graph_quality_guard,
@@ -758,14 +1169,23 @@ async fn execute_job(
             &document_for_processing,
             chunk,
             normalized,
+            Some(recovery_summary),
         )
         .await?;
+        merge_follow_up_required |= merge_outcome.has_projection_follow_up();
         graph_contribution_count += merge_outcome.nodes.len() + merge_outcome.edges.len();
-        changed_node_ids.extend(merge_outcome.changed_node_ids());
-        changed_edge_ids.extend(merge_outcome.changed_edge_ids());
+        changed_node_ids.extend(merge_outcome.summary_refresh_node_ids());
+        changed_edge_ids.extend(merge_outcome.summary_refresh_edge_ids());
     }
+    reconcile_merge_support_counts(
+        &state.persistence.postgres,
+        &merge_scope,
+        &changed_node_ids.iter().copied().collect::<Vec<_>>(),
+        &changed_edge_ids.iter().copied().collect::<Vec<_>>(),
+    )
+    .await?;
 
-    if graph_contribution_count > 0 {
+    if merge_follow_up_required {
         let changed_edge_rows = repositories::list_admitted_runtime_graph_edges_by_ids(
             &state.persistence.postgres,
             payload.project_id,
@@ -816,21 +1236,6 @@ async fn execute_job(
             .await?;
         }
     }
-
-    let merged_nodes = repositories::list_admitted_runtime_graph_nodes_by_projection(
-        &state.persistence.postgres,
-        payload.project_id,
-        projection_scope.projection_version,
-    )
-    .await
-    .context("failed to load merged graph nodes after merge stage")?;
-    let merged_edges = repositories::list_admitted_runtime_graph_edges_by_projection(
-        &state.persistence.postgres,
-        payload.project_id,
-        projection_scope.projection_version,
-    )
-    .await
-    .context("failed to load merged graph edges after merge stage")?;
     if let Some(runtime_ingestion_run_id) = runtime_ingestion_run_id {
         let _merging_graph_event = complete_runtime_stage(
             state.as_ref(),
@@ -858,6 +1263,14 @@ async fn execute_job(
     )
     .await?;
     let projection_outcome = if is_revision_update_mutation(&payload) {
+        let summary_refresh = if changed_node_ids.is_empty() && changed_edge_ids.is_empty() {
+            GraphSummaryRefreshRequest::broad()
+        } else {
+            GraphSummaryRefreshRequest::targeted(
+                changed_node_ids.iter().copied().collect(),
+                changed_edge_ids.iter().copied().collect(),
+            )
+        };
         finalize_revision_mutation(
             state.as_ref(),
             &payload,
@@ -865,34 +1278,54 @@ async fn execute_job(
             &document_for_processing,
             &checksum,
             &projection_scope,
-        )
-        .await?
-    } else if graph_contribution_count > 0 {
-        project_canonical_graph(state.as_ref(), &projection_scope).await?
-    } else if merged_nodes.is_empty() && merged_edges.is_empty() {
-        ensure_empty_graph_snapshot(
-            state.as_ref(),
-            payload.project_id,
-            projection_scope.projection_version,
+            summary_refresh,
         )
         .await?
     } else {
-        repositories::upsert_runtime_graph_snapshot(
+        let source_truth_version = advance_project_source_truth(state.as_ref(), payload.project_id)
+            .await
+            .context("failed to advance project source truth after document upload")?;
+        let summary_refresh = if changed_node_ids.is_empty() && changed_edge_ids.is_empty() {
+            GraphSummaryRefreshRequest::broad()
+        } else {
+            GraphSummaryRefreshRequest::targeted(
+                changed_node_ids.iter().copied().collect(),
+                changed_edge_ids.iter().copied().collect(),
+            )
+        }
+        .with_source_truth_version(source_truth_version);
+        let projection_scope = projection_scope.clone().with_summary_refresh(summary_refresh);
+        let existing_snapshot = repositories::get_runtime_graph_snapshot(
             &state.persistence.postgres,
             payload.project_id,
-            "ready",
-            projection_scope.projection_version,
-            i32::try_from(merged_nodes.len()).unwrap_or(i32::MAX),
-            i32::try_from(merged_edges.len()).unwrap_or(i32::MAX),
-            Some(100.0),
-            None,
         )
-        .await?;
-        crate::services::graph_projection::GraphProjectionOutcome {
-            projection_version: projection_scope.projection_version,
-            node_count: merged_nodes.len(),
-            edge_count: merged_edges.len(),
-            graph_status: "ready".to_string(),
+        .await
+        .context("failed to load graph snapshot after merge stage")?;
+        let graph_is_empty = existing_snapshot
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.node_count <= 0 && snapshot.edge_count <= 0);
+
+        if graph_contribution_count > 0 || graph_is_empty {
+            project_canonical_graph(state.as_ref(), &projection_scope).await?
+        } else {
+            let snapshot = existing_snapshot.expect("snapshot must exist when graph is not empty");
+            repositories::upsert_runtime_graph_snapshot(
+                &state.persistence.postgres,
+                payload.project_id,
+                "ready",
+                projection_scope.projection_version,
+                snapshot.node_count,
+                snapshot.edge_count,
+                Some(100.0),
+                None,
+            )
+            .await?;
+            crate::services::graph_projection::GraphProjectionOutcome {
+                projection_version: projection_scope.projection_version,
+                node_count: usize::try_from(snapshot.node_count).unwrap_or_default(),
+                edge_count: usize::try_from(snapshot.edge_count).unwrap_or_default(),
+                graph_status: "ready".to_string(),
+            }
         }
     };
     if let Some(runtime_ingestion_run_id) = runtime_ingestion_run_id {
@@ -915,6 +1348,25 @@ async fn execute_job(
         .await?;
     }
 
+    repositories::mark_ingestion_job_stage(
+        &state.persistence.postgres,
+        job.id,
+        worker_id,
+        "running",
+        "finalizing",
+        None,
+    )
+    .await?;
+    repositories::mark_ingestion_job_attempt_stage(
+        &state.persistence.postgres,
+        job.id,
+        attempt_no,
+        worker_id,
+        "running",
+        "finalizing",
+        None,
+    )
+    .await?;
     let finalizing_span = start_runtime_stage(
         state.as_ref(),
         runtime_ingestion_run_id,
@@ -980,8 +1432,14 @@ async fn execute_job(
         )
         .await?;
     }
+    release_library_queue_isolation_slot(state.as_ref(), job.project_id)
+        .await
+        .context("failed to release queue-isolation slot after job completion")?;
     finalize_document_attempt_success(state.as_ref(), &payload, &document_context, terminal_status)
         .await?;
+    refresh_terminal_library_settlement(state.as_ref(), job.project_id)
+        .await
+        .context("failed to refresh final collection settlement after job completion")?;
 
     info!(
         job_id = %job.id,
@@ -1012,6 +1470,14 @@ async fn ensure_worker_document(
                 .into_iter()
                 .map(|chunk| chunk.id)
                 .collect::<Vec<_>>();
+        cleanup_retry_attempt_artifacts(
+            state,
+            payload,
+            &document,
+            previous_active_revision.as_ref(),
+            &old_chunk_ids,
+        )
+        .await?;
         let document_for_processing = build_processing_document(&document, payload, checksum);
         if let Some(runtime_ingestion_run_id) = runtime_ingestion_run_id {
             repositories::attach_runtime_ingestion_run_document(
@@ -1117,6 +1583,109 @@ async fn create_initial_document_revision(
     .with_context(|| format!("failed to create initial revision for document {}", document.id))
 }
 
+async fn cleanup_retry_attempt_artifacts(
+    state: &AppState,
+    payload: &repositories::IngestionExecutionPayload,
+    document: &repositories::DocumentRow,
+    previous_active_revision: Option<&repositories::DocumentRevisionRow>,
+    old_chunk_ids: &[Uuid],
+) -> anyhow::Result<()> {
+    if !should_cleanup_retry_attempt_artifacts(payload, previous_active_revision, old_chunk_ids) {
+        return Ok(());
+    }
+
+    let mut deleted_query_refs = 0_u64;
+    let mut deactivated_evidence = 0_u64;
+    if let Some(previous_active_revision) = previous_active_revision {
+        deleted_query_refs = repositories::delete_runtime_query_references_by_document_revision(
+            &state.persistence.postgres,
+            payload.project_id,
+            document.id,
+            previous_active_revision.id,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to delete stale retry query references for document {} revision {}",
+                document.id, previous_active_revision.id
+            )
+        })?;
+        deactivated_evidence =
+            repositories::deactivate_runtime_graph_evidence_by_document_revision(
+                &state.persistence.postgres,
+                payload.project_id,
+                document.id,
+                previous_active_revision.id,
+                payload.document_mutation_workflow_id,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to deactivate stale retry graph evidence for document {} revision {}",
+                    document.id, previous_active_revision.id
+                )
+            })?;
+    }
+
+    let deleted_chunks =
+        repositories::delete_chunks_by_document(&state.persistence.postgres, document.id)
+            .await
+            .with_context(|| {
+                format!("failed to delete stale retry chunks for document {}", document.id)
+            })?;
+
+    if let Some(snapshot) =
+        repositories::get_runtime_graph_snapshot(&state.persistence.postgres, payload.project_id)
+            .await
+            .context("failed to load graph snapshot while cleaning retry artifacts")?
+        && snapshot.projection_version > 0
+    {
+        repositories::recalculate_runtime_graph_support_counts(
+            &state.persistence.postgres,
+            payload.project_id,
+            snapshot.projection_version,
+        )
+        .await
+        .context("failed to recalculate graph support counts after retry cleanup")?;
+        repositories::delete_runtime_graph_edges_without_support(
+            &state.persistence.postgres,
+            payload.project_id,
+            snapshot.projection_version,
+        )
+        .await
+        .context("failed to prune unsupported graph edges after retry cleanup")?;
+        repositories::delete_runtime_graph_nodes_without_support(
+            &state.persistence.postgres,
+            payload.project_id,
+            snapshot.projection_version,
+        )
+        .await
+        .context("failed to prune unsupported graph nodes after retry cleanup")?;
+    }
+
+    if deleted_chunks > 0 || deleted_query_refs > 0 || deactivated_evidence > 0 {
+        info!(
+            project_id = %payload.project_id,
+            document_id = %document.id,
+            deleted_chunks,
+            deleted_query_refs,
+            deactivated_evidence,
+            "cleaned stale retry artifacts before replaying document ingestion",
+        );
+    }
+
+    Ok(())
+}
+
+fn should_cleanup_retry_attempt_artifacts(
+    payload: &repositories::IngestionExecutionPayload,
+    previous_active_revision: Option<&repositories::DocumentRevisionRow>,
+    old_chunk_ids: &[Uuid],
+) -> bool {
+    payload.mutation_kind.is_none()
+        && (previous_active_revision.is_some() || !old_chunk_ids.is_empty())
+}
+
 fn build_processing_document(
     document: &repositories::DocumentRow,
     payload: &repositories::IngestionExecutionPayload,
@@ -1147,10 +1716,41 @@ async fn finalize_revision_mutation(
     document_for_processing: &repositories::DocumentRow,
     checksum: &str,
     projection_scope: &crate::services::graph_projection::GraphProjectionScope,
+    summary_refresh: GraphSummaryRefreshRequest,
 ) -> anyhow::Result<crate::services::graph_projection::GraphProjectionOutcome> {
     let target_revision_id = document_context.target_revision_id.with_context(|| {
         format!("document {} is missing a target revision", document_context.document.id)
     })?;
+    let mut targeted_node_ids = Vec::new();
+    let mut targeted_edge_ids = Vec::new();
+    let mut effective_summary_refresh = summary_refresh;
+    if let (Some(previous_active_revision), Some(mutation_workflow_id)) =
+        (document_context.previous_active_revision.as_ref(), payload.document_mutation_workflow_id)
+    {
+        let detected_scope = state
+            .retrieval_intelligence_services
+            .graph_reconciliation_scope
+            .detect_revision_mutation_scope(
+                state,
+                payload.project_id,
+                document_context.document.id,
+                previous_active_revision.id,
+                target_revision_id,
+            )
+            .await
+            .context("failed to detect revision-mutation impact scope")?;
+        persist_mutation_impact_scope(state, mutation_workflow_id, &detected_scope).await?;
+        if detected_scope.scope_status == "targeted" {
+            targeted_node_ids = detected_scope.affected_node_ids.clone();
+            targeted_edge_ids = detected_scope.affected_relationship_ids.clone();
+            effective_summary_refresh = GraphSummaryRefreshRequest::targeted(
+                targeted_node_ids.clone(),
+                targeted_edge_ids.clone(),
+            );
+        } else {
+            effective_summary_refresh = GraphSummaryRefreshRequest::broad();
+        }
+    }
     repositories::update_document_metadata(
         &state.persistence.postgres,
         document_context.document.id,
@@ -1255,7 +1855,18 @@ async fn finalize_revision_mutation(
     .with_context(|| {
         format!("failed to delete superseded chunks for document {}", document_context.document.id)
     })?;
-    project_canonical_graph(state, projection_scope)
+    let source_truth_version = advance_project_source_truth(state, payload.project_id)
+        .await
+        .context("failed to advance project source truth after revision activation")?;
+    let mut projection_scope = projection_scope.clone();
+    if !targeted_node_ids.is_empty() || !targeted_edge_ids.is_empty() {
+        projection_scope =
+            projection_scope.with_targeted_refresh(targeted_node_ids, targeted_edge_ids);
+    }
+    let projection_scope = projection_scope.with_summary_refresh(
+        effective_summary_refresh.with_source_truth_version(source_truth_version),
+    );
+    project_canonical_graph(state, &projection_scope)
         .await
         .context("failed to project canonical graph after revision mutation")
 }
@@ -1294,6 +1905,18 @@ async fn finalize_document_attempt_success(
         format!("failed to finalize logical document {}", document_context.document.id)
     })?;
     if let Some(mutation_workflow_id) = payload.document_mutation_workflow_id {
+        repositories::complete_document_mutation_impact_scope(
+            &state.persistence.postgres,
+            mutation_workflow_id,
+            "completed",
+            None,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to mark document mutation impact scope {mutation_workflow_id} as completed"
+            )
+        })?;
         repositories::update_document_mutation_workflow_status(
             &state.persistence.postgres,
             mutation_workflow_id,
@@ -1306,6 +1929,14 @@ async fn finalize_document_attempt_success(
         })?;
     }
     Ok(())
+}
+
+async fn refresh_terminal_library_settlement(
+    state: &AppState,
+    project_id: Uuid,
+) -> anyhow::Result<()> {
+    refresh_library_collection_settlement_snapshots(state, project_id).await?;
+    refresh_library_warning_snapshots(state, project_id).await
 }
 
 async fn finalize_document_attempt_failure(
@@ -1323,6 +1954,13 @@ async fn finalize_document_attempt_failure(
         .with_context(|| format!("failed to mark revision {target_revision_id} as failed"))?;
     }
     if let Some(mutation_workflow_id) = payload.document_mutation_workflow_id {
+        let _ = repositories::complete_document_mutation_impact_scope(
+            &state.persistence.postgres,
+            mutation_workflow_id,
+            "failed",
+            Some(error_message),
+        )
+        .await;
         repositories::update_document_mutation_workflow_status(
             &state.persistence.postgres,
             mutation_workflow_id,
@@ -1473,6 +2111,17 @@ pub async fn fail_job(
             }
         }
     }
+    if let Some(project_id) = runtime_stage_snapshot.as_ref().map(|run| run.project_id) {
+        if let Err(queue_error) = release_library_queue_isolation_slot(state, project_id).await {
+            error!(
+                job_id = %job_id,
+                %worker_id,
+                project_id = %project_id,
+                ?queue_error,
+                "failed to release queue-isolation slot after job failure"
+            );
+        }
+    }
     match repositories::get_ingestion_job_by_id(&state.persistence.postgres, job_id).await {
         Ok(Some(job)) => match repositories::parse_ingestion_execution_payload(&job) {
             Ok(payload) => {
@@ -1484,6 +2133,16 @@ pub async fn fail_job(
                         %worker_id,
                         ?document_error,
                         "failed to finalize document lifecycle after ingestion failure"
+                    );
+                } else if let Err(settlement_error) =
+                    refresh_terminal_library_settlement(state, job.project_id).await
+                {
+                    error!(
+                        job_id = %job_id,
+                        %worker_id,
+                        project_id = %job.project_id,
+                        ?settlement_error,
+                        "failed to refresh final collection settlement after ingestion failure"
                     );
                 }
             }
@@ -1678,14 +2337,16 @@ fn graph_stage_progress_percent(processed_chunks: usize, total_chunks: usize) ->
 fn should_persist_graph_progress_checkpoint(
     tracker: &GraphStageProgressTracker,
     next_progress: i32,
+    checkpoint_interval: Duration,
 ) -> bool {
     next_progress > tracker.last_persisted_progress
-        || tracker.last_persisted_at.elapsed() >= GRAPH_PROGRESS_ACTIVITY_INTERVAL
+        || tracker.last_persisted_at.elapsed() >= checkpoint_interval
 }
 
 async fn maybe_persist_graph_progress_checkpoint(
     state: &AppState,
     runtime_ingestion_run_id: Option<Uuid>,
+    attempt_no: i32,
     tracker: &mut GraphStageProgressTracker,
     processed_chunks: usize,
     total_chunks: usize,
@@ -1696,7 +2357,10 @@ async fn maybe_persist_graph_progress_checkpoint(
     let Some(next_progress) = graph_stage_progress_percent(processed_chunks, total_chunks) else {
         return Ok(());
     };
-    if !should_persist_graph_progress_checkpoint(tracker, next_progress) {
+    let checkpoint_interval = Duration::from_secs(
+        state.pipeline_hardening.graph_progress_checkpoint_interval_seconds.max(1),
+    );
+    if !should_persist_graph_progress_checkpoint(tracker, next_progress, checkpoint_interval) {
         return Ok(());
     }
 
@@ -1709,9 +2373,43 @@ async fn maybe_persist_graph_progress_checkpoint(
         persisted_at,
     )
     .await?;
+    repositories::upsert_runtime_graph_progress_checkpoint(
+        &state.persistence.postgres,
+        &repositories::RuntimeGraphProgressCheckpointInput {
+            ingestion_run_id: runtime_ingestion_run_id,
+            attempt_no,
+            processed_chunks: i64::try_from(processed_chunks).unwrap_or(i64::MAX),
+            total_chunks: i64::try_from(total_chunks).unwrap_or(i64::MAX),
+            progress_percent: Some(next_progress),
+            provider_call_count: i64::try_from(tracker.provider_call_count).unwrap_or(i64::MAX),
+            avg_call_elapsed_ms: tracker.avg_call_elapsed_ms(),
+            avg_chunk_elapsed_ms: tracker.avg_chunk_elapsed_ms(),
+            avg_chars_per_second: tracker.avg_chars_per_second(),
+            avg_tokens_per_second: tracker.avg_tokens_per_second(),
+            last_provider_call_at: tracker.last_provider_call_at,
+            next_checkpoint_eta_ms: tracker.next_checkpoint_eta_ms(total_chunks),
+            pressure_kind: graph_progress_pressure_kind(tracker, total_chunks).map(str::to_string),
+            computed_at: persisted_at,
+        },
+    )
+    .await?;
     tracker.last_persisted_progress = tracker.last_persisted_progress.max(next_progress);
     tracker.last_persisted_at = Instant::now();
     Ok(())
+}
+
+fn graph_progress_pressure_kind(
+    tracker: &GraphStageProgressTracker,
+    total_chunks: usize,
+) -> Option<&'static str> {
+    let remaining_chunks = total_chunks.saturating_sub(tracker.processed_chunks);
+    match (remaining_chunks, tracker.avg_chunk_elapsed_ms()) {
+        (0, _) => Some("steady"),
+        (_, Some(avg_chunk_elapsed_ms)) if avg_chunk_elapsed_ms >= 10_000 => Some("high"),
+        (_, Some(avg_chunk_elapsed_ms)) if avg_chunk_elapsed_ms >= 4_000 => Some("elevated"),
+        (_, Some(_)) => Some("steady"),
+        _ => None,
+    }
 }
 
 fn collect_graph_embedding_support_node_ids(
@@ -1954,6 +2652,50 @@ async fn maybe_record_usage_stage_accounting(
     Ok(())
 }
 
+async fn persist_graph_extraction_recovery_attempts(
+    state: &AppState,
+    workspace_id: Option<Uuid>,
+    project_id: Uuid,
+    document: &repositories::DocumentRow,
+    runtime_ingestion_run_id: Option<Uuid>,
+    attempt_no: i32,
+    chunk_id: Uuid,
+    revision_id: Option<Uuid>,
+    recovery_attempts: &[GraphExtractionRecoveryRecord],
+) -> anyhow::Result<()> {
+    let Some(workspace_id) = workspace_id else {
+        return Ok(());
+    };
+    for attempt in recovery_attempts {
+        let created = repositories::create_runtime_graph_extraction_recovery_attempt(
+            &state.persistence.postgres,
+            &repositories::CreateRuntimeGraphExtractionRecoveryAttemptInput {
+                workspace_id,
+                project_id,
+                document_id: document.id,
+                revision_id,
+                ingestion_run_id: runtime_ingestion_run_id,
+                attempt_no,
+                chunk_id: Some(chunk_id),
+                recovery_kind: attempt.recovery_kind.clone(),
+                trigger_reason: attempt.trigger_reason.clone(),
+                status: "started".to_string(),
+                raw_issue_summary: attempt.raw_issue_summary.clone(),
+                recovered_summary: None,
+            },
+        )
+        .await?;
+        let _ = repositories::update_runtime_graph_extraction_recovery_attempt_status(
+            &state.persistence.postgres,
+            created.id,
+            &attempt.status,
+            attempt.recovered_summary.as_deref(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 fn stage_event_metadata(
     ingestion_job_id: Uuid,
     provider_kind: Option<&str>,
@@ -2115,6 +2857,18 @@ mod tests {
     }
 
     #[test]
+    fn worker_ids_use_service_identity_namespace() {
+        let worker_id = ingestion_worker_id("rustrag-worker", 2);
+
+        assert!(worker_id.starts_with("rustrag-worker:2:"));
+    }
+
+    #[test]
+    fn lease_recovery_ids_use_service_identity_namespace() {
+        assert_eq!(lease_recovery_worker_id("rustrag-worker"), "rustrag-worker:lease-recovery");
+    }
+
+    #[test]
     fn graph_stage_progress_advances_with_chunk_completion() {
         assert_eq!(graph_stage_progress_percent(0, 10), None);
         assert_eq!(graph_stage_progress_percent(1, 10), Some(83));
@@ -2127,17 +2881,42 @@ mod tests {
         let tracker = GraphStageProgressTracker {
             last_persisted_progress: EXTRACTING_GRAPH_PROGRESS_START_PERCENT,
             last_persisted_at: Instant::now(),
+            processed_chunks: 0,
+            provider_call_count: 0,
+            total_call_elapsed_ms: 0,
+            chars_per_second_sum: 0.0,
+            chars_per_second_samples: 0,
+            tokens_per_second_sum: 0.0,
+            tokens_per_second_samples: 0,
+            last_provider_call_at: None,
         };
-        assert!(should_persist_graph_progress_checkpoint(&tracker, 83));
-        assert!(!should_persist_graph_progress_checkpoint(&tracker, 82));
+        assert!(should_persist_graph_progress_checkpoint(
+            &tracker,
+            83,
+            GRAPH_PROGRESS_ACTIVITY_INTERVAL,
+        ));
+        assert!(!should_persist_graph_progress_checkpoint(
+            &tracker,
+            82,
+            GRAPH_PROGRESS_ACTIVITY_INTERVAL,
+        ));
 
         let stale_tracker = GraphStageProgressTracker {
             last_persisted_progress: EXTRACTING_GRAPH_PROGRESS_END_PERCENT,
             last_persisted_at: Instant::now() - GRAPH_PROGRESS_ACTIVITY_INTERVAL,
+            processed_chunks: 0,
+            provider_call_count: 0,
+            total_call_elapsed_ms: 0,
+            chars_per_second_sum: 0.0,
+            chars_per_second_samples: 0,
+            tokens_per_second_sum: 0.0,
+            tokens_per_second_samples: 0,
+            last_provider_call_at: None,
         };
         assert!(should_persist_graph_progress_checkpoint(
             &stale_tracker,
             EXTRACTING_GRAPH_PROGRESS_END_PERCENT,
+            GRAPH_PROGRESS_ACTIVITY_INTERVAL,
         ));
     }
 
@@ -2168,6 +2947,205 @@ mod tests {
         assert!(support_node_ids.contains(&source_node_id));
         assert!(support_node_ids.contains(&target_node_id));
         assert!(support_node_ids.iter().any(|id| changed_node_ids.contains(id)));
+    }
+
+    #[test]
+    fn cleanup_retry_artifacts_runs_only_for_non_mutation_replays_with_existing_state() {
+        let payload = repositories::IngestionExecutionPayload {
+            project_id: Uuid::now_v7(),
+            runtime_ingestion_run_id: None,
+            upload_batch_id: None,
+            logical_document_id: None,
+            target_revision_id: None,
+            document_mutation_workflow_id: None,
+            stale_guard_revision_no: None,
+            attempt_kind: Some("initial_upload".to_string()),
+            mutation_kind: None,
+            source_id: None,
+            external_key: "retry-fixture".to_string(),
+            title: None,
+            mime_type: Some("text/plain".to_string()),
+            text: Some("retry fixture".to_string()),
+            file_kind: Some("txt".to_string()),
+            file_size_bytes: Some(32),
+            adapter_status: None,
+            extraction_error: None,
+            extraction_kind: Some("text_like".to_string()),
+            page_count: None,
+            extraction_warnings: Vec::new(),
+            source_map: serde_json::json!({}),
+            extraction_provider_kind: None,
+            extraction_model_name: None,
+            extraction_version: None,
+            ingest_mode: "runtime_upload".to_string(),
+            extra_metadata: serde_json::json!({}),
+        };
+        let revision = repositories::DocumentRevisionRow {
+            id: Uuid::now_v7(),
+            document_id: Uuid::now_v7(),
+            revision_no: 1,
+            revision_kind: "initial_upload".to_string(),
+            parent_revision_id: None,
+            source_file_name: "retry-fixture.txt".to_string(),
+            appended_text_excerpt: None,
+            accepted_at: Utc::now(),
+            activated_at: Some(Utc::now()),
+            superseded_at: None,
+            content_hash: None,
+            status: "ready".to_string(),
+            mime_type: Some("text/plain".to_string()),
+            file_size_bytes: Some(32),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        assert!(should_cleanup_retry_attempt_artifacts(&payload, Some(&revision), &[],));
+        assert!(should_cleanup_retry_attempt_artifacts(&payload, None, &[Uuid::now_v7()],));
+
+        let mut mutation_payload = payload.clone();
+        mutation_payload.mutation_kind = Some("update_append".to_string());
+        assert!(!should_cleanup_retry_attempt_artifacts(
+            &mutation_payload,
+            Some(&revision),
+            &[Uuid::now_v7()],
+        ));
+
+        assert!(!should_cleanup_retry_attempt_artifacts(&payload, None, &[]));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local postgres, redis, and neo4j services"]
+    async fn cleanup_retry_artifacts_deletes_stale_chunks_for_replayed_initial_uploads() {
+        let state =
+            AppState::new(Settings::from_env().expect("settings")).await.expect("app state");
+        let workspace = repositories::create_workspace(
+            &state.persistence.postgres,
+            &format!("retry-clean-{}", Uuid::now_v7().simple()),
+            "Retry Cleanup Workspace",
+        )
+        .await
+        .expect("workspace");
+        let project = repositories::create_project(
+            &state.persistence.postgres,
+            workspace.id,
+            &format!("retry-clean-lib-{}", Uuid::now_v7().simple()),
+            "Retry Cleanup Library",
+            Some("ingestion retry cleanup regression test"),
+        )
+        .await
+        .expect("project");
+        let document = repositories::create_document(
+            &state.persistence.postgres,
+            project.id,
+            None,
+            "retry-clean-fixture.txt",
+            Some("Retry Cleanup Fixture"),
+            Some("text/plain"),
+            Some("deadbeef"),
+        )
+        .await
+        .expect("document");
+        let revision = repositories::create_document_revision(
+            &state.persistence.postgres,
+            document.id,
+            1,
+            "initial_upload",
+            None,
+            "retry-clean-fixture.txt",
+            Some("text/plain"),
+            Some(128),
+            None,
+            Some("deadbeef"),
+        )
+        .await
+        .expect("revision");
+        repositories::activate_document_revision(
+            &state.persistence.postgres,
+            document.id,
+            revision.id,
+        )
+        .await
+        .expect("activate revision");
+        let document = repositories::update_document_current_revision(
+            &state.persistence.postgres,
+            document.id,
+            Some(revision.id),
+            "ready",
+            None,
+            None,
+        )
+        .await
+        .expect("set current revision");
+        let stale_chunks = vec![
+            repositories::create_chunk(
+                &state.persistence.postgres,
+                document.id,
+                project.id,
+                0,
+                "stale chunk 0",
+                Some(3),
+                serde_json::json!({}),
+            )
+            .await
+            .expect("chunk 0"),
+            repositories::create_chunk(
+                &state.persistence.postgres,
+                document.id,
+                project.id,
+                1,
+                "stale chunk 1",
+                Some(3),
+                serde_json::json!({}),
+            )
+            .await
+            .expect("chunk 1"),
+        ];
+        let stale_chunk_ids = stale_chunks.iter().map(|chunk| chunk.id).collect::<Vec<_>>();
+        let payload = repositories::IngestionExecutionPayload {
+            project_id: project.id,
+            runtime_ingestion_run_id: None,
+            upload_batch_id: None,
+            logical_document_id: Some(document.id),
+            target_revision_id: None,
+            document_mutation_workflow_id: None,
+            stale_guard_revision_no: Some(revision.revision_no),
+            attempt_kind: Some("initial_upload".to_string()),
+            mutation_kind: None,
+            source_id: None,
+            external_key: document.external_key.clone(),
+            title: document.title.clone(),
+            mime_type: document.mime_type.clone(),
+            text: Some("fresh retry text".to_string()),
+            file_kind: Some("txt".to_string()),
+            file_size_bytes: Some(32),
+            adapter_status: None,
+            extraction_error: None,
+            extraction_kind: Some("text_like".to_string()),
+            page_count: None,
+            extraction_warnings: Vec::new(),
+            source_map: serde_json::json!({}),
+            extraction_provider_kind: None,
+            extraction_model_name: None,
+            extraction_version: None,
+            ingest_mode: "runtime_upload".to_string(),
+            extra_metadata: serde_json::json!({}),
+        };
+
+        cleanup_retry_attempt_artifacts(
+            &state,
+            &payload,
+            &document,
+            Some(&revision),
+            &stale_chunk_ids,
+        )
+        .await
+        .expect("cleanup retry artifacts");
+
+        let remaining_chunks =
+            repositories::list_chunks_by_document(&state.persistence.postgres, document.id)
+                .await
+                .expect("remaining chunks");
+        assert!(remaining_chunks.is_empty());
     }
 
     #[tokio::test]
@@ -2373,7 +3351,7 @@ async fn recover_expired_leases(state: &AppState, worker_id: &str) -> anyhow::Re
 async fn handle_recovered_jobs(
     state: &AppState,
     worker_id: &str,
-    recovered: Vec<IngestionJobRow>,
+    recovered: Vec<repositories::RecoveredIngestionJobRow>,
     attempt_error_code: &str,
     runtime_stage_message: &str,
     per_job_log: &str,
@@ -2381,7 +3359,8 @@ async fn handle_recovered_jobs(
 ) -> anyhow::Result<()> {
     let recovered_count = recovered.len();
     for job in recovered {
-        if let Ok(payload) = repositories::parse_ingestion_execution_payload(&job) {
+        let current_job = job.current_job();
+        if let Ok(payload) = repositories::parse_ingestion_execution_payload(&current_job) {
             if let Some(runtime_ingestion_run_id) = payload.runtime_ingestion_run_id {
                 match repositories::get_runtime_ingestion_run_by_id(
                     &state.persistence.postgres,
@@ -2419,7 +3398,7 @@ async fn handle_recovered_jobs(
                 &state.persistence.postgres,
                 job.id,
                 job.attempt_count,
-                job.worker_id.as_deref().unwrap_or(worker_id),
+                job.attempt_worker_id(worker_id),
                 attempt_error_code,
                 runtime_stage_message,
             )
@@ -2430,13 +3409,33 @@ async fn handle_recovered_jobs(
             job_id = %job.id,
             project_id = %job.project_id,
             source_id = ?job.source_id,
-            previous_worker_id = ?job.worker_id,
+            previous_worker_id = ?job.previous_worker_id,
             attempt_no = job.attempt_count,
-            previous_stage = %job.stage,
-            previous_status = %job.status,
+            previous_stage = %job.previous_stage,
+            previous_status = %job.previous_status,
+            current_stage = %job.stage,
+            current_status = %job.status,
             recovery_reason = per_job_log,
             "requeued abandoned ingestion job during recovery",
         );
+        if let Err(queue_error) = release_library_queue_isolation_slot(state, job.project_id).await
+        {
+            warn!(
+                %worker_id,
+                project_id = %job.project_id,
+                ?queue_error,
+                "failed to release queue-isolation slot during recovery"
+            );
+        } else if let Err(settlement_error) =
+            refresh_terminal_library_settlement(state, job.project_id).await
+        {
+            warn!(
+                %worker_id,
+                project_id = %job.project_id,
+                ?settlement_error,
+                "failed to refresh final collection settlement after recovery requeue"
+            );
+        }
     }
     if recovered_count > 0 {
         warn!(

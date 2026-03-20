@@ -52,6 +52,41 @@ pub enum RuntimeGraphArtifactFilterReason {
     LowValueArtifact,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeGraphProjectionHealth {
+    Healthy,
+    RetryingContention,
+    Degraded,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeGraphProjectionLockState {
+    Idle,
+    Acquired,
+    RetryingContention,
+    FailedContention,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeGraphProjectionWriteState {
+    Pending,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeGraphWriteFailureKind {
+    ProjectionContention,
+    GraphPersistenceIntegrity,
+    DiagnosticsUnavailable,
+    ProjectionFailure,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeGraphNode {
     pub id: Uuid,
@@ -114,4 +149,33 @@ pub struct RuntimeGraphQuality {
     pub canonical_summary: Option<CanonicalGraphSummary>,
     pub extraction_recovery: Option<ExtractionRecoverySummary>,
     pub reconciliation_scope: Option<MutationImpactScopeSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeGraphProjectionScope {
+    pub id: Uuid,
+    pub library_id: Uuid,
+    pub scope_kind: String,
+    pub attempt_no: i32,
+    pub lock_state: RuntimeGraphProjectionLockState,
+    pub write_state: RuntimeGraphProjectionWriteState,
+    pub deadlock_retry_count: usize,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub failure_kind: Option<RuntimeGraphWriteFailureKind>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeGraphDiagnosticsSnapshot {
+    pub library_id: Uuid,
+    pub snapshot_at: DateTime<Utc>,
+    pub projection_health: RuntimeGraphProjectionHealth,
+    pub active_projection_count: usize,
+    pub retrying_projection_count: usize,
+    pub failed_projection_count: usize,
+    pub pending_node_write_count: usize,
+    pub pending_edge_write_count: usize,
+    pub last_projection_failure_kind: Option<RuntimeGraphWriteFailureKind>,
+    pub last_projection_failure_at: Option<DateTime<Utc>>,
+    pub is_runtime_readable: bool,
 }

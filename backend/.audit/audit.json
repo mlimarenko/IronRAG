@@ -1,0 +1,1519 @@
+{
+  "root": "/home/leader/sources/RustRAG/rustrag/backend",
+  "totals": {
+    "files_scanned": 172,
+    "total_lines": 78568,
+    "code_lines": 72638,
+    "comment_lines": 1067,
+    "marker_lines": 1
+  },
+  "languages": {
+    ".rs": 155,
+    ".sql": 13,
+    ".json": 2,
+    ".md": 1,
+    ".yaml": 1
+  },
+  "hierarchy": {
+    "max_depth": 4,
+    "avg_depth": 2.96,
+    "median_depth": 3.0,
+    "flat_ratio": 0.2791
+  },
+  "smells": [
+    {
+      "path": "contracts/rustrag.openapi.yaml",
+      "severity": "high",
+      "issues": [
+        "long file (10056 lines > 1200)"
+      ]
+    },
+    {
+      "path": "src/interfaces/http/graph.rs",
+      "severity": "high",
+      "issues": [
+        "long file (1385 lines > 1200)"
+      ]
+    },
+    {
+      "path": "src/interfaces/http/mcp_memory.rs",
+      "severity": "high",
+      "issues": [
+        "long file (1280 lines > 1200)"
+      ]
+    },
+    {
+      "path": "src/services/mcp_memory.rs",
+      "severity": "high",
+      "issues": [
+        "long file (1543 lines > 1200)"
+      ]
+    },
+    {
+      "path": "src/shared/file_extract.rs",
+      "severity": "high",
+      "issues": [
+        "long file (1209 lines > 1200)"
+      ]
+    },
+    {
+      "path": "src/infra/ui_queries.rs",
+      "severity": "high",
+      "issues": [
+        "long file (2247 lines > 1200)",
+        "long signatures (1 functions > 8 params)"
+      ]
+    },
+    {
+      "path": "src/integrations/provider_catalog.rs",
+      "severity": "high",
+      "issues": [
+        "long file (1575 lines > 1200)",
+        "many magic numbers (181)"
+      ]
+    },
+    {
+      "path": "src/interfaces/http/retrieval.rs",
+      "severity": "high",
+      "issues": [
+        "long file (1261 lines > 1200)",
+        "many message chains (33)"
+      ]
+    },
+    {
+      "path": "src/interfaces/http/runtime_documents.rs",
+      "severity": "high",
+      "issues": [
+        "long file (2417 lines > 1200)",
+        "long signatures (1 functions > 8 params)"
+      ]
+    },
+    {
+      "path": "src/interfaces/http/runtime_graph.rs",
+      "severity": "high",
+      "issues": [
+        "long file (1608 lines > 1200)",
+        "high branching + nesting (branches=88, depth=6)"
+      ]
+    },
+    {
+      "path": "src/services/query_runtime.rs",
+      "severity": "high",
+      "issues": [
+        "long file (2218 lines > 1200)",
+        "long signatures (1 functions > 8 params)",
+        "many message chains (21)"
+      ]
+    },
+    {
+      "path": "src/infra/repositories.rs",
+      "severity": "high",
+      "issues": [
+        "long file (11146 lines > 1200)",
+        "long signatures (15 functions > 8 params)",
+        "many magic numbers (152)",
+        "many switch/case hits (39)"
+      ]
+    },
+    {
+      "path": "src/services/ingestion_worker.rs",
+      "severity": "high",
+      "issues": [
+        "long file (2860 lines > 1200)",
+        "long signatures (3 functions > 8 params)",
+        "high branching + nesting (branches=148, depth=8)",
+        "many unwrap/expect (20)"
+      ]
+    },
+    {
+      "path": "src/services/graph_extract.rs",
+      "severity": "high",
+      "issues": [
+        "long file (2223 lines > 1200)",
+        "long signatures (1 functions > 8 params)",
+        "many magic numbers (29)",
+        "many message chains (17)",
+        "many unwrap/expect (12)"
+      ]
+    },
+    {
+      "path": "src/services/runtime_ingestion.rs",
+      "severity": "high",
+      "issues": [
+        "long file (2861 lines > 1200)",
+        "long signatures (2 functions > 8 params)",
+        "many magic numbers (31)",
+        "many message chains (33)",
+        "high branching + nesting (branches=87, depth=8)"
+      ]
+    },
+    {
+      "path": "src/app/config.rs",
+      "severity": "medium",
+      "issues": [
+        "many magic numbers (66)"
+      ]
+    },
+    {
+      "path": "src/interfaces/http/router_support.rs",
+      "severity": "medium",
+      "issues": [
+        "panic! usage (1)"
+      ]
+    },
+    {
+      "path": "src/interfaces/http/runtime_providers.rs",
+      "severity": "medium",
+      "issues": [
+        "panic! usage (2)"
+      ]
+    },
+    {
+      "path": "src/interfaces/http/ui_graph.rs",
+      "severity": "medium",
+      "issues": [
+        "long signatures (1 functions > 8 params)"
+      ]
+    },
+    {
+      "path": "src/services/collection_settlement.rs",
+      "severity": "medium",
+      "issues": [
+        "long signatures (1 functions > 8 params)"
+      ]
+    },
+    {
+      "path": "src/services/document_reconciliation.rs",
+      "severity": "medium",
+      "issues": [
+        "many message chains (13)"
+      ]
+    },
+    {
+      "path": "src/services/graph_diagnostics_snapshot.rs",
+      "severity": "medium",
+      "issues": [
+        "long signatures (1 functions > 8 params)"
+      ]
+    },
+    {
+      "path": "src/services/graph_projection_guard.rs",
+      "severity": "medium",
+      "issues": [
+        "long signatures (1 functions > 8 params)"
+      ]
+    },
+    {
+      "path": "src/services/pricing_catalog.rs",
+      "severity": "medium",
+      "issues": [
+        "long signatures (1 functions > 8 params)"
+      ]
+    },
+    {
+      "path": "src/services/provider_failure_classification.rs",
+      "severity": "medium",
+      "issues": [
+        "long signatures (2 functions > 8 params)"
+      ]
+    },
+    {
+      "path": "src/services/query_intelligence.rs",
+      "severity": "medium",
+      "issues": [
+        "many message chains (21)"
+      ]
+    },
+    {
+      "path": "src/services/terminal_settlement.rs",
+      "severity": "medium",
+      "issues": [
+        "long signatures (1 functions > 8 params)"
+      ]
+    },
+    {
+      "path": "tests/mcp_memory_audit.rs",
+      "severity": "medium",
+      "issues": [
+        "many message chains (15)"
+      ]
+    },
+    {
+      "path": "tests/mcp_memory_mutations.rs",
+      "severity": "medium",
+      "issues": [
+        "many message chains (17)"
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "kind": "file",
+      "severity": "high",
+      "primary_smell": "Large Class",
+      "secondary_smells": [
+        "Long Method",
+        "Long Parameter List",
+        "Primitive Obsession",
+        "Switch Statements"
+      ],
+      "evidence": [
+        "long file: 2860 lines (threshold 1200)",
+        "long signatures: 3 functions > 8 params",
+        "flag-like params detected: 13 (heuristic)",
+        "magic numbers: 18 samples=[416, 511, 570, 621, 1009, 1107]",
+        "branching+nested: branches=148, indent-depth=8 samples=[99, 103, 107, 137, 139, 164]",
+        "raw issues: long file (2860 lines > 1200), long signatures (3 functions > 8 params), high branching + nesting (branches=148, depth=8), many unwrap/expect (20)"
+      ],
+      "paths": [
+        "src/services/ingestion_worker.rs"
+      ],
+      "suggested_refactorings": [
+        "Split Module (by concern)",
+        "Extract Module",
+        "Move Function",
+        "Extract Struct",
+        "Extract Trait (when behavior varies)",
+        "Extract Class",
+        "Move Method",
+        "Move Field",
+        "Extract Interface"
+      ],
+      "suggested_patterns": [
+        "Facade"
+      ],
+      "micro_recipes": [
+        "Untangle data and behavior"
+      ],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "high",
+      "primary_smell": "Large Class",
+      "secondary_smells": [
+        "Long Method",
+        "Long Parameter List",
+        "Message Chains",
+        "Primitive Obsession"
+      ],
+      "evidence": [
+        "long file: 2861 lines (threshold 1200)",
+        "long signatures: 2 functions > 8 params",
+        "magic numbers: 31 samples=[2266, 2596, 2599, 2603, 2605, 2614]",
+        "message chains: 33 lines with 3+ chained accesses samples=[453, 455, 457, 459, 773, 774]",
+        "branching+nested: branches=87, indent-depth=8 samples=[163, 169, 175, 191, 194, 249]",
+        "raw issues: long file (2861 lines > 1200), long signatures (2 functions > 8 params), many magic numbers (31), many message chains (33), high branching + nesting (branches=87, depth=8)"
+      ],
+      "paths": [
+        "src/services/runtime_ingestion.rs"
+      ],
+      "suggested_refactorings": [
+        "Split Module (by concern)",
+        "Extract Module",
+        "Move Function",
+        "Extract Struct",
+        "Extract Trait (when behavior varies)",
+        "Extract Class",
+        "Move Method",
+        "Move Field",
+        "Extract Interface"
+      ],
+      "suggested_patterns": [
+        "Facade"
+      ],
+      "micro_recipes": [
+        "Untangle data and behavior"
+      ],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "high",
+      "primary_smell": "Large Class",
+      "secondary_smells": [
+        "Long Parameter List",
+        "Primitive Obsession",
+        "Switch Statements"
+      ],
+      "evidence": [
+        "long file: 11146 lines (threshold 1200)",
+        "long signatures: 15 functions > 8 params",
+        "magic numbers: 152 samples=[1197, 1856, 1894, 2510, 2573, 2731]",
+        "switch/case hits: 39 samples=[1342, 1453, 3045, 3054, 3060, 3070]",
+        "raw issues: long file (11146 lines > 1200), long signatures (15 functions > 8 params), many magic numbers (152), many switch/case hits (39)"
+      ],
+      "paths": [
+        "src/infra/repositories.rs"
+      ],
+      "suggested_refactorings": [
+        "Split Module (by concern)",
+        "Extract Module",
+        "Move Function",
+        "Extract Struct",
+        "Extract Trait (when behavior varies)",
+        "Extract Class",
+        "Move Method",
+        "Move Field",
+        "Extract Interface"
+      ],
+      "suggested_patterns": [
+        "Facade"
+      ],
+      "micro_recipes": [
+        "Untangle data and behavior"
+      ],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "high",
+      "primary_smell": "Large Class",
+      "secondary_smells": [
+        "Long Parameter List",
+        "Message Chains",
+        "Primitive Obsession"
+      ],
+      "evidence": [
+        "long file: 2223 lines (threshold 1200)",
+        "long signatures: 1 functions > 8 params",
+        "magic numbers: 29 samples=[301, 304, 380, 1976, 1978, 1988]",
+        "message chains: 17 lines with 3+ chained accesses samples=[409, 647, 662, 663, 870, 880]",
+        "raw issues: long file (2223 lines > 1200), long signatures (1 functions > 8 params), many magic numbers (29), many message chains (17), many unwrap/expect (12)"
+      ],
+      "paths": [
+        "src/services/graph_extract.rs"
+      ],
+      "suggested_refactorings": [
+        "Split Module (by concern)",
+        "Extract Module",
+        "Move Function",
+        "Extract Struct",
+        "Extract Trait (when behavior varies)",
+        "Extract Class",
+        "Move Method",
+        "Move Field",
+        "Extract Interface"
+      ],
+      "suggested_patterns": [
+        "Facade"
+      ],
+      "micro_recipes": [
+        "Untangle data and behavior"
+      ],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "high",
+      "primary_smell": "Large Class",
+      "secondary_smells": [
+        "Long Parameter List",
+        "Primitive Obsession"
+      ],
+      "evidence": [
+        "long file: 2417 lines (threshold 1200)",
+        "long signatures: 1 functions > 8 params",
+        "magic numbers: 18 samples=[981, 2048, 2049, 2050, 2051, 2052]",
+        "raw issues: long file (2417 lines > 1200), long signatures (1 functions > 8 params)"
+      ],
+      "paths": [
+        "src/interfaces/http/runtime_documents.rs"
+      ],
+      "suggested_refactorings": [
+        "Split Module (by concern)",
+        "Extract Module",
+        "Move Function",
+        "Extract Struct",
+        "Extract Trait (when behavior varies)",
+        "Extract Class",
+        "Move Method",
+        "Move Field",
+        "Extract Interface"
+      ],
+      "suggested_patterns": [
+        "Facade"
+      ],
+      "micro_recipes": [
+        "Untangle data and behavior"
+      ],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "high",
+      "primary_smell": "Large Class",
+      "secondary_smells": [
+        "Long Parameter List",
+        "Message Chains"
+      ],
+      "evidence": [
+        "long file: 2218 lines (threshold 1200)",
+        "long signatures: 1 functions > 8 params",
+        "message chains: 21 lines with 3+ chained accesses samples=[270, 287, 353, 354, 415, 418]",
+        "raw issues: long file (2218 lines > 1200), long signatures (1 functions > 8 params), many message chains (21)"
+      ],
+      "paths": [
+        "src/services/query_runtime.rs"
+      ],
+      "suggested_refactorings": [
+        "Split Module (by concern)",
+        "Extract Module",
+        "Move Function",
+        "Extract Struct",
+        "Extract Trait (when behavior varies)",
+        "Extract Class",
+        "Move Method",
+        "Move Field",
+        "Extract Interface"
+      ],
+      "suggested_patterns": [
+        "Facade"
+      ],
+      "micro_recipes": [
+        "Untangle data and behavior"
+      ],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "high",
+      "primary_smell": "Large Class",
+      "secondary_smells": [
+        "Long Parameter List"
+      ],
+      "evidence": [
+        "long file: 2247 lines (threshold 1200)",
+        "long signatures: 1 functions > 8 params",
+        "raw issues: long file (2247 lines > 1200), long signatures (1 functions > 8 params)"
+      ],
+      "paths": [
+        "src/infra/ui_queries.rs"
+      ],
+      "suggested_refactorings": [
+        "Split Module (by concern)",
+        "Extract Module",
+        "Move Function",
+        "Extract Struct",
+        "Extract Trait (when behavior varies)",
+        "Extract Class",
+        "Move Method",
+        "Move Field",
+        "Extract Interface"
+      ],
+      "suggested_patterns": [
+        "Facade"
+      ],
+      "micro_recipes": [
+        "Untangle data and behavior"
+      ],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "high",
+      "primary_smell": "Large Class",
+      "secondary_smells": [
+        "Primitive Obsession"
+      ],
+      "evidence": [
+        "long file: 1575 lines (threshold 1200)",
+        "magic numbers: 181 samples=[94, 96, 100, 102, 104, 106]",
+        "raw issues: long file (1575 lines > 1200), many magic numbers (181)"
+      ],
+      "paths": [
+        "src/integrations/provider_catalog.rs"
+      ],
+      "suggested_refactorings": [
+        "Split Module (by concern)",
+        "Extract Module",
+        "Move Function",
+        "Extract Struct",
+        "Extract Trait (when behavior varies)",
+        "Extract Class",
+        "Move Method",
+        "Move Field",
+        "Extract Interface"
+      ],
+      "suggested_patterns": [
+        "Facade"
+      ],
+      "micro_recipes": [
+        "Untangle data and behavior"
+      ],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "high",
+      "primary_smell": "Large Class",
+      "secondary_smells": [
+        "Message Chains"
+      ],
+      "evidence": [
+        "long file: 1261 lines (threshold 1200)",
+        "message chains: 33 lines with 3+ chained accesses samples=[504, 564, 585, 869, 906, 907]",
+        "raw issues: long file (1261 lines > 1200), many message chains (33)"
+      ],
+      "paths": [
+        "src/interfaces/http/retrieval.rs"
+      ],
+      "suggested_refactorings": [
+        "Split Module (by concern)",
+        "Extract Module",
+        "Move Function",
+        "Extract Struct",
+        "Extract Trait (when behavior varies)",
+        "Extract Class",
+        "Move Method",
+        "Move Field",
+        "Extract Interface"
+      ],
+      "suggested_patterns": [
+        "Facade"
+      ],
+      "micro_recipes": [
+        "Untangle data and behavior"
+      ],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "high",
+      "primary_smell": "Large Class",
+      "secondary_smells": [
+        "Long Method"
+      ],
+      "evidence": [
+        "long file: 1608 lines (threshold 1200)",
+        "branching+nested: branches=88, indent-depth=6 samples=[277, 356, 378, 419, 450, 580]",
+        "raw issues: long file (1608 lines > 1200), high branching + nesting (branches=88, depth=6)"
+      ],
+      "paths": [
+        "src/interfaces/http/runtime_graph.rs"
+      ],
+      "suggested_refactorings": [
+        "Split Module (by concern)",
+        "Extract Module",
+        "Move Function",
+        "Extract Struct",
+        "Extract Trait (when behavior varies)",
+        "Extract Class",
+        "Move Method",
+        "Move Field",
+        "Extract Interface"
+      ],
+      "suggested_patterns": [
+        "Facade"
+      ],
+      "micro_recipes": [
+        "Untangle data and behavior"
+      ],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "high",
+      "primary_smell": "Oversized File",
+      "secondary_smells": [],
+      "evidence": [
+        "long file: 10056 lines (threshold 1200)",
+        "raw issues: long file (10056 lines > 1200)"
+      ],
+      "paths": [
+        "contracts/rustrag.openapi.yaml"
+      ],
+      "suggested_refactorings": [
+        "Extract Section",
+        "Split File (by concern)",
+        "Extract Constants"
+      ],
+      "suggested_patterns": [],
+      "micro_recipes": [],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "high",
+      "primary_smell": "Primitive Obsession",
+      "secondary_smells": [],
+      "evidence": [
+        "magic numbers: 66 samples=[100, 104, 105, 106, 107, 111]",
+        "raw issues: many magic numbers (66)"
+      ],
+      "paths": [
+        "src/app/config.rs"
+      ],
+      "suggested_refactorings": [
+        "Introduce Newtype / Value Object",
+        "Replace Magic Number with Named Constant",
+        "Replace Stringly-Typed Values with Enum",
+        "Replace Magic Number with Symbolic Constant",
+        "Replace Data Value with Object"
+      ],
+      "suggested_patterns": [],
+      "micro_recipes": [
+        "Untangle data and behavior"
+      ],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "high",
+      "primary_smell": "Large Class",
+      "secondary_smells": [],
+      "evidence": [
+        "long file: 1385 lines (threshold 1200)",
+        "raw issues: long file (1385 lines > 1200)"
+      ],
+      "paths": [
+        "src/interfaces/http/graph.rs"
+      ],
+      "suggested_refactorings": [
+        "Split Module (by concern)",
+        "Extract Module",
+        "Move Function",
+        "Extract Struct",
+        "Extract Trait (when behavior varies)",
+        "Extract Class",
+        "Move Method",
+        "Move Field",
+        "Extract Interface"
+      ],
+      "suggested_patterns": [
+        "Facade"
+      ],
+      "micro_recipes": [
+        "Untangle data and behavior"
+      ],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "high",
+      "primary_smell": "Large Class",
+      "secondary_smells": [],
+      "evidence": [
+        "long file: 1280 lines (threshold 1200)",
+        "raw issues: long file (1280 lines > 1200)"
+      ],
+      "paths": [
+        "src/interfaces/http/mcp_memory.rs"
+      ],
+      "suggested_refactorings": [
+        "Split Module (by concern)",
+        "Extract Module",
+        "Move Function",
+        "Extract Struct",
+        "Extract Trait (when behavior varies)",
+        "Extract Class",
+        "Move Method",
+        "Move Field",
+        "Extract Interface"
+      ],
+      "suggested_patterns": [
+        "Facade"
+      ],
+      "micro_recipes": [
+        "Untangle data and behavior"
+      ],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "high",
+      "primary_smell": "Large Class",
+      "secondary_smells": [],
+      "evidence": [
+        "long file: 1543 lines (threshold 1200)",
+        "raw issues: long file (1543 lines > 1200)"
+      ],
+      "paths": [
+        "src/services/mcp_memory.rs"
+      ],
+      "suggested_refactorings": [
+        "Split Module (by concern)",
+        "Extract Module",
+        "Move Function",
+        "Extract Struct",
+        "Extract Trait (when behavior varies)",
+        "Extract Class",
+        "Move Method",
+        "Move Field",
+        "Extract Interface"
+      ],
+      "suggested_patterns": [
+        "Facade"
+      ],
+      "micro_recipes": [
+        "Untangle data and behavior"
+      ],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "high",
+      "primary_smell": "Large Class",
+      "secondary_smells": [],
+      "evidence": [
+        "long file: 1209 lines (threshold 1200)",
+        "raw issues: long file (1209 lines > 1200)"
+      ],
+      "paths": [
+        "src/shared/file_extract.rs"
+      ],
+      "suggested_refactorings": [
+        "Split Module (by concern)",
+        "Extract Module",
+        "Move Function",
+        "Extract Struct",
+        "Extract Trait (when behavior varies)",
+        "Extract Class",
+        "Move Method",
+        "Move Field",
+        "Extract Interface"
+      ],
+      "suggested_patterns": [
+        "Facade"
+      ],
+      "micro_recipes": [
+        "Untangle data and behavior"
+      ],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "medium",
+      "primary_smell": "Long Parameter List",
+      "secondary_smells": [],
+      "evidence": [
+        "long signatures: 1 functions > 8 params",
+        "raw issues: long signatures (1 functions > 8 params)"
+      ],
+      "paths": [
+        "src/interfaces/http/ui_graph.rs"
+      ],
+      "suggested_refactorings": [
+        "Introduce Parameter Object",
+        "Preserve Whole Object",
+        "Replace Parameter with Explicit Methods"
+      ],
+      "suggested_patterns": [
+        "Builder"
+      ],
+      "micro_recipes": [
+        "Replace flags and type switches"
+      ],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "medium",
+      "primary_smell": "Long Parameter List",
+      "secondary_smells": [],
+      "evidence": [
+        "long signatures: 1 functions > 8 params",
+        "raw issues: long signatures (1 functions > 8 params)"
+      ],
+      "paths": [
+        "src/services/collection_settlement.rs"
+      ],
+      "suggested_refactorings": [
+        "Introduce Parameter Object",
+        "Preserve Whole Object",
+        "Replace Parameter with Explicit Methods"
+      ],
+      "suggested_patterns": [
+        "Builder"
+      ],
+      "micro_recipes": [
+        "Replace flags and type switches"
+      ],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "medium",
+      "primary_smell": "Message Chains",
+      "secondary_smells": [],
+      "evidence": [
+        "message chains: 13 lines with 3+ chained accesses samples=[206, 207, 242, 312, 317, 318]",
+        "raw issues: many message chains (13)"
+      ],
+      "paths": [
+        "src/services/document_reconciliation.rs"
+      ],
+      "suggested_refactorings": [
+        "Bind Intermediate Variables (reduce deep access)",
+        "Hide Delegate (via helper/facade functions)",
+        "Move Function (closer to data owner)",
+        "Hide Delegate",
+        "Move Method",
+        "Extract Class"
+      ],
+      "suggested_patterns": [
+        "Facade",
+        "Mediator"
+      ],
+      "micro_recipes": [],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "medium",
+      "primary_smell": "Long Parameter List",
+      "secondary_smells": [],
+      "evidence": [
+        "long signatures: 1 functions > 8 params",
+        "raw issues: long signatures (1 functions > 8 params)"
+      ],
+      "paths": [
+        "src/services/graph_diagnostics_snapshot.rs"
+      ],
+      "suggested_refactorings": [
+        "Introduce Parameter Object",
+        "Preserve Whole Object",
+        "Replace Parameter with Explicit Methods"
+      ],
+      "suggested_patterns": [
+        "Builder"
+      ],
+      "micro_recipes": [
+        "Replace flags and type switches"
+      ],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "medium",
+      "primary_smell": "Long Parameter List",
+      "secondary_smells": [],
+      "evidence": [
+        "long signatures: 1 functions > 8 params",
+        "raw issues: long signatures (1 functions > 8 params)"
+      ],
+      "paths": [
+        "src/services/graph_projection_guard.rs"
+      ],
+      "suggested_refactorings": [
+        "Introduce Parameter Object",
+        "Preserve Whole Object",
+        "Replace Parameter with Explicit Methods"
+      ],
+      "suggested_patterns": [
+        "Builder"
+      ],
+      "micro_recipes": [
+        "Replace flags and type switches"
+      ],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "medium",
+      "primary_smell": "Long Parameter List",
+      "secondary_smells": [],
+      "evidence": [
+        "long signatures: 1 functions > 8 params",
+        "raw issues: long signatures (1 functions > 8 params)"
+      ],
+      "paths": [
+        "src/services/pricing_catalog.rs"
+      ],
+      "suggested_refactorings": [
+        "Introduce Parameter Object",
+        "Preserve Whole Object",
+        "Replace Parameter with Explicit Methods"
+      ],
+      "suggested_patterns": [
+        "Builder"
+      ],
+      "micro_recipes": [
+        "Replace flags and type switches"
+      ],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "medium",
+      "primary_smell": "Long Parameter List",
+      "secondary_smells": [],
+      "evidence": [
+        "long signatures: 2 functions > 8 params",
+        "raw issues: long signatures (2 functions > 8 params)"
+      ],
+      "paths": [
+        "src/services/provider_failure_classification.rs"
+      ],
+      "suggested_refactorings": [
+        "Introduce Parameter Object",
+        "Preserve Whole Object",
+        "Replace Parameter with Explicit Methods"
+      ],
+      "suggested_patterns": [
+        "Builder"
+      ],
+      "micro_recipes": [
+        "Replace flags and type switches"
+      ],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "medium",
+      "primary_smell": "Message Chains",
+      "secondary_smells": [],
+      "evidence": [
+        "message chains: 21 lines with 3+ chained accesses samples=[104, 105, 106, 107, 112, 113]",
+        "raw issues: many message chains (21)"
+      ],
+      "paths": [
+        "src/services/query_intelligence.rs"
+      ],
+      "suggested_refactorings": [
+        "Bind Intermediate Variables (reduce deep access)",
+        "Hide Delegate (via helper/facade functions)",
+        "Move Function (closer to data owner)",
+        "Hide Delegate",
+        "Move Method",
+        "Extract Class"
+      ],
+      "suggested_patterns": [
+        "Facade",
+        "Mediator"
+      ],
+      "micro_recipes": [],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "medium",
+      "primary_smell": "Long Parameter List",
+      "secondary_smells": [],
+      "evidence": [
+        "long signatures: 1 functions > 8 params",
+        "raw issues: long signatures (1 functions > 8 params)"
+      ],
+      "paths": [
+        "src/services/terminal_settlement.rs"
+      ],
+      "suggested_refactorings": [
+        "Introduce Parameter Object",
+        "Preserve Whole Object",
+        "Replace Parameter with Explicit Methods"
+      ],
+      "suggested_patterns": [
+        "Builder"
+      ],
+      "micro_recipes": [
+        "Replace flags and type switches"
+      ],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "medium",
+      "primary_smell": "Message Chains",
+      "secondary_smells": [],
+      "evidence": [
+        "message chains: 15 lines with 3+ chained accesses samples=[74, 93, 189, 200, 214, 221]",
+        "raw issues: many message chains (15)"
+      ],
+      "paths": [
+        "tests/mcp_memory_audit.rs"
+      ],
+      "suggested_refactorings": [
+        "Bind Intermediate Variables (reduce deep access)",
+        "Hide Delegate (via helper/facade functions)",
+        "Move Function (closer to data owner)",
+        "Hide Delegate",
+        "Move Method",
+        "Extract Class"
+      ],
+      "suggested_patterns": [
+        "Facade",
+        "Mediator"
+      ],
+      "micro_recipes": [],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "medium",
+      "primary_smell": "Message Chains",
+      "secondary_smells": [],
+      "evidence": [
+        "message chains: 17 lines with 3+ chained accesses samples=[56, 61, 66, 71, 84, 164]",
+        "raw issues: many message chains (17)"
+      ],
+      "paths": [
+        "tests/mcp_memory_mutations.rs"
+      ],
+      "suggested_refactorings": [
+        "Bind Intermediate Variables (reduce deep access)",
+        "Hide Delegate (via helper/facade functions)",
+        "Move Function (closer to data owner)",
+        "Hide Delegate",
+        "Move Method",
+        "Extract Class"
+      ],
+      "suggested_patterns": [
+        "Facade",
+        "Mediator"
+      ],
+      "micro_recipes": [],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "duplicate",
+      "severity": "low",
+      "primary_smell": "Duplicate Code",
+      "secondary_smells": [],
+      "evidence": [
+        "duplicate group: 2 locations",
+        "hash: ffb1ecafe173"
+      ],
+      "paths": [
+        "tests/fixtures/runtime/deepseek-fixture-manifest.json:1",
+        "tests/fixtures/runtime/openai-fixture-manifest.json:1"
+      ],
+      "suggested_refactorings": [
+        "Extract Method",
+        "Introduce Parameter Object",
+        "Form Template Method"
+      ],
+      "suggested_patterns": [
+        "Strategy"
+      ],
+      "micro_recipes": [
+        "Kill duplication with variants"
+      ],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "low",
+      "primary_smell": "Risky Constructs",
+      "secondary_smells": [],
+      "evidence": [
+        "panic!: 1 samples=[415]",
+        "multiple heuristic issues present; defaulting to Long Method treatment",
+        "raw issues: panic! usage (1)"
+      ],
+      "paths": [
+        "src/interfaces/http/router_support.rs"
+      ],
+      "suggested_refactorings": [
+        "Encapsulate Unsafe",
+        "Replace unwrap/expect with Result propagation (?)",
+        "Introduce Newtype / Value Object",
+        "Replace panic!/todo! with errors",
+        "Introduce Invariants (newtypes, constructors, validation)",
+        "Replace panic!/todo! with errors or explicit unreachable"
+      ],
+      "suggested_patterns": [],
+      "micro_recipes": [],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    },
+    {
+      "kind": "file",
+      "severity": "low",
+      "primary_smell": "Risky Constructs",
+      "secondary_smells": [],
+      "evidence": [
+        "panic!: 2 samples=[664, 692]",
+        "multiple heuristic issues present; defaulting to Long Method treatment",
+        "raw issues: panic! usage (2)"
+      ],
+      "paths": [
+        "src/interfaces/http/runtime_providers.rs"
+      ],
+      "suggested_refactorings": [
+        "Encapsulate Unsafe",
+        "Replace unwrap/expect with Result propagation (?)",
+        "Introduce Newtype / Value Object",
+        "Replace panic!/todo! with errors",
+        "Introduce Invariants (newtypes, constructors, validation)",
+        "Replace panic!/todo! with errors or explicit unreachable"
+      ],
+      "suggested_patterns": [],
+      "micro_recipes": [],
+      "safe_steps": [
+        "Step 0: add/extend characterization tests around the touched behavior (or logging assertions if tests are hard).",
+        "Step 1: do the smallest refactor that improves readability without changing behavior (naming, extraction).",
+        "Step 2: apply the selected refactoring technique(s) in tiny commits; keep code compiling and tests passing.",
+        "Step 3: remove duplication / reduce coupling only after local structure is clearer.",
+        "Step 4: re-run the audit to confirm risk metrics improved and no new duplication was introduced."
+      ],
+      "validation": [
+        "Run unit tests + integration tests for the affected module.",
+        "If no tests exist: add targeted tests for the refactored paths and compare outputs against pre-change behavior.",
+        "Run formatting/linting and ensure no public API contracts changed unintentionally."
+      ],
+      "rollback": "Revert to the last green commit; keep the characterization tests as a safety net."
+    }
+  ],
+  "duplicates": [
+    {
+      "hash": "ffb1ecafe173ea099fb0d3509fa61e0fc8ebcfe7",
+      "count": 2,
+      "files": [
+        "tests/fixtures/runtime/deepseek-fixture-manifest.json:1",
+        "tests/fixtures/runtime/openai-fixture-manifest.json:1"
+      ],
+      "snippet": "{\n\"x\": \"x\",\n\"x\": [\n{\n\"x\": \"x\",\n\"x\": \"x\",\n\"x\": \"x\"\n},\n{\n\"x\": \"x\","
+    }
+  ],
+  "recommendations": [
+    "Some duplicated logic exists; review top duplicate groups for safe extraction.",
+    "High-priority fix list: 15 files with major risk indicators (long files / large magic number usage)."
+  ]
+}

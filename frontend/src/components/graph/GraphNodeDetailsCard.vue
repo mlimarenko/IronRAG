@@ -64,6 +64,14 @@ const graphQualitySummary = computed(() => {
   if (props.detail.convergenceStatus && props.detail.convergenceStatus !== 'current') {
     lines.push(t(`graph.convergenceDescriptions.${props.detail.convergenceStatus}`))
   }
+  if (
+    props.detail.extractionRecovery &&
+    props.detail.extractionRecovery.status !== 'clean'
+  ) {
+    lines.push(
+      t(`graph.extractionRecovery.${props.detail.extractionRecovery.status}`),
+    )
+  }
   return lines
 })
 
@@ -89,6 +97,18 @@ function propertyValue(key: string, value: string): string {
     }
   }
   return value
+}
+
+function reconciliationScopeLabel(status: string, count: number): string {
+  return t(`graph.reconciliation.scope.${status}`, { count })
+}
+
+function reconciliationConfidenceLabel(status: string): string {
+  return t(`graph.reconciliation.confidence.${status}`)
+}
+
+function summaryConfidenceLabel(status: string): string {
+  return t(`graph.summary.confidence.${status}`)
 }
 
 function relationLabel(value: string): string {
@@ -126,22 +146,41 @@ function normalizeEvidenceText(value: string): string {
 }
 
 const reconciliationSummary = computed(() => {
-  if (!props.detail?.warning) {
-    return null
+  if (!props.detail) {
+    return []
   }
 
-  return [
-    props.detail.warning,
-    props.detail.pendingDeleteCount > 0
-      ? t('graph.pendingDeleteBanner', { count: props.detail.pendingDeleteCount })
-      : null,
-    props.detail.pendingUpdateCount > 0
-      ? t('graph.pendingUpdateBanner', { count: props.detail.pendingUpdateCount })
-      : null,
-  ]
-    .filter(Boolean)
-    .join(' ')
+  const lines: string[] = []
+  if (props.detail.warning) {
+    lines.push(props.detail.warning)
+  }
+  const scope = props.detail.reconciliationScope
+  if (scope) {
+    lines.push(
+      reconciliationScopeLabel(
+        scope.scopeStatus,
+        scope.affectedNodeCount + scope.affectedRelationshipCount,
+      ),
+    )
+    lines.push(
+      t('graph.reconciliation.confidenceLine', {
+        value: reconciliationConfidenceLabel(scope.confidenceStatus),
+      }),
+    )
+    if (scope.fallbackReason) {
+      lines.push(scope.fallbackReason)
+    }
+  }
+  if (props.detail.pendingDeleteCount > 0) {
+    lines.push(t('graph.pendingDeleteBanner', { count: props.detail.pendingDeleteCount }))
+  }
+  if (props.detail.pendingUpdateCount > 0) {
+    lines.push(t('graph.pendingUpdateBanner', { count: props.detail.pendingUpdateCount }))
+  }
+  return lines
 })
+
+const canonicalSummary = computed(() => props.detail?.canonicalSummary ?? null)
 </script>
 
 <template>
@@ -172,10 +211,45 @@ const reconciliationSummary = computed(() => {
       <p>{{ detailSummary }}</p>
 
       <div
-        v-if="reconciliationSummary"
+        v-if="canonicalSummary"
+        class="rr-graph-node-card__summary"
+      >
+        <div class="rr-graph-node-card__summary-meta">
+          <strong>{{ $t('graph.summary.title') }}</strong>
+          <span class="rr-graph-node-card__metric">
+            {{
+              $t('graph.summary.confidenceLine', {
+                value: summaryConfidenceLabel(canonicalSummary.confidenceStatus),
+              })
+            }}
+          </span>
+          <span class="rr-graph-node-card__metric">
+            {{
+              $t('graph.summary.supportCount', {
+                count: canonicalSummary.supportCount,
+              })
+            }}
+          </span>
+        </div>
+        <p>{{ canonicalSummary.text }}</p>
+        <p
+          v-if="canonicalSummary.warning"
+          class="rr-graph-node-card__summary-warning"
+        >
+          {{ canonicalSummary.warning }}
+        </p>
+      </div>
+
+      <div
+        v-if="reconciliationSummary.length"
         class="rr-graph-node-card__warning"
       >
-        {{ reconciliationSummary }}
+        <p
+          v-for="line in reconciliationSummary"
+          :key="line"
+        >
+          {{ line }}
+        </p>
       </div>
 
       <div

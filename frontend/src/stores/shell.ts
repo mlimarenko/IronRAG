@@ -1,107 +1,259 @@
 import { defineStore } from 'pinia'
-import type { ShellContextResponse } from 'src/models/ui/shell'
+import type {
+  LibraryOption,
+  ShellCapabilities,
+  ShellContextResponse,
+  ShellCurrentUser,
+  ShellGrant,
+  ShellWorkspaceMembership,
+  WorkspaceOption,
+} from 'src/models/ui/shell'
 import {
+  buildShellContext,
   createLibrary,
   createWorkspace,
-  fetchShellContext,
-  updateShellContext,
+  fetchLibrariesForWorkspace,
+  fetchShellBootstrap,
 } from 'src/services/api/shell'
 import { useSessionStore } from './session'
 
+const ACTIVE_WORKSPACE_STORAGE_KEY = 'rustrag.shell.activeWorkspaceId'
+const ACTIVE_LIBRARY_STORAGE_KEY = 'rustrag.shell.activeLibraryId'
+
 interface ShellState {
   context: ShellContextResponse | null
+  viewer: ShellCurrentUser | null
+  workspaces: WorkspaceOption[]
+  libraries: LibraryOption[]
+  activeWorkspace: WorkspaceOption | null
+  activeLibrary: LibraryOption | null
+  workspaceMemberships: ShellWorkspaceMembership[]
+  effectiveGrants: ShellGrant[]
+  capabilities: ShellCapabilities | null
   loading: boolean
   error: string | null
   showCreateWorkspace: boolean
   showCreateLibrary: boolean
 }
 
+function readStoredSelection(key: string): string | null {
+  if (typeof window === 'undefined') {
+    return null
+  }
+  return window.localStorage.getItem(key)
+}
+
+function writeStoredSelection(key: string, value: string | null): void {
+  if (typeof window === 'undefined') {
+    return
+  }
+  if (!value) {
+    window.localStorage.removeItem(key)
+    return
+  }
+  window.localStorage.setItem(key, value)
+}
+
+function deriveLibraryCreateCapability(
+  capabilities: ShellCapabilities | null,
+  workspaceId: string | null,
+): boolean {
+  if (!capabilities || !workspaceId) {
+    return false
+  }
+
+  return (
+    capabilities.canCreateWorkspace || capabilities.creatableWorkspaceIds.includes(workspaceId)
+  )
+}
+
 export const useShellStore = defineStore('shell', {
   state: (): ShellState => ({
     context: null,
+    viewer: null,
+    workspaces: [],
+    libraries: [],
+    activeWorkspace: null,
+    activeLibrary: null,
+    workspaceMemberships: [],
+    effectiveGrants: [],
+    capabilities: null,
     loading: false,
     error: null,
     showCreateWorkspace: false,
     showCreateLibrary: false,
   }),
   getters: {
-    currentUser: (state) => state.context?.currentUser ?? null,
+    currentUser: (state) => state.viewer,
+    adminEnabled: (state) => state.capabilities?.adminEnabled ?? false,
+    canCreateWorkspace: (state) => state.capabilities?.canCreateWorkspace ?? false,
+    canCreateLibrary: (state) =>
+      deriveLibraryCreateCapability(state.capabilities, state.activeWorkspace?.id ?? null),
+    hasWorkspaceOptions: (state) => state.workspaces.length > 0,
+    hasLibraryOptions: (state) => state.libraries.length > 0,
+    hasBootstrapResources(): boolean {
+      return this.hasWorkspaceOptions && this.hasLibraryOptions
+    },
   },
   actions: {
     clearContext(): void {
       this.context = null
+      this.viewer = null
+      this.workspaces = []
+      this.libraries = []
+      this.activeWorkspace = null
+      this.activeLibrary = null
+      this.workspaceMemberships = []
+      this.effectiveGrants = []
+      this.capabilities = null
       this.error = null
       this.loading = false
       this.showCreateWorkspace = false
       this.showCreateLibrary = false
+      writeStoredSelection(ACTIVE_WORKSPACE_STORAGE_KEY, null)
+      writeStoredSelection(ACTIVE_LIBRARY_STORAGE_KEY, null)
     },
     syncClientLocale(locale: 'en' | 'ru'): void {
       const sessionStore = useSessionStore()
       sessionStore.setLocale(locale)
     },
-    async loadContext(): Promise<void> {
+    refreshContext(locale: 'en' | 'ru'): void {
+      if (!this.viewer || !this.capabilities) {
+        this.context = null
+        return
+      }
+
+      this.context = buildShellContext(
+        {
+          currentUser: this.viewer,
+          workspaces: this.workspaces,
+          activeWorkspace: this.activeWorkspace,
+          libraries: this.libraries,
+          activeLibrary: this.activeLibrary,
+          workspaceMemberships: this.workspaceMemberships,
+          effectiveGrants: this.effectiveGrants,
+          capabilities: this.capabilities,
+        },
+        locale,
+      )
+    },
+    async loadContext(options?: {
+      preferredWorkspaceId?: string | null
+      preferredLibraryId?: string | null
+    }): Promise<void> {
+      const sessionStore = useSessionStore()
       this.loading = true
       try {
-        this.context = await fetchShellContext()
-        this.syncClientLocale(this.context.locale)
+        const preferredWorkspaceId =
+          options?.preferredWorkspaceId ??
+          readStoredSelection(ACTIVE_WORKSPACE_STORAGE_KEY) ??
+          null
+        const preferredLibraryId =
+          options?.preferredLibraryId ??
+          readStoredSelection(ACTIVE_LIBRARY_STORAGE_KEY) ??
+          null
+        const bootstrap = await fetchShellBootstrap({
+          preferredWorkspaceId,
+          preferredLibraryId,
+        })
+
+        this.viewer = bootstrap.currentUser
+        this.workspaces = bootstrap.workspaces
+        this.activeWorkspace = bootstrap.activeWorkspace
+        this.libraries = bootstrap.libraries
+        this.activeLibrary = bootstrap.activeLibrary
+        this.workspaceMemberships = bootstrap.workspaceMemberships
+        this.effectiveGrants = bootstrap.effectiveGrants
+        this.capabilities = bootstrap.capabilities
+        writeStoredSelection(ACTIVE_WORKSPACE_STORAGE_KEY, this.activeWorkspace?.id ?? null)
+        writeStoredSelection(ACTIVE_LIBRARY_STORAGE_KEY, this.activeLibrary?.id ?? null)
+        this.refreshContext(sessionStore.locale)
+        this.syncClientLocale(sessionStore.locale)
         this.error = null
       } catch (error) {
-        this.error = error instanceof Error ? error.message : 'Failed to load workspace context'
+        this.context = null
+        this.error = error instanceof Error ? error.message : 'Failed to load shell context'
         throw error
       } finally {
         this.loading = false
       }
     },
     async switchWorkspace(workspaceId: string): Promise<void> {
+      const sessionStore = useSessionStore()
+      const workspace = this.workspaces.find((item) => item.id === workspaceId) ?? null
+
+      this.activeWorkspace = workspace
+      writeStoredSelection(ACTIVE_WORKSPACE_STORAGE_KEY, workspace?.id ?? null)
+      writeStoredSelection(ACTIVE_LIBRARY_STORAGE_KEY, null)
+
+      if (!workspace) {
+        this.libraries = []
+        this.activeLibrary = null
+        this.refreshContext(sessionStore.locale)
+        return
+      }
+
       try {
-        this.context = await updateShellContext({ workspaceId })
-        this.syncClientLocale(this.context.locale)
+        this.libraries = await fetchLibrariesForWorkspace(workspace.id)
+        this.activeLibrary = this.libraries[0] ?? null
+        const activeLibraryId = this.libraries[0]?.id ?? null
+        writeStoredSelection(ACTIVE_LIBRARY_STORAGE_KEY, activeLibraryId)
+        this.refreshContext(sessionStore.locale)
         this.error = null
       } catch (error) {
+        this.activeLibrary = null
+        this.context = null
         this.error = error instanceof Error ? error.message : 'Failed to switch workspace'
       }
     },
-    async switchLibrary(libraryId: string): Promise<void> {
-      try {
-        this.context = await updateShellContext({ libraryId })
-        this.syncClientLocale(this.context.locale)
-        this.error = null
-      } catch (error) {
-        this.error = error instanceof Error ? error.message : 'Failed to switch library'
-      }
+    switchLibrary(libraryId: string): void {
+      const sessionStore = useSessionStore()
+      this.activeLibrary = this.libraries.find((item) => item.id === libraryId) ?? null
+      const activeLibraryId = this.activeLibrary ? this.activeLibrary.id : null
+      writeStoredSelection(ACTIVE_LIBRARY_STORAGE_KEY, activeLibraryId)
+      this.refreshContext(sessionStore.locale)
+      this.error = null
     },
-    async switchLocale(locale: 'en' | 'ru'): Promise<void> {
-      try {
-        this.context = await updateShellContext({ locale })
-        this.syncClientLocale(this.context.locale)
-        this.error = null
-      } catch (error) {
-        this.error = error instanceof Error ? error.message : 'Failed to switch locale'
-      }
+    switchLocale(locale: 'en' | 'ru'): void {
+      this.syncClientLocale(locale)
+      this.refreshContext(locale)
+      this.error = null
     },
     async submitWorkspace(name: string): Promise<void> {
+      if (!this.capabilities?.canCreateWorkspace) {
+        this.error = 'You do not have permission to create a workspace'
+        return
+      }
+
       try {
         const workspace = await createWorkspace(name)
         this.showCreateWorkspace = false
-        this.context = await updateShellContext({ workspaceId: workspace.id })
-        this.syncClientLocale(this.context.locale)
+        await this.loadContext({ preferredWorkspaceId: workspace.id })
         this.error = null
       } catch (error) {
         this.error = error instanceof Error ? error.message : 'Failed to create workspace'
       }
     },
     async submitLibrary(name: string): Promise<void> {
-      if (!this.context) {
+      if (!this.activeWorkspace) {
+        this.error = 'Select a workspace before creating a library'
         return
       }
+      if (!deriveLibraryCreateCapability(this.capabilities, this.activeWorkspace.id)) {
+        this.error = 'You do not have permission to create a library in this workspace'
+        return
+      }
+
       try {
         const library = await createLibrary({
-          workspaceId: this.context.activeWorkspace.id,
+          workspaceId: this.activeWorkspace.id,
           name,
         })
         this.showCreateLibrary = false
-        this.context = await updateShellContext({ libraryId: library.id })
-        this.syncClientLocale(this.context.locale)
+        await this.loadContext({
+          preferredWorkspaceId: this.activeWorkspace.id,
+          preferredLibraryId: library.id,
+        })
         this.error = null
       } catch (error) {
         this.error = error instanceof Error ? error.message : 'Failed to create library'

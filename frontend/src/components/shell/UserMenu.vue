@@ -2,7 +2,7 @@
 defineProps<{
   initials: string
   displayName: string
-  roleLabel: string
+  accessLabel: string
 }>()
 
 const emit = defineEmits<{
@@ -15,7 +15,7 @@ const emit = defineEmits<{
     <span class="rr-user-chip__avatar">{{ initials }}</span>
     <span class="rr-user-chip__meta">
       <strong>{{ displayName }}</strong>
-      <span>{{ roleLabel }}</span>
+      <span>{{ accessLabel }}</span>
     </span>
     <button
       class="rr-user-chip__logout"

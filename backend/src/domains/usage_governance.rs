@@ -54,6 +54,19 @@ pub struct UsageStageOwnership {
     pub attribution_source: StageAttributionSource,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryUsageAttribution {
+    pub requested_mode: String,
+    pub planned_mode: String,
+    pub intent_cache_status: String,
+    pub rerank_status: String,
+    pub rerank_candidate_count: usize,
+    pub reranked_candidate_count: Option<usize>,
+    pub context_assembly_status: String,
+    pub reference_group_count: usize,
+    pub warning_kind: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeStageBillingPolicy {
     Billable { capability: PricingCapability, billing_unit: PricingBillingUnit },
@@ -107,6 +120,25 @@ pub fn decorate_payload_with_stage_ownership(
         None => serde_json::json!({
             "value": payload,
             "stage_ownership": ownership,
+        }),
+    }
+}
+
+#[must_use]
+pub fn decorate_payload_with_query_usage_attribution(
+    mut payload: serde_json::Value,
+    attribution: &QueryUsageAttribution,
+) -> serde_json::Value {
+    let attribution_json =
+        serde_json::to_value(attribution).unwrap_or_else(|_| serde_json::json!({}));
+    match payload.as_object_mut() {
+        Some(object) => {
+            object.insert("query_usage_attribution".to_string(), attribution_json);
+            payload
+        }
+        None => serde_json::json!({
+            "value": payload,
+            "query_usage_attribution": attribution,
         }),
     }
 }

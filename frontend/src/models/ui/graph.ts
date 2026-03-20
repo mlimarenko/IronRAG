@@ -8,62 +8,19 @@ export type GraphLayoutMode =
   | 'clusters'
   | 'islands'
   | 'spiral'
-export type GraphGroundingStatus = 'grounded' | 'partial' | 'weak' | 'none'
 export type GraphConvergenceStatus = 'partial' | 'current' | 'degraded'
-export type QueryIntentCacheStatus = 'miss' | 'hit_fresh' | 'hit_stale_recomputed'
-export type GraphRerankStatus = 'not_applicable' | 'applied' | 'skipped' | 'failed'
-export type GraphContextAssemblyStatus =
-  | 'document_only'
-  | 'graph_only'
-  | 'balanced_mixed'
-  | 'mixed_skewed'
-
-import type {
-  ChatFocusContext,
-  ChatQueryMode,
-  ChatSessionDetail,
-  ChatSessionSettings,
-  ChatSessionSummary,
-  ChatThreadMessage,
-  ChatThreadProvider,
-  ChatThreadReference,
-} from './chat'
-
-export type {
-  ChatFocusContext,
-  ChatSessionDetail,
-  ChatSessionSettings,
-  ChatSessionSummary,
-} from './chat'
-
-export type GraphQueryMode = ChatQueryMode
-
-export interface QueryIntentKeywords {
-  highLevel: string[]
-  lowLevel: string[]
-}
-
-export interface QueryPlanningMetadata {
-  requestedMode: GraphQueryMode
-  plannedMode: GraphQueryMode
-  intentCacheStatus: QueryIntentCacheStatus
-  keywords: QueryIntentKeywords
-  warnings: string[]
-}
-
-export interface RerankMetadata {
-  status: GraphRerankStatus
-  candidateCount: number
-  reorderedCount: number | null
-}
-
-export interface ContextAssemblyMetadata {
-  status: GraphContextAssemblyStatus
-  warning: string | null
-}
+export type GraphMutationImpactScopeStatus =
+  | 'pending'
+  | 'targeted'
+  | 'fallback_broad'
+  | 'completed'
+  | 'failed'
+export type GraphMutationImpactScopeConfidence = 'high' | 'medium' | 'low'
+export type GraphSummaryConfidenceStatus = 'strong' | 'partial' | 'weak' | 'conflicted'
 
 export interface GraphNode {
   id: string
+  canonicalKey?: string | null
   label: string
   nodeType: GraphNodeType
   secondaryLabel: string | null
@@ -73,6 +30,7 @@ export interface GraphNode {
 
 export interface GraphEdge {
   id: string
+  canonicalKey?: string | null
   source: string
   target: string
   relationType: string
@@ -85,38 +43,11 @@ export interface GraphLegendItem {
   label: string
 }
 
-export interface GraphAssistantModeDescriptor {
-  mode: GraphQueryMode
-  labelKey: string
-  shortDescriptionKey: string
-  bestForKey: string
-  cautionKey: string | null
-  exampleQuestionKey: string
-}
-
-export interface GraphAssistantConfig {
-  scopeHintKey: string
-  defaultPromptKeys: string[]
-  modes: GraphAssistantModeDescriptor[]
-}
-
-export interface GraphAssistantState {
-  title: string
-  subtitle: string
-  prompts: string[]
-  disclaimer: string
-  sessionId: string | null
-  recentSessions: ChatSessionSummary[]
-  activeSession: ChatSessionDetail | null
-  settingsSummary: ChatSessionSettings | null
-  focusContext: ChatFocusContext | null
-  messages: ChatThreadMessage[]
-}
-
 export interface GraphSurfaceResponse {
   graphStatus: GraphStatus
   convergenceStatus: GraphConvergenceStatus | null
   projectionVersion: number
+  projectionState?: string | null
   nodeCount: number
   relationCount: number
   filteredArtifactCount: number | null
@@ -125,7 +56,6 @@ export interface GraphSurfaceResponse {
   nodes: GraphNode[]
   edges: GraphEdge[]
   legend: GraphLegendItem[]
-  assistant: GraphAssistantState
 }
 
 export interface GraphSearchHit {
@@ -133,6 +63,29 @@ export interface GraphSearchHit {
   label: string
   nodeType: GraphNodeType
   secondaryLabel: string | null
+  preview?: string | null
+}
+
+export interface GraphExtractionRecoverySummary {
+  status: 'clean' | 'recovered' | 'partial' | 'failed'
+  parserRepairApplied: boolean
+  secondPassApplied: boolean
+  warning: string | null
+}
+
+export interface GraphMutationImpactScopeSummary {
+  scopeStatus: GraphMutationImpactScopeStatus
+  confidenceStatus: GraphMutationImpactScopeConfidence
+  affectedNodeCount: number
+  affectedRelationshipCount: number
+  fallbackReason: string | null
+}
+
+export interface GraphCanonicalSummary {
+  text: string
+  confidenceStatus: GraphSummaryConfidenceStatus
+  supportCount: number
+  warning: string | null
 }
 
 export interface GraphNodeDetail {
@@ -146,12 +99,15 @@ export interface GraphNodeDetail {
   relatedEdges: GraphRelatedEdge[]
   evidence: GraphEvidence[]
   relationCount: number
+  canonicalSummary: GraphCanonicalSummary | null
+  reconciliationScope: GraphMutationImpactScopeSummary | null
   reconciliationStatus: string | null
   convergenceStatus: GraphConvergenceStatus | null
   pendingUpdateCount: number
   pendingDeleteCount: number
   activeProvenanceOnly: boolean
   filteredArtifactCount: number | null
+  extractionRecovery: GraphExtractionRecoverySummary | null
   warning: string | null
 }
 
@@ -175,33 +131,6 @@ export interface GraphEvidence {
   activeProvenanceOnly: boolean
 }
 
-export type GraphAssistantMessage = ChatThreadMessage
-export type GraphAssistantProvider = ChatThreadProvider
-export type GraphAssistantReference = ChatThreadReference
-
-export interface GraphAssistantAnswer {
-  sessionId: string
-  userMessageId: string
-  assistantMessageId: string
-  queryId: string
-  effectiveMode: GraphQueryMode
-  sessionSummary: ChatSessionDetail | null
-  settingsSummary: ChatSessionSettings | null
-  userMessage: GraphAssistantMessage
-  assistantMessage: GraphAssistantMessage
-  answer: string
-  references: string[]
-  structuredReferences: GraphAssistantReference[]
-  mode: GraphQueryMode
-  groundingStatus: GraphGroundingStatus
-  provider: GraphAssistantProvider
-  planning: QueryPlanningMetadata
-  rerank: RerankMetadata
-  contextAssembly: ContextAssemblyMetadata
-  warning: string | null
-  warningKind: string | null
-}
-
 export interface GraphDiagnostics {
   graphStatus: GraphStatus
   reconciliationStatus: string
@@ -214,6 +143,7 @@ export interface GraphDiagnostics {
   readyNoGraphCount: number
   pendingUpdateCount: number
   pendingDeleteCount: number
+  activeMutationScope: GraphMutationImpactScopeSummary | null
   filteredArtifactCount: number | null
   filteredEmptyRelationCount: number | null
   filteredDegenerateLoopCount: number | null

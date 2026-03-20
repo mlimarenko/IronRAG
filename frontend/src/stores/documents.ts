@@ -2,15 +2,24 @@ import { defineStore } from 'pinia'
 import type {
   DocumentAccountingStatus,
   DocumentActivityStatus,
+  DocumentGraphHealthSummary,
+  DocumentCollectionSettlementSummary,
+  DocumentCollectionWarning,
   DocumentDetail,
   DocumentFilterValues,
   DocumentMutationAccepted,
   DocumentMutationStatus,
+  DocumentProviderFailureSummary,
+  DocumentQueueWaitingReason,
   DocumentRow,
   DocumentStatus,
+  DocumentTerminalOutcomeSummary,
   DocumentUploadFailure,
+  DocumentsWorkspaceNotice,
+  DocumentsWorkspaceSummary,
   DocumentsSurfaceResponse,
 } from 'src/models/ui/documents'
+import type { GraphDiagnostics } from 'src/models/ui/graph'
 import {
   appendDocumentItem,
   deleteDocumentItem,
@@ -22,6 +31,8 @@ import {
   retryDocumentItem,
   uploadDocument,
 } from 'src/services/api/documents'
+import { fetchGraphDiagnostics } from 'src/services/api/graph'
+import { i18n } from 'src/lib/i18n'
 import { useGraphStore } from './graph'
 import { useShellStore } from './shell'
 
@@ -44,6 +55,14 @@ interface DocumentsState {
   appendDialogDocumentId: string | null
   replaceDialogDocumentId: string | null
   uploadFailures: DocumentUploadFailure[]
+  informationalWarnings: DocumentCollectionWarning[]
+  degradedWarnings: DocumentCollectionWarning[]
+  settlementSnapshot: DocumentCollectionSettlementSummary | null
+  terminalOutcomeSnapshot: DocumentTerminalOutcomeSummary | null
+  graphHealthSnapshot: DocumentGraphHealthSummary | null
+  graphDiagnostics: GraphDiagnostics | null
+  providerFailureDetail: DocumentProviderFailureSummary | null
+  workspaceSummary: DocumentsWorkspaceSummary | null
 }
 
 const LOCAL_UPLOAD_CONCURRENCY = 3
@@ -83,7 +102,21 @@ function detailNeedsPolling(detail: DocumentDetail | null): boolean {
   if (!detail) {
     return false
   }
-  return needsActivityPolling(detail.activityStatus) || hasPendingMutation(detail.mutation.status)
+  const recoveryStatus = detail.extractedStats.recovery?.status ?? null
+  const hasLiveRecoveryState =
+    detail.status === 'processing' &&
+    (recoveryStatus === 'recovered' || recoveryStatus === 'partial')
+  const reconciliationScopeStatus = detail.reconciliationScope?.scopeStatus ?? null
+  const hasLiveReconciliationState =
+    reconciliationScopeStatus === 'pending' ||
+    reconciliationScopeStatus === 'targeted' ||
+    reconciliationScopeStatus === 'fallback_broad'
+  return (
+    needsActivityPolling(detail.activityStatus) ||
+    hasPendingMutation(detail.mutation.status) ||
+    hasLiveRecoveryState ||
+    hasLiveReconciliationState
+  )
 }
 
 function resolveRefreshInterval(
@@ -91,7 +124,13 @@ function resolveRefreshInterval(
   detail: DocumentDetail | null,
   detailOpen: boolean,
   activeBacklogCount: number,
+  queueWaitingReason: DocumentQueueWaitingReason | null,
+  terminalOutcome: DocumentTerminalOutcomeSummary | null,
+  collectionGraphPollIntervalMs: number | null,
 ): number {
+  if (terminalOutcome && terminalOutcome.terminalState !== 'live_in_flight') {
+    return 0
+  }
   const pollingRows = rows.filter(rowNeedsPolling)
   const pollDetail = detailOpen && detailNeedsPolling(detail)
   const effectiveBacklogCount = Math.max(activeBacklogCount, pollingRows.length)
@@ -104,7 +143,23 @@ function resolveRefreshInterval(
   if (watchCadence) {
     return FAST_REFRESH_INTERVAL_MS
   }
+  if (queueWaitingReason === 'isolated_capacity_wait') {
+    return WATCH_REFRESH_INTERVAL_MS
+  }
   const backlogForCadence = effectiveBacklogCount + (pollDetail ? 1 : 0)
+  const graphPollIntervalMs =
+    detailOpen && detail?.graphThroughput
+      ? detail.graphThroughput.recommendedPollIntervalMs
+      : collectionGraphPollIntervalMs
+  if (graphPollIntervalMs !== null && graphPollIntervalMs > 0) {
+    if (backlogForCadence >= THROTTLED_BACKLOG_THRESHOLD) {
+      return Math.max(graphPollIntervalMs, BACKLOG_REFRESH_INTERVAL_MS)
+    }
+    if (backlogForCadence >= WATCH_BACKLOG_THRESHOLD) {
+      return Math.max(graphPollIntervalMs, WATCH_REFRESH_INTERVAL_MS)
+    }
+    return Math.max(graphPollIntervalMs, FAST_REFRESH_INTERVAL_MS)
+  }
   if (backlogForCadence >= THROTTLED_BACKLOG_THRESHOLD) {
     return BACKLOG_REFRESH_INTERVAL_MS
   }
@@ -112,6 +167,50 @@ function resolveRefreshInterval(
     return WATCH_REFRESH_INTERVAL_MS
   }
   return FAST_REFRESH_INTERVAL_MS
+}
+
+function resolveGraphDiagnosticsRefreshInterval(
+  surface: DocumentsSurfaceResponse | null,
+  graphHealth: DocumentGraphHealthSummary | null,
+  graphDiagnostics: GraphDiagnostics | null,
+): number {
+  if (!surface) {
+    return 0
+  }
+  const graphStatus = graphDiagnostics?.graphStatus ?? surface.graphStatus
+  const projectionHealth = graphHealth?.projectionHealth ?? null
+  const freshness = graphDiagnostics?.projectionFreshness ?? null
+  const activeBacklogCount = surface.diagnostics.activeBacklogCount
+
+  if (
+    graphStatus === 'empty' &&
+    !graphHealth &&
+    activeBacklogCount === 0 &&
+    surface.rebuildBacklogCount === 0
+  ) {
+    return 0
+  }
+
+  if (
+    projectionHealth === 'failed' ||
+    projectionHealth === 'retrying_contention' ||
+    freshness === 'failed'
+  ) {
+    return FAST_REFRESH_INTERVAL_MS
+  }
+
+  if (
+    freshness === 'stale' ||
+    freshness === 'lagging' ||
+    graphStatus === 'building' ||
+    graphStatus === 'stale' ||
+    activeBacklogCount > 0 ||
+    surface.rebuildBacklogCount > 0
+  ) {
+    return WATCH_REFRESH_INTERVAL_MS
+  }
+
+  return 0
 }
 
 function createEmptySurface(): DocumentsSurfaceResponse {
@@ -162,11 +261,64 @@ function createEmptySurface(): DocumentsSurfaceResponse {
       queueBacklogCount: 0,
       processingBacklogCount: 0,
       activeBacklogCount: 0,
+      queueIsolation: null,
+      graphThroughput: null,
+      settlement: null,
+      terminalOutcome: null,
+      graphHealth: null,
+      warnings: [],
       perStage: [],
       perFormat: [],
     },
+    workspace: null,
     rows: [],
   }
+}
+
+function splitCollectionWarnings(
+  warnings: DocumentCollectionWarning[],
+): {
+  informationalWarnings: DocumentCollectionWarning[]
+  degradedWarnings: DocumentCollectionWarning[]
+} {
+  return warnings.reduce(
+    (accumulator, warning) => {
+      if (warning.isDegraded) {
+        accumulator.degradedWarnings.push(warning)
+      } else {
+        accumulator.informationalWarnings.push(warning)
+      }
+      return accumulator
+    },
+    {
+      informationalWarnings: [] as DocumentCollectionWarning[],
+      degradedWarnings: [] as DocumentCollectionWarning[],
+    },
+  )
+}
+
+function dedupeWorkspaceNotices(notices: DocumentsWorkspaceNotice[]): DocumentsWorkspaceNotice[] {
+  const seen = new Set<string>()
+  return notices.filter((notice) => {
+    const key = `${notice.kind}:${notice.title}:${notice.message}`
+    if (seen.has(key)) {
+      return false
+    }
+    seen.add(key)
+    return true
+  })
+}
+
+function residualReasonLabel(reason: string): string {
+  const key = `documents.terminal.residualReasons.${reason}`
+  const translated = i18n.global.t(key)
+  return translated === key ? reason : translated
+}
+
+function providerFailureClassLabel(value: string): string {
+  const key = `documents.providerFailureClass.${value}`
+  const translated = i18n.global.t(key)
+  return translated === key ? value : translated
 }
 
 function summarizeRows(rows: DocumentRow[]) {
@@ -266,6 +418,7 @@ function syncDetailContributionSummaryFromRow(
     currency: row.currency,
     inFlightStageCount: row.inFlightStageCount,
     missingStageCount: row.missingStageCount,
+    graphThroughput: row.graphThroughput ?? detail.graphThroughput,
     extractedStats: {
       ...detail.extractedStats,
       chunkCount: row.chunkCount ?? detail.extractedStats.chunkCount,
@@ -306,19 +459,26 @@ function inferFileType(file: File): string {
 }
 
 function createLocalUploadRow(file: File, libraryName: string): DocumentRow {
+  const localId = `local-upload:${crypto.randomUUID()}`
+  const createdAt = new Date().toISOString()
+
   return {
-    id: `local-upload:${crypto.randomUUID()}`,
+    id: localId,
     logicalDocumentId: null,
+    readabilityState: 'unreadable',
+    activeRevisionId: null,
+    readableRevisionId: null,
+    readableRevisionNo: null,
     fileName: file.name,
     fileType: inferFileType(file),
     fileSizeLabel: formatFileSizeLabel(file.size),
-    uploadedAt: new Date().toISOString(),
+    uploadedAt: createdAt,
     libraryName,
     stage: 'client_uploading',
     status: 'queued',
     progressPercent: 0,
     activityStatus: 'active',
-    lastActivityAt: new Date().toISOString(),
+    lastActivityAt: createdAt,
     stalledReason: null,
     chunkCount: null,
     graphNodeCount: null,
@@ -335,6 +495,7 @@ function createLocalUploadRow(file: File, libraryName: string): DocumentRow {
     missingStageCount: 0,
     partialHistory: false,
     partialHistoryReason: null,
+    graphThroughput: null,
     mutation: {
       kind: null,
       status: null,
@@ -345,6 +506,24 @@ function createLocalUploadRow(file: File, libraryName: string): DocumentRow {
     canReplace: false,
     canRemove: false,
     detailAvailable: false,
+    canonical: {
+      document: {
+        id: localId,
+        workspaceId: '',
+        libraryId: '',
+        externalKey: file.name,
+        documentState: 'pending_upload',
+        createdAt,
+      },
+      head: null,
+      activeRevision: null,
+      readableRevision: null,
+      latestMutation: null,
+      latestMutationItems: [],
+      latestJob: null,
+      latestAttempt: null,
+      latestAttemptStages: [],
+    },
   }
 }
 
@@ -388,6 +567,14 @@ export const useDocumentsStore = defineStore('documents', {
     appendDialogDocumentId: null,
     replaceDialogDocumentId: null,
     uploadFailures: [],
+    informationalWarnings: [],
+    degradedWarnings: [],
+    settlementSnapshot: null,
+    terminalOutcomeSnapshot: null,
+    graphHealthSnapshot: null,
+    graphDiagnostics: null,
+    providerFailureDetail: null,
+    workspaceSummary: null,
   }),
   getters: {
     filteredRows(state): DocumentRow[] {
@@ -417,12 +604,137 @@ export const useDocumentsStore = defineStore('documents', {
     replaceDialogDocument(state): DocumentRow | null {
       return state.surface?.rows.find((row) => row.id === state.replaceDialogDocumentId) ?? null
     },
+    selectedDetailGraphQuality(state):
+      | {
+          graphNodeId: string | null
+          canonicalSummaryPreview: DocumentDetail['canonicalSummaryPreview']
+          reconciliationScope: DocumentDetail['reconciliationScope']
+          extractionRecovery: DocumentDetail['extractedStats']['recovery']
+          graphStats: DocumentDetail['graphStats']
+          warningCount: number
+          normalizationStatus: string
+        }
+      | null {
+      if (!state.detail) {
+        return null
+      }
+      return {
+        graphNodeId: state.detail.graphNodeId,
+        canonicalSummaryPreview: state.detail.canonicalSummaryPreview,
+        reconciliationScope: state.detail.reconciliationScope,
+        extractionRecovery: state.detail.extractedStats.recovery,
+        graphStats: state.detail.graphStats,
+        warningCount: state.detail.extractedStats.warningCount,
+        normalizationStatus: state.detail.extractedStats.normalizationStatus,
+      }
+    },
+    selectedDetailReconciliationScope(state): DocumentDetail['reconciliationScope'] {
+      return state.detail?.reconciliationScope ?? null
+    },
+    selectedDetailCanonicalSummary(state): DocumentDetail['canonicalSummaryPreview'] {
+      return state.detail?.canonicalSummaryPreview ?? null
+    },
+    workspacePrimarySummary(state): DocumentsWorkspaceSummary['primarySummary'] | null {
+      return state.workspaceSummary?.primarySummary ?? null
+    },
+    workspaceSecondaryDiagnostics(state): DocumentsWorkspaceSummary['secondaryDiagnostics'] {
+      return state.workspaceSummary?.secondaryDiagnostics ?? []
+    },
+    workspaceNoticeGroups(state): {
+      degraded: DocumentsWorkspaceSummary['degradedNotices']
+      informational: DocumentsWorkspaceSummary['informationalNotices']
+    } {
+      const degraded = [...(state.workspaceSummary?.degradedNotices ?? [])]
+      const informational = [...(state.workspaceSummary?.informationalNotices ?? [])]
+      const terminalOutcome = state.terminalOutcomeSnapshot
+      const providerFailure = state.providerFailureDetail
+
+      if (
+        terminalOutcome?.terminalState === 'failed_with_residual_work' &&
+        terminalOutcome.residualReason
+      ) {
+        degraded.push({
+          kind: `residual:${terminalOutcome.residualReason}`,
+          title: i18n.global.t('documents.workspace.notices.residualFailure.title', {
+            reason: residualReasonLabel(terminalOutcome.residualReason),
+          }),
+          message: [
+            terminalOutcome.failedDocumentCount > 0
+              ? i18n.global.t('documents.workspace.notices.residualFailure.failedDocuments', {
+                  count: terminalOutcome.failedDocumentCount,
+                })
+              : null,
+            terminalOutcome.pendingGraphCount > 0
+              ? i18n.global.t('documents.workspace.notices.residualFailure.pendingGraph', {
+                  count: terminalOutcome.pendingGraphCount,
+                })
+              : null,
+            terminalOutcome.queuedCount > 0
+              ? i18n.global.t('documents.workspace.notices.residualFailure.queued', {
+                  count: terminalOutcome.queuedCount,
+                })
+              : null,
+            terminalOutcome.processingCount > 0
+              ? i18n.global.t('documents.workspace.notices.residualFailure.processing', {
+                  count: terminalOutcome.processingCount,
+                })
+              : null,
+          ]
+            .filter(Boolean)
+            .join(' · '),
+        })
+      }
+
+      if (terminalOutcome?.residualReason === 'provider_failure' && terminalOutcome.failedDocumentCount > 0) {
+        degraded.push({
+          kind: 'provider_failure_count',
+          title: i18n.global.t('documents.workspace.notices.providerFailure.title'),
+          message: i18n.global.t('documents.workspace.notices.providerFailure.message', {
+            count: terminalOutcome.failedDocumentCount,
+          }),
+        })
+      }
+
+      if (providerFailure) {
+        degraded.push({
+          kind: `selected_provider_failure:${providerFailure.failureClass}`,
+          title: i18n.global.t('documents.workspace.notices.selectedProviderFailure.title', {
+            failure: providerFailureClassLabel(providerFailure.failureClass),
+          }),
+          message: [
+            providerFailure.providerKind,
+            providerFailure.modelName,
+            providerFailure.requestShapeKey,
+          ]
+            .filter(Boolean)
+            .join(' · '),
+        })
+      }
+
+      return {
+        degraded: dedupeWorkspaceNotices(degraded),
+        informational: dedupeWorkspaceNotices(informational),
+      }
+    },
+    selectedProviderFailureDetail(state): DocumentProviderFailureSummary | null {
+      return state.providerFailureDetail ?? state.detail?.providerFailure ?? null
+    },
     refreshIntervalMs(state): number {
       return resolveRefreshInterval(
         state.surface?.rows ?? [],
         state.detail,
         state.detailOpen,
         state.surface?.diagnostics.activeBacklogCount ?? 0,
+        state.surface?.diagnostics.queueIsolation?.waitingReason ?? null,
+        state.terminalOutcomeSnapshot,
+        state.surface?.diagnostics.graphThroughput?.recommendedPollIntervalMs ?? null,
+      )
+    },
+    graphDiagnosticsRefreshIntervalMs(state): number {
+      return resolveGraphDiagnosticsRefreshInterval(
+        state.surface,
+        state.graphHealthSnapshot,
+        state.graphDiagnostics,
       )
     },
   },
@@ -454,16 +766,50 @@ export const useDocumentsStore = defineStore('documents', {
       this.loading = true
       this.error = null
       try {
+        const shellStore = useShellStore()
+        const activeWorkspace = shellStore.activeWorkspace
+        const activeLibrary = shellStore.activeLibrary
+
+        if (!activeWorkspace || !activeLibrary) {
+          this.surface = createEmptySurface()
+          this.informationalWarnings = []
+          this.degradedWarnings = []
+          this.settlementSnapshot = null
+          this.terminalOutcomeSnapshot = null
+          this.graphHealthSnapshot = null
+          this.workspaceSummary = null
+          this.providerFailureDetail = null
+          this.graphDiagnostics = null
+          return
+        }
+
         this.surface = mergeLocalUploadRows(await fetchDocumentsSurface(), this.localUploadRows)
+        const warningChannels = splitCollectionWarnings(this.surface.diagnostics.warnings)
+        this.informationalWarnings = warningChannels.informationalWarnings
+        this.degradedWarnings = warningChannels.degradedWarnings
+        this.settlementSnapshot = this.surface.diagnostics.settlement
+        this.terminalOutcomeSnapshot = this.surface.diagnostics.terminalOutcome
+        this.graphHealthSnapshot = this.surface.diagnostics.graphHealth
+        this.workspaceSummary = this.surface.workspace
         this.detail = syncDetailContributionSummaryFromRow(
           this.detail,
           this.surface.rows.find((row) => row.id === this.detail?.id),
         )
+        this.providerFailureDetail = this.detail?.providerFailure ?? null
+        if (this.graphDiagnosticsRefreshIntervalMs > 0 || this.graphDiagnostics === null) {
+          await this.loadGraphDiagnostics({ silent: true }).catch(() => undefined)
+        }
         if (options?.syncDetail) {
           await this.syncOpenDetail().catch(() => undefined)
         }
       } catch (error) {
         this.error = error instanceof Error ? error.message : 'Failed to load documents surface'
+        this.settlementSnapshot = null
+        this.terminalOutcomeSnapshot = null
+        this.graphHealthSnapshot = null
+        this.graphDiagnostics = null
+        this.providerFailureDetail = null
+        this.workspaceSummary = null
         throw error
       } finally {
         this.loading = false
@@ -481,6 +827,8 @@ export const useDocumentsStore = defineStore('documents', {
         } else if (!options?.silent) {
           this.detail = detail
         }
+        this.providerFailureDetail = detail.providerFailure
+        this.graphHealthSnapshot = detail.collectionDiagnostics?.graphHealth ?? this.graphHealthSnapshot
         return detail
       } catch (error) {
         this.detailError =
@@ -488,6 +836,7 @@ export const useDocumentsStore = defineStore('documents', {
         if (!options?.silent) {
           this.detail = null
         }
+        this.providerFailureDetail = null
         throw error
       } finally {
         if (!options?.silent) {
@@ -503,7 +852,18 @@ export const useDocumentsStore = defineStore('documents', {
       const detail = await fetchDocumentDetail(selectedId)
       if (this.detail.id === selectedId) {
         this.detail = detail
+        this.providerFailureDetail = detail.providerFailure
+        this.graphHealthSnapshot = detail.collectionDiagnostics?.graphHealth ?? this.graphHealthSnapshot
         this.detailError = null
+      }
+    },
+    async loadGraphDiagnostics(options?: { silent?: boolean }): Promise<void> {
+      try {
+        this.graphDiagnostics = await fetchGraphDiagnostics()
+      } catch (error) {
+        if (!options?.silent) {
+          throw error
+        }
       }
     },
     async uploadFiles(files: File[]): Promise<void> {
@@ -518,8 +878,15 @@ export const useDocumentsStore = defineStore('documents', {
         loadSurface: (libraryId: string, options?: { preserveUi?: boolean }) => Promise<void>
       }
       const shellStore = useShellStore()
-      const libraryId = shellStore.context?.activeLibrary.id
-      const libraryName = shellStore.context?.activeLibrary.name ?? ''
+      const activeWorkspace = shellStore.activeWorkspace
+      const activeLibrary = shellStore.activeLibrary
+      const libraryId = activeLibrary?.id ?? null
+      const libraryName = activeLibrary?.name ?? ''
+      if (!activeWorkspace || !activeLibrary) {
+        this.uploadLoading = false
+        this.error = 'Active workspace and library are required before uploading documents'
+        return
+      }
       const placeholders = files.map((file) => createLocalUploadRow(file, libraryName))
       const queuedFiles: { file: File; placeholderId: string }[] = placeholders.map(
         (placeholder, index) => ({
@@ -574,6 +941,7 @@ export const useDocumentsStore = defineStore('documents', {
     },
     closeDetail(): void {
       this.detailOpen = false
+      this.providerFailureDetail = null
     },
     openAppendDialog(id: string): void {
       this.replaceDialogDocumentId = null
@@ -593,7 +961,7 @@ export const useDocumentsStore = defineStore('documents', {
       const graphStore = useGraphStore() as {
         loadSurface: (libraryId: string, options?: { preserveUi?: boolean }) => Promise<void>
       }
-      const libraryId = useShellStore().context?.activeLibrary.id
+      const libraryId = useShellStore().activeLibrary?.id ?? null
       await retryDocumentItem(id)
       await this.loadSurface({ syncDetail: true })
       if (libraryId) {
@@ -607,7 +975,7 @@ export const useDocumentsStore = defineStore('documents', {
       const graphStore = useGraphStore() as {
         loadSurface: (libraryId: string, options?: { preserveUi?: boolean }) => Promise<void>
       }
-      const libraryId = useShellStore().context?.activeLibrary.id
+      const libraryId = useShellStore().activeLibrary?.id ?? null
       await deleteDocumentItem(id)
       await this.loadSurface({ syncDetail: true })
       if (libraryId) {
@@ -626,7 +994,7 @@ export const useDocumentsStore = defineStore('documents', {
       const graphStore = useGraphStore() as {
         loadSurface: (libraryId: string, options?: { preserveUi?: boolean }) => Promise<void>
       }
-      const libraryId = useShellStore().context?.activeLibrary.id
+      const libraryId = useShellStore().activeLibrary?.id ?? null
       await reprocessDocumentItem(id)
       await this.loadSurface({ syncDetail: true })
       if (libraryId) {
@@ -641,7 +1009,7 @@ export const useDocumentsStore = defineStore('documents', {
       const graphStore = useGraphStore() as {
         loadSurface: (libraryId: string, options?: { preserveUi?: boolean }) => Promise<void>
       }
-      const libraryId = shellStore.context?.activeLibrary.id
+      const libraryId = shellStore.activeLibrary?.id ?? null
       if (!libraryId) {
         throw new Error('Active library is not selected')
       }
@@ -669,7 +1037,7 @@ export const useDocumentsStore = defineStore('documents', {
       const graphStore = useGraphStore() as {
         loadSurface: (libraryId: string, options?: { preserveUi?: boolean }) => Promise<void>
       }
-      const libraryId = shellStore.context?.activeLibrary.id
+      const libraryId = shellStore.activeLibrary?.id ?? null
       if (!libraryId) {
         throw new Error('Active library is not selected')
       }

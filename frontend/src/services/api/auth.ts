@@ -2,44 +2,34 @@ import type { LoginPayload, UiSessionResponse } from 'src/models/ui/auth'
 import { apiHttp, unwrap } from './http'
 
 interface RawSessionUser {
-  id: string
+  principalId: string
   email: string
-  display_name: string
-  role_label: string
-  initials: string
+  displayName: string
 }
 
 interface RawSessionResponse {
-  session_id: string
-  locale: 'en' | 'ru'
-  active_workspace_id: string | null
-  active_library_id: string | null
-  expires_at: string
+  sessionId: string
+  expiresAt: string
   user: RawSessionUser
 }
 
 function mapSession(response: RawSessionResponse): UiSessionResponse {
   return {
-    sessionId: response.session_id,
-    locale: response.locale,
-    activeWorkspaceId: response.active_workspace_id,
-    activeLibraryId: response.active_library_id,
-    expiresAt: response.expires_at,
+    sessionId: response.sessionId,
+    expiresAt: response.expiresAt,
     user: {
-      id: response.user.id,
+      principalId: response.user.principalId,
       email: response.user.email,
-      displayName: response.user.display_name,
-      roleLabel: response.user.role_label,
-      initials: response.user.initials,
+      displayName: response.user.displayName,
     },
   }
 }
 
 export async function fetchSession(): Promise<UiSessionResponse | null> {
-  const response = await apiHttp.get<RawSessionResponse>('/ui/auth/session', {
-    validateStatus: (status) => status === 200 || status === 204,
+  const response = await apiHttp.get<RawSessionResponse>('/iam/session', {
+    validateStatus: (status) => status === 200 || status === 401,
   })
-  if (response.status === 204) {
+  if (response.status === 401) {
     return null
   }
   return mapSession(response.data)
@@ -48,16 +38,15 @@ export async function fetchSession(): Promise<UiSessionResponse | null> {
 export async function loginWithPassword(payload: LoginPayload): Promise<UiSessionResponse> {
   return mapSession(
     await unwrap(
-      apiHttp.post<RawSessionResponse>('/ui/auth/login', {
-        login: payload.login,
+      apiHttp.post<RawSessionResponse>('/iam/session/login', {
+        email: payload.login,
         password: payload.password,
-        remember_me: payload.rememberMe,
-        locale: payload.locale,
+        rememberMe: payload.rememberMe,
       }),
     ),
   )
 }
 
 export async function logout(): Promise<void> {
-  await unwrap(apiHttp.post<{ ok: boolean }>('/ui/auth/logout'))
+  await apiHttp.post('/iam/session/logout')
 }

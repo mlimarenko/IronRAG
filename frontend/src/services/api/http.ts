@@ -29,8 +29,16 @@ export class ApiClientError extends Error {
   }
 }
 
+export const apiBasePath = import.meta.env.VITE_API_BASE_URL ?? '/v1'
+
+export function resolveApiPath(path: string): string {
+  const normalizedBase = apiBasePath.endsWith('/') ? apiBasePath.slice(0, -1) : apiBasePath
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`
+  return `${normalizedBase}${normalizedPath}`
+}
+
 export const apiHttp = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL ?? '/v1',
+  baseURL: apiBasePath,
   withCredentials: true,
 })
 

@@ -7,19 +7,24 @@ use crate::{
     app::state::AppState,
     domains::{
         provider_profiles::{EffectiveProviderProfile, ProviderModelSelection},
+        query_intelligence::GroupedReferenceKind,
         query_modes::RuntimeQueryMode,
         runtime_query::{GroundingStatus, RuntimeQueryEnrichment, RuntimeQueryReference},
     },
     infra::{
         graph_store::{GraphProjectionData, GraphProjectionEdgeWrite, GraphProjectionNodeWrite},
-        repositories::{self, ChunkEmbeddingRow, ChunkRow, DocumentRow, RuntimeQueryExecutionRow},
+        repositories::{
+            self, ChunkEmbeddingRow, ChunkRow, DocumentRow, RuntimeQueryEnrichmentRow,
+            RuntimeQueryExecutionRow, RuntimeQueryReferenceGroupRow,
+        },
         vector_search,
     },
     integrations::llm::{ChatRequest, EmbeddingRequest},
     services::{
         graph_projection::active_projection_version,
         query_intelligence::{
-            IntentResolutionRequest, RerankCandidate, RerankOutcome, RerankRequest,
+            GroupedReferenceCandidate, IntentResolutionRequest, RerankCandidate, RerankOutcome,
+            RerankRequest,
         },
         query_planner::{RuntimeQueryPlan, build_query_plan},
         runtime_ingestion::resolve_effective_provider_profile,
@@ -97,6 +102,8 @@ pub struct RuntimeAnswerQueryResult {
 pub struct PersistedRuntimeQuery {
     pub execution: RuntimeQueryExecutionRow,
     pub references: Vec<repositories::RuntimeQueryReferenceRow>,
+    pub enrichment: Option<RuntimeQueryEnrichmentRow>,
+    pub grouped_references: Vec<RuntimeQueryReferenceGroupRow>,
 }
 
 #[derive(Debug, Clone)]
@@ -276,6 +283,16 @@ pub async fn execute_structured_query(
         classify_grounding_status(&bundle.entities, &bundle.relationships, &bundle.chunks);
     let references =
         build_references(&bundle.entities, &bundle.relationships, &bundle.chunks, plan.top_k);
+    let grouped_references =
+        state.retrieval_intelligence_services.query_intelligence.group_visible_references(
+            &build_grouped_reference_candidates(
+                &bundle.entities,
+                &bundle.relationships,
+                &bundle.chunks,
+                plan.top_k,
+            ),
+            plan.top_k,
+        );
     let context_text = assemble_bounded_context(
         &bundle.entities,
         &bundle.relationships,
@@ -290,7 +307,7 @@ pub async fn execute_structured_query(
             .retrieval_intelligence_services
             .query_intelligence
             .context_assembly_stub(plan.planned_mode, graph_support_count, bundle.chunks.len()),
-        grouped_references: Vec::new(),
+        grouped_references,
     };
     let debug_json = build_debug_json(
         &plan,
@@ -377,6 +394,7 @@ pub async fn persist_structured_query_result(
         None,
         result.grounding_status.clone(),
         &result.provider,
+        &result.enrichment,
         result.debug_json.clone(),
         &result.references,
     )
@@ -396,6 +414,7 @@ pub async fn persist_answer_query_result(
         Some(result.answer.as_str()),
         result.structured.grounding_status.clone(),
         &result.provider,
+        &result.structured.enrichment,
         result.structured.debug_json.clone(),
         &result.structured.references,
     )
@@ -423,7 +442,19 @@ pub async fn load_persisted_query(
     )
     .await
     .context("failed to load runtime query references")?;
-    Ok(Some(PersistedRuntimeQuery { execution, references }))
+    let enrichment = repositories::get_runtime_query_enrichment_by_execution(
+        &state.persistence.postgres,
+        query_id,
+    )
+    .await
+    .context("failed to load runtime query enrichment")?;
+    let grouped_references = repositories::list_runtime_query_reference_groups_by_execution(
+        &state.persistence.postgres,
+        query_id,
+    )
+    .await
+    .context("failed to load runtime query reference groups")?;
+    Ok(Some(PersistedRuntimeQuery { execution, references, enrichment, grouped_references }))
 }
 
 async fn persist_query_execution(
@@ -434,6 +465,7 @@ async fn persist_query_execution(
     answer_text: Option<&str>,
     grounding_status: GroundingStatus,
     provider: &ProviderModelSelection,
+    enrichment: &RuntimeQueryEnrichment,
     debug_json: serde_json::Value,
     references: &[RuntimeQueryReference],
 ) -> anyhow::Result<PersistedRuntimeQuery> {
@@ -447,10 +479,25 @@ async fn persist_query_execution(
         grounding_status.as_str(),
         provider.provider_kind.as_str(),
         &provider.model_name,
-        debug_json,
+        debug_json.clone(),
     )
     .await
     .context("failed to create runtime query execution")?;
+
+    let persisted_enrichment = repositories::upsert_runtime_query_enrichment(
+        &state.persistence.postgres,
+        &build_runtime_query_enrichment_upsert(execution.id, enrichment, &debug_json, references),
+    )
+    .await
+    .context("failed to persist runtime query enrichment")?;
+
+    let grouped_references = repositories::replace_runtime_query_reference_groups(
+        &state.persistence.postgres,
+        execution.id,
+        &build_runtime_query_reference_group_upserts(&enrichment.grouped_references),
+    )
+    .await
+    .context("failed to persist runtime query reference groups")?;
 
     let mut persisted_references = Vec::with_capacity(references.len());
     for reference in references {
@@ -472,7 +519,107 @@ async fn persist_query_execution(
         );
     }
 
-    Ok(PersistedRuntimeQuery { execution, references: persisted_references })
+    Ok(PersistedRuntimeQuery {
+        execution,
+        references: persisted_references,
+        enrichment: Some(persisted_enrichment),
+        grouped_references,
+    })
+}
+
+fn build_runtime_query_enrichment_upsert(
+    query_execution_id: Uuid,
+    enrichment: &RuntimeQueryEnrichment,
+    debug_json: &serde_json::Value,
+    references: &[RuntimeQueryReference],
+) -> repositories::RuntimeQueryEnrichmentUpsertInput {
+    let reranked_candidate_count = if matches!(
+        enrichment.rerank.status,
+        crate::domains::query_intelligence::RerankStatus::Applied
+    ) {
+        enrichment
+            .rerank
+            .reordered_count
+            .and_then(|value| i32::try_from(value).ok())
+            .unwrap_or_default()
+    } else {
+        0
+    };
+    let mut warnings = enrichment.planning.warnings.clone();
+    if let Some(warning) = enrichment.context_assembly.warning.clone() {
+        warnings.push(warning);
+    }
+    warnings.sort();
+    warnings.dedup();
+
+    repositories::RuntimeQueryEnrichmentUpsertInput {
+        query_execution_id,
+        requested_mode: enrichment.planning.requested_mode.as_str().to_string(),
+        planned_mode: enrichment.planning.planned_mode.as_str().to_string(),
+        intent_cache_status: serde_json::to_string(&enrichment.planning.intent_cache_status)
+            .unwrap_or_else(|_| "\"miss\"".to_string())
+            .trim_matches('"')
+            .to_string(),
+        high_level_keywords_json: serde_json::to_value(&enrichment.planning.keywords.high_level)
+            .unwrap_or_else(|_| serde_json::json!([])),
+        low_level_keywords_json: serde_json::to_value(&enrichment.planning.keywords.low_level)
+            .unwrap_or_else(|_| serde_json::json!([])),
+        candidate_counts_json: serde_json::json!({
+            "entities": debug_json.get("entity_count").and_then(serde_json::Value::as_u64).unwrap_or(0),
+            "relationships": debug_json.get("relationship_count").and_then(serde_json::Value::as_u64).unwrap_or(0),
+            "chunks": debug_json.get("chunk_count").and_then(serde_json::Value::as_u64).unwrap_or(0),
+            "references": references.len(),
+        }),
+        retrieval_order_json: serde_json::json!({
+            "references": references
+                .iter()
+                .map(|reference| serde_json::json!({
+                    "kind": &reference.kind,
+                    "referenceId": reference.reference_id,
+                    "rank": reference.rank,
+                }))
+                .collect::<Vec<_>>(),
+        }),
+        rerank_status: serde_json::to_string(&enrichment.rerank.status)
+            .unwrap_or_else(|_| "\"not_applicable\"".to_string())
+            .trim_matches('"')
+            .to_string(),
+        rerank_candidate_count: i32::try_from(enrichment.rerank.candidate_count)
+            .unwrap_or(i32::MAX),
+        reranked_candidate_count,
+        context_mix_status: serde_json::to_string(&enrichment.context_assembly.status)
+            .unwrap_or_else(|_| "\"document_only\"".to_string())
+            .trim_matches('"')
+            .to_string(),
+        context_warning: enrichment.context_assembly.warning.clone(),
+        reference_group_count: i32::try_from(enrichment.grouped_references.len())
+            .unwrap_or(i32::MAX),
+        warnings_json: serde_json::to_value(warnings).unwrap_or_else(|_| serde_json::json!([])),
+    }
+}
+
+fn build_runtime_query_reference_group_upserts(
+    grouped_references: &[crate::domains::query_intelligence::GroupedReference],
+) -> Vec<repositories::RuntimeQueryReferenceGroupUpsertInput> {
+    grouped_references
+        .iter()
+        .map(|group| repositories::RuntimeQueryReferenceGroupUpsertInput {
+            rank: i32::try_from(group.rank).unwrap_or(i32::MAX),
+            group_kind: serde_json::to_string(&group.kind)
+                .unwrap_or_else(|_| "\"mixed\"".to_string())
+                .trim_matches('"')
+                .to_string(),
+            primary_document_id: None,
+            primary_graph_target_id: None,
+            title: group.title.clone(),
+            excerpt: group.excerpt.clone(),
+            evidence_count: i32::try_from(group.evidence_count).unwrap_or(i32::MAX),
+            dedupe_key: group.id.clone(),
+            support_ids_json: serde_json::to_value(&group.support_ids)
+                .unwrap_or_else(|_| serde_json::json!([])),
+            metadata_json: serde_json::json!({}),
+        })
+        .collect()
 }
 
 async fn embed_question(
@@ -989,6 +1136,58 @@ fn build_references(
     references
 }
 
+fn build_grouped_reference_candidates(
+    entities: &[RuntimeMatchedEntity],
+    relationships: &[RuntimeMatchedRelationship],
+    chunks: &[RuntimeMatchedChunk],
+    top_k: usize,
+) -> Vec<GroupedReferenceCandidate> {
+    let mut candidates = Vec::new();
+    let mut rank = 1usize;
+
+    for chunk in chunks.iter().take(top_k) {
+        candidates.push(GroupedReferenceCandidate {
+            dedupe_key: format!("document:{}", chunk.document_id),
+            kind: GroupedReferenceKind::Document,
+            rank,
+            title: chunk.document_label.clone(),
+            excerpt: Some(chunk.excerpt.clone()),
+            support_id: format!("chunk:{}", chunk.chunk_id),
+        });
+        rank += 1;
+    }
+    for entity in entities.iter().take(top_k) {
+        candidates.push(GroupedReferenceCandidate {
+            dedupe_key: format!("node:{}", entity.node_id),
+            kind: GroupedReferenceKind::Entity,
+            rank,
+            title: entity.label.clone(),
+            excerpt: Some(format!("{} ({})", entity.label, entity.node_type)),
+            support_id: format!("node:{}", entity.node_id),
+        });
+        rank += 1;
+    }
+    for relationship in relationships.iter().take(top_k) {
+        candidates.push(GroupedReferenceCandidate {
+            dedupe_key: format!("edge:{}", relationship.edge_id),
+            kind: GroupedReferenceKind::Relationship,
+            rank,
+            title: format!(
+                "{} {} {}",
+                relationship.from_label, relationship.relation_type, relationship.to_label
+            ),
+            excerpt: Some(format!(
+                "{} --{}--> {}",
+                relationship.from_label, relationship.relation_type, relationship.to_label
+            )),
+            support_id: format!("edge:{}", relationship.edge_id),
+        });
+        rank += 1;
+    }
+
+    candidates
+}
+
 fn classify_grounding_status(
     entities: &[RuntimeMatchedEntity],
     relationships: &[RuntimeMatchedRelationship],
@@ -1011,55 +1210,58 @@ fn assemble_bounded_context(
     chunks: &[RuntimeMatchedChunk],
     budget_chars: usize,
 ) -> String {
+    let mut graph_lines = entities
+        .iter()
+        .map(|entity| format!("[graph-node] {} ({})", entity.label, entity.node_type))
+        .collect::<Vec<_>>();
+    graph_lines.extend(relationships.iter().map(|edge| {
+        format!("[graph-edge] {} --{}--> {}", edge.from_label, edge.relation_type, edge.to_label)
+    }));
+    let document_lines = chunks
+        .iter()
+        .map(|chunk| format!("[document] {}: {}", chunk.document_label, chunk.excerpt))
+        .collect::<Vec<_>>();
+
     let mut sections = Vec::new();
     let mut used = 0usize;
+    let mut graph_index = 0usize;
+    let mut document_index = 0usize;
+    let mut prefer_document = !document_lines.is_empty();
 
-    append_context_section(
-        &mut sections,
-        &mut used,
-        budget_chars,
-        "Entities",
-        entities.iter().map(|entity| format!("- {} ({})", entity.label, entity.node_type)),
-    );
-    append_context_section(
-        &mut sections,
-        &mut used,
-        budget_chars,
-        "Relationships",
-        relationships.iter().map(|edge| {
-            format!("- {} --{}--> {}", edge.from_label, edge.relation_type, edge.to_label)
-        }),
-    );
-    append_context_section(
-        &mut sections,
-        &mut used,
-        budget_chars,
-        "Chunks",
-        chunks.iter().map(|chunk| format!("- {}: {}", chunk.document_label, chunk.excerpt)),
-    );
+    while graph_index < graph_lines.len() || document_index < document_lines.len() {
+        let mut consumed = false;
+        for bucket in 0..2 {
+            let take_document = if prefer_document { bucket == 0 } else { bucket == 1 };
+            let next_line = if take_document {
+                document_lines.get(document_index).cloned().map(|line| {
+                    document_index += 1;
+                    line
+                })
+            } else {
+                graph_lines.get(graph_index).cloned().map(|line| {
+                    graph_index += 1;
+                    line
+                })
+            };
 
-    sections.join("\n\n")
-}
-
-fn append_context_section(
-    sections: &mut Vec<String>,
-    used: &mut usize,
-    budget_chars: usize,
-    title: &str,
-    lines: impl Iterator<Item = String>,
-) {
-    let mut section_lines = Vec::new();
-    for line in lines {
-        let projected = *used + title.len() + line.len() + 4;
-        if projected > budget_chars {
+            let Some(line) = next_line else {
+                continue;
+            };
+            let projected = used + "Context".len() + line.len() + 4;
+            if projected > budget_chars {
+                return if sections.is_empty() { String::new() } else { sections.join("\n") };
+            }
+            used = projected;
+            sections.push(line);
+            consumed = true;
+        }
+        if !consumed {
             break;
         }
-        *used = projected;
-        section_lines.push(line);
+        prefer_document = !prefer_document;
     }
-    if !section_lines.is_empty() {
-        sections.push(format!("{title}\n{}", section_lines.join("\n")));
-    }
+
+    if sections.is_empty() { String::new() } else { format!("Context\n{}", sections.join("\n")) }
 }
 
 fn build_answer_prompt(
@@ -1108,6 +1310,8 @@ fn build_debug_json(
         "planning": serde_json::to_value(&enrichment.planning).unwrap_or_else(|_| serde_json::json!({})),
         "rerank": serde_json::to_value(&enrichment.rerank).unwrap_or_else(|_| serde_json::json!({})),
         "context_assembly": serde_json::to_value(&enrichment.context_assembly).unwrap_or_else(|_| serde_json::json!({})),
+        "grouped_references": serde_json::to_value(&enrichment.grouped_references)
+            .unwrap_or_else(|_| serde_json::json!([])),
     });
     if include_debug {
         debug["context_text"] = serde_json::Value::String(context_text.to_string());
@@ -1255,8 +1459,25 @@ pub fn parse_runtime_query_enrichment(
             status: crate::domains::query_intelligence::ContextAssemblyStatus::DocumentOnly,
             warning: None,
         });
+    let grouped_references = debug_json
+        .get("grouped_references")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
 
-    RuntimeQueryEnrichment { planning, rerank, context_assembly, grouped_references: Vec::new() }
+    RuntimeQueryEnrichment { planning, rerank, context_assembly, grouped_references }
+}
+
+#[must_use]
+pub fn hydrate_runtime_query_enrichment(
+    persisted: Option<&RuntimeQueryEnrichmentRow>,
+    grouped_references: &[RuntimeQueryReferenceGroupRow],
+    debug_json: &serde_json::Value,
+    fallback_mode: RuntimeQueryMode,
+) -> RuntimeQueryEnrichment {
+    persisted
+        .map(|row| map_persisted_runtime_query_enrichment(row, grouped_references, fallback_mode))
+        .unwrap_or_else(|| parse_runtime_query_enrichment(debug_json, fallback_mode))
 }
 
 #[must_use]
@@ -1268,6 +1489,104 @@ pub fn parse_runtime_query_warning(
     let warning_kind =
         debug_json.get("warning_kind").and_then(serde_json::Value::as_str).map(ToOwned::to_owned);
     (warning, warning_kind)
+}
+
+fn map_persisted_runtime_query_enrichment(
+    row: &RuntimeQueryEnrichmentRow,
+    grouped_references: &[RuntimeQueryReferenceGroupRow],
+    fallback_mode: RuntimeQueryMode,
+) -> RuntimeQueryEnrichment {
+    let requested_mode = row.requested_mode.parse::<RuntimeQueryMode>().unwrap_or(fallback_mode);
+    let planned_mode = row.planned_mode.parse::<RuntimeQueryMode>().unwrap_or(requested_mode);
+    let intent_cache_status = parse_query_intent_cache_status(&row.intent_cache_status);
+    let rerank_status = parse_rerank_status(&row.rerank_status);
+    let context_status = parse_context_assembly_status(&row.context_mix_status);
+    let high_level = serde_json::from_value::<Vec<String>>(row.high_level_keywords_json.clone())
+        .unwrap_or_default();
+    let low_level = serde_json::from_value::<Vec<String>>(row.low_level_keywords_json.clone())
+        .unwrap_or_default();
+    let warnings =
+        serde_json::from_value::<Vec<String>>(row.warnings_json.clone()).unwrap_or_default();
+
+    RuntimeQueryEnrichment {
+        planning: crate::domains::query_intelligence::QueryPlanningMetadata {
+            requested_mode,
+            planned_mode,
+            intent_cache_status,
+            keywords: crate::domains::query_intelligence::IntentKeywords { high_level, low_level },
+            warnings,
+        },
+        rerank: crate::domains::query_intelligence::RerankMetadata {
+            status: rerank_status,
+            candidate_count: usize::try_from(row.rerank_candidate_count.max(0)).unwrap_or_default(),
+            reordered_count: match row.reranked_candidate_count {
+                value if value > 0 => usize::try_from(value).ok(),
+                _ => None,
+            },
+        },
+        context_assembly: crate::domains::query_intelligence::ContextAssemblyMetadata {
+            status: context_status,
+            warning: row.context_warning.clone(),
+        },
+        grouped_references: grouped_references
+            .iter()
+            .map(|group| crate::domains::query_intelligence::GroupedReference {
+                id: group.id.to_string(),
+                kind: parse_grouped_reference_kind(&group.group_kind),
+                rank: usize::try_from(group.rank.max(0)).unwrap_or_default(),
+                title: group.title.clone(),
+                excerpt: group.excerpt.clone(),
+                evidence_count: usize::try_from(group.evidence_count.max(0)).unwrap_or_default(),
+                support_ids: serde_json::from_value(group.support_ids_json.clone())
+                    .unwrap_or_default(),
+            })
+            .collect(),
+    }
+}
+
+fn parse_query_intent_cache_status(
+    value: &str,
+) -> crate::domains::query_intelligence::QueryIntentCacheStatus {
+    match value {
+        "hit_fresh" => crate::domains::query_intelligence::QueryIntentCacheStatus::HitFresh,
+        "hit_stale_recomputed" => {
+            crate::domains::query_intelligence::QueryIntentCacheStatus::HitStaleRecomputed
+        }
+        _ => crate::domains::query_intelligence::QueryIntentCacheStatus::Miss,
+    }
+}
+
+fn parse_rerank_status(value: &str) -> crate::domains::query_intelligence::RerankStatus {
+    match value {
+        "applied" => crate::domains::query_intelligence::RerankStatus::Applied,
+        "skipped" => crate::domains::query_intelligence::RerankStatus::Skipped,
+        "failed" => crate::domains::query_intelligence::RerankStatus::Failed,
+        _ => crate::domains::query_intelligence::RerankStatus::NotApplicable,
+    }
+}
+
+fn parse_context_assembly_status(
+    value: &str,
+) -> crate::domains::query_intelligence::ContextAssemblyStatus {
+    match value {
+        "graph_only" => crate::domains::query_intelligence::ContextAssemblyStatus::GraphOnly,
+        "balanced_mixed" => {
+            crate::domains::query_intelligence::ContextAssemblyStatus::BalancedMixed
+        }
+        "mixed_skewed" => crate::domains::query_intelligence::ContextAssemblyStatus::MixedSkewed,
+        _ => crate::domains::query_intelligence::ContextAssemblyStatus::DocumentOnly,
+    }
+}
+
+fn parse_grouped_reference_kind(
+    value: &str,
+) -> crate::domains::query_intelligence::GroupedReferenceKind {
+    match value {
+        "document" => crate::domains::query_intelligence::GroupedReferenceKind::Document,
+        "relationship" => crate::domains::query_intelligence::GroupedReferenceKind::Relationship,
+        "entity" => crate::domains::query_intelligence::GroupedReferenceKind::Entity,
+        _ => crate::domains::query_intelligence::GroupedReferenceKind::Mixed,
+    }
 }
 
 fn score_chunk_embedding(
@@ -1530,6 +1849,75 @@ mod tests {
     }
 
     #[test]
+    fn grouped_reference_candidates_prefer_document_deduping() {
+        let document_id = Uuid::now_v7();
+        let candidates = build_grouped_reference_candidates(
+            &[],
+            &[],
+            &[
+                RuntimeMatchedChunk {
+                    chunk_id: Uuid::now_v7(),
+                    document_id,
+                    document_label: "spec.md".to_string(),
+                    excerpt: "First excerpt".to_string(),
+                    score: Some(0.8),
+                },
+                RuntimeMatchedChunk {
+                    chunk_id: Uuid::now_v7(),
+                    document_id,
+                    document_label: "spec.md".to_string(),
+                    excerpt: "Second excerpt".to_string(),
+                    score: Some(0.7),
+                },
+            ],
+            4,
+        );
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].dedupe_key, format!("document:{document_id}"));
+        assert_eq!(candidates[1].dedupe_key, format!("document:{document_id}"));
+    }
+
+    #[test]
+    fn assemble_bounded_context_interleaves_graph_and_document_support() {
+        let context = assemble_bounded_context(
+            &[RuntimeMatchedEntity {
+                node_id: Uuid::now_v7(),
+                label: "RustRAG".to_string(),
+                node_type: "entity".to_string(),
+                score: Some(0.9),
+            }],
+            &[RuntimeMatchedRelationship {
+                edge_id: Uuid::now_v7(),
+                relation_type: "uses".to_string(),
+                from_node_id: Uuid::now_v7(),
+                from_label: "RustRAG".to_string(),
+                to_node_id: Uuid::now_v7(),
+                to_label: "Neo4j".to_string(),
+                score: Some(0.7),
+            }],
+            &[RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: Uuid::now_v7(),
+                document_label: "spec.md".to_string(),
+                excerpt: "RustRAG stores graph knowledge.".to_string(),
+                score: Some(0.8),
+            }],
+            2_000,
+        );
+
+        assert!(context.starts_with("Context\n"));
+        assert!(context.contains("[document] spec.md: RustRAG stores graph knowledge."));
+        assert!(context.contains("[graph-node] RustRAG (entity)"));
+        assert!(context.contains("[graph-edge] RustRAG --uses--> Neo4j"));
+        let document_index = context.find("[document]").unwrap_or_default();
+        let graph_node_index = context.find("[graph-node]").unwrap_or_default();
+        let graph_edge_index = context.find("[graph-edge]").unwrap_or_default();
+        assert!(document_index < graph_node_index);
+        assert!(graph_node_index < graph_edge_index);
+    }
+
+    #[test]
     fn build_answer_prompt_mentions_every_runtime_mode() {
         for mode in [
             RuntimeQueryMode::Document,
@@ -1621,7 +2009,113 @@ mod tests {
         assert_eq!(debug["graph_edge_count"], 0);
         assert_eq!(debug["planning"]["intentCacheStatus"], "miss");
         assert_eq!(debug["context_assembly"]["status"], "balanced_mixed");
+        assert_eq!(debug["grouped_references"], serde_json::json!([]));
         assert_eq!(debug["context_text"], "Bounded context");
+    }
+
+    #[test]
+    fn parse_runtime_query_enrichment_reads_grouped_references_from_debug_json() {
+        let enrichment = parse_runtime_query_enrichment(
+            &serde_json::json!({
+                "planning": {
+                    "requestedMode": "hybrid",
+                    "plannedMode": "mix",
+                    "intentCacheStatus": "hit_fresh",
+                    "keywords": {
+                        "highLevel": ["roadmap"],
+                        "lowLevel": ["q2", "budget"]
+                    },
+                    "warnings": ["broad query"]
+                },
+                "rerank": {
+                    "status": "applied",
+                    "candidateCount": 12,
+                    "reorderedCount": 4
+                },
+                "context_assembly": {
+                    "status": "mixed_skewed",
+                    "warning": "Document evidence dominates the context."
+                },
+                "grouped_references": [{
+                    "id": "group-1",
+                    "kind": "document",
+                    "rank": 1,
+                    "title": "Quarterly roadmap",
+                    "excerpt": "Budget was approved in Q2.",
+                    "evidenceCount": 2,
+                    "supportIds": ["chunk:1", "chunk:2"]
+                }]
+            }),
+            RuntimeQueryMode::Hybrid,
+        );
+
+        assert_eq!(enrichment.planning.planned_mode, RuntimeQueryMode::Mix);
+        assert_eq!(enrichment.rerank.candidate_count, 12);
+        assert_eq!(enrichment.grouped_references.len(), 1);
+        assert_eq!(enrichment.grouped_references[0].title, "Quarterly roadmap");
+    }
+
+    #[test]
+    fn hydrate_runtime_query_enrichment_prefers_persisted_rows() {
+        let query_execution_id = Uuid::now_v7();
+        let group_id = Uuid::now_v7();
+        let enrichment = hydrate_runtime_query_enrichment(
+            Some(&RuntimeQueryEnrichmentRow {
+                query_execution_id,
+                requested_mode: "hybrid".to_string(),
+                planned_mode: "mix".to_string(),
+                intent_cache_status: "hit_stale_recomputed".to_string(),
+                high_level_keywords_json: serde_json::json!(["plans"]),
+                low_level_keywords_json: serde_json::json!(["roadmap"]),
+                candidate_counts_json: serde_json::json!({"chunks": 4}),
+                retrieval_order_json: serde_json::json!({"references": []}),
+                rerank_status: "applied".to_string(),
+                rerank_candidate_count: 10,
+                reranked_candidate_count: 3,
+                context_mix_status: "balanced_mixed".to_string(),
+                context_warning: Some("Balanced mix.".to_string()),
+                reference_group_count: 1,
+                warnings_json: serde_json::json!(["cached"]),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }),
+            &[RuntimeQueryReferenceGroupRow {
+                id: group_id,
+                query_execution_id,
+                rank: 1,
+                group_kind: "document".to_string(),
+                primary_document_id: None,
+                primary_graph_target_id: None,
+                title: "Plans".to_string(),
+                excerpt: Some("Roadmap plans".to_string()),
+                evidence_count: 2,
+                dedupe_key: "plans".to_string(),
+                support_ids_json: serde_json::json!(["chunk:1", "chunk:2"]),
+                metadata_json: serde_json::json!({}),
+                created_at: chrono::Utc::now(),
+            }],
+            &serde_json::json!({
+                "planning": {
+                    "requestedMode": "document",
+                    "plannedMode": "document",
+                    "intentCacheStatus": "miss",
+                    "keywords": {"highLevel": [], "lowLevel": []},
+                    "warnings": []
+                }
+            }),
+            RuntimeQueryMode::Document,
+        );
+
+        assert_eq!(
+            enrichment.planning.intent_cache_status,
+            crate::domains::query_intelligence::QueryIntentCacheStatus::HitStaleRecomputed
+        );
+        assert_eq!(enrichment.grouped_references[0].id, group_id.to_string());
+        assert_eq!(
+            enrichment.grouped_references[0].kind,
+            crate::domains::query_intelligence::GroupedReferenceKind::Document
+        );
+        assert_eq!(enrichment.rerank.reordered_count, Some(3));
     }
 
     #[test]

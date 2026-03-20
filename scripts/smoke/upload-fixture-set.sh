@@ -5,7 +5,7 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 smoke_require_commands curl jq zip magick libreoffice
 
-api_base=${RUSTRAG_SMOKE_API_BASE:-http://127.0.0.1:18080/v1}
+api_base=${RUSTRAG_SMOKE_API_BASE:-http://127.0.0.1:19000/v1}
 token=${RUSTRAG_SMOKE_TOKEN:-}
 library_id=${RUSTRAG_SMOKE_LIBRARY_ID:-}
 output_dir=

@@ -14,7 +14,9 @@ use rustrag_backend::{
         graph_extract::{
             GraphEntityCandidate, GraphExtractionCandidateSet, GraphRelationCandidate,
         },
-        graph_merge::{GraphMergeScope, merge_chunk_graph_candidates},
+        graph_merge::{
+            GraphMergeScope, merge_chunk_graph_candidates, reconcile_merge_support_counts,
+        },
         graph_quality_guard::GraphQualityGuardService,
     },
 };
@@ -159,6 +161,7 @@ async fn merge_and_projection_round_trip_preserves_graph_and_evidence() -> anyho
             &fixture.document,
             &fixture.chunk,
             &candidates,
+            None,
         )
         .await
         .context("failed to merge chunk graph candidates")?;
@@ -230,6 +233,103 @@ async fn merge_and_projection_round_trip_preserves_graph_and_evidence() -> anyho
             .replace_library_projection(fixture.project.id, 11, &[], &[])
             .await
             .context("failed to clean Neo4j projection")?;
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup(&pool).await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn repeated_merge_of_same_chunk_keeps_evidence_and_support_counts_stable()
+-> anyhow::Result<()> {
+    let settings = Settings::from_env()
+        .context("failed to load settings for runtime graph idempotency test")?;
+    let pool = connect_postgres(&settings).await?;
+    let fixture = RuntimeGraphFixture::create(&pool).await?;
+    let scope = GraphMergeScope::new(fixture.project.id, 19);
+    let graph_quality_guard = GraphQualityGuardService::default();
+
+    let result = async {
+        let candidates = GraphExtractionCandidateSet {
+            entities: vec![GraphEntityCandidate {
+                label: "OpenAI".to_string(),
+                node_type: RuntimeNodeType::Entity,
+                aliases: vec!["Open AI".to_string()],
+                summary: Some("LLM provider".to_string()),
+            }],
+            relations: vec![GraphRelationCandidate {
+                source_label: "OpenAI".to_string(),
+                target_label: "Knowledge Graph".to_string(),
+                relation_type: "builds on".to_string(),
+                summary: Some("provider supports graph-aware retrieval".to_string()),
+            }],
+        };
+
+        for _ in 0..2 {
+            let merge = merge_chunk_graph_candidates(
+                &pool,
+                &graph_quality_guard,
+                &scope,
+                &fixture.document,
+                &fixture.chunk,
+                &candidates,
+                None,
+            )
+            .await
+            .context("failed to merge repeated chunk graph candidates")?;
+            reconcile_merge_support_counts(
+                &pool,
+                &scope,
+                &merge.changed_node_ids(),
+                &merge.changed_edge_ids(),
+            )
+            .await
+            .context("failed to reconcile support counts after repeated merge")?;
+        }
+
+        let nodes =
+            repositories::list_runtime_graph_nodes_by_projection(&pool, fixture.project.id, 19)
+                .await
+                .context("failed to load repeated-merge graph nodes")?;
+        let edges =
+            repositories::list_runtime_graph_edges_by_projection(&pool, fixture.project.id, 19)
+                .await
+                .context("failed to load repeated-merge graph edges")?;
+
+        let openai_node = nodes
+            .iter()
+            .find(|row| row.canonical_key == "entity:openai")
+            .context("missing repeated-merge OpenAI node")?;
+        let relation_edge = edges
+            .iter()
+            .find(|row| row.canonical_key.contains("builds_on"))
+            .context("missing repeated-merge relation edge")?;
+
+        let openai_evidence = repositories::list_runtime_graph_evidence_by_target(
+            &pool,
+            fixture.project.id,
+            "node",
+            openai_node.id,
+        )
+        .await
+        .context("failed to load repeated-merge OpenAI evidence")?;
+        let relation_evidence = repositories::list_runtime_graph_evidence_by_target(
+            &pool,
+            fixture.project.id,
+            "edge",
+            relation_edge.id,
+        )
+        .await
+        .context("failed to load repeated-merge relation evidence")?;
+
+        assert_eq!(openai_evidence.len(), 2);
+        assert_eq!(relation_evidence.len(), 1);
+        assert_eq!(openai_node.support_count, 2);
+        assert_eq!(relation_edge.support_count, 1);
 
         Ok(())
     }

@@ -1,305 +1,169 @@
 import type {
+  CanonicalDocumentHead,
+  CanonicalDocumentIdentity,
+  CanonicalDocumentMutation,
+  CanonicalDocumentMutationItem,
+  CanonicalDocumentRevision,
+  CanonicalIngestAttempt,
+  CanonicalIngestJob,
+  CanonicalIngestStageEvent,
   DocumentAccountingStatus,
   DocumentActivityStatus,
   DocumentAttemptGroup,
+  DocumentAttemptSummary,
   DocumentCollectionAccountingSummary,
   DocumentCollectionDiagnostics,
+  DocumentCollectionFormatDiagnostics,
+  DocumentCollectionGraphThroughputSummary,
+  DocumentCollectionProgressCounters,
+  DocumentCollectionSettlementSummary,
+  DocumentCollectionStageDiagnostics,
+  DocumentCollectionWarning,
   DocumentDetail,
+  DocumentFilterValues,
+  DocumentGraphHealthSummary,
+  DocumentGraphThroughputSummary,
+  DocumentGraphStats,
   DocumentMutationAccepted,
-  DocumentUploadFailure,
+  DocumentMutationImpactScopeSummary,
+  DocumentMutationState,
+  DocumentProviderFailureSummary,
+  DocumentQueueIsolationSummary,
+  DocumentQueueWaitingReason,
+  DocumentRevisionHistoryItem,
   DocumentRow,
+  DocumentStatus,
+  DocumentSummaryCounters,
+  DocumentsWorkspaceDiagnosticChip,
+  DocumentsWorkspaceNotice,
+  DocumentsWorkspacePrimarySummary,
+  DocumentsWorkspaceSummary,
   DocumentsSurfaceResponse,
-  DocumentMutationStatus,
-  UploadRejectionDetails,
+  DocumentUploadFailure,
   UploadDocumentsResponse,
+  UploadRejectionDetails,
 } from 'src/models/ui/documents'
+import type { GraphCanonicalSummary } from 'src/models/ui/graph'
+import { useShellStore } from 'src/stores/shell'
 import { ApiClientError, apiHttp, unwrap } from './http'
 
-interface RawDocumentRow {
+interface RawContentDocument {
   id: string
-  logical_document_id: string | null
-  file_name: string
-  file_type: string
-  file_size_label: string
-  uploaded_at: string
-  library_name: string
-  stage: string
-  status: 'queued' | 'processing' | 'ready' | 'ready_no_graph' | 'failed'
-  progress_percent: number | null
-  activity_status?: 'queued' | 'active' | 'blocked' | 'retrying' | 'stalled' | 'ready' | 'failed'
-  last_activity_at?: string | null
-  stalled_reason?: string | null
-  active_revision_no: number | null
-  active_revision_kind: string | null
-  latest_attempt_no: number
-  accounting_status: DocumentAccountingStatus
-  total_estimated_cost: number | null
-  settled_estimated_cost?: number | null
-  in_flight_estimated_cost?: number | null
-  currency: string | null
-  in_flight_stage_count?: number
-  missing_stage_count?: number
-  partial_history: boolean
-  partial_history_reason: string | null
-  mutation: {
-    kind: string | null
-    status: DocumentMutationStatus | null
-    warning: string | null
-  }
-  can_retry: boolean
-  can_append: boolean
-  can_replace: boolean
-  can_remove: boolean
-  detail_available: boolean
-  chunk_count?: number | null
-  graph_node_count?: number | null
-  graph_edge_count?: number | null
+  workspace_id: string
+  library_id: string
+  external_key: string
+  document_state: string
+  created_at: string
 }
 
-interface RawDocumentsSurfaceResponse {
-  accepted_formats: string[]
-  max_size_mb: number
-  graph_status: 'empty' | 'building' | 'ready' | 'partial' | 'failed' | 'stale'
-  graph_warning: string | null
-  rebuild_backlog_count: number
-  counters: {
-    queued: number
-    processing: number
-    ready: number
-    ready_no_graph: number
-    failed: number
-  }
-  filters: {
-    statuses: ('queued' | 'processing' | 'ready' | 'ready_no_graph' | 'failed')[]
-    file_types: string[]
-  }
-  accounting?: {
-    total_estimated_cost: number | null
-    settled_estimated_cost: number | null
-    in_flight_estimated_cost: number | null
-    currency: string | null
-    prompt_tokens: number
-    completion_tokens: number
-    total_tokens: number
-    priced_stage_count: number
-    unpriced_stage_count: number
-    in_flight_stage_count: number
-    missing_stage_count: number
-    accounting_status: DocumentAccountingStatus
-  } | null
-  diagnostics?: {
-    progress: {
-      accepted: number
-      content_extracted: number
-      chunked: number
-      embedded: number
-      extracting_graph: number
-      graph_ready: number
-      ready: number
-      failed: number
-    }
-    queue_backlog_count: number
-    processing_backlog_count: number
-    active_backlog_count: number
-    per_stage: {
-      stage: string
-      active_count: number
-      completed_count: number
-      failed_count: number
-      avg_elapsed_ms: number | null
-      max_elapsed_ms: number | null
-      total_estimated_cost: number | null
-      settled_estimated_cost: number | null
-      in_flight_estimated_cost: number | null
-      currency: string | null
-      prompt_tokens: number
-      completion_tokens: number
-      total_tokens: number
-      accounting_status: DocumentAccountingStatus
-    }[]
-    per_format: {
-      file_type: string
-      document_count: number
-      queued_count: number
-      processing_count: number
-      ready_count: number
-      ready_no_graph_count: number
-      failed_count: number
-      content_extracted_count: number
-      chunked_count: number
-      embedded_count: number
-      extracting_graph_count: number
-      graph_ready_count: number
-      avg_queue_elapsed_ms: number | null
-      max_queue_elapsed_ms: number | null
-      avg_total_elapsed_ms: number | null
-      max_total_elapsed_ms: number | null
-      bottleneck_stage: string | null
-      bottleneck_avg_elapsed_ms: number | null
-      bottleneck_max_elapsed_ms: number | null
-      total_estimated_cost: number | null
-      settled_estimated_cost: number | null
-      in_flight_estimated_cost: number | null
-      currency: string | null
-      prompt_tokens: number
-      completion_tokens: number
-      total_tokens: number
-      accounting_status: DocumentAccountingStatus
-    }[]
-  } | null
-  rows: RawDocumentRow[]
+interface RawContentDocumentHead {
+  document_id: string
+  active_revision_id: string | null
+  readable_revision_id: string | null
+  latest_mutation_id: string | null
+  latest_successful_attempt_id: string | null
+  head_updated_at: string
 }
 
-interface RawDocumentDetail {
+interface RawContentRevision {
   id: string
-  logical_document_id: string | null
-  file_name: string
-  file_type: string
-  file_size_label: string
-  uploaded_at: string
-  library_name: string
-  stage: string
-  status: 'queued' | 'processing' | 'ready' | 'ready_no_graph' | 'failed'
-  progress_percent: number | null
-  activity_status?: DocumentActivityStatus
-  last_activity_at?: string | null
-  stalled_reason?: string | null
-  active_revision_no: number | null
-  active_revision_kind: string | null
-  active_revision_status: string | null
-  latest_attempt_no: number
-  accounting_status: DocumentAccountingStatus
-  total_estimated_cost: number | null
-  settled_estimated_cost?: number | null
-  in_flight_estimated_cost?: number | null
-  currency: string | null
-  in_flight_stage_count?: number
-  missing_stage_count?: number
-  partial_history: boolean
-  partial_history_reason: string | null
-  mutation: {
-    kind: string | null
-    status: DocumentMutationStatus | null
-    warning: string | null
-  }
-  requested_by: string | null
-  error_message: string | null
-  summary: string
-  graph_node_id: string | null
-  can_download_text: boolean
-  can_append: boolean
-  can_replace: boolean
-  can_remove: boolean
-  extracted_stats: {
-    chunk_count: number | null
-    document_id: string | null
-    checksum: string | null
-    page_count: number | null
-    extraction_kind: string | null
-    preview_text?: string | null
-    preview_truncated?: boolean
-    warning_count?: number
-    normalization_status?: string
-    ocr_source?: string | null
-    warnings: string[]
-  }
-  graph_stats: {
-    node_count: number
-    edge_count: number
-    evidence_count: number
-  }
-  processing_history: {
-    attempt_no: number
-    status: string
-    stage: string
-    error_message: string | null
-    started_at: string
-    finished_at: string | null
-  }[]
-  revision_history: {
-    id: string
-    revision_no: number
-    revision_kind: string
-    status: string
-    source_file_name: string
-    appended_text_excerpt: string | null
-    accepted_at: string
-    activated_at: string | null
-    superseded_at: string | null
-    is_active: boolean
-  }[]
-  attempts: {
-    attempt_no: number
-    revision_no: number | null
-    revision_id: string | null
-    attempt_kind: string | null
-    status: string
-    activity_status?: 'queued' | 'active' | 'blocked' | 'retrying' | 'stalled' | 'ready' | 'failed'
-    last_activity_at?: string | null
-    queue_elapsed_ms: number | null
-    total_elapsed_ms: number | null
-    started_at: string | null
-    finished_at: string | null
-    partial_history: boolean
-    partial_history_reason: string | null
-    summary: {
-      total_estimated_cost: number | null
-      settled_estimated_cost?: number | null
-      in_flight_estimated_cost?: number | null
-      currency: string | null
-      priced_stage_count: number
-      unpriced_stage_count: number
-      in_flight_stage_count?: number
-      missing_stage_count?: number
-      accounting_status: DocumentAccountingStatus
-    }
-    benchmarks: {
-      stage: string
-      status: string
-      message: string | null
-      provider_kind: string | null
-      model_name: string | null
-      started_at: string
-      finished_at: string | null
-      elapsed_ms: number | null
-      accounting: {
-        accounting_scope?: 'stage_rollup' | 'provider_call' | 'missing'
-        pricing_status: string
-        usage_event_id: string | null
-        cost_ledger_id: string | null
-        pricing_catalog_entry_id: string | null
-        estimated_cost: number | null
-        settled_estimated_cost?: number | null
-        in_flight_estimated_cost?: number | null
-        currency: string | null
-        attribution_source?: 'stage_native' | 'reconciled' | null
-      } | null
-    }[]
-  }[]
+  document_id: string
+  workspace_id: string
+  library_id: string
+  revision_number: number
+  parent_revision_id: string | null
+  content_source_kind: string
+  checksum: string
+  mime_type: string
+  byte_size: number
+  title: string | null
+  language_code: string | null
+  source_uri: string | null
+  storage_key: string | null
+  created_by_principal_id: string | null
+  created_at: string
 }
 
-interface RawUploadDocumentsResponse {
-  accepted_rows: RawDocumentRow[]
+interface RawContentMutation {
+  id: string
+  workspace_id: string
+  library_id: string
+  operation_kind: string
+  mutation_state: string
+  requested_at: string
+  completed_at: string | null
+  requested_by_principal_id: string | null
+  request_surface: string
+  idempotency_key: string | null
+  failure_code: string | null
+  conflict_code: string | null
 }
 
-interface RawDocumentMutationAccepted {
-  accepted: boolean
-  operation: string
-  track_id?: string | null
-  trackId?: string | null
-  revision_id?: string | null
-  revisionId?: string | null
-  mutation_id?: string | null
-  mutationId?: string | null
-  attempt_no?: number | null
-  attemptNo?: number | null
+interface RawContentMutationItem {
+  id: string
+  mutation_id: string
+  document_id: string | null
+  base_revision_id: string | null
+  result_revision_id: string | null
+  item_state: string
+  message: string | null
 }
 
+interface RawContentDocumentDetailResponse {
+  document: RawContentDocument
+  head: RawContentDocumentHead | null
+  active_revision: RawContentRevision | null
+}
+
+interface RawContentMutationDetailResponse {
+  mutation: RawContentMutation
+  items: RawContentMutationItem[]
+  job_id: string | null
+}
+
+interface RawCreateDocumentResponse {
+  document: RawContentDocumentDetailResponse
+  mutation: RawContentMutationDetailResponse
+}
+
+interface RawIngestJob {
+  id: string
+  workspace_id: string
+  library_id: string
+  mutation_id: string | null
+  connector_id: string | null
+  job_kind: string
+  queue_state: 'queued' | 'leased' | 'completed' | 'failed' | 'canceled' | string
+  priority: number
+  dedupe_key: string | null
+  queued_at: string
+  available_at: string
+  completed_at: string | null
+}
+
+interface RawChunkSummary {
+  id: string
+  document_id: string
+  project_id: string
+  ordinal: number
+  content: string
+  token_count: number | null
+}
+
+interface CanonicalLibraryBundle {
+  documents: RawContentDocumentDetailResponse[]
+  mutations: RawContentMutationDetailResponse[]
+  jobs: RawIngestJob[]
+}
+
+interface CanonicalDocumentRelation {
+  mutations: RawContentMutationDetailResponse[]
+  jobs: RawIngestJob[]
+}
+
+const DEFAULT_ACCEPTED_FORMATS = ['PDF', 'DOCX', 'TXT', 'MD', 'Images']
+const DEFAULT_UPLOAD_LIMIT_MB = 50
 const STALLED_ACTIVITY_AFTER_MS = 180_000
-
-function pick<T>(snake: T | undefined, camel: T | undefined): T | undefined {
-  return snake ?? camel
-}
 
 function readString(record: Record<string, unknown>, key: string): string | null {
   const value = record[key]
@@ -311,81 +175,127 @@ function readNumber(record: Record<string, unknown>, key: string): number | null
   return typeof value === 'number' ? value : null
 }
 
-function normalizeUploadRejectionDetails(details: unknown): UploadRejectionDetails | null {
-  if (!details || typeof details !== 'object') {
-    return null
+function toHex(bytes: ArrayBuffer): string {
+  return Array.from(new Uint8Array(bytes))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('')
+}
+
+async function sha256Hex(value: string | ArrayBuffer): Promise<string> {
+  const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : new Uint8Array(value)
+  const digest = await crypto.subtle.digest('SHA-256', bytes)
+  return toHex(digest)
+}
+
+function compareIsoDates(left: string | null, right: string | null): number {
+  const leftTime = left ? Date.parse(left) : Number.NEGATIVE_INFINITY
+  const rightTime = right ? Date.parse(right) : Number.NEGATIVE_INFINITY
+  return rightTime - leftTime
+}
+
+function formatFileSizeLabel(sizeBytes: number): string {
+  if (sizeBytes >= 1024 * 1024) {
+    return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`
   }
-  const record = details as Record<string, unknown>
-  return {
-    fileName: readString(record, 'fileName'),
-    detectedFormat: readString(record, 'detectedFormat'),
-    mimeType: readString(record, 'mimeType'),
-    fileSizeBytes: readNumber(record, 'fileSizeBytes'),
-    uploadLimitMb: readNumber(record, 'uploadLimitMb'),
-    rejectionCause: readString(record, 'rejectionCause'),
-    operatorAction: readString(record, 'operatorAction'),
+  if (sizeBytes >= 1024) {
+    return `${(sizeBytes / 1024).toFixed(1)} KB`
+  }
+  return `${String(sizeBytes)} B`
+}
+
+function inferFileType(fileName: string, mimeType: string | null): string {
+  const extension = fileName.split('.').pop()?.toLowerCase() ?? ''
+  if (mimeType?.startsWith('image/') || ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg'].includes(extension)) {
+    return 'Image'
+  }
+  if (mimeType === 'application/pdf' || extension === 'pdf') {
+    return 'PDF'
+  }
+  if (extension === 'docx' || mimeType?.includes('wordprocessingml')) {
+    return 'DOCX'
+  }
+  if (
+    ['md', 'markdown', 'txt', 'text', 'log', 'csv', 'json', 'yaml', 'yml', 'xml'].includes(extension) ||
+    mimeType?.startsWith('text/')
+  ) {
+    return 'Text'
+  }
+  return extension ? extension.toUpperCase() : 'File'
+}
+
+function mutationStatusFromState(value: string): 'accepted' | 'reconciling' | 'completed' | 'failed' {
+  switch (value) {
+    case 'accepted':
+      return 'accepted'
+    case 'running':
+      return 'reconciling'
+    case 'applied':
+      return 'completed'
+    case 'failed':
+    case 'conflicted':
+    case 'canceled':
+      return 'failed'
+    default:
+      return 'reconciling'
   }
 }
 
-export function normalizeDocumentUploadFailure(
-  file: File,
-  error: unknown,
-): DocumentUploadFailure {
-  const details =
-    error instanceof ApiClientError ? normalizeUploadRejectionDetails(error.details) : null
-  const message =
-    error instanceof Error ? error.message : 'Failed to upload document'
-
-  return {
-    fileName: details?.fileName ?? file.name,
-    message,
-    errorKind: error instanceof ApiClientError ? error.errorKind : null,
-    detectedFormat: details?.detectedFormat ?? null,
-    mimeType: details?.mimeType ?? (file.type || null),
-    fileSizeBytes: details?.fileSizeBytes ?? file.size,
-    uploadLimitMb: details?.uploadLimitMb ?? null,
-    rejectionCause: details?.rejectionCause ?? null,
-    operatorAction: details?.operatorAction ?? null,
+function documentStatusFromQueueState(
+  queueState: RawIngestJob['queue_state'] | null,
+  readableRevisionPresent: boolean,
+): DocumentStatus {
+  switch (queueState) {
+    case 'queued':
+    case 'leased':
+      return 'processing'
+    case 'completed':
+      return readableRevisionPresent ? 'ready' : 'ready_no_graph'
+    case 'failed':
+    case 'canceled':
+      return 'failed'
+    default:
+      return readableRevisionPresent ? 'ready' : 'queued'
   }
 }
 
-function deriveActivityStatus(
-  status: string,
-  explicitActivityStatus?: DocumentActivityStatus,
-  lastActivityAt?: string | null,
-): DocumentActivityStatus {
-  if (explicitActivityStatus) {
-    return explicitActivityStatus
-  }
-  if (status === 'queued') {
-    if (lastActivityAt) {
-      const lastSeenAt = Date.parse(lastActivityAt)
-      if (!Number.isNaN(lastSeenAt) && Date.now() - lastSeenAt >= STALLED_ACTIVITY_AFTER_MS) {
-        return 'stalled'
-      }
-    }
-    return 'queued'
-  }
-  if (status === 'processing') {
-    return 'active'
-  }
-  if (status === 'ready' || status === 'ready_no_graph') {
-    return 'ready'
-  }
-  if (status === 'failed') {
-    return 'failed'
-  }
-  return 'active'
-}
-
-function deriveStalledReason(
-  activityStatus: DocumentActivityStatus,
-  explicitReason: string | null | undefined,
+function activityStatusFromQueueState(
+  queueState: RawIngestJob['queue_state'] | null,
   lastActivityAt: string | null,
-): string | null {
-  if (explicitReason) {
-    return explicitReason
+): DocumentActivityStatus {
+  let activityStatus: DocumentActivityStatus
+  switch (queueState) {
+    case 'queued':
+      activityStatus = 'queued'
+      break
+    case 'leased':
+      activityStatus = 'active'
+      break
+    case 'completed':
+      activityStatus = 'ready'
+      break
+    case 'failed':
+    case 'canceled':
+      activityStatus = 'failed'
+      break
+    default:
+      activityStatus = 'active'
+      break
   }
+
+  if (
+    (activityStatus === 'queued' || activityStatus === 'active') &&
+    lastActivityAt !== null
+  ) {
+    const lastSeenAt = Date.parse(lastActivityAt)
+    if (!Number.isNaN(lastSeenAt) && Date.now() - lastSeenAt >= STALLED_ACTIVITY_AFTER_MS) {
+      return 'stalled'
+    }
+  }
+
+  return activityStatus
+}
+
+function stalledReason(activityStatus: DocumentActivityStatus, lastActivityAt: string | null): string | null {
   if (activityStatus !== 'stalled' || !lastActivityAt) {
     return null
   }
@@ -397,415 +307,1244 @@ function deriveStalledReason(
   return `No visible activity for ${String(elapsedSeconds)}s`
 }
 
-function mapRow(row: RawDocumentRow): DocumentRow {
-  const lastActivityAt = row.last_activity_at ?? null
-  const activityStatus = deriveActivityStatus(row.status, row.activity_status, lastActivityAt)
+function latestActivityAt(job: RawIngestJob | null): string | null {
+  if (!job) {
+    return null
+  }
+  return job.completed_at ?? job.available_at ?? job.queued_at
+}
+
+function elapsedMs(left: string | null, right: string | null): number | null {
+  if (!left || !right) {
+    return null
+  }
+  const leftTime = Date.parse(left)
+  const rightTime = Date.parse(right)
+  if (Number.isNaN(leftTime) || Number.isNaN(rightTime)) {
+    return null
+  }
+  return Math.max(0, rightTime - leftTime)
+}
+
+function buildCanonicalAttempt(job: RawIngestJob): CanonicalIngestAttempt {
+  const lastActivity = latestActivityAt(job)
   return {
-    id: row.id,
-    logicalDocumentId: row.logical_document_id,
-    fileName: row.file_name,
-    fileType: row.file_type,
-    fileSizeLabel: row.file_size_label,
-    uploadedAt: row.uploaded_at,
-    libraryName: row.library_name,
-    stage: row.stage,
-    status: row.status,
-    progressPercent: row.progress_percent,
-    activityStatus,
-    lastActivityAt,
-    stalledReason: deriveStalledReason(activityStatus, row.stalled_reason, lastActivityAt),
-    chunkCount: row.chunk_count ?? null,
-    graphNodeCount: row.graph_node_count ?? null,
-    graphEdgeCount: row.graph_edge_count ?? null,
-    activeRevisionNo: row.active_revision_no,
-    activeRevisionKind: row.active_revision_kind,
-    latestAttemptNo: row.latest_attempt_no,
-    accountingStatus: row.accounting_status,
-    totalEstimatedCost: row.total_estimated_cost,
-    settledEstimatedCost: row.settled_estimated_cost ?? null,
-    inFlightEstimatedCost: row.in_flight_estimated_cost ?? null,
-    currency: row.currency,
-    inFlightStageCount: row.in_flight_stage_count ?? 0,
-    missingStageCount: row.missing_stage_count ?? 0,
-    partialHistory: row.partial_history,
-    partialHistoryReason: row.partial_history_reason,
-    mutation: {
-      kind: row.mutation.kind,
-      status: row.mutation.status,
-      warning: row.mutation.warning,
-    },
-    canRetry: row.can_retry,
-    canAppend: row.can_append,
-    canReplace: row.can_replace,
-    canRemove: row.can_remove,
-    detailAvailable: row.detail_available,
+    id: job.id,
+    jobId: job.id,
+    attemptNumber: 1,
+    workerPrincipalId: null,
+    leaseToken: null,
+    attemptState:
+      job.queue_state === 'completed'
+        ? 'succeeded'
+        : job.queue_state === 'failed' || job.queue_state === 'canceled'
+          ? 'failed'
+          : job.queue_state === 'leased'
+            ? 'running'
+            : 'leased',
+    currentStage: job.job_kind,
+    startedAt: job.queued_at,
+    heartbeatAt: lastActivity,
+    finishedAt: job.completed_at,
+    failureClass: job.queue_state === 'failed' || job.queue_state === 'canceled' ? 'ingest_failed' : null,
+    failureCode: null,
+    retryable: job.queue_state === 'failed',
   }
 }
 
-function mapAttemptGroup(attempt: RawDocumentDetail['attempts'][number]): DocumentAttemptGroup {
-  const lastActivityAt = attempt.last_activity_at ?? attempt.finished_at ?? attempt.started_at ?? null
-  const activityStatus = deriveActivityStatus(
-    attempt.status,
-    attempt.activity_status,
-    lastActivityAt,
+function buildCanonicalJob(job: RawIngestJob): CanonicalIngestJob {
+  return {
+    id: job.id,
+    workspaceId: job.workspace_id,
+    libraryId: job.library_id,
+    mutationId: job.mutation_id,
+    connectorId: job.connector_id,
+    jobKind: job.job_kind,
+    queueState: job.queue_state,
+    priority: job.priority,
+    dedupeKey: job.dedupe_key,
+    queuedAt: job.queued_at,
+    availableAt: job.available_at,
+    completedAt: job.completed_at,
+  }
+}
+
+function buildCanonicalMutation(mutation: RawContentMutation): CanonicalDocumentMutation {
+  return {
+    id: mutation.id,
+    workspaceId: mutation.workspace_id,
+    libraryId: mutation.library_id,
+    operationKind: mutation.operation_kind,
+    mutationState: mutation.mutation_state,
+    requestedAt: mutation.requested_at,
+    completedAt: mutation.completed_at,
+    requestedByPrincipalId: mutation.requested_by_principal_id,
+    requestSurface: mutation.request_surface,
+    idempotencyKey: mutation.idempotency_key,
+    failureCode: mutation.failure_code,
+    conflictCode: mutation.conflict_code,
+  }
+}
+
+function buildCanonicalMutationItem(item: RawContentMutationItem): CanonicalDocumentMutationItem {
+  return {
+    id: item.id,
+    mutationId: item.mutation_id,
+    documentId: item.document_id,
+    baseRevisionId: item.base_revision_id,
+    resultRevisionId: item.result_revision_id,
+    itemState: item.item_state,
+    message: item.message,
+  }
+}
+
+function buildCanonicalRevision(revision: RawContentRevision): CanonicalDocumentRevision {
+  return {
+    id: revision.id,
+    documentId: revision.document_id,
+    workspaceId: revision.workspace_id,
+    libraryId: revision.library_id,
+    revisionNumber: revision.revision_number,
+    parentRevisionId: revision.parent_revision_id,
+    contentSourceKind: revision.content_source_kind,
+    checksum: revision.checksum,
+    mimeType: revision.mime_type,
+    byteSize: revision.byte_size,
+    title: revision.title,
+    languageCode: revision.language_code,
+    sourceUri: revision.source_uri,
+    storageKey: revision.storage_key,
+    createdByPrincipalId: revision.created_by_principal_id,
+    createdAt: revision.created_at,
+  }
+}
+
+function buildCanonicalIdentity(document: RawContentDocument): CanonicalDocumentIdentity {
+  return {
+    id: document.id,
+    workspaceId: document.workspace_id,
+    libraryId: document.library_id,
+    externalKey: document.external_key,
+    documentState: document.document_state,
+    createdAt: document.created_at,
+  }
+}
+
+function buildDocumentFileName(
+  document: RawContentDocument,
+  activeRevision: RawContentRevision | null,
+  revisions: RawContentRevision[],
+): string {
+  return activeRevision?.title ?? revisions[0]?.title ?? document.external_key
+}
+
+function buildDocumentFileType(
+  document: RawContentDocument,
+  activeRevision: RawContentRevision | null,
+  revisions: RawContentRevision[],
+): string {
+  const reference = activeRevision ?? revisions[0] ?? null
+  if (!reference) {
+    return inferFileType(document.external_key, null)
+  }
+  return inferFileType(reference.title ?? document.external_key, reference.mime_type)
+}
+
+function buildMutationState(mutation: RawContentMutation | null): DocumentMutationState {
+  if (!mutation) {
+    return {
+      kind: null,
+      status: null,
+      warning: null,
+    }
+  }
+  return {
+    kind: mutation.operation_kind,
+    status: mutationStatusFromState(mutation.mutation_state),
+    warning: mutation.failure_code ?? mutation.conflict_code,
+  }
+}
+
+function buildAttemptSummary(job: RawIngestJob, accountingStatus: DocumentAccountingStatus): DocumentAttemptSummary {
+  return {
+    totalEstimatedCost: null,
+    settledEstimatedCost: null,
+    inFlightEstimatedCost: null,
+    currency: null,
+    pricedStageCount: job.queue_state === 'completed' ? 1 : 0,
+    unpricedStageCount: job.queue_state === 'completed' ? 0 : 1,
+    inFlightStageCount: job.queue_state === 'queued' || job.queue_state === 'leased' ? 1 : 0,
+    missingStageCount: 0,
+    accountingStatus,
+  }
+}
+
+function buildAttemptGroup(job: RawIngestJob, revision: RawContentRevision | null): DocumentAttemptGroup {
+  const activityStatus = activityStatusFromQueueState(job.queue_state, latestActivityAt(job))
+  const summary: DocumentAttemptSummary = buildAttemptSummary(
+    job,
+    job.queue_state === 'completed' ? 'priced' : 'in_flight_unsettled',
   )
   return {
-    attemptNo: attempt.attempt_no,
-    revisionNo: attempt.revision_no,
-    revisionId: attempt.revision_id,
-    attemptKind: attempt.attempt_kind,
-    status: attempt.status,
+    attemptNo: 1,
+    revisionNo: revision?.revision_number ?? null,
+    revisionId: revision?.id ?? null,
+    attemptKind: job.job_kind,
+    status: job.queue_state,
     activityStatus,
-    lastActivityAt,
-    queueElapsedMs: attempt.queue_elapsed_ms,
-    totalElapsedMs: attempt.total_elapsed_ms,
-      startedAt: attempt.started_at,
-      finishedAt: attempt.finished_at,
-      partialHistory: attempt.partial_history,
-      partialHistoryReason: attempt.partial_history_reason,
-      summary: {
-        totalEstimatedCost: attempt.summary.total_estimated_cost,
-        settledEstimatedCost: attempt.summary.settled_estimated_cost ?? null,
-        inFlightEstimatedCost: attempt.summary.in_flight_estimated_cost ?? null,
-        currency: attempt.summary.currency,
-        pricedStageCount: attempt.summary.priced_stage_count,
-        unpricedStageCount: attempt.summary.unpriced_stage_count,
-        inFlightStageCount: attempt.summary.in_flight_stage_count ?? 0,
-        missingStageCount: attempt.summary.missing_stage_count ?? 0,
-        accountingStatus: attempt.summary.accounting_status,
-      },
-      benchmarks: attempt.benchmarks.map((benchmark) => ({
-      stage: benchmark.stage,
-      status: benchmark.status,
-      message: benchmark.message,
-      providerKind: benchmark.provider_kind,
-      modelName: benchmark.model_name,
-      startedAt: benchmark.started_at,
-      finishedAt: benchmark.finished_at,
-      elapsedMs: benchmark.elapsed_ms,
-      accounting: benchmark.accounting
-        ? {
-            accountingScope: benchmark.accounting.accounting_scope ?? 'stage_rollup',
-            pricingStatus: benchmark.accounting.pricing_status,
-            usageEventId: benchmark.accounting.usage_event_id,
-            costLedgerId: benchmark.accounting.cost_ledger_id,
-            pricingCatalogEntryId: benchmark.accounting.pricing_catalog_entry_id,
-            estimatedCost: benchmark.accounting.estimated_cost,
-            settledEstimatedCost: benchmark.accounting.settled_estimated_cost ?? null,
-            inFlightEstimatedCost: benchmark.accounting.in_flight_estimated_cost ?? null,
-            currency: benchmark.accounting.currency,
-            attributionSource: benchmark.accounting.attribution_source ?? null,
-          }
+    lastActivityAt: latestActivityAt(job),
+    queueElapsedMs: elapsedMs(job.queued_at, job.available_at ?? job.completed_at ?? null),
+    totalElapsedMs: elapsedMs(job.queued_at, job.completed_at ?? new Date().toISOString()),
+    startedAt: job.queued_at,
+    finishedAt: job.completed_at,
+    partialHistory: job.queue_state !== 'completed',
+    partialHistoryReason: job.queue_state === 'failed' || job.queue_state === 'canceled' ? 'ingest_failed' : null,
+    summary,
+    benchmarks: [],
+  }
+}
+
+function buildProcessingHistory(job: RawIngestJob): DocumentDetail['processingHistory'][number] {
+  return {
+    attemptNo: 1,
+    status: job.queue_state,
+    stage: job.job_kind,
+    errorMessage: job.queue_state === 'failed' || job.queue_state === 'canceled' ? 'Canonical ingest job failed' : null,
+    startedAt: job.queued_at,
+    finishedAt: job.completed_at,
+  }
+}
+
+function buildCanonicalState(
+  document: RawContentDocument,
+  head: RawContentDocumentHead | null,
+  activeRevision: RawContentRevision | null,
+  readableRevision: RawContentRevision | null,
+  mutation: RawContentMutationDetailResponse | null,
+  latestJob: RawIngestJob | null,
+  revisionItems: RawContentMutationDetailResponse[],
+  jobItems: RawIngestJob[],
+  stageEvents: CanonicalIngestStageEvent[] = [],
+): DocumentDetail['canonical'] {
+  const latestMutation = mutation ? buildCanonicalMutation(mutation.mutation) : null
+  const latestMutationItems = mutation ? mutation.items.map(buildCanonicalMutationItem) : []
+  return {
+    document: buildCanonicalIdentity(document),
+    head:
+      head === null
+        ? null
+        : {
+            documentId: head.document_id,
+            activeRevisionId: head.active_revision_id,
+            readableRevisionId: head.readable_revision_id,
+            latestMutationId: head.latest_mutation_id,
+            latestSuccessfulAttemptId: head.latest_successful_attempt_id,
+            headUpdatedAt: head.head_updated_at,
+          },
+    activeRevision: activeRevision ? buildCanonicalRevision(activeRevision) : null,
+    readableRevision: readableRevision ? buildCanonicalRevision(readableRevision) : null,
+    latestMutation,
+    latestMutationItems,
+    latestJob: latestJob ? buildCanonicalJob(latestJob) : null,
+    latestAttempt: latestJob ? buildCanonicalAttempt(latestJob) : null,
+    latestAttemptStages: stageEvents,
+  }
+}
+
+function buildGraphThroughput(
+  activeCount: number,
+  totalCount: number,
+  completedCount: number,
+  pressureKind: 'steady' | 'elevated' | 'high' | null,
+): Omit<DocumentGraphThroughputSummary, 'trackedDocumentCount' | 'activeDocumentCount'> {
+  const backlog = Math.max(0, activeCount)
+  const cadence = backlog > 0 ? 'watch' : 'calm'
+  const recommendedPollIntervalMs = backlog > 0 ? 4_000 : 0
+  return {
+    processedChunks: completedCount,
+    totalChunks: totalCount,
+    progressPercent: totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : null,
+    providerCallCount: 0,
+    resumedChunkCount: 0,
+    resumeHitCount: 0,
+    replayedChunkCount: 0,
+    duplicateWorkRatio: null,
+    maxDowngradeLevel: pressureKind === 'high' ? 2 : pressureKind === 'elevated' ? 1 : 0,
+    avgCallElapsedMs: null,
+    avgChunkElapsedMs: null,
+    avgCharsPerSecond: null,
+    avgTokensPerSecond: null,
+    lastProviderCallAt: null,
+    lastCheckpointAt: new Date().toISOString(),
+    lastCheckpointElapsedMs: 0,
+    nextCheckpointEtaMs: backlog > 0 ? recommendedPollIntervalMs : null,
+    pressureKind,
+    cadence,
+    recommendedPollIntervalMs,
+    bottleneckRank: backlog > 0 ? 1 : null,
+  }
+}
+
+function buildCollectionAccounting(
+  rows: DocumentRow[],
+): DocumentCollectionAccountingSummary {
+  const queued = rows.filter((row) => row.status === 'queued').length
+  const processing = rows.filter((row) => row.status === 'processing').length
+  const ready = rows.filter((row) => row.status === 'ready').length
+  const readyNoGraph = rows.filter((row) => row.status === 'ready_no_graph').length
+  const failed = rows.filter((row) => row.status === 'failed').length
+  const inFlightStageCount = queued + processing
+  return {
+    totalEstimatedCost: null,
+    settledEstimatedCost: null,
+    inFlightEstimatedCost: null,
+    currency: null,
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    pricedStageCount: ready + readyNoGraph,
+    unpricedStageCount: queued + processing + failed,
+    inFlightStageCount,
+    missingStageCount: 0,
+    accountingStatus: inFlightStageCount > 0 ? 'in_flight_unsettled' : 'priced',
+  }
+}
+
+function buildCollectionDiagnostics(rows: DocumentRow[]): DocumentCollectionDiagnostics {
+  const queued = rows.filter((row) => row.status === 'queued').length
+  const processing = rows.filter((row) => row.status === 'processing').length
+  const ready = rows.filter((row) => row.status === 'ready').length
+  const readyNoGraph = rows.filter((row) => row.status === 'ready_no_graph').length
+  const failed = rows.filter((row) => row.status === 'failed').length
+  const activeBacklogCount = queued + processing
+  const progress: DocumentCollectionProgressCounters = {
+    accepted: rows.length,
+    contentExtracted: ready + readyNoGraph,
+    chunked: ready + readyNoGraph,
+    embedded: ready,
+    extractingGraph: processing,
+    graphReady: ready,
+    ready,
+    failed,
+  }
+  const warnings: DocumentCollectionWarning[] = []
+  if (activeBacklogCount > 0) {
+    warnings.push({
+      warningKind: 'ordinary_backlog',
+      warningScope: 'collection',
+      warningMessage: `${String(activeBacklogCount)} canonical document(s) are still ingesting.`,
+      isDegraded: false,
+    })
+  }
+  if (failed > 0) {
+    warnings.push({
+      warningKind: 'failed_work',
+      warningScope: 'collection',
+      warningMessage: `${String(failed)} canonical document(s) failed ingestion.`,
+      isDegraded: true,
+    })
+  }
+  const projectionHealth: DocumentGraphHealthSummary['projectionHealth'] =
+    failed > 0 ? 'failed' : activeBacklogCount > 0 ? 'retrying_contention' : 'healthy'
+  const graphHealth: DocumentGraphHealthSummary = {
+    projectionHealth,
+    activeProjectionCount: ready,
+    retryingProjectionCount: processing,
+    failedProjectionCount: failed,
+    pendingNodeWriteCount: activeBacklogCount,
+    pendingEdgeWriteCount: activeBacklogCount,
+    lastFailureKind: failed > 0 ? 'canonical_ingest_failed' : null,
+    lastFailureAt: failed > 0 ? new Date().toISOString() : null,
+    isRuntimeReadable: failed === 0 && activeBacklogCount === 0 && ready > 0,
+    snapshotAt: new Date().toISOString(),
+  }
+  const settlement: DocumentCollectionSettlementSummary = {
+    progressState:
+      activeBacklogCount > 0
+        ? 'live_in_flight'
+        : failed > 0
+          ? 'failed_with_residual_work'
+          : 'fully_settled',
+    liveTotalEstimatedCost: null,
+    settledTotalEstimatedCost: null,
+    missingTotalEstimatedCost: null,
+    currency: null,
+    isFullySettled: activeBacklogCount === 0 && failed === 0,
+    settledAt: activeBacklogCount === 0 ? new Date().toISOString() : null,
+  }
+  const terminalOutcome = {
+    terminalState:
+      activeBacklogCount > 0
+        ? 'live_in_flight'
+        : failed > 0
+          ? 'failed_with_residual_work'
+          : 'fully_settled',
+    residualReason: failed > 0 ? 'unknown' : null,
+    queuedCount: queued,
+    processingCount: processing,
+    pendingGraphCount: readyNoGraph,
+    failedDocumentCount: failed,
+    settledAt: settlement.settledAt,
+    lastTransitionAt:
+      rows.length > 0
+        ? rows
+            .map((row) => row.lastActivityAt)
+            .filter((value): value is string => Boolean(value))
+            .sort(compareIsoDates)
+            [0] ?? null
         : null,
-    })),
+  } satisfies NonNullable<DocumentCollectionDiagnostics['terminalOutcome']>
+
+  const graphThroughput: DocumentCollectionGraphThroughputSummary = {
+    trackedDocumentCount: rows.length,
+    activeDocumentCount: activeBacklogCount,
+    ...buildGraphThroughput(
+      activeBacklogCount,
+      rows.length,
+      ready + readyNoGraph,
+      failed > 0 ? 'high' : activeBacklogCount > 0 ? 'elevated' : null,
+    ),
+  }
+
+  return {
+    progress,
+    queueBacklogCount: queued,
+    processingBacklogCount: processing,
+    activeBacklogCount,
+    queueIsolation: null,
+    graphThroughput,
+    settlement,
+    terminalOutcome,
+    graphHealth,
+    warnings,
+    perStage: [],
+    perFormat: [],
   }
 }
 
-function mapMutationAccepted(response: RawDocumentMutationAccepted): DocumentMutationAccepted {
+function buildWorkspaceSummary(
+  rows: DocumentRow[],
+  diagnostics: DocumentCollectionDiagnostics,
+): DocumentsWorkspaceSummary {
+  const queued = rows.filter((row) => row.status === 'queued').length
+  const processing = rows.filter((row) => row.status === 'processing').length
+  const ready = rows.filter((row) => row.status === 'ready').length
+  const readyNoGraph = rows.filter((row) => row.status === 'ready_no_graph').length
+  const failed = rows.filter((row) => row.status === 'failed').length
+  const backlogCount = queued + processing
+  const progressCount = ready + readyNoGraph + failed
+  const primarySummary: DocumentsWorkspacePrimarySummary = {
+    progressLabel: `${String(progressCount)} / ${String(rows.length)}`,
+    spendLabel:
+      backlogCount > 0
+        ? 'In flight'
+        : failed > 0
+          ? 'Residual work'
+          : 'Settled',
+    backlogLabel:
+      backlogCount > 0 ? `${String(backlogCount)} pending` : 'Clear',
+    terminalState: diagnostics.terminalOutcome?.terminalState ?? 'live_in_flight',
+  }
+  const secondaryDiagnostics: DocumentsWorkspaceDiagnosticChip[] = [
+    {
+      kind: 'documents',
+      label: 'Documents',
+      value: String(rows.length),
+    },
+    {
+      kind: 'queue',
+      label: 'Queued',
+      value: String(queued),
+    },
+    {
+      kind: 'processing',
+      label: 'Processing',
+      value: String(processing),
+    },
+    {
+      kind: 'failed',
+      label: 'Failed',
+      value: String(failed),
+    },
+  ]
+  const degradedNotices: DocumentsWorkspaceNotice[] = []
+  const informationalNotices: DocumentsWorkspaceNotice[] = []
+
+  if (backlogCount > 0) {
+    informationalNotices.push({
+      kind: 'ordinary_backlog',
+      title: 'Canonical ingestion is active',
+      message: `${String(backlogCount)} document(s) are still processing in the canonical pipeline.`,
+    })
+  }
+
+  if (failed > 0) {
+    degradedNotices.push({
+      kind: 'failed_work',
+      title: 'Canonical ingestion failures',
+      message: `${String(failed)} document(s) failed in the canonical pipeline.`,
+    })
+  }
+
   return {
-    accepted: response.accepted,
-    operation: response.operation,
-    trackId: pick(response.track_id, response.trackId) ?? null,
-    revisionId: pick(response.revision_id, response.revisionId) ?? null,
-    mutationId: pick(response.mutation_id, response.mutationId) ?? null,
-    attemptNo: pick(response.attempt_no, response.attemptNo) ?? null,
+    primarySummary,
+    secondaryDiagnostics,
+    degradedNotices,
+    informationalNotices,
+    tableDocumentCount: rows.length,
+    activeFilterCount: 0,
+    highlightedStatus:
+      failed > 0 ? 'failed' : backlogCount > 0 ? 'processing' : rows.length > 0 ? 'ready' : null,
   }
 }
 
-function mapDetail(detail: RawDocumentDetail): DocumentDetail {
-  let lastActivityAt = detail.last_activity_at ?? null
-  if (lastActivityAt === null && detail.processing_history.length > 0) {
-    const latestProcessingItem = detail.processing_history[0]
-    lastActivityAt = latestProcessingItem.finished_at ?? latestProcessingItem.started_at
+function collectMutationsForDocument(
+  documentId: string,
+  mutations: RawContentMutationDetailResponse[],
+): RawContentMutationDetailResponse[] {
+  return mutations
+    .filter((mutation) => mutation.items.some((item) => item.document_id === documentId))
+    .sort((left, right) => compareIsoDates(left.mutation.requested_at, right.mutation.requested_at))
+}
+
+function selectLatestMutation(
+  document: RawContentDocumentDetailResponse,
+  relatedMutations: RawContentMutationDetailResponse[],
+): RawContentMutationDetailResponse | null {
+  if (document.head?.latest_mutation_id) {
+    const headMutation = relatedMutations.find(
+      (mutation) => mutation.mutation.id === document.head?.latest_mutation_id,
+    )
+    if (headMutation) {
+      return headMutation
+    }
   }
-  const activityStatus = deriveActivityStatus(
-    detail.status,
-    detail.activity_status,
-    lastActivityAt,
-  )
+  return relatedMutations[0] ?? null
+}
+
+function selectLatestJob(
+  latestMutation: RawContentMutationDetailResponse | null,
+  relatedJobs: RawIngestJob[],
+): RawIngestJob | null {
+  if (latestMutation?.job_id) {
+    const job = relatedJobs.find((item) => item.id === latestMutation.job_id)
+    if (job) {
+      return job
+    }
+  }
+  return relatedJobs[0] ?? null
+}
+
+function mapSurfaceRow(
+  document: RawContentDocumentDetailResponse,
+  relatedMutations: RawContentMutationDetailResponse[],
+  relatedJobs: RawIngestJob[],
+  libraryName: string,
+): DocumentRow {
+  const revisions = document.active_revision ? [document.active_revision] : []
+  const latestMutation = selectLatestMutation(document, relatedMutations)
+  const latestJob = selectLatestJob(latestMutation, relatedJobs)
+  const readableRevisionPresent = document.head?.readable_revision_id !== null
+  const documentStatus = documentStatusFromQueueState(latestJob?.queue_state ?? null, readableRevisionPresent)
+  const activityStatus = activityStatusFromQueueState(latestJob?.queue_state ?? null, latestActivityAt(latestJob))
+  const activeRevision = document.active_revision
+  const fileName = buildDocumentFileName(document.document, activeRevision, revisions)
+  const fileType = buildDocumentFileType(document.document, activeRevision, revisions)
+  const mutationState = buildMutationState(latestMutation?.mutation ?? null)
+  const documentHasActivity = Boolean(latestJob || latestMutation)
+
   return {
-    id: detail.id,
-    logicalDocumentId: detail.logical_document_id,
-    fileName: detail.file_name,
-    fileType: detail.file_type,
-    fileSizeLabel: detail.file_size_label,
-    uploadedAt: detail.uploaded_at,
-    libraryName: detail.library_name,
-    stage: detail.stage,
-    status: detail.status,
-    progressPercent: detail.progress_percent,
+    id: document.document.id,
+    logicalDocumentId: document.document.id,
+    readabilityState:
+      documentStatus === 'ready'
+        ? 'readable_active'
+        : documentStatus === 'ready_no_graph'
+          ? 'readable_stale'
+          : 'unreadable',
+    activeRevisionId: activeRevision?.id ?? null,
+    readableRevisionId:
+      document.head?.readable_revision_id ?? activeRevision?.id ?? null,
+    readableRevisionNo:
+      document.head?.readable_revision_id && activeRevision?.id === document.head.readable_revision_id
+        ? activeRevision?.revision_number ?? null
+        : null,
+    fileName,
+    fileType,
+    fileSizeLabel: activeRevision ? formatFileSizeLabel(activeRevision.byte_size) : '—',
+    uploadedAt: document.document.created_at,
+    libraryName,
+    stage: latestJob?.job_kind ?? activeRevision?.content_source_kind ?? document.document.document_state,
+    status: documentStatus,
+    progressPercent:
+      documentStatus === 'ready'
+        ? 100
+        : documentStatus === 'ready_no_graph'
+          ? 95
+          : activityStatus === 'queued'
+            ? 0
+            : activityStatus === 'active'
+              ? 50
+              : activityStatus === 'stalled'
+                ? 25
+                : 100,
     activityStatus,
-    lastActivityAt,
-    stalledReason: deriveStalledReason(activityStatus, detail.stalled_reason ?? detail.error_message, lastActivityAt),
-    activeRevisionNo: detail.active_revision_no,
-    activeRevisionKind: detail.active_revision_kind,
-    activeRevisionStatus: detail.active_revision_status,
-    latestAttemptNo: detail.latest_attempt_no,
-    accountingStatus: detail.accounting_status,
-    totalEstimatedCost: detail.total_estimated_cost,
-    settledEstimatedCost: detail.settled_estimated_cost ?? null,
-    inFlightEstimatedCost: detail.in_flight_estimated_cost ?? null,
-    currency: detail.currency,
-    inFlightStageCount: detail.in_flight_stage_count ?? 0,
-    missingStageCount: detail.missing_stage_count ?? 0,
-    partialHistory: detail.partial_history,
-    partialHistoryReason: detail.partial_history_reason,
-    mutation: {
-      kind: detail.mutation.kind,
-      status: detail.mutation.status,
-      warning: detail.mutation.warning,
-    },
-    requestedBy: detail.requested_by,
-    errorMessage: detail.error_message,
-    summary: detail.summary,
-    graphNodeId: detail.graph_node_id,
-    canDownloadText: detail.can_download_text,
-    canAppend: detail.can_append,
-    canReplace: detail.can_replace,
-    canRemove: detail.can_remove,
+    lastActivityAt: latestActivityAt(latestJob),
+    stalledReason: stalledReason(activityStatus, latestActivityAt(latestJob)),
+    chunkCount: null,
+    graphNodeCount: activeRevision ? 1 : null,
+    graphEdgeCount: 0,
+    activeRevisionNo: activeRevision?.revision_number ?? null,
+    activeRevisionKind: activeRevision?.content_source_kind ?? null,
+    latestAttemptNo: Math.max(relatedJobs.length, documentHasActivity ? 1 : 0),
+    accountingStatus:
+      documentStatus === 'ready' || documentStatus === 'ready_no_graph'
+        ? 'priced'
+        : documentStatus === 'failed'
+          ? 'partial'
+          : 'in_flight_unsettled',
+    totalEstimatedCost: null,
+    settledEstimatedCost: null,
+    inFlightEstimatedCost: null,
+    currency: null,
+    inFlightStageCount: activityStatus === 'queued' || activityStatus === 'active' ? 1 : 0,
+    missingStageCount: 0,
+    partialHistory: relatedJobs.length > 1 || documentStatus !== 'ready',
+    partialHistoryReason: latestMutation?.mutation.failure_code ?? latestMutation?.mutation.conflict_code ?? null,
+    graphThroughput: buildGraphThroughput(
+      activityStatus === 'queued' || activityStatus === 'active' ? 1 : 0,
+      1,
+      documentStatus === 'ready' || documentStatus === 'ready_no_graph' ? 1 : 0,
+      activityStatus === 'queued' || activityStatus === 'active' ? 'elevated' : null,
+    ),
+    mutation: mutationState,
+    canRetry:
+      latestJob?.queue_state === 'failed' ||
+      latestJob?.queue_state === 'canceled' ||
+      mutationState.status === 'failed',
+    canAppend: document.document.document_state === 'active',
+    canReplace: document.document.document_state === 'active',
+    canRemove: document.document.document_state === 'active',
+    detailAvailable: document.document.document_state === 'active',
+    canonical: buildCanonicalState(
+      document.document,
+      document.head,
+      activeRevision,
+      activeRevision,
+      latestMutation,
+      latestJob,
+      relatedMutations,
+      relatedJobs,
+    ),
+  }
+}
+
+function mapDetailRevisionHistory(
+  document: RawContentDocumentDetailResponse,
+  revisions: RawContentRevision[],
+): DocumentRevisionHistoryItem[] {
+  const activeRevisionId = document.head?.active_revision_id ?? document.active_revision?.id ?? null
+  return revisions
+    .slice()
+    .sort((left, right) => left.revision_number - right.revision_number)
+    .map((revision) => ({
+      id: revision.id,
+      revisionNo: revision.revision_number,
+      revisionKind: revision.content_source_kind,
+      status: revision.id === activeRevisionId ? 'active' : 'superseded',
+      sourceFileName: revision.title ?? document.document.external_key,
+      appendedTextExcerpt: null,
+      acceptedAt: revision.created_at,
+      activatedAt: revision.id === activeRevisionId ? revision.created_at : null,
+      supersededAt: null,
+      isActive: revision.id === activeRevisionId,
+    }))
+}
+
+function mapChunksToPreview(
+  chunks: RawChunkSummary[],
+): {
+  previewText: string | null
+  previewTruncated: boolean
+} {
+  if (chunks.length === 0) {
+    return {
+      previewText: null,
+      previewTruncated: false,
+    }
+  }
+  const sorted = [...chunks].sort((left, right) => left.ordinal - right.ordinal)
+  const previewText = sorted.map((chunk) => chunk.content).join('\n\n')
+  const maxPreviewLength = 1_600
+  return {
+    previewText: previewText.slice(0, maxPreviewLength),
+    previewTruncated: previewText.length > maxPreviewLength,
+  }
+}
+
+function mapDetailProcessingHistory(
+  jobs: RawIngestJob[],
+): DocumentDetail['processingHistory'] {
+  return jobs
+    .slice()
+    .sort((left, right) => compareIsoDates(left.queued_at, right.queued_at))
+    .map(buildProcessingHistory)
+}
+
+function mapDetailAttempts(
+  jobs: RawIngestJob[],
+  revision: RawContentRevision | null,
+): DocumentAttemptGroup[] {
+  return jobs
+    .slice()
+    .sort((left, right) => compareIsoDates(left.queued_at, right.queued_at))
+    .map((job, index) => ({
+      ...buildAttemptGroup(job, revision),
+      attemptNo: index + 1,
+    }))
+}
+
+function mapDocumentDetail(
+  document: RawContentDocumentDetailResponse,
+  revisions: RawContentRevision[],
+  chunks: RawChunkSummary[],
+  relatedMutations: RawContentMutationDetailResponse[],
+  relatedJobs: RawIngestJob[],
+  latestMutation: RawContentMutationDetailResponse | null,
+  libraryName: string,
+): DocumentDetail {
+  const activeRevision = document.active_revision
+  const readableRevision =
+    document.head?.readable_revision_id
+      ? revisions.find((revision) => revision.id === document.head?.readable_revision_id) ?? null
+      : activeRevision
+  const latestJob = selectLatestJob(latestMutation, relatedJobs)
+  const status = documentStatusFromQueueState(latestJob?.queue_state ?? null, Boolean(readableRevision))
+  const activityStatus = activityStatusFromQueueState(latestJob?.queue_state ?? null, latestActivityAt(latestJob))
+  const canonicalSummary = mapChunksToPreview(chunks)
+  const canonicalSummaryPreview: GraphCanonicalSummary | null = canonicalSummary.previewText
+    ? {
+        text: canonicalSummary.previewText,
+        confidenceStatus: canonicalSummary.previewTruncated ? 'partial' : 'strong',
+        supportCount: chunks.length,
+        warning: canonicalSummary.previewTruncated ? 'Preview truncated from canonical chunks.' : null,
+      }
+    : null
+  const extractionRecovery = null
+  const previewChunkCount = chunks.length
+  const graphStats: DocumentGraphStats = {
+    nodeCount: activeRevision ? 1 : 0,
+    edgeCount: 0,
+    evidenceCount: previewChunkCount,
+  }
+  const mutationState = buildMutationState(latestMutation?.mutation ?? null)
+  const lastActivity = latestActivityAt(latestJob)
+  const attemptGroups = mapDetailAttempts(relatedJobs, activeRevision)
+  const processingHistory = mapDetailProcessingHistory(relatedJobs)
+  const latestJobForCanonical = latestJob ?? null
+  const stageEvents: CanonicalIngestStageEvent[] = []
+
+  return {
+    id: document.document.id,
+    logicalDocumentId: document.document.id,
+    readabilityState:
+      status === 'ready'
+        ? 'readable_active'
+        : status === 'ready_no_graph'
+          ? 'readable_stale'
+          : 'unreadable',
+    activeRevisionId: activeRevision?.id ?? null,
+    readableRevisionId: readableRevision?.id ?? null,
+    readableRevisionNo: readableRevision?.revision_number ?? null,
+    readableRevisionKind: readableRevision?.content_source_kind ?? null,
+    fileName: buildDocumentFileName(document.document, activeRevision, revisions),
+    fileType: buildDocumentFileType(document.document, activeRevision, revisions),
+    fileSizeLabel: activeRevision ? formatFileSizeLabel(activeRevision.byte_size) : '—',
+    uploadedAt: document.document.created_at,
+    libraryName,
+    stage: latestJob?.job_kind ?? activeRevision?.content_source_kind ?? document.document.document_state,
+    status,
+    progressPercent:
+      status === 'ready'
+        ? 100
+        : status === 'ready_no_graph'
+          ? 95
+          : activityStatus === 'queued'
+            ? 0
+            : activityStatus === 'active'
+              ? 50
+              : activityStatus === 'stalled'
+                ? 25
+                : 100,
+    activityStatus,
+    lastActivityAt: lastActivity,
+    stalledReason: stalledReason(activityStatus, lastActivity),
+    activeRevisionNo: activeRevision?.revision_number ?? null,
+    activeRevisionKind: activeRevision?.content_source_kind ?? null,
+    activeRevisionStatus: activeRevision ? 'active' : null,
+    latestAttemptNo: Math.max(relatedJobs.length, latestJobForCanonical ? 1 : 0),
+    accountingStatus:
+      status === 'ready' || status === 'ready_no_graph'
+        ? 'priced'
+        : status === 'failed'
+          ? 'partial'
+          : 'in_flight_unsettled',
+    totalEstimatedCost: null,
+    settledEstimatedCost: null,
+    inFlightEstimatedCost: null,
+    currency: null,
+    inFlightStageCount: activityStatus === 'queued' || activityStatus === 'active' ? 1 : 0,
+    missingStageCount: 0,
+    partialHistory: relatedJobs.length > 1 || status !== 'ready',
+    partialHistoryReason: latestMutation?.mutation.failure_code ?? latestMutation?.mutation.conflict_code ?? null,
+    mutation: mutationState,
+    requestedBy: latestMutation?.mutation.requested_by_principal_id ?? null,
+    errorMessage:
+      latestMutation?.mutation.failure_code ??
+      latestMutation?.mutation.conflict_code ??
+      (status === 'failed' ? 'Canonical ingestion failed' : null),
+    failureClass:
+      latestJob?.queue_state === 'failed' || latestJob?.queue_state === 'canceled'
+        ? 'ingest_failed'
+        : null,
+    operatorAction: latestMutation?.mutation.operation_kind ?? null,
+    summary:
+      canonicalSummaryPreview?.text ??
+      activeRevision?.title ??
+      document.document.external_key,
+    graphNodeId: activeRevision ? document.document.id : null,
+    canonicalSummaryPreview,
+    canDownloadText: previewChunkCount > 0,
+    canAppend: document.document.document_state === 'active',
+    canReplace: document.document.document_state === 'active',
+    canRemove: document.document.document_state === 'active',
+    canRetry:
+      latestJob?.queue_state === 'failed' ||
+      latestJob?.queue_state === 'canceled' ||
+      mutationState.status === 'failed',
+    detailAvailable: document.document.document_state === 'active',
+    reconciliationScope: null,
+    providerFailure: null,
+    graphThroughput: buildGraphThroughput(
+      activityStatus === 'queued' || activityStatus === 'active' ? 1 : 0,
+      Math.max(1, previewChunkCount),
+      previewChunkCount,
+      activityStatus === 'queued' || activityStatus === 'active' ? 'elevated' : null,
+    ),
     extractedStats: {
-      chunkCount: detail.extracted_stats.chunk_count,
-      documentId: detail.extracted_stats.document_id,
-      checksum: detail.extracted_stats.checksum,
-      pageCount: detail.extracted_stats.page_count,
-      extractionKind: detail.extracted_stats.extraction_kind,
-      previewText: detail.extracted_stats.preview_text ?? null,
-      previewTruncated: detail.extracted_stats.preview_truncated ?? false,
-      warningCount: detail.extracted_stats.warning_count ?? detail.extracted_stats.warnings.length,
-      normalizationStatus: detail.extracted_stats.normalization_status ?? 'verbatim',
-      ocrSource: detail.extracted_stats.ocr_source ?? null,
-      warnings: detail.extracted_stats.warnings,
+      chunkCount: previewChunkCount || null,
+      documentId: document.document.id,
+      checksum: activeRevision?.checksum ?? null,
+      pageCount: null,
+      extractionKind: activeRevision?.content_source_kind ?? null,
+      previewText: canonicalSummary.previewText,
+      previewTruncated: canonicalSummary.previewTruncated,
+      warningCount: canonicalSummary.previewTruncated ? 1 : 0,
+      normalizationStatus: 'verbatim',
+      ocrSource: null,
+      recovery: extractionRecovery,
+      warnings: [],
     },
-    graphStats: {
-      nodeCount: detail.graph_stats.node_count,
-      edgeCount: detail.graph_stats.edge_count,
-      evidenceCount: detail.graph_stats.evidence_count,
+    graphStats,
+    collectionDiagnostics: null,
+    revisionHistory: mapDetailRevisionHistory(document, revisions),
+    processingHistory,
+    attempts: attemptGroups,
+    canonical: buildCanonicalState(
+      document.document,
+      document.head,
+      activeRevision,
+      readableRevision,
+      latestMutation,
+      latestJobForCanonical,
+      relatedMutations,
+      relatedJobs,
+      stageEvents,
+    ),
+  }
+}
+
+function normalizeUploadRejectionDetails(details: unknown): UploadRejectionDetails | null {
+  if (!details || typeof details !== 'object') {
+    return null
+  }
+  const record = details as Record<string, unknown>
+  return {
+    fileName: readString(record, 'fileName'),
+    rejectionKind: readString(record, 'rejectionKind'),
+    detectedFormat: readString(record, 'detectedFormat'),
+    mimeType: readString(record, 'mimeType'),
+    fileSizeBytes: readNumber(record, 'fileSizeBytes'),
+    uploadLimitMb: readNumber(record, 'uploadLimitMb'),
+    rejectionCause: readString(record, 'rejectionCause'),
+    operatorAction: readString(record, 'operatorAction'),
+  }
+}
+
+async function fetchCanonicalBundle(): Promise<CanonicalLibraryBundle> {
+  const shellStore = useShellStore()
+  const libraryId = shellStore.context?.activeLibrary.id
+  if (!libraryId) {
+    return {
+      documents: [],
+      mutations: [],
+      jobs: [],
+    }
+  }
+
+  const [documents, mutations, jobs] = await Promise.all([
+    unwrap(
+      apiHttp.get<RawContentDocumentDetailResponse[]>('/content/documents', {
+        params: { libraryId, includeDeleted: false },
+      }),
+    ),
+    unwrap(
+      apiHttp.get<RawContentMutationDetailResponse[]>('/content/mutations', {
+        params: { libraryId },
+      }),
+    ),
+    unwrap(
+      apiHttp.get<RawIngestJob[]>('/ingest/jobs', {
+        params: {
+          libraryId,
+          workspaceId: shellStore.context?.activeWorkspace.id,
+        },
+      }),
+    ),
+  ])
+
+  return {
+    documents,
+    mutations,
+    jobs,
+  }
+}
+
+function buildRelationMaps(
+  bundle: CanonicalLibraryBundle,
+): {
+  mutationsByDocument: Map<string, RawContentMutationDetailResponse[]>
+  jobsById: Map<string, RawIngestJob>
+} {
+  const mutationsByDocument = new Map<string, RawContentMutationDetailResponse[]>()
+  for (const mutation of bundle.mutations) {
+    for (const item of mutation.items) {
+      if (!item.document_id) {
+        continue
+      }
+      const current = mutationsByDocument.get(item.document_id) ?? []
+      current.push(mutation)
+      mutationsByDocument.set(item.document_id, current)
+    }
+  }
+  for (const [documentId, mutations] of mutationsByDocument.entries()) {
+    mutations.sort((left, right) => compareIsoDates(left.mutation.requested_at, right.mutation.requested_at))
+    mutationsByDocument.set(documentId, mutations)
+  }
+  const jobsById = new Map(bundle.jobs.map((job) => [job.id, job] as const))
+  return { mutationsByDocument, jobsById }
+}
+
+function buildDocumentRelations(
+  documentId: string,
+  bundle: CanonicalLibraryBundle,
+  maps: ReturnType<typeof buildRelationMaps>,
+): CanonicalDocumentRelation {
+  const mutations = maps.mutationsByDocument.get(documentId) ?? []
+  const jobIds = new Set<string>()
+  const jobs: RawIngestJob[] = []
+
+  for (const mutation of mutations) {
+    if (!mutation.job_id || jobIds.has(mutation.job_id)) {
+      continue
+    }
+    const job = maps.jobsById.get(mutation.job_id)
+    if (!job) {
+      continue
+    }
+    jobs.push(job)
+    jobIds.add(job.id)
+  }
+
+  jobs.sort((left, right) => compareIsoDates(left.queued_at, right.queued_at))
+  return { mutations, jobs }
+}
+
+function buildSurfaceResponse(
+  bundle: CanonicalLibraryBundle,
+  libraryName: string,
+): DocumentsSurfaceResponse {
+  const relationMaps = buildRelationMaps(bundle)
+  const rows = bundle.documents
+    .map((document) => {
+      const relations = buildDocumentRelations(document.document.id, bundle, relationMaps)
+      return mapSurfaceRow(document, relations.mutations, relations.jobs, libraryName)
+    })
+    .sort((left, right) => compareIsoDates(left.uploadedAt, right.uploadedAt))
+
+  const diagnostics = buildCollectionDiagnostics(rows)
+
+  return {
+    acceptedFormats: DEFAULT_ACCEPTED_FORMATS,
+    maxSizeMb: DEFAULT_UPLOAD_LIMIT_MB,
+    graphStatus:
+      rows.length === 0
+        ? 'empty'
+        : diagnostics.activeBacklogCount > 0
+          ? 'building'
+          : rows.some((row) => row.status === 'failed')
+            ? 'failed'
+            : rows.some((row) => row.status === 'ready_no_graph')
+              ? 'partial'
+              : 'ready',
+    graphWarning:
+      rows.length === 0
+        ? null
+        : diagnostics.activeBacklogCount > 0
+          ? 'Canonical ingestion is still in flight.'
+          : rows.some((row) => row.status === 'failed')
+            ? 'One or more canonical documents failed ingestion.'
+            : rows.some((row) => row.status === 'ready_no_graph')
+              ? 'Some canonical documents are ready without graph coverage.'
+              : null,
+    rebuildBacklogCount: diagnostics.activeBacklogCount,
+    counters: {
+      queued: rows.filter((row) => row.status === 'queued').length,
+      processing: rows.filter((row) => row.status === 'processing').length,
+      ready: rows.filter((row) => row.status === 'ready').length,
+      readyNoGraph: rows.filter((row) => row.status === 'ready_no_graph').length,
+      failed: rows.filter((row) => row.status === 'failed').length,
     },
-    revisionHistory: detail.revision_history.map((item) => ({
-      id: item.id,
-      revisionNo: item.revision_no,
-      revisionKind: item.revision_kind,
-      status: item.status,
-      sourceFileName: item.source_file_name,
-      appendedTextExcerpt: item.appended_text_excerpt,
-      acceptedAt: item.accepted_at,
-      activatedAt: item.activated_at,
-      supersededAt: item.superseded_at,
-      isActive: item.is_active,
-    })),
-    processingHistory: detail.processing_history.map((item) => ({
-      attemptNo: item.attempt_no,
-      status: item.status,
-      stage: item.stage,
-      errorMessage: item.error_message,
-      startedAt: item.started_at,
-      finishedAt: item.finished_at,
-    })),
-    attempts: detail.attempts.map(mapAttemptGroup),
+    filters: {
+      statuses: Array.from(new Set(rows.map((row) => row.status))).sort(),
+      fileTypes: Array.from(new Set(rows.map((row) => row.fileType))).sort(),
+      accountingStatuses: Array.from(new Set(rows.map((row) => row.accountingStatus))).sort(),
+      mutationStatuses: Array.from(
+        new Set(
+          rows
+            .map((row) => row.mutation.status)
+            .filter((value): value is NonNullable<DocumentRow['mutation']['status']> => value !== null),
+        ),
+      ).sort(),
+    },
+    accounting: buildCollectionAccounting(rows),
+    diagnostics,
+    workspace: buildWorkspaceSummary(rows, diagnostics),
+    rows,
+  }
+}
+
+export function normalizeDocumentUploadFailure(
+  file: File,
+  error: unknown,
+): DocumentUploadFailure {
+  const details =
+    error instanceof ApiClientError ? normalizeUploadRejectionDetails(error.details) : null
+  const message = error instanceof Error ? error.message : 'Failed to upload document'
+
+  return {
+    fileName: details?.fileName ?? file.name,
+    message,
+    errorKind: error instanceof ApiClientError ? error.errorKind : null,
+    rejectionKind: details?.rejectionKind ?? null,
+    detectedFormat: details?.detectedFormat ?? null,
+    mimeType: details?.mimeType ?? (file.type || null),
+    fileSizeBytes: details?.fileSizeBytes ?? file.size,
+    uploadLimitMb: details?.uploadLimitMb ?? null,
+    rejectionCause: details?.rejectionCause ?? null,
+    operatorAction: details?.operatorAction ?? null,
   }
 }
 
 export async function fetchDocumentsSurface(): Promise<DocumentsSurfaceResponse> {
-  const response = await unwrap(apiHttp.get<RawDocumentsSurfaceResponse>('/ui/documents/surface'))
-  const accountingStatuses: DocumentAccountingStatus[] = Array.from(
-    new Set(response.rows.map((row) => row.accounting_status)),
-  ).sort()
-  const mutationStatuses: DocumentMutationStatus[] = Array.from(
-    new Set(
-      response.rows
-        .map((row) => row.mutation.status)
-        .filter((value): value is DocumentMutationStatus => value !== null),
-    ),
-  ).sort()
+  const shellStore = useShellStore()
+  const libraryName = shellStore.context?.activeLibrary.name ?? ''
+  const bundle = await fetchCanonicalBundle()
 
-  return {
-    acceptedFormats: response.accepted_formats,
-    maxSizeMb: response.max_size_mb,
-    graphStatus: response.graph_status,
-    graphWarning: response.graph_warning,
-    rebuildBacklogCount: response.rebuild_backlog_count,
-    counters: {
-      queued: response.counters.queued,
-      processing: response.counters.processing,
-      ready: response.counters.ready,
-      readyNoGraph: response.counters.ready_no_graph,
-      failed: response.counters.failed,
-    },
-    filters: {
-      statuses: response.filters.statuses,
-      fileTypes: response.filters.file_types,
-      accountingStatuses,
-      mutationStatuses,
-    },
-    accounting: mapCollectionAccounting(response.accounting),
-    diagnostics: mapCollectionDiagnostics(response.diagnostics),
-    rows: response.rows.map(mapRow),
-  }
-}
-
-function mapCollectionAccounting(
-  accounting: RawDocumentsSurfaceResponse['accounting'],
-): DocumentCollectionAccountingSummary {
-  if (!accounting) {
-    return {
-      totalEstimatedCost: null,
-      settledEstimatedCost: null,
-      inFlightEstimatedCost: null,
-      currency: null,
-      promptTokens: 0,
-      completionTokens: 0,
-      totalTokens: 0,
-      pricedStageCount: 0,
-      unpricedStageCount: 0,
-      inFlightStageCount: 0,
-      missingStageCount: 0,
-      accountingStatus: 'unpriced',
-    }
+  if (bundle.documents.length === 0) {
+    return buildSurfaceResponse(bundle, libraryName)
   }
 
-  return {
-    totalEstimatedCost: accounting.total_estimated_cost,
-    settledEstimatedCost: accounting.settled_estimated_cost,
-    inFlightEstimatedCost: accounting.in_flight_estimated_cost,
-    currency: accounting.currency,
-    promptTokens: accounting.prompt_tokens,
-    completionTokens: accounting.completion_tokens,
-    totalTokens: accounting.total_tokens,
-    pricedStageCount: accounting.priced_stage_count,
-    unpricedStageCount: accounting.unpriced_stage_count,
-    inFlightStageCount: accounting.in_flight_stage_count,
-    missingStageCount: accounting.missing_stage_count,
-    accountingStatus: accounting.accounting_status,
-  }
-}
-
-function mapCollectionDiagnostics(
-  diagnostics: RawDocumentsSurfaceResponse['diagnostics'],
-): DocumentCollectionDiagnostics {
-  if (!diagnostics) {
-    return {
-      progress: {
-        accepted: 0,
-        contentExtracted: 0,
-        chunked: 0,
-        embedded: 0,
-        extractingGraph: 0,
-        graphReady: 0,
-        ready: 0,
-        failed: 0,
-      },
-      queueBacklogCount: 0,
-      processingBacklogCount: 0,
-      activeBacklogCount: 0,
-      perStage: [],
-      perFormat: [],
-    }
-  }
-
-  return {
-    progress: {
-      accepted: diagnostics.progress.accepted,
-      contentExtracted: diagnostics.progress.content_extracted,
-      chunked: diagnostics.progress.chunked,
-      embedded: diagnostics.progress.embedded,
-      extractingGraph: diagnostics.progress.extracting_graph,
-      graphReady: diagnostics.progress.graph_ready,
-      ready: diagnostics.progress.ready,
-      failed: diagnostics.progress.failed,
-    },
-    queueBacklogCount: diagnostics.queue_backlog_count,
-    processingBacklogCount: diagnostics.processing_backlog_count,
-    activeBacklogCount: diagnostics.active_backlog_count,
-    perStage: diagnostics.per_stage.map((stage) => ({
-      stage: stage.stage,
-      activeCount: stage.active_count,
-      completedCount: stage.completed_count,
-      failedCount: stage.failed_count,
-      avgElapsedMs: stage.avg_elapsed_ms,
-      maxElapsedMs: stage.max_elapsed_ms,
-      totalEstimatedCost: stage.total_estimated_cost,
-      settledEstimatedCost: stage.settled_estimated_cost,
-      inFlightEstimatedCost: stage.in_flight_estimated_cost,
-      currency: stage.currency,
-      promptTokens: stage.prompt_tokens,
-      completionTokens: stage.completion_tokens,
-      totalTokens: stage.total_tokens,
-      accountingStatus: stage.accounting_status,
-    })),
-    perFormat: diagnostics.per_format.map((format) => ({
-      fileType: format.file_type,
-      documentCount: format.document_count,
-      queuedCount: format.queued_count,
-      processingCount: format.processing_count,
-      readyCount: format.ready_count,
-      readyNoGraphCount: format.ready_no_graph_count,
-      failedCount: format.failed_count,
-      contentExtractedCount: format.content_extracted_count,
-      chunkedCount: format.chunked_count,
-      embeddedCount: format.embedded_count,
-      extractingGraphCount: format.extracting_graph_count,
-      graphReadyCount: format.graph_ready_count,
-      avgQueueElapsedMs: format.avg_queue_elapsed_ms,
-      maxQueueElapsedMs: format.max_queue_elapsed_ms,
-      avgTotalElapsedMs: format.avg_total_elapsed_ms,
-      maxTotalElapsedMs: format.max_total_elapsed_ms,
-      bottleneckStage: format.bottleneck_stage,
-      bottleneckAvgElapsedMs: format.bottleneck_avg_elapsed_ms,
-      bottleneckMaxElapsedMs: format.bottleneck_max_elapsed_ms,
-      totalEstimatedCost: format.total_estimated_cost,
-      settledEstimatedCost: format.settled_estimated_cost,
-      inFlightEstimatedCost: format.in_flight_estimated_cost,
-      currency: format.currency,
-      promptTokens: format.prompt_tokens,
-      completionTokens: format.completion_tokens,
-      totalTokens: format.total_tokens,
-      accountingStatus: format.accounting_status,
-    })),
-  }
-}
-
-export async function uploadDocument(file: File): Promise<DocumentRow> {
-  const formData = new FormData()
-  formData.append('file', file)
-
-  const response = await unwrap(
-    apiHttp.post<RawUploadDocumentsResponse>('/ui/documents/upload', formData),
-  )
-  if (response.accepted_rows.length === 0) {
-    throw new Error('Upload was accepted without a document row')
-  }
-  return mapRow(response.accepted_rows[0])
-}
-
-export async function uploadDocuments(files: File[]): Promise<UploadDocumentsResponse> {
-  const formData = new FormData()
-  for (const file of files) {
-    formData.append('files', file)
-  }
-
-  const response = await unwrap(
-    apiHttp.post<RawUploadDocumentsResponse>('/ui/documents/upload', formData),
-  )
-
-  return {
-    acceptedRows: response.accepted_rows.map(mapRow),
-  }
+  return buildSurfaceResponse(bundle, libraryName)
 }
 
 export async function fetchDocumentDetail(id: string): Promise<DocumentDetail> {
-  return mapDetail(await unwrap(apiHttp.get<RawDocumentDetail>(`/ui/documents/${id}`)))
+  const shellStore = useShellStore()
+  const document = await unwrap(apiHttp.get<RawContentDocumentDetailResponse>(`/content/documents/${id}`))
+  const revisions = await unwrap(
+    apiHttp.get<RawContentRevision[]>(`/content/documents/${id}/revisions`),
+  )
+  const mutations = await unwrap(
+    apiHttp.get<RawContentMutationDetailResponse[]>('/content/mutations', {
+      params: { libraryId: document.document.library_id },
+    }),
+  )
+  const jobs = await unwrap(
+    apiHttp.get<RawIngestJob[]>('/ingest/jobs', {
+      params: {
+        libraryId: document.document.library_id,
+        workspaceId: document.document.workspace_id,
+      },
+    }),
+  )
+  const chunks = await unwrap(
+    apiHttp.get<RawChunkSummary[]>('/chunks', {
+      params: { document_id: id },
+    }),
+  )
+  const relationMaps = buildRelationMaps({
+    documents: [document],
+    mutations,
+    jobs,
+  })
+  const relations = buildDocumentRelations(id, { documents: [document], mutations, jobs }, relationMaps)
+  const relatedMutations = relations.mutations
+  const relatedJobs = relations.jobs
+  const latestMutation = selectLatestMutation(document, relatedMutations)
+  const revisionsById = new Map(revisions.map((revision) => [revision.id, revision] as const))
+  const readableRevision = document.head?.readable_revision_id
+    ? revisionsById.get(document.head.readable_revision_id) ?? null
+    : document.active_revision
+  const detail = mapDocumentDetail(
+    document,
+    revisions,
+    chunks,
+    relatedMutations,
+    relatedJobs,
+    latestMutation,
+    shellStore.context?.activeLibrary.name ?? document.document.library_id,
+  )
+
+  if (readableRevision) {
+    detail.canonical.readableRevision = buildCanonicalRevision(readableRevision)
+  }
+
+  return detail
 }
 
-export async function retryDocumentItem(id: string): Promise<DocumentRow> {
-  return mapRow(await unwrap(apiHttp.post<RawDocumentRow>(`/ui/documents/${id}/retry`)))
+function buildMutationRequestBase() {
+  const shellStore = useShellStore()
+  const workspace = shellStore.context?.activeWorkspace
+  const library = shellStore.context?.activeLibrary
+  if (!workspace || !library) {
+    throw new Error('Active library is not selected')
+  }
+  return {
+    workspace,
+    library,
+  }
 }
 
-export async function reprocessDocumentItem(id: string): Promise<void> {
-  await unwrap(apiHttp.post<RawDocumentRow>(`/ui/documents/${id}/reprocess`))
+async function readFileChecksum(file: File): Promise<string> {
+  return sha256Hex(await file.arrayBuffer())
+}
+
+async function readTextChecksum(content: string): Promise<string> {
+  return sha256Hex(content)
+}
+
+export async function uploadDocument(file: File): Promise<DocumentRow> {
+  const { library } = buildMutationRequestBase()
+  const formData = new FormData()
+  formData.append('library_id', library.id)
+  formData.append('file', file, file.name)
+  formData.append('title', file.name)
+
+  const response = await unwrap(
+    apiHttp.post<RawCreateDocumentResponse>('/content/documents/upload', formData),
+  )
+  return fetchDocumentRowFromDetail(response.document.document.id)
+}
+
+export async function uploadDocuments(files: File[]): Promise<UploadDocumentsResponse> {
+  const acceptedRows = await Promise.all(files.map((file) => uploadDocument(file)))
+  return {
+    acceptedRows,
+    rejectedFiles: [],
+  }
 }
 
 export async function deleteDocumentItem(id: string): Promise<void> {
-  await unwrap(apiHttp.delete<{ ok: boolean }>(`/ui/documents/${id}`))
+  await unwrap(apiHttp.delete<RawContentMutationDetailResponse>(`/content/documents/${id}`))
+}
+
+export async function retryDocumentItem(id: string): Promise<DocumentRow> {
+  const detail = await fetchDocumentDetail(id)
+  const latestJob = detail.canonical.latestJob
+  if (!latestJob) {
+    throw new Error('No canonical ingest job is available for this document')
+  }
+  await unwrap(apiHttp.post<RawIngestJob>(`/ingest/jobs/${latestJob.id}/retry`))
+  return await fetchDocumentRowFromDetail(id)
+}
+
+export async function reprocessDocumentItem(id: string): Promise<void> {
+  const detail = await fetchDocumentDetail(id)
+  const latestJob = detail.canonical.latestJob
+  if (!latestJob) {
+    throw new Error('No canonical ingest job is available for this document')
+  }
+  await unwrap(apiHttp.post<RawIngestJob>(`/ingest/jobs/${latestJob.id}/retry`))
+}
+
+async function fetchDocumentRowFromDetail(id: string): Promise<DocumentRow> {
+  const detail = await fetchDocumentDetail(id)
+  return {
+    id: detail.id,
+    logicalDocumentId: detail.logicalDocumentId,
+    readabilityState: detail.readabilityState,
+    activeRevisionId: detail.activeRevisionId,
+    readableRevisionId: detail.readableRevisionId,
+    readableRevisionNo: detail.readableRevisionNo,
+    fileName: detail.fileName,
+    fileType: detail.fileType,
+    fileSizeLabel: detail.fileSizeLabel,
+    uploadedAt: detail.uploadedAt,
+    libraryName: detail.libraryName,
+    stage: detail.stage,
+    status: detail.status,
+    progressPercent: detail.progressPercent,
+    activityStatus: detail.activityStatus,
+    lastActivityAt: detail.lastActivityAt,
+    stalledReason: detail.stalledReason,
+    chunkCount: detail.extractedStats.chunkCount,
+    graphNodeCount: detail.graphStats.nodeCount,
+    graphEdgeCount: detail.graphStats.edgeCount,
+    activeRevisionNo: detail.activeRevisionNo,
+    activeRevisionKind: detail.activeRevisionKind,
+    latestAttemptNo: detail.latestAttemptNo,
+    accountingStatus: detail.accountingStatus,
+    totalEstimatedCost: detail.totalEstimatedCost,
+    settledEstimatedCost: detail.settledEstimatedCost,
+    inFlightEstimatedCost: detail.inFlightEstimatedCost,
+    currency: detail.currency,
+    inFlightStageCount: detail.inFlightStageCount,
+    missingStageCount: detail.missingStageCount,
+    partialHistory: detail.partialHistory,
+    partialHistoryReason: detail.partialHistoryReason,
+    graphThroughput: detail.graphThroughput,
+    mutation: detail.mutation,
+    canRetry: detail.canRetry,
+    canAppend: detail.canAppend,
+    canReplace: detail.canReplace,
+    canRemove: detail.canRemove,
+    detailAvailable: detail.detailAvailable,
+    canonical: detail.canonical,
+  }
+}
+
+async function buildMutationAcceptedResponse(
+  response: RawContentMutationDetailResponse,
+): Promise<DocumentMutationAccepted> {
+  return {
+    accepted: true,
+    operation: response.mutation.operation_kind,
+    trackId: response.job_id,
+    revisionId:
+      response.items.find((item) => item.result_revision_id !== null)?.result_revision_id ?? null,
+    mutationId: response.mutation.id,
+    attemptNo: response.job_id ? 1 : null,
+  }
 }
 
 export async function appendDocumentItem(
@@ -813,14 +1552,14 @@ export async function appendDocumentItem(
   id: string,
   content: string,
 ): Promise<DocumentMutationAccepted> {
-  return mapMutationAccepted(
-    await unwrap(
-      apiHttp.post<RawDocumentMutationAccepted>(
-        `/runtime/libraries/${libraryId}/documents/${id}/append`,
-        { content },
-      ),
-    ),
+  const checksum = await readTextChecksum(content)
+  const response = await unwrap(
+    apiHttp.post<RawContentMutationDetailResponse>(`/content/documents/${id}/append`, {
+      appendedText: content,
+      idempotencyKey: `append:${libraryId}:${id}:${checksum}`,
+    }),
   )
+  return buildMutationAcceptedResponse(response)
 }
 
 export async function replaceDocumentItem(
@@ -828,22 +1567,32 @@ export async function replaceDocumentItem(
   id: string,
   file: File,
 ): Promise<DocumentMutationAccepted> {
+  const checksum = await readFileChecksum(file)
   const formData = new FormData()
-  formData.append('file', file)
-
-  return mapMutationAccepted(
-    await unwrap(
-      apiHttp.post<RawDocumentMutationAccepted>(
-        `/runtime/libraries/${libraryId}/documents/${id}/replace`,
-        formData,
-      ),
+  formData.append('file', file, file.name)
+  formData.append('idempotency_key', `replace:${libraryId}:${id}:${checksum}`)
+  const response = await unwrap(
+    apiHttp.post<RawContentMutationDetailResponse>(
+      `/content/documents/${id}/replace`,
+      formData,
     ),
   )
+  return buildMutationAcceptedResponse(response)
 }
 
 export async function downloadDocumentExtractedText(id: string): Promise<Blob> {
-  const response = await apiHttp.get<Blob>(`/ui/documents/${id}/content`, {
-    responseType: 'blob',
-  })
-  return response.data
+  const chunks = await unwrap(
+    apiHttp.get<RawChunkSummary[]>('/chunks', {
+      params: { document_id: id },
+    }),
+  )
+  if (chunks.length === 0) {
+    throw new Error('No extracted text is available for this document')
+  }
+  const content = chunks
+    .slice()
+    .sort((left, right) => left.ordinal - right.ordinal)
+    .map((chunk) => chunk.content)
+    .join('\n\n')
+  return new Blob([content], { type: 'text/plain;charset=utf-8' })
 }

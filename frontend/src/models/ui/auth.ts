@@ -1,18 +1,13 @@
 export type UiLocale = 'en' | 'ru'
 
 export interface SessionUser {
-  id: string
+  principalId: string
   email: string
   displayName: string
-  roleLabel: string
-  initials: string
 }
 
 export interface UiSessionResponse {
   sessionId: string
-  locale: UiLocale
-  activeWorkspaceId: string | null
-  activeLibraryId: string | null
   expiresAt: string
   user: SessionUser
 }

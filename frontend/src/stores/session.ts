@@ -36,7 +36,6 @@ export const useSessionStore = defineStore('session', {
           return
         }
         this.session = session
-        this.locale = this.session.locale
         this.status = 'ready'
       } catch {
         this.session = null
@@ -48,7 +47,7 @@ export const useSessionStore = defineStore('session', {
       this.error = null
       try {
         this.session = await loginWithPassword(payload)
-        this.locale = this.session.locale
+        this.locale = payload.locale
         this.status = 'ready'
       } catch (error) {
         this.error = error instanceof Error ? error.message : 'Failed to sign in'
@@ -64,12 +63,6 @@ export const useSessionStore = defineStore('session', {
     setLocale(locale: 'en' | 'ru') {
       this.locale = locale
       i18n.global.locale.value = locale
-      if (this.session) {
-        this.session = {
-          ...this.session,
-          locale,
-        }
-      }
     },
   },
 })

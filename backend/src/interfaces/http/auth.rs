@@ -1,36 +1,71 @@
+use std::collections::BTreeSet;
+
 use axum::{
     Json, Router,
     extract::{FromRequestParts, Path, Query, State},
-    http::{StatusCode, header, request::Parts},
+    http::{HeaderMap, StatusCode, header, request::Parts},
 };
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
-    app::state::AppState, infra::repositories, interfaces::http::router_support::ApiError,
+    app::state::AppState,
+    infra::repositories::{self, iam_repository},
+    interfaces::http::router_support::ApiError,
+    shared::auth_tokens,
 };
+
+#[derive(Clone, Debug)]
+pub struct AuthGrant {
+    pub id: Uuid,
+    pub resource_kind: String,
+    pub resource_id: Uuid,
+    pub permission_kind: String,
+    pub workspace_id: Option<Uuid>,
+    pub library_id: Option<Uuid>,
+    pub document_id: Option<Uuid>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AuthWorkspaceMembership {
+    pub workspace_id: Uuid,
+    pub membership_state: String,
+}
 
 #[derive(Clone, Debug)]
 pub struct AuthContext {
     pub token_id: Uuid,
+    pub principal_id: Uuid,
+    pub parent_principal_id: Option<Uuid>,
     pub workspace_id: Option<Uuid>,
     pub token_kind: String,
     pub scopes: Vec<String>,
+    pub grants: Vec<AuthGrant>,
+    pub workspace_memberships: Vec<AuthWorkspaceMembership>,
+    pub visible_workspace_ids: BTreeSet<Uuid>,
+    pub is_system_admin: bool,
 }
 
 impl AuthContext {
+    #[must_use]
+    pub fn has_scope(&self, wanted: &str) -> bool {
+        self.is_system_admin || self.scopes.iter().any(|scope| scope == wanted)
+    }
+
+    #[must_use]
+    pub fn has_any_scope(&self, accepted: &[&str]) -> bool {
+        self.is_system_admin
+            || self.scopes.iter().any(|scope| accepted.iter().any(|wanted| scope == wanted))
+    }
+
     /// Validates that the token has at least one accepted scope.
     ///
     /// # Errors
     /// Returns [`ApiError::Unauthorized`] when the token lacks all accepted scopes.
     pub fn require_any_scope(&self, accepted: &[&str]) -> Result<(), ApiError> {
-        if self.token_kind == "instance_admin" {
-            return Ok(());
-        }
-
-        if self.scopes.iter().any(|scope| accepted.iter().any(|wanted| scope == wanted)) {
+        if self.has_any_scope(accepted) {
             return Ok(());
         }
 
@@ -45,19 +80,148 @@ impl AuthContext {
     /// # Errors
     /// Returns [`ApiError::Unauthorized`] when the caller does not belong to the target workspace.
     pub fn require_workspace_access(&self, workspace_id: Uuid) -> Result<(), ApiError> {
-        if self.token_kind == "instance_admin" {
+        if self.can_access_workspace(workspace_id) {
             return Ok(());
         }
 
-        match self.workspace_id {
-            Some(token_workspace_id) if token_workspace_id == workspace_id => Ok(()),
-            _ => Err(ApiError::Unauthorized),
-        }
+        Err(ApiError::Unauthorized)
     }
 
     #[must_use]
     pub fn can_access_workspace(&self, workspace_id: Uuid) -> bool {
-        self.token_kind == "instance_admin" || self.workspace_id == Some(workspace_id)
+        self.is_system_admin || self.visible_workspace_ids.contains(&workspace_id)
+    }
+
+    #[must_use]
+    pub fn is_read_only_for_library(&self, workspace_id: Uuid, write_scopes: &[&str]) -> bool {
+        self.can_access_workspace(workspace_id) && !self.has_any_scope(write_scopes)
+    }
+
+    #[must_use]
+    pub fn has_workspace_permission(&self, workspace_id: Uuid, accepted: &[&str]) -> bool {
+        self.is_system_admin
+            || self.grants.iter().any(|grant| {
+                grant.resource_kind == "workspace"
+                    && grant.workspace_id == Some(workspace_id)
+                    && accepted.iter().any(|permission| grant.permission_kind == *permission)
+            })
+    }
+
+    #[must_use]
+    pub fn has_library_permission(
+        &self,
+        workspace_id: Uuid,
+        library_id: Uuid,
+        accepted: &[&str],
+    ) -> bool {
+        self.is_system_admin
+            || self.grants.iter().any(|grant| {
+                ((grant.resource_kind == "workspace" && grant.workspace_id == Some(workspace_id))
+                    || grant.resource_kind == "library" && grant.library_id == Some(library_id))
+                    && accepted.iter().any(|permission| grant.permission_kind == *permission)
+            })
+    }
+
+    #[must_use]
+    pub fn has_document_permission(
+        &self,
+        workspace_id: Uuid,
+        library_id: Uuid,
+        document_id: Uuid,
+        accepted: &[&str],
+    ) -> bool {
+        self.is_system_admin
+            || self.grants.iter().any(|grant| {
+                ((grant.resource_kind == "workspace" && grant.workspace_id == Some(workspace_id))
+                    || (grant.resource_kind == "library" && grant.library_id == Some(library_id))
+                    || (grant.resource_kind == "document"
+                        && grant.document_id == Some(document_id)))
+                    && accepted.iter().any(|permission| grant.permission_kind == *permission)
+            })
+    }
+
+    #[must_use]
+    pub fn can_discover_workspace(&self, workspace_id: Uuid, accepted: &[&str]) -> bool {
+        self.is_system_admin
+            || self.grants.iter().any(|grant| {
+                grant.workspace_id == Some(workspace_id)
+                    && accepted.iter().any(|permission| grant.permission_kind == *permission)
+            })
+    }
+
+    #[must_use]
+    pub fn can_discover_library(
+        &self,
+        workspace_id: Uuid,
+        library_id: Uuid,
+        accepted: &[&str],
+    ) -> bool {
+        self.is_system_admin
+            || self.grants.iter().any(|grant| {
+                (grant.workspace_id == Some(workspace_id) || grant.library_id == Some(library_id))
+                    && accepted.iter().any(|permission| grant.permission_kind == *permission)
+            })
+    }
+
+    #[must_use]
+    pub fn can_admin_any_workspace(&self, accepted: &[&str]) -> bool {
+        self.is_system_admin
+            || self.grants.iter().any(|grant| {
+                grant.resource_kind == "workspace"
+                    && accepted.iter().any(|permission| grant.permission_kind == *permission)
+            })
+    }
+
+    #[must_use]
+    pub fn can_read_any_library_memory(&self, accepted: &[&str]) -> bool {
+        self.is_system_admin
+            || self.grants.iter().any(|grant| {
+                matches!(grant.resource_kind.as_str(), "workspace" | "library")
+                    && accepted.iter().any(|permission| grant.permission_kind == *permission)
+            })
+    }
+
+    #[must_use]
+    pub fn can_read_any_document_memory(&self, accepted: &[&str]) -> bool {
+        self.is_system_admin
+            || self.grants.iter().any(|grant| {
+                matches!(grant.resource_kind.as_str(), "workspace" | "library" | "document")
+                    && accepted.iter().any(|permission| grant.permission_kind == *permission)
+            })
+    }
+
+    #[must_use]
+    pub fn can_write_any_library_memory(&self, accepted: &[&str]) -> bool {
+        self.is_system_admin
+            || self.grants.iter().any(|grant| {
+                matches!(grant.resource_kind.as_str(), "workspace" | "library")
+                    && accepted.iter().any(|permission| grant.permission_kind == *permission)
+            })
+    }
+
+    #[must_use]
+    pub fn can_write_any_document_memory(&self, accepted: &[&str]) -> bool {
+        self.is_system_admin
+            || self.grants.iter().any(|grant| {
+                matches!(grant.resource_kind.as_str(), "workspace" | "library" | "document")
+                    && accepted.iter().any(|permission| grant.permission_kind == *permission)
+            })
+    }
+
+    #[must_use]
+    pub fn has_document_or_library_read_scope_for_library(
+        &self,
+        workspace_id: Uuid,
+        library_id: Uuid,
+        accepted: &[&str],
+    ) -> bool {
+        self.is_system_admin
+            || self.grants.iter().any(|grant| {
+                ((grant.resource_kind == "workspace" && grant.workspace_id == Some(workspace_id))
+                    || (grant.resource_kind == "library" && grant.library_id == Some(library_id))
+                    || (grant.resource_kind == "document" && grant.library_id == Some(library_id)))
+                    && accepted.iter().any(|permission| grant.permission_kind == *permission)
+            })
     }
 }
 
@@ -115,25 +279,121 @@ pub fn router() -> Router<crate::app::state::AppState> {
 
 #[must_use]
 pub fn hash_token(raw: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(raw.as_bytes());
-    hex::encode(hasher.finalize())
+    auth_tokens::hash_api_token(raw)
 }
 
 #[must_use]
 pub fn mint_plaintext_token() -> String {
-    format!("rtrg_{}", Uuid::now_v7().simple())
+    auth_tokens::mint_plaintext_api_token()
 }
 
 #[must_use]
 pub fn preview_token(raw: &str) -> String {
-    if raw.len() <= 10 {
-        return raw.to_string();
+    auth_tokens::preview_api_token(raw)
+}
+
+#[must_use]
+pub fn hash_session_secret(raw: &str) -> String {
+    auth_tokens::hash_session_secret(raw)
+}
+
+#[must_use]
+pub fn mint_plaintext_session_secret() -> String {
+    auth_tokens::mint_plaintext_session_secret()
+}
+
+#[must_use]
+pub fn build_session_cookie_value(session_id: Uuid, secret: &str) -> String {
+    auth_tokens::build_session_cookie_value(session_id, secret)
+}
+
+pub fn parse_session_cookie_value(raw: &str) -> Option<(Uuid, String)> {
+    auth_tokens::parse_session_cookie_value(raw)
+}
+
+fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers.get(header::COOKIE).and_then(|value| value.to_str().ok()).and_then(|value| {
+        value.split(';').find_map(|pair| {
+            let mut parts = pair.trim().splitn(2, '=');
+            match (parts.next(), parts.next()) {
+                (Some(cookie_name), Some(cookie_value)) if cookie_name == name => {
+                    Some(cookie_value.to_string())
+                }
+                _ => None,
+            }
+        })
+    })
+}
+
+async fn build_auth_context_for_principal(
+    state: &AppState,
+    principal_id: Uuid,
+    token_id: Uuid,
+    token_kind: String,
+    workspace_id: Option<Uuid>,
+    parent_principal_id: Option<Uuid>,
+) -> Result<AuthContext, (StatusCode, &'static str)> {
+    let mut grants = iam_repository::list_resolved_grants_by_principal(
+        &state.persistence.postgres,
+        principal_id,
+    )
+    .await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "grant lookup failed"))?;
+    let mut memberships = iam_repository::list_workspace_memberships_by_principal(
+        &state.persistence.postgres,
+        principal_id,
+    )
+    .await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "membership lookup failed"))?;
+
+    if let Some(token_workspace_id) = workspace_id {
+        grants.retain(|grant| {
+            grant.resource_kind == "system" || grant.workspace_id == Some(token_workspace_id)
+        });
+        memberships.retain(|membership| membership.workspace_id == token_workspace_id);
     }
 
-    let prefix = &raw[..5];
-    let suffix = &raw[raw.len().saturating_sub(4)..];
-    format!("{prefix}***{suffix}")
+    let is_system_admin = grants
+        .iter()
+        .any(|grant| grant.resource_kind == "system" && grant.permission_kind == "iam_admin");
+    let scopes = collect_permission_kinds(&grants);
+    let workspace_memberships = memberships
+        .into_iter()
+        .filter(|membership| membership.membership_state == "active")
+        .map(|membership| AuthWorkspaceMembership {
+            workspace_id: membership.workspace_id,
+            membership_state: membership.membership_state,
+        })
+        .collect::<Vec<_>>();
+    let mut visible_workspace_ids = workspace_memberships
+        .iter()
+        .map(|membership| membership.workspace_id)
+        .collect::<BTreeSet<_>>();
+    visible_workspace_ids.extend(grants.iter().filter_map(|grant| grant.workspace_id));
+
+    Ok(AuthContext {
+        token_id,
+        principal_id,
+        parent_principal_id,
+        workspace_id,
+        token_kind,
+        scopes,
+        grants: grants
+            .into_iter()
+            .map(|grant| AuthGrant {
+                id: grant.id,
+                resource_kind: grant.resource_kind,
+                resource_id: grant.resource_id,
+                permission_kind: grant.permission_kind,
+                workspace_id: grant.workspace_id,
+                library_id: grant.library_id,
+                document_id: grant.document_id,
+            })
+            .collect(),
+        workspace_memberships,
+        visible_workspace_ids,
+        is_system_admin,
+    })
 }
 
 /// Creates a new API token and returns the plaintext token once.
@@ -175,6 +435,12 @@ pub async fn create_bootstrap_token(
     State(state): State<AppState>,
     Json(payload): Json<BootstrapTokenRequest>,
 ) -> Result<Json<TokenCreateResponse>, ApiError> {
+    if !state.settings.bootstrap_settings().legacy_bootstrap_token_endpoint_enabled {
+        return Err(ApiError::forbidden(
+            "legacy bootstrap token endpoint is disabled; use the canonical iam bootstrap claim flow",
+        ));
+    }
+
     validate_create_token_request(
         payload.workspace_id,
         &payload.token_kind,
@@ -223,8 +489,8 @@ pub async fn list_tokens(
     State(state): State<AppState>,
     Query(query): Query<ListTokensQuery>,
 ) -> Result<Json<Vec<TokenSummary>>, ApiError> {
-    auth.require_any_scope(&["workspace:admin"])?;
-    let workspace_filter = if auth.token_kind == "instance_admin" {
+    auth.require_any_scope(&["workspace_admin"])?;
+    let workspace_filter = if auth.is_system_admin {
         query.workspace_id
     } else {
         match query.workspace_id {
@@ -273,7 +539,7 @@ pub async fn get_token(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<TokenSummary>, ApiError> {
-    auth.require_any_scope(&["workspace:admin"])?;
+    auth.require_any_scope(&["workspace_admin"])?;
 
     let row = repositories::get_api_token_by_id(&state.persistence.postgres, id)
         .await
@@ -290,7 +556,7 @@ pub async fn get_token(
 
     if let Some(workspace_id) = row.workspace_id {
         auth.require_workspace_access(workspace_id)?;
-    } else if auth.token_kind != "instance_admin" {
+    } else if !auth.is_system_admin {
         warn!(
             auth_token_id = %auth.token_id,
             api_token_id = %id,
@@ -322,7 +588,7 @@ pub async fn revoke_token(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    auth.require_any_scope(&["workspace:admin"])?;
+    auth.require_any_scope(&["workspace_admin"])?;
 
     let row = repositories::get_api_token_by_id(&state.persistence.postgres, id)
         .await
@@ -339,7 +605,7 @@ pub async fn revoke_token(
 
     if let Some(workspace_id) = row.workspace_id {
         auth.require_workspace_access(workspace_id)?;
-    } else if auth.token_kind != "instance_admin" {
+    } else if !auth.is_system_admin {
         warn!(
             auth_token_id = %auth.token_id,
             api_token_id = %id,
@@ -434,11 +700,11 @@ fn authorize_token_creation(
     auth: &AuthContext,
     workspace_id: Option<Uuid>,
 ) -> Result<(), ApiError> {
-    auth.require_any_scope(&["workspace:admin"])?;
+    auth.require_any_scope(&["workspace_admin"])?;
 
     match workspace_id {
         Some(workspace_id) => auth.require_workspace_access(workspace_id),
-        None if auth.token_kind == "instance_admin" => Ok(()),
+        None if auth.is_system_admin => Ok(()),
         None => Err(ApiError::Unauthorized),
     }
 }
@@ -517,16 +783,38 @@ async fn mint_token_response(
     })
 }
 
+fn collect_permission_kinds(grants: &[iam_repository::ResolvedIamGrantScopeRow]) -> Vec<String> {
+    let mut permissions = BTreeSet::new();
+    for grant in grants {
+        permissions.insert(grant.permission_kind.clone());
+    }
+    permissions.into_iter().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn workspace_token(workspace_id: Option<Uuid>) -> AuthContext {
+        let visible_workspace_ids =
+            workspace_id.into_iter().collect::<std::collections::BTreeSet<_>>();
         AuthContext {
             token_id: Uuid::now_v7(),
             workspace_id,
-            token_kind: "workspace_token".into(),
-            scopes: vec!["workspace:admin".into()],
+            principal_id: Uuid::now_v7(),
+            parent_principal_id: None,
+            token_kind: "api_token".into(),
+            scopes: vec!["workspace_admin".into()],
+            grants: Vec::new(),
+            workspace_memberships: visible_workspace_ids
+                .iter()
+                .map(|workspace_id| AuthWorkspaceMembership {
+                    workspace_id: *workspace_id,
+                    membership_state: "active".into(),
+                })
+                .collect(),
+            visible_workspace_ids,
+            is_system_admin: false,
         }
     }
 
@@ -552,9 +840,15 @@ mod tests {
     fn instance_admin_can_access_any_workspace() {
         let auth = AuthContext {
             token_id: Uuid::now_v7(),
+            principal_id: Uuid::now_v7(),
+            parent_principal_id: None,
             workspace_id: None,
-            token_kind: "instance_admin".into(),
+            token_kind: "api_token".into(),
             scopes: Vec::new(),
+            grants: Vec::new(),
+            workspace_memberships: Vec::new(),
+            visible_workspace_ids: BTreeSet::new(),
+            is_system_admin: true,
         };
 
         assert!(auth.require_workspace_access(Uuid::now_v7()).is_ok());
@@ -567,9 +861,15 @@ mod tests {
         let mismatched_workspace_auth = workspace_token(Some(Uuid::now_v7()));
         let instance_admin = AuthContext {
             token_id: Uuid::now_v7(),
+            principal_id: Uuid::now_v7(),
+            parent_principal_id: None,
             workspace_id: None,
-            token_kind: "instance_admin".into(),
+            token_kind: "api_token".into(),
             scopes: Vec::new(),
+            grants: Vec::new(),
+            workspace_memberships: Vec::new(),
+            visible_workspace_ids: BTreeSet::new(),
+            is_system_admin: true,
         };
 
         assert!(matching_workspace_auth.can_access_workspace(workspace_id));
@@ -581,25 +881,56 @@ mod tests {
     fn require_any_scope_allows_matching_scope() {
         let auth = AuthContext {
             token_id: Uuid::now_v7(),
+            principal_id: Uuid::now_v7(),
+            parent_principal_id: None,
             workspace_id: Some(Uuid::now_v7()),
-            token_kind: "workspace_token".into(),
-            scopes: vec!["documents:read".into(), "query:run".into()],
+            token_kind: "api_token".into(),
+            scopes: vec!["document_read".into(), "query_run".into()],
+            grants: Vec::new(),
+            workspace_memberships: Vec::new(),
+            visible_workspace_ids: BTreeSet::new(),
+            is_system_admin: false,
         };
 
-        assert!(auth.require_any_scope(&["workspace:admin", "query:run"]).is_ok());
+        assert!(auth.require_any_scope(&["workspace_admin", "query_run"]).is_ok());
+    }
+
+    #[test]
+    fn has_scope_matches_single_scope_membership() {
+        let auth = AuthContext {
+            token_id: Uuid::now_v7(),
+            principal_id: Uuid::now_v7(),
+            parent_principal_id: None,
+            workspace_id: Some(Uuid::now_v7()),
+            token_kind: "api_token".into(),
+            scopes: vec!["document_read".into(), "query_run".into()],
+            grants: Vec::new(),
+            workspace_memberships: Vec::new(),
+            visible_workspace_ids: BTreeSet::new(),
+            is_system_admin: false,
+        };
+
+        assert!(auth.has_scope("document_read"));
+        assert!(!auth.has_scope("document_write"));
     }
 
     #[test]
     fn require_any_scope_rejects_when_no_scope_matches() {
         let auth = AuthContext {
             token_id: Uuid::now_v7(),
+            principal_id: Uuid::now_v7(),
+            parent_principal_id: None,
             workspace_id: Some(Uuid::now_v7()),
-            token_kind: "workspace_token".into(),
-            scopes: vec!["documents:read".into()],
+            token_kind: "api_token".into(),
+            scopes: vec!["document_read".into()],
+            grants: Vec::new(),
+            workspace_memberships: Vec::new(),
+            visible_workspace_ids: BTreeSet::new(),
+            is_system_admin: false,
         };
 
         assert!(matches!(
-            auth.require_any_scope(&["workspace:admin", "query:run"]),
+            auth.require_any_scope(&["workspace_admin", "query_run"]),
             Err(ApiError::Unauthorized)
         ));
     }
@@ -608,12 +939,57 @@ mod tests {
     fn require_any_scope_allows_instance_admin_without_explicit_scopes() {
         let auth = AuthContext {
             token_id: Uuid::now_v7(),
+            principal_id: Uuid::now_v7(),
+            parent_principal_id: None,
             workspace_id: None,
-            token_kind: "instance_admin".into(),
+            token_kind: "api_token".into(),
             scopes: Vec::new(),
+            grants: Vec::new(),
+            workspace_memberships: Vec::new(),
+            visible_workspace_ids: BTreeSet::new(),
+            is_system_admin: true,
         };
 
-        assert!(auth.require_any_scope(&["workspace:admin"]).is_ok());
+        assert!(auth.require_any_scope(&["workspace_admin"]).is_ok());
+    }
+
+    #[test]
+    fn is_read_only_for_library_requires_workspace_access_and_no_write_scope() {
+        let workspace_id = Uuid::now_v7();
+        let read_only = AuthContext {
+            token_id: Uuid::now_v7(),
+            principal_id: Uuid::now_v7(),
+            parent_principal_id: None,
+            workspace_id: Some(workspace_id),
+            token_kind: "api_token".into(),
+            scopes: vec!["document_read".into()],
+            grants: Vec::new(),
+            workspace_memberships: vec![AuthWorkspaceMembership {
+                workspace_id,
+                membership_state: "active".into(),
+            }],
+            visible_workspace_ids: [workspace_id].into_iter().collect(),
+            is_system_admin: false,
+        };
+        let writable = AuthContext {
+            token_id: Uuid::now_v7(),
+            principal_id: Uuid::now_v7(),
+            parent_principal_id: None,
+            workspace_id: Some(workspace_id),
+            token_kind: "api_token".into(),
+            scopes: vec!["document_read".into(), "document_write".into()],
+            grants: Vec::new(),
+            workspace_memberships: vec![AuthWorkspaceMembership {
+                workspace_id,
+                membership_state: "active".into(),
+            }],
+            visible_workspace_ids: [workspace_id].into_iter().collect(),
+            is_system_admin: false,
+        };
+
+        assert!(read_only.is_read_only_for_library(workspace_id, &["document_write"]));
+        assert!(!writable.is_read_only_for_library(workspace_id, &["document_write"]));
+        assert!(!read_only.is_read_only_for_library(Uuid::now_v7(), &["document_write"]));
     }
 
     #[test]
@@ -695,36 +1071,71 @@ impl FromRequestParts<AppState> for AuthContext {
         let state = state.clone();
 
         async move {
-            let header_value = auth_header
-                .ok_or((StatusCode::UNAUTHORIZED, "missing authorization header"))?
-                .to_str()
-                .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid authorization header"))?
-                .to_owned();
+            if let Some(auth_header) = auth_header {
+                let header_value = auth_header
+                    .to_str()
+                    .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid authorization header"))?
+                    .to_owned();
 
-            let token = header_value
-                .strip_prefix("Bearer ")
-                .ok_or((StatusCode::UNAUTHORIZED, "expected bearer token"))?;
+                let token = header_value
+                    .strip_prefix("Bearer ")
+                    .ok_or((StatusCode::UNAUTHORIZED, "expected bearer token"))?;
 
-            let token_hash = hash_token(token);
-            let row =
-                repositories::find_api_token_by_hash(&state.persistence.postgres, &token_hash)
-                    .await
-                    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "token lookup failed"))?
-                    .ok_or((StatusCode::UNAUTHORIZED, "invalid token"))?;
+                let token_hash = hash_token(token);
+                let token_row = iam_repository::find_active_api_token_by_secret_hash(
+                    &state.persistence.postgres,
+                    &token_hash,
+                )
+                .await
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "token lookup failed"))?
+                .ok_or((StatusCode::UNAUTHORIZED, "invalid token"))?;
 
-            repositories::touch_api_token_last_used(&state.persistence.postgres, row.id)
+                iam_repository::touch_api_token(
+                    &state.persistence.postgres,
+                    token_row.principal_id,
+                )
                 .await
                 .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "token touch failed"))?;
 
-            let scopes: Vec<String> = serde_json::from_value(row.scope_json)
-                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "invalid token scopes"))?;
+                return build_auth_context_for_principal(
+                    &state,
+                    token_row.principal_id,
+                    token_row.principal_id,
+                    token_row.principal_kind,
+                    token_row.workspace_id,
+                    token_row.parent_principal_id,
+                )
+                .await;
+            }
 
-            Ok(Self {
-                token_id: row.id,
-                workspace_id: row.workspace_id,
-                token_kind: row.token_kind,
-                scopes,
-            })
+            let cookie_value = read_cookie(&parts.headers, state.ui_session_cookie.name)
+                .ok_or((StatusCode::UNAUTHORIZED, "missing authorization header"))?;
+            let (session_id, session_secret) = parse_session_cookie_value(&cookie_value)
+                .ok_or((StatusCode::UNAUTHORIZED, "invalid session cookie"))?;
+            let session_row =
+                iam_repository::get_session_by_id(&state.persistence.postgres, session_id)
+                    .await
+                    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "session lookup failed"))?
+                    .ok_or((StatusCode::UNAUTHORIZED, "invalid session"))?;
+            if session_row.revoked_at.is_some() || session_row.expires_at < Utc::now() {
+                return Err((StatusCode::UNAUTHORIZED, "session expired"));
+            }
+            if session_row.session_secret_hash != hash_session_secret(&session_secret) {
+                return Err((StatusCode::UNAUTHORIZED, "invalid session"));
+            }
+            iam_repository::touch_session(&state.persistence.postgres, session_id)
+                .await
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "session touch failed"))?;
+
+            build_auth_context_for_principal(
+                &state,
+                session_row.principal_id,
+                session_row.id,
+                "session".to_string(),
+                None,
+                None,
+            )
+            .await
         }
     }
 }

@@ -159,13 +159,13 @@ async fn delete_and_reprocess_cleanup_keep_runtime_graph_consistent() -> anyhow:
             .await?;
 
         let scope_v1 = GraphMergeScope::new(fixture.project.id, 1);
-        merge_chunk_graph_candidates(&pool, &graph_quality_guard, &scope_v1, &document_a, &chunk_a, &shared_graph_candidates())
+        merge_chunk_graph_candidates(&pool, &graph_quality_guard, &scope_v1, &document_a, &chunk_a, &shared_graph_candidates(), None)
             .await
             .context("failed to merge shared candidates for document A")?;
-        merge_chunk_graph_candidates(&pool, &graph_quality_guard, &scope_v1, &document_a, &chunk_a, &unique_graph_candidates())
+        merge_chunk_graph_candidates(&pool, &graph_quality_guard, &scope_v1, &document_a, &chunk_a, &unique_graph_candidates(), None)
             .await
             .context("failed to merge unique candidates for document A")?;
-        merge_chunk_graph_candidates(&pool, &graph_quality_guard, &scope_v1, &document_b, &chunk_b, &shared_graph_candidates())
+        merge_chunk_graph_candidates(&pool, &graph_quality_guard, &scope_v1, &document_b, &chunk_b, &shared_graph_candidates(), None)
             .await
             .context("failed to merge shared candidates for document B")?;
 
@@ -305,7 +305,7 @@ async fn delete_and_reprocess_cleanup_keep_runtime_graph_consistent() -> anyhow:
             .context("failed to delete document A")?;
 
         let scope_v2 = GraphMergeScope::new(fixture.project.id, 2);
-        merge_chunk_graph_candidates(&pool, &graph_quality_guard, &scope_v2, &document_b, &chunk_b, &shared_graph_candidates())
+        merge_chunk_graph_candidates(&pool, &graph_quality_guard, &scope_v2, &document_b, &chunk_b, &shared_graph_candidates(), None)
             .await
             .context("failed to rebuild surviving graph into v2")?;
 
@@ -336,6 +336,7 @@ async fn delete_and_reprocess_cleanup_keep_runtime_graph_consistent() -> anyhow:
             &document_a_reprocessed,
             &chunk_a_reprocessed,
             &shared_graph_candidates(),
+            None,
         )
         .await
         .context("failed to merge shared reprocessed document knowledge")?;
@@ -346,6 +347,7 @@ async fn delete_and_reprocess_cleanup_keep_runtime_graph_consistent() -> anyhow:
             &document_a_reprocessed,
             &chunk_a_reprocessed,
             &unique_graph_candidates(),
+            None,
         )
         .await
         .context("failed to merge unique reprocessed document knowledge")?;

@@ -32,23 +32,53 @@ pub async fn run() -> anyhow::Result<()> {
     crate::shared::telemetry::init(&config.log_filter);
 
     let state = state::AppState::new(config.clone()).await?;
-    ui_auth::ensure_bootstrap_admin(&state)
-        .await
-        .map_err(|error| anyhow::anyhow!("failed to initialize bootstrap ui admin: {error}"))?;
-    pricing_catalog::bootstrap_from_env_if_enabled(&state)
-        .await
-        .map_err(|error| anyhow::anyhow!("failed to bootstrap pricing catalog: {error}"))?;
+    run_startup_bootstraps(
+        &state,
+        &config.bootstrap_settings(),
+        &config.ai_catalog_validation_settings(),
+        &config.destructive_fresh_bootstrap_settings(),
+    )
+    .await?;
     let graph_backend = state.graph_store.backend_name();
     let shutdown = shutdown::ShutdownSignal::new();
-    let worker_handle =
-        ingestion_worker::spawn_ingestion_worker(state.clone(), shutdown.subscribe());
-    let router = Router::new()
+    let signal_listener = spawn_signal_listener(shutdown.clone());
+    let worker_handle = config
+        .runs_ingestion_workers()
+        .then(|| ingestion_worker::spawn_ingestion_worker(state.clone(), shutdown.subscribe()));
+
+    let run_result = if config.runs_http_api() {
+        run_http_api(&config, &state, graph_backend, shutdown.clone()).await
+    } else {
+        info!(
+            service = %config.service_name,
+            service_role = %config.service_role,
+            environment = %config.environment,
+            graph_backend,
+            worker_concurrency = config.ingestion_worker_concurrency.max(1),
+            "starting rustrag worker service",
+        );
+        shutdown.wait().await;
+        Ok(())
+    };
+
+    let _ = shutdown.trigger();
+    signal_listener.abort();
+    let _ = signal_listener.await;
+    if let Some(worker_handle) = worker_handle {
+        let _ = worker_handle.await;
+    }
+    run_result
+}
+
+fn build_router(config: &config::Settings, state: state::AppState) -> Router {
+    let public_origin_settings = config.public_origin_settings();
+    Router::new()
         .nest("/v1", http::router())
         .layer(middleware::map_request(inject_request_id))
         .layer(middleware::map_response(propagate_request_id))
         .layer(
             CorsLayer::new()
-                .allow_origin(parse_allowed_origins(&config.frontend_origin))
+                .allow_origin(parse_allowed_origins(&public_origin_settings))
                 .allow_credentials(true)
                 .allow_methods([
                     Method::GET,
@@ -134,11 +164,20 @@ pub async fn run() -> anyhow::Result<()> {
                     },
                 ),
         )
-        .with_state(state.clone());
+        .with_state(state)
+}
 
+async fn run_http_api(
+    config: &config::Settings,
+    state: &state::AppState,
+    graph_backend: &str,
+    shutdown: shutdown::ShutdownSignal,
+) -> anyhow::Result<()> {
+    let router = build_router(config, state.clone());
     let addr: SocketAddr = config.bind_addr.parse()?;
     info!(
         service = %config.service_name,
+        service_role = %config.service_role,
         environment = %config.environment,
         graph_backend,
         neo4j_uri = %state.graph_runtime.neo4j_uri,
@@ -155,24 +194,100 @@ pub async fn run() -> anyhow::Result<()> {
         graph_filter_degenerate_self_loops = state
             .bulk_ingest_hardening
             .graph_filter_degenerate_self_loops,
+        mcp_memory_default_read_window_chars = state.mcp_memory.default_read_window_chars,
+        mcp_memory_max_read_window_chars = state.mcp_memory.max_read_window_chars,
+        mcp_memory_default_search_limit = state.mcp_memory.default_search_limit,
+        mcp_memory_max_search_limit = state.mcp_memory.max_search_limit,
+        mcp_memory_audit_enabled = state.mcp_memory.audit_enabled,
+        queue_isolation_enabled = state.pipeline_hardening.queue_isolation_enabled,
+        minimum_slice_capacity = state.pipeline_hardening.minimum_slice_capacity,
+        token_touch_min_interval_seconds = state.pipeline_hardening.token_touch_min_interval_seconds,
+        heartbeat_write_min_interval_seconds = state
+            .pipeline_hardening
+            .heartbeat_write_min_interval_seconds,
+        graph_progress_checkpoint_interval_seconds = state
+            .pipeline_hardening
+            .graph_progress_checkpoint_interval_seconds,
+        projection_retry_limit = state.resolve_settle_blockers.projection_retry_limit,
+        diagnostics_snapshot_stale_after_seconds = state
+            .resolve_settle_blockers
+            .diagnostics_snapshot_stale_after_seconds,
+        provider_request_size_soft_limit_bytes = state
+            .resolve_settle_blockers
+            .provider_request_size_soft_limit_bytes,
+        provider_timeout_retry_limit = state
+            .resolve_settle_blockers
+            .provider_timeout_retry_limit,
         %addr,
         "starting rustrag backend"
     );
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let server = axum::serve(listener, router).with_graceful_shutdown(async move {
-        let _ = tokio::signal::ctrl_c().await;
+        shutdown.wait().await;
     });
     server.await?;
-    shutdown.trigger();
-    let _ = worker_handle.await;
     Ok(())
 }
 
-fn parse_allowed_origins(origins: &str) -> AllowOrigin {
+async fn run_startup_bootstraps(
+    state: &state::AppState,
+    bootstrap_settings: &config::BootstrapSettings,
+    ai_catalog_validation: &config::AiCatalogValidationSettings,
+    destructive_bootstrap: &config::DestructiveFreshBootstrapSettings,
+) -> anyhow::Result<()> {
+    if destructive_bootstrap.required
+        && !destructive_bootstrap.allow_legacy_startup_side_effects
+        && (bootstrap_settings.legacy_ui_bootstrap_enabled || ai_catalog_validation.seed_from_env)
+    {
+        anyhow::bail!(
+            "destructive fresh bootstrap mode forbids legacy startup side effects; disable legacy_ui_bootstrap_enabled and runtime_pricing_seed_from_env"
+        );
+    }
+
+    if bootstrap_settings.legacy_ui_bootstrap_enabled
+        && crate::infra::persistence::legacy_ui_bootstrap_tables_present(
+            &state.persistence.postgres,
+        )
+        .await?
+    {
+        ui_auth::ensure_bootstrap_admin(state)
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to initialize bootstrap ui admin: {error}"))?;
+    } else {
+        info!("legacy ui bootstrap side effect disabled at startup");
+    }
+
+    if ai_catalog_validation.seed_from_env
+        && crate::infra::persistence::legacy_pricing_catalog_tables_present(
+            &state.persistence.postgres,
+        )
+        .await?
+        && !crate::infra::persistence::canonical_ai_catalog_seeded(&state.persistence.postgres)
+            .await?
+    {
+        pricing_catalog::bootstrap_from_env_if_enabled(state)
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to bootstrap pricing catalog: {error}"))?;
+    } else {
+        info!("legacy pricing bootstrap side effect disabled at startup");
+    }
+
+    Ok(())
+}
+
+fn spawn_signal_listener(shutdown: shutdown::ShutdownSignal) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let signal_name = shutdown::wait_for_termination_signal().await;
+        if shutdown.trigger() {
+            warn!(signal = signal_name, "shutdown signal received");
+        }
+    })
+}
+
+fn parse_allowed_origins(origins: &config::PublicOriginSettings) -> AllowOrigin {
     let parsed_origins = origins
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .allowed_origins
+        .iter()
         .filter_map(|value| value.parse().ok())
         .collect::<Vec<header::HeaderValue>>();
 

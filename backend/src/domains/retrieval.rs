@@ -2,7 +2,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domains::query_modes::RuntimeQueryMode;
+use crate::domains::{
+    query_modes::RuntimeQueryMode, retrieval_diagnostics::RetrievalDiagnostics,
+    runtime_query::GroundingStatus,
+};
 
 #[derive(Debug, Clone)]
 pub struct RetrievalRun {
@@ -11,6 +14,13 @@ pub struct RetrievalRun {
     pub query_text: String,
     pub response_text: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrievalResponseMetadata {
+    pub mode: RuntimeQueryMode,
+    pub grounding_status: GroundingStatus,
+    pub diagnostics: RetrievalDiagnostics,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

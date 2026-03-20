@@ -1,9 +1,16 @@
+import type { GraphCanonicalSummary } from './graph'
+
 export type DocumentStatus =
   | 'queued'
   | 'processing'
   | 'ready'
   | 'ready_no_graph'
   | 'failed'
+
+export type DocumentReadabilityState =
+  | 'unreadable'
+  | 'readable_active'
+  | 'readable_stale'
 
 export type DocumentActivityStatus =
   | 'queued'
@@ -20,7 +27,70 @@ export type DocumentAccountingStatus =
   | 'unpriced'
   | 'in_flight_unsettled'
 
+export type DocumentQueueWaitingReason =
+  | 'ordinary_backlog'
+  | 'isolated_capacity_wait'
+  | 'blocked'
+  | 'degraded'
+
+export type DocumentCollectionProgressState =
+  | 'live_in_flight'
+  | 'settling'
+  | 'fully_settled'
+  | 'failed_with_residual_work'
+
+export type DocumentCollectionTerminalState =
+  | 'live_in_flight'
+  | 'fully_settled'
+  | 'failed_with_residual_work'
+
+export type DocumentCollectionResidualReason =
+  | 'projection_contention'
+  | 'graph_persistence_integrity'
+  | 'settlement_refresh_failed'
+  | 'provider_failure'
+  | 'diagnostics_unavailable'
+  | 'upload_limit_exceeded'
+  | 'unknown'
+
+export type DocumentGraphProgressCadence = 'fast' | 'watch' | 'calm'
+
+export type DocumentGraphProjectionHealth =
+  | 'healthy'
+  | 'retrying_contention'
+  | 'degraded'
+  | 'failed'
+
+export type DocumentCollectionWarningKind =
+  | 'ordinary_backlog'
+  | 'isolated_capacity_wait'
+  | 'in_flight_accounting'
+  | 'missing_accounting'
+  | 'liveness_loss'
+  | 'failed_work'
+  | 'degraded_extraction'
+
 export type DocumentMutationStatus = 'accepted' | 'reconciling' | 'completed' | 'failed'
+export type DocumentMutationImpactScopeStatus =
+  | 'pending'
+  | 'targeted'
+  | 'fallback_broad'
+  | 'completed'
+  | 'failed'
+export type DocumentMutationImpactScopeConfidence = 'high' | 'medium' | 'low'
+export type DocumentExtractionRecoveryStatus =
+  | 'clean'
+  | 'recovered'
+  | 'partial'
+  | 'failed'
+
+export type DocumentProviderFailureClass =
+  | 'internal_request_invalid'
+  | 'upstream_timeout'
+  | 'upstream_rejection'
+  | 'invalid_model_output'
+  | 'recovered_after_retry'
+  | 'unknown'
 
 export interface DocumentMutationAccepted {
   accepted: boolean
@@ -29,6 +99,129 @@ export interface DocumentMutationAccepted {
   revisionId: string | null
   mutationId: string | null
   attemptNo: number | null
+}
+
+export interface CanonicalDocumentIdentity {
+  id: string
+  workspaceId: string
+  libraryId: string
+  externalKey: string
+  documentState: string
+  createdAt: string
+}
+
+export interface CanonicalDocumentHead {
+  documentId: string
+  activeRevisionId: string | null
+  readableRevisionId: string | null
+  latestMutationId: string | null
+  latestSuccessfulAttemptId: string | null
+  headUpdatedAt: string
+}
+
+export interface CanonicalDocumentRevision {
+  id: string
+  documentId: string
+  workspaceId: string
+  libraryId: string
+  revisionNumber: number
+  parentRevisionId: string | null
+  contentSourceKind: string
+  checksum: string
+  mimeType: string
+  byteSize: number
+  title: string | null
+  languageCode: string | null
+  sourceUri: string | null
+  storageKey: string | null
+  createdByPrincipalId: string | null
+  createdAt: string
+}
+
+export interface CanonicalDocumentMutation {
+  id: string
+  workspaceId: string
+  libraryId: string
+  operationKind: string
+  mutationState: string
+  requestedAt: string
+  completedAt: string | null
+  requestedByPrincipalId: string | null
+  requestSurface: string
+  idempotencyKey: string | null
+  failureCode: string | null
+  conflictCode: string | null
+}
+
+export interface CanonicalDocumentMutationItem {
+  id: string
+  mutationId: string
+  documentId: string | null
+  baseRevisionId: string | null
+  resultRevisionId: string | null
+  itemState: string
+  message: string | null
+}
+
+export interface CanonicalIngestJob {
+  id: string
+  workspaceId: string
+  libraryId: string
+  mutationId: string | null
+  connectorId: string | null
+  jobKind: string
+  queueState: string
+  priority: number
+  dedupeKey: string | null
+  queuedAt: string
+  availableAt: string
+  completedAt: string | null
+}
+
+export interface CanonicalIngestAttempt {
+  id: string
+  jobId: string
+  attemptNumber: number
+  workerPrincipalId: string | null
+  leaseToken: string | null
+  attemptState: string
+  currentStage: string | null
+  startedAt: string
+  heartbeatAt: string | null
+  finishedAt: string | null
+  failureClass: string | null
+  failureCode: string | null
+  retryable: boolean
+}
+
+export interface CanonicalIngestStageEvent {
+  id: string
+  attemptId: string
+  stageName: string
+  stageState: string
+  ordinal: number
+  message: string | null
+  detailsJson: Record<string, unknown>
+  recordedAt: string
+}
+
+export interface DocumentCanonicalState {
+  document: CanonicalDocumentIdentity
+  head: CanonicalDocumentHead | null
+  activeRevision: CanonicalDocumentRevision | null
+  readableRevision: CanonicalDocumentRevision | null
+  latestMutation: CanonicalDocumentMutation | null
+  latestMutationItems: CanonicalDocumentMutationItem[]
+  latestJob: CanonicalIngestJob | null
+  latestAttempt: CanonicalIngestAttempt | null
+  latestAttemptStages: CanonicalIngestStageEvent[]
+}
+
+export interface DocumentExtractionRecovery {
+  status: DocumentExtractionRecoveryStatus
+  parserRepairApplied: boolean
+  secondPassApplied: boolean
+  warning: string | null
 }
 
 export interface DocumentSummaryCounters {
@@ -52,9 +245,21 @@ export interface DocumentMutationState {
   warning: string | null
 }
 
+export interface DocumentMutationImpactScopeSummary {
+  scopeStatus: DocumentMutationImpactScopeStatus
+  confidenceStatus: DocumentMutationImpactScopeConfidence
+  affectedNodeCount: number
+  affectedRelationshipCount: number
+  fallbackReason: string | null
+}
+
 export interface DocumentRow {
   id: string
   logicalDocumentId: string | null
+  readabilityState: DocumentReadabilityState
+  activeRevisionId: string | null
+  readableRevisionId: string | null
+  readableRevisionNo: number | null
   fileName: string
   fileType: string
   fileSizeLabel: string
@@ -81,12 +286,14 @@ export interface DocumentRow {
   missingStageCount: number
   partialHistory: boolean
   partialHistoryReason: string | null
+  graphThroughput: DocumentGraphThroughputSummary | null
   mutation: DocumentMutationState
   canRetry: boolean
   canAppend: boolean
   canReplace: boolean
   canRemove: boolean
   detailAvailable: boolean
+  canonical: DocumentCanonicalState
 }
 
 export interface DocumentHistoryItem {
@@ -109,6 +316,7 @@ export interface DocumentExtractedStats {
   warningCount: number
   normalizationStatus: string
   ocrSource: string | null
+  recovery: DocumentExtractionRecovery | null
   warnings: string[]
 }
 
@@ -186,9 +394,79 @@ export interface DocumentAttemptGroup {
   benchmarks: DocumentStageBenchmarkItem[]
 }
 
+export interface DocumentTerminalOutcomeSummary {
+  terminalState: DocumentCollectionTerminalState
+  residualReason: DocumentCollectionResidualReason | null
+  queuedCount: number
+  processingCount: number
+  pendingGraphCount: number
+  failedDocumentCount: number
+  settledAt: string | null
+  lastTransitionAt: string | null
+}
+
+export interface DocumentGraphHealthSummary {
+  projectionHealth: DocumentGraphProjectionHealth
+  activeProjectionCount: number
+  retryingProjectionCount: number
+  failedProjectionCount: number
+  pendingNodeWriteCount: number
+  pendingEdgeWriteCount: number
+  lastFailureKind: string | null
+  lastFailureAt: string | null
+  isRuntimeReadable: boolean
+  snapshotAt: string
+}
+
+export interface DocumentProviderFailureSummary {
+  failureClass: DocumentProviderFailureClass
+  providerKind: string | null
+  modelName: string | null
+  requestShapeKey: string | null
+  requestSizeBytes: number | null
+  upstreamStatus: string | null
+  elapsedMs: number | null
+  retryDecision: string | null
+  usageVisible: boolean
+}
+
+export interface DocumentsWorkspacePrimarySummary {
+  progressLabel: string
+  spendLabel: string
+  backlogLabel: string
+  terminalState: string
+}
+
+export interface DocumentsWorkspaceDiagnosticChip {
+  kind: string
+  label: string
+  value: string
+}
+
+export interface DocumentsWorkspaceNotice {
+  kind: string
+  title: string
+  message: string
+}
+
+export interface DocumentsWorkspaceSummary {
+  primarySummary: DocumentsWorkspacePrimarySummary
+  secondaryDiagnostics: DocumentsWorkspaceDiagnosticChip[]
+  degradedNotices: DocumentsWorkspaceNotice[]
+  informationalNotices: DocumentsWorkspaceNotice[]
+  tableDocumentCount: number
+  activeFilterCount: number
+  highlightedStatus: string | null
+}
+
 export interface DocumentDetail {
   id: string
   logicalDocumentId: string | null
+  readabilityState: DocumentReadabilityState
+  activeRevisionId: string | null
+  readableRevisionId: string | null
+  readableRevisionNo: number | null
+  readableRevisionKind: string | null
   fileName: string
   fileType: string
   fileSizeLabel: string
@@ -216,17 +494,27 @@ export interface DocumentDetail {
   mutation: DocumentMutationState
   requestedBy: string | null
   errorMessage: string | null
+  failureClass: string | null
+  operatorAction: string | null
   summary: string
   graphNodeId: string | null
+  canonicalSummaryPreview: GraphCanonicalSummary | null
   canDownloadText: boolean
   canAppend: boolean
   canReplace: boolean
   canRemove: boolean
+  canRetry: boolean
+  detailAvailable: boolean
+  reconciliationScope: DocumentMutationImpactScopeSummary | null
+  providerFailure: DocumentProviderFailureSummary | null
+  graphThroughput: DocumentGraphThroughputSummary | null
   extractedStats: DocumentExtractedStats
   graphStats: DocumentGraphStats
+  collectionDiagnostics: DocumentCollectionDiagnostics | null
   revisionHistory: DocumentRevisionHistoryItem[]
   processingHistory: DocumentHistoryItem[]
   attempts: DocumentAttemptGroup[]
+  canonical: DocumentCanonicalState
 }
 
 export interface DocumentsSurfaceResponse {
@@ -239,6 +527,7 @@ export interface DocumentsSurfaceResponse {
   filters: DocumentFilterValues
   accounting: DocumentCollectionAccountingSummary
   diagnostics: DocumentCollectionDiagnostics
+  workspace: DocumentsWorkspaceSummary | null
   rows: DocumentRow[]
 }
 
@@ -320,16 +609,83 @@ export interface DocumentCollectionDiagnostics {
   queueBacklogCount: number
   processingBacklogCount: number
   activeBacklogCount: number
+  queueIsolation: DocumentQueueIsolationSummary | null
+  graphThroughput: DocumentCollectionGraphThroughputSummary | null
+  settlement: DocumentCollectionSettlementSummary | null
+  terminalOutcome: DocumentTerminalOutcomeSummary | null
+  graphHealth: DocumentGraphHealthSummary | null
+  warnings: DocumentCollectionWarning[]
   perStage: DocumentCollectionStageDiagnostics[]
   perFormat: DocumentCollectionFormatDiagnostics[]
 }
 
+export interface DocumentGraphThroughputSummary {
+  trackedDocumentCount?: number | null
+  activeDocumentCount?: number | null
+  processedChunks: number
+  totalChunks: number
+  progressPercent: number | null
+  providerCallCount: number
+  resumedChunkCount: number
+  resumeHitCount: number
+  replayedChunkCount: number
+  duplicateWorkRatio: number | null
+  maxDowngradeLevel: number
+  avgCallElapsedMs: number | null
+  avgChunkElapsedMs: number | null
+  avgCharsPerSecond: number | null
+  avgTokensPerSecond: number | null
+  lastProviderCallAt: string | null
+  lastCheckpointAt: string
+  lastCheckpointElapsedMs: number
+  nextCheckpointEtaMs: number | null
+  pressureKind: 'steady' | 'elevated' | 'high' | null
+  cadence: DocumentGraphProgressCadence
+  recommendedPollIntervalMs: number
+  bottleneckRank: number | null
+}
+
+export interface DocumentCollectionGraphThroughputSummary
+  extends DocumentGraphThroughputSummary {
+  trackedDocumentCount: number
+  activeDocumentCount: number
+}
+
+export interface DocumentQueueIsolationSummary {
+  waitingReason: DocumentQueueWaitingReason
+  queuedCount: number
+  processingCount: number
+  isolatedCapacityCount: number
+  availableCapacityCount: number
+  lastClaimedAt: string | null
+  lastProgressAt: string | null
+}
+
+export interface DocumentCollectionSettlementSummary {
+  progressState: DocumentCollectionProgressState
+  liveTotalEstimatedCost: number | null
+  settledTotalEstimatedCost: number | null
+  missingTotalEstimatedCost: number | null
+  currency: string | null
+  isFullySettled: boolean
+  settledAt: string | null
+}
+
+export interface DocumentCollectionWarning {
+  warningKind: DocumentCollectionWarningKind
+  warningScope: 'library' | 'collection' | 'document' | 'stage'
+  warningMessage: string
+  isDegraded: boolean
+}
+
 export interface UploadDocumentsResponse {
   acceptedRows: DocumentRow[]
+  rejectedFiles: DocumentUploadFailure[]
 }
 
 export interface UploadRejectionDetails {
   fileName: string | null
+  rejectionKind: string | null
   detectedFormat: string | null
   mimeType: string | null
   fileSizeBytes: number | null
@@ -342,6 +698,7 @@ export interface DocumentUploadFailure {
   fileName: string
   message: string
   errorKind: string | null
+  rejectionKind: string | null
   detectedFormat: string | null
   mimeType: string | null
   fileSizeBytes: number | null

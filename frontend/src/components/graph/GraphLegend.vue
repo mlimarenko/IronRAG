@@ -44,5 +44,8 @@ defineProps<{
           : $t('graph.filteredArtifactsHint', { count: filteredArtifactCount })
       }}
     </p>
+    <p class="rr-graph-legend__note">
+      {{ $t('graph.summary.legend') }}
+    </p>
   </div>
 </template>

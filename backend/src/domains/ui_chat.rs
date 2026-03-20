@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 use crate::domains::query_intelligence::{
-    ContextAssemblyMetadata, QueryPlanningMetadata, RerankMetadata,
+    ContextAssemblyMetadata, GroupedReference, QueryPlanningMetadata, RerankMetadata,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,6 +67,7 @@ pub struct ChatThreadMessageModel {
     pub planning: Option<QueryPlanningMetadata>,
     pub rerank: Option<RerankMetadata>,
     pub context_assembly: Option<ContextAssemblyMetadata>,
+    pub grouped_references: Vec<GroupedReference>,
     pub warning: Option<String>,
     pub warning_kind: Option<String>,
 }

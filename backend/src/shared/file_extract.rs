@@ -126,6 +126,7 @@ pub struct FileExtractionPlan {
 #[serde(rename_all = "camelCase")]
 pub struct UploadRejectionDetails {
     pub file_name: Option<String>,
+    pub rejection_kind: Option<String>,
     pub detected_format: Option<String>,
     pub mime_type: Option<String>,
     pub file_size_bytes: Option<u64>,
@@ -145,15 +146,18 @@ impl UploadAdmissionError {
     #[must_use]
     pub fn invalid_multipart_payload() -> Self {
         Self {
-            error_kind: "invalid_multipart_payload",
-            message: "invalid multipart payload".to_string(),
+            error_kind: "multipart_stream_failure",
+            message: "multipart upload stream failed".to_string(),
             details: UploadRejectionDetails {
                 file_name: None,
+                rejection_kind: Some("multipart_stream_failure".to_string()),
                 detected_format: None,
                 mime_type: None,
                 file_size_bytes: None,
                 upload_limit_mb: None,
-                rejection_cause: "The multipart form body could not be parsed.".to_string(),
+                rejection_cause:
+                    "The multipart upload stream could not be parsed into complete fields."
+                        .to_string(),
                 operator_action:
                     "Retry the upload using a standard multipart/form-data request body."
                         .to_string(),
@@ -163,6 +167,19 @@ impl UploadAdmissionError {
 
     #[must_use]
     pub fn invalid_file_body(file_name: Option<&str>, mime_type: Option<&str>) -> Self {
+        Self::invalid_file_body_with_cause(
+            file_name,
+            mime_type,
+            "The upload stream could not be read into a complete file body.".to_string(),
+        )
+    }
+
+    #[must_use]
+    pub fn invalid_file_body_with_cause(
+        file_name: Option<&str>,
+        mime_type: Option<&str>,
+        rejection_cause: String,
+    ) -> Self {
         let detected_format = detect_declared_upload_file_kind(file_name, mime_type)
             .map(|kind| kind.display_name().to_string());
         let message = file_name
@@ -173,14 +190,43 @@ impl UploadAdmissionError {
             message,
             details: UploadRejectionDetails {
                 file_name: file_name.map(str::to_string),
+                rejection_kind: Some("invalid_file_body".to_string()),
                 detected_format,
                 mime_type: mime_type.map(str::to_string),
                 file_size_bytes: None,
                 upload_limit_mb: None,
-                rejection_cause: "The upload stream could not be read into a complete file body."
-                    .to_string(),
+                rejection_cause,
                 operator_action:
                     "Retry the upload; if it keeps failing, upload the file individually to isolate the broken part."
+                        .to_string(),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn multipart_stream_failure(
+        file_name: Option<&str>,
+        mime_type: Option<&str>,
+        rejection_cause: impl Into<String>,
+    ) -> Self {
+        let detected_format = detect_declared_upload_file_kind(file_name, mime_type)
+            .map(|kind| kind.display_name().to_string());
+        let message = file_name
+            .map(|name| format!("multipart upload stream failed for {name}"))
+            .unwrap_or_else(|| "multipart upload stream failed".to_string());
+        Self {
+            error_kind: "multipart_stream_failure",
+            message,
+            details: UploadRejectionDetails {
+                file_name: file_name.map(str::to_string),
+                rejection_kind: Some("multipart_stream_failure".to_string()),
+                detected_format,
+                mime_type: mime_type.map(str::to_string),
+                file_size_bytes: None,
+                upload_limit_mb: None,
+                rejection_cause: rejection_cause.into(),
+                operator_action:
+                    "Retry the upload; if it keeps failing, re-export the file and upload it individually."
                         .to_string(),
             },
         }
@@ -200,12 +246,90 @@ impl UploadAdmissionError {
             message: format!("file {file_name} exceeds the {upload_limit_mb} MB upload limit"),
             details: UploadRejectionDetails {
                 file_name: Some(file_name.to_string()),
+                rejection_kind: Some("upload_limit_exceeded".to_string()),
                 detected_format,
                 mime_type: mime_type.map(str::to_string),
                 file_size_bytes: Some(file_size_bytes),
                 upload_limit_mb: Some(upload_limit_mb),
                 rejection_cause: "The file is larger than the configured upload size limit."
                     .to_string(),
+                operator_action:
+                    "Upload a smaller file, split the document, or raise the configured upload limit."
+                        .to_string(),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn upload_batch_too_large(total_size_bytes: u64, upload_limit_mb: u64) -> Self {
+        Self {
+            error_kind: "upload_limit_exceeded",
+            message: format!(
+                "upload batch exceeds the {upload_limit_mb} MB upload limit"
+            ),
+            details: UploadRejectionDetails {
+                file_name: None,
+                rejection_kind: Some("upload_limit_exceeded".to_string()),
+                detected_format: None,
+                mime_type: None,
+                file_size_bytes: Some(total_size_bytes),
+                upload_limit_mb: Some(upload_limit_mb),
+                rejection_cause:
+                    "The total decoded upload batch is larger than the configured upload size limit."
+                        .to_string(),
+                operator_action:
+                    "Split the batch into smaller uploads, reduce document size, or raise the configured upload limit."
+                        .to_string(),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn request_body_too_large(upload_limit_mb: u64) -> Self {
+        Self {
+            error_kind: "upload_limit_exceeded",
+            message: format!("request body exceeded the {upload_limit_mb} MB upload limit"),
+            details: UploadRejectionDetails {
+                file_name: None,
+                rejection_kind: Some("upload_limit_exceeded".to_string()),
+                detected_format: None,
+                mime_type: None,
+                file_size_bytes: None,
+                upload_limit_mb: Some(upload_limit_mb),
+                rejection_cause:
+                    "The MCP request body exceeded the configured upload size limit before it could be fully buffered."
+                        .to_string(),
+                operator_action:
+                    "Split the upload into smaller calls, reduce document size, or raise the configured upload limit."
+                        .to_string(),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn streaming_size_limit_exceeded(
+        file_name: Option<&str>,
+        mime_type: Option<&str>,
+        upload_limit_mb: u64,
+    ) -> Self {
+        let detected_format = detect_declared_upload_file_kind(file_name, mime_type)
+            .map(|kind| kind.display_name().to_string());
+        let message = file_name
+            .map(|name| format!("file {name} exceeded the {upload_limit_mb} MB upload limit"))
+            .unwrap_or_else(|| format!("upload exceeded the {upload_limit_mb} MB size limit"));
+        Self {
+            error_kind: "upload_limit_exceeded",
+            message,
+            details: UploadRejectionDetails {
+                file_name: file_name.map(str::to_string),
+                rejection_kind: Some("upload_limit_exceeded".to_string()),
+                detected_format,
+                mime_type: mime_type.map(str::to_string),
+                file_size_bytes: None,
+                upload_limit_mb: Some(upload_limit_mb),
+                rejection_cause:
+                    "The upload stream exceeded the configured upload size limit before the file body was fully read."
+                        .to_string(),
                 operator_action:
                     "Upload a smaller file, split the document, or raise the configured upload limit."
                         .to_string(),
@@ -221,6 +345,7 @@ impl UploadAdmissionError {
             message: message.clone(),
             details: UploadRejectionDetails {
                 file_name: None,
+                rejection_kind: Some("missing_upload_file".to_string()),
                 detected_format: None,
                 mime_type: None,
                 file_size_bytes: None,
@@ -245,6 +370,7 @@ impl UploadAdmissionError {
             error_kind,
             details: UploadRejectionDetails {
                 file_name: Some(file_name.to_string()),
+                rejection_kind: Some(error_kind.to_string()),
                 detected_format: Some(error.detected_kind().display_name().to_string()),
                 mime_type: mime_type.map(str::to_string),
                 file_size_bytes: Some(file_size_bytes),
@@ -352,6 +478,88 @@ impl FileExtractError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MultipartFileReadFailure {
+    StreamFailure,
+    InvalidBody,
+    SizeLimit,
+}
+
+fn classify_multipart_file_read_failure(message: &str) -> MultipartFileReadFailure {
+    let normalized = message.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return MultipartFileReadFailure::InvalidBody;
+    }
+
+    if [
+        "size limit",
+        "field exceeded",
+        "stream size exceeded",
+        "field size exceeded",
+        "body too large",
+        "larger than the limit",
+    ]
+    .iter()
+    .any(|pattern| normalized.contains(pattern))
+    {
+        return MultipartFileReadFailure::SizeLimit;
+    }
+
+    if [
+        "multipart",
+        "stream",
+        "boundary",
+        "connection",
+        "incomplete field data",
+        "failed to read field data",
+        "failed to read stream",
+    ]
+    .iter()
+    .any(|pattern| normalized.contains(pattern))
+    {
+        return MultipartFileReadFailure::StreamFailure;
+    }
+
+    MultipartFileReadFailure::InvalidBody
+}
+
+fn normalize_upload_rejection_cause(message: &str) -> String {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        "The upload stream could not be decoded into a complete file body.".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+#[must_use]
+pub fn classify_multipart_file_body_error(
+    file_name: Option<&str>,
+    mime_type: Option<&str>,
+    upload_limit_mb: u64,
+    error_message: &str,
+) -> UploadAdmissionError {
+    match classify_multipart_file_read_failure(error_message) {
+        MultipartFileReadFailure::SizeLimit => UploadAdmissionError::streaming_size_limit_exceeded(
+            file_name,
+            mime_type,
+            upload_limit_mb,
+        ),
+        MultipartFileReadFailure::StreamFailure => UploadAdmissionError::multipart_stream_failure(
+            file_name,
+            mime_type,
+            normalize_upload_rejection_cause(error_message),
+        ),
+        MultipartFileReadFailure::InvalidBody => {
+            UploadAdmissionError::invalid_file_body_with_cause(
+                file_name,
+                mime_type,
+                normalize_upload_rejection_cause(error_message),
+            )
+        }
+    }
+}
+
 fn detect_declared_upload_file_kind(
     file_name: Option<&str>,
     mime_type: Option<&str>,
@@ -396,11 +604,30 @@ pub fn detect_upload_file_kind(
     if let Some(file_kind) = detect_declared_upload_file_kind(file_name, mime_type) {
         return file_kind;
     }
-    if std::str::from_utf8(file_bytes).is_ok() {
-        return UploadFileKind::TextLike;
+    if let Ok(decoded_text) = std::str::from_utf8(file_bytes) {
+        if !utf8_payload_looks_binary(decoded_text) {
+            return UploadFileKind::TextLike;
+        }
     }
 
     UploadFileKind::Binary
+}
+
+fn utf8_payload_looks_binary(decoded_text: &str) -> bool {
+    if decoded_text.chars().any(|ch| ch == '\0') {
+        return true;
+    }
+
+    let non_whitespace_control_count = decoded_text
+        .chars()
+        .filter(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t' | '\u{000C}'))
+        .count();
+    let total_char_count = decoded_text.chars().count();
+    if total_char_count == 0 {
+        return false;
+    }
+
+    non_whitespace_control_count.saturating_mul(5) >= total_char_count
 }
 
 #[must_use]
@@ -819,6 +1046,14 @@ mod tests {
     }
 
     #[test]
+    fn rejects_extensionless_utf8_payloads_with_nul_bytes_as_binary() {
+        assert_eq!(
+            detect_upload_file_kind(Some("payload.bin"), None, b"\0\x01\x02\x03\n"),
+            UploadFileKind::Binary
+        );
+    }
+
+    #[test]
     fn rejects_invalid_utf8_when_file_is_text_like() {
         let result =
             build_file_extraction_plan(Some("notes.txt"), Some("text/plain"), vec![0xff, 0xfe]);
@@ -837,6 +1072,7 @@ mod tests {
 
         assert_eq!(rejection.error_kind(), "invalid_text_encoding");
         assert_eq!(rejection.details().file_name.as_deref(), Some("notes.txt"));
+        assert_eq!(rejection.details().rejection_kind.as_deref(), Some("invalid_text_encoding"));
         assert_eq!(rejection.details().detected_format.as_deref(), Some("Text"));
         assert_eq!(rejection.details().file_size_bytes, Some(2));
     }
@@ -847,8 +1083,36 @@ mod tests {
             UploadAdmissionError::file_too_large("manual.pdf", Some("application/pdf"), 1024, 1);
 
         assert_eq!(rejection.error_kind(), "upload_limit_exceeded");
+        assert_eq!(rejection.details().rejection_kind.as_deref(), Some("upload_limit_exceeded"));
         assert_eq!(rejection.details().detected_format.as_deref(), Some("PDF"));
         assert_eq!(rejection.details().upload_limit_mb, Some(1));
+    }
+
+    #[test]
+    fn classifies_stream_limit_body_errors_as_upload_limit_exceeded() {
+        let rejection = classify_multipart_file_body_error(
+            Some("large.pdf"),
+            Some("application/pdf"),
+            4,
+            "field size exceeded",
+        );
+
+        assert_eq!(rejection.error_kind(), "upload_limit_exceeded");
+        assert_eq!(rejection.details().rejection_kind.as_deref(), Some("upload_limit_exceeded"));
+        assert_eq!(rejection.details().upload_limit_mb, Some(4));
+    }
+
+    #[test]
+    fn classifies_stream_failures_as_multipart_stream_failure() {
+        let rejection = classify_multipart_file_body_error(
+            Some("report.pdf"),
+            Some("application/pdf"),
+            4,
+            "failed to read stream to end",
+        );
+
+        assert_eq!(rejection.error_kind(), "multipart_stream_failure");
+        assert_eq!(rejection.details().rejection_kind.as_deref(), Some("multipart_stream_failure"));
     }
 
     #[test]
@@ -883,6 +1147,25 @@ mod tests {
                 .as_deref()
                 .is_some_and(|text| text.contains("Quarterly graph report"))
         );
+    }
+
+    #[test]
+    fn rejects_binary_like_utf8_payloads_with_structured_unsupported_type() {
+        let rejection = UploadAdmissionError::from_file_extract_error(
+            "unsupported.bin",
+            Some("application/octet-stream"),
+            5,
+            build_file_extraction_plan(
+                Some("unsupported.bin"),
+                Some("application/octet-stream"),
+                b"\0\x01\x02\x03\n".to_vec(),
+            )
+            .expect_err("binary-ish utf8 payload should be rejected"),
+        );
+
+        assert_eq!(rejection.error_kind(), "unsupported_upload_type");
+        assert_eq!(rejection.details().file_name.as_deref(), Some("unsupported.bin"));
+        assert_eq!(rejection.details().detected_format.as_deref(), Some("Binary"));
     }
 
     #[tokio::test]

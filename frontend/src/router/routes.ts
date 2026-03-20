@@ -22,6 +22,10 @@ const routes = [
         component: () => import('src/pages/GraphPage.vue'),
       },
       {
+        path: 'swagger',
+        component: () => import('src/pages/SwaggerPage.vue'),
+      },
+      {
         path: 'admin',
         component: () => import('src/pages/AdminPage.vue'),
         meta: { requiresAdmin: true },

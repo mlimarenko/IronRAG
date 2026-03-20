@@ -1,5 +1,9 @@
 use serde::Serialize;
 
+use crate::domains::graph_quality::{
+    CanonicalGraphSummary, ExtractionRecoverySummary, MutationImpactScopeSummary,
+};
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DocumentMutationState {
     pub kind: Option<String>,
@@ -57,6 +61,7 @@ pub struct DocumentListItem {
     pub missing_stage_count: i32,
     pub partial_history: bool,
     pub partial_history_reason: Option<String>,
+    pub graph_throughput: Option<DocumentGraphThroughputSummary>,
     pub mutation: DocumentMutationState,
     pub can_retry: bool,
     pub can_append: bool,
@@ -88,6 +93,74 @@ pub struct DocumentCollectionAccountingSummary {
     pub in_flight_stage_count: i32,
     pub missing_stage_count: i32,
     pub accounting_status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentQueueIsolationSummary {
+    pub waiting_reason: String,
+    pub queued_count: usize,
+    pub processing_count: usize,
+    pub isolated_capacity_count: usize,
+    pub available_capacity_count: usize,
+    pub last_claimed_at: Option<String>,
+    pub last_progress_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentCollectionSettlementSummary {
+    pub progress_state: String,
+    pub live_total_estimated_cost: Option<f64>,
+    pub settled_total_estimated_cost: Option<f64>,
+    pub missing_total_estimated_cost: Option<f64>,
+    pub currency: Option<String>,
+    pub is_fully_settled: bool,
+    pub settled_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentCollectionWarning {
+    pub warning_kind: String,
+    pub warning_scope: String,
+    pub warning_message: String,
+    pub is_degraded: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentTerminalOutcomeSummary {
+    pub terminal_state: String,
+    pub residual_reason: Option<String>,
+    pub queued_count: usize,
+    pub processing_count: usize,
+    pub pending_graph_count: usize,
+    pub failed_document_count: usize,
+    pub settled_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentGraphHealthSummary {
+    pub projection_health: String,
+    pub active_projection_count: usize,
+    pub retrying_projection_count: usize,
+    pub failed_projection_count: usize,
+    pub pending_node_write_count: usize,
+    pub pending_edge_write_count: usize,
+    pub last_failure_kind: Option<String>,
+    pub last_failure_at: Option<String>,
+    pub is_runtime_readable: bool,
+    pub snapshot_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentProviderFailureSummary {
+    pub failure_class: String,
+    pub provider_kind: Option<String>,
+    pub model_name: Option<String>,
+    pub request_shape_key: Option<String>,
+    pub request_size_bytes: Option<usize>,
+    pub upstream_status: Option<String>,
+    pub elapsed_ms: Option<i64>,
+    pub retry_decision: Option<String>,
+    pub usage_visible: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -157,8 +230,99 @@ pub struct DocumentCollectionDiagnostics {
     pub queue_backlog_count: usize,
     pub processing_backlog_count: usize,
     pub active_backlog_count: usize,
+    pub queue_isolation: Option<DocumentQueueIsolationSummary>,
+    pub graph_throughput: Option<DocumentCollectionGraphThroughputSummary>,
+    pub settlement: Option<DocumentCollectionSettlementSummary>,
+    pub terminal_outcome: Option<DocumentTerminalOutcomeSummary>,
+    pub graph_health: Option<DocumentGraphHealthSummary>,
+    pub warnings: Vec<DocumentCollectionWarning>,
     pub per_stage: Vec<DocumentCollectionStageDiagnostics>,
     pub per_format: Vec<DocumentCollectionFormatDiagnostics>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentsWorkspacePrimarySummary {
+    pub progress_label: String,
+    pub spend_label: String,
+    pub backlog_label: String,
+    pub terminal_state: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentsWorkspaceDiagnosticChip {
+    pub kind: String,
+    pub label: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentsWorkspaceNotice {
+    pub kind: String,
+    pub title: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentsWorkspaceModel {
+    pub primary_summary: DocumentsWorkspacePrimarySummary,
+    pub secondary_diagnostics: Vec<DocumentsWorkspaceDiagnosticChip>,
+    pub degraded_notices: Vec<DocumentsWorkspaceNotice>,
+    pub informational_notices: Vec<DocumentsWorkspaceNotice>,
+    pub table_document_count: usize,
+    pub active_filter_count: usize,
+    pub highlighted_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentGraphThroughputSummary {
+    pub processed_chunks: usize,
+    pub total_chunks: usize,
+    pub progress_percent: Option<i32>,
+    pub provider_call_count: usize,
+    pub resumed_chunk_count: usize,
+    pub resume_hit_count: usize,
+    pub replayed_chunk_count: usize,
+    pub duplicate_work_ratio: Option<f64>,
+    pub max_downgrade_level: usize,
+    pub avg_call_elapsed_ms: Option<i64>,
+    pub avg_chunk_elapsed_ms: Option<i64>,
+    pub avg_chars_per_second: Option<f64>,
+    pub avg_tokens_per_second: Option<f64>,
+    pub last_provider_call_at: Option<String>,
+    pub last_checkpoint_at: String,
+    pub last_checkpoint_elapsed_ms: i64,
+    pub next_checkpoint_eta_ms: Option<i64>,
+    pub pressure_kind: Option<String>,
+    pub cadence: String,
+    pub recommended_poll_interval_ms: i64,
+    pub bottleneck_rank: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentCollectionGraphThroughputSummary {
+    pub tracked_document_count: usize,
+    pub active_document_count: usize,
+    pub processed_chunks: usize,
+    pub total_chunks: usize,
+    pub progress_percent: Option<i32>,
+    pub provider_call_count: usize,
+    pub resumed_chunk_count: usize,
+    pub resume_hit_count: usize,
+    pub replayed_chunk_count: usize,
+    pub duplicate_work_ratio: Option<f64>,
+    pub max_downgrade_level: usize,
+    pub avg_call_elapsed_ms: Option<i64>,
+    pub avg_chunk_elapsed_ms: Option<i64>,
+    pub avg_chars_per_second: Option<f64>,
+    pub avg_tokens_per_second: Option<f64>,
+    pub last_provider_call_at: Option<String>,
+    pub last_checkpoint_at: String,
+    pub last_checkpoint_elapsed_ms: i64,
+    pub next_checkpoint_eta_ms: Option<i64>,
+    pub pressure_kind: Option<String>,
+    pub cadence: String,
+    pub recommended_poll_interval_ms: i64,
+    pub bottleneck_rank: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -242,6 +406,7 @@ pub struct DocumentExtractedStats {
     pub warning_count: usize,
     pub normalization_status: String,
     pub ocr_source: Option<String>,
+    pub recovery: Option<ExtractionRecoverySummary>,
     pub warnings: Vec<String>,
 }
 
@@ -283,14 +448,21 @@ pub struct DocumentDetailModel {
     pub mutation: DocumentMutationState,
     pub requested_by: Option<String>,
     pub error_message: Option<String>,
+    pub failure_class: Option<String>,
+    pub operator_action: Option<String>,
     pub summary: String,
     pub graph_node_id: Option<String>,
+    pub canonical_summary_preview: Option<CanonicalGraphSummary>,
     pub can_download_text: bool,
     pub can_append: bool,
     pub can_replace: bool,
     pub can_remove: bool,
+    pub reconciliation_scope: Option<MutationImpactScopeSummary>,
+    pub provider_failure: Option<DocumentProviderFailureSummary>,
+    pub graph_throughput: Option<DocumentGraphThroughputSummary>,
     pub extracted_stats: DocumentExtractedStats,
     pub graph_stats: DocumentGraphStats,
+    pub collection_diagnostics: Option<DocumentCollectionDiagnostics>,
     pub revision_history: Vec<DocumentRevisionHistoryItem>,
     pub processing_history: Vec<DocumentHistoryItem>,
     pub attempts: Vec<DocumentAttemptGroup>,
@@ -307,5 +479,6 @@ pub struct DocumentSurfaceModel {
     pub filters: DocumentFilterValues,
     pub accounting: DocumentCollectionAccountingSummary,
     pub diagnostics: DocumentCollectionDiagnostics,
+    pub workspace: Option<DocumentsWorkspaceModel>,
     pub rows: Vec<DocumentListItem>,
 }

@@ -1,20 +1,16 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Context, anyhow};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
 use serde_json::json;
 use tracing::info;
 use uuid::Uuid;
 
 use crate::{
-    app::{
-        config::Settings,
-        state::{AppState, PricingCatalogBootstrapSettings},
-    },
+    app::state::{AppState, PricingCatalogBootstrapSettings},
     domains::{
         pricing_catalog::{PricingResolution, PricingResolutionStatus},
-        provider_profiles::ProviderModelSelection,
         usage_governance::{PricingCoverageStatus, PricingCoverageSummary, PricingCoverageWarning},
     },
     infra::repositories::{self, ModelPricingCatalogEntryRow},
@@ -396,15 +392,10 @@ pub async fn bootstrap_from_env_if_enabled(state: &AppState) -> anyhow::Result<u
     let now = Utc::now();
     let mut seen = BTreeSet::new();
     let mut seeded = 0usize;
-    for seed in build_seed_entries(
-        &state.settings,
-        &state.runtime_provider_defaults.indexing,
-        &state.runtime_provider_defaults.embedding,
-        &state.runtime_provider_defaults.answer,
-        &state.runtime_provider_defaults.vision,
-        &state.pricing_catalog_bootstrap,
-        now,
-    )? {
+    let mut synced = 0usize;
+    let existing_rows = list_pricing_entries(state, None).await?;
+
+    for seed in build_seed_entries(&state.pricing_catalog_bootstrap, now)? {
         let dedupe_key = (
             seed.workspace_id,
             seed.provider_kind.clone(),
@@ -416,31 +407,41 @@ pub async fn bootstrap_from_env_if_enabled(state: &AppState) -> anyhow::Result<u
             continue;
         }
 
-        let resolution = resolve_pricing(
-            state,
-            PricingLookupRequest {
-                workspace_id: seed.workspace_id,
-                provider_kind: seed.provider_kind.clone(),
-                model_name: seed.model_name.clone(),
-                capability: seed.capability.clone(),
-                billing_unit: seed.billing_unit.clone(),
-                at: now,
-            },
-        )
-        .await?;
-        if matches!(resolution.status, PricingResolutionStatus::Priced) {
-            continue;
+        let existing = existing_rows
+            .iter()
+            .find(|row| {
+                row.status.eq_ignore_ascii_case("active")
+                    && row.workspace_id == seed.workspace_id
+                    && row.provider_kind.eq_ignore_ascii_case(&seed.provider_kind)
+                    && row.model_name.eq_ignore_ascii_case(&seed.model_name)
+                    && row.capability.eq_ignore_ascii_case(&seed.capability)
+                    && row.billing_unit.eq_ignore_ascii_case(&seed.billing_unit)
+            })
+            .cloned();
+
+        match existing {
+            Some(row) if pricing_row_matches_seed(&row, &seed) => {}
+            Some(row) if row.source_kind.eq_ignore_ascii_case("seeded") => {
+                sync_seeded_pricing_entry(state, row, seed, now).await?;
+                synced += 1;
+            }
+            Some(_) => {}
+            None => {
+                create_pricing_entry(state, seed).await?;
+                seeded += 1;
+            }
         }
-
-        create_pricing_entry(state, seed).await?;
-        seeded += 1;
     }
 
-    if seeded > 0 {
-        info!(seeded_pricing_entries = seeded, "bootstrapped pricing catalog from env defaults");
+    if seeded > 0 || synced > 0 {
+        info!(
+            seeded_pricing_entries = seeded,
+            synced_seeded_pricing_entries = synced,
+            "bootstrapped pricing catalog from built-in provider catalog"
+        );
     }
 
-    Ok(seeded)
+    Ok(seeded + synced)
 }
 
 #[must_use]
@@ -483,133 +484,73 @@ fn normalize_optional_string(value: &mut Option<String>, map: impl FnOnce(&str) 
 }
 
 fn build_seed_entries(
-    settings: &Settings,
-    indexing: &ProviderModelSelection,
-    embedding: &ProviderModelSelection,
-    answer: &ProviderModelSelection,
-    vision: &ProviderModelSelection,
     bootstrap: &PricingCatalogBootstrapSettings,
     effective_from: DateTime<Utc>,
 ) -> anyhow::Result<Vec<UpsertPricingCatalogEntry>> {
-    let mut entries = Vec::new();
-    if let Some(entry) =
-        build_chat_seed_entry(settings, indexing, "indexing", bootstrap, effective_from)?
-    {
-        entries.push(entry);
-    }
-    if let Some(entry) =
-        build_chat_seed_entry(settings, indexing, "graph_extract", bootstrap, effective_from)?
-    {
-        entries.push(entry);
-    }
-    if let Some(entry) =
-        build_chat_seed_entry(settings, answer, "answer", bootstrap, effective_from)?
-    {
-        entries.push(entry);
-    }
-    if let Some(entry) =
-        build_chat_seed_entry(settings, vision, "vision", bootstrap, effective_from)?
-    {
-        entries.push(entry);
-    }
-    if let Some(entry) = build_embedding_seed_entry(settings, embedding, bootstrap, effective_from)?
-    {
-        entries.push(entry);
-    }
-    Ok(entries)
+    provider_catalog::built_in_pricing_catalog_seeds()
+        .into_iter()
+        .map(|seed| {
+            Ok(UpsertPricingCatalogEntry {
+                workspace_id: None,
+                provider_kind: seed.provider_kind.as_str().to_string(),
+                model_name: seed.model_name.to_string(),
+                capability: seed.capability.to_string(),
+                billing_unit: seed.billing_unit.to_string(),
+                input_price: parse_optional_seed_price(seed.input_price)?,
+                output_price: parse_optional_seed_price(seed.output_price)?,
+                currency: bootstrap.default_currency.clone(),
+                source_kind: "seeded".to_string(),
+                note: Some(seed.note.to_string()),
+                effective_from,
+            })
+        })
+        .collect()
 }
 
-fn build_chat_seed_entry(
-    settings: &Settings,
-    selection: &ProviderModelSelection,
-    capability: &str,
-    bootstrap: &PricingCatalogBootstrapSettings,
-    effective_from: DateTime<Utc>,
-) -> anyhow::Result<Option<UpsertPricingCatalogEntry>> {
-    let Some((input_price, output_price)) =
-        provider_seed_prices(settings, selection.provider_kind.as_str(), capability)?
-    else {
-        return Ok(None);
+fn parse_optional_seed_price(value: Option<&str>) -> anyhow::Result<Option<Decimal>> {
+    value.map(Decimal::from_str_exact).transpose().context("invalid built-in seed price")
+}
+
+fn pricing_row_matches_seed(
+    row: &ModelPricingCatalogEntryRow,
+    seed: &UpsertPricingCatalogEntry,
+) -> bool {
+    row.source_kind.eq_ignore_ascii_case("seeded")
+        && row.currency.eq_ignore_ascii_case(&seed.currency)
+        && row.input_price == seed.input_price
+        && row.output_price == seed.output_price
+        && row.note.as_deref() == seed.note.as_deref()
+}
+
+async fn sync_seeded_pricing_entry(
+    state: &AppState,
+    existing: ModelPricingCatalogEntryRow,
+    mut replacement: UpsertPricingCatalogEntry,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    let effective_from = if existing.effective_from >= now {
+        existing.effective_from + Duration::seconds(1)
+    } else {
+        now
     };
-    Ok(Some(UpsertPricingCatalogEntry {
-        workspace_id: None,
-        provider_kind: selection.provider_kind.as_str().to_string(),
-        model_name: selection.model_name.clone(),
-        capability: capability.to_string(),
-        billing_unit: "per_1m_tokens".to_string(),
-        input_price: Some(input_price),
-        output_price: Some(output_price),
-        currency: bootstrap.default_currency.clone(),
-        source_kind: "seeded".to_string(),
-        note: Some("Seeded from runtime env defaults".to_string()),
+
+    repositories::supersede_overlapping_model_pricing_catalog_entries(
+        &state.persistence.postgres,
+        existing.workspace_id,
+        &existing.provider_kind,
+        &existing.model_name,
+        &existing.capability,
+        &existing.billing_unit,
         effective_from,
-    }))
-}
+    )
+    .await
+    .context("failed to supersede stale seeded pricing entry")?;
 
-fn build_embedding_seed_entry(
-    settings: &Settings,
-    selection: &ProviderModelSelection,
-    bootstrap: &PricingCatalogBootstrapSettings,
-    effective_from: DateTime<Utc>,
-) -> anyhow::Result<Option<UpsertPricingCatalogEntry>> {
-    let Some((input_price, _)) =
-        provider_seed_prices(settings, selection.provider_kind.as_str(), "embedding")?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(UpsertPricingCatalogEntry {
-        workspace_id: None,
-        provider_kind: selection.provider_kind.as_str().to_string(),
-        model_name: selection.model_name.clone(),
-        capability: "embedding".to_string(),
-        billing_unit: "per_1m_input_tokens".to_string(),
-        input_price: Some(input_price),
-        output_price: None,
-        currency: bootstrap.default_currency.clone(),
-        source_kind: "seeded".to_string(),
-        note: Some("Seeded from runtime env defaults".to_string()),
-        effective_from,
-    }))
-}
-
-fn provider_seed_prices(
-    settings: &Settings,
-    provider_kind: &str,
-    capability: &str,
-) -> anyhow::Result<Option<(Decimal, Decimal)>> {
-    let (input, output) = match provider_kind {
-        "openai" => (settings.openai_input_price_per_1m, settings.openai_output_price_per_1m),
-        "deepseek" => (settings.deepseek_input_price_per_1m, settings.deepseek_output_price_per_1m),
-        "qwen" if capability == "embedding" => (settings.qwen_input_price_per_1m, 0.0),
-        "qwen" if capability == "vision" => {
-            let input = if settings.qwen_vision_input_price_per_1m > 0.0 {
-                settings.qwen_vision_input_price_per_1m
-            } else {
-                settings.qwen_chat_input_price_per_1m
-            };
-            let output = if settings.qwen_vision_output_price_per_1m > 0.0 {
-                settings.qwen_vision_output_price_per_1m
-            } else {
-                settings.qwen_chat_output_price_per_1m
-            };
-            if input <= 0.0 && output <= 0.0 {
-                return Ok(None);
-            }
-            (input, output)
-        }
-        "qwen" => {
-            if settings.qwen_chat_input_price_per_1m <= 0.0
-                && settings.qwen_chat_output_price_per_1m <= 0.0
-            {
-                return Ok(None);
-            }
-            (settings.qwen_chat_input_price_per_1m, settings.qwen_chat_output_price_per_1m)
-        }
-        other => return Err(anyhow!("unsupported provider pricing seed: {other}")),
-    };
-    let input = Decimal::from_f64_retain(input).context("invalid input seed price")?;
-    let output = Decimal::from_f64_retain(output).context("invalid output seed price")?;
-    Ok(Some((input, output)))
+    replacement.effective_from = effective_from;
+    create_pricing_entry(state, replacement)
+        .await
+        .context("failed to replace stale seeded pricing entry")?;
+    Ok(())
 }
 
 async fn find_effective_pricing_entry(

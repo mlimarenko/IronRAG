@@ -23,11 +23,6 @@ export default configure(function () {
             '@sigma/node-border',
             '@sigma/edge-curve',
           ],
-          ai: [
-            'ai',
-            '@ai-sdk/vue',
-            'ai-elements-vue',
-          ],
         }
       },
     },

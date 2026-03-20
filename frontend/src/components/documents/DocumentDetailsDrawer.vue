@@ -1,17 +1,32 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type {
-  DocumentActivityStatus,
-  DocumentDetail,
-  DocumentStatus,
-} from 'src/models/ui/documents'
 import { useI18n } from 'vue-i18n'
 import StatusPill from 'src/components/base/StatusPill.vue'
 import DocumentSummaryCard from './DocumentSummaryCard.vue'
+import type {
+  DocumentActivityStatus,
+  DocumentCollectionDiagnostics,
+  DocumentDetail,
+  DocumentStatus,
+} from 'src/models/ui/documents'
+
+type StatusPillTone =
+  | DocumentStatus
+  | 'active'
+  | 'blocked'
+  | 'retrying'
+  | 'stalled'
+
+interface DrawerTruthState {
+  tone: StatusPillTone
+  label: string
+  note: string
+}
 
 const props = defineProps<{
   open: boolean
   detail: DocumentDetail | null
+  libraryDiagnostics: DocumentCollectionDiagnostics | null
   workspaceName: string | null
   loading: boolean
   error: string | null
@@ -38,7 +53,10 @@ function formatDate(value: string | null): string {
   if (Number.isNaN(parsed.getTime())) {
     return value
   }
-  return parsed.toLocaleString()
+  return parsed.toLocaleString(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  })
 }
 
 function formatDuration(value: number | null): string {
@@ -76,52 +94,25 @@ function formatCount(value: number): string {
   return new Intl.NumberFormat().format(value)
 }
 
-function stageLabel(stage: string): string {
-  const key = `documents.stage.${stage}`
-  return i18n.te(key) ? i18n.t(key) : stage
-}
-
 function statusLabel(status: string): string {
   const key = `documents.status.${status}`
   return i18n.te(key) ? i18n.t(key) : status
 }
 
-function activityLabel(activityStatus: DocumentActivityStatus): string {
-  const key = `documents.activity.${activityStatus}`
-  return i18n.te(key) ? i18n.t(key) : activityStatus
+function stageLabel(stage: string): string {
+  const key = `documents.stage.${stage}`
+  return i18n.te(key) ? i18n.t(key) : stage
 }
 
-function activityTone(activityStatus: DocumentActivityStatus): DocumentActivityStatus {
-  return activityStatus
-}
-
-function accountingLabel(status: string): string {
-  const key = `documents.accounting.${status}`
+function activityLabel(status: DocumentActivityStatus): string {
+  const key = `documents.activity.${status}`
   return i18n.te(key) ? i18n.t(key) : status
 }
 
-function normalizationLabel(status: string): string {
-  const key = `documents.normalization.${status}`
-  return i18n.te(key) ? i18n.t(key) : status
-}
-
-function ocrSourceLabel(value: string | null): string | null {
-  if (!value) {
-    return null
+function revisionKindLabel(kind: string | null): string {
+  if (!kind) {
+    return '—'
   }
-  const key = `documents.ocrSource.${value}`
-  return i18n.te(key) ? i18n.t(key) : value
-}
-
-function attributionSourceLabel(value: 'stage_native' | 'reconciled' | null): string | null {
-  if (!value) {
-    return null
-  }
-  const key = `documents.attribution.${value}`
-  return i18n.te(key) ? i18n.t(key) : value
-}
-
-function revisionKindLabel(kind: string): string {
   const key = `documents.revision.kind.${kind}`
   return i18n.te(key) ? i18n.t(key) : kind
 }
@@ -150,165 +141,159 @@ function mutationKindLabel(kind: string | null): string | null {
   return i18n.te(key) ? i18n.t(key) : kind
 }
 
-function accountingTone(status: string): DocumentStatus {
-  switch (status) {
-    case 'priced':
-      return 'ready'
-    case 'in_flight_unsettled':
-      return 'processing'
-    case 'partial':
-      return 'ready_no_graph'
-    default:
-      return 'failed'
-  }
-}
-
 function mutationTone(status: string | null): DocumentStatus {
-  switch (status) {
-    case 'accepted':
-    case 'reconciling':
-      return 'processing'
-    case 'failed':
-      return 'failed'
-    default:
-      return 'ready'
+  if (status === 'failed') {
+    return 'failed'
   }
+  if (status === 'accepted' || status === 'reconciling') {
+    return 'processing'
+  }
+  return 'ready'
 }
 
-function benchmarkTone(status: string): DocumentStatus {
-  switch (status) {
-    case 'completed':
-    case 'skipped':
-      return 'ready'
-    case 'failed':
-      return 'failed'
-    case 'started':
-      return 'processing'
-    default:
-      return 'queued'
+function truthToneReady(status: DocumentStatus): DocumentStatus {
+  if (status === 'ready_no_graph') {
+    return 'ready_no_graph'
   }
+  if (status === 'ready') {
+    return 'ready'
+  }
+  if (status === 'failed') {
+    return 'failed'
+  }
+  return status === 'queued' ? 'queued' : 'processing'
 }
 
-function activityNarrative(
-  activityStatus: DocumentActivityStatus,
-  stalledReason: string | null,
-  lastActivityAt: string | null,
-): string | null {
-  if (stalledReason) {
-    return stalledReason
+function summaryTone(tone: StatusPillTone): DocumentStatus {
+  if (tone === 'active' || tone === 'blocked' || tone === 'retrying' || tone === 'stalled') {
+    return 'processing'
   }
-  if (lastActivityAt) {
-    return i18n.t('documents.lastActivityAt', { value: formatDate(lastActivityAt) })
-  }
-  if (activityStatus === 'blocked' || activityStatus === 'retrying' || activityStatus === 'stalled') {
-    return i18n.t(`documents.activityDescriptions.${activityStatus}`)
-  }
-  return null
+  return tone
 }
 
-const localizedSummary = computed(() => {
-  const detail = props.detail
-  if (!detail) {
-    return ''
-  }
-
-  const chunkCount = detail.extractedStats.chunkCount ?? 0
-  if (detail.status === 'ready') {
-    return i18n.t('documents.details.summary.ready', { count: chunkCount })
-  }
-  if (detail.status === 'ready_no_graph') {
-    return i18n.t('documents.details.summary.readyNoGraph', { count: chunkCount })
-  }
-  if (detail.status === 'failed') {
-    return i18n.t('documents.details.summary.failed')
-  }
-  if (detail.status === 'processing') {
-    return i18n.t('documents.details.summary.processing')
-  }
-  return i18n.t('documents.details.summary.queued')
+const resolvedDiagnostics = computed(() => {
+  return props.detail?.collectionDiagnostics ?? props.libraryDiagnostics ?? null
 })
 
-const headlineCards = computed(() => {
+const readableTruth = computed<DrawerTruthState | null>(() => {
+  const detail = props.detail
+  if (!detail) {
+    return null
+  }
+
+  const readableNow =
+    Boolean(detail.extractedStats.previewText?.trim()) ||
+    detail.status === 'ready' ||
+    detail.status === 'ready_no_graph' ||
+    resolvedDiagnostics.value?.graphHealth?.isRuntimeReadable === true
+
+  if (readableNow) {
+    return {
+      tone: truthToneReady(detail.status),
+      label: detail.status === 'ready_no_graph' ? 'Readable with graph catch-up' : 'Readable',
+      note:
+        detail.extractedStats.previewTruncated || detail.status === 'ready_no_graph'
+          ? 'Text is already usable while downstream graph work is still catching up.'
+          : 'Current extracted text is ready for read and search flows.',
+    }
+  }
+
+  return {
+    tone: detail.status === 'failed' ? 'failed' : detail.status === 'queued' ? 'queued' : 'processing',
+    label: detail.status === 'failed' ? 'Readable state unavailable' : 'Not readable yet',
+    note: detail.errorMessage ?? stageLabel(detail.stage),
+  }
+})
+
+const settledTruth = computed<DrawerTruthState | null>(() => {
+  const detail = props.detail
+  if (!detail) {
+    return null
+  }
+
+  const terminal = resolvedDiagnostics.value?.terminalOutcome ?? null
+  const settlement = resolvedDiagnostics.value?.settlement ?? null
+  const pendingMutation =
+    detail.mutation.status === 'accepted' || detail.mutation.status === 'reconciling'
+  const activeWork =
+    pendingMutation ||
+    ['queued', 'active', 'blocked', 'retrying', 'stalled'].includes(detail.activityStatus) ||
+    detail.inFlightStageCount > 0 ||
+    detail.missingStageCount > 0
+
+  if (terminal?.terminalState === 'failed_with_residual_work') {
+    return {
+      tone: 'failed' as DocumentStatus,
+      label: 'Residual failure',
+      note: terminal.residualReason ?? detail.errorMessage ?? 'Downstream work settled in failure.',
+    }
+  }
+
+  if (settlement?.isFullySettled || terminal?.terminalState === 'fully_settled') {
+    return {
+      tone: 'ready' as DocumentStatus,
+      label: 'Settled',
+      note: terminal?.settledAt
+        ? `Settled at ${formatDate(terminal.settledAt)}`
+        : settlement?.settledAt
+          ? `Settled at ${formatDate(settlement.settledAt)}`
+          : 'No in-flight work remains for this document context.',
+    }
+  }
+
+  if (activeWork) {
+    return {
+      tone: 'processing' as DocumentStatus,
+      label: 'Settling',
+      note: [
+        detail.inFlightStageCount > 0 ? `${detail.inFlightStageCount} live stage(s)` : null,
+        detail.missingStageCount > 0 ? `${detail.missingStageCount} missing stage(s)` : null,
+      ]
+        .filter(Boolean)
+        .join(' · ') || 'Mutation or ingest work is still in progress.',
+    }
+  }
+
+  return {
+    tone: detail.status === 'failed' ? ('failed' as DocumentStatus) : ('ready_no_graph' as DocumentStatus),
+    label: detail.status === 'failed' ? 'Failed' : 'Open',
+    note: 'Readable state is known, but final settlement has not been confirmed yet.',
+  }
+})
+
+const summaryCards = computed(() => {
   const detail = props.detail
   if (!detail) {
     return []
   }
-  const cards = [
+
+  return [
     {
-      key: 'cost',
-      tone: accountingTone(detail.accountingStatus),
-      value: formatMoney(detail.totalEstimatedCost, detail.currency),
-      label: i18n.t('documents.details.totalCost'),
-    },
-    {
-      key: 'accounting',
-      tone: accountingTone(detail.accountingStatus),
-      value: accountingLabel(detail.accountingStatus),
-      label: i18n.t('documents.details.accountingStatus'),
+      key: 'revision',
+      tone: truthToneReady(detail.status),
+      value: detail.activeRevisionNo ? `#${String(detail.activeRevisionNo)}` : '—',
+      label: 'Active revision',
     },
     {
       key: 'attempt',
       tone: detail.status,
-      value: `#${String(detail.latestAttemptNo)}`,
-      label: i18n.t('documents.details.latestAttempt'),
+      value: detail.latestAttemptNo > 0 ? `#${String(detail.latestAttemptNo)}` : '—',
+      label: 'Latest attempt',
     },
-  ] satisfies { key: string; tone: DocumentStatus; value: string; label: string }[]
-
-  if (detail.settledEstimatedCost !== null) {
-    cards.splice(1, 0, {
-      key: 'settled-cost',
-      tone: 'ready',
-      value: formatMoney(detail.settledEstimatedCost, detail.currency),
-      label: i18n.t('documents.details.settledCost'),
-    })
-  }
-
-  if (detail.inFlightEstimatedCost !== null || detail.inFlightStageCount > 0) {
-    cards.splice(2, 0, {
-      key: 'in-flight-cost',
-      tone: 'processing',
-      value: formatMoney(detail.inFlightEstimatedCost, detail.currency),
-      label: i18n.t('documents.details.inFlightCost'),
-    })
-  }
-
-  if (eyebrowStageLabel.value) {
-    cards.splice(2, 0, {
+    {
       key: 'stage',
       tone: detail.status,
-      value: eyebrowStageLabel.value,
-      label: i18n.t('documents.headers.stage'),
-    })
-  }
-
-  return cards
-})
-
-const statsCards = computed(() => {
-  const detail = props.detail
-  if (!detail) {
-    return []
-  }
-  return [
-    {
-      key: 'chunks',
-      label: i18n.t('documents.details.chunkCount'),
-      value: detail.extractedStats.chunkCount ?? '—',
+      value: stageLabel(detail.stage),
+      label: 'Current stage',
     },
     {
-      key: 'nodes',
-      label: i18n.t('documents.details.graphNodes'),
-      value: detail.graphStats.nodeCount,
-    },
-    {
-      key: 'evidence',
-      label: i18n.t('documents.details.graphEvidence'),
-      value: detail.graphStats.evidenceCount,
-    },
-    {
-      key: 'pages',
-      label: i18n.t('documents.details.pageCount'),
-      value: detail.extractedStats.pageCount ?? '—',
+      key: 'cost',
+      tone: summaryTone(settledTruth.value?.tone ?? detail.status),
+      value:
+        detail.settledEstimatedCost !== null
+          ? formatMoney(detail.settledEstimatedCost, detail.currency)
+          : formatMoney(detail.totalEstimatedCost, detail.currency),
+      label: detail.settledEstimatedCost !== null ? 'Settled cost' : 'Estimated cost',
     },
   ]
 })
@@ -318,14 +303,43 @@ const metadataRows = computed(() => {
   if (!detail) {
     return []
   }
-
   return [
-    { key: 'type', label: i18n.t('documents.headers.type'), value: detail.fileType },
-    { key: 'size', label: i18n.t('documents.headers.size'), value: detail.fileSizeLabel },
-    { key: 'uploaded', label: i18n.t('documents.headers.uploaded'), value: formatDate(detail.uploadedAt) },
-    { key: 'lastActivity', label: i18n.t('documents.details.lastActivity'), value: formatDate(detail.lastActivityAt) },
-    { key: 'extractor', label: i18n.t('documents.details.extractionKind'), value: detail.extractedStats.extractionKind ?? '—' },
-    { key: 'revisionStatus', label: i18n.t('documents.details.activeRevisionStatus'), value: detail.activeRevisionStatus ?? '—' },
+    { key: 'workspace', label: 'Workspace', value: props.workspaceName ?? '—' },
+    { key: 'library', label: 'Library', value: detail.libraryName },
+    { key: 'uploaded', label: 'Uploaded', value: formatDate(detail.uploadedAt) },
+    { key: 'fileType', label: 'File type', value: detail.fileType },
+    { key: 'fileSize', label: 'File size', value: detail.fileSizeLabel },
+    { key: 'requestedBy', label: 'Requested by', value: detail.requestedBy ?? '—' },
+    { key: 'accounting', label: 'Accounting', value: detail.accountingStatus },
+  ]
+})
+
+const mutationRows = computed(() => {
+  const detail = props.detail
+  if (!detail) {
+    return []
+  }
+  return [
+    {
+      key: 'kind',
+      label: 'Operation',
+      value: mutationKindLabel(detail.mutation.kind) ?? 'No active mutation',
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      value: mutationLabel(detail.mutation.status) ?? 'Idle',
+    },
+    {
+      key: 'warning',
+      label: 'Warning',
+      value: detail.mutation.warning ?? '—',
+    },
+    {
+      key: 'error',
+      label: 'Error',
+      value: detail.errorMessage ?? '—',
+    },
   ]
 })
 
@@ -338,21 +352,20 @@ const revisionTimeline = computed(() => {
     key: revision.id,
     title: `#${String(revision.revisionNo)} · ${revisionKindLabel(revision.revisionKind)}`,
     subtitle: [
-      revision.sourceFileName,
       revision.status,
-      revision.isActive ? i18n.t('documents.details.currentRevision') : null,
+      revision.sourceFileName,
+      revision.isActive ? 'Active head' : null,
     ]
       .filter(Boolean)
       .join(' · '),
-    body: revision.appendedTextExcerpt ?? null,
     timestamp: [
-      formatDate(revision.acceptedAt),
-      revision.activatedAt ? formatDate(revision.activatedAt) : null,
+      `Accepted ${formatDate(revision.acceptedAt)}`,
+      revision.activatedAt ? `Activated ${formatDate(revision.activatedAt)}` : null,
+      revision.supersededAt ? `Superseded ${formatDate(revision.supersededAt)}` : null,
     ]
       .filter(Boolean)
       .join(' · '),
-    isCurrent: revision.isActive,
-    isDone: revision.status === 'active' || revision.status === 'superseded',
+    body: revision.appendedTextExcerpt,
   }))
 })
 
@@ -363,82 +376,65 @@ const attemptSections = computed(() => {
   }
   return detail.attempts.map((attempt) => ({
     key: `${detail.id}-${String(attempt.attemptNo)}`,
-    heading: i18n.t('documents.details.attemptLabel', { number: attempt.attemptNo }),
+    heading: `Attempt #${String(attempt.attemptNo)}`,
     subtitle: [
       attemptKindLabel(attempt.attemptKind),
-      attempt.revisionNo ? `#${String(attempt.revisionNo)}` : null,
+      attempt.revisionNo ? `Revision #${String(attempt.revisionNo)}` : null,
       attempt.status,
+      activityLabel(attempt.activityStatus),
     ]
       .filter(Boolean)
       .join(' · '),
-    summaryLines: [
-      `${i18n.t('documents.details.activityStatus')}: ${activityLabel(attempt.activityStatus)}`,
-      `${i18n.t('documents.details.lastActivity')}: ${formatDate(attempt.lastActivityAt)}`,
-      `${i18n.t('documents.details.queueTime')}: ${formatDuration(attempt.queueElapsedMs)}`,
-      `${i18n.t('documents.details.totalTime')}: ${formatDuration(attempt.totalElapsedMs)}`,
-      `${i18n.t('documents.details.accountingStatus')}: ${accountingLabel(
-        attempt.summary.accountingStatus,
-      )}`,
-      `${i18n.t('documents.details.totalCost')}: ${formatMoney(
-        attempt.summary.totalEstimatedCost,
-        attempt.summary.currency,
-      )}`,
-      ...(attempt.summary.settledEstimatedCost !== null
-        ? [
-            `${i18n.t('documents.details.settledCost')}: ${formatMoney(
-              attempt.summary.settledEstimatedCost,
-              attempt.summary.currency,
-            )}`,
-          ]
-        : []),
-      ...(attempt.summary.inFlightEstimatedCost !== null || attempt.summary.inFlightStageCount > 0
-        ? [
-            `${i18n.t('documents.details.inFlightCost')}: ${formatMoney(
-              attempt.summary.inFlightEstimatedCost,
-              attempt.summary.currency,
-            )}`,
-            `${i18n.t('documents.details.inFlightStages')}: ${formatCount(
-              attempt.summary.inFlightStageCount,
-            )}`,
-          ]
-        : []),
-      ...(attempt.summary.missingStageCount > 0
-        ? [
-            `${i18n.t('documents.details.missingAccountingStages')}: ${formatCount(
-              attempt.summary.missingStageCount,
-            )}`,
-          ]
-        : []),
-    ],
-    partialHistoryReason: attempt.partialHistory ? attempt.partialHistoryReason : null,
+    meta: [
+      `Last activity ${formatDate(attempt.lastActivityAt)}`,
+      `Queue ${formatDuration(attempt.queueElapsedMs)}`,
+      `Total ${formatDuration(attempt.totalElapsedMs)}`,
+      `Accounting ${attempt.summary.accountingStatus}`,
+      `Cost ${formatMoney(attempt.summary.totalEstimatedCost, attempt.summary.currency)}`,
+      attempt.summary.settledEstimatedCost !== null
+        ? `Settled ${formatMoney(attempt.summary.settledEstimatedCost, attempt.summary.currency)}`
+        : null,
+      attempt.summary.inFlightStageCount > 0
+        ? `${attempt.summary.inFlightStageCount} live stage(s)`
+        : null,
+      attempt.summary.missingStageCount > 0
+        ? `${attempt.summary.missingStageCount} missing stage(s)`
+        : null,
+    ].filter((value): value is string => Boolean(value)),
     benchmarks: attempt.benchmarks.map((benchmark, index) => ({
       key: `${String(attempt.attemptNo)}-${benchmark.stage}-${benchmark.startedAt}-${String(index)}`,
-      tone: benchmarkTone(benchmark.status),
+      tone:
+        benchmark.status === 'failed'
+          ? ('failed' as DocumentStatus)
+          : benchmark.status === 'completed' || benchmark.status === 'skipped'
+            ? ('ready' as DocumentStatus)
+            : ('processing' as DocumentStatus),
       title: stageLabel(benchmark.stage),
       subtitle: [
+        benchmark.status,
+        benchmark.providerKind,
+        benchmark.modelName,
+      ]
+        .filter(Boolean)
+        .join(' · '),
+      timing: [
         formatDate(benchmark.startedAt),
         benchmark.finishedAt ? formatDate(benchmark.finishedAt) : null,
         formatDuration(benchmark.elapsedMs),
       ]
         .filter(Boolean)
         .join(' · '),
-      provider: [benchmark.providerKind, benchmark.modelName].filter(Boolean).join(' / ') || null,
       message: benchmark.message,
       accounting: benchmark.accounting
         ? [
-            accountingLabel(benchmark.accounting.pricingStatus),
-            attributionSourceLabel(benchmark.accounting.attributionSource),
-            benchmark.accounting.inFlightEstimatedCost !== null
-              ? `${i18n.t('documents.details.inFlightCost')}: ${formatMoney(
-                  benchmark.accounting.inFlightEstimatedCost,
-                  benchmark.accounting.currency,
-                )}`
-              : benchmark.accounting.settledEstimatedCost !== null
-                ? `${i18n.t('documents.details.settledCost')}: ${formatMoney(
-                    benchmark.accounting.settledEstimatedCost,
-                    benchmark.accounting.currency,
-                  )}`
-                : formatMoney(benchmark.accounting.estimatedCost, benchmark.accounting.currency),
+            benchmark.accounting.pricingStatus,
+            benchmark.accounting.attributionSource ?? null,
+            formatMoney(
+              benchmark.accounting.settledEstimatedCost ??
+                benchmark.accounting.inFlightEstimatedCost ??
+                benchmark.accounting.estimatedCost,
+              benchmark.accounting.currency,
+            ),
           ]
             .filter(Boolean)
             .join(' · ')
@@ -447,35 +443,12 @@ const attemptSections = computed(() => {
   }))
 })
 
+const extractedPreview = computed(() => {
+  const preview = props.detail?.extractedStats.previewText?.trim() ?? ''
+  return preview.length > 0 ? preview : null
+})
+
 const showOpenInGraph = computed(() => Boolean(props.detail?.graphNodeId))
-const showMutationWarning = computed(() => Boolean(props.detail?.mutation.warning))
-const showMutationBadge = computed(() => {
-  const mutation = props.detail?.mutation
-  if (!mutation?.status) {
-    return false
-  }
-
-  if (mutation.status === 'failed') {
-    return true
-  }
-
-  return mutation.kind === 'delete'
-})
-const showActivityWarning = computed(() => {
-  const activityStatus = props.detail?.activityStatus
-  return (
-    activityStatus === 'blocked' ||
-    activityStatus === 'retrying' ||
-    activityStatus === 'stalled'
-  )
-})
-const deleteInProgress = computed(() => {
-  const mutation = props.detail?.mutation
-  return (
-    mutation?.kind === 'delete' &&
-    (mutation.status === 'accepted' || mutation.status === 'reconciling')
-  )
-})
 const mutationLocked = computed(
   () =>
     props.detail?.mutation.status === 'accepted' ||
@@ -487,6 +460,11 @@ const activityLocked = computed(
     props.detail?.activityStatus === 'retrying' ||
     props.detail?.activityStatus === 'stalled',
 )
+const deleteInProgress = computed(
+  () =>
+    props.detail?.mutation.kind === 'delete' &&
+    (props.detail.mutation.status === 'accepted' || props.detail.mutation.status === 'reconciling'),
+)
 const disableReprocess = computed(
   () =>
     props.detail?.status === 'processing' ||
@@ -494,513 +472,271 @@ const disableReprocess = computed(
     mutationLocked.value ||
     props.detail?.activityStatus === 'retrying',
 )
-const showActivityBadge = computed(() => {
-  const detail = props.detail
-  if (!detail) {
-    return false
-  }
-
-  return ['blocked', 'retrying', 'stalled'].includes(detail.activityStatus)
-})
-
-const heroMetaLine = computed(() => {
-  const detail = props.detail
-  if (!detail) {
-    return ''
-  }
-
-  return [
-    detail.fileType,
-    detail.fileSizeLabel,
-    formatDate(detail.uploadedAt),
-  ]
-    .filter(Boolean)
-    .join(' · ')
-})
-
-const eyebrowStageLabel = computed(() => {
-  const detail = props.detail
-  if (!detail) {
-    return null
-  }
-
-  const label = stageLabel(detail.stage)
-  const normalized = label.toLowerCase()
-  if (normalized === statusLabel(detail.status).toLowerCase()) {
-    return null
-  }
-  if (normalized === 'принято' || normalized === 'accepted') {
-    return null
-  }
-  return label
-})
-
-const showRevisionHistory = computed(() => revisionTimeline.value.length > 0)
-const showAttemptSections = computed(() => attemptSections.value.length > 0)
-const showExtractedPreview = computed(() => Boolean(props.detail?.extractedStats.previewText))
-const showGraphProgressCard = computed(() => {
-  const detail = props.detail
-  return (
-    Boolean(detail) &&
-    detail?.status === 'processing' &&
-    detail.stage === 'extracting_graph' &&
-    detail.progressPercent !== null
-  )
-})
-const graphProgressSummary = computed(() => {
-  const detail = props.detail
-  const progressPercent = detail?.progressPercent
-  if (!detail || progressPercent === null || progressPercent === undefined) {
-    return null
-  }
-
-  return i18n.t('documents.details.graphProgress.summary', {
-    progress: progressPercent,
-    chunks: detail.extractedStats.chunkCount ?? 0,
-  })
-})
-const graphProgressMeta = computed(() => {
-  const detail = props.detail
-  const progressPercent = detail?.progressPercent
-  if (!detail || progressPercent === null || progressPercent === undefined) {
-    return []
-  }
-
-  return [
-    `${i18n.t('documents.details.graphProgress.stage')}: ${stageLabel(detail.stage)}`,
-    `${i18n.t('documents.details.graphProgress.percent')}: ${String(progressPercent)}%`,
-    detail.lastActivityAt
-      ? `${i18n.t('documents.details.lastActivity')}: ${formatDate(detail.lastActivityAt)}`
-      : null,
-  ].filter((value): value is string => Boolean(value))
-})
-const extractedMetaLines = computed(() => {
-  const detail = props.detail
-  if (!detail) {
-    return []
-  }
-
-  return [
-    `${i18n.t('documents.details.normalizationStatus')}: ${normalizationLabel(
-      detail.extractedStats.normalizationStatus,
-    )}`,
-    `${i18n.t('documents.details.warningCount')}: ${formatCount(detail.extractedStats.warningCount)}`,
-    detail.extractedStats.ocrSource
-      ? `${i18n.t('documents.details.ocrSource')}: ${ocrSourceLabel(detail.extractedStats.ocrSource) ?? detail.extractedStats.ocrSource}`
-      : null,
-  ].filter((value): value is string => Boolean(value))
-})
 </script>
 
 <template>
   <div
     v-if="props.open"
-    class="rr-documents-drawer-shell"
-    @click.self="emit('close')"
+    class="rr-documents-drawer"
   >
-    <aside class="rr-documents-drawer">
-      <div class="rr-documents-drawer__main">
-        <header class="rr-documents-drawer__header">
-          <div class="rr-documents-drawer__eyebrow">
+    <div
+      class="rr-documents-drawer__backdrop"
+      @click="emit('close')"
+    />
+
+    <aside class="rr-documents-drawer__panel">
+      <header class="rr-documents-drawer__head">
+        <div>
+          <span class="rr-documents-drawer__eyebrow">Document</span>
+          <h2 v-if="props.detail">{{ props.detail.fileName }}</h2>
+          <h2 v-else>{{ $t('documents.actions.details') }}</h2>
+          <p v-if="props.detail">{{ [props.workspaceName ?? '—', props.detail.libraryName].join(' / ') }}</p>
+        </div>
+        <button
+          type="button"
+          class="rr-button rr-button--ghost rr-button--tiny"
+          @click="emit('close')"
+        >
+          {{ $t('common.close') }}
+        </button>
+      </header>
+
+      <div
+        v-if="props.loading"
+        class="rr-page-card rr-documents-drawer__section"
+      >
+        <p>{{ $t('common.loading') }}</p>
+      </div>
+
+      <div
+        v-else-if="props.error"
+        class="rr-page-card rr-documents-drawer__section"
+      >
+        <p>{{ props.error }}</p>
+      </div>
+
+      <template v-else-if="props.detail">
+        <section class="rr-page-card rr-documents-drawer__section">
+          <p>{{ props.detail.summary }}</p>
+          <div class="rr-documents-drawer__pill-row">
             <StatusPill
-              v-if="props.detail"
               :tone="props.detail.status"
               :label="statusLabel(props.detail.status)"
             />
             <StatusPill
-              v-if="props.detail && showActivityBadge"
-              :tone="activityTone(props.detail.activityStatus)"
-              :label="activityLabel(props.detail.activityStatus)"
-            />
-            <StatusPill
-              v-if="props.detail && showMutationBadge && mutationLabel(props.detail.mutation.status)"
+              v-if="props.detail.mutation.status"
               :tone="mutationTone(props.detail.mutation.status)"
               :label="mutationLabel(props.detail.mutation.status)!"
             />
-            <span
-              v-if="eyebrowStageLabel"
-              class="rr-documents-drawer__eyebrow-copy"
-            >
-              {{ eyebrowStageLabel }}
-            </span>
-          </div>
-          <button
-            class="rr-button rr-button--ghost rr-button--tiny"
-            type="button"
-            @click="emit('close')"
-          >
-            {{ $t('documents.details.close') }}
-          </button>
-        </header>
-
-        <div
-          v-if="props.loading"
-          class="rr-documents-drawer__loading"
-        >
-          {{ $t('documents.loadingDetail') }}
-        </div>
-        <p
-          v-else-if="props.error"
-          class="rr-error-card"
-        >
-          {{ props.error }}
-        </p>
-
-        <template v-else-if="props.detail">
-          <section class="rr-documents-drawer__hero">
-            <div>
-              <h2 :title="props.detail.fileName">{{ props.detail.fileName }}</h2>
-              <span
-                class="rr-documents-drawer__hero-meta"
-                :title="heroMetaLine"
-              >
-                {{ heroMetaLine }}
-              </span>
-              <p>{{ localizedSummary }}</p>
-            </div>
-          </section>
-
-          <section class="rr-documents-drawer__stats-grid">
-            <DocumentSummaryCard
-              v-for="card in headlineCards"
-              :key="card.key"
-              :tone="card.tone"
-              :value="card.value"
-              :label="card.label"
+            <StatusPill
+              v-if="readableTruth"
+              :tone="readableTruth.tone"
+              :label="readableTruth.label"
             />
-          </section>
-
-          <section class="rr-documents-drawer__stats-grid">
+            <StatusPill
+              v-if="settledTruth"
+              :tone="settledTruth.tone"
+              :label="settledTruth.label"
+            />
+          </div>
+          <div class="rr-documents-drawer__truth-grid">
             <article
-              v-for="card in statsCards"
-              :key="card.key"
-              class="rr-documents-drawer__stat-card"
+              v-if="readableTruth"
+              class="rr-documents-drawer__soft-card"
             >
-              <span>{{ card.label }}</span>
-              <strong>{{ card.value }}</strong>
+              <span>Readable truth</span>
+              <strong>{{ readableTruth.label }}</strong>
+              <p>{{ readableTruth.note }}</p>
             </article>
-          </section>
-
-          <section class="rr-documents-drawer__meta-grid">
             <article
+              v-if="settledTruth"
+              class="rr-documents-drawer__soft-card"
+            >
+              <span>Settled truth</span>
+              <strong>{{ settledTruth.label }}</strong>
+              <p>{{ settledTruth.note }}</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="rr-documents-drawer__summary-grid">
+          <DocumentSummaryCard
+            v-for="card in summaryCards"
+            :key="card.key"
+            :tone="card.tone"
+            :value="card.value"
+            :label="card.label"
+          />
+        </section>
+
+        <section class="rr-page-card rr-documents-drawer__section">
+          <h3>Overview</h3>
+          <dl class="rr-documents-drawer__meta-grid">
+            <template
               v-for="item in metadataRows"
               :key="item.key"
-              class="rr-documents-drawer__meta-item"
-              :title="item.value"
             >
-              <span>{{ item.label }}</span>
-              <strong>{{ item.value }}</strong>
-            </article>
-          </section>
+              <dt>{{ item.label }}</dt>
+              <dd>{{ item.value }}</dd>
+            </template>
+          </dl>
+        </section>
 
-          <section
-            v-if="showActivityWarning"
-            class="rr-documents-drawer__soft-card"
-          >
-            <h4>{{ $t('documents.details.activityWarning') }}</h4>
-            <p>
-              {{
-                activityNarrative(
-                  props.detail.activityStatus,
-                  props.detail.stalledReason,
-                  props.detail.lastActivityAt,
-                ) || $t(`documents.activityDescriptions.${props.detail.activityStatus}`)
-              }}
-            </p>
-          </section>
-
-          <section
-            v-if="props.detail.errorMessage"
-            class="rr-documents-drawer__soft-card rr-documents-drawer__soft-card--danger"
-          >
-            <h4>{{ $t('documents.details.error') }}</h4>
-            <p>{{ props.detail.errorMessage }}</p>
-          </section>
-
-          <section
-            v-if="props.detail.mutation.status"
-            class="rr-documents-drawer__soft-card"
-          >
-            <h4>{{ $t('documents.details.activeMutation') }}</h4>
-            <p>
-              {{
-                [
-                  mutationKindLabel(props.detail.mutation.kind),
-                  mutationLabel(props.detail.mutation.status),
-                  props.detail.activeRevisionNo ? `#${String(props.detail.activeRevisionNo)}` : null,
-                ]
-                  .filter(Boolean)
-                  .join(' · ')
-              }}
-            </p>
-          </section>
-
-          <section
-            v-if="props.detail.partialHistory"
-            class="rr-documents-drawer__soft-card"
-          >
-            <h4>{{ $t('documents.details.partialHistory') }}</h4>
-            <p>
-              {{ props.detail.partialHistoryReason || $t('documents.details.partialHistoryFallback') }}
-            </p>
-          </section>
-
-          <section
-            v-if="showMutationWarning"
-            class="rr-documents-drawer__soft-card"
-          >
-            <h4>{{ $t('documents.details.mutationWarning') }}</h4>
-            <p>{{ props.detail.mutation.warning }}</p>
-          </section>
-
-          <section
-            v-if="showGraphProgressCard"
-            class="rr-documents-drawer__soft-card"
-          >
-            <h4>{{ $t('documents.details.graphProgress.title') }}</h4>
-            <p>{{ graphProgressSummary }}</p>
-            <p class="rr-documents-drawer__microcopy">
-              {{ graphProgressMeta.join(' · ') }}
-            </p>
-          </section>
-
-          <section
-            v-if="showExtractedPreview"
-            class="rr-documents-drawer__soft-card"
-          >
-            <h4>{{ $t('documents.details.preview') }}</h4>
-            <p class="rr-documents-drawer__microcopy">
-              {{ extractedMetaLines.join(' · ') }}
-            </p>
-            <pre class="rr-documents-drawer__preview">{{ props.detail.extractedStats.previewText }}</pre>
-            <p
-              v-if="props.detail.extractedStats.previewTruncated"
-              class="rr-documents-drawer__microcopy"
+        <section
+          v-if="extractedPreview"
+          class="rr-page-card rr-documents-drawer__section"
+        >
+          <div class="rr-documents-drawer__section-head">
+            <h3>Readable text</h3>
+            <button
+              class="rr-button rr-button--ghost rr-button--tiny"
+              type="button"
+              :disabled="!props.detail.canDownloadText"
+              @click="emit('downloadText', props.detail.id)"
             >
-              {{ $t('documents.details.previewTruncated') }}
-            </p>
-          </section>
+              {{ $t('documents.details.downloadText') }}
+            </button>
+          </div>
+          <p class="rr-documents-drawer__preview-text">{{ extractedPreview }}</p>
+        </section>
 
-          <section
-            v-if="props.detail.extractedStats.warnings.length"
-            class="rr-documents-drawer__soft-card"
+        <section class="rr-page-card rr-documents-drawer__section">
+          <h3>Mutation</h3>
+          <dl class="rr-documents-drawer__meta-grid">
+            <template
+              v-for="item in mutationRows"
+              :key="item.key"
+            >
+              <dt>{{ item.label }}</dt>
+              <dd>{{ item.value }}</dd>
+            </template>
+          </dl>
+        </section>
+
+        <section
+          v-if="revisionTimeline.length"
+          class="rr-page-card rr-documents-drawer__section"
+        >
+          <h3>Revision history</h3>
+          <ol class="rr-documents-drawer__timeline">
+            <li
+              v-for="revision in revisionTimeline"
+              :key="revision.key"
+              class="rr-documents-drawer__timeline-item"
+            >
+              <strong>{{ revision.title }}</strong>
+              <span>{{ revision.subtitle }}</span>
+              <span>{{ revision.timestamp }}</span>
+              <p v-if="revision.body">{{ revision.body }}</p>
+            </li>
+          </ol>
+        </section>
+
+        <section
+          v-if="attemptSections.length"
+          class="rr-page-card rr-documents-drawer__section"
+        >
+          <h3>Attempt stages</h3>
+          <article
+            v-for="attempt in attemptSections"
+            :key="attempt.key"
+            class="rr-documents-drawer__attempt-card"
           >
-            <h4>{{ $t('documents.details.warnings') }}</h4>
-            <ul class="rr-documents-drawer__list">
+            <header class="rr-documents-drawer__attempt-head">
+              <strong>{{ attempt.heading }}</strong>
+              <span>{{ attempt.subtitle }}</span>
+            </header>
+            <ul class="rr-documents-drawer__attempt-meta">
               <li
-                v-for="warning in props.detail.extractedStats.warnings"
-                :key="warning"
+                v-for="line in attempt.meta"
+                :key="line"
               >
-                {{ warning }}
+                {{ line }}
               </li>
             </ul>
-          </section>
-
-          <section class="rr-documents-drawer__soft-card">
-            <h4>{{ $t('documents.details.graphStats') }}</h4>
-            <p>
-              {{ $t('documents.details.graphContributionSummary', {
-                nodes: props.detail.graphStats.nodeCount,
-                edges: props.detail.graphStats.edgeCount,
-                evidence: props.detail.graphStats.evidenceCount,
-              }) }}
-            </p>
-          </section>
-
-          <details
-            v-if="showRevisionHistory"
-            class="rr-documents-drawer__soft-card rr-documents-drawer__accordion"
-          >
-            <summary>
-              <span>{{ $t('documents.details.revisionHistory') }}</span>
-              <span>{{ revisionTimeline.length }}</span>
-            </summary>
-            <ol class="rr-documents-drawer__timeline">
-              <li
-                v-for="revision in revisionTimeline"
-                :key="revision.key"
-                class="rr-documents-drawer__timeline-item"
-                :class="{ 'is-current': revision.isCurrent, 'is-done': revision.isDone }"
-              >
-                <div class="rr-documents-drawer__timeline-marker" />
-                <div class="rr-documents-drawer__timeline-body">
-                  <strong>{{ revision.title }}</strong>
-                  <span>{{ revision.subtitle }}</span>
-                  <span>{{ revision.timestamp }}</span>
-                  <p v-if="revision.body">{{ revision.body }}</p>
-                </div>
-              </li>
-            </ol>
-          </details>
-
-          <template v-if="showAttemptSections">
-            <details
-              v-for="attempt in attemptSections"
-              :key="attempt.key"
-              class="rr-documents-drawer__soft-card rr-documents-drawer__accordion"
+            <div
+              v-if="attempt.benchmarks.length"
+              class="rr-documents-drawer__benchmark-list"
             >
-              <summary>
-                <span>{{ attempt.heading }}</span>
-                <span>{{ attempt.subtitle }}</span>
-              </summary>
-              <ul class="rr-documents-drawer__list">
-                <li
-                  v-for="line in attempt.summaryLines"
-                  :key="line"
-                >
-                  {{ line }}
-                </li>
-              </ul>
-              <p v-if="attempt.partialHistoryReason">{{ attempt.partialHistoryReason }}</p>
-              <ol class="rr-documents-drawer__timeline">
-                <li
-                  v-for="benchmark in attempt.benchmarks"
-                  :key="benchmark.key"
-                  class="rr-documents-drawer__timeline-item"
-                  :class="{ 'is-current': benchmark.tone === 'processing', 'is-done': benchmark.tone === 'ready' }"
-                >
-                  <div class="rr-documents-drawer__timeline-marker" />
-                  <div class="rr-documents-drawer__timeline-body">
-                    <strong>{{ benchmark.title }}</strong>
-                    <span>{{ benchmark.subtitle }}</span>
-                    <p v-if="benchmark.provider">{{ benchmark.provider }}</p>
-                    <p v-if="benchmark.accounting">{{ benchmark.accounting }}</p>
-                    <p v-if="benchmark.message">{{ benchmark.message }}</p>
-                  </div>
-                </li>
-              </ol>
-            </details>
-          </template>
-
-          <details
-            v-else
-            class="rr-documents-drawer__soft-card rr-documents-drawer__accordion"
-          >
-            <summary>
-              <span>{{ $t('documents.details.history') }}</span>
-              <span>{{ props.detail.processingHistory.length }}</span>
-            </summary>
-            <ol class="rr-documents-drawer__timeline">
-              <li
-                v-for="item in props.detail.processingHistory"
-                :key="`${String(item.attemptNo)}-${item.stage}-${item.startedAt}`"
-                class="rr-documents-drawer__timeline-item"
-                :class="{ 'is-current': props.detail.status === 'processing', 'is-done': item.status === 'completed' }"
+              <article
+                v-for="benchmark in attempt.benchmarks"
+                :key="benchmark.key"
+                class="rr-documents-drawer__benchmark-card"
               >
-                <div class="rr-documents-drawer__timeline-marker" />
-                <div class="rr-documents-drawer__timeline-body">
-                  <strong>{{ stageLabel(item.stage) }}</strong>
-                  <span>{{ formatDate(item.startedAt) }} · {{ formatDate(item.finishedAt) }}</span>
-                  <p v-if="item.errorMessage">{{ item.errorMessage }}</p>
+                <div class="rr-documents-drawer__benchmark-head">
+                  <StatusPill
+                    :tone="benchmark.tone"
+                    :label="benchmark.title"
+                  />
+                  <span>{{ benchmark.subtitle }}</span>
                 </div>
-              </li>
-            </ol>
-          </details>
-        </template>
-      </div>
+                <p>{{ benchmark.timing }}</p>
+                <p v-if="benchmark.accounting">{{ benchmark.accounting }}</p>
+                <p v-if="benchmark.message">{{ benchmark.message }}</p>
+              </article>
+            </div>
+          </article>
+        </section>
 
-      <aside
-        v-if="props.detail"
-        class="rr-documents-drawer__rail"
-      >
-        <h4>{{ $t('documents.details.actionsTitle') }}</h4>
-        <p>{{ $t('documents.details.actionsSubtitle') }}</p>
+        <footer class="rr-documents-drawer__actions">
+          <button
+            v-if="props.detail.canAppend"
+            class="rr-button rr-button--ghost"
+            type="button"
+            :disabled="mutationLocked || activityLocked"
+            @click="emit('append', props.detail.id)"
+          >
+            {{ $t('documents.actions.append') }}
+          </button>
 
-        <button
-          v-if="showOpenInGraph"
-          class="rr-button"
-          type="button"
-          @click="emit('openInGraph', props.detail.graphNodeId!)"
-        >
-          {{ $t('documents.details.openInGraph') }}
-        </button>
+          <button
+            v-if="props.detail.canReplace"
+            class="rr-button rr-button--ghost"
+            type="button"
+            :disabled="mutationLocked || activityLocked"
+            @click="emit('replace', props.detail.id)"
+          >
+            {{ $t('documents.actions.replace') }}
+          </button>
 
-        <button
-          v-if="props.detail.canAppend"
-          class="rr-button rr-button--ghost"
-          type="button"
-          :disabled="mutationLocked || activityLocked"
-          @click="emit('append', props.detail.id)"
-        >
-          {{ $t('documents.actions.append') }}
-        </button>
+          <button
+            class="rr-button rr-button--ghost"
+            type="button"
+            :disabled="disableReprocess"
+            @click="emit('reprocess', props.detail.id)"
+          >
+            {{ $t('documents.details.reprocess') }}
+          </button>
 
-        <button
-          v-if="props.detail.canReplace"
-          class="rr-button rr-button--ghost"
-          type="button"
-          :disabled="mutationLocked || activityLocked"
-          @click="emit('replace', props.detail.id)"
-        >
-          {{ $t('documents.actions.replace') }}
-        </button>
+          <button
+            v-if="showOpenInGraph && props.detail.graphNodeId"
+            class="rr-button rr-button--ghost"
+            type="button"
+            @click="emit('openInGraph', props.detail.graphNodeId)"
+          >
+            {{ $t('documents.details.openInGraph') }}
+          </button>
 
-        <button
-          class="rr-button rr-button--ghost"
-          type="button"
-          :disabled="disableReprocess"
-          @click="emit('reprocess', props.detail.id)"
-        >
-          {{ $t('documents.details.reprocess') }}
-        </button>
+          <button
+            v-if="props.detail.status === 'failed'"
+            class="rr-button rr-button--ghost"
+            type="button"
+            @click="emit('retry', props.detail.id)"
+          >
+            {{ $t('documents.actions.retry') }}
+          </button>
 
-        <button
-          class="rr-button rr-button--ghost"
-          type="button"
-          :disabled="!props.detail.canDownloadText"
-          @click="emit('downloadText', props.detail.id)"
-        >
-          {{ $t('documents.details.downloadText') }}
-        </button>
-
-        <button
-          v-if="props.detail.status === 'failed'"
-          class="rr-button rr-button--ghost"
-          type="button"
-          @click="emit('retry', props.detail.id)"
-        >
-          {{ $t('documents.actions.retry') }}
-        </button>
-
-        <button
-          v-if="props.detail.canRemove || deleteInProgress"
-          class="rr-button rr-button--ghost is-danger"
-          type="button"
-          :disabled="!props.detail.canRemove || mutationLocked || activityLocked"
-          @click="emit('remove', props.detail.id)"
-        >
-          {{ deleteInProgress ? $t('documents.actions.removing') : $t('documents.actions.remove') }}
-        </button>
-
-        <div class="rr-documents-drawer__rail-card">
-          <span>{{ $t('documents.details.fileSize') }}</span>
-          <strong :title="props.detail.fileSizeLabel">{{ props.detail.fileSizeLabel }}</strong>
-        </div>
-        <div class="rr-documents-drawer__rail-card">
-          <span>{{ $t('documents.details.pageCount') }}</span>
-          <strong>{{ props.detail.extractedStats.pageCount ?? '—' }}</strong>
-        </div>
-        <div class="rr-documents-drawer__rail-card">
-          <span>{{ $t('documents.details.accountingStatus') }}</span>
-          <strong :title="accountingLabel(props.detail.accountingStatus)">{{ accountingLabel(props.detail.accountingStatus) }}</strong>
-        </div>
-        <div class="rr-documents-drawer__rail-card">
-          <span>{{ $t('documents.details.inFlightStages') }}</span>
-          <strong>{{ formatCount(props.detail.inFlightStageCount) }}</strong>
-        </div>
-        <div class="rr-documents-drawer__rail-card">
-          <span>{{ $t('documents.details.missingAccountingStages') }}</span>
-          <strong>{{ formatCount(props.detail.missingStageCount) }}</strong>
-        </div>
-        <div class="rr-documents-drawer__rail-card">
-          <span>{{ $t('documents.details.checksum') }}</span>
-          <strong :title="props.detail.extractedStats.checksum ?? '—'">{{ props.detail.extractedStats.checksum ?? '—' }}</strong>
-        </div>
-        <div class="rr-documents-drawer__rail-card">
-          <span>{{ $t('documents.details.requestedBy') }}</span>
-          <strong :title="props.detail.requestedBy ?? '—'">{{ props.detail.requestedBy ?? '—' }}</strong>
-        </div>
-      </aside>
+          <button
+            v-if="props.detail.canRemove || deleteInProgress"
+            class="rr-button rr-button--ghost is-danger"
+            type="button"
+            :disabled="!props.detail.canRemove || mutationLocked || activityLocked"
+            @click="emit('remove', props.detail.id)"
+          >
+            {{ deleteInProgress ? $t('documents.actions.removing') : $t('documents.actions.remove') }}
+          </button>
+        </footer>
+      </template>
     </aside>
   </div>
 </template>

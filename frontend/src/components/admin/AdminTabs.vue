@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import type { AdminOverviewResponse, AdminTab } from 'src/models/ui/admin'
+import type { AdminTab, AdminTabAvailability, AdminTabCounts } from 'src/models/ui/admin'
 
 const props = defineProps<{
-  overview: AdminOverviewResponse
+  counts: AdminTabCounts
+  availability: AdminTabAvailability
   activeTab: AdminTab
 }>()
 
@@ -10,18 +11,18 @@ const emit = defineEmits<{
   change: [tab: AdminTab]
 }>()
 
-const tabs: { id: AdminTab; labelKey: string; count: keyof AdminOverviewResponse['counts'] }[] = [
-  { id: 'api_tokens', labelKey: 'admin.tabs.apiTokens', count: 'apiTokens' },
-  { id: 'members', labelKey: 'admin.tabs.members', count: 'members' },
-  { id: 'library_access', labelKey: 'admin.tabs.libraryAccess', count: 'libraryAccess' },
-  { id: 'settings', labelKey: 'admin.tabs.settings', count: 'settings' },
+const tabs: { id: AdminTab; labelKey: string; count: keyof AdminTabCounts }[] = [
+  { id: 'tokens', labelKey: 'admin.tabs.tokens', count: 'tokens' },
+  { id: 'aiCatalog', labelKey: 'admin.tabs.aiCatalog', count: 'aiCatalog' },
+  { id: 'pricing', labelKey: 'admin.tabs.pricing', count: 'pricing' },
+  { id: 'audit', labelKey: 'admin.tabs.audit', count: 'audit' },
 ]
 </script>
 
 <template>
   <div class="rr-admin-tabs">
     <button
-      v-for="tab in tabs"
+      v-for="tab in tabs.filter((item) => props.availability[item.id])"
       :key="tab.id"
       class="rr-admin-tabs__button"
       :class="{ 'is-active': props.activeTab === tab.id }"
@@ -29,7 +30,7 @@ const tabs: { id: AdminTab; labelKey: string; count: keyof AdminOverviewResponse
       @click="emit('change', tab.id)"
     >
       <span>{{ $t(tab.labelKey) }}</span>
-      <small>{{ props.overview.counts[tab.count] }}</small>
+      <small>{{ props.counts[tab.count] }}</small>
     </button>
   </div>
 </template>

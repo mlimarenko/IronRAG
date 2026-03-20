@@ -3,17 +3,19 @@ import { computed, onBeforeUnmount, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useI18n } from 'vue-i18n'
 import router from 'src/router'
-import EmptyStateCard from 'src/components/base/EmptyStateCard.vue'
 import ErrorStateCard from 'src/components/base/ErrorStateCard.vue'
 import PageSurface from 'src/components/base/PageSurface.vue'
 import AppendDocumentDialog from 'src/components/documents/AppendDocumentDialog.vue'
 import DocumentDetailsDrawer from 'src/components/documents/DocumentDetailsDrawer.vue'
+import DocumentsDiagnosticsStrip from 'src/components/documents/DocumentsDiagnosticsStrip.vue'
+import DocumentsEmptyState from 'src/components/documents/DocumentsEmptyState.vue'
 import DocumentsFiltersBar from 'src/components/documents/DocumentsFiltersBar.vue'
+import DocumentsNoticeStack from 'src/components/documents/DocumentsNoticeStack.vue'
+import DocumentsPrimarySummary from 'src/components/documents/DocumentsPrimarySummary.vue'
 import DocumentsTable from 'src/components/documents/DocumentsTable.vue'
-import DocumentSummaryCard from 'src/components/documents/DocumentSummaryCard.vue'
+import DocumentsWorkspaceHeader from 'src/components/documents/DocumentsWorkspaceHeader.vue'
 import ReplaceDocumentDialog from 'src/components/documents/ReplaceDocumentDialog.vue'
-import UploadDropzone from 'src/components/documents/UploadDropzone.vue'
-import type { DocumentStatus, DocumentUploadFailure } from 'src/models/ui/documents'
+import type { DocumentStatus } from 'src/models/ui/documents'
 import { downloadDocumentExtractedText } from 'src/services/api/documents'
 import { useDocumentsStore } from 'src/stores/documents'
 import { useShellStore } from 'src/stores/shell'
@@ -30,17 +32,24 @@ const {
   detailOpen,
   error,
   filteredRows,
+  graphDiagnostics,
+  graphHealthSnapshot,
+  graphDiagnosticsRefreshIntervalMs,
   loading,
   mutationLoading,
+  refreshIntervalMs,
   replaceDialogDocument,
   replaceDialogDocumentId,
-  refreshIntervalMs,
   surface,
   uploadFailures,
   uploadLoading,
-} =
-  storeToRefs(documentsStore)
+  workspaceNoticeGroups,
+  workspacePrimarySummary,
+  workspaceSecondaryDiagnostics,
+} = storeToRefs(documentsStore)
+
 let refreshTimer: number | null = null
+let graphDiagnosticsTimer: number | null = null
 
 function formatMoney(value: number | null, currency: string | null): string {
   if (value === null) {
@@ -58,47 +67,39 @@ function formatMoney(value: number | null, currency: string | null): string {
   }
 }
 
-function formatDuration(value: number | null): string {
-  if (value === null) {
+function formatTimestamp(value: string | null): string {
+  if (!value) {
     return '—'
   }
-  const totalSeconds = Math.max(0, Math.round(value / 1000))
-  const minutes = Math.floor(totalSeconds / 60)
-  const seconds = totalSeconds % 60
-  if (minutes >= 60) {
-    const hours = Math.floor(minutes / 60)
-    const restMinutes = minutes % 60
-    return `${String(hours)}h ${String(restMinutes)}m`
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) {
+    return value
   }
-  if (minutes > 0) {
-    return `${String(minutes)}m ${String(seconds)}s`
-  }
-  return `${String(totalSeconds)}s`
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(parsed)
 }
 
-function stageLabel(stage: string): string {
-  const key = `documents.stage.${stage}`
-  const translated = t(key)
-  return translated === key ? stage : translated
-}
-
-function accountingTone(status: string): DocumentStatus {
-  switch (status) {
-    case 'priced':
-      return 'ready'
-    case 'in_flight_unsettled':
-      return 'processing'
-    case 'partial':
-      return 'ready_no_graph'
-    default:
-      return 'failed'
+function residualReasonLabel(reason: string | null): string | null {
+  if (!reason) {
+    return null
   }
+  const key = `documents.terminal.residualReasons.${reason}`
+  return t(key) === key ? reason : t(key)
 }
 
 function stopPolling() {
   if (refreshTimer !== null) {
     window.clearInterval(refreshTimer)
     refreshTimer = null
+  }
+}
+
+function stopGraphDiagnosticsPolling() {
+  if (graphDiagnosticsTimer !== null) {
+    window.clearInterval(graphDiagnosticsTimer)
+    graphDiagnosticsTimer = null
   }
 }
 
@@ -129,8 +130,23 @@ watch(
   { immediate: true },
 )
 
+watch(
+  () => graphDiagnosticsRefreshIntervalMs.value,
+  (intervalMs) => {
+    stopGraphDiagnosticsPolling()
+    if (intervalMs <= 0) {
+      return
+    }
+    graphDiagnosticsTimer = window.setInterval(() => {
+      void documentsStore.loadGraphDiagnostics({ silent: true }).catch(() => undefined)
+    }, intervalMs)
+  },
+  { immediate: true },
+)
+
 onBeforeUnmount(() => {
   stopPolling()
+  stopGraphDiagnosticsPolling()
 })
 
 const summaryCards = computed<{ tone: DocumentStatus; value: number; label: string }[]>(() => {
@@ -154,66 +170,72 @@ const summaryCards = computed<{ tone: DocumentStatus; value: number; label: stri
   ]
 })
 
-const accountingCards = computed<{ tone: DocumentStatus; value: string; label: string }[]>(() => {
-  if (!surface.value) {
-    return []
+const terminalBanner = computed<{
+  tone: DocumentStatus
+  title: string
+  summary: string
+  chips: string[]
+} | null>(() => {
+  const terminal = surface.value?.diagnostics.terminalOutcome
+  if (!terminal) {
+    return null
   }
-  const { accounting } = surface.value
-  return [
-    {
-      tone: accountingTone(accounting.accountingStatus),
-      value: formatMoney(accounting.totalEstimatedCost, accounting.currency),
-      label: t('documents.collectionAccounting.totalCost'),
-    },
-    {
+
+  const chips = [
+    terminal.queuedCount > 0
+      ? t('documents.terminal.blockers.queued', { count: terminal.queuedCount })
+      : null,
+    terminal.processingCount > 0
+      ? t('documents.terminal.blockers.processing', { count: terminal.processingCount })
+      : null,
+    terminal.pendingGraphCount > 0
+      ? t('documents.terminal.blockers.pendingGraph', { count: terminal.pendingGraphCount })
+      : null,
+    terminal.failedDocumentCount > 0
+      ? t('documents.terminal.blockers.failedDocuments', {
+          count: terminal.failedDocumentCount,
+        })
+      : null,
+    terminal.lastTransitionAt
+      ? t('documents.terminal.blockers.settledAt', {
+          value: formatTimestamp(terminal.lastTransitionAt),
+        })
+      : null,
+  ].filter((value): value is string => Boolean(value))
+
+  if (terminal.terminalState === 'fully_settled') {
+    return {
       tone: 'ready',
-      value: formatMoney(accounting.settledEstimatedCost, accounting.currency),
-      label: t('documents.collectionAccounting.settledCost'),
-    },
-    {
-      tone: 'processing',
-      value: formatMoney(accounting.inFlightEstimatedCost, accounting.currency),
-      label: t('documents.collectionAccounting.inFlightCost'),
-    },
-  ]
-})
-
-const progressCards = computed(() => {
-  const progress = surface.value?.diagnostics.progress
-  if (!progress) {
-    return []
+      title: t('documents.terminal.title'),
+      summary: t('documents.terminal.summary.fully_settled'),
+      chips,
+    }
   }
-  return [
-    { label: t('documents.diagnostics.progress.accepted'), value: progress.accepted },
-    {
-      label: t('documents.diagnostics.progress.contentExtracted'),
-      value: progress.contentExtracted,
-    },
-    { label: t('documents.diagnostics.progress.chunked'), value: progress.chunked },
-    { label: t('documents.diagnostics.progress.embedded'), value: progress.embedded },
-    {
-      label: t('documents.diagnostics.progress.extractingGraph'),
-      value: progress.extractingGraph,
-    },
-    { label: t('documents.diagnostics.progress.graphReady'), value: progress.graphReady },
-  ]
+  if (terminal.terminalState === 'failed_with_residual_work') {
+    return {
+      tone: 'failed',
+      title: t('documents.terminal.title'),
+      summary: t('documents.terminal.summary.failed_with_residual_work', {
+        reason: residualReasonLabel(terminal.residualReason) ?? '—',
+      }),
+      chips,
+    }
+  }
+  return {
+    tone: 'processing',
+    title: t('documents.terminal.title'),
+    summary: t('documents.terminal.summary.live_in_flight'),
+    chips,
+  }
 })
 
-const stageDiagnostics = computed(() =>
-  (surface.value?.diagnostics.perStage ?? []).filter(
-    (stage) => stage.activeCount > 0 || stage.completedCount > 0 || stage.failedCount > 0,
-  ),
-)
-
-const formatDiagnostics = computed(() =>
-  [...(surface.value?.diagnostics.perFormat ?? [])].sort((left, right) => {
-    const leftValue = left.bottleneckAvgElapsedMs ?? -1
-    const rightValue = right.bottleneckAvgElapsedMs ?? -1
-    return rightValue - leftValue
-  }),
-)
-
-const graphBannerMessage = computed(() => {
+const graphStatusMessage = computed(() => {
+  if (graphDiagnostics.value?.warning) {
+    return graphDiagnostics.value.warning
+  }
+  if (graphDiagnostics.value?.blockers.length) {
+    return graphDiagnostics.value.blockers[0]
+  }
   if (!surface.value) {
     return null
   }
@@ -235,84 +257,46 @@ const graphBannerMessage = computed(() => {
   return surface.value.graphWarning
 })
 
-const importProgressMessage = computed(() => {
-  if (!surface.value) {
+const graphStatusLabel = computed(() => {
+  const graphStatus = graphDiagnostics.value?.graphStatus ?? surface.value?.graphStatus ?? null
+  if (!graphStatus || !graphStatusMessage.value) {
     return null
   }
-  const rebuildBacklogCount = surface.value.rebuildBacklogCount
-  const readyNoGraphCount = surface.value.counters.readyNoGraph
-  const activeCount = surface.value.diagnostics.activeBacklogCount
-  const extractedOnlyCount = Math.max(
-    0,
-    surface.value.diagnostics.progress.contentExtracted - surface.value.diagnostics.progress.chunked,
-  )
-  if (activeCount > 0 && rebuildBacklogCount > 0) {
-    return t('documents.importGuide.activeWithBacklog', {
-      count: activeCount,
-      backlog: rebuildBacklogCount,
-    })
-  }
-  if (extractedOnlyCount > 0) {
-    return t('documents.importGuide.extractedOnly', { count: extractedOnlyCount })
-  }
-  if (activeCount > 0) {
-    return t('documents.importGuide.active', { count: activeCount })
-  }
-  if (rebuildBacklogCount > 0) {
-    return t('documents.importGuide.reconciling', { count: rebuildBacklogCount })
-  }
-  if (readyNoGraphCount > 0) {
-    return t('documents.importGuide.readyNoGraph', { count: readyNoGraphCount })
-  }
-  if (surface.value.graphStatus === 'partial' || surface.value.graphStatus === 'stale') {
-    return t('documents.importGuide.partial')
-  }
-  if (surface.value.graphStatus === 'ready' && surface.value.counters.ready > 0) {
-    return t('documents.importGuide.ready')
-  }
-  return null
+  return t(`graph.statuses.${graphStatus}`)
 })
 
-const accountingBannerMessage = computed(() => {
-  const accounting = surface.value?.accounting
-  if (!accounting) {
-    return null
-  }
-  if (accounting.inFlightEstimatedCost !== null || accounting.inFlightStageCount > 0) {
-    return t('documents.collectionAccounting.inFlightBanner', {
-      cost: formatMoney(accounting.inFlightEstimatedCost, accounting.currency),
-      count: accounting.inFlightStageCount,
-    })
-  }
-  if (accounting.missingStageCount > 0) {
-    return t('documents.collectionAccounting.missingBanner', {
-      count: accounting.missingStageCount,
-    })
-  }
-  return null
-})
+const supportingLines = computed(() =>
+  [
+    workspacePrimarySummary.value?.terminalState
+      ? t(`documents.workspace.terminalStates.${workspacePrimarySummary.value.terminalState}`)
+      : null,
+    surface.value?.diagnostics.activeBacklogCount
+      ? t('documents.workspace.activeBacklog', {
+          count: surface.value.diagnostics.activeBacklogCount,
+        })
+      : null,
+    (surface.value
+      ? surface.value.accounting.inFlightEstimatedCost !== null ||
+          surface.value.accounting.inFlightStageCount > 0
+      : false)
+      ? t('documents.workspace.liveSpend', {
+          cost: formatMoney(
+            surface.value?.accounting.inFlightEstimatedCost ?? null,
+            surface.value?.accounting.currency ?? null,
+          ),
+        })
+      : null,
+  ].filter((line, index, items): line is string => Boolean(line) && items.indexOf(line) === index),
+)
 
-const uploadFailureSummary = computed(() => {
-  const count = uploadFailures.value.length
-  if (count === 0) {
-    return null
-  }
-  return t('documents.uploadReport.summary', { count })
-})
-
-function uploadFailureMeta(failure: DocumentUploadFailure): string[] {
-  const meta: string[] = []
-  if (failure.detectedFormat) {
-    meta.push(`${t('documents.uploadReport.labels.format')}: ${failure.detectedFormat}`)
-  }
-  if (failure.mimeType) {
-    meta.push(`${t('documents.uploadReport.labels.mimeType')}: ${failure.mimeType}`)
-  }
-  if (failure.uploadLimitMb !== null) {
-    meta.push(`${t('documents.uploadReport.labels.limit')}: ${String(failure.uploadLimitMb)} MB`)
-  }
-  return meta
-}
+const hasActiveFilters = computed(
+  () =>
+    Boolean(documentsStore.searchQuery.trim()) ||
+    documentsStore.statusFilter !== '' ||
+    documentsStore.accountingFilter !== '' ||
+    documentsStore.mutationStatusFilter !== '' ||
+    documentsStore.fileTypeFilter !== '',
+)
 
 async function openInGraph(graphNodeId: string) {
   await router.push({
@@ -354,244 +338,41 @@ async function submitReplace(file: File) {
 <template>
   <PageSurface wide>
     <div class="rr-documents">
-      <UploadDropzone
+      <DocumentsWorkspaceHeader
         :accepted-formats="surface?.acceptedFormats ?? []"
         :max-size-mb="surface?.maxSizeMb ?? 50"
         :loading="uploadLoading"
+        :workspace-name="shellStore.context?.activeWorkspace.name ?? null"
+        :library-name="shellStore.context?.activeLibrary.name ?? null"
+        :upload-failures="uploadFailures"
         @select="documentsStore.uploadFiles"
+        @clear-failures="documentsStore.clearUploadFailures"
       />
 
-      <section
-        v-if="uploadFailures.length"
-        class="rr-documents__upload-report"
-        role="status"
-        aria-live="polite"
-      >
-        <div class="rr-documents__upload-report-header">
-          <div>
-            <strong>{{ $t('documents.uploadReport.title') }}</strong>
-            <p>{{ uploadFailureSummary }}</p>
-          </div>
-          <button
-            type="button"
-            class="rr-button rr-button--ghost rr-button--tiny"
-            @click="documentsStore.clearUploadFailures"
-          >
-            {{ $t('documents.uploadReport.dismiss') }}
-          </button>
-        </div>
+      <DocumentsPrimarySummary
+        v-if="
+          workspacePrimarySummary ||
+            summaryCards.length ||
+            terminalBanner ||
+            supportingLines.length
+        "
+        :primary-summary="workspacePrimarySummary"
+        :summary-cards="summaryCards"
+        :terminal-banner="terminalBanner"
+        :supporting-lines="supportingLines"
+      />
 
-        <ul class="rr-documents__upload-report-list">
-          <li
-            v-for="failure in uploadFailures"
-            :key="`${failure.fileName}:${failure.message}`"
-            class="rr-documents__upload-report-item"
-          >
-            <div class="rr-documents__upload-report-headline">
-              <strong>{{ failure.fileName }}</strong>
-              <span>{{ failure.message }}</span>
-            </div>
-            <p
-              v-if="failure.rejectionCause"
-              class="rr-documents__upload-report-copy"
-            >
-              <span>{{ $t('documents.uploadReport.labels.reason') }}:</span>
-              {{ failure.rejectionCause }}
-            </p>
-            <p
-              v-if="failure.operatorAction"
-              class="rr-documents__upload-report-copy"
-            >
-              <span>{{ $t('documents.uploadReport.labels.action') }}:</span>
-              {{ failure.operatorAction }}
-            </p>
-            <p
-              v-if="uploadFailureMeta(failure).length"
-              class="rr-documents__upload-report-meta"
-            >
-              {{ uploadFailureMeta(failure).join(' · ') }}
-            </p>
-          </li>
-        </ul>
-      </section>
+      <DocumentsDiagnosticsStrip
+        :chips="workspaceSecondaryDiagnostics"
+        :graph-health="graphHealthSnapshot"
+        :graph-status-label="graphStatusLabel"
+        :graph-status-message="graphStatusMessage"
+      />
 
-      <section class="rr-documents__summary">
-        <article
-          v-for="card in summaryCards"
-          :key="card.label"
-        >
-          <DocumentSummaryCard
-            :tone="card.tone"
-            :value="card.value"
-            :label="card.label"
-          />
-        </article>
-      </section>
-
-      <section
-        v-if="importProgressMessage"
-        class="rr-documents__graph-banner is-progress"
-      >
-        <strong>{{ $t('documents.importGuide.title') }}</strong>
-        <p>{{ importProgressMessage }}</p>
-      </section>
-
-      <section
-        v-if="accountingBannerMessage"
-        class="rr-documents__graph-banner is-progress"
-      >
-        <strong>{{ $t('documents.collectionAccounting.title') }}</strong>
-        <p>{{ accountingBannerMessage }}</p>
-      </section>
-
-      <section
-        v-if="surface?.graphWarning || graphBannerMessage"
-        class="rr-documents__graph-banner"
-        :class="`is-${surface?.graphStatus ?? 'empty'}`"
-      >
-        <strong>{{ $t(`graph.statuses.${surface?.graphStatus ?? 'empty'}`) }}</strong>
-        <p>{{ graphBannerMessage }}</p>
-      </section>
-
-      <section
-        v-if="accountingCards.length || progressCards.length || surface?.diagnostics"
-        class="rr-documents__insights"
-      >
-        <details
-          v-if="accountingCards.length"
-          class="rr-page-card rr-documents__insight-section"
-        >
-          <summary>
-            <strong>{{ $t('documents.collectionAccounting.title') }}</strong>
-            <span>{{ $t('documents.collectionAccounting.inFlightCost') }}</span>
-          </summary>
-          <div class="rr-documents__summary rr-documents__summary--compact">
-            <article
-              v-for="card in accountingCards"
-              :key="card.label"
-            >
-              <DocumentSummaryCard
-                :tone="card.tone"
-                :value="card.value"
-                :label="card.label"
-              />
-            </article>
-          </div>
-        </details>
-
-        <details
-          v-if="progressCards.length"
-          class="rr-page-card rr-documents__insight-section"
-        >
-          <summary>
-            <strong>{{ $t('documents.importGuide.title') }}</strong>
-            <span>{{ $t('documents.diagnostics.progress.graphReady') }}</span>
-          </summary>
-          <div class="rr-documents__summary rr-documents__summary--compact">
-            <article
-              v-for="card in progressCards"
-              :key="card.label"
-            >
-              <DocumentSummaryCard
-                tone="processing"
-                :value="card.value"
-                :label="card.label"
-              />
-            </article>
-          </div>
-        </details>
-
-        <details
-          v-if="surface?.diagnostics"
-          class="rr-page-card rr-documents__insight-section"
-        >
-          <summary>
-            <strong>{{ $t('documents.diagnostics.title') }}</strong>
-            <span>
-              {{
-                $t('documents.diagnostics.backlog', {
-                  queued: surface.diagnostics.queueBacklogCount,
-                  processing: surface.diagnostics.processingBacklogCount,
-                })
-              }}
-            </span>
-          </summary>
-
-          <section class="rr-documents__diagnostics">
-            <div
-              v-if="stageDiagnostics.length"
-              class="rr-documents__diagnostics-grid"
-            >
-              <article
-                v-for="stage in stageDiagnostics"
-                :key="stage.stage"
-                class="rr-documents__diagnostics-card"
-              >
-                <strong>{{ stageLabel(stage.stage) }}</strong>
-                <p>
-                  {{
-                    $t('documents.diagnostics.stageSummary', {
-                      active: stage.activeCount,
-                      completed: stage.completedCount,
-                      failed: stage.failedCount,
-                    })
-                  }}
-                </p>
-                <span>
-                  {{
-                    $t('documents.diagnostics.timing', {
-                      avg: formatDuration(stage.avgElapsedMs),
-                      max: formatDuration(stage.maxElapsedMs),
-                    })
-                  }}
-                </span>
-              </article>
-            </div>
-
-            <div
-              v-if="formatDiagnostics.length"
-              class="rr-documents__diagnostics-list"
-            >
-              <article
-                v-for="format in formatDiagnostics"
-                :key="format.fileType"
-                class="rr-documents__diagnostics-item"
-              >
-                <div>
-                  <strong>{{ format.fileType }}</strong>
-                  <p>
-                    {{
-                      $t('documents.diagnostics.formatSummary', {
-                        documents: format.documentCount,
-                        ready: format.readyCount,
-                        failed: format.failedCount,
-                      })
-                    }}
-                  </p>
-                </div>
-                <div class="rr-documents__diagnostics-meta">
-                  <span>
-                    {{
-                      $t('documents.diagnostics.queueTiming', {
-                        avg: formatDuration(format.avgQueueElapsedMs),
-                        total: formatDuration(format.avgTotalElapsedMs),
-                      })
-                    }}
-                  </span>
-                  <span v-if="format.bottleneckStage">
-                    {{
-                      $t('documents.diagnostics.bottleneck', {
-                        stage: stageLabel(format.bottleneckStage),
-                        avg: formatDuration(format.bottleneckAvgElapsedMs),
-                      })
-                    }}
-                  </span>
-                </div>
-              </article>
-            </div>
-          </section>
-        </details>
-      </section>
+      <DocumentsNoticeStack
+        :degraded="workspaceNoticeGroups.degraded"
+        :informational="workspaceNoticeGroups.informational"
+      />
 
       <DocumentsFiltersBar
         :search-query="documentsStore.searchQuery"
@@ -612,7 +393,7 @@ async function submitReplace(file: File) {
 
       <ErrorStateCard
         v-if="error && !surface"
-        :title="$t('shell.documents')"
+        :title="$t('documents.workspace.title')"
         :description="error"
       />
 
@@ -628,16 +409,18 @@ async function submitReplace(file: File) {
         @remove="documentsStore.removeDocument"
       />
 
-      <EmptyStateCard
+      <DocumentsEmptyState
         v-else
-        :title="loading ? $t('documents.loading') : $t('shell.documents')"
-        :description="loading ? $t('documents.loading') : $t('documents.empty')"
+        :loading="loading"
+        :has-documents="Boolean(surface?.rows.length)"
+        :has-active-filters="hasActiveFilters"
       />
     </div>
 
     <DocumentDetailsDrawer
       :open="detailOpen"
       :detail="detail"
+      :library-diagnostics="surface?.diagnostics ?? null"
       :workspace-name="shellStore.context?.activeWorkspace.name ?? null"
       :loading="detailLoading"
       :error="detailError"

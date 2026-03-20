@@ -25,11 +25,7 @@ export function installRouteGuards(router: Router) {
       return '/documents'
     }
 
-    if (
-      to.meta.requiresAdmin &&
-      shellStore.context &&
-      !shellStore.context.adminEnabled
-    ) {
+    if (to.meta.requiresAdmin && !shellStore.adminEnabled) {
       return '/documents'
     }
 

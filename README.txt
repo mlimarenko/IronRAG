@@ -12,13 +12,14 @@ Repository layout
 
 Supported local stack
 
-PostgreSQL, Redis, Neo4j, backend, frontend.
+PostgreSQL, Redis, Neo4j, backend, frontend, nginx ingress.
 
-  docker compose up --build -d
+  docker compose up --build -d nginx
 
 Default login: admin / rustrag
-Frontend: http://127.0.0.1:19000
-Backend: http://127.0.0.1:18080
+Ingress: http://127.0.0.1:19000
+API: http://127.0.0.1:19000/v1
+Neo4j Browser: http://127.0.0.1:19000/browser/
 
 Validation
 

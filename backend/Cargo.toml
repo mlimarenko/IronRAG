@@ -41,6 +41,7 @@ uuid = { version = "1.16", features = ["v7", "serde"] }
 redis = { version = "0.32", features = ["tokio-comp"] }
 anyhow = "1.0"
 futures = "0.3"
+http-body-util = "0.1"
 sha2 = "0.10"
 hex = "0.4"
 async-trait = "0.1"

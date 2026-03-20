@@ -1,739 +1,1147 @@
-create extension if not exists vector;
-create extension if not exists pgcrypto;
+create extension vector;
+create extension pgcrypto;
 
-create table if not exists workspace (
-    id uuid primary key,
+create type catalog_workspace_lifecycle_state as enum ('active', 'archived');
+create type catalog_library_lifecycle_state as enum ('active', 'archived');
+create type catalog_connector_kind as enum ('generic', 'filesystem', 'github', 's3', 'web');
+create type catalog_connector_sync_mode as enum ('manual', 'scheduled', 'webhook');
+
+create type iam_principal_kind as enum ('user', 'api_token', 'worker', 'bootstrap');
+create type iam_principal_status as enum ('active', 'disabled', 'revoked');
+create type iam_api_token_status as enum ('active', 'disabled', 'revoked', 'expired');
+create type iam_membership_state as enum ('active', 'invited', 'suspended', 'ended');
+create type iam_grant_resource_kind as enum (
+    'system',
+    'workspace',
+    'library',
+    'document',
+    'connector',
+    'provider_credential',
+    'library_binding'
+);
+create type iam_permission_kind as enum (
+    'workspace_admin',
+    'workspace_read',
+    'library_read',
+    'library_write',
+    'document_read',
+    'document_write',
+    'connector_admin',
+    'credential_admin',
+    'binding_admin',
+    'query_run',
+    'ops_read',
+    'audit_read',
+    'iam_admin'
+);
+
+create type ai_provider_api_style as enum ('openai_compatible');
+create type ai_provider_lifecycle_state as enum ('active', 'preview', 'deprecated', 'disabled');
+create type ai_model_capability_kind as enum ('chat', 'embedding');
+create type ai_model_modality_kind as enum ('text', 'multimodal');
+create type ai_model_lifecycle_state as enum ('active', 'preview', 'deprecated', 'disabled');
+create type ai_price_catalog_scope as enum ('system', 'workspace_override');
+create type ai_credential_state as enum ('active', 'invalid', 'revoked');
+create type ai_binding_purpose as enum (
+    'extract_text',
+    'extract_graph',
+    'embed_chunk',
+    'query_retrieve',
+    'query_answer',
+    'vision'
+);
+create type ai_binding_state as enum ('active', 'invalid', 'disabled');
+create type ai_validation_state as enum ('pending', 'succeeded', 'failed');
+
+create type surface_kind as enum ('ui', 'rest', 'mcp', 'worker', 'bootstrap');
+
+create type content_document_state as enum ('active', 'deleted');
+create type content_source_kind as enum ('upload', 'append', 'replace', 'connector_sync', 'import');
+create type content_mutation_operation_kind as enum (
+    'upload',
+    'append',
+    'replace',
+    'reprocess',
+    'delete',
+    'connector_sync'
+);
+create type content_mutation_state as enum (
+    'accepted',
+    'running',
+    'applied',
+    'failed',
+    'conflicted',
+    'canceled'
+);
+create type content_mutation_item_state as enum ('pending', 'applied', 'failed', 'conflicted', 'skipped');
+
+create type ingest_job_kind as enum ('content_mutation', 'connector_sync', 'reindex', 'reembed', 'graph_refresh');
+create type ingest_queue_state as enum ('queued', 'leased', 'completed', 'failed', 'canceled');
+create type ingest_attempt_state as enum ('leased', 'running', 'succeeded', 'failed', 'abandoned', 'canceled');
+create type ingest_stage_state as enum ('started', 'completed', 'failed', 'skipped');
+
+create type extract_state as enum ('missing', 'processing', 'ready', 'failed');
+
+create type graph_projection_state as enum ('building', 'active', 'failed', 'superseded');
+create type graph_summary_state as enum ('pending', 'ready', 'failed');
+
+create type query_conversation_state as enum ('active', 'archived');
+create type query_turn_kind as enum ('user', 'assistant', 'system', 'tool');
+create type query_execution_state as enum (
+    'planned',
+    'retrieving',
+    'answering',
+    'completed',
+    'failed',
+    'canceled'
+);
+
+create type billing_owning_execution_kind as enum ('ingest_attempt', 'query_execution', 'binding_validation');
+create type billing_call_state as enum ('started', 'completed', 'failed', 'canceled');
+create type billing_unit as enum ('per_1m_input_tokens', 'per_1m_output_tokens');
+
+create type ops_async_operation_status as enum ('accepted', 'processing', 'ready', 'failed', 'superseded', 'canceled');
+create type ops_degraded_state as enum ('healthy', 'degraded', 'failed', 'rebuilding');
+create type ops_warning_severity as enum ('info', 'warn', 'error');
+
+create type audit_result_kind as enum ('succeeded', 'rejected', 'failed');
+
+create table iam_principal (
+    id uuid primary key default gen_random_uuid(),
+    principal_kind iam_principal_kind not null,
+    display_label text not null,
+    status iam_principal_status not null default 'active',
+    parent_principal_id uuid references iam_principal(id) on delete set null,
+    created_at timestamptz not null default now(),
+    disabled_at timestamptz
+);
+
+create table catalog_workspace (
+    id uuid primary key default gen_random_uuid(),
     slug text not null unique,
-    name text not null,
-    status text not null default 'active',
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
-);
-
-create table if not exists project (
-    id uuid primary key,
-    workspace_id uuid not null references workspace(id) on delete cascade,
-    slug text not null,
-    name text not null,
-    description text,
-    default_model_profile_id uuid,
-    default_embedding_profile_id uuid,
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now(),
-    unique (workspace_id, slug)
-);
-
-create table if not exists provider_account (
-    id uuid primary key,
-    workspace_id uuid not null references workspace(id) on delete cascade,
-    provider_kind text not null,
-    label text not null,
-    api_base_url text,
-    encrypted_secret jsonb,
-    status text not null default 'active',
-    metadata_json jsonb not null default '{}'::jsonb,
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
-);
-
-create table if not exists model_profile (
-    id uuid primary key,
-    workspace_id uuid not null references workspace(id) on delete cascade,
-    provider_account_id uuid not null references provider_account(id) on delete restrict,
-    profile_kind text not null,
-    model_name text not null,
-    temperature double precision,
-    max_output_tokens integer,
-    json_config jsonb not null default '{}'::jsonb,
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
-);
-
-create table if not exists source (
-    id uuid primary key,
-    project_id uuid not null references project(id) on delete cascade,
-    source_kind text not null,
-    label text not null,
-    config_json jsonb not null default '{}'::jsonb,
-    status text not null default 'active',
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
-);
-
-create table if not exists ingestion_job (
-    id uuid primary key,
-    project_id uuid not null references project(id) on delete cascade,
-    source_id uuid references source(id) on delete set null,
-    trigger_kind text not null,
-    status text not null,
-    stage text not null,
-    requested_by text,
-    error_message text,
-    started_at timestamptz,
-    finished_at timestamptz,
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now(),
-    idempotency_key text,
-    parent_job_id uuid references ingestion_job(id) on delete set null,
-    attempt_count integer not null default 0,
-    worker_id text,
-    lease_expires_at timestamptz,
-    heartbeat_at timestamptz,
-    payload_json jsonb not null default '{}'::jsonb,
-    result_json jsonb not null default '{}'::jsonb
-);
-
-create table if not exists document (
-    id uuid primary key,
-    project_id uuid not null references project(id) on delete cascade,
-    source_id uuid references source(id) on delete set null,
-    external_key text not null,
-    title text,
-    mime_type text,
-    checksum text,
-    metadata_json jsonb not null default '{}'::jsonb,
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
-);
-
-create table if not exists chunk (
-    id uuid primary key,
-    document_id uuid not null references document(id) on delete cascade,
-    project_id uuid not null references project(id) on delete cascade,
-    ordinal integer not null,
-    content text not null,
-    token_count integer,
-    embedding vector(1536),
-    metadata_json jsonb not null default '{}'::jsonb,
-    created_at timestamptz not null default now()
-);
-
-create table if not exists chunk_embedding (
-    chunk_id uuid primary key references chunk(id) on delete cascade,
-    project_id uuid not null references project(id) on delete cascade,
-    provider_kind text not null,
-    model_name text not null,
-    dimensions integer not null,
-    embedding_json jsonb not null,
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
-);
-
-create table if not exists entity (
-    id uuid primary key,
-    project_id uuid not null references project(id) on delete cascade,
-    canonical_name text not null,
-    entity_type text,
-    metadata_json jsonb not null default '{}'::jsonb,
-    created_at timestamptz not null default now()
-);
-
-create table if not exists relation (
-    id uuid primary key,
-    project_id uuid not null references project(id) on delete cascade,
-    from_entity_id uuid not null references entity(id) on delete cascade,
-    to_entity_id uuid not null references entity(id) on delete cascade,
-    relation_type text not null,
-    weight double precision,
-    provenance_json jsonb not null default '{}'::jsonb,
-    created_at timestamptz not null default now()
-);
-
-create table if not exists chat_session (
-    id uuid primary key,
-    workspace_id uuid not null references workspace(id) on delete cascade,
-    project_id uuid not null references project(id) on delete cascade,
-    title text not null,
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
-);
-
-create table if not exists retrieval_run (
-    id uuid primary key,
-    project_id uuid not null references project(id) on delete cascade,
-    query_text text not null,
-    model_profile_id uuid references model_profile(id) on delete set null,
-    top_k integer not null default 8,
-    response_text text,
-    debug_json jsonb not null default '{}'::jsonb,
-    created_at timestamptz not null default now(),
-    session_id uuid references chat_session(id) on delete set null
-);
-
-create table if not exists chat_message (
-    id uuid primary key,
-    session_id uuid not null references chat_session(id) on delete cascade,
-    project_id uuid not null references project(id) on delete cascade,
-    role text not null,
-    content text not null,
-    retrieval_run_id uuid references retrieval_run(id) on delete set null,
-    created_at timestamptz not null default now()
-);
-
-create table if not exists usage_event (
-    id uuid primary key,
-    workspace_id uuid references workspace(id) on delete cascade,
-    project_id uuid references project(id) on delete cascade,
-    provider_account_id uuid references provider_account(id) on delete set null,
-    model_profile_id uuid references model_profile(id) on delete set null,
-    usage_kind text not null,
-    prompt_tokens integer,
-    completion_tokens integer,
-    total_tokens integer,
-    raw_usage_json jsonb not null default '{}'::jsonb,
-    created_at timestamptz not null default now()
-);
-
-create table if not exists cost_ledger (
-    id uuid primary key,
-    workspace_id uuid references workspace(id) on delete cascade,
-    project_id uuid references project(id) on delete cascade,
-    usage_event_id uuid not null references usage_event(id) on delete cascade,
-    provider_kind text not null,
-    model_name text not null,
-    currency text not null default 'USD',
-    estimated_cost numeric(18,8) not null default 0,
-    pricing_snapshot_json jsonb not null default '{}'::jsonb,
-    created_at timestamptz not null default now()
-);
-
-create table if not exists ingestion_job_attempt (
-    id uuid primary key,
-    job_id uuid not null references ingestion_job(id) on delete cascade,
-    attempt_no integer not null,
-    worker_id text,
-    status text not null,
-    stage text not null,
-    error_message text,
-    started_at timestamptz not null default now(),
-    finished_at timestamptz,
-    created_at timestamptz not null default now(),
-    unique(job_id, attempt_no)
-);
-
-create table if not exists ui_user (
-    id uuid primary key,
-    login text not null,
-    email text not null,
     display_name text not null,
-    role_label text not null,
-    password_hash text not null,
-    preferred_locale text not null default 'ru',
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
-);
-
-create table if not exists ui_session (
-    id uuid primary key,
-    user_id uuid not null references ui_user(id) on delete cascade,
-    active_workspace_id uuid references workspace(id) on delete set null,
-    active_project_id uuid references project(id) on delete set null,
-    locale text not null default 'ru',
-    expires_at timestamptz not null,
+    lifecycle_state catalog_workspace_lifecycle_state not null default 'active',
+    created_by_principal_id uuid references iam_principal(id) on delete set null,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
+    check (slug ~ '^[a-z0-9]+(?:[-_][a-z0-9]+)*$')
+);
+
+create table catalog_library (
+    id uuid primary key default gen_random_uuid(),
+    workspace_id uuid not null references catalog_workspace(id) on delete cascade,
+    slug text not null,
+    display_name text not null,
+    description text,
+    lifecycle_state catalog_library_lifecycle_state not null default 'active',
+    created_by_principal_id uuid references iam_principal(id) on delete set null,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    unique (workspace_id, slug),
+    unique (id, workspace_id),
+    check (slug ~ '^[a-z0-9]+(?:[-_][a-z0-9]+)*$')
+);
+
+create table ai_provider_catalog (
+    id uuid primary key,
+    provider_kind text not null unique,
+    display_name text not null,
+    api_style ai_provider_api_style not null,
+    lifecycle_state ai_provider_lifecycle_state not null default 'active',
+    default_base_url text,
+    capability_flags_json jsonb not null default '{}'::jsonb
+);
+
+create table ai_model_catalog (
+    id uuid primary key,
+    provider_catalog_id uuid not null references ai_provider_catalog(id) on delete cascade,
+    model_name text not null,
+    capability_kind ai_model_capability_kind not null,
+    modality_kind ai_model_modality_kind not null,
+    context_window integer,
+    max_output_tokens integer,
+    lifecycle_state ai_model_lifecycle_state not null default 'active',
+    metadata_json jsonb not null default '{}'::jsonb,
+    unique (provider_catalog_id, model_name, capability_kind)
+);
+
+create table ai_price_catalog (
+    id uuid primary key,
+    model_catalog_id uuid not null references ai_model_catalog(id) on delete cascade,
+    billing_unit billing_unit not null,
+    unit_price numeric(18,8) not null,
+    currency_code text not null,
+    effective_from timestamptz not null,
+    effective_to timestamptz,
+    catalog_scope ai_price_catalog_scope not null,
+    workspace_id uuid references catalog_workspace(id) on delete cascade,
+    check (effective_to is null or effective_to > effective_from),
+    check (
+        (catalog_scope = 'system' and workspace_id is null)
+        or (catalog_scope = 'workspace_override' and workspace_id is not null)
+    )
+);
+
+create table iam_user (
+    principal_id uuid primary key references iam_principal(id) on delete cascade,
+    email text not null unique,
+    display_name text not null,
+    password_hash text not null,
+    auth_provider_kind text not null default 'password',
+    external_subject text
+);
+
+create table iam_session (
+    id uuid primary key default gen_random_uuid(),
+    principal_id uuid not null references iam_principal(id) on delete cascade,
+    session_secret_hash text not null,
+    issued_at timestamptz not null default now(),
+    expires_at timestamptz not null,
+    revoked_at timestamptz,
     last_seen_at timestamptz not null default now()
 );
 
-create table if not exists workspace_member (
-    workspace_id uuid not null references workspace(id) on delete cascade,
-    user_id uuid not null references ui_user(id) on delete cascade,
-    role_label text not null,
-    created_at timestamptz not null default now(),
-    primary key (workspace_id, user_id)
-);
-
-create table if not exists project_access_grant (
-    project_id uuid not null references project(id) on delete cascade,
-    user_id uuid not null references ui_user(id) on delete cascade,
-    access_level text not null,
-    created_at timestamptz not null default now(),
-    primary key (project_id, user_id)
-);
-
-create table if not exists api_token (
-    id uuid primary key,
-    workspace_id uuid references workspace(id) on delete cascade,
-    token_kind text not null,
+create table iam_api_token (
+    principal_id uuid primary key references iam_principal(id) on delete cascade,
+    workspace_id uuid references catalog_workspace(id) on delete cascade,
     label text not null,
-    token_hash text not null unique,
-    token_preview text,
-    scope_json jsonb not null default '[]'::jsonb,
-    status text not null default 'active',
-    last_used_at timestamptz,
+    token_prefix text not null,
+    status iam_api_token_status not null default 'active',
     expires_at timestamptz,
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
+    revoked_at timestamptz,
+    issued_by_principal_id uuid references iam_principal(id) on delete set null,
+    last_used_at timestamptz
 );
 
-create table if not exists runtime_ingestion_run (
-    id uuid primary key,
-    project_id uuid not null references project(id) on delete cascade,
-    document_id uuid references document(id) on delete set null,
-    upload_batch_id uuid,
-    track_id text not null unique,
-    file_name text not null,
-    file_type text not null,
-    mime_type text,
-    file_size_bytes bigint,
-    status text not null,
-    current_stage text not null,
-    progress_percent integer,
-    provider_profile_snapshot_json jsonb not null default '{}'::jsonb,
-    latest_error_message text,
-    current_attempt_no integer not null default 1,
-    started_at timestamptz,
+create table iam_api_token_secret (
+    token_principal_id uuid not null references iam_api_token(principal_id) on delete cascade,
+    secret_version integer not null,
+    secret_hash text not null,
+    issued_at timestamptz not null default now(),
+    revoked_at timestamptz,
+    primary key (token_principal_id, secret_version)
+);
+
+create table iam_workspace_membership (
+    workspace_id uuid not null references catalog_workspace(id) on delete cascade,
+    principal_id uuid not null references iam_principal(id) on delete cascade,
+    membership_state iam_membership_state not null,
+    joined_at timestamptz not null default now(),
+    ended_at timestamptz,
+    primary key (workspace_id, principal_id)
+);
+
+create table iam_grant (
+    id uuid primary key default gen_random_uuid(),
+    principal_id uuid not null references iam_principal(id) on delete cascade,
+    resource_kind iam_grant_resource_kind not null,
+    resource_id uuid not null,
+    permission_kind iam_permission_kind not null,
+    granted_by_principal_id uuid references iam_principal(id) on delete set null,
+    granted_at timestamptz not null default now(),
+    expires_at timestamptz,
+    unique (principal_id, resource_kind, resource_id, permission_kind)
+);
+
+create table catalog_library_connector (
+    id uuid primary key default gen_random_uuid(),
+    workspace_id uuid not null,
+    library_id uuid not null,
+    connector_kind catalog_connector_kind not null,
+    display_name text not null,
+    configuration_json jsonb not null default '{}'::jsonb,
+    sync_mode catalog_connector_sync_mode not null default 'manual',
+    last_sync_requested_at timestamptz,
+    created_by_principal_id uuid references iam_principal(id) on delete set null,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    foreign key (library_id, workspace_id)
+        references catalog_library(id, workspace_id)
+        on delete cascade
+);
+
+create table ai_provider_credential (
+    id uuid primary key default gen_random_uuid(),
+    workspace_id uuid not null references catalog_workspace(id) on delete cascade,
+    provider_catalog_id uuid not null references ai_provider_catalog(id) on delete restrict,
+    label text not null,
+    secret_ref text not null,
+    credential_state ai_credential_state not null default 'active',
+    created_by_principal_id uuid references iam_principal(id) on delete set null,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    unique (workspace_id, provider_catalog_id, label),
+    unique (id, workspace_id)
+);
+
+create table ai_model_preset (
+    id uuid primary key default gen_random_uuid(),
+    workspace_id uuid not null references catalog_workspace(id) on delete cascade,
+    model_catalog_id uuid not null references ai_model_catalog(id) on delete restrict,
+    preset_name text not null,
+    temperature double precision,
+    top_p double precision,
+    max_output_tokens_override integer,
+    extra_parameters_json jsonb not null default '{}'::jsonb,
+    created_by_principal_id uuid references iam_principal(id) on delete set null,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    unique (workspace_id, model_catalog_id, preset_name),
+    unique (id, workspace_id)
+);
+
+create table ai_library_model_binding (
+    id uuid primary key default gen_random_uuid(),
+    workspace_id uuid not null,
+    library_id uuid not null,
+    binding_purpose ai_binding_purpose not null,
+    provider_credential_id uuid not null,
+    model_preset_id uuid not null,
+    binding_state ai_binding_state not null default 'active',
+    updated_by_principal_id uuid references iam_principal(id) on delete set null,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    unique (library_id, binding_purpose),
+    foreign key (library_id, workspace_id)
+        references catalog_library(id, workspace_id)
+        on delete cascade,
+    foreign key (provider_credential_id, workspace_id)
+        references ai_provider_credential(id, workspace_id)
+        on delete restrict,
+    foreign key (model_preset_id, workspace_id)
+        references ai_model_preset(id, workspace_id)
+        on delete restrict
+);
+
+create table ai_binding_validation (
+    id uuid primary key default gen_random_uuid(),
+    binding_id uuid not null references ai_library_model_binding(id) on delete cascade,
+    validation_state ai_validation_state not null,
+    checked_at timestamptz not null default now(),
+    failure_code text,
+    message text
+);
+
+create table billing_provider_call (
+    id uuid primary key default gen_random_uuid(),
+    workspace_id uuid not null,
+    library_id uuid not null,
+    binding_id uuid references ai_library_model_binding(id) on delete set null,
+    owning_execution_kind billing_owning_execution_kind not null,
+    owning_execution_id uuid not null,
+    provider_catalog_id uuid not null references ai_provider_catalog(id) on delete restrict,
+    model_catalog_id uuid not null references ai_model_catalog(id) on delete restrict,
+    call_kind text not null,
+    started_at timestamptz not null default now(),
+    completed_at timestamptz,
+    call_state billing_call_state not null default 'started',
+    foreign key (library_id, workspace_id)
+        references catalog_library(id, workspace_id)
+        on delete cascade
+);
+
+create table billing_usage (
+    id uuid primary key default gen_random_uuid(),
+    provider_call_id uuid not null references billing_provider_call(id) on delete cascade,
+    usage_kind text not null,
+    billing_unit billing_unit not null,
+    quantity numeric(18,6) not null,
+    observed_at timestamptz not null default now()
+);
+
+create table billing_charge (
+    id uuid primary key default gen_random_uuid(),
+    usage_id uuid not null references billing_usage(id) on delete cascade,
+    price_catalog_id uuid not null references ai_price_catalog(id) on delete restrict,
+    currency_code text not null,
+    unit_price numeric(18,8) not null,
+    total_price numeric(18,8) not null,
+    priced_at timestamptz not null default now()
+);
+
+create table billing_execution_cost (
+    id uuid primary key default gen_random_uuid(),
+    owning_execution_kind billing_owning_execution_kind not null,
+    owning_execution_id uuid not null,
+    total_cost numeric(18,8) not null default 0,
+    currency_code text not null,
+    provider_call_count integer not null default 0,
+    updated_at timestamptz not null default now(),
+    unique (owning_execution_kind, owning_execution_id)
+);
+
+create table content_document (
+    id uuid primary key default gen_random_uuid(),
+    workspace_id uuid not null,
+    library_id uuid not null,
+    external_key text not null,
+    document_state content_document_state not null default 'active',
+    created_by_principal_id uuid references iam_principal(id) on delete set null,
+    created_at timestamptz not null default now(),
+    deleted_at timestamptz,
+    unique (library_id, external_key),
+    unique (id, workspace_id, library_id),
+    foreign key (library_id, workspace_id)
+        references catalog_library(id, workspace_id)
+        on delete cascade
+);
+
+create table content_revision (
+    id uuid primary key default gen_random_uuid(),
+    document_id uuid not null,
+    workspace_id uuid not null,
+    library_id uuid not null,
+    revision_number integer not null,
+    parent_revision_id uuid references content_revision(id) on delete set null,
+    content_source_kind content_source_kind not null,
+    checksum text not null,
+    mime_type text not null,
+    byte_size bigint not null,
+    title text,
+    language_code text,
+    source_uri text,
+    storage_key text,
+    created_by_principal_id uuid references iam_principal(id) on delete set null,
+    created_at timestamptz not null default now(),
+    unique (document_id, revision_number),
+    unique (id, workspace_id, library_id),
+    foreign key (document_id, workspace_id, library_id)
+        references content_document(id, workspace_id, library_id)
+        on delete cascade
+);
+
+create table content_chunk (
+    id uuid primary key default gen_random_uuid(),
+    revision_id uuid not null references content_revision(id) on delete cascade,
+    chunk_index integer not null,
+    start_offset integer not null,
+    end_offset integer not null,
+    token_count integer,
+    normalized_text text not null,
+    text_checksum text not null,
+    unique (revision_id, chunk_index),
+    check (start_offset >= 0),
+    check (end_offset >= start_offset)
+);
+
+create table content_mutation (
+    id uuid primary key default gen_random_uuid(),
+    workspace_id uuid not null,
+    library_id uuid not null,
+    operation_kind content_mutation_operation_kind not null,
+    requested_by_principal_id uuid references iam_principal(id) on delete set null,
+    request_surface surface_kind not null,
+    idempotency_key text,
+    mutation_state content_mutation_state not null default 'accepted',
+    requested_at timestamptz not null default now(),
+    completed_at timestamptz,
+    failure_code text,
+    conflict_code text,
+    foreign key (library_id, workspace_id)
+        references catalog_library(id, workspace_id)
+        on delete cascade
+);
+
+create table content_mutation_item (
+    id uuid primary key default gen_random_uuid(),
+    mutation_id uuid not null references content_mutation(id) on delete cascade,
+    document_id uuid references content_document(id) on delete set null,
+    base_revision_id uuid references content_revision(id) on delete set null,
+    result_revision_id uuid references content_revision(id) on delete set null,
+    item_state content_mutation_item_state not null default 'pending',
+    message text
+);
+
+create table ingest_job (
+    id uuid primary key default gen_random_uuid(),
+    workspace_id uuid not null,
+    library_id uuid not null,
+    mutation_id uuid references content_mutation(id) on delete set null,
+    connector_id uuid references catalog_library_connector(id) on delete set null,
+    job_kind ingest_job_kind not null,
+    queue_state ingest_queue_state not null default 'queued',
+    priority integer not null default 100,
+    dedupe_key text,
+    queued_at timestamptz not null default now(),
+    available_at timestamptz not null default now(),
+    completed_at timestamptz,
+    foreign key (library_id, workspace_id)
+        references catalog_library(id, workspace_id)
+        on delete cascade
+);
+
+create table ingest_attempt (
+    id uuid primary key default gen_random_uuid(),
+    job_id uuid not null references ingest_job(id) on delete cascade,
+    attempt_number integer not null,
+    worker_principal_id uuid references iam_principal(id) on delete set null,
+    lease_token text,
+    attempt_state ingest_attempt_state not null,
+    current_stage text,
+    started_at timestamptz not null default now(),
+    heartbeat_at timestamptz,
     finished_at timestamptz,
-    created_at timestamptz not null default now(),
+    failure_class text,
+    failure_code text,
+    retryable boolean not null default false,
+    unique (job_id, attempt_number)
+);
+
+create table ingest_stage_event (
+    id uuid primary key default gen_random_uuid(),
+    attempt_id uuid not null references ingest_attempt(id) on delete cascade,
+    stage_name text not null,
+    stage_state ingest_stage_state not null,
+    ordinal integer not null,
+    message text,
+    details_json jsonb not null default '{}'::jsonb,
+    recorded_at timestamptz not null default now(),
+    unique (attempt_id, ordinal)
+);
+
+create table extract_content (
+    revision_id uuid primary key references content_revision(id) on delete cascade,
+    attempt_id uuid references ingest_attempt(id) on delete set null,
+    extract_state extract_state not null default 'missing',
+    normalized_text text,
+    text_checksum text,
+    warning_count integer not null default 0,
     updated_at timestamptz not null default now()
 );
 
-create table if not exists runtime_ingestion_stage_event (
-    id uuid primary key,
-    ingestion_run_id uuid not null references runtime_ingestion_run(id) on delete cascade,
-    attempt_no integer not null,
-    stage text not null,
-    status text not null,
-    message text,
-    metadata_json jsonb not null default '{}'::jsonb,
+create table extract_chunk_result (
+    id uuid primary key default gen_random_uuid(),
+    chunk_id uuid not null references content_chunk(id) on delete cascade,
+    attempt_id uuid not null references ingest_attempt(id) on delete cascade,
+    extract_state extract_state not null,
+    provider_call_id uuid references billing_provider_call(id) on delete set null,
     started_at timestamptz not null default now(),
     finished_at timestamptz,
-    created_at timestamptz not null default now()
+    failure_code text,
+    unique (chunk_id, attempt_id)
 );
 
-create table if not exists runtime_extracted_content (
-    id uuid primary key,
-    ingestion_run_id uuid not null unique references runtime_ingestion_run(id) on delete cascade,
-    document_id uuid references document(id) on delete set null,
-    extraction_kind text not null,
-    content_text text,
-    page_count integer,
-    char_count integer,
-    extraction_warnings_json jsonb not null default '[]'::jsonb,
-    source_map_json jsonb not null default '{}'::jsonb,
-    provider_kind text,
-    model_name text,
-    extraction_version text,
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
-);
-
-create table if not exists runtime_graph_snapshot (
-    project_id uuid primary key references project(id) on delete cascade,
-    graph_status text not null,
-    projection_version bigint not null default 0,
-    node_count integer not null default 0,
-    edge_count integer not null default 0,
-    provenance_coverage_percent double precision,
-    last_built_at timestamptz,
-    last_error_message text,
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
-);
-
-create table if not exists runtime_graph_node (
-    id uuid primary key,
-    project_id uuid not null references project(id) on delete cascade,
+create table extract_node_candidate (
+    id uuid primary key default gen_random_uuid(),
+    chunk_result_id uuid not null references extract_chunk_result(id) on delete cascade,
     canonical_key text not null,
-    label text not null,
-    node_type text not null,
-    aliases_json jsonb not null default '[]'::jsonb,
-    summary text,
-    metadata_json jsonb not null default '{}'::jsonb,
-    support_count integer not null default 0,
-    projection_version bigint not null default 0,
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now(),
-    unique(project_id, canonical_key, projection_version)
+    node_kind text not null,
+    display_label text not null,
+    summary text
 );
 
-create table if not exists runtime_graph_edge (
-    id uuid primary key,
-    project_id uuid not null references project(id) on delete cascade,
-    from_node_id uuid not null references runtime_graph_node(id) on delete cascade,
-    to_node_id uuid not null references runtime_graph_node(id) on delete cascade,
-    relation_type text not null,
+create table extract_edge_candidate (
+    id uuid primary key default gen_random_uuid(),
+    chunk_result_id uuid not null references extract_chunk_result(id) on delete cascade,
     canonical_key text not null,
-    summary text,
-    weight double precision,
-    support_count integer not null default 0,
-    metadata_json jsonb not null default '{}'::jsonb,
-    projection_version bigint not null default 0,
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now(),
-    unique(project_id, canonical_key, projection_version)
+    edge_kind text not null,
+    from_canonical_key text not null,
+    to_canonical_key text not null,
+    summary text
 );
 
-create table if not exists runtime_graph_evidence (
-    id uuid primary key,
-    project_id uuid not null references project(id) on delete cascade,
-    target_kind text not null,
-    target_id uuid not null,
-    document_id uuid references document(id) on delete cascade,
-    chunk_id uuid references chunk(id) on delete cascade,
-    source_file_name text,
-    page_ref text,
-    evidence_text text not null,
-    confidence_score double precision,
-    is_active boolean not null default true,
-    created_at timestamptz not null default now()
-);
-
-create table if not exists runtime_provider_profile (
-    project_id uuid primary key references project(id) on delete cascade,
-    indexing_provider_kind text not null,
-    indexing_model_name text not null,
-    embedding_provider_kind text not null,
-    embedding_model_name text not null,
-    answer_provider_kind text not null,
-    answer_model_name text not null,
-    vision_provider_kind text not null,
-    vision_model_name text not null,
-    last_validated_at timestamptz,
-    last_validation_status text,
-    last_validation_error text,
-    created_at timestamptz not null default now(),
+create table extract_resume_cursor (
+    attempt_id uuid primary key references ingest_attempt(id) on delete cascade,
+    last_completed_chunk_index integer not null default -1,
+    replay_count integer not null default 0,
+    downgrade_level integer not null default 0,
     updated_at timestamptz not null default now()
 );
 
-create table if not exists runtime_provider_validation_log (
-    id uuid primary key,
-    project_id uuid references project(id) on delete cascade,
-    provider_kind text not null,
-    model_name text not null,
-    capability text not null,
-    status text not null,
-    error_message text,
-    created_at timestamptz not null default now()
-);
-
-create table if not exists runtime_query_execution (
-    id uuid primary key,
-    project_id uuid not null references project(id) on delete cascade,
-    mode text not null,
-    question text not null,
-    status text not null,
-    answer_text text,
-    grounding_status text not null,
-    provider_kind text not null,
-    model_name text not null,
-    debug_json jsonb not null default '{}'::jsonb,
-    created_at timestamptz not null default now(),
-    finished_at timestamptz
-);
-
-create table if not exists runtime_query_reference (
-    id uuid primary key,
-    query_execution_id uuid not null references runtime_query_execution(id) on delete cascade,
-    reference_kind text not null,
-    reference_id uuid not null,
-    excerpt text,
-    rank integer not null,
-    score double precision,
-    metadata_json jsonb not null default '{}'::jsonb,
-    created_at timestamptz not null default now()
-);
-
-create table if not exists runtime_vector_target (
-    id uuid primary key,
-    project_id uuid not null references project(id) on delete cascade,
-    target_kind text not null,
-    target_id uuid not null,
-    provider_kind text not null,
-    model_name text not null,
-    dimensions integer,
-    embedding_json jsonb not null default '[]'::jsonb,
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now(),
-    unique(project_id, target_kind, target_id, provider_kind, model_name)
-);
-
-create table if not exists runtime_graph_extraction (
-    id uuid primary key,
-    project_id uuid not null references project(id) on delete cascade,
-    document_id uuid not null references document(id) on delete cascade,
-    chunk_id uuid not null references chunk(id) on delete cascade,
-    provider_kind text not null,
-    model_name text not null,
-    extraction_version text not null,
-    prompt_hash text not null,
-    status text not null,
-    raw_output_json jsonb not null default '{}'::jsonb,
-    normalized_output_json jsonb not null default '{}'::jsonb,
-    glean_pass_count integer not null default 1,
-    error_message text,
-    created_at timestamptz not null default now()
-);
-
-create index if not exists idx_project_workspace_id on project(workspace_id);
-create index if not exists idx_provider_account_workspace_id on provider_account(workspace_id);
-create index if not exists idx_model_profile_workspace_id on model_profile(workspace_id);
-create index if not exists idx_source_project_id on source(project_id);
-create unique index if not exists idx_ingestion_job_idempotency_key
-    on ingestion_job(idempotency_key)
-    where idempotency_key is not null;
-create index if not exists idx_ingestion_job_project_status_created
-    on ingestion_job(project_id, status, created_at desc);
-create index if not exists idx_ingestion_job_queue_claim
-    on ingestion_job(status, lease_expires_at, created_at asc);
-create index if not exists idx_document_project_id on document(project_id);
-create index if not exists idx_chunk_project_id on chunk(project_id);
-create index if not exists idx_chunk_project_embedding_cosine
-    on chunk using hnsw (embedding vector_cosine_ops);
-create index if not exists idx_entity_project_id on entity(project_id);
-create index if not exists idx_relation_project_id on relation(project_id);
-create index if not exists idx_chat_session_project_updated
-    on chat_session(project_id, updated_at desc, created_at desc);
-create index if not exists idx_retrieval_run_project_created
-    on retrieval_run(project_id, created_at desc);
-create index if not exists idx_retrieval_run_session_created
-    on retrieval_run(session_id, created_at desc);
-create index if not exists idx_chat_message_session_created
-    on chat_message(session_id, created_at asc, id asc);
-create index if not exists idx_usage_event_workspace_project_created
-    on usage_event(workspace_id, project_id, created_at desc);
-create index if not exists idx_cost_ledger_workspace_project_created
-    on cost_ledger(workspace_id, project_id, created_at desc);
-create index if not exists idx_ingestion_job_attempt_job_created
-    on ingestion_job_attempt(job_id, created_at desc);
-create unique index if not exists idx_ui_user_login_lower on ui_user(lower(login));
-create unique index if not exists idx_ui_user_email_lower on ui_user(lower(email));
-create index if not exists idx_ui_session_user_expires on ui_session(user_id, expires_at desc);
-create index if not exists idx_workspace_member_user on workspace_member(user_id, workspace_id);
-create index if not exists idx_project_access_user on project_access_grant(user_id, project_id);
-create index if not exists idx_api_token_workspace_id on api_token(workspace_id);
-create index if not exists idx_api_token_status on api_token(status);
-create index if not exists idx_api_token_expires_at
-    on api_token (expires_at)
-    where expires_at is not null;
-create index if not exists idx_runtime_ingestion_run_project_created
-    on runtime_ingestion_run(project_id, created_at desc);
-create index if not exists idx_runtime_ingestion_run_project_status
-    on runtime_ingestion_run(project_id, status, updated_at desc);
-create index if not exists idx_runtime_stage_event_run_created
-    on runtime_ingestion_stage_event(ingestion_run_id, created_at asc);
-create index if not exists idx_runtime_graph_node_project_type
-    on runtime_graph_node(project_id, node_type, updated_at desc);
-create index if not exists idx_runtime_graph_edge_project_relation
-    on runtime_graph_edge(project_id, relation_type, updated_at desc);
-create index if not exists idx_runtime_graph_evidence_target
-    on runtime_graph_evidence(project_id, target_kind, target_id, is_active);
-create index if not exists idx_runtime_provider_validation_project_created
-    on runtime_provider_validation_log(project_id, created_at desc);
-create index if not exists idx_runtime_query_execution_project_created
-    on runtime_query_execution(project_id, created_at desc);
-create index if not exists idx_runtime_query_reference_execution_rank
-    on runtime_query_reference(query_execution_id, rank asc);
-create index if not exists idx_runtime_graph_extraction_project_document
-    on runtime_graph_extraction(project_id, document_id, created_at desc);
-create index if not exists idx_runtime_graph_extraction_chunk_created
-    on runtime_graph_extraction(chunk_id, created_at desc);
-
-alter table document
-    add column if not exists current_revision_id uuid,
-    add column if not exists active_status text not null default 'ready',
-    add column if not exists active_mutation_kind text,
-    add column if not exists active_mutation_status text,
-    add column if not exists deleted_at timestamptz;
-
-create table if not exists document_revision (
-    id uuid primary key,
-    document_id uuid not null references document(id) on delete cascade,
-    revision_no integer not null,
-    revision_kind text not null,
-    parent_revision_id uuid references document_revision(id) on delete set null,
-    source_file_name text not null,
-    mime_type text,
-    file_size_bytes bigint,
-    appended_text_excerpt text,
-    content_hash text,
-    status text not null default 'pending',
-    accepted_at timestamptz not null default now(),
-    activated_at timestamptz,
+create table graph_projection (
+    id uuid primary key default gen_random_uuid(),
+    workspace_id uuid not null,
+    library_id uuid not null,
+    source_attempt_id uuid references ingest_attempt(id) on delete set null,
+    projection_state graph_projection_state not null default 'building',
+    started_at timestamptz not null default now(),
+    completed_at timestamptz,
     superseded_at timestamptz,
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now(),
-    unique(document_id, revision_no)
+    unique (id, workspace_id, library_id),
+    foreign key (library_id, workspace_id)
+        references catalog_library(id, workspace_id)
+        on delete cascade
 );
 
-create index if not exists idx_document_revision_document_revision_no
-    on document_revision(document_id, revision_no desc);
-create index if not exists idx_document_revision_document_status
-    on document_revision(document_id, status, accepted_at desc);
+create table graph_node (
+    id uuid primary key default gen_random_uuid(),
+    projection_id uuid not null references graph_projection(id) on delete cascade,
+    workspace_id uuid not null,
+    library_id uuid not null,
+    canonical_key text not null,
+    node_kind text not null,
+    display_label text not null,
+    summary text,
+    support_count integer not null default 0,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    unique (projection_id, canonical_key),
+    foreign key (projection_id, workspace_id, library_id)
+        references graph_projection(id, workspace_id, library_id)
+        on delete cascade
+);
 
-insert into document_revision (
+create table graph_edge (
+    id uuid primary key default gen_random_uuid(),
+    projection_id uuid not null references graph_projection(id) on delete cascade,
+    workspace_id uuid not null,
+    library_id uuid not null,
+    canonical_key text not null,
+    edge_kind text not null,
+    from_node_id uuid not null references graph_node(id) on delete cascade,
+    to_node_id uuid not null references graph_node(id) on delete cascade,
+    summary text,
+    support_count integer not null default 0,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    unique (projection_id, canonical_key),
+    foreign key (projection_id, workspace_id, library_id)
+        references graph_projection(id, workspace_id, library_id)
+        on delete cascade
+);
+
+create table graph_node_evidence (
+    node_id uuid not null references graph_node(id) on delete cascade,
+    chunk_id uuid not null references content_chunk(id) on delete cascade,
+    revision_id uuid not null references content_revision(id) on delete cascade,
+    attempt_id uuid not null references ingest_attempt(id) on delete cascade,
+    candidate_node_id uuid references extract_node_candidate(id) on delete set null,
+    evidence_weight numeric(10,4) not null default 1,
+    primary key (node_id, chunk_id, attempt_id)
+);
+
+create table graph_edge_evidence (
+    edge_id uuid not null references graph_edge(id) on delete cascade,
+    chunk_id uuid not null references content_chunk(id) on delete cascade,
+    revision_id uuid not null references content_revision(id) on delete cascade,
+    attempt_id uuid not null references ingest_attempt(id) on delete cascade,
+    candidate_edge_id uuid references extract_edge_candidate(id) on delete set null,
+    evidence_weight numeric(10,4) not null default 1,
+    primary key (edge_id, chunk_id, attempt_id)
+);
+
+create table graph_summary (
+    projection_id uuid primary key references graph_projection(id) on delete cascade,
+    summary_text text,
+    summary_state graph_summary_state not null default 'pending',
+    generated_at timestamptz
+);
+
+create table search_chunk_embedding (
+    chunk_id uuid not null references content_chunk(id) on delete cascade,
+    model_catalog_id uuid not null references ai_model_catalog(id) on delete restrict,
+    embedding_vector vector,
+    embedded_at timestamptz not null default now(),
+    active boolean not null default true,
+    primary key (chunk_id, model_catalog_id)
+);
+
+create table search_graph_node_embedding (
+    node_id uuid not null references graph_node(id) on delete cascade,
+    model_catalog_id uuid not null references ai_model_catalog(id) on delete restrict,
+    embedding_vector vector,
+    embedded_at timestamptz not null default now(),
+    active boolean not null default true,
+    primary key (node_id, model_catalog_id)
+);
+
+create table query_conversation (
+    id uuid primary key default gen_random_uuid(),
+    workspace_id uuid not null,
+    library_id uuid not null,
+    created_by_principal_id uuid references iam_principal(id) on delete set null,
+    title text,
+    conversation_state query_conversation_state not null default 'active',
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    unique (id, workspace_id, library_id),
+    foreign key (library_id, workspace_id)
+        references catalog_library(id, workspace_id)
+        on delete cascade
+);
+
+create table query_execution (
+    id uuid primary key default gen_random_uuid(),
+    workspace_id uuid not null,
+    library_id uuid not null,
+    conversation_id uuid not null references query_conversation(id) on delete cascade,
+    request_turn_id uuid,
+    response_turn_id uuid,
+    binding_id uuid references ai_library_model_binding(id) on delete set null,
+    execution_state query_execution_state not null default 'planned',
+    query_text text not null,
+    failure_code text,
+    started_at timestamptz not null default now(),
+    completed_at timestamptz,
+    foreign key (library_id, workspace_id)
+        references catalog_library(id, workspace_id)
+        on delete cascade
+);
+
+create table query_turn (
+    id uuid primary key default gen_random_uuid(),
+    conversation_id uuid not null references query_conversation(id) on delete cascade,
+    turn_index integer not null,
+    turn_kind query_turn_kind not null,
+    author_principal_id uuid references iam_principal(id) on delete set null,
+    content_text text not null,
+    execution_id uuid references query_execution(id) on delete set null,
+    created_at timestamptz not null default now(),
+    unique (conversation_id, turn_index)
+);
+
+alter table query_execution
+    add constraint query_execution_request_turn_id_fkey
+        foreign key (request_turn_id) references query_turn(id) on delete set null,
+    add constraint query_execution_response_turn_id_fkey
+        foreign key (response_turn_id) references query_turn(id) on delete set null;
+
+create table query_chunk_reference (
+    execution_id uuid not null references query_execution(id) on delete cascade,
+    chunk_id uuid not null references content_chunk(id) on delete cascade,
+    rank integer not null,
+    score double precision not null,
+    primary key (execution_id, chunk_id)
+);
+
+create table query_graph_node_reference (
+    execution_id uuid not null references query_execution(id) on delete cascade,
+    node_id uuid not null references graph_node(id) on delete cascade,
+    rank integer not null,
+    score double precision not null,
+    primary key (execution_id, node_id)
+);
+
+create table query_graph_edge_reference (
+    execution_id uuid not null references query_execution(id) on delete cascade,
+    edge_id uuid not null references graph_edge(id) on delete cascade,
+    rank integer not null,
+    score double precision not null,
+    primary key (execution_id, edge_id)
+);
+
+create table ops_async_operation (
+    id uuid primary key default gen_random_uuid(),
+    workspace_id uuid not null,
+    library_id uuid not null,
+    operation_kind text not null,
+    surface_kind surface_kind not null,
+    requested_by_principal_id uuid references iam_principal(id) on delete set null,
+    status ops_async_operation_status not null default 'accepted',
+    subject_kind text not null,
+    subject_id uuid,
+    created_at timestamptz not null default now(),
+    completed_at timestamptz,
+    failure_code text,
+    foreign key (library_id, workspace_id)
+        references catalog_library(id, workspace_id)
+        on delete cascade
+);
+
+create table ops_library_state (
+    library_id uuid primary key references catalog_library(id) on delete cascade,
+    queue_depth integer not null default 0,
+    running_attempts integer not null default 0,
+    readable_document_count integer not null default 0,
+    failed_document_count integer not null default 0,
+    active_projection_id uuid references graph_projection(id) on delete set null,
+    degraded_state ops_degraded_state not null default 'healthy',
+    last_recomputed_at timestamptz not null default now()
+);
+
+create table ops_library_warning (
+    id uuid primary key default gen_random_uuid(),
+    library_id uuid not null references catalog_library(id) on delete cascade,
+    warning_kind text not null,
+    severity ops_warning_severity not null,
+    message text not null,
+    source_operation_id uuid references ops_async_operation(id) on delete set null,
+    created_at timestamptz not null default now(),
+    resolved_at timestamptz
+);
+
+create table audit_event (
+    id uuid primary key default gen_random_uuid(),
+    actor_principal_id uuid references iam_principal(id) on delete set null,
+    surface_kind surface_kind not null,
+    action_kind text not null,
+    request_id text,
+    trace_id text,
+    result_kind audit_result_kind not null,
+    created_at timestamptz not null default now(),
+    redacted_message text,
+    internal_message text
+);
+
+create table audit_event_subject (
+    audit_event_id uuid not null references audit_event(id) on delete cascade,
+    subject_kind text not null,
+    subject_id uuid not null,
+    workspace_id uuid references catalog_workspace(id) on delete set null,
+    library_id uuid references catalog_library(id) on delete set null,
+    document_id uuid references content_document(id) on delete set null,
+    primary key (audit_event_id, subject_kind, subject_id)
+);
+
+create table content_document_head (
+    document_id uuid primary key references content_document(id) on delete cascade,
+    active_revision_id uuid references content_revision(id) on delete set null,
+    readable_revision_id uuid references content_revision(id) on delete set null,
+    latest_mutation_id uuid references content_mutation(id) on delete set null,
+    latest_successful_attempt_id uuid references ingest_attempt(id) on delete set null,
+    head_updated_at timestamptz not null default now()
+);
+
+create unique index idx_iam_api_token_secret_latest_active
+    on iam_api_token_secret (token_principal_id)
+    where revoked_at is null;
+
+create unique index idx_ai_price_catalog_system_effective
+    on ai_price_catalog (model_catalog_id, billing_unit, effective_from)
+    where catalog_scope = 'system';
+
+create unique index idx_ai_price_catalog_workspace_override_effective
+    on ai_price_catalog (model_catalog_id, billing_unit, workspace_id, effective_from)
+    where catalog_scope = 'workspace_override';
+
+create unique index idx_content_mutation_idempotency
+    on content_mutation (requested_by_principal_id, request_surface, idempotency_key)
+    where idempotency_key is not null;
+
+create unique index idx_ingest_job_dedupe_key
+    on ingest_job (library_id, dedupe_key)
+    where dedupe_key is not null;
+
+create index idx_catalog_library_workspace_lifecycle
+    on catalog_library (workspace_id, lifecycle_state);
+
+create index idx_catalog_library_connector_library_sync_mode
+    on catalog_library_connector (library_id, sync_mode, last_sync_requested_at);
+
+create index idx_iam_grant_principal_resource
+    on iam_grant (principal_id, resource_kind, resource_id);
+
+create index idx_ai_library_model_binding_library_purpose
+    on ai_library_model_binding (library_id, binding_purpose, binding_state);
+
+create index idx_content_document_library_state
+    on content_document (library_id, document_state);
+
+create index idx_content_revision_document_created_at
+    on content_revision (document_id, created_at desc);
+
+create index idx_content_mutation_library_state
+    on content_mutation (library_id, mutation_state, requested_at desc);
+
+create index idx_ingest_job_library_queue
+    on ingest_job (library_id, queue_state, priority, available_at);
+
+create index idx_ingest_attempt_job_state
+    on ingest_attempt (job_id, attempt_state, started_at desc);
+
+create index idx_ingest_stage_event_attempt_ordinal
+    on ingest_stage_event (attempt_id, ordinal);
+
+create index idx_extract_chunk_result_attempt_state
+    on extract_chunk_result (attempt_id, extract_state);
+
+create index idx_graph_projection_library_state
+    on graph_projection (library_id, projection_state, started_at desc);
+
+create index idx_graph_node_projection_kind
+    on graph_node (projection_id, node_kind);
+
+create index idx_graph_edge_projection_kind
+    on graph_edge (projection_id, edge_kind);
+
+create index idx_query_conversation_library_updated_at
+    on query_conversation (library_id, updated_at desc);
+
+create index idx_query_execution_library_state
+    on query_execution (library_id, execution_state, started_at desc);
+
+create index idx_billing_provider_call_owner
+    on billing_provider_call (owning_execution_kind, owning_execution_id);
+
+create index idx_ops_async_operation_library_status
+    on ops_async_operation (library_id, status, created_at desc);
+
+create index idx_audit_event_actor_created_at
+    on audit_event (actor_principal_id, created_at desc);
+
+create index idx_audit_event_request_id
+    on audit_event (request_id)
+    where request_id is not null;
+
+insert into ai_provider_catalog (
     id,
-    document_id,
-    revision_no,
-    revision_kind,
-    source_file_name,
-    mime_type,
-    content_hash,
-    status,
-    accepted_at,
-    activated_at,
-    created_at,
-    updated_at
+    provider_kind,
+    display_name,
+    api_style,
+    lifecycle_state,
+    default_base_url,
+    capability_flags_json
 )
-select
-    gen_random_uuid(),
-    d.id,
-    1,
-    'initial_upload',
-    coalesce(nullif(d.title, ''), d.external_key),
-    d.mime_type,
-    d.checksum,
-    'active',
-    d.created_at,
-    d.created_at,
-    d.created_at,
-    d.updated_at
-from document as d
-where not exists (
-    select 1
-    from document_revision as revision
-    where revision.document_id = d.id
-);
+values
+    (
+        '00000000-0000-0000-0000-000000000101',
+        'openai',
+        'OpenAI',
+        'openai_compatible',
+        'active',
+        'https://api.openai.com/v1',
+        '{"chat": true, "embedding": true, "vision": true}'::jsonb
+    ),
+    (
+        '00000000-0000-0000-0000-000000000102',
+        'deepseek',
+        'DeepSeek',
+        'openai_compatible',
+        'active',
+        'https://api.deepseek.com/v1',
+        '{"chat": true, "embedding": false, "vision": false}'::jsonb
+    ),
+    (
+        '00000000-0000-0000-0000-000000000103',
+        'qwen',
+        'Qwen',
+        'openai_compatible',
+        'active',
+        'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+        '{"chat": true, "embedding": true, "vision": true}'::jsonb
+    );
 
-update document as d
-set current_revision_id = revision.id
-from document_revision as revision
-where revision.document_id = d.id
-  and revision.revision_no = 1
-  and d.current_revision_id is null;
-
-alter table runtime_ingestion_run
-    add column if not exists revision_id uuid references document_revision(id) on delete set null,
-    add column if not exists attempt_kind text not null default 'initial_upload',
-    add column if not exists queue_started_at timestamptz not null default now(),
-    add column if not exists queue_elapsed_ms bigint,
-    add column if not exists total_elapsed_ms bigint;
-
-update runtime_ingestion_run
-set queue_started_at = coalesce(queue_started_at, created_at)
-where queue_started_at is null;
-
-create table if not exists document_mutation_workflow (
-    id uuid primary key,
-    document_id uuid not null references document(id) on delete cascade,
-    target_revision_id uuid references document_revision(id) on delete set null,
-    mutation_kind text not null,
-    status text not null,
-    stale_guard_revision_no integer,
-    requested_by text,
-    accepted_at timestamptz not null default now(),
-    finished_at timestamptz,
-    error_message text,
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
-);
-
-create unique index if not exists idx_document_mutation_workflow_active
-    on document_mutation_workflow(document_id)
-    where status in ('accepted', 'reconciling');
-
-alter table runtime_ingestion_stage_event
-    add column if not exists provider_kind text,
-    add column if not exists model_name text,
-    add column if not exists elapsed_ms bigint;
-
-update runtime_ingestion_stage_event
-set elapsed_ms = greatest(
-    0,
-    floor(extract(epoch from (finished_at - started_at)) * 1000)::bigint
+insert into ai_model_catalog (
+    id,
+    provider_catalog_id,
+    model_name,
+    capability_kind,
+    modality_kind,
+    context_window,
+    max_output_tokens,
+    lifecycle_state,
+    metadata_json
 )
-where finished_at is not null
-  and elapsed_ms is null;
+values
+    (
+        '00000000-0000-0000-0000-000000000201',
+        '00000000-0000-0000-0000-000000000101',
+        'gpt-5-mini',
+        'chat',
+        'multimodal',
+        null,
+        null,
+        'active',
+        '{"defaultRoles": ["extract_text", "vision"], "seedSource": "provider_catalog"}'::jsonb
+    ),
+    (
+        '00000000-0000-0000-0000-000000000202',
+        '00000000-0000-0000-0000-000000000101',
+        'text-embedding-3-large',
+        'embedding',
+        'text',
+        null,
+        null,
+        'active',
+        '{"defaultRoles": ["embed_chunk"], "seedSource": "provider_catalog"}'::jsonb
+    ),
+    (
+        '00000000-0000-0000-0000-000000000203',
+        '00000000-0000-0000-0000-000000000101',
+        'gpt-5.4',
+        'chat',
+        'multimodal',
+        null,
+        null,
+        'active',
+        '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb
+    ),
+    (
+        '00000000-0000-0000-0000-000000000204',
+        '00000000-0000-0000-0000-000000000102',
+        'deepseek-chat',
+        'chat',
+        'text',
+        null,
+        null,
+        'active',
+        '{"defaultRoles": ["extract_graph"], "seedSource": "provider_catalog"}'::jsonb
+    ),
+    (
+        '00000000-0000-0000-0000-000000000205',
+        '00000000-0000-0000-0000-000000000103',
+        'qwen3-max',
+        'chat',
+        'text',
+        null,
+        null,
+        'active',
+        '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb
+    ),
+    (
+        '00000000-0000-0000-0000-000000000206',
+        '00000000-0000-0000-0000-000000000103',
+        'text-embedding-v4',
+        'embedding',
+        'text',
+        null,
+        null,
+        'active',
+        '{"defaultRoles": ["embed_chunk"], "seedSource": "provider_catalog"}'::jsonb
+    ),
+    (
+        '00000000-0000-0000-0000-000000000207',
+        '00000000-0000-0000-0000-000000000103',
+        'qwen3.5-plus',
+        'chat',
+        'multimodal',
+        null,
+        null,
+        'active',
+        '{"defaultRoles": ["vision"], "seedSource": "provider_catalog"}'::jsonb
+    );
 
-create table if not exists runtime_attempt_stage_accounting (
-    id uuid primary key,
-    ingestion_run_id uuid not null references runtime_ingestion_run(id) on delete cascade,
-    stage_event_id uuid not null unique references runtime_ingestion_stage_event(id) on delete cascade,
-    stage text not null,
-    workspace_id uuid references workspace(id) on delete cascade,
-    project_id uuid references project(id) on delete cascade,
-    provider_kind text,
-    model_name text,
-    capability text not null,
-    billing_unit text not null,
-    usage_event_id uuid references usage_event(id) on delete set null,
-    cost_ledger_id uuid references cost_ledger(id) on delete set null,
-    pricing_catalog_entry_id uuid,
-    pricing_status text not null,
-    estimated_cost numeric(20,8),
-    currency text,
-    token_usage_json jsonb not null default '{}'::jsonb,
-    pricing_snapshot_json jsonb not null default '{}'::jsonb,
-    created_at timestamptz not null default now()
-);
-
-create index if not exists idx_runtime_attempt_stage_accounting_run
-    on runtime_attempt_stage_accounting(ingestion_run_id, created_at asc);
-create index if not exists idx_runtime_attempt_stage_accounting_pricing
-    on runtime_attempt_stage_accounting(pricing_status, provider_kind, model_name);
-
-create table if not exists runtime_attempt_cost_summary (
-    ingestion_run_id uuid primary key references runtime_ingestion_run(id) on delete cascade,
-    total_estimated_cost numeric(20,8),
-    currency text,
-    priced_stage_count integer not null default 0,
-    unpriced_stage_count integer not null default 0,
-    accounting_status text not null default 'unpriced',
-    computed_at timestamptz not null default now()
-);
-
-alter table runtime_graph_evidence
-    add column if not exists revision_id uuid references document_revision(id) on delete set null,
-    add column if not exists activated_by_attempt_id uuid references runtime_ingestion_run(id) on delete set null,
-    add column if not exists deactivated_by_mutation_id uuid references document_mutation_workflow(id) on delete set null;
-
-create table if not exists model_pricing_catalog (
-    id uuid primary key,
-    workspace_id uuid references workspace(id) on delete cascade,
-    provider_kind text not null,
-    model_name text not null,
-    capability text not null,
-    billing_unit text not null,
-    input_price numeric(20,8),
-    output_price numeric(20,8),
-    currency text not null default 'USD',
-    status text not null default 'active',
-    source_kind text not null default 'manual',
-    note text,
-    effective_from timestamptz not null,
-    effective_to timestamptz,
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now(),
-    unique(workspace_id, provider_kind, model_name, capability, billing_unit, effective_from)
-);
-
-create index if not exists idx_model_pricing_catalog_lookup
-    on model_pricing_catalog(workspace_id, provider_kind, model_name, capability, billing_unit, effective_from desc);
-create index if not exists idx_model_pricing_catalog_status
-    on model_pricing_catalog(status, provider_kind, model_name);
-
-create table if not exists query_intent_cache_entry (
-    id uuid primary key,
-    workspace_id uuid not null references workspace(id) on delete cascade,
-    project_id uuid not null references project(id) on delete cascade,
-    normalized_question_hash text not null,
-    explicit_mode text not null,
-    planned_mode text not null,
-    high_level_keywords_json jsonb not null default '[]'::jsonb,
-    low_level_keywords_json jsonb not null default '[]'::jsonb,
-    intent_summary text,
-    source_truth_version bigint not null,
-    status text not null default 'fresh',
-    created_at timestamptz not null default now(),
-    last_used_at timestamptz not null default now(),
-    expires_at timestamptz not null
-);
-
-create unique index if not exists idx_query_intent_cache_entry_unique
-    on query_intent_cache_entry(project_id, normalized_question_hash, explicit_mode, source_truth_version);
-
-create index if not exists idx_query_intent_cache_entry_lookup
-    on query_intent_cache_entry(project_id, explicit_mode, source_truth_version, status, last_used_at desc);
-
-create index if not exists idx_query_intent_cache_entry_expiry
-    on query_intent_cache_entry(project_id, expires_at asc);
+insert into ai_price_catalog (
+    id,
+    model_catalog_id,
+    billing_unit,
+    unit_price,
+    currency_code,
+    effective_from,
+    effective_to,
+    catalog_scope,
+    workspace_id
+)
+values
+    (
+        '00000000-0000-0000-0000-000000000301',
+        '00000000-0000-0000-0000-000000000201',
+        'per_1m_input_tokens',
+        0.25,
+        'USD',
+        timestamptz '2026-03-20 00:00:00+00',
+        null,
+        'system',
+        null
+    ),
+    (
+        '00000000-0000-0000-0000-000000000302',
+        '00000000-0000-0000-0000-000000000201',
+        'per_1m_output_tokens',
+        2.00,
+        'USD',
+        timestamptz '2026-03-20 00:00:00+00',
+        null,
+        'system',
+        null
+    ),
+    (
+        '00000000-0000-0000-0000-000000000303',
+        '00000000-0000-0000-0000-000000000202',
+        'per_1m_input_tokens',
+        0.13,
+        'USD',
+        timestamptz '2026-03-20 00:00:00+00',
+        null,
+        'system',
+        null
+    ),
+    (
+        '00000000-0000-0000-0000-000000000304',
+        '00000000-0000-0000-0000-000000000203',
+        'per_1m_input_tokens',
+        2.50,
+        'USD',
+        timestamptz '2026-03-20 00:00:00+00',
+        null,
+        'system',
+        null
+    ),
+    (
+        '00000000-0000-0000-0000-000000000305',
+        '00000000-0000-0000-0000-000000000203',
+        'per_1m_output_tokens',
+        15.00,
+        'USD',
+        timestamptz '2026-03-20 00:00:00+00',
+        null,
+        'system',
+        null
+    ),
+    (
+        '00000000-0000-0000-0000-000000000306',
+        '00000000-0000-0000-0000-000000000204',
+        'per_1m_input_tokens',
+        0.28,
+        'USD',
+        timestamptz '2026-03-20 00:00:00+00',
+        null,
+        'system',
+        null
+    ),
+    (
+        '00000000-0000-0000-0000-000000000307',
+        '00000000-0000-0000-0000-000000000204',
+        'per_1m_output_tokens',
+        0.42,
+        'USD',
+        timestamptz '2026-03-20 00:00:00+00',
+        null,
+        'system',
+        null
+    ),
+    (
+        '00000000-0000-0000-0000-000000000308',
+        '00000000-0000-0000-0000-000000000205',
+        'per_1m_input_tokens',
+        1.20,
+        'USD',
+        timestamptz '2026-03-20 00:00:00+00',
+        null,
+        'system',
+        null
+    ),
+    (
+        '00000000-0000-0000-0000-000000000309',
+        '00000000-0000-0000-0000-000000000205',
+        'per_1m_output_tokens',
+        6.00,
+        'USD',
+        timestamptz '2026-03-20 00:00:00+00',
+        null,
+        'system',
+        null
+    ),
+    (
+        '00000000-0000-0000-0000-000000000310',
+        '00000000-0000-0000-0000-000000000206',
+        'per_1m_input_tokens',
+        0.07,
+        'USD',
+        timestamptz '2026-03-20 00:00:00+00',
+        null,
+        'system',
+        null
+    ),
+    (
+        '00000000-0000-0000-0000-000000000311',
+        '00000000-0000-0000-0000-000000000207',
+        'per_1m_input_tokens',
+        0.40,
+        'USD',
+        timestamptz '2026-03-20 00:00:00+00',
+        null,
+        'system',
+        null
+    ),
+    (
+        '00000000-0000-0000-0000-000000000312',
+        '00000000-0000-0000-0000-000000000207',
+        'per_1m_output_tokens',
+        2.40,
+        'USD',
+        timestamptz '2026-03-20 00:00:00+00',
+        null,
+        'system',
+        null
+    );

@@ -12,6 +12,7 @@ use crate::{
         router_support::ApiError,
         ui_support::{UiSessionContext, parse_locale, require_admin_role},
     },
+    shared::slugs::slugify,
 };
 
 #[derive(Serialize)]
@@ -73,17 +74,6 @@ pub struct LibrariesQuery {
     pub workspace_id: Option<Uuid>,
 }
 
-fn slugify(name: &str) -> String {
-    let slug = name
-        .trim()
-        .to_lowercase()
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-        .collect::<String>();
-    let slug = slug.split('-').filter(|segment| !segment.is_empty()).collect::<Vec<_>>().join("-");
-    if slug.is_empty() { "new-item".to_string() } else { slug }
-}
-
 fn map_workspace_option(row: repositories::WorkspaceRow) -> WorkspaceOptionResponse {
     WorkspaceOptionResponse { id: row.id, slug: row.slug, name: row.name }
 }
@@ -137,9 +127,14 @@ async fn load_resolved_context(
         .await
         .map_err(|_| ApiError::Internal)?
         .ok_or(ApiError::Unauthorized)?;
-    ui_queries::resolve_shell_context(&state.persistence.postgres, session, user)
-        .await
-        .map_err(|_| ApiError::Internal)
+    ui_queries::resolve_shell_context(
+        &state.persistence.postgres,
+        session,
+        user,
+        state.settings.destructive_fresh_bootstrap_settings().allow_legacy_startup_side_effects,
+    )
+    .await
+    .map_err(|_| ApiError::Internal)
 }
 
 async fn get_context(
@@ -167,7 +162,9 @@ async fn update_context(
     )
     .await
     .map_err(|_| ApiError::Internal)?;
-    if projects.is_empty() {
+    if projects.is_empty()
+        && state.settings.destructive_fresh_bootstrap_settings().allow_legacy_startup_side_effects
+    {
         let project =
             repositories::find_or_create_default_project(&state.persistence.postgres, workspace_id)
                 .await

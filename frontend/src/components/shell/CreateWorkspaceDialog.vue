@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useShellStore } from 'src/stores/shell'
 
 defineProps<{
   open: boolean
@@ -12,10 +13,12 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
+const shellStore = useShellStore()
 const name = ref('')
+const canSubmit = computed(() => Boolean(name.value.trim()) && shellStore.canCreateWorkspace)
 
 function submit() {
-  if (!name.value.trim()) {
+  if (!canSubmit.value) {
     return
   }
   emit('submit', name.value.trim())
@@ -42,6 +45,7 @@ function close() {
           id="workspace-name"
           v-model="name"
           type="text"
+          @keydown.enter="submit"
         >
       </div>
       <div class="rr-dialog__actions">
@@ -55,6 +59,7 @@ function close() {
         <button
           class="rr-button"
           type="button"
+          :disabled="!canSubmit"
           @click="submit"
         >
           {{ t('dialogs.create') }}

@@ -1,11 +1,12 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, bail};
 use chrono::Utc;
+use rust_decimal::Decimal;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::{task::JoinHandle, time};
@@ -17,20 +18,28 @@ use crate::{
     domains::{
         provider_profiles::{EffectiveProviderProfile, ProviderModelSelection},
         runtime_ingestion::{
-            RuntimeDocumentActivityStatus, RuntimeIngestionStage, RuntimeIngestionStatus,
+            RuntimeAccountingTruthStatus, RuntimeCollectionGraphThroughputSummary,
+            RuntimeCollectionResidualReason, RuntimeDocumentActivityStatus,
+            RuntimeDocumentGraphThroughputSummary, RuntimeGraphProgressCadence,
+            RuntimeIngestionStage, RuntimeIngestionStatus,
         },
     },
     infra::repositories::{
         self, IngestionExecutionPayload, IngestionJobRow, RuntimeExtractedContentRow,
-        RuntimeGraphEdgeRow, RuntimeGraphNodeRow, RuntimeIngestionRunRow,
-        RuntimeProviderProfileRow,
+        RuntimeGraphEdgeRow, RuntimeGraphExtractionResumeRollupRow, RuntimeGraphNodeRow,
+        RuntimeGraphProgressCheckpointRow, RuntimeIngestionRunRow, RuntimeProviderProfileRow,
     },
     infra::vector_search,
     integrations::llm::{EmbeddingBatchRequest, EmbeddingBatchResponse},
     services::{
-        document_reconciliation::{DeleteDocumentRequest, delete_document_and_reconcile},
+        document_accounting,
+        document_reconciliation::{
+            DeleteDocumentRequest, delete_document_and_reconcile,
+            refresh_graph_summaries_after_reconciliation,
+        },
         graph_projection::mark_graph_snapshot_stale,
         graph_rebuild::rebuild_library_graph,
+        graph_summary::GraphSummaryRefreshRequest,
         ingest_activity::IngestActivityService,
     },
     shared::file_extract::{
@@ -283,13 +292,24 @@ impl JobLeaseHeartbeat {
             self.job_id,
             &self.worker_id,
             self.lease_duration,
+            i64::try_from(state.pipeline_hardening.heartbeat_write_min_interval_seconds)
+                .unwrap_or(i64::MAX),
         )
         .await
         .with_context(|| format!("failed to renew ingestion job lease {}", self.job_id))?;
-        if !renewed {
-            bail!("worker {} no longer owns ingestion job {} lease", self.worker_id, self.job_id);
+        match renewed {
+            repositories::LeaseRenewalOutcome::Renewed => {
+                self.last_renewed_at = Instant::now();
+            }
+            repositories::LeaseRenewalOutcome::Busy => {}
+            repositories::LeaseRenewalOutcome::NotOwned => {
+                bail!(
+                    "worker {} no longer owns ingestion job {} lease",
+                    self.worker_id,
+                    self.job_id
+                );
+            }
         }
-        self.last_renewed_at = Instant::now();
         Ok(())
     }
 
@@ -310,11 +330,16 @@ impl JobLeaseHeartbeat {
                     job_id,
                     &worker_id,
                     lease_duration,
+                    i64::try_from(state.pipeline_hardening.heartbeat_write_min_interval_seconds)
+                        .unwrap_or(i64::MAX),
                 )
                 .await
                 {
-                    Ok(true) => {}
-                    Ok(false) => {
+                    Ok(repositories::LeaseRenewalOutcome::Renewed) => {}
+                    Ok(repositories::LeaseRenewalOutcome::Busy) => {
+                        continue;
+                    }
+                    Ok(repositories::LeaseRenewalOutcome::NotOwned) => {
                         warn!(
                             %worker_id,
                             job_id = %job_id,
@@ -333,13 +358,18 @@ impl JobLeaseHeartbeat {
                     }
                 }
                 if let Some(runtime_ingestion_run_id) = runtime_ingestion_run_id {
-                    if let Err(error) = repositories::update_runtime_ingestion_run_heartbeat(
-                        &state.persistence.postgres,
-                        runtime_ingestion_run_id,
-                        Utc::now(),
-                        activity_status_label(RuntimeDocumentActivityStatus::Active),
-                    )
-                    .await
+                    if let Err(error) =
+                        repositories::update_runtime_ingestion_run_heartbeat_with_interval(
+                            &state.persistence.postgres,
+                            runtime_ingestion_run_id,
+                            Utc::now(),
+                            activity_status_label(RuntimeDocumentActivityStatus::Active),
+                            i64::try_from(
+                                state.pipeline_hardening.heartbeat_write_min_interval_seconds,
+                            )
+                            .unwrap_or(i64::MAX),
+                        )
+                        .await
                     {
                         warn!(
                             %worker_id,
@@ -937,7 +967,7 @@ pub async fn queue_prepared_runtime_attempt(
         stale_guard_revision_no,
         mutation_kind,
     )?;
-    repositories::create_ingestion_job(
+    let job = repositories::create_ingestion_job(
         &state.persistence.postgres,
         runtime_run.project_id,
         source_id,
@@ -945,10 +975,13 @@ pub async fn queue_prepared_runtime_attempt(
         requested_by,
         parent_job_id,
         None,
+        Some(runtime_run.current_attempt_no),
         payload_json,
     )
     .await
-    .context("failed to create runtime ingestion job")
+    .context("failed to create runtime ingestion job")?;
+    persist_library_queue_isolation_waiting_reason(state, runtime_run.project_id).await?;
+    Ok(job)
 }
 
 pub async fn queue_new_runtime_upload(
@@ -1054,10 +1087,12 @@ pub async fn queue_new_runtime_upload(
         request.requested_by.as_deref(),
         request.parent_job_id,
         request.idempotency_key.as_deref(),
+        None,
         build_runtime_payload_json(&request, &runtime_run, &extraction_plan),
     )
     .await
     .context("failed to create runtime ingestion job")?;
+    persist_library_queue_isolation_waiting_reason(state, request.project_id).await?;
 
     Ok(RuntimeQueuedUpload { runtime_run, ingestion_job, extracted_content })
 }
@@ -1113,6 +1148,7 @@ pub async fn requeue_runtime_run(
         None,
     )
     .await?;
+    persist_library_queue_isolation_waiting_reason(state, runtime_run.project_id).await?;
 
     Ok((runtime_run, ingestion_job))
 }
@@ -1123,6 +1159,7 @@ pub async fn delete_runtime_run_and_rebuild(
     requested_by: Option<&str>,
 ) -> anyhow::Result<Option<repositories::DocumentMutationWorkflowRow>> {
     if runtime_run.document_id.is_none() {
+        let project_id = runtime_run.project_id;
         repositories::delete_ingestion_jobs_by_runtime_ingestion_run_id(
             &state.persistence.postgres,
             runtime_run.id,
@@ -1135,6 +1172,7 @@ pub async fn delete_runtime_run_and_rebuild(
         )
         .await
         .context("failed to delete runtime ingestion run without logical document")?;
+        refresh_library_queue_isolation_snapshot(state, project_id).await?;
         return Ok(None);
     }
 
@@ -1227,8 +1265,992 @@ pub async fn reprocess_runtime_run_and_rebuild(
         Some("Graph coverage is rebuilding while the reprocessed document runs again."),
     )
     .await;
+    let _ = refresh_graph_summaries_after_reconciliation(
+        state,
+        runtime_run.project_id,
+        GraphSummaryRefreshRequest::broad(),
+    )
+    .await
+    .context("failed to invalidate graph summaries after reprocess rebuild")?;
 
     Ok((runtime_run, ingestion_job))
+}
+
+pub async fn refresh_library_queue_isolation_snapshot(
+    state: &AppState,
+    project_id: Uuid,
+) -> anyhow::Result<()> {
+    let snapshot = build_library_queue_isolation_snapshot_input(state, project_id).await?;
+    repositories::upsert_runtime_library_queue_slice(&state.persistence.postgres, &snapshot)
+        .await
+        .context("failed to persist queue-isolation snapshot")?;
+    refresh_library_collection_settlement_snapshots(state, project_id).await?;
+    refresh_library_warning_snapshots(state, project_id).await
+}
+
+pub async fn persist_library_queue_isolation_waiting_reason(
+    state: &AppState,
+    project_id: Uuid,
+) -> anyhow::Result<()> {
+    let snapshot = build_library_queue_isolation_snapshot_input(state, project_id).await?;
+    repositories::persist_runtime_library_queue_waiting_reason(
+        &state.persistence.postgres,
+        &snapshot,
+    )
+    .await
+    .context("failed to persist queue-isolation waiting reason")?;
+    refresh_library_collection_settlement_snapshots(state, project_id).await?;
+    refresh_library_warning_snapshots(state, project_id).await
+}
+
+pub async fn release_library_queue_isolation_slot(
+    state: &AppState,
+    project_id: Uuid,
+) -> anyhow::Result<()> {
+    let snapshot = build_library_queue_isolation_snapshot_input(state, project_id).await?;
+    repositories::release_runtime_library_queue_slot(&state.persistence.postgres, &snapshot)
+        .await
+        .context("failed to release queue-isolation slot")?;
+    refresh_library_collection_settlement_snapshots(state, project_id).await?;
+    refresh_library_warning_snapshots(state, project_id).await
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeCollectionAccountingSnapshot {
+    live_total_estimated_cost: Option<Decimal>,
+    settled_total_estimated_cost: Option<Decimal>,
+    missing_total_estimated_cost: Option<Decimal>,
+    currency: Option<String>,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    total_tokens: i64,
+    priced_stage_count: i32,
+    unpriced_stage_count: i32,
+    in_flight_stage_count: i32,
+    missing_stage_count: i32,
+    accounting_status: RuntimeAccountingTruthStatus,
+    display_accounting_status: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RuntimeCollectionScopeAccountingSnapshot {
+    document_count: i64,
+    live_estimated_cost: Option<Decimal>,
+    settled_estimated_cost: Option<Decimal>,
+    missing_estimated_cost: Option<Decimal>,
+    currency: Option<String>,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    total_tokens: i64,
+    accounting_status: String,
+}
+
+pub async fn refresh_library_warning_snapshots(
+    state: &AppState,
+    project_id: Uuid,
+) -> anyhow::Result<()> {
+    let queue_slice =
+        repositories::load_runtime_library_queue_slice(&state.persistence.postgres, project_id)
+            .await
+            .context("failed to load queue-isolation slice for warning refresh")?;
+    let settlement_row = repositories::load_runtime_collection_settlement_snapshot(
+        &state.persistence.postgres,
+        project_id,
+    )
+    .await
+    .context("failed to load collection settlement snapshot for warning refresh")?;
+    let format_rollups = repositories::list_runtime_collection_settlement_rollups(
+        &state.persistence.postgres,
+        project_id,
+        "format",
+    )
+    .await
+    .context("failed to load persisted collection format rollups for warning refresh")?;
+    let settlement_row =
+        settlement_row.context("collection settlement snapshot missing during warning refresh")?;
+    let settlement = map_runtime_collection_settlement_summary(&settlement_row);
+    let queue_isolation = state.pipeline_hardening_services.queue_isolation.summarize(
+        usize::try_from(queue_slice.queued_count).unwrap_or(usize::MAX),
+        usize::try_from(queue_slice.processing_count).unwrap_or(usize::MAX),
+        usize::try_from(queue_slice.workspace_processing_count).unwrap_or(usize::MAX),
+        usize::try_from(queue_slice.global_processing_count).unwrap_or(usize::MAX),
+        queue_slice.last_claimed_at,
+        queue_slice.last_progress_at,
+        repositories::parse_runtime_queue_waiting_reason(queue_slice.waiting_reason.as_deref()),
+    );
+    let degraded_extraction_count = format_rollups
+        .iter()
+        .map(|row| usize::try_from(row.ready_no_graph_count).unwrap_or(usize::MAX))
+        .sum();
+    let warnings = state.pipeline_hardening_services.operator_warning.build_collection_warnings(
+        Some(&queue_isolation),
+        &settlement,
+        usize::try_from(settlement_row.failed_count).unwrap_or(usize::MAX),
+        settlement_row.missing_stage_count,
+        0,
+        degraded_extraction_count,
+    );
+    let warning_rows =
+        repositories::build_runtime_collection_warning_rows(project_id, &warnings, Utc::now());
+    repositories::replace_runtime_collection_warning_snapshots(
+        &state.persistence.postgres,
+        project_id,
+        &warning_rows,
+    )
+    .await
+    .context("failed to persist collection warning snapshots")
+}
+
+pub async fn refresh_library_collection_settlement_snapshots(
+    state: &AppState,
+    project_id: Uuid,
+) -> anyhow::Result<()> {
+    let progress_rollup = repositories::load_runtime_collection_progress_rollup(
+        &state.persistence.postgres,
+        project_id,
+    )
+    .await
+    .context("failed to load collection progress rollup for settlement refresh")?;
+    let stage_rollups = repositories::list_runtime_collection_stage_rollups(
+        &state.persistence.postgres,
+        project_id,
+    )
+    .await
+    .context("failed to load collection stage rollups for settlement refresh")?;
+    let format_rollups = repositories::list_runtime_collection_format_rollups(
+        &state.persistence.postgres,
+        project_id,
+    )
+    .await
+    .context("failed to load collection format rollups for settlement refresh")?;
+    let accounting_rows = repositories::list_runtime_collection_resolved_stage_accounting(
+        &state.persistence.postgres,
+        project_id,
+    )
+    .await
+    .context("failed to load collection accounting rows for settlement refresh")?;
+    let existing_snapshot = repositories::load_runtime_collection_settlement_snapshot(
+        &state.persistence.postgres,
+        project_id,
+    )
+    .await
+    .context("failed to load previous collection settlement snapshot")?;
+    let existing_terminal_outcome = repositories::load_runtime_collection_terminal_projection(
+        &state.persistence.postgres,
+        project_id,
+    )
+    .await
+    .context("failed to load previous collection terminal outcome")?;
+    let graph_health = repositories::load_runtime_graph_diagnostics_snapshot(
+        &state.persistence.postgres,
+        project_id,
+    )
+    .await
+    .context("failed to load graph diagnostics snapshot for terminal settlement")?;
+    let project = repositories::get_project_by_id(&state.persistence.postgres, project_id)
+        .await
+        .context("failed to load project for terminal settlement refresh")?
+        .context("project missing during terminal settlement refresh")?;
+    let failed_runs = repositories::list_runtime_ingestion_runs_by_project(
+        &state.persistence.postgres,
+        project_id,
+    )
+    .await
+    .context("failed to load runtime runs for terminal settlement refresh")?
+    .into_iter()
+    .filter(|row| row.status == "failed")
+    .collect::<Vec<_>>();
+
+    let accounting = summarize_runtime_collection_accounting(&accounting_rows);
+    let pending_graph_count = format_rollups
+        .iter()
+        .map(|row| usize::try_from(row.ready_no_graph_count).unwrap_or(usize::MAX))
+        .sum();
+    let residual_reason = derive_collection_residual_reason(
+        graph_health.as_ref(),
+        &failed_runs,
+        accounting.missing_stage_count,
+        existing_terminal_outcome.as_ref().and_then(|row| {
+            repositories::parse_runtime_collection_residual_reason(row.residual_reason.as_deref())
+        }),
+    );
+    let terminal_transition_at = terminal_transition_at(
+        existing_terminal_outcome.as_ref(),
+        usize::try_from(progress_rollup.queue_backlog_count).unwrap_or(usize::MAX),
+        usize::try_from(progress_rollup.processing_backlog_count).unwrap_or(usize::MAX),
+        pending_graph_count,
+        usize::try_from(progress_rollup.failed_count).unwrap_or(usize::MAX),
+        accounting.missing_stage_count,
+        residual_reason.as_ref(),
+    );
+    let terminal_outcome = state.resolve_settle_blockers_services.terminal_settlement.summarize(
+        usize::try_from(progress_rollup.queue_backlog_count).unwrap_or(usize::MAX),
+        usize::try_from(progress_rollup.processing_backlog_count).unwrap_or(usize::MAX),
+        pending_graph_count,
+        usize::try_from(progress_rollup.failed_count).unwrap_or(usize::MAX),
+        accounting.missing_stage_count,
+        residual_reason,
+        accounting.live_total_estimated_cost,
+        accounting.settled_total_estimated_cost,
+        accounting.missing_total_estimated_cost,
+        accounting.currency.clone(),
+        existing_terminal_outcome.as_ref().and_then(|row| row.settled_at),
+        terminal_transition_at,
+    );
+    let settlement = state.pipeline_hardening_services.collection_settlement.summarize(
+        &terminal_outcome,
+        accounting.live_total_estimated_cost,
+        accounting.settled_total_estimated_cost,
+        accounting.missing_total_estimated_cost,
+        accounting.currency.clone(),
+        accounting.in_flight_stage_count,
+        accounting.missing_stage_count,
+        accounting.accounting_status.clone(),
+        existing_snapshot.as_ref().and_then(|row| row.settled_at),
+    );
+    let computed_at = Utc::now();
+    let snapshot_row = repositories::RuntimeCollectionSettlementRow {
+        project_id,
+        progress_state: repositories::runtime_collection_progress_state_key(
+            &settlement.progress_state,
+        )
+        .to_string(),
+        terminal_state: repositories::runtime_collection_terminal_state_key(
+            &terminal_outcome.terminal_state,
+        )
+        .to_string(),
+        terminal_transition_at: terminal_outcome.last_transition_at,
+        residual_reason: terminal_outcome
+            .residual_reason
+            .as_ref()
+            .map(repositories::runtime_collection_residual_reason_key)
+            .map(str::to_string),
+        document_count: progress_rollup.accepted_count.max(0),
+        accepted_count: progress_rollup.accepted_count.max(0),
+        content_extracted_count: progress_rollup.content_extracted_count.max(0),
+        chunked_count: progress_rollup.chunked_count.max(0),
+        embedded_count: progress_rollup.embedded_count.max(0),
+        graph_active_count: progress_rollup.extracting_graph_count.max(0),
+        graph_ready_count: progress_rollup.graph_ready_count.max(0),
+        pending_graph_count: i64::try_from(pending_graph_count).unwrap_or(i64::MAX),
+        ready_count: progress_rollup.ready_count.max(0),
+        failed_count: progress_rollup.failed_count.max(0),
+        queue_backlog_count: progress_rollup.queue_backlog_count.max(0),
+        processing_backlog_count: progress_rollup.processing_backlog_count.max(0),
+        live_total_estimated_cost: accounting.live_total_estimated_cost,
+        settled_total_estimated_cost: accounting.settled_total_estimated_cost,
+        missing_total_estimated_cost: accounting.missing_total_estimated_cost,
+        currency: accounting.currency.clone(),
+        prompt_tokens: accounting.prompt_tokens,
+        completion_tokens: accounting.completion_tokens,
+        total_tokens: accounting.total_tokens,
+        priced_stage_count: accounting.priced_stage_count,
+        unpriced_stage_count: accounting.unpriced_stage_count,
+        in_flight_stage_count: accounting.in_flight_stage_count,
+        missing_stage_count: accounting.missing_stage_count,
+        accounting_status: accounting.display_accounting_status.clone(),
+        is_fully_settled: settlement.is_fully_settled,
+        settled_at: settlement.settled_at,
+        computed_at,
+    };
+    let terminal_outcome_row = repositories::RuntimeCollectionTerminalOutcomeRow {
+        project_id,
+        workspace_id: project.workspace_id,
+        terminal_state: repositories::runtime_collection_terminal_state_key(
+            &terminal_outcome.terminal_state,
+        )
+        .to_string(),
+        residual_reason: terminal_outcome
+            .residual_reason
+            .as_ref()
+            .map(repositories::runtime_collection_residual_reason_key)
+            .map(str::to_string),
+        queued_count: i64::try_from(terminal_outcome.queued_count).unwrap_or(i64::MAX),
+        processing_count: i64::try_from(terminal_outcome.processing_count).unwrap_or(i64::MAX),
+        pending_graph_count: i64::try_from(terminal_outcome.pending_graph_count)
+            .unwrap_or(i64::MAX),
+        failed_document_count: i64::try_from(terminal_outcome.failed_document_count)
+            .unwrap_or(i64::MAX),
+        live_total_estimated_cost: terminal_outcome.live_total_estimated_cost,
+        settled_total_estimated_cost: terminal_outcome.settled_total_estimated_cost,
+        missing_total_estimated_cost: terminal_outcome.missing_total_estimated_cost,
+        currency: terminal_outcome.currency.clone(),
+        settled_at: terminal_outcome.settled_at,
+        last_transition_at: terminal_outcome.last_transition_at,
+    };
+    repositories::upsert_runtime_collection_settlement_snapshot(
+        &state.persistence.postgres,
+        &snapshot_row,
+    )
+    .await
+    .context("failed to persist collection settlement snapshot")?;
+    repositories::upsert_runtime_collection_terminal_outcome(
+        &state.persistence.postgres,
+        &terminal_outcome_row,
+    )
+    .await
+    .context("failed to persist collection terminal outcome")?;
+
+    let stage_inputs = build_stage_settlement_rollup_inputs(&stage_rollups, &accounting_rows);
+    repositories::replace_runtime_collection_settlement_rollups(
+        &state.persistence.postgres,
+        project_id,
+        "stage",
+        &stage_inputs,
+    )
+    .await
+    .context("failed to persist stage settlement rollups")?;
+
+    let format_inputs = build_format_settlement_rollup_inputs(&format_rollups, &accounting_rows);
+    repositories::replace_runtime_collection_settlement_rollups(
+        &state.persistence.postgres,
+        project_id,
+        "format",
+        &format_inputs,
+    )
+    .await
+    .context("failed to persist format settlement rollups")
+}
+
+fn summarize_runtime_collection_accounting(
+    rows: &[repositories::RuntimeCollectionResolvedStageAccountingRow],
+) -> RuntimeCollectionAccountingSnapshot {
+    let settled_total_estimated_cost = sum_decimal_values(
+        rows.iter()
+            .filter(|row| row.accounting_scope == "stage_rollup")
+            .filter_map(|row| row.estimated_cost),
+    );
+    let live_total_estimated_cost = sum_decimal_values(
+        rows.iter()
+            .filter(|row| row.accounting_scope == "provider_call")
+            .filter_map(|row| row.estimated_cost),
+    );
+    let missing_stage_count =
+        i32::try_from(rows.iter().filter(|row| row.accounting_scope == "missing").count())
+            .unwrap_or(i32::MAX);
+    let in_flight_stage_count =
+        i32::try_from(rows.iter().filter(|row| row.accounting_scope == "provider_call").count())
+            .unwrap_or(i32::MAX);
+    let priced_stage_count = i32::try_from(
+        rows.iter()
+            .filter(|row| row.accounting_scope == "stage_rollup" && row.pricing_status == "priced")
+            .count(),
+    )
+    .unwrap_or(i32::MAX);
+    let unpriced_stage_count = i32::try_from(
+        rows.iter()
+            .filter(|row| row.accounting_scope == "stage_rollup" && row.pricing_status != "priced")
+            .count(),
+    )
+    .unwrap_or(i32::MAX);
+    let accounting_status = document_accounting::classify_accounting_truth_status(
+        priced_stage_count,
+        unpriced_stage_count,
+        in_flight_stage_count,
+        missing_stage_count,
+    );
+    let display_accounting_status =
+        document_accounting::accounting_truth_status_key(&accounting_status).to_string();
+    RuntimeCollectionAccountingSnapshot {
+        live_total_estimated_cost,
+        settled_total_estimated_cost,
+        missing_total_estimated_cost: (missing_stage_count > 0).then_some(Decimal::ZERO),
+        currency: rows.iter().find_map(|row| row.currency.clone()),
+        prompt_tokens: rows.iter().map(|row| row.prompt_tokens).sum(),
+        completion_tokens: rows.iter().map(|row| row.completion_tokens).sum(),
+        total_tokens: rows.iter().map(|row| row.total_tokens).sum(),
+        priced_stage_count,
+        unpriced_stage_count,
+        in_flight_stage_count,
+        missing_stage_count,
+        accounting_status,
+        display_accounting_status,
+    }
+}
+
+fn map_runtime_collection_settlement_summary(
+    row: &repositories::RuntimeCollectionSettlementRow,
+) -> crate::domains::runtime_ingestion::RuntimeCollectionSettlementSummary {
+    crate::domains::runtime_ingestion::RuntimeCollectionSettlementSummary {
+        progress_state: repositories::parse_runtime_collection_progress_state(Some(
+            row.progress_state.as_str(),
+        )),
+        live_total_estimated_cost: row.live_total_estimated_cost,
+        settled_total_estimated_cost: row.settled_total_estimated_cost,
+        missing_total_estimated_cost: row.missing_total_estimated_cost,
+        currency: row.currency.clone(),
+        is_fully_settled: row.is_fully_settled,
+        settled_at: row.settled_at,
+    }
+}
+
+fn derive_collection_residual_reason(
+    graph_health: Option<&repositories::RuntimeGraphDiagnosticsSnapshotRow>,
+    failed_runs: &[repositories::RuntimeIngestionRunRow],
+    missing_stage_count: i32,
+    existing_reason: Option<RuntimeCollectionResidualReason>,
+) -> Option<RuntimeCollectionResidualReason> {
+    if let Some(graph_health) = graph_health {
+        match graph_health.last_projection_failure_kind.as_deref() {
+            Some("projection_contention") if graph_health.failed_projection_count > 0 => {
+                return Some(RuntimeCollectionResidualReason::ProjectionContention);
+            }
+            Some("graph_persistence_integrity") if graph_health.failed_projection_count > 0 => {
+                return Some(RuntimeCollectionResidualReason::GraphPersistenceIntegrity);
+            }
+            Some("diagnostics_unavailable") | _ if !graph_health.is_runtime_readable => {
+                return Some(RuntimeCollectionResidualReason::DiagnosticsUnavailable);
+            }
+            _ => {}
+        }
+    }
+    for run in failed_runs {
+        if let Some(reason) =
+            classify_failed_run_residual_reason(run.latest_error_message.as_deref())
+        {
+            return Some(reason);
+        }
+    }
+    if !failed_runs.is_empty() {
+        if let Some(reason) = existing_reason {
+            return Some(reason);
+        }
+        return Some(RuntimeCollectionResidualReason::ProviderFailure);
+    }
+    if missing_stage_count > 0 {
+        return Some(RuntimeCollectionResidualReason::SettlementRefreshFailed);
+    }
+    None
+}
+
+fn classify_failed_run_residual_reason(
+    latest_error_message: Option<&str>,
+) -> Option<RuntimeCollectionResidualReason> {
+    let normalized = latest_error_message?.to_ascii_lowercase();
+    if normalized.contains("upload_limit_exceeded")
+        || normalized.contains("upload limit exceeded")
+        || normalized.contains("exceeded the size limit")
+    {
+        return Some(RuntimeCollectionResidualReason::UploadLimitExceeded);
+    }
+    if normalized.contains("projection contention")
+        || normalized.contains("deadlock")
+        || normalized.contains("lock timeout")
+    {
+        return Some(RuntimeCollectionResidualReason::ProjectionContention);
+    }
+    if normalized.contains("graph persistence integrity")
+        || normalized.contains("foreign key violation")
+        || normalized.contains("runtime_graph_edge")
+    {
+        return Some(RuntimeCollectionResidualReason::GraphPersistenceIntegrity);
+    }
+    if normalized.contains("settlement refresh failed")
+        || normalized.contains("failed to persist collection settlement")
+        || normalized.contains("failed to persist collection terminal outcome")
+    {
+        return Some(RuntimeCollectionResidualReason::SettlementRefreshFailed);
+    }
+    if normalized.contains("provider failure")
+        || normalized.contains("upstream timeout")
+        || normalized.contains("upstream rejection")
+        || normalized.contains("invalid model output")
+        || normalized.contains("invalid_request")
+        || normalized.contains("invalid request")
+    {
+        return Some(RuntimeCollectionResidualReason::ProviderFailure);
+    }
+    None
+}
+
+fn terminal_transition_at(
+    existing: Option<&repositories::RuntimeCollectionTerminalOutcomeRow>,
+    queued_count: usize,
+    processing_count: usize,
+    pending_graph_count: usize,
+    failed_document_count: usize,
+    missing_stage_count: i32,
+    residual_reason: Option<&RuntimeCollectionResidualReason>,
+) -> Option<chrono::DateTime<Utc>> {
+    let terminal_state = if queued_count > 0 || processing_count > 0 || pending_graph_count > 0 {
+        "live_in_flight"
+    } else if residual_reason.is_some() || failed_document_count > 0 || missing_stage_count > 0 {
+        "failed_with_residual_work"
+    } else {
+        "fully_settled"
+    };
+    let residual_reason = residual_reason
+        .map(repositories::runtime_collection_residual_reason_key)
+        .map(str::to_string);
+    match existing {
+        Some(existing)
+            if existing.terminal_state == terminal_state
+                && existing.residual_reason == residual_reason =>
+        {
+            Some(existing.last_transition_at)
+        }
+        _ => None,
+    }
+}
+
+fn sum_decimal_values<I>(values: I) -> Option<Decimal>
+where
+    I: Iterator<Item = Decimal>,
+{
+    let mut saw_value = false;
+    let total = values.fold(Decimal::ZERO, |acc, value| {
+        saw_value = true;
+        acc + value
+    });
+    saw_value.then_some(total)
+}
+
+fn summarize_runtime_collection_scope_accounting(
+    rows: &[repositories::RuntimeCollectionResolvedStageAccountingRow],
+) -> RuntimeCollectionScopeAccountingSnapshot {
+    let document_count =
+        i64::try_from(rows.iter().map(|row| row.ingestion_run_id).collect::<BTreeSet<_>>().len())
+            .unwrap_or(i64::MAX);
+    let priced_stage_count = i32::try_from(
+        rows.iter()
+            .filter(|row| row.accounting_scope == "stage_rollup" && row.pricing_status == "priced")
+            .count(),
+    )
+    .unwrap_or(i32::MAX);
+    let unpriced_stage_count = i32::try_from(
+        rows.iter()
+            .filter(|row| row.accounting_scope == "stage_rollup" && row.pricing_status != "priced")
+            .count(),
+    )
+    .unwrap_or(i32::MAX);
+    let in_flight_stage_count =
+        i32::try_from(rows.iter().filter(|row| row.accounting_scope == "provider_call").count())
+            .unwrap_or(i32::MAX);
+    let missing_stage_count =
+        i32::try_from(rows.iter().filter(|row| row.accounting_scope == "missing").count())
+            .unwrap_or(i32::MAX);
+
+    RuntimeCollectionScopeAccountingSnapshot {
+        document_count,
+        live_estimated_cost: sum_decimal_values(
+            rows.iter()
+                .filter(|row| row.accounting_scope == "provider_call")
+                .filter_map(|row| row.estimated_cost),
+        ),
+        settled_estimated_cost: sum_decimal_values(
+            rows.iter()
+                .filter(|row| row.accounting_scope == "stage_rollup")
+                .filter_map(|row| row.estimated_cost),
+        ),
+        missing_estimated_cost: (missing_stage_count > 0).then_some(Decimal::ZERO),
+        currency: rows.iter().find_map(|row| row.currency.clone()),
+        prompt_tokens: rows.iter().map(|row| row.prompt_tokens).sum(),
+        completion_tokens: rows.iter().map(|row| row.completion_tokens).sum(),
+        total_tokens: rows.iter().map(|row| row.total_tokens).sum(),
+        accounting_status: document_accounting::accounting_truth_status_key(
+            &document_accounting::classify_accounting_truth_status(
+                priced_stage_count,
+                unpriced_stage_count,
+                in_flight_stage_count,
+                missing_stage_count,
+            ),
+        )
+        .to_string(),
+    }
+}
+
+fn build_stage_settlement_rollup_inputs(
+    stage_rollups: &[repositories::RuntimeCollectionStageRollupRow],
+    accounting_rows: &[repositories::RuntimeCollectionResolvedStageAccountingRow],
+) -> Vec<repositories::RuntimeCollectionSettlementRollupInput> {
+    let mut rows_by_stage =
+        BTreeMap::<String, Vec<repositories::RuntimeCollectionResolvedStageAccountingRow>>::new();
+    for row in accounting_rows {
+        rows_by_stage.entry(row.stage.clone()).or_default().push(row.clone());
+    }
+
+    let mut rows = stage_rollups
+        .iter()
+        .map(|rollup| {
+            let stage_rows = rows_by_stage.remove(&rollup.stage).unwrap_or_default();
+            let summary = summarize_runtime_collection_scope_accounting(&stage_rows);
+            repositories::RuntimeCollectionSettlementRollupInput {
+                scope_kind: "stage".to_string(),
+                scope_key: rollup.stage.clone(),
+                queued_count: 0,
+                processing_count: rollup.active_count.max(0),
+                completed_count: rollup.completed_count.max(0),
+                failed_count: rollup.failed_count.max(0),
+                document_count: summary.document_count.max(0),
+                ready_count: 0,
+                ready_no_graph_count: 0,
+                content_extracted_count: 0,
+                chunked_count: 0,
+                embedded_count: 0,
+                graph_active_count: 0,
+                graph_ready_count: 0,
+                live_estimated_cost: summary.live_estimated_cost,
+                settled_estimated_cost: summary.settled_estimated_cost,
+                missing_estimated_cost: summary.missing_estimated_cost,
+                currency: summary.currency.clone(),
+                avg_elapsed_ms: rollup.avg_elapsed_ms,
+                max_elapsed_ms: rollup.max_elapsed_ms,
+                bottleneck_stage: None,
+                bottleneck_avg_elapsed_ms: None,
+                bottleneck_max_elapsed_ms: None,
+                prompt_tokens: summary.prompt_tokens,
+                completion_tokens: summary.completion_tokens,
+                total_tokens: summary.total_tokens,
+                accounting_status: summary.accounting_status,
+                bottleneck_rank: None,
+                is_primary_bottleneck: false,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    apply_rollup_bottleneck_ranks(&mut rows, |row| {
+        (row.avg_elapsed_ms, row.max_elapsed_ms, row.scope_key.clone())
+    });
+    rows
+}
+
+fn build_format_settlement_rollup_inputs(
+    format_rollups: &[repositories::RuntimeCollectionFormatRollupRow],
+    accounting_rows: &[repositories::RuntimeCollectionResolvedStageAccountingRow],
+) -> Vec<repositories::RuntimeCollectionSettlementRollupInput> {
+    let mut rows_by_format =
+        BTreeMap::<String, Vec<repositories::RuntimeCollectionResolvedStageAccountingRow>>::new();
+    for row in accounting_rows {
+        rows_by_format.entry(row.file_type.clone()).or_default().push(row.clone());
+    }
+
+    let mut rows = format_rollups
+        .iter()
+        .map(|rollup| {
+            let format_rows = rows_by_format.remove(&rollup.file_type).unwrap_or_default();
+            let summary = summarize_runtime_collection_scope_accounting(&format_rows);
+            repositories::RuntimeCollectionSettlementRollupInput {
+                scope_kind: "format".to_string(),
+                scope_key: rollup.file_type.clone(),
+                queued_count: rollup.queued_count.max(0),
+                processing_count: rollup.processing_count.max(0),
+                completed_count: (rollup.ready_count + rollup.ready_no_graph_count).max(0),
+                failed_count: rollup.failed_count.max(0),
+                document_count: rollup.document_count.max(0),
+                ready_count: rollup.ready_count.max(0),
+                ready_no_graph_count: rollup.ready_no_graph_count.max(0),
+                content_extracted_count: rollup.content_extracted_count.max(0),
+                chunked_count: rollup.chunked_count.max(0),
+                embedded_count: rollup.embedded_count.max(0),
+                graph_active_count: rollup.extracting_graph_count.max(0),
+                graph_ready_count: rollup.graph_ready_count.max(0),
+                live_estimated_cost: summary.live_estimated_cost,
+                settled_estimated_cost: summary.settled_estimated_cost,
+                missing_estimated_cost: summary.missing_estimated_cost,
+                currency: summary.currency.clone(),
+                avg_elapsed_ms: rollup.avg_total_elapsed_ms,
+                max_elapsed_ms: rollup.max_total_elapsed_ms,
+                bottleneck_stage: rollup.bottleneck_stage.clone(),
+                bottleneck_avg_elapsed_ms: rollup.bottleneck_avg_elapsed_ms,
+                bottleneck_max_elapsed_ms: rollup.bottleneck_max_elapsed_ms,
+                prompt_tokens: summary.prompt_tokens,
+                completion_tokens: summary.completion_tokens,
+                total_tokens: summary.total_tokens,
+                accounting_status: summary.accounting_status,
+                bottleneck_rank: None,
+                is_primary_bottleneck: false,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    apply_rollup_bottleneck_ranks(&mut rows, |row| {
+        (
+            row.bottleneck_avg_elapsed_ms.or(row.avg_elapsed_ms),
+            row.bottleneck_max_elapsed_ms.or(row.max_elapsed_ms),
+            row.scope_key.clone(),
+        )
+    });
+    rows
+}
+
+fn apply_rollup_bottleneck_ranks<F>(
+    rows: &mut [repositories::RuntimeCollectionSettlementRollupInput],
+    metrics: F,
+) where
+    F: Fn(
+        &repositories::RuntimeCollectionSettlementRollupInput,
+    ) -> (Option<i64>, Option<i64>, String),
+{
+    let mut ranked = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let (avg_elapsed_ms, max_elapsed_ms, scope_key) = metrics(row);
+            (index, avg_elapsed_ms, max_elapsed_ms, scope_key)
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        right.1.cmp(&left.1).then_with(|| right.2.cmp(&left.2)).then_with(|| left.3.cmp(&right.3))
+    });
+    let primary_rank_available = ranked
+        .first()
+        .map(|(_, avg_elapsed_ms, max_elapsed_ms, _)| {
+            avg_elapsed_ms.is_some() || max_elapsed_ms.is_some()
+        })
+        .unwrap_or(false);
+    for (rank, (index, _, _, _)) in ranked.into_iter().enumerate() {
+        rows[index].bottleneck_rank = Some(i32::try_from(rank + 1).unwrap_or(i32::MAX));
+        rows[index].is_primary_bottleneck = primary_rank_available && rank == 0;
+    }
+}
+
+async fn build_library_queue_isolation_snapshot_input(
+    state: &AppState,
+    project_id: Uuid,
+) -> anyhow::Result<repositories::RuntimeLibraryQueueSliceSnapshotInput> {
+    let queue_slice =
+        repositories::load_runtime_library_queue_slice(&state.persistence.postgres, project_id)
+            .await
+            .context("failed to load queue-isolation slice for snapshot refresh")?;
+    let summary = state.pipeline_hardening_services.queue_isolation.summarize(
+        usize::try_from(queue_slice.queued_count).unwrap_or(usize::MAX),
+        usize::try_from(queue_slice.processing_count).unwrap_or(usize::MAX),
+        usize::try_from(queue_slice.workspace_processing_count).unwrap_or(usize::MAX),
+        usize::try_from(queue_slice.global_processing_count).unwrap_or(usize::MAX),
+        queue_slice.last_claimed_at,
+        queue_slice.last_progress_at,
+        repositories::parse_runtime_queue_waiting_reason(queue_slice.waiting_reason.as_deref()),
+    );
+    Ok(repositories::RuntimeLibraryQueueSliceSnapshotInput {
+        project_id,
+        workspace_id: queue_slice.workspace_id,
+        queued_count: queue_slice.queued_count,
+        processing_count: queue_slice.processing_count,
+        workspace_processing_count: queue_slice.workspace_processing_count,
+        global_processing_count: queue_slice.global_processing_count,
+        isolated_capacity_count: i64::try_from(summary.isolated_capacity_count).unwrap_or(i64::MAX),
+        available_capacity_count: i64::try_from(summary.available_capacity_count)
+            .unwrap_or(i64::MAX),
+        waiting_reason: Some(
+            repositories::runtime_queue_waiting_reason_key(&summary.waiting_reason).to_string(),
+        ),
+        last_claimed_at: summary.last_claimed_at,
+        last_progress_at: summary.last_progress_at,
+    })
+}
+
+const GRAPH_PROGRESS_FAST_POLL_MS: i64 = 2_000;
+const GRAPH_PROGRESS_WATCH_POLL_MS: i64 = 4_000;
+const GRAPH_PROGRESS_CALM_POLL_MS: i64 = 8_000;
+
+#[must_use]
+pub fn rank_runtime_graph_progress_bottlenecks(
+    checkpoints: &[RuntimeGraphProgressCheckpointRow],
+) -> HashMap<(Uuid, i32), usize> {
+    let mut sorted = checkpoints.to_vec();
+    sorted.sort_by(|left, right| {
+        right
+            .avg_chunk_elapsed_ms
+            .unwrap_or_default()
+            .cmp(&left.avg_chunk_elapsed_ms.unwrap_or_default())
+            .then_with(|| right.total_chunks.cmp(&left.total_chunks))
+            .then_with(|| left.ingestion_run_id.cmp(&right.ingestion_run_id))
+    });
+    sorted
+        .into_iter()
+        .enumerate()
+        .map(|(index, row)| ((row.ingestion_run_id, row.attempt_no), index + 1))
+        .collect()
+}
+
+#[must_use]
+pub fn build_runtime_document_graph_throughput_summary(
+    checkpoint: Option<&RuntimeGraphProgressCheckpointRow>,
+    resume_rollup: Option<&RuntimeGraphExtractionResumeRollupRow>,
+    bottleneck_rank: Option<usize>,
+) -> Option<RuntimeDocumentGraphThroughputSummary> {
+    let checkpoint = checkpoint?;
+    let (cadence, recommended_poll_interval_ms) =
+        graph_progress_cadence(checkpoint.pressure_kind.as_deref(), checkpoint.computed_at);
+    let resumed_chunk_count = resume_rollup
+        .map(|row| usize::try_from(row.resumed_chunk_count.max(0)).unwrap_or(usize::MAX))
+        .unwrap_or(0);
+    let resume_hit_count = resume_rollup
+        .map(|row| usize::try_from(row.resume_hit_count.max(0)).unwrap_or(usize::MAX))
+        .unwrap_or(0);
+    let replayed_chunk_count = resume_rollup
+        .map(|row| usize::try_from(row.replayed_chunk_count.max(0)).unwrap_or(usize::MAX))
+        .unwrap_or(0);
+    let max_downgrade_level = resume_rollup
+        .map(|row| usize::try_from(row.max_downgrade_level.max(0)).unwrap_or(usize::MAX))
+        .unwrap_or(0);
+    let duplicate_work_ratio = (checkpoint.total_chunks > 0)
+        .then(|| replayed_chunk_count as f64 / checkpoint.total_chunks.max(1) as f64);
+    Some(RuntimeDocumentGraphThroughputSummary {
+        processed_chunks: usize::try_from(checkpoint.processed_chunks).unwrap_or(usize::MAX),
+        total_chunks: usize::try_from(checkpoint.total_chunks).unwrap_or(usize::MAX),
+        progress_percent: checkpoint.progress_percent,
+        provider_call_count: usize::try_from(checkpoint.provider_call_count).unwrap_or(usize::MAX),
+        resumed_chunk_count,
+        resume_hit_count,
+        replayed_chunk_count,
+        duplicate_work_ratio,
+        max_downgrade_level,
+        avg_call_elapsed_ms: checkpoint.avg_call_elapsed_ms,
+        avg_chunk_elapsed_ms: checkpoint.avg_chunk_elapsed_ms,
+        avg_chars_per_second: checkpoint.avg_chars_per_second,
+        avg_tokens_per_second: checkpoint.avg_tokens_per_second,
+        last_provider_call_at: checkpoint.last_provider_call_at,
+        last_checkpoint_at: checkpoint.computed_at,
+        last_checkpoint_elapsed_ms: checkpoint_age_ms(checkpoint.computed_at),
+        next_checkpoint_eta_ms: checkpoint.next_checkpoint_eta_ms,
+        pressure_kind: checkpoint.pressure_kind.clone(),
+        cadence,
+        recommended_poll_interval_ms,
+        bottleneck_rank,
+    })
+}
+
+#[must_use]
+pub fn build_runtime_collection_graph_throughput_summary(
+    checkpoints: &[RuntimeGraphProgressCheckpointRow],
+    resume_rollups: &[RuntimeGraphExtractionResumeRollupRow],
+) -> Option<RuntimeCollectionGraphThroughputSummary> {
+    if checkpoints.is_empty() {
+        return None;
+    }
+
+    let tracked_document_count = checkpoints.len();
+    let active_document_count = checkpoints
+        .iter()
+        .filter(|checkpoint| checkpoint.processed_chunks < checkpoint.total_chunks)
+        .count();
+    let processed_chunks =
+        checkpoints.iter().map(|checkpoint| checkpoint.processed_chunks.max(0)).sum::<i64>();
+    let total_chunks =
+        checkpoints.iter().map(|checkpoint| checkpoint.total_chunks.max(0)).sum::<i64>();
+    let provider_call_count =
+        checkpoints.iter().map(|checkpoint| checkpoint.provider_call_count.max(0)).sum::<i64>();
+    let resumed_chunk_count =
+        resume_rollups.iter().map(|rollup| rollup.resumed_chunk_count.max(0)).sum::<i64>();
+    let resume_hit_count =
+        resume_rollups.iter().map(|rollup| rollup.resume_hit_count.max(0)).sum::<i64>();
+    let replayed_chunk_count =
+        resume_rollups.iter().map(|rollup| rollup.replayed_chunk_count.max(0)).sum::<i64>();
+    let max_downgrade_level = resume_rollups
+        .iter()
+        .map(|rollup| rollup.max_downgrade_level.max(0))
+        .max()
+        .unwrap_or_default();
+    let total_call_elapsed_ms = checkpoints.iter().fold(0i64, |accumulator, checkpoint| {
+        accumulator.saturating_add(
+            checkpoint
+                .avg_call_elapsed_ms
+                .unwrap_or_default()
+                .max(0)
+                .saturating_mul(checkpoint.provider_call_count.max(0)),
+        )
+    });
+    let total_chunk_elapsed_ms = checkpoints.iter().fold(0i64, |accumulator, checkpoint| {
+        accumulator.saturating_add(
+            checkpoint
+                .avg_chunk_elapsed_ms
+                .unwrap_or_default()
+                .max(0)
+                .saturating_mul(checkpoint.processed_chunks.max(0)),
+        )
+    });
+    let chars_per_second_samples =
+        checkpoints.iter().filter(|checkpoint| checkpoint.avg_chars_per_second.is_some()).count();
+    let tokens_per_second_samples =
+        checkpoints.iter().filter(|checkpoint| checkpoint.avg_tokens_per_second.is_some()).count();
+    let last_checkpoint_at =
+        checkpoints.iter().map(|checkpoint| checkpoint.computed_at).max().unwrap_or_else(Utc::now);
+    let pressure_kind = strongest_graph_pressure_kind(
+        checkpoints.iter().filter_map(|checkpoint| checkpoint.pressure_kind.as_deref()),
+    );
+    let (cadence, recommended_poll_interval_ms) =
+        graph_progress_cadence(pressure_kind, last_checkpoint_at);
+
+    Some(RuntimeCollectionGraphThroughputSummary {
+        tracked_document_count,
+        active_document_count,
+        processed_chunks: usize::try_from(processed_chunks).unwrap_or(usize::MAX),
+        total_chunks: usize::try_from(total_chunks).unwrap_or(usize::MAX),
+        progress_percent: percent_from_counts(processed_chunks, total_chunks),
+        provider_call_count: usize::try_from(provider_call_count).unwrap_or(usize::MAX),
+        resumed_chunk_count: usize::try_from(resumed_chunk_count).unwrap_or(usize::MAX),
+        resume_hit_count: usize::try_from(resume_hit_count).unwrap_or(usize::MAX),
+        replayed_chunk_count: usize::try_from(replayed_chunk_count).unwrap_or(usize::MAX),
+        duplicate_work_ratio: (total_chunks > 0)
+            .then_some(replayed_chunk_count as f64 / total_chunks.max(1) as f64),
+        max_downgrade_level: usize::try_from(max_downgrade_level).unwrap_or(usize::MAX),
+        avg_call_elapsed_ms: (provider_call_count > 0)
+            .then_some(total_call_elapsed_ms / provider_call_count.max(1)),
+        avg_chunk_elapsed_ms: (processed_chunks > 0)
+            .then_some(total_chunk_elapsed_ms / processed_chunks.max(1)),
+        avg_chars_per_second: (chars_per_second_samples > 0).then(|| {
+            checkpoints.iter().filter_map(|checkpoint| checkpoint.avg_chars_per_second).sum::<f64>()
+                / chars_per_second_samples as f64
+        }),
+        avg_tokens_per_second: (tokens_per_second_samples > 0).then(|| {
+            checkpoints
+                .iter()
+                .filter_map(|checkpoint| checkpoint.avg_tokens_per_second)
+                .sum::<f64>()
+                / tokens_per_second_samples as f64
+        }),
+        last_provider_call_at: checkpoints
+            .iter()
+            .filter_map(|checkpoint| checkpoint.last_provider_call_at)
+            .max(),
+        last_checkpoint_at,
+        last_checkpoint_elapsed_ms: checkpoint_age_ms(last_checkpoint_at),
+        next_checkpoint_eta_ms: checkpoints
+            .iter()
+            .filter_map(|checkpoint| checkpoint.next_checkpoint_eta_ms)
+            .max(),
+        pressure_kind: pressure_kind.map(str::to_string),
+        cadence,
+        recommended_poll_interval_ms,
+        bottleneck_rank: Some(1),
+    })
+}
+
+fn graph_progress_cadence(
+    pressure_kind: Option<&str>,
+    last_checkpoint_at: chrono::DateTime<Utc>,
+) -> (RuntimeGraphProgressCadence, i64) {
+    let last_checkpoint_elapsed_ms = checkpoint_age_ms(last_checkpoint_at);
+    match (graph_pressure_severity(pressure_kind), last_checkpoint_elapsed_ms) {
+        (2, _) | (_, 15_000..) => (RuntimeGraphProgressCadence::Fast, GRAPH_PROGRESS_FAST_POLL_MS),
+        (1, _) | (_, 6_000..) => (RuntimeGraphProgressCadence::Watch, GRAPH_PROGRESS_WATCH_POLL_MS),
+        _ => (RuntimeGraphProgressCadence::Calm, GRAPH_PROGRESS_CALM_POLL_MS),
+    }
+}
+
+fn strongest_graph_pressure_kind<'a>(values: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    values.max_by_key(|value| graph_pressure_severity(Some(*value)))
+}
+
+fn graph_pressure_severity(value: Option<&str>) -> i32 {
+    match value {
+        Some("high") => 2,
+        Some("elevated") => 1,
+        Some("steady") => 0,
+        _ => -1,
+    }
+}
+
+fn checkpoint_age_ms(value: chrono::DateTime<Utc>) -> i64 {
+    Utc::now().signed_duration_since(value).num_milliseconds().max(0)
+}
+
+fn percent_from_counts(processed: i64, total: i64) -> Option<i32> {
+    if processed <= 0 || total <= 0 {
+        return None;
+    }
+    Some(((processed as f64 / total as f64) * 100.0).round() as i32)
 }
 
 fn parse_runtime_ingestion_status(status: &str) -> RuntimeIngestionStatus {
@@ -1726,5 +2748,229 @@ mod tests {
         assert_eq!(target_rows[0].target_kind, "entity");
         assert_eq!(target_rows[0].target_id, nodes[0].id);
         assert_eq!(target_rows[0].dimensions, Some(1536));
+    }
+
+    #[test]
+    fn graph_progress_bottlenecks_rank_slowest_checkpoint_first() {
+        let slow_run_id = Uuid::now_v7();
+        let fast_run_id = Uuid::now_v7();
+        let checkpoints = vec![
+            repositories::RuntimeGraphProgressCheckpointRow {
+                ingestion_run_id: fast_run_id,
+                attempt_no: 1,
+                processed_chunks: 10,
+                total_chunks: 40,
+                progress_percent: Some(25),
+                provider_call_count: 10,
+                avg_call_elapsed_ms: Some(1_500),
+                avg_chunk_elapsed_ms: Some(2_500),
+                avg_chars_per_second: Some(1200.0),
+                avg_tokens_per_second: Some(420.0),
+                last_provider_call_at: Some(Utc::now()),
+                next_checkpoint_eta_ms: Some(8_000),
+                pressure_kind: Some("steady".to_string()),
+                provider_failure_class: None,
+                request_shape_key: None,
+                request_size_bytes: None,
+                upstream_status: None,
+                retry_outcome: None,
+                computed_at: Utc::now(),
+            },
+            repositories::RuntimeGraphProgressCheckpointRow {
+                ingestion_run_id: slow_run_id,
+                attempt_no: 1,
+                processed_chunks: 8,
+                total_chunks: 40,
+                progress_percent: Some(20),
+                provider_call_count: 8,
+                avg_call_elapsed_ms: Some(3_500),
+                avg_chunk_elapsed_ms: Some(12_000),
+                avg_chars_per_second: Some(420.0),
+                avg_tokens_per_second: Some(150.0),
+                last_provider_call_at: Some(Utc::now()),
+                next_checkpoint_eta_ms: Some(20_000),
+                pressure_kind: Some("high".to_string()),
+                provider_failure_class: None,
+                request_shape_key: None,
+                request_size_bytes: None,
+                upstream_status: None,
+                retry_outcome: None,
+                computed_at: Utc::now(),
+            },
+        ];
+
+        let ranks = rank_runtime_graph_progress_bottlenecks(&checkpoints);
+
+        assert_eq!(ranks.get(&(slow_run_id, 1)), Some(&1usize));
+        assert_eq!(ranks.get(&(fast_run_id, 1)), Some(&2usize));
+    }
+
+    #[test]
+    fn document_graph_progress_summary_exposes_poll_cadence() {
+        let checkpoint = repositories::RuntimeGraphProgressCheckpointRow {
+            ingestion_run_id: Uuid::now_v7(),
+            attempt_no: 2,
+            processed_chunks: 12,
+            total_chunks: 40,
+            progress_percent: Some(30),
+            provider_call_count: 12,
+            avg_call_elapsed_ms: Some(2_800),
+            avg_chunk_elapsed_ms: Some(10_500),
+            avg_chars_per_second: Some(640.0),
+            avg_tokens_per_second: Some(210.0),
+            last_provider_call_at: Some(Utc::now()),
+            next_checkpoint_eta_ms: Some(15_000),
+            pressure_kind: Some("high".to_string()),
+            provider_failure_class: None,
+            request_shape_key: None,
+            request_size_bytes: None,
+            upstream_status: None,
+            retry_outcome: None,
+            computed_at: Utc::now(),
+        };
+
+        let resume_rollup = repositories::RuntimeGraphExtractionResumeRollupRow {
+            ingestion_run_id: checkpoint.ingestion_run_id,
+            chunk_count: 12,
+            ready_chunk_count: 10,
+            failed_chunk_count: 1,
+            replayed_chunk_count: 4,
+            resume_hit_count: 2,
+            resumed_chunk_count: 2,
+            max_downgrade_level: 1,
+        };
+
+        let summary = build_runtime_document_graph_throughput_summary(
+            Some(&checkpoint),
+            Some(&resume_rollup),
+            Some(1),
+        )
+        .expect("summary should exist");
+
+        assert_eq!(summary.cadence, RuntimeGraphProgressCadence::Fast);
+        assert_eq!(summary.recommended_poll_interval_ms, GRAPH_PROGRESS_FAST_POLL_MS);
+        assert_eq!(summary.bottleneck_rank, Some(1));
+        assert_eq!(summary.resumed_chunk_count, 2);
+        assert_eq!(summary.replayed_chunk_count, 4);
+        assert_eq!(summary.max_downgrade_level, 1);
+    }
+
+    #[test]
+    fn collection_graph_progress_summary_aggregates_checkpoint_truth() {
+        let now = Utc::now();
+        let checkpoints = vec![
+            repositories::RuntimeGraphProgressCheckpointRow {
+                ingestion_run_id: Uuid::now_v7(),
+                attempt_no: 1,
+                processed_chunks: 10,
+                total_chunks: 20,
+                progress_percent: Some(50),
+                provider_call_count: 10,
+                avg_call_elapsed_ms: Some(2_000),
+                avg_chunk_elapsed_ms: Some(4_000),
+                avg_chars_per_second: Some(1_000.0),
+                avg_tokens_per_second: Some(350.0),
+                last_provider_call_at: Some(now),
+                next_checkpoint_eta_ms: Some(6_000),
+                pressure_kind: Some("elevated".to_string()),
+                provider_failure_class: None,
+                request_shape_key: None,
+                request_size_bytes: None,
+                upstream_status: None,
+                retry_outcome: None,
+                computed_at: now,
+            },
+            repositories::RuntimeGraphProgressCheckpointRow {
+                ingestion_run_id: Uuid::now_v7(),
+                attempt_no: 1,
+                processed_chunks: 5,
+                total_chunks: 20,
+                progress_percent: Some(25),
+                provider_call_count: 5,
+                avg_call_elapsed_ms: Some(1_000),
+                avg_chunk_elapsed_ms: Some(2_000),
+                avg_chars_per_second: Some(1_200.0),
+                avg_tokens_per_second: Some(420.0),
+                last_provider_call_at: Some(now),
+                next_checkpoint_eta_ms: Some(8_000),
+                pressure_kind: Some("steady".to_string()),
+                provider_failure_class: None,
+                request_shape_key: None,
+                request_size_bytes: None,
+                upstream_status: None,
+                retry_outcome: None,
+                computed_at: now,
+            },
+        ];
+
+        let resume_rollups = vec![
+            repositories::RuntimeGraphExtractionResumeRollupRow {
+                ingestion_run_id: checkpoints[0].ingestion_run_id,
+                chunk_count: 10,
+                ready_chunk_count: 8,
+                failed_chunk_count: 1,
+                replayed_chunk_count: 3,
+                resume_hit_count: 1,
+                resumed_chunk_count: 1,
+                max_downgrade_level: 1,
+            },
+            repositories::RuntimeGraphExtractionResumeRollupRow {
+                ingestion_run_id: checkpoints[1].ingestion_run_id,
+                chunk_count: 5,
+                ready_chunk_count: 5,
+                failed_chunk_count: 0,
+                replayed_chunk_count: 1,
+                resume_hit_count: 1,
+                resumed_chunk_count: 1,
+                max_downgrade_level: 0,
+            },
+        ];
+
+        let summary =
+            build_runtime_collection_graph_throughput_summary(&checkpoints, &resume_rollups)
+                .expect("summary should exist");
+
+        assert_eq!(summary.tracked_document_count, 2);
+        assert_eq!(summary.active_document_count, 2);
+        assert_eq!(summary.processed_chunks, 15);
+        assert_eq!(summary.total_chunks, 40);
+        assert_eq!(summary.provider_call_count, 15);
+        assert_eq!(summary.resumed_chunk_count, 2);
+        assert_eq!(summary.replayed_chunk_count, 4);
+        assert_eq!(summary.progress_percent, Some(38));
+        assert_eq!(summary.pressure_kind.as_deref(), Some("elevated"));
+    }
+
+    #[test]
+    fn terminal_transition_is_preserved_when_terminal_truth_does_not_change() {
+        let previous_at = Utc::now();
+        let existing = repositories::RuntimeCollectionTerminalOutcomeRow {
+            project_id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            terminal_state: "failed_with_residual_work".to_string(),
+            residual_reason: Some("provider_failure".to_string()),
+            queued_count: 0,
+            processing_count: 0,
+            pending_graph_count: 0,
+            failed_document_count: 1,
+            live_total_estimated_cost: None,
+            settled_total_estimated_cost: None,
+            missing_total_estimated_cost: None,
+            currency: None,
+            settled_at: None,
+            last_transition_at: previous_at,
+        };
+
+        let transition_at = terminal_transition_at(
+            Some(&existing),
+            0,
+            0,
+            0,
+            1,
+            0,
+            Some(&RuntimeCollectionResidualReason::ProviderFailure),
+        );
+
+        assert_eq!(transition_at, Some(previous_at));
     }
 }

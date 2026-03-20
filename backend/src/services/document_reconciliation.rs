@@ -5,12 +5,15 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     infra::repositories::{
-        self, DocumentMutationWorkflowRow, DocumentRevisionRow, IngestionJobRow,
-        RuntimeIngestionRunRow,
+        self, CreateDocumentMutationImpactScopeInput, DocumentMutationWorkflowRow,
+        DocumentRevisionRow, IngestionJobRow, RuntimeIngestionRunRow,
     },
+    services::graph_reconciliation_scope::MutationImpactScopeDetection,
+    services::graph_summary::GraphSummaryRefreshRequest,
     services::runtime_ingestion::{
         RuntimeUploadFileInput, persist_extracted_content_from_plan,
-        provider_profile_snapshot_json, queue_prepared_runtime_attempt,
+        persist_library_queue_isolation_waiting_reason, provider_profile_snapshot_json,
+        queue_prepared_runtime_attempt, refresh_library_queue_isolation_snapshot,
         resolve_effective_provider_profile, validate_runtime_extraction_plan,
     },
     services::{graph_projection::mark_graph_snapshot_stale, graph_rebuild::rebuild_library_graph},
@@ -72,6 +75,53 @@ pub struct DeletedDocumentMutation {
 
 const DELETE_RECONCILIATION_ACTIVITY_MESSAGE: &str =
     "waiting for graph reconciliation after delete mutation";
+
+async fn fail_pending_mutation_setup(
+    state: &AppState,
+    mutation_workflow_id: Uuid,
+    error_message: &str,
+) {
+    let _ = repositories::complete_document_mutation_impact_scope(
+        &state.persistence.postgres,
+        mutation_workflow_id,
+        "failed",
+        Some(error_message),
+    )
+    .await;
+    let _ = repositories::update_document_mutation_workflow_status(
+        &state.persistence.postgres,
+        mutation_workflow_id,
+        "failed",
+        Some(error_message),
+    )
+    .await;
+}
+
+pub async fn advance_project_source_truth(
+    state: &AppState,
+    project_id: Uuid,
+) -> anyhow::Result<i64> {
+    state
+        .retrieval_intelligence_services
+        .query_intelligence
+        .invalidate_project_source_truth(state, project_id)
+        .await
+}
+
+pub async fn refresh_graph_summaries_after_reconciliation(
+    state: &AppState,
+    project_id: Uuid,
+    refresh: GraphSummaryRefreshRequest,
+) -> anyhow::Result<GraphSummaryRefreshRequest> {
+    let refreshed =
+        refresh.with_source_truth_version(advance_project_source_truth(state, project_id).await?);
+    state
+        .retrieval_intelligence_services
+        .graph_summary
+        .invalidate_summaries(state, project_id, &refreshed)
+        .await?;
+    Ok(refreshed)
+}
 
 pub async fn create_document_revision(
     state: &AppState,
@@ -170,65 +220,83 @@ pub async fn queue_append_document_mutation(
         request.requested_by.as_deref(),
     )
     .await?;
-    repositories::update_document_current_revision(
-        &state.persistence.postgres,
-        document.id,
-        document.current_revision_id,
-        "reconciling",
-        Some("update_append"),
-        Some("accepted"),
-    )
-    .await
-    .context("failed to mark document append mutation as accepted")?;
-
-    let provider_profile =
-        resolve_effective_provider_profile(state, request.runtime_run.project_id).await?;
-    let runtime_run = repositories::prepare_runtime_ingestion_run_for_attempt(
-        &state.persistence.postgres,
-        request.runtime_run.id,
-        Some(target_revision.id),
-        provider_profile_snapshot_json(&provider_profile),
-        "update_append",
-        &request.runtime_run.file_name,
-        &request.runtime_run.file_type,
-        request.runtime_run.mime_type.as_deref(),
-        request.runtime_run.file_size_bytes,
-    )
-    .await
-    .context("failed to prepare runtime ingestion run for append mutation")?;
-    let extracted_content = repositories::upsert_runtime_extracted_content(
-        &state.persistence.postgres,
-        runtime_run.id,
-        Some(document.id),
-        "append_text",
-        Some(&combined_text),
-        existing_extracted_content.page_count,
-        i32::try_from(combined_text.chars().count()).ok(),
-        existing_extracted_content.extraction_warnings_json.clone(),
-        serde_json::json!({
-            "mutation_kind": "update_append",
-            "base_source_map": existing_extracted_content.source_map_json,
-            "appended_char_count": appended_text.chars().count(),
-        }),
-        existing_extracted_content.provider_kind.as_deref(),
-        existing_extracted_content.model_name.as_deref(),
-        existing_extracted_content.extraction_version.as_deref(),
-    )
-    .await
-    .context("failed to persist appended extracted content")?;
-    let ingestion_job = queue_prepared_runtime_attempt(
+    create_pending_mutation_impact_scope(
         state,
-        &runtime_run,
-        &extracted_content,
-        document.source_id,
-        request.requested_by.as_deref(),
-        &request.trigger_kind,
-        request.parent_job_id,
-        Some(mutation_workflow.id),
-        Some(active_revision.revision_no),
-        Some("update_append"),
+        &document,
+        &mutation_workflow,
+        Some(active_revision.id),
+        Some(target_revision.id),
     )
     .await?;
+    let queue_result = async {
+        let provider_profile =
+            resolve_effective_provider_profile(state, request.runtime_run.project_id).await?;
+        let runtime_run = repositories::prepare_runtime_ingestion_run_for_attempt(
+            &state.persistence.postgres,
+            request.runtime_run.id,
+            Some(target_revision.id),
+            provider_profile_snapshot_json(&provider_profile),
+            "update_append",
+            &request.runtime_run.file_name,
+            &request.runtime_run.file_type,
+            request.runtime_run.mime_type.as_deref(),
+            request.runtime_run.file_size_bytes,
+        )
+        .await
+        .context("failed to prepare runtime ingestion run for append mutation")?;
+        let extracted_content = repositories::upsert_runtime_extracted_content(
+            &state.persistence.postgres,
+            runtime_run.id,
+            Some(document.id),
+            "append_text",
+            Some(&combined_text),
+            existing_extracted_content.page_count,
+            i32::try_from(combined_text.chars().count()).ok(),
+            existing_extracted_content.extraction_warnings_json.clone(),
+            serde_json::json!({
+                "mutation_kind": "update_append",
+                "base_source_map": existing_extracted_content.source_map_json,
+                "appended_char_count": appended_text.chars().count(),
+            }),
+            existing_extracted_content.provider_kind.as_deref(),
+            existing_extracted_content.model_name.as_deref(),
+            existing_extracted_content.extraction_version.as_deref(),
+        )
+        .await
+        .context("failed to persist appended extracted content")?;
+        let ingestion_job = queue_prepared_runtime_attempt(
+            state,
+            &runtime_run,
+            &extracted_content,
+            document.source_id,
+            request.requested_by.as_deref(),
+            &request.trigger_kind,
+            request.parent_job_id,
+            Some(mutation_workflow.id),
+            Some(active_revision.revision_no),
+            Some("update_append"),
+        )
+        .await?;
+        repositories::update_document_current_revision(
+            &state.persistence.postgres,
+            document.id,
+            document.current_revision_id,
+            "reconciling",
+            Some("update_append"),
+            Some("accepted"),
+        )
+        .await
+        .context("failed to mark document append mutation as accepted")?;
+        Ok::<_, anyhow::Error>((runtime_run, ingestion_job))
+    }
+    .await;
+    let (runtime_run, ingestion_job) = match queue_result {
+        Ok(result) => result,
+        Err(error) => {
+            fail_pending_mutation_setup(state, mutation_workflow.id, &error.to_string()).await;
+            return Err(error);
+        }
+    };
 
     Ok(QueuedDocumentMutation { runtime_run, ingestion_job, target_revision, mutation_workflow })
 }
@@ -297,50 +365,68 @@ pub async fn queue_replace_document_mutation(
         request.requested_by.as_deref(),
     )
     .await?;
-    repositories::update_document_current_revision(
-        &state.persistence.postgres,
-        document.id,
-        document.current_revision_id,
-        "reconciling",
-        Some("update_replace"),
-        Some("accepted"),
-    )
-    .await
-    .context("failed to mark document replace mutation as accepted")?;
-
-    let runtime_run = repositories::prepare_runtime_ingestion_run_for_attempt(
-        &state.persistence.postgres,
-        request.runtime_run.id,
+    create_pending_mutation_impact_scope(
+        state,
+        &document,
+        &mutation_workflow,
+        Some(active_revision.id),
         Some(target_revision.id),
-        provider_profile_snapshot_json(&provider_profile),
-        "update_replace",
-        &request.file.file_name,
-        extraction_plan.file_kind.as_str(),
-        request.file.mime_type.as_deref(),
-        i64::try_from(request.file.file_bytes.len()).ok(),
-    )
-    .await
-    .context("failed to prepare runtime ingestion run for replace mutation")?;
-    let extracted_content = persist_extracted_content_from_plan(
-        state,
-        runtime_run.id,
-        Some(document.id),
-        &extraction_plan,
     )
     .await?;
-    let ingestion_job = queue_prepared_runtime_attempt(
-        state,
-        &runtime_run,
-        &extracted_content,
-        document.source_id,
-        request.requested_by.as_deref(),
-        &request.trigger_kind,
-        request.parent_job_id,
-        Some(mutation_workflow.id),
-        Some(active_revision.revision_no),
-        Some("update_replace"),
-    )
-    .await?;
+    let queue_result = async {
+        let runtime_run = repositories::prepare_runtime_ingestion_run_for_attempt(
+            &state.persistence.postgres,
+            request.runtime_run.id,
+            Some(target_revision.id),
+            provider_profile_snapshot_json(&provider_profile),
+            "update_replace",
+            &request.file.file_name,
+            extraction_plan.file_kind.as_str(),
+            request.file.mime_type.as_deref(),
+            i64::try_from(request.file.file_bytes.len()).ok(),
+        )
+        .await
+        .context("failed to prepare runtime ingestion run for replace mutation")?;
+        let extracted_content = persist_extracted_content_from_plan(
+            state,
+            runtime_run.id,
+            Some(document.id),
+            &extraction_plan,
+        )
+        .await?;
+        let ingestion_job = queue_prepared_runtime_attempt(
+            state,
+            &runtime_run,
+            &extracted_content,
+            document.source_id,
+            request.requested_by.as_deref(),
+            &request.trigger_kind,
+            request.parent_job_id,
+            Some(mutation_workflow.id),
+            Some(active_revision.revision_no),
+            Some("update_replace"),
+        )
+        .await?;
+        repositories::update_document_current_revision(
+            &state.persistence.postgres,
+            document.id,
+            document.current_revision_id,
+            "reconciling",
+            Some("update_replace"),
+            Some("accepted"),
+        )
+        .await
+        .context("failed to mark document replace mutation as accepted")?;
+        Ok::<_, anyhow::Error>((runtime_run, ingestion_job))
+    }
+    .await;
+    let (runtime_run, ingestion_job) = match queue_result {
+        Ok(result) => result,
+        Err(error) => {
+            fail_pending_mutation_setup(state, mutation_workflow.id, &error.to_string()).await;
+            return Err(error);
+        }
+    };
 
     Ok(QueuedDocumentMutation { runtime_run, ingestion_job, target_revision, mutation_workflow })
 }
@@ -360,6 +446,20 @@ pub async fn delete_document_and_reconcile(
         request.requested_by.as_deref(),
     )
     .await?;
+    create_pending_mutation_impact_scope(
+        state,
+        &document,
+        &mutation_workflow,
+        Some(active_revision.id),
+        None,
+    )
+    .await?;
+    let detected_scope = state
+        .retrieval_intelligence_services
+        .graph_reconciliation_scope
+        .detect_delete_scope(state, document.project_id, document.id, active_revision.id)
+        .await?;
+    persist_mutation_impact_scope(state, mutation_workflow.id, &detected_scope).await?;
     repositories::update_document_current_revision(
         &state.persistence.postgres,
         document.id,
@@ -382,6 +482,9 @@ pub async fn delete_document_and_reconcile(
         )
         .await
         .context("failed to publish delete reconciliation activity on runtime run")?;
+        persist_library_queue_isolation_waiting_reason(state, document.project_id)
+            .await
+            .context("failed to persist queue-isolation waiting reason for delete mutation")?;
     }
     repositories::delete_ingestion_jobs_by_runtime_ingestion_run_id(
         &state.persistence.postgres,
@@ -406,13 +509,7 @@ pub async fn delete_document_and_reconcile(
     )
     .await
     .context("failed to deactivate graph evidence for deleted document revision")?;
-    let chunk_ids = repositories::list_chunks_by_document(&state.persistence.postgres, document.id)
-        .await
-        .context("failed to list chunks for deleted document")?
-        .into_iter()
-        .map(|chunk| chunk.id)
-        .collect::<Vec<_>>();
-    repositories::delete_chunks_by_ids(&state.persistence.postgres, &chunk_ids)
+    repositories::delete_chunks_by_document(&state.persistence.postgres, document.id)
         .await
         .context("failed to delete chunks for tombstoned document")?;
 
@@ -458,6 +555,13 @@ pub async fn delete_document_and_reconcile(
     .context("failed to tombstone logical document")?;
 
     if let Err(error) = rebuild_library_graph(state, document.project_id).await {
+        let _ = repositories::complete_document_mutation_impact_scope(
+            &state.persistence.postgres,
+            mutation_workflow.id,
+            "failed",
+            Some(&error.to_string()),
+        )
+        .await;
         let _ = repositories::update_document_mutation_workflow_status(
             &state.persistence.postgres,
             mutation_workflow.id,
@@ -465,6 +569,7 @@ pub async fn delete_document_and_reconcile(
             Some(&error.to_string()),
         )
         .await;
+        let _ = refresh_library_queue_isolation_snapshot(state, document.project_id).await;
         return Err(error).context("failed to rebuild graph after document delete");
     }
 
@@ -485,6 +590,32 @@ pub async fn delete_document_and_reconcile(
     )
     .await
     .context("failed to finalize tombstoned logical document")?;
+    let completed_scope = repositories::get_document_mutation_impact_scope_by_workflow_id(
+        &state.persistence.postgres,
+        mutation_workflow.id,
+    )
+    .await
+    .context("failed to load delete mutation impact scope after rebuild")?;
+    repositories::complete_document_mutation_impact_scope(
+        &state.persistence.postgres,
+        mutation_workflow.id,
+        "completed",
+        completed_scope.as_ref().and_then(|row| row.fallback_reason.as_deref()),
+    )
+    .await
+    .context("failed to finalize delete mutation impact scope")?;
+    let _ = refresh_graph_summaries_after_reconciliation(
+        state,
+        document.project_id,
+        completed_scope.as_ref().map_or_else(GraphSummaryRefreshRequest::broad, |row| {
+            graph_summary_refresh_request_for_scope(row)
+        }),
+    )
+    .await
+    .context("failed to invalidate graph summaries after document delete")?;
+    refresh_library_queue_isolation_snapshot(state, document.project_id)
+        .await
+        .context("failed to refresh queue-isolation snapshot after delete reconciliation")?;
 
     Ok(DeletedDocumentMutation { runtime_run: request.runtime_run, mutation_workflow })
 }
@@ -493,6 +624,69 @@ fn should_publish_delete_reconciliation_activity(runtime_run: &RuntimeIngestionR
     runtime_run.activity_status != "blocked"
         || runtime_run.latest_error_message.as_deref()
             != Some(DELETE_RECONCILIATION_ACTIVITY_MESSAGE)
+}
+
+async fn create_pending_mutation_impact_scope(
+    state: &AppState,
+    document: &repositories::DocumentRow,
+    mutation_workflow: &DocumentMutationWorkflowRow,
+    source_revision_id: Option<Uuid>,
+    target_revision_id: Option<Uuid>,
+) -> anyhow::Result<()> {
+    let project = repositories::get_project_by_id(&state.persistence.postgres, document.project_id)
+        .await
+        .context("failed to load project while creating pending mutation impact scope")?
+        .with_context(|| format!("project {} not found", document.project_id))?;
+    repositories::create_document_mutation_impact_scope(
+        &state.persistence.postgres,
+        &CreateDocumentMutationImpactScopeInput {
+            workspace_id: project.workspace_id,
+            project_id: document.project_id,
+            document_id: document.id,
+            mutation_workflow_id: mutation_workflow.id,
+            mutation_kind: mutation_workflow.mutation_kind.clone(),
+            source_revision_id,
+            target_revision_id,
+            scope_status: "pending".to_string(),
+            confidence_status: "low".to_string(),
+            affected_node_ids_json: serde_json::json!([]),
+            affected_relationship_ids_json: serde_json::json!([]),
+            fallback_reason: None,
+        },
+    )
+    .await
+    .context("failed to create pending mutation impact scope")?;
+    Ok(())
+}
+
+pub async fn persist_mutation_impact_scope(
+    state: &AppState,
+    mutation_workflow_id: Uuid,
+    detection: &MutationImpactScopeDetection,
+) -> anyhow::Result<()> {
+    repositories::update_document_mutation_impact_scope(
+        &state.persistence.postgres,
+        mutation_workflow_id,
+        &detection.scope_status,
+        &detection.confidence_status,
+        detection.affected_node_ids_json(),
+        detection.affected_relationship_ids_json(),
+        detection.fallback_reason.as_deref(),
+    )
+    .await
+    .context("failed to persist mutation impact scope")?;
+    Ok(())
+}
+
+pub fn graph_summary_refresh_request_for_scope(
+    row: &repositories::DocumentMutationImpactScopeRow,
+) -> GraphSummaryRefreshRequest {
+    GraphSummaryRefreshRequest::for_mutation_scope(
+        &row.scope_status,
+        serde_json::from_value::<Vec<Uuid>>(row.affected_node_ids_json.clone()).unwrap_or_default(),
+        serde_json::from_value::<Vec<Uuid>>(row.affected_relationship_ids_json.clone())
+            .unwrap_or_default(),
+    )
 }
 
 async fn load_mutable_document_context(

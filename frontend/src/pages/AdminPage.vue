@@ -4,17 +4,16 @@ import { storeToRefs } from 'pinia'
 import { useI18n } from 'vue-i18n'
 import ErrorStateCard from 'src/components/base/ErrorStateCard.vue'
 import PageSurface from 'src/components/base/PageSurface.vue'
-import AdminPlaceholderPanel from 'src/components/admin/AdminPlaceholderPanel.vue'
 import AdminModelPricingPanel from 'src/components/admin/AdminModelPricingPanel.vue'
+import AdminPlaceholderPanel from 'src/components/admin/AdminPlaceholderPanel.vue'
 import AdminProviderSettingsPanel from 'src/components/admin/AdminProviderSettingsPanel.vue'
 import AdminTabs from 'src/components/admin/AdminTabs.vue'
 import ApiTokensTable from 'src/components/admin/ApiTokensTable.vue'
 import CreateTokenDialog from 'src/components/admin/CreateTokenDialog.vue'
 import TokenSecurityBanner from 'src/components/admin/TokenSecurityBanner.vue'
 import type {
-  AdminUpsertPricingEntryPayload,
+  CreateAdminCredentialPayload,
   CreateApiTokenPayload,
-  UpdateAdminProviderProfilePayload,
 } from 'src/models/ui/admin'
 import { useAdminStore } from 'src/stores/admin'
 import { useShellStore } from 'src/stores/shell'
@@ -24,40 +23,53 @@ const adminStore = useAdminStore()
 const shellStore = useShellStore()
 const {
   activeTab,
+  aiConsole,
+  auditEvents,
+  bindingValidatingId,
+  context,
+  credentialSaving,
   error,
   latestPlaintextToken,
-  libraryAccess,
   loading,
-  members,
-  overview,
-  settings,
-  pricingSaving,
-  settingsSaving,
-  settingsValidating,
+  principal,
   showCreateToken,
   tabLoading,
   tokens,
+  tabAvailability,
+  tabCounts,
 } = storeToRefs(adminStore)
 
 watch(
   () => {
-    const context = shellStore.context
-    return context ? `${context.activeWorkspace.id}:${context.activeLibrary.id}` : null
+    const shellContext = shellStore.context
+    if (!shellContext) {
+      return null
+    }
+    return {
+      workspaceId: shellContext.activeWorkspace.id,
+      workspaceName: shellContext.activeWorkspace.name,
+      libraryId: shellContext.activeLibrary.id,
+      libraryName: shellContext.activeLibrary.name,
+    }
   },
-  async (contextKey) => {
-    if (!contextKey) {
+  async (nextContext) => {
+    if (!nextContext) {
+      adminStore.clearState()
       return
     }
-    await adminStore.loadOverview()
+    await adminStore.loadForContext(nextContext)
   },
-  { immediate: true },
+  { immediate: true, deep: true },
 )
 
-const memberRows = computed(() =>
-  members.value.map((row) => [row.displayName, row.email, row.roleLabel]),
-)
-const libraryAccessRows = computed(() =>
-  libraryAccess.value.map((row) => [row.libraryName, row.principalLabel, row.accessLevel]),
+const auditRows = computed(() =>
+  auditEvents.value.map((event) => [
+    formatDate(event.createdAt),
+    event.actionKind,
+    event.resultKind,
+    summarizeSubjects(event.subjects),
+    event.redactedMessage ?? '—',
+  ]),
 )
 
 async function copyLatestToken() {
@@ -78,27 +90,28 @@ async function submitCreateToken(payload: CreateApiTokenPayload) {
   await adminStore.createToken(payload)
 }
 
-async function saveProviderProfile(payload: UpdateAdminProviderProfilePayload) {
-  await adminStore.saveProviderProfile(payload)
+async function createCredential(payload: CreateAdminCredentialPayload) {
+  await adminStore.createCredential(payload)
 }
 
-async function validateProviderProfile() {
-  await adminStore.validateProviderProfile()
+async function validateBinding(bindingId: string) {
+  await adminStore.validateBinding(bindingId)
 }
 
-async function createPricingEntry(payload: AdminUpsertPricingEntryPayload) {
-  await adminStore.createPricingEntry(payload)
+function formatDate(value: string): string {
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) {
+    return value
+  }
+  return parsed.toLocaleString()
 }
 
-async function updatePricingEntry(
-  pricingId: string,
-  payload: AdminUpsertPricingEntryPayload,
-) {
-  await adminStore.updatePricingEntry(pricingId, payload)
-}
-
-async function deactivatePricingEntry(pricingId: string) {
-  await adminStore.deactivatePricingEntry(pricingId)
+function summarizeSubjects(
+  subjects: { subjectKind: string; subjectId: string; libraryId: string | null; workspaceId: string | null }[],
+): string {
+  return subjects
+    .map((subject) => `${subject.subjectKind}:${subject.subjectId.slice(0, 8)}`)
+    .join(', ')
 }
 </script>
 
@@ -108,10 +121,15 @@ async function deactivatePricingEntry(pricingId: string) {
       <header class="rr-admin__header">
         <div>
           <h1>{{ $t('admin.title') }}</h1>
-          <p>{{ overview?.workspaceName ?? $t('admin.subtitle') }}</p>
+          <p v-if="context">
+            {{ $t('admin.subtitle', {
+              workspace: context.workspaceName,
+              library: context.libraryName,
+            }) }}
+          </p>
         </div>
         <button
-          v-if="activeTab === 'api_tokens'"
+          v-if="activeTab === 'tokens' && tabAvailability.tokens"
           class="rr-button"
           type="button"
           @click="adminStore.showCreateToken = true"
@@ -121,14 +139,15 @@ async function deactivatePricingEntry(pricingId: string) {
       </header>
 
       <ErrorStateCard
-        v-if="error && !overview"
+        v-if="error && !principal"
         :title="$t('admin.title')"
         :description="error"
       />
 
-      <template v-else-if="overview">
+      <template v-else-if="context && principal">
         <AdminTabs
-          :overview="overview"
+          :counts="tabCounts"
+          :availability="tabAvailability"
           :active-tab="activeTab"
           @change="adminStore.switchTab"
         />
@@ -146,65 +165,62 @@ async function deactivatePricingEntry(pricingId: string) {
           {{ $t('admin.loading') }}
         </p>
 
-        <template v-else-if="activeTab === 'api_tokens'">
+        <template v-else-if="activeTab === 'tokens'">
           <ApiTokensTable
             :rows="tokens"
             @copy="adminStore.copyToken"
             @revoke="adminStore.revokeToken"
           />
-          <TokenSecurityBanner />
+          <TokenSecurityBanner
+            :principal="principal"
+            :workspace-name="context.workspaceName"
+            :library-name="context.libraryName"
+          />
         </template>
 
-        <AdminPlaceholderPanel
-          v-else-if="activeTab === 'members'"
-          :title="$t('admin.tabs.members')"
-          :columns="[
-            t('admin.headers.member'),
-            t('admin.headers.email'),
-            t('admin.headers.role'),
-          ]"
-          :rows="memberRows"
-        />
-
-        <AdminPlaceholderPanel
-          v-else-if="activeTab === 'library_access'"
-          :title="$t('admin.tabs.libraryAccess')"
-          :columns="[
-            t('admin.headers.library'),
-            t('admin.headers.principal'),
-            t('admin.headers.access'),
-          ]"
-          :rows="libraryAccessRows"
-        />
-
-        <template v-else-if="settings">
+        <template v-else-if="activeTab === 'aiCatalog' && aiConsole">
           <AdminProviderSettingsPanel
-            :settings="settings"
-            :saving="settingsSaving"
-            :validating="settingsValidating"
-            @save="saveProviderProfile"
-            @validate="validateProviderProfile"
-          />
-          <AdminModelPricingPanel
-            :settings="settings"
-            :saving="pricingSaving"
-            @create="createPricingEntry"
-            @update="updatePricingEntry"
-            @deactivate="deactivatePricingEntry"
+            :settings="aiConsole"
+            :credential-saving="credentialSaving"
+            :validating-binding-id="bindingValidatingId"
+            @create-credential="createCredential"
+            @validate-binding="validateBinding"
           />
         </template>
+
+        <template v-else-if="activeTab === 'pricing' && aiConsole">
+          <AdminModelPricingPanel :settings="aiConsole" />
+        </template>
+
+        <AdminPlaceholderPanel
+          v-else-if="activeTab === 'audit'"
+          :title="$t('admin.audit.title')"
+          :columns="[
+            t('admin.headers.created'),
+            t('admin.headers.action'),
+            t('admin.headers.result'),
+            t('admin.headers.subjects'),
+            t('admin.headers.message'),
+          ]"
+          :rows="auditRows"
+        />
 
         <ErrorStateCard
           v-else
-          :title="$t('admin.tabs.settings')"
-          :description="$t('admin.settings.emptyState')"
+          :title="$t('admin.title')"
+          :description="$t('admin.emptyState')"
         />
       </template>
     </div>
 
     <CreateTokenDialog
+      v-if="context"
       :open="showCreateToken"
       :plaintext-token="latestPlaintextToken"
+      :workspace-id="context.workspaceId"
+      :workspace-name="context.workspaceName"
+      :library-id="context.libraryId"
+      :library-name="context.libraryName"
       @close="closeCreateDialog"
       @submit="submitCreateToken"
       @copy="copyLatestToken"

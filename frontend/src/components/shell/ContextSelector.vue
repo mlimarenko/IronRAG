@@ -5,6 +5,9 @@ defineProps<{
   label: string
   selectedId: string
   options: (WorkspaceOption | LibraryOption)[]
+  disabled?: boolean
+  placeholder?: string
+  canCreate?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -18,9 +21,17 @@ const emit = defineEmits<{
     <span class="rr-selector__label">{{ label }}</span>
     <select
       :value="selectedId"
+      :disabled="disabled"
       :title="options.find((option) => option.id === selectedId)?.name ?? ''"
       @change="emit('change', ($event.target as HTMLSelectElement).value)"
     >
+      <option
+        v-if="!options.length"
+        value=""
+        disabled
+      >
+        {{ placeholder ?? label }}
+      </option>
       <option
         v-for="option in options"
         :key="option.id"
@@ -32,6 +43,7 @@ const emit = defineEmits<{
     <button
       class="rr-selector__add"
       type="button"
+      :disabled="!canCreate"
       @click="emit('create')"
     >
       +

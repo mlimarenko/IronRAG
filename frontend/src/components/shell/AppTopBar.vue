@@ -11,7 +11,15 @@ import UserMenu from './UserMenu.vue'
 
 const sessionStore = useSessionStore()
 const shellStore = useShellStore()
-const { context } = storeToRefs(shellStore)
+const {
+  activeLibrary,
+  activeWorkspace,
+  canCreateLibrary,
+  canCreateWorkspace,
+  currentUser,
+  libraries,
+  workspaces,
+} = storeToRefs(shellStore)
 
 async function logout() {
   await sessionStore.logout()
@@ -28,20 +36,27 @@ async function logout() {
     </div>
 
     <div
-      v-if="context"
+      v-if="currentUser"
       class="rr-topbar__meta"
     >
       <ContextSelector
         :label="$t('shell.workspace')"
-        :selected-id="context.activeWorkspace.id"
-        :options="context.workspaces"
+        :selected-id="activeWorkspace?.id ?? ''"
+        :options="workspaces"
+        :disabled="!workspaces.length"
+        :placeholder="workspaces.length ? $t('shell.workspace') : 'No workspaces yet'"
+        :can-create="canCreateWorkspace"
         @change="shellStore.switchWorkspace"
         @create="shellStore.showCreateWorkspace = true"
       />
       <ContextSelector
+        v-if="activeWorkspace || libraries.length || canCreateLibrary"
         :label="$t('shell.library')"
-        :selected-id="context.activeLibrary.id"
-        :options="context.libraries"
+        :selected-id="activeLibrary?.id ?? ''"
+        :options="libraries"
+        :disabled="!activeWorkspace || !libraries.length"
+        :placeholder="activeWorkspace ? 'No libraries yet' : 'Select a workspace first'"
+        :can-create="canCreateLibrary"
         @change="shellStore.switchLibrary"
         @create="shellStore.showCreateLibrary = true"
       />
@@ -50,9 +65,9 @@ async function logout() {
         @change="shellStore.switchLocale"
       />
       <UserMenu
-        :initials="context.currentUser.initials"
-        :display-name="context.currentUser.displayName"
-        :role-label="context.currentUser.roleLabel"
+        :initials="currentUser.initials"
+        :display-name="currentUser.displayName"
+        :access-label="currentUser.accessLabel"
         @logout="logout"
       />
     </div>

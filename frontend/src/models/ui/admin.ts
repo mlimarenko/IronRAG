@@ -1,168 +1,214 @@
-export type AdminTab = 'api_tokens' | 'members' | 'library_access' | 'settings'
+export type AdminTab = 'tokens' | 'aiCatalog' | 'pricing' | 'audit'
 
-export interface AdminOverviewResponse {
-  activeTab: AdminTab
-  workspaceName: string
-  counts: {
-    apiTokens: number
-    members: number
-    libraryAccess: number
-    settings: number
-  }
-  availability: {
-    apiTokens: boolean
-    members: boolean
-    libraryAccess: boolean
-    settings: boolean
-  }
+export type AdminGrantResourceKind =
+  | 'system'
+  | 'workspace'
+  | 'library'
+  | 'document'
+  | 'connector'
+  | 'provider_credential'
+  | 'library_binding'
+
+export type AdminPermissionKind =
+  | 'workspace_admin'
+  | 'workspace_read'
+  | 'library_read'
+  | 'library_write'
+  | 'document_read'
+  | 'document_write'
+  | 'connector_admin'
+  | 'credential_admin'
+  | 'binding_admin'
+  | 'query_run'
+  | 'ops_read'
+  | 'audit_read'
+  | 'iam_admin'
+
+export interface AdminTabCounts {
+  tokens: number
+  aiCatalog: number
+  pricing: number
+  audit: number
 }
 
-export interface ApiTokenRow {
+export interface AdminTabAvailability {
+  tokens: boolean
+  aiCatalog: boolean
+  pricing: boolean
+  audit: boolean
+}
+
+export interface AdminWorkspaceMembership {
+  workspaceId: string
+  principalId: string
+  membershipState: string
+  joinedAt: string
+  endedAt: string | null
+}
+
+export interface AdminGrant {
   id: string
-  label: string
-  maskedToken: string
-  scopes: string[]
-  createdAt: string
-  lastUsedAt: string | null
+  principalId: string
+  resourceKind: AdminGrantResourceKind
+  resourceId: string
+  permissionKind: AdminPermissionKind
+  grantedByPrincipalId: string | null
+  grantedAt: string
   expiresAt: string | null
-  canRevoke: boolean
+}
+
+export interface AdminPrincipalSummary {
+  id: string
+  principalKind: string
+  status: string
+  displayLabel: string
+  email: string | null
+  displayName: string | null
+  authProviderKind: string | null
+  externalSubject: string | null
+  workspaceMemberships: AdminWorkspaceMembership[]
+  effectiveGrants: AdminGrant[]
+}
+
+export interface AdminApiTokenRow {
+  principalId: string
+  workspaceId: string | null
+  label: string
+  tokenPrefix: string
+  status: string
+  expiresAt: string | null
+  revokedAt: string | null
+  issuedByPrincipalId: string | null
+  lastUsedAt: string | null
   plaintextToken: string | null
+  grants: AdminGrant[]
 }
 
 export interface CreateApiTokenPayload {
+  workspaceId: string
   label: string
-  scopes: string[]
   expiresInDays: number | null
+  grantResourceKind: Extract<AdminGrantResourceKind, 'workspace' | 'library'>
+  grantResourceId: string
+  permissionKinds: AdminPermissionKind[]
 }
 
 export interface CreateApiTokenResult {
-  row: ApiTokenRow
+  row: AdminApiTokenRow
   plaintextToken: string
 }
 
-export interface AdminMemberRow {
+export interface AdminProviderCatalogEntry {
   id: string
-  displayName: string
-  email: string
-  roleLabel: string
-}
-
-export interface LibraryAccessRow {
-  id: string
-  libraryName: string
-  principalLabel: string
-  accessLevel: string
-}
-
-export interface AdminSettingItem {
-  id: string
-  label: string
-  value: string
-}
-
-export interface AdminSupportedProvider {
   providerKind: string
-  supportedCapabilities: string[]
-  defaultModels: Partial<Record<string, string>>
-  availableModels: Partial<Record<string, string[]>>
-  isConfigured: boolean
+  displayName: string
+  apiStyle: string
+  lifecycleState: string
 }
 
-export interface AdminProviderProfile {
+export interface AdminModelCatalogEntry {
+  id: string
+  providerCatalogId: string
+  modelName: string
+  capabilityKind: string
+  modalityKind: string
+  contextWindow: number | null
+  maxOutputTokens: number | null
+}
+
+export interface AdminPriceCatalogEntry {
+  id: string
+  modelCatalogId: string
+  billingUnit: string
+  unitPrice: string
+  currencyCode: string
+  effectiveFrom: string
+}
+
+export interface AdminProviderCredential {
+  id: string
+  workspaceId: string
+  providerCatalogId: string
+  label: string
+  secretRef: string
+  credentialState: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AdminModelPreset {
+  id: string
+  workspaceId: string
+  modelCatalogId: string
+  presetName: string
+  systemPrompt: string | null
+  temperature: number | null
+  topP: number | null
+  maxOutputTokensOverride: number | null
+  extraParametersJson: unknown
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AdminBindingValidation {
+  id: string
+  bindingId: string
+  validationState: string
+  checkedAt: string
+  failureCode: string | null
+  message: string | null
+}
+
+export interface AdminLibraryBinding {
+  id: string
+  workspaceId: string
+  libraryId: string
+  bindingPurpose: string
+  providerCredentialId: string
+  modelPresetId: string
+  bindingState: string
+  latestValidation: AdminBindingValidation | null
+}
+
+export interface CreateAdminCredentialPayload {
+  workspaceId: string
+  providerCatalogId: string
+  label: string
+  secretRef: string
+}
+
+export interface AdminAiConsoleState {
+  workspaceId: string
+  workspaceName: string
   libraryId: string
   libraryName: string
-  indexingProviderKind: string
-  indexingModelName: string
-  embeddingProviderKind: string
-  embeddingModelName: string
-  answerProviderKind: string
-  answerModelName: string
-  visionProviderKind: string
-  visionModelName: string
-  lastValidatedAt: string | null
-  lastValidationStatus: string | null
-  lastValidationError: string | null
+  providers: AdminProviderCatalogEntry[]
+  models: AdminModelCatalogEntry[]
+  modelPresets: AdminModelPreset[]
+  prices: AdminPriceCatalogEntry[]
+  credentials: AdminProviderCredential[]
+  bindings: AdminLibraryBinding[]
 }
 
-export interface AdminProviderValidationCheck {
-  providerKind: string
-  modelName: string
-  capability: string
-  status: string
-  checkedAt: string
-  error: string | null
+export interface AdminAuditEventSubject {
+  auditEventId: string
+  subjectKind: string
+  subjectId: string
+  workspaceId: string | null
+  libraryId: string | null
+  documentId: string | null
 }
 
-export interface AdminProviderValidation {
-  status: string | null
-  checkedAt: string | null
-  error: string | null
-  checks: AdminProviderValidationCheck[]
-}
-
-export interface AdminPricingCatalogEntry {
+export interface AdminAuditEvent {
   id: string
-  workspaceId: string | null
-  providerKind: string
-  modelName: string
-  capability: string
-  billingUnit: string
-  inputPrice: string | null
-  outputPrice: string | null
-  currency: string
-  status: string
-  sourceKind: string
-  note: string | null
-  effectiveFrom: string
-  effectiveTo: string | null
-}
-
-export interface AdminPricingCoverageWarning {
-  providerKind: string
-  modelName: string
-  capability: string
-  billingUnit: string
-  message: string
-}
-
-export interface AdminPricingCoverageSummary {
-  status: 'covered' | 'partial' | 'missing'
-  coveredTargets: number
-  missingTargets: number
-  warnings: AdminPricingCoverageWarning[]
-}
-
-export interface AdminUpsertPricingEntryPayload {
-  workspaceId: string | null
-  providerKind: string
-  modelName: string
-  capability: string
-  billingUnit: string
-  inputPrice: number | null
-  outputPrice: number | null
-  currency: string
-  note: string | null
-  effectiveFrom: string
-}
-
-export interface AdminSettingsResponse {
-  items: AdminSettingItem[]
-  providerCatalog: AdminSupportedProvider[]
-  providerProfile: AdminProviderProfile
-  providerValidation: AdminProviderValidation
-  pricingCatalog: AdminPricingCatalogEntry[]
-  pricingCoverage: AdminPricingCoverageSummary
-  liveValidationEnabled: boolean
-  supportedProviderKinds: string[]
-}
-
-export interface UpdateAdminProviderProfilePayload {
-  indexingProviderKind: string
-  indexingModelName: string
-  embeddingProviderKind: string
-  embeddingModelName: string
-  answerProviderKind: string
-  answerModelName: string
-  visionProviderKind: string
-  visionModelName: string
+  actorPrincipalId: string | null
+  surfaceKind: string
+  actionKind: string
+  resultKind: string
+  requestId: string | null
+  traceId: string | null
+  createdAt: string
+  redactedMessage: string | null
+  internalMessage: string | null
+  subjects: AdminAuditEventSubject[]
 }
