@@ -15,6 +15,7 @@ pub struct IamPrincipalRow {
 #[derive(Debug, Clone, FromRow)]
 pub struct IamUserRow {
     pub principal_id: Uuid,
+    pub login: String,
     pub email: String,
     pub display_name: String,
     pub password_hash: String,
@@ -107,6 +108,7 @@ pub struct ResolvedIamGrantScopeRow {
 #[derive(Debug, Clone, FromRow)]
 pub struct BootstrapClaimRow {
     pub principal_id: Uuid,
+    pub login: String,
     pub email: String,
     pub display_name: String,
     pub claimed_at: DateTime<Utc>,
@@ -210,6 +212,7 @@ pub async fn get_user_by_principal_id(
     sqlx::query_as::<_, IamUserRow>(
         "select
             principal_id,
+            login,
             email,
             display_name,
             password_hash,
@@ -230,6 +233,7 @@ pub async fn get_user_by_email(
     sqlx::query_as::<_, IamUserRow>(
         "select
             principal_id,
+            login,
             email,
             display_name,
             password_hash,
@@ -240,6 +244,62 @@ pub async fn get_user_by_email(
     )
     .bind(email)
     .fetch_optional(postgres)
+    .await
+}
+
+pub async fn get_user_by_login(
+    postgres: &PgPool,
+    login: &str,
+) -> Result<Option<IamUserRow>, sqlx::Error> {
+    sqlx::query_as::<_, IamUserRow>(
+        "select
+            principal_id,
+            login,
+            email,
+            display_name,
+            password_hash,
+            auth_provider_kind,
+            external_subject
+         from iam_user
+         where lower(login) = lower($1)",
+    )
+    .bind(login)
+    .fetch_optional(postgres)
+    .await
+}
+
+pub async fn get_user_by_login_or_email(
+    postgres: &PgPool,
+    login_or_email: &str,
+) -> Result<Option<IamUserRow>, sqlx::Error> {
+    sqlx::query_as::<_, IamUserRow>(
+        "select
+            principal_id,
+            login,
+            email,
+            display_name,
+            password_hash,
+            auth_provider_kind,
+            external_subject
+         from iam_user
+         where lower(login) = lower($1)
+            or lower(email) = lower($1)
+         order by case when lower(login) = lower($1) then 0 else 1 end
+         limit 1",
+    )
+    .bind(login_or_email)
+    .fetch_optional(postgres)
+    .await
+}
+
+pub async fn count_active_user_principals(postgres: &PgPool) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>(
+        "select count(*)::bigint
+         from iam_principal
+         where principal_kind = 'user'
+           and status = 'active'",
+    )
+    .fetch_one(postgres)
     .await
 }
 
@@ -787,6 +847,7 @@ pub async fn delete_grant(
 
 pub async fn claim_bootstrap_user(
     postgres: &PgPool,
+    login: &str,
     email: &str,
     display_name: &str,
     password_hash: &str,
@@ -830,16 +891,18 @@ pub async fn claim_bootstrap_user(
     let row = sqlx::query_as::<_, BootstrapClaimRow>(
         "insert into iam_user (
             principal_id,
+            login,
             email,
             display_name,
             password_hash,
             auth_provider_kind,
             external_subject
         )
-        values ($1, $2, $3, $4, 'password', null)
-        returning principal_id, email, display_name, now() as claimed_at",
+        values ($1, $2, $3, $4, $5, 'password', null)
+        returning principal_id, login, email, display_name, now() as claimed_at",
     )
     .bind(principal_id)
+    .bind(login)
     .bind(email)
     .bind(display_name)
     .bind(password_hash)

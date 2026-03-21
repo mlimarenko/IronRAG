@@ -1,9 +1,7 @@
 use serde::Deserialize;
 
-const DEFAULT_UI_BOOTSTRAP_ADMIN_LOGIN: &str = "admin";
-const DEFAULT_UI_BOOTSTRAP_ADMIN_EMAIL: &str = "admin@rustrag.local";
+const DEFAULT_UI_BOOTSTRAP_ADMIN_EMAIL_DOMAIN: &str = "rustrag.local";
 const DEFAULT_UI_BOOTSTRAP_ADMIN_NAME: &str = "Admin";
-const DEFAULT_UI_BOOTSTRAP_ADMIN_PASSWORD: &str = "rustrag";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UiBootstrapAdmin {
@@ -11,6 +9,7 @@ pub struct UiBootstrapAdmin {
     pub email: String,
     pub display_name: String,
     pub password: String,
+    pub api_token: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -106,6 +105,7 @@ pub struct Settings {
     pub ui_bootstrap_admin_email: Option<String>,
     pub ui_bootstrap_admin_name: Option<String>,
     pub ui_bootstrap_admin_password: Option<String>,
+    pub ui_bootstrap_admin_api_token: Option<String>,
     pub ui_session_ttl_hours: u64,
     pub upload_max_size_mb: u64,
     pub ingestion_worker_concurrency: usize,
@@ -312,10 +312,7 @@ impl Settings {
             bootstrap_claim_enabled: self.bootstrap_claim_enabled,
             legacy_ui_bootstrap_enabled: self.legacy_ui_bootstrap_enabled,
             legacy_bootstrap_token_endpoint_enabled: self.legacy_bootstrap_token_endpoint_enabled,
-            legacy_ui_bootstrap_admin: self
-                .legacy_ui_bootstrap_enabled
-                .then(|| self.resolved_ui_bootstrap_admin())
-                .flatten(),
+            legacy_ui_bootstrap_admin: self.resolved_ui_bootstrap_admin(),
         }
     }
 
@@ -384,22 +381,20 @@ impl Settings {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(str::to_lowercase)
-            .unwrap_or_else(|| DEFAULT_UI_BOOTSTRAP_ADMIN_LOGIN.to_string());
+            .map(str::to_lowercase)?;
+        let password = self
+            .ui_bootstrap_admin_password
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(std::string::ToString::to_string)?;
         let email = self
             .ui_bootstrap_admin_email
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_lowercase)
-            .unwrap_or_else(|| DEFAULT_UI_BOOTSTRAP_ADMIN_EMAIL.to_string());
-        let password = self
-            .ui_bootstrap_admin_password
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(std::string::ToString::to_string)
-            .unwrap_or_else(|| DEFAULT_UI_BOOTSTRAP_ADMIN_PASSWORD.to_string());
+            .unwrap_or_else(|| format!("{login}@{DEFAULT_UI_BOOTSTRAP_ADMIN_EMAIL_DOMAIN}"));
         let display_name = self
             .ui_bootstrap_admin_name
             .as_deref()
@@ -407,22 +402,19 @@ impl Settings {
             .filter(|value| !value.is_empty())
             .map(std::string::ToString::to_string)
             .unwrap_or_else(|| DEFAULT_UI_BOOTSTRAP_ADMIN_NAME.to_string());
+        let api_token = self
+            .ui_bootstrap_admin_api_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(std::string::ToString::to_string);
 
-        Some(UiBootstrapAdmin { login, email, display_name, password })
+        Some(UiBootstrapAdmin { login, email, display_name, password, api_token })
     }
 
     #[must_use]
     pub fn has_explicit_ui_bootstrap_admin(&self) -> bool {
-        [
-            self.ui_bootstrap_admin_login.as_deref(),
-            self.ui_bootstrap_admin_email.as_deref(),
-            self.ui_bootstrap_admin_name.as_deref(),
-            self.ui_bootstrap_admin_password.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .map(str::trim)
-        .any(|value| !value.is_empty())
+        self.resolved_ui_bootstrap_admin().is_some()
     }
 
     #[must_use]
@@ -560,6 +552,7 @@ mod tests {
             ui_bootstrap_admin_email: None,
             ui_bootstrap_admin_name: None,
             ui_bootstrap_admin_password: None,
+            ui_bootstrap_admin_api_token: None,
             ui_session_ttl_hours: 720,
             upload_max_size_mb: 50,
             ingestion_worker_concurrency: 4,
@@ -660,18 +653,10 @@ mod tests {
     }
 
     #[test]
-    fn resolved_ui_bootstrap_admin_falls_back_to_builtin_admin() {
+    fn resolved_ui_bootstrap_admin_is_absent_without_explicit_credentials() {
         let settings = sample_settings();
 
-        assert_eq!(
-            settings.resolved_ui_bootstrap_admin(),
-            Some(UiBootstrapAdmin {
-                login: "admin".into(),
-                email: "admin@rustrag.local".into(),
-                display_name: "Admin".into(),
-                password: "rustrag".into(),
-            })
-        );
+        assert_eq!(settings.resolved_ui_bootstrap_admin(), None);
         assert!(!settings.has_explicit_ui_bootstrap_admin());
     }
 
@@ -682,6 +667,7 @@ mod tests {
         settings.ui_bootstrap_admin_email = Some(" admin@example.com ".into());
         settings.ui_bootstrap_admin_name = Some(" Platform Owner ".into());
         settings.ui_bootstrap_admin_password = Some(" secret ".into());
+        settings.ui_bootstrap_admin_api_token = Some(" bootstrap-token ".into());
 
         assert_eq!(
             settings.resolved_ui_bootstrap_admin(),
@@ -690,9 +676,28 @@ mod tests {
                 email: "admin@example.com".into(),
                 display_name: "Platform Owner".into(),
                 password: "secret".into(),
+                api_token: Some("bootstrap-token".into()),
             })
         );
         assert!(settings.has_explicit_ui_bootstrap_admin());
+    }
+
+    #[test]
+    fn resolved_ui_bootstrap_admin_derives_email_when_missing() {
+        let mut settings = sample_settings();
+        settings.ui_bootstrap_admin_login = Some(" owner ".into());
+        settings.ui_bootstrap_admin_password = Some(" secret ".into());
+
+        assert_eq!(
+            settings.resolved_ui_bootstrap_admin(),
+            Some(UiBootstrapAdmin {
+                login: "owner".into(),
+                email: "owner@rustrag.local".into(),
+                display_name: "Admin".into(),
+                password: "secret".into(),
+                api_token: None,
+            })
+        );
     }
 
     #[test]
@@ -703,13 +708,27 @@ mod tests {
         assert!(bootstrap.bootstrap_claim_enabled);
         assert!(bootstrap.legacy_ui_bootstrap_enabled);
         assert!(bootstrap.legacy_bootstrap_token_endpoint_enabled);
+        assert_eq!(bootstrap.legacy_ui_bootstrap_admin, None);
+    }
+
+    #[test]
+    fn bootstrap_settings_keep_explicit_admin_even_when_legacy_ui_bootstrap_is_disabled() {
+        let mut settings = sample_settings();
+        settings.legacy_ui_bootstrap_enabled = false;
+        settings.ui_bootstrap_admin_login = Some(" root ".into());
+        settings.ui_bootstrap_admin_password = Some(" secret ".into());
+
+        let bootstrap = settings.bootstrap_settings();
+
+        assert!(!bootstrap.legacy_ui_bootstrap_enabled);
         assert_eq!(
             bootstrap.legacy_ui_bootstrap_admin,
             Some(UiBootstrapAdmin {
-                login: "admin".into(),
-                email: "admin@rustrag.local".into(),
+                login: "root".into(),
+                email: "root@rustrag.local".into(),
                 display_name: "Admin".into(),
-                password: "rustrag".into(),
+                password: "secret".into(),
+                api_token: None,
             })
         );
     }

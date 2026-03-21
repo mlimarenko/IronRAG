@@ -87,6 +87,11 @@ services:
       log_filter: info
       frontend_origin: http://127.0.0.1:19000,http://localhost:19000,http://127.0.0.1:9000,http://localhost:9000,http://127.0.0.1:3000,http://localhost:3000
       bootstrap_token: ${RUSTRAG_BOOTSTRAP_TOKEN:-bootstrap-local}
+      ui_bootstrap_admin_login: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN:-}
+      ui_bootstrap_admin_email: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_EMAIL:-}
+      ui_bootstrap_admin_name: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_NAME:-}
+      ui_bootstrap_admin_password: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD:-}
+      ui_bootstrap_admin_api_token: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN:-}
       openai_api_key: ${RUSTRAG_OPENAI_API_KEY:-}
       deepseek_api_key: ${RUSTRAG_DEEPSEEK_API_KEY:-}
       qwen_api_key: ${RUSTRAG_QWEN_API_KEY:-}
@@ -146,6 +151,11 @@ services:
       log_filter: info
       frontend_origin: http://127.0.0.1:19000,http://localhost:19000,http://127.0.0.1:9000,http://localhost:9000,http://127.0.0.1:3000,http://localhost:3000
       bootstrap_token: ${RUSTRAG_BOOTSTRAP_TOKEN:-bootstrap-local}
+      ui_bootstrap_admin_login: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN:-}
+      ui_bootstrap_admin_email: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_EMAIL:-}
+      ui_bootstrap_admin_name: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_NAME:-}
+      ui_bootstrap_admin_password: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD:-}
+      ui_bootstrap_admin_api_token: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN:-}
       openai_api_key: ${RUSTRAG_OPENAI_API_KEY:-}
       deepseek_api_key: ${RUSTRAG_DEEPSEEK_API_KEY:-}
       qwen_api_key: ${RUSTRAG_QWEN_API_KEY:-}

@@ -94,6 +94,44 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/iam/bootstrap/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Resolve whether first-run admin setup is still required */
+        get: operations["getBootstrapStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/iam/bootstrap/setup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Configure the first administrator interactively
+         * @description One-time interactive setup route for a fresh deployment with no administrator and no
+         *     explicit bootstrap admin credentials configured through environment variables.
+         */
+        post: operations["postBootstrapSetup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/mcp": {
         parameters: {
             query?: never;
@@ -212,7 +250,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Authenticate a browser session */
+        /** Authenticate a browser session with login and password */
         post: operations["loginIamSession"];
         delete?: never;
         options?: never;
@@ -1077,6 +1115,12 @@ export interface components {
         BootstrapClaimResponse: {
             [key: string]: unknown;
         };
+        BootstrapSetupRequest: {
+            [key: string]: unknown;
+        };
+        BootstrapStatusResponse: {
+            [key: string]: unknown;
+        };
         CatalogLibraryResponse: {
             [key: string]: unknown;
         };
@@ -1482,6 +1526,77 @@ export interface operations {
                 };
             };
             /** @description Bootstrap was already claimed */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    getBootstrapStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Bootstrap setup status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BootstrapStatusResponse"];
+                };
+            };
+        };
+    };
+    postBootstrapSetup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BootstrapSetupRequest"];
+            };
+        };
+        responses: {
+            /** @description Bootstrap setup succeeded and created a browser session */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionResponse"];
+                };
+            };
+            /** @description Invalid bootstrap payload */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Interactive bootstrap setup is disabled by configured environment credentials */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Bootstrap was already completed */
             409: {
                 headers: {
                     [name: string]: unknown;

@@ -1,11 +1,20 @@
 const en = {
   auth: {
     title: 'Welcome back',
-    subtitle: 'Sign in with your email to access the knowledge base',
-    login: 'Email',
+    subtitle: 'Sign in with your login and password to access the knowledge base',
+    login: 'Login',
     password: 'Password',
     remember: 'Remember for 30 days',
     submit: 'Sign in',
+    setup: {
+      title: 'Set up the first administrator',
+      subtitle:
+        'This deployment does not have an administrator yet. Create the first admin login and password to finish the initial setup.',
+      displayName: 'Display name',
+      displayNamePlaceholder: 'Administrator',
+      hint: 'You can configure provider credentials, grants, and additional API tokens after the first sign-in.',
+      submit: 'Create administrator',
+    },
     heroTitle: 'Turn documents into a knowledge graph',
     heroBody:
       'Upload documents, extract entities and relationships automatically, and explore your knowledge base through interactive graph visualization.',

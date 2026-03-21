@@ -186,6 +186,7 @@ create table ai_price_catalog (
 
 create table iam_user (
     principal_id uuid primary key references iam_principal(id) on delete cascade,
+    login text not null unique,
     email text not null unique,
     display_name text not null,
     password_hash text not null,

@@ -24,7 +24,8 @@ use crate::{
     },
     services::audit_service::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
     services::iam_service::{
-        AuthenticateSessionCommand, BootstrapClaimCommand, CreateGrantCommand,
+        AuthenticateSessionCommand, BootstrapClaimCommand, BootstrapSetupCommand,
+        CreateGrantCommand,
     },
 };
 
@@ -105,6 +106,7 @@ pub struct PrincipalResponse {
 #[serde(rename_all = "camelCase")]
 pub struct UserResponse {
     pub principal_id: Uuid,
+    pub login: String,
     pub email: String,
     pub display_name: String,
     pub auth_provider_kind: String,
@@ -168,9 +170,16 @@ pub struct MeResponse {
 #[serde(rename_all = "camelCase")]
 pub struct BootstrapClaimResponse {
     pub principal_id: uuid::Uuid,
+    pub login: String,
     pub email: String,
     pub display_name: String,
     pub claimed_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapStatusResponse {
+    pub setup_required: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -185,15 +194,24 @@ pub struct BootstrapClaimRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoginSessionRequest {
-    pub email: String,
+    pub login: String,
     pub password: String,
     pub remember_me: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapSetupRequest {
+    pub login: String,
+    pub display_name: Option<String>,
+    pub password: String,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionUserResponse {
     pub principal_id: Uuid,
+    pub login: String,
     pub email: String,
     pub display_name: String,
 }
@@ -208,6 +226,8 @@ pub struct SessionResponse {
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/iam/bootstrap/status", get(get_bootstrap_status))
+        .route("/iam/bootstrap/setup", post(setup_bootstrap_admin))
         .route("/iam/bootstrap/claim", post(claim_bootstrap_admin))
         .route("/iam/session/login", post(login_session))
         .route("/iam/session", get(get_session))
@@ -217,6 +237,94 @@ pub fn router() -> Router<AppState> {
         .route("/iam/tokens/{token_principal_id}/revoke", post(revoke_token))
         .route("/iam/grants", get(list_grants).post(create_grant))
         .route("/iam/grants/{grant_id}", delete(revoke_grant))
+}
+
+async fn get_bootstrap_status(
+    State(state): State<AppState>,
+) -> Result<Json<BootstrapStatusResponse>, ApiError> {
+    let outcome = state.canonical_services.iam.get_bootstrap_status(&state).await?;
+    Ok(Json(BootstrapStatusResponse { setup_required: outcome.setup_required }))
+}
+
+async fn setup_bootstrap_admin(
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Json(payload): Json<BootstrapSetupRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let request_id = request_id.map_or_else(|| uuid::Uuid::now_v7().to_string(), |value| value.0.0);
+    let outcome = state
+        .canonical_services
+        .iam
+        .setup_bootstrap_admin(
+            &state,
+            BootstrapSetupCommand {
+                login: payload.login,
+                display_name: payload.display_name,
+                password: payload.password,
+                ttl_hours: state.ui_session_cookie.ttl_hours,
+                request_id: request_id.clone(),
+            },
+        )
+        .await?;
+
+    let mut headers = HeaderMap::new();
+    let cookie = build_session_cookie(
+        state.ui_session_cookie.name,
+        &build_session_cookie_value(outcome.session_id, &outcome.session_secret),
+        state.ui_session_cookie.ttl_hours,
+    );
+    headers.insert(header::SET_COOKIE, cookie.parse().map_err(|_| ApiError::Internal)?);
+
+    let _ = state
+        .canonical_services
+        .audit
+        .append_event(
+            &state,
+            AppendAuditEventCommand {
+                actor_principal_id: Some(outcome.principal_id),
+                surface_kind: "rest".to_string(),
+                action_kind: "iam.bootstrap.setup".to_string(),
+                request_id: Some(request_id),
+                trace_id: None,
+                result_kind: "succeeded".to_string(),
+                redacted_message: Some("bootstrap setup succeeded".to_string()),
+                internal_message: Some(format!(
+                    "principal {} configured bootstrap session {}",
+                    outcome.principal_id, outcome.session_id
+                )),
+                subjects: vec![
+                    AppendAuditEventSubjectCommand {
+                        subject_kind: "principal".to_string(),
+                        subject_id: outcome.principal_id,
+                        workspace_id: None,
+                        library_id: None,
+                        document_id: None,
+                    },
+                    AppendAuditEventSubjectCommand {
+                        subject_kind: "session".to_string(),
+                        subject_id: outcome.session_id,
+                        workspace_id: None,
+                        library_id: None,
+                        document_id: None,
+                    },
+                ],
+            },
+        )
+        .await;
+
+    Ok((
+        headers,
+        Json(SessionResponse {
+            session_id: outcome.session_id,
+            expires_at: outcome.expires_at,
+            user: SessionUserResponse {
+                principal_id: outcome.principal_id,
+                login: outcome.login,
+                email: outcome.email,
+                display_name: outcome.display_name,
+            },
+        }),
+    ))
 }
 
 async fn claim_bootstrap_admin(
@@ -242,6 +350,7 @@ async fn claim_bootstrap_admin(
 
     Ok(Json(BootstrapClaimResponse {
         principal_id: outcome.principal_id,
+        login: outcome.login,
         email: outcome.email,
         display_name: outcome.display_name,
         claimed_at: outcome.claimed_at,
@@ -261,7 +370,7 @@ async fn login_session(
         .authenticate_session(
             &state,
             AuthenticateSessionCommand {
-                email: payload.email,
+                login: payload.login,
                 password: payload.password,
                 ttl_hours,
             },
@@ -311,6 +420,7 @@ async fn login_session(
             expires_at: outcome.expires_at,
             user: SessionUserResponse {
                 principal_id: outcome.principal_id,
+                login: outcome.login,
                 email: outcome.email,
                 display_name: outcome.display_name,
             },
@@ -356,6 +466,7 @@ async fn get_session(
         expires_at: session_row.expires_at,
         user: SessionUserResponse {
             principal_id: user_row.principal_id,
+            login: user_row.login,
             email: user_row.email,
             display_name: user_row.display_name,
         },
@@ -1063,6 +1174,7 @@ fn map_principal_row(row: iam_repository::IamPrincipalRow) -> Result<PrincipalRe
 fn map_user_row(row: iam_repository::IamUserRow) -> UserResponse {
     UserResponse {
         principal_id: row.principal_id,
+        login: row.login,
         email: row.email,
         display_name: row.display_name,
         auth_provider_kind: row.auth_provider_kind,

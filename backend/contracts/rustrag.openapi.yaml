@@ -50,6 +50,8 @@ x-greenfield-scaffold:
     prices: 12
   freshBootstrapDiscovery:
     - /v1/openapi/rustrag.openapi.yaml
+    - /v1/iam/bootstrap/status
+    - /v1/iam/bootstrap/setup
     - /v1/iam/bootstrap/claim
   scaffoldStatus: canonical-cutover
 paths:
@@ -148,6 +150,59 @@ paths:
                 $ref: "#/components/schemas/ApiErrorBody"
         "409":
           description: Bootstrap was already claimed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/iam/bootstrap/status:
+    get:
+      tags: [iam]
+      summary: Resolve whether first-run admin setup is still required
+      operationId: getBootstrapStatus
+      security: []
+      responses:
+        "200":
+          description: Bootstrap setup status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BootstrapStatusResponse"
+  /v1/iam/bootstrap/setup:
+    post:
+      tags: [iam]
+      summary: Configure the first administrator interactively
+      operationId: postBootstrapSetup
+      security: []
+      description: |
+        One-time interactive setup route for a fresh deployment with no administrator and no
+        explicit bootstrap admin credentials configured through environment variables.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BootstrapSetupRequest"
+      responses:
+        "200":
+          description: Bootstrap setup succeeded and created a browser session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "400":
+          description: Invalid bootstrap payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "403":
+          description: Interactive bootstrap setup is disabled by configured environment credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "409":
+          description: Bootstrap was already completed
           content:
             application/json:
               schema:
@@ -377,7 +432,7 @@ paths:
   /v1/iam/session/login:
     post:
       tags: [iam]
-      summary: Authenticate a browser session
+      summary: Authenticate a browser session with login and password
       operationId: loginIamSession
       requestBody:
         required: true
@@ -2416,6 +2471,8 @@ components:
     BindingValidationResponse: *genericObject
     BootstrapClaimRequest: *genericObject
     BootstrapClaimResponse: *genericObject
+    BootstrapSetupRequest: *genericObject
+    BootstrapStatusResponse: *genericObject
     CatalogLibraryResponse: *genericObject
     CatalogWorkspaceResponse: *genericObject
     ChunkSummary: *genericObject

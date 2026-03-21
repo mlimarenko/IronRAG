@@ -7,7 +7,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
-    app::state::AppState,
+    app::{bootstrap, state::AppState},
     domains::iam::{
         ApiToken, Grant, GrantResourceKind, Principal, PrincipalKind, WorkspaceMembership,
     },
@@ -34,9 +34,24 @@ pub struct BootstrapClaimCommand {
 #[derive(Debug, Clone)]
 pub struct BootstrapClaimOutcome {
     pub principal_id: uuid::Uuid,
+    pub login: String,
     pub email: String,
     pub display_name: String,
     pub claimed_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BootstrapStatusOutcome {
+    pub setup_required: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct BootstrapSetupCommand {
+    pub login: String,
+    pub display_name: Option<String>,
+    pub password: String,
+    pub ttl_hours: u64,
+    pub request_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -62,7 +77,7 @@ pub struct RotateApiTokenOutcome {
 
 #[derive(Debug, Clone)]
 pub struct AuthenticateSessionCommand {
-    pub email: String,
+    pub login: String,
     pub password: String,
     pub ttl_hours: u64,
 }
@@ -72,6 +87,7 @@ pub struct AuthenticateSessionOutcome {
     pub session_id: Uuid,
     pub session_secret: String,
     pub principal_id: Uuid,
+    pub login: String,
     pub email: String,
     pub display_name: String,
     pub expires_at: chrono::DateTime<chrono::Utc>,
@@ -109,6 +125,11 @@ impl IamService {
         state: &AppState,
         command: BootstrapClaimCommand,
     ) -> Result<BootstrapClaimOutcome, ApiError> {
+        if state.settings.has_explicit_ui_bootstrap_admin() {
+            return Err(ApiError::forbidden(
+                "bootstrap claim is disabled when admin credentials are configured via environment",
+            ));
+        }
         let bootstrap_settings = state.settings.bootstrap_settings();
         if !bootstrap_settings.bootstrap_claim_enabled {
             return Err(ApiError::forbidden("bootstrap claim is disabled"));
@@ -125,6 +146,12 @@ impl IamService {
         if email.is_empty() || !email.contains('@') {
             return Err(ApiError::BadRequest("email must be a valid address".into()));
         }
+        let login = normalize_bootstrap_login(
+            email
+                .split('@')
+                .next()
+                .ok_or_else(|| ApiError::BadRequest("email must be a valid address".into()))?,
+        )?;
         let display_name = command.display_name.trim().to_string();
         if display_name.is_empty() {
             return Err(ApiError::BadRequest("displayName must not be empty".into()));
@@ -137,6 +164,7 @@ impl IamService {
         let password_hash = hash_password(&password)?;
         let claimed = iam_repository::claim_bootstrap_user(
             &state.persistence.postgres,
+            &login,
             &email,
             &display_name,
             &password_hash,
@@ -165,13 +193,106 @@ impl IamService {
             warn!(?error, principal_id = %claimed.principal_id, "failed to append bootstrap audit event");
             ApiError::Internal
         })?;
+        bootstrap::ensure_default_catalog_workspace_and_library(state, claimed.principal_id)
+            .await?;
 
         Ok(BootstrapClaimOutcome {
             principal_id: claimed.principal_id,
+            login: claimed.login,
             email: claimed.email,
             display_name: claimed.display_name,
             claimed_at: claimed.claimed_at,
         })
+    }
+
+    pub async fn get_bootstrap_status(
+        &self,
+        state: &AppState,
+    ) -> Result<BootstrapStatusOutcome, ApiError> {
+        let active_users =
+            iam_repository::count_active_user_principals(&state.persistence.postgres)
+                .await
+                .map_err(|_| ApiError::Internal)?;
+        let setup_required = active_users == 0 && !state.settings.has_explicit_ui_bootstrap_admin();
+        Ok(BootstrapStatusOutcome { setup_required })
+    }
+
+    pub async fn setup_bootstrap_admin(
+        &self,
+        state: &AppState,
+        command: BootstrapSetupCommand,
+    ) -> Result<AuthenticateSessionOutcome, ApiError> {
+        if state.settings.has_explicit_ui_bootstrap_admin() {
+            return Err(ApiError::forbidden(
+                "interactive bootstrap setup is disabled when admin credentials are configured via environment",
+            ));
+        }
+
+        let status = self.get_bootstrap_status(state).await?;
+        if !status.setup_required {
+            return Err(ApiError::bootstrap_already_claimed(
+                "bootstrap setup has already been completed",
+            ));
+        }
+
+        let login = normalize_bootstrap_login(&command.login)?;
+        let display_name = command
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(std::string::ToString::to_string)
+            .unwrap_or_else(|| login.clone());
+        let password = command.password.trim().to_string();
+        if password.len() < 8 {
+            return Err(ApiError::BadRequest("password must be at least 8 characters long".into()));
+        }
+
+        let email = default_bootstrap_email(&login);
+        let password_hash = hash_password(&password)?;
+        let claimed = iam_repository::claim_bootstrap_user(
+            &state.persistence.postgres,
+            &login,
+            &email,
+            &display_name,
+            &password_hash,
+        )
+        .await
+        .map_err(|error| {
+            warn!(?error, login = %login, "failed to persist interactive bootstrap setup");
+            ApiError::Internal
+        })?
+        .ok_or_else(|| {
+            ApiError::bootstrap_already_claimed("bootstrap setup has already been completed")
+        })?;
+
+        audit_repository::append_bootstrap_claim_event(
+            &state.persistence.postgres,
+            claimed.principal_id,
+            &command.request_id,
+            "Bootstrap administrator configured",
+            &format!(
+                "Interactive bootstrap setup created principal {} for {}",
+                claimed.principal_id, claimed.login
+            ),
+        )
+        .await
+        .map_err(|error| {
+            warn!(?error, principal_id = %claimed.principal_id, "failed to append bootstrap setup audit event");
+            ApiError::Internal
+        })?;
+        bootstrap::ensure_default_catalog_workspace_and_library(state, claimed.principal_id)
+            .await?;
+
+        issue_session_for_user(
+            state,
+            claimed.principal_id,
+            &claimed.login,
+            &claimed.email,
+            &claimed.display_name,
+            command.ttl_hours,
+        )
+        .await
     }
 
     pub async fn get_principal(
@@ -315,15 +436,15 @@ impl IamService {
         state: &AppState,
         command: AuthenticateSessionCommand,
     ) -> Result<AuthenticateSessionOutcome, ApiError> {
-        let email = command.email.trim().to_ascii_lowercase();
-        if email.is_empty() || !email.contains('@') {
-            return Err(ApiError::BadRequest("email must be a valid address".into()));
+        let login = command.login.trim().to_ascii_lowercase();
+        if login.is_empty() {
+            return Err(ApiError::BadRequest("login must not be empty".into()));
         }
         if command.password.is_empty() {
             return Err(ApiError::BadRequest("password must not be empty".into()));
         }
 
-        let user = iam_repository::get_user_by_email(&state.persistence.postgres, &email)
+        let user = iam_repository::get_user_by_login(&state.persistence.postgres, &login)
             .await
             .map_err(|_| ApiError::Internal)?
             .ok_or(ApiError::Unauthorized)?;
@@ -337,26 +458,15 @@ impl IamService {
             return Err(ApiError::Unauthorized);
         }
 
-        let ttl_hours = command.ttl_hours.max(1);
-        let expires_at = Utc::now() + Duration::hours(i64::try_from(ttl_hours).unwrap_or(24));
-        let session_secret = mint_plaintext_session_secret();
-        let session = iam_repository::create_session(
-            &state.persistence.postgres,
+        issue_session_for_user(
+            state,
             user.principal_id,
-            &hash_session_secret(&session_secret),
-            expires_at,
+            &user.login,
+            &user.email,
+            &user.display_name,
+            command.ttl_hours,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
-
-        Ok(AuthenticateSessionOutcome {
-            session_id: session.id,
-            session_secret,
-            principal_id: user.principal_id,
-            email: user.email,
-            display_name: user.display_name,
-            expires_at: session.expires_at,
-        })
     }
 
     pub async fn revoke_session(&self, state: &AppState, session_id: Uuid) -> Result<(), ApiError> {
@@ -407,6 +517,53 @@ fn verify_password(password: &str, password_hash: &str) -> Result<(), ApiError> 
     Argon2::default()
         .verify_password(password.as_bytes(), &parsed_hash)
         .map_err(|_| ApiError::Unauthorized)
+}
+
+fn normalize_bootstrap_login(value: &str) -> Result<String, ApiError> {
+    let login = value.trim().to_ascii_lowercase();
+    if login.is_empty() {
+        return Err(ApiError::BadRequest("login must not be empty".into()));
+    }
+    if login.bytes().any(|byte| !matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-')) {
+        return Err(ApiError::BadRequest(
+            "login must contain only lowercase letters, digits, '.', '_' or '-'".into(),
+        ));
+    }
+    Ok(login)
+}
+
+fn default_bootstrap_email(login: &str) -> String {
+    format!("{login}@rustrag.local")
+}
+
+async fn issue_session_for_user(
+    state: &AppState,
+    principal_id: Uuid,
+    login: &str,
+    email: &str,
+    display_name: &str,
+    ttl_hours: u64,
+) -> Result<AuthenticateSessionOutcome, ApiError> {
+    let expires_at = Utc::now() + Duration::hours(i64::try_from(ttl_hours.max(1)).unwrap_or(24));
+    let session_secret = mint_plaintext_session_secret();
+    let session = iam_repository::create_session(
+        &state.persistence.postgres,
+        principal_id,
+        &hash_session_secret(&session_secret),
+        expires_at,
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?;
+
+    Ok(AuthenticateSessionOutcome {
+        session_id: session.id,
+        session_secret,
+        principal_id,
+        login: login.to_string(),
+        email: email.to_string(),
+        display_name: display_name.to_string(),
+        expires_at: session.expires_at,
+    })
 }
 
 fn map_principal(row: iam_repository::IamPrincipalRow) -> Result<Principal, ApiError> {

@@ -9,6 +9,7 @@ use crate::{
     app::state::AppState,
     infra::repositories::{self, catalog_repository, iam_repository},
     interfaces::http::router_support::ApiError,
+    shared::auth_tokens::{hash_api_token, preview_api_token},
 };
 
 fn hash_password(password: &str) -> Result<String, ApiError> {
@@ -53,7 +54,7 @@ async fn ensure_default_workspace_and_library(
     Ok((workspace, project))
 }
 
-async fn ensure_default_catalog_workspace_and_library(
+pub(crate) async fn ensure_default_catalog_workspace_and_library(
     state: &AppState,
     principal_id: Uuid,
 ) -> Result<(), ApiError> {
@@ -104,6 +105,72 @@ async fn ensure_default_catalog_workspace_and_library(
     Ok(())
 }
 
+async fn ensure_bootstrap_api_token(
+    state: &AppState,
+    principal_id: Uuid,
+    plaintext_token: &str,
+) -> Result<(), ApiError> {
+    let token_hash = hash_api_token(plaintext_token);
+    let token_principal_id = if let Some(existing) = iam_repository::find_active_api_token_by_secret_hash(
+        &state.persistence.postgres,
+        &token_hash,
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?
+    {
+        existing.principal_id
+    } else {
+        let token = iam_repository::create_api_token(
+            &state.persistence.postgres,
+            None,
+            "Bootstrap admin token",
+            &preview_api_token(plaintext_token),
+            Some(principal_id),
+            None,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?;
+        iam_repository::create_api_token_secret(
+            &state.persistence.postgres,
+            token.principal_id,
+            &token_hash,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?;
+        token.principal_id
+    };
+    let grants = iam_repository::list_grants_by_principal(
+        &state.persistence.postgres,
+        token_principal_id,
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    let has_admin_grant = grants.into_iter().any(|grant| {
+        grant.resource_kind == "system"
+            && grant.resource_id.is_nil()
+            && grant.permission_kind == "iam_admin"
+    });
+    if !has_admin_grant {
+        iam_repository::create_grant(
+            &state.persistence.postgres,
+            token_principal_id,
+            "system",
+            Uuid::nil(),
+            "iam_admin",
+            Some(principal_id),
+            None,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    }
+    info!(
+        principal_id = %principal_id,
+        api_token_principal_id = %token_principal_id,
+        "ensured bootstrap admin api token",
+    );
+    Ok(())
+}
+
 pub async fn ensure_bootstrap_admin(state: &AppState) -> Result<(), ApiError> {
     let Some(bootstrap_admin) = state.ui_bootstrap_admin.clone() else {
         return Ok(());
@@ -122,21 +189,6 @@ pub async fn ensure_bootstrap_admin(state: &AppState) -> Result<(), ApiError> {
     {
         existing
     } else {
-        let should_create = if state.settings.has_explicit_ui_bootstrap_admin() {
-            true
-        } else if state.settings.environment.eq_ignore_ascii_case("local") {
-            true
-        } else {
-            repositories::count_ui_users(&state.persistence.postgres)
-                .await
-                .map_err(|_| ApiError::Internal)?
-                == 0
-        };
-
-        if !should_create {
-            return Ok(());
-        }
-
         let password_hash = hash_password(&bootstrap_admin.password)?;
         let created = repositories::create_ui_user(
             &state.persistence.postgres,
@@ -169,15 +221,22 @@ pub async fn ensure_canonical_bootstrap_admin(state: &AppState) -> Result<(), Ap
     };
 
     let principal_id = if let Some(existing) =
-        iam_repository::get_user_by_email(&state.persistence.postgres, &bootstrap_admin.email)
+        iam_repository::get_user_by_login(&state.persistence.postgres, &bootstrap_admin.login)
             .await
             .map_err(|_| ApiError::Internal)?
+            .or(iam_repository::get_user_by_email(
+                &state.persistence.postgres,
+                &bootstrap_admin.email,
+            )
+            .await
+            .map_err(|_| ApiError::Internal)?)
     {
         existing.principal_id
     } else {
         let password_hash = hash_password(&bootstrap_admin.password)?;
         let claimed = iam_repository::claim_bootstrap_user(
             &state.persistence.postgres,
+            &bootstrap_admin.login,
             &bootstrap_admin.email,
             &bootstrap_admin.display_name,
             &password_hash,
@@ -190,5 +249,9 @@ pub async fn ensure_canonical_bootstrap_admin(state: &AppState) -> Result<(), Ap
         claimed.principal_id
     };
 
-    ensure_default_catalog_workspace_and_library(state, principal_id).await
+    ensure_default_catalog_workspace_and_library(state, principal_id).await?;
+    if let Some(api_token) = bootstrap_admin.api_token.as_deref() {
+        ensure_bootstrap_api_token(state, principal_id, api_token).await?;
+    }
+    Ok(())
 }

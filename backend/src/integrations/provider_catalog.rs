@@ -1438,6 +1438,7 @@ mod tests {
             ui_bootstrap_admin_email: None,
             ui_bootstrap_admin_name: None,
             ui_bootstrap_admin_password: None,
+            ui_bootstrap_admin_api_token: None,
             ui_session_ttl_hours: 720,
             upload_max_size_mb: 50,
             ingestion_worker_concurrency: 4,

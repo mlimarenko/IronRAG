@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { reactive } from 'vue'
+import { computed, reactive } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 const props = defineProps<{
@@ -8,38 +8,40 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  submit: [payload: { login: string; password: string; rememberMe: boolean }]
+  submit: [payload: { login: string; displayName: string; password: string }]
 }>()
 
 const { t } = useI18n()
 const form = reactive({
   login: '',
+  displayName: '',
   password: '',
-  rememberMe: true,
 })
+
+const displayNamePlaceholder = computed(() => form.login.trim() || t('auth.setup.displayNamePlaceholder'))
 
 function submit() {
   emit('submit', {
     login: form.login,
+    displayName: form.displayName,
     password: form.password,
-    rememberMe: form.rememberMe,
   })
 }
 </script>
 
 <template>
   <div class="rr-auth-card">
-    <h2>{{ t('auth.title') }}</h2>
-    <p>{{ t('auth.subtitle') }}</p>
+    <h2>{{ t('auth.setup.title') }}</h2>
+    <p>{{ t('auth.setup.subtitle') }}</p>
 
     <form
       class="rr-form"
       @submit.prevent="submit"
     >
       <div class="rr-field">
-        <label for="login">{{ t('auth.login') }}</label>
+        <label for="setup-login">{{ t('auth.login') }}</label>
         <input
-          id="login"
+          id="setup-login"
           v-model="form.login"
           type="text"
           placeholder="admin"
@@ -48,30 +50,37 @@ function submit() {
       </div>
 
       <div class="rr-field">
-        <label for="password">{{ t('auth.password') }}</label>
+        <label for="setup-display-name">{{ t('auth.setup.displayName') }}</label>
         <input
-          id="password"
-          v-model="form.password"
-          type="password"
-          placeholder="••••••••"
-          autocomplete="current-password"
+          id="setup-display-name"
+          v-model="form.displayName"
+          type="text"
+          :placeholder="displayNamePlaceholder"
+          autocomplete="name"
         >
       </div>
 
-      <label class="rr-form__checkbox">
+      <div class="rr-field">
+        <label for="setup-password">{{ t('auth.password') }}</label>
         <input
-          v-model="form.rememberMe"
-          type="checkbox"
+          id="setup-password"
+          v-model="form.password"
+          type="password"
+          placeholder="••••••••"
+          autocomplete="new-password"
         >
-        <span>{{ t('auth.remember') }}</span>
-      </label>
+      </div>
+
+      <p class="rr-form__hint">
+        {{ t('auth.setup.hint') }}
+      </p>
 
       <button
         class="rr-button"
         type="submit"
         :disabled="props.loading"
       >
-        {{ t('auth.submit') }}
+        {{ t('auth.setup.submit') }}
       </button>
 
       <p

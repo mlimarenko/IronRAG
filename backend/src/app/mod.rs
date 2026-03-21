@@ -233,16 +233,22 @@ async fn run_startup_bootstraps(
     _ai_catalog_validation: &config::AiCatalogValidationSettings,
     destructive_bootstrap: &config::DestructiveFreshBootstrapSettings,
 ) -> anyhow::Result<()> {
+    let explicit_ui_bootstrap_admin = state.settings.has_explicit_ui_bootstrap_admin();
     if destructive_bootstrap.required
         && !destructive_bootstrap.allow_legacy_startup_side_effects
         && bootstrap_settings.legacy_ui_bootstrap_enabled
+        && !explicit_ui_bootstrap_admin
     {
         anyhow::bail!(
             "destructive fresh bootstrap mode forbids startup bootstrap side effects; disable legacy_ui_bootstrap_enabled"
         );
     }
 
-    if bootstrap_settings.legacy_ui_bootstrap_enabled {
+    if explicit_ui_bootstrap_admin {
+        bootstrap::ensure_canonical_bootstrap_admin(state).await.map_err(|error| {
+            anyhow::anyhow!("failed to initialize canonical bootstrap admin: {error}")
+        })?;
+    } else if bootstrap_settings.legacy_ui_bootstrap_enabled {
         if crate::infra::persistence::legacy_ui_bootstrap_tables_present(
             &state.persistence.postgres,
         )

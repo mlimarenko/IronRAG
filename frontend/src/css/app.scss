@@ -561,6 +561,13 @@ select {
   font-size: 14px;
 }
 
+.rr-form__hint {
+  margin: -8px 0 0;
+  color: var(--rr-text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .rr-button {
   display: inline-flex;
   align-items: center;
