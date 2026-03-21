@@ -154,9 +154,9 @@ function submit() {
             id="token-expiry"
             v-model="expiresInDays"
           >
-            <option value="30">30 days</option>
-            <option value="90">90 days</option>
-            <option value="365">365 days</option>
+            <option value="30">{{ $t('admin.dialog.dayOption', { count: 30 }) }}</option>
+            <option value="90">{{ $t('admin.dialog.dayOption', { count: 90 }) }}</option>
+            <option value="365">{{ $t('admin.dialog.dayOption', { count: 365 }) }}</option>
             <option value="never">{{ $t('admin.dialog.never') }}</option>
           </select>
         </div>

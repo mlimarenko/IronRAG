@@ -178,8 +178,8 @@ function resolveGraphDiagnosticsRefreshInterval(
     return 0
   }
   const graphStatus = graphDiagnostics?.graphStatus ?? surface.graphStatus
-  const projectionHealth = graphHealth?.projectionHealth ?? null
-  const freshness = graphDiagnostics?.projectionFreshness ?? null
+  const writeHealth = graphHealth?.writeHealth ?? null
+  const freshness = graphDiagnostics?.graphFreshness ?? null
   const activeBacklogCount = surface.diagnostics.activeBacklogCount
 
   if (
@@ -192,8 +192,8 @@ function resolveGraphDiagnosticsRefreshInterval(
   }
 
   if (
-    projectionHealth === 'failed' ||
-    projectionHealth === 'retrying_contention' ||
+    writeHealth === 'failed' ||
+    writeHealth === 'retrying_contention' ||
     freshness === 'failed'
   ) {
     return FAST_REFRESH_INTERVAL_MS
@@ -501,6 +501,7 @@ function createLocalUploadRow(file: File, libraryName: string): DocumentRow {
       status: null,
       warning: null,
     },
+    knowledgeReadiness: null,
     canRetry: false,
     canAppend: false,
     canReplace: false,
@@ -634,6 +635,9 @@ export const useDocumentsStore = defineStore('documents', {
     selectedDetailCanonicalSummary(state): DocumentDetail['canonicalSummaryPreview'] {
       return state.detail?.canonicalSummaryPreview ?? null
     },
+    selectedDetailKnowledgeReadiness(state): DocumentDetail['knowledgeReadiness'] {
+      return state.detail?.knowledgeReadiness ?? null
+    },
     workspacePrimarySummary(state): DocumentsWorkspaceSummary['primarySummary'] | null {
       return state.workspaceSummary?.primarySummary ?? null
     },
@@ -708,6 +712,19 @@ export const useDocumentsStore = defineStore('documents', {
           ]
             .filter(Boolean)
             .join(' · '),
+        })
+      }
+
+      if (state.detail?.knowledgeReadiness) {
+        const readiness = state.detail.knowledgeReadiness
+        informational.push({
+          kind: `readiness:${readiness.textState}:${readiness.vectorState}:${readiness.graphState}`,
+          title: `Knowledge readiness for ${state.detail.fileName}`,
+          message: [
+            `Text ${readiness.textState}`,
+            `Vector ${readiness.vectorState}`,
+            `Graph ${readiness.graphState}`,
+          ].join(' · '),
         })
       }
 

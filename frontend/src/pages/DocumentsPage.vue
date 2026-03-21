@@ -16,11 +16,13 @@ import DocumentsTable from 'src/components/documents/DocumentsTable.vue'
 import DocumentsWorkspaceHeader from 'src/components/documents/DocumentsWorkspaceHeader.vue'
 import ReplaceDocumentDialog from 'src/components/documents/ReplaceDocumentDialog.vue'
 import type { DocumentStatus } from 'src/models/ui/documents'
+import { useDisplayFormatters } from 'src/composables/useDisplayFormatters'
 import { downloadDocumentExtractedText } from 'src/services/api/documents'
 import { useDocumentsStore } from 'src/stores/documents'
 import { useShellStore } from 'src/stores/shell'
 
 const { t } = useI18n()
+const { graphWarningLabel } = useDisplayFormatters()
 const documentsStore = useDocumentsStore()
 const shellStore = useShellStore()
 const {
@@ -47,6 +49,18 @@ const {
   workspacePrimarySummary,
   workspaceSecondaryDiagnostics,
 } = storeToRefs(documentsStore)
+
+const graphBackendLabel = computed(() => {
+  const backend = graphDiagnostics.value?.graphBackend ?? null
+  if (!backend) {
+    return null
+  }
+  const key = `documents.workspace.backends.${backend}`
+  if (t(key) !== key) {
+    return t(key)
+  }
+  return backend
+})
 
 let refreshTimer: number | null = null
 let graphDiagnosticsTimer: number | null = null
@@ -231,16 +245,19 @@ const terminalBanner = computed<{
 
 const graphStatusMessage = computed(() => {
   if (graphDiagnostics.value?.warning) {
-    return graphDiagnostics.value.warning
+    return graphWarningLabel(graphDiagnostics.value.warning)
   }
   if (graphDiagnostics.value?.blockers.length) {
-    return graphDiagnostics.value.blockers[0]
+    return graphWarningLabel(graphDiagnostics.value.blockers[0] ?? null)
   }
   if (!surface.value) {
     return null
   }
   if (surface.value.rebuildBacklogCount > 0) {
     return t('graph.rebuildBacklog', { count: surface.value.rebuildBacklogCount })
+  }
+  if (graphDiagnostics.value?.graphStatus === 'rebuilding') {
+    return t('graph.statusDescriptions.rebuilding')
   }
   if (surface.value.graphStatus === 'stale') {
     return t('graph.statusDescriptions.stale')
@@ -254,7 +271,7 @@ const graphStatusMessage = computed(() => {
   if (surface.value.counters.readyNoGraph > 0) {
     return t('graph.readyNoGraph', { count: surface.value.counters.readyNoGraph })
   }
-  return surface.value.graphWarning
+  return graphWarningLabel(surface.value.graphWarning)
 })
 
 const graphStatusLabel = computed(() => {
@@ -264,6 +281,10 @@ const graphStatusLabel = computed(() => {
   }
   return t(`graph.statuses.${graphStatus}`)
 })
+
+const graphStatus = computed(
+  () => graphDiagnostics.value?.graphStatus ?? surface.value?.graphStatus ?? null,
+)
 
 const supportingLines = computed(() =>
   [
@@ -364,7 +385,9 @@ async function submitReplace(file: File) {
 
       <DocumentsDiagnosticsStrip
         :chips="workspaceSecondaryDiagnostics"
+        :graph-backend="graphBackendLabel"
         :graph-health="graphHealthSnapshot"
+        :graph-status="graphStatus"
         :graph-status-label="graphStatusLabel"
         :graph-status-message="graphStatusMessage"
       />
@@ -420,6 +443,7 @@ async function submitReplace(file: File) {
     <DocumentDetailsDrawer
       :open="detailOpen"
       :detail="detail"
+      :graph-backend="graphBackendLabel"
       :library-diagnostics="surface?.diagnostics ?? null"
       :workspace-name="shellStore.context?.activeWorkspace.name ?? null"
       :loading="detailLoading"

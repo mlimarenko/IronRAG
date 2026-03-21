@@ -5,16 +5,12 @@ The Graph page now uses a chat-first `Ask AI` rail instead of the older diagnost
 ## Retrieval UX
 
 - Query mode chips describe retrieval strategy, not model choice: `Documents`, `Local`, `Global`, `Hybrid`, `Mixed`
-- Mode guidance comes from `/v1/ui/libraries/{libraryId}/graph/assistant/config` and is shown through compact tooltip/help copy
 - Assistant history preserves persisted planning, rerank, grouped references, and warning metadata when older chats are reopened
 - Node detail and document detail both surface graph-quality truth: canonical summaries, extraction recovery, and reconciliation scope
 - Grouped references keep one visible title/excerpt per support cluster while preserving support ids for drill-down
 
 ## Main flow
 
-- Graph bootstrap loads one assistant aggregate from `/v1/ui/graph/surface`.
-- Recent chats, active session summary, and compact settings summary are included in that aggregate.
-- Sending a question still goes through `/v1/ui/graph/ask`.
 - Session lifecycle and settings edits use `/v1/chat/sessions`, `/v1/chat/sessions/{id}`, and `/v1/chat/sessions/{id}/messages`.
 - When a saved assistant message has a persisted `executionId`, the frontend can hydrate the full persisted query detail from `/v1/query/executions/{executionId}` to restore grouped references and planning truth.
 

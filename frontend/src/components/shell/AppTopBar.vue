@@ -44,8 +44,9 @@ async function logout() {
         :selected-id="activeWorkspace?.id ?? ''"
         :options="workspaces"
         :disabled="!workspaces.length"
-        :placeholder="workspaces.length ? $t('shell.workspace') : 'No workspaces yet'"
+        :placeholder="$t('shell.noWorkspaces')"
         :can-create="canCreateWorkspace"
+        :create-label="$t('shell.createWorkspace')"
         @change="shellStore.switchWorkspace"
         @create="shellStore.showCreateWorkspace = true"
       />
@@ -55,8 +56,9 @@ async function logout() {
         :selected-id="activeLibrary?.id ?? ''"
         :options="libraries"
         :disabled="!activeWorkspace || !libraries.length"
-        :placeholder="activeWorkspace ? 'No libraries yet' : 'Select a workspace first'"
+        :placeholder="activeWorkspace ? $t('shell.noLibraries') : $t('shell.selectWorkspaceFirst')"
         :can-create="canCreateLibrary"
+        :create-label="$t('shell.createLibrary')"
         @change="shellStore.switchLibrary"
         @create="shellStore.showCreateLibrary = true"
       />

@@ -1,3 +1,5 @@
+use chrono::Utc;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
@@ -6,8 +8,9 @@ use crate::{
         ExtractChunkResult, ExtractContent, ExtractEdgeCandidate, ExtractNodeCandidate,
         ExtractResumeCursor,
     },
-    infra::repositories::extract_repository::{
-        self, NewExtractEdgeCandidate, NewExtractNodeCandidate,
+    infra::{
+        arangodb::graph_store::{NewKnowledgeEntityCandidate, NewKnowledgeRelationCandidate},
+        repositories::{content_repository, extract_repository},
     },
     interfaces::http::router_support::ApiError,
 };
@@ -82,6 +85,18 @@ impl ExtractService {
         )
         .await
         .map_err(|_| ApiError::Internal)?;
+        let _ = state
+            .canonical_services
+            .knowledge
+            .set_revision_text_state(
+                state,
+                row.revision_id,
+                map_extract_state_to_text_state(&row.extract_state),
+                row.normalized_text.as_deref(),
+                row.text_checksum.as_deref(),
+                extract_text_readable_at(&row),
+            )
+            .await?;
         Ok(map_extract_content_row(row))
     }
 
@@ -140,42 +155,14 @@ impl ExtractService {
             .map_err(|_| ApiError::Internal)?
         };
 
-        let node_candidates = command
-            .node_candidates
-            .iter()
-            .map(|candidate| NewExtractNodeCandidate {
-                canonical_key: &candidate.canonical_key,
-                node_kind: &candidate.node_kind,
-                display_label: &candidate.display_label,
-                summary: candidate.summary.as_deref(),
-            })
-            .collect::<Vec<_>>();
-        let edge_candidates = command
-            .edge_candidates
-            .iter()
-            .map(|candidate| NewExtractEdgeCandidate {
-                canonical_key: &candidate.canonical_key,
-                edge_kind: &candidate.edge_kind,
-                from_canonical_key: &candidate.from_canonical_key,
-                to_canonical_key: &candidate.to_canonical_key,
-                summary: candidate.summary.as_deref(),
-            })
-            .collect::<Vec<_>>();
-
-        let _ = extract_repository::replace_extract_node_candidates(
-            &state.persistence.postgres,
+        self.persist_arango_extract_candidates(
+            state,
             chunk_result.id,
-            &node_candidates,
+            command.chunk_id,
+            &command.node_candidates,
+            &command.edge_candidates,
         )
-        .await
-        .map_err(|_| ApiError::Internal)?;
-        let _ = extract_repository::replace_extract_edge_candidates(
-            &state.persistence.postgres,
-            chunk_result.id,
-            &edge_candidates,
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?;
+        .await?;
 
         Ok(map_extract_chunk_result_row(chunk_result))
     }
@@ -278,6 +265,109 @@ impl ExtractService {
         .map_err(|_| ApiError::Internal)?;
         Ok(map_resume_cursor_row(row))
     }
+
+    async fn persist_arango_extract_candidates(
+        &self,
+        state: &AppState,
+        chunk_result_id: Uuid,
+        chunk_id: Uuid,
+        node_candidates: &[NewNodeCandidate],
+        edge_candidates: &[NewEdgeCandidate],
+    ) -> Result<(), ApiError> {
+        let chunk = content_repository::get_chunk_by_id(&state.persistence.postgres, chunk_id)
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .ok_or_else(|| ApiError::resource_not_found("chunk", chunk_id))?;
+        let revision =
+            content_repository::get_revision_by_id(&state.persistence.postgres, chunk.revision_id)
+                .await
+                .map_err(|_| ApiError::Internal)?
+                .ok_or_else(|| {
+                    ApiError::resource_not_found("content_revision", chunk.revision_id)
+                })?;
+        let knowledge_revision = state
+            .arango_document_store
+            .get_revision(revision.id)
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .ok_or_else(|| ApiError::resource_not_found("knowledge_revision", revision.id))?;
+
+        for candidate in node_candidates {
+            let row = NewKnowledgeEntityCandidate {
+                candidate_id: stable_candidate_id(
+                    "entity",
+                    chunk_result_id,
+                    &candidate.canonical_key,
+                    &candidate.node_kind,
+                ),
+                workspace_id: knowledge_revision.workspace_id,
+                library_id: knowledge_revision.library_id,
+                revision_id: knowledge_revision.revision_id,
+                chunk_id: Some(chunk_id),
+                candidate_label: candidate.display_label.clone(),
+                candidate_type: candidate.node_kind.clone(),
+                normalization_key: candidate.canonical_key.clone(),
+                confidence: None,
+                extraction_method: "extract_chunk_result".to_string(),
+                candidate_state: "active".to_string(),
+                created_at: Some(Utc::now()),
+                updated_at: Some(Utc::now()),
+            };
+            let _ = state
+                .arango_graph_store
+                .upsert_entity_candidate(&row)
+                .await
+                .map_err(|_| ApiError::Internal)?;
+        }
+
+        for candidate in edge_candidates {
+            let row = NewKnowledgeRelationCandidate {
+                candidate_id: stable_candidate_id(
+                    "relation",
+                    chunk_result_id,
+                    &candidate.canonical_key,
+                    &candidate.edge_kind,
+                ),
+                workspace_id: knowledge_revision.workspace_id,
+                library_id: knowledge_revision.library_id,
+                revision_id: knowledge_revision.revision_id,
+                chunk_id: Some(chunk_id),
+                subject_candidate_key: candidate.from_canonical_key.clone(),
+                predicate: candidate.edge_kind.clone(),
+                object_candidate_key: candidate.to_canonical_key.clone(),
+                normalized_assertion: candidate.canonical_key.clone(),
+                confidence: None,
+                extraction_method: "extract_chunk_result".to_string(),
+                candidate_state: "active".to_string(),
+                created_at: Some(Utc::now()),
+                updated_at: Some(Utc::now()),
+            };
+            let _ = state
+                .arango_graph_store
+                .upsert_relation_candidate(&row)
+                .await
+                .map_err(|_| ApiError::Internal)?;
+        }
+
+        Ok(())
+    }
+}
+
+fn map_extract_state_to_text_state(extract_state: &str) -> &str {
+    match extract_state {
+        "readable" | "ready" => "text_readable",
+        "failed" => "failed",
+        "processing" => "extracting_text",
+        _ => "accepted",
+    }
+}
+
+fn extract_text_readable_at(
+    row: &extract_repository::ExtractContentRow,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    matches!(row.extract_state.as_str(), "readable" | "ready")
+        .then_some(row.updated_at)
+        .filter(|_| row.normalized_text.as_deref().is_some_and(|text| !text.trim().is_empty()))
 }
 
 fn map_extract_content_row(row: extract_repository::ExtractContentRow) -> ExtractContent {
@@ -342,4 +432,21 @@ fn map_resume_cursor_row(row: extract_repository::ExtractResumeCursorRow) -> Ext
         downgrade_level: row.downgrade_level,
         updated_at: row.updated_at,
     }
+}
+
+#[must_use]
+fn stable_candidate_id(
+    kind: &str,
+    chunk_result_id: Uuid,
+    canonical_key: &str,
+    flavor: &str,
+) -> Uuid {
+    let digest = Sha256::digest(
+        format!("extract:{kind}:{chunk_result_id}:{canonical_key}:{flavor}").as_bytes(),
+    );
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
 }

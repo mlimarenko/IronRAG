@@ -135,19 +135,10 @@ async fn content_repository_persists_logical_document_revision_head_and_chunks()
             .await
             .context("failed to load document by id")?
             .context("missing document by id")?;
-        let by_external_key = content_repository::get_document_by_external_key(
-            &pool,
-            fixture.library_id,
-            &external_key,
-        )
-        .await
-        .context("failed to load document by external key")?
-        .context("missing document by external key")?;
         let listed = content_repository::list_documents_by_library(&pool, fixture.library_id)
             .await
             .context("failed to list documents by library")?;
         assert_eq!(by_id.id, document.id);
-        assert_eq!(by_external_key.id, document.id);
         assert!(listed.iter().any(|row| row.id == document.id));
 
         let first_revision = content_repository::create_revision(

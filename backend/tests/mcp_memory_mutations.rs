@@ -292,7 +292,7 @@ async fn receipt_row_count_for_id(state: &AppState, receipt_id: Uuid) -> anyhow:
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn read_only_tokens_cannot_create_mutation_receipts_via_mcp() -> anyhow::Result<()> {
     let settings = Settings::from_env().context("failed to load settings for mcp mutation test")?;
     let fixture = McpMutationFixture::create(settings).await?;
@@ -342,7 +342,7 @@ async fn read_only_tokens_cannot_create_mutation_receipts_via_mcp() -> anyhow::R
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn authorized_upload_returns_receipt_but_document_remains_unreadable_until_processing_finishes()
 -> anyhow::Result<()> {
     let settings = Settings::from_env().context("failed to load settings for mcp upload test")?;
@@ -413,7 +413,7 @@ async fn authorized_upload_returns_receipt_but_document_remains_unreadable_until
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn append_and_replace_mutations_preserve_logical_document_identity() -> anyhow::Result<()> {
     let settings = Settings::from_env().context("failed to load settings for mcp mutation test")?;
     let fixture = McpMutationFixture::create(settings).await?;
@@ -495,7 +495,7 @@ async fn append_and_replace_mutations_preserve_logical_document_identity() -> an
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn readable_processing_documents_still_reject_overlapping_mutations() -> anyhow::Result<()> {
     let settings = Settings::from_env().context("failed to load settings for mcp mutation test")?;
     let fixture = McpMutationFixture::create(settings).await?;
@@ -545,7 +545,7 @@ async fn readable_processing_documents_still_reject_overlapping_mutations() -> a
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn repeated_upload_idempotency_reuses_the_same_receipt() -> anyhow::Result<()> {
     let settings = Settings::from_env().context("failed to load settings for idempotency test")?;
     let fixture = McpMutationFixture::create(settings).await?;
@@ -599,7 +599,7 @@ async fn repeated_upload_idempotency_reuses_the_same_receipt() -> anyhow::Result
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn failed_but_readable_documents_can_still_accept_append_mutations() -> anyhow::Result<()> {
     let settings = Settings::from_env()
         .context("failed to load settings for failed-readable mutation test")?;
@@ -644,7 +644,7 @@ async fn failed_but_readable_documents_can_still_accept_append_mutations() -> an
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn mutation_status_reports_ready_when_failed_runtime_run_already_exposes_memory()
 -> anyhow::Result<()> {
     let settings =
@@ -704,7 +704,7 @@ async fn mutation_status_reports_ready_when_failed_runtime_run_already_exposes_m
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn upload_documents_rejects_decoded_payloads_over_mcp_upload_limit() -> anyhow::Result<()> {
     let mut settings =
         Settings::from_env().context("failed to load settings for mcp mutation test")?;
@@ -747,7 +747,7 @@ async fn upload_documents_rejects_decoded_payloads_over_mcp_upload_limit() -> an
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn replace_document_rejects_replacement_payloads_over_mcp_upload_limit() -> anyhow::Result<()>
 {
     let mut settings =
@@ -793,7 +793,7 @@ async fn replace_document_rejects_replacement_payloads_over_mcp_upload_limit() -
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn mcp_route_rejects_oversized_request_bodies_with_structured_limit_error()
 -> anyhow::Result<()> {
     let mut settings =

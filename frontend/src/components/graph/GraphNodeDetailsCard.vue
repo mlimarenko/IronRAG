@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useDisplayFormatters } from 'src/composables/useDisplayFormatters'
 import type { GraphNodeDetail } from 'src/models/ui/graph'
 
 const props = defineProps<{
@@ -13,6 +14,8 @@ defineEmits<{
 }>()
 
 const { t } = useI18n()
+const { graphPropertyLabel, graphPropertyValue, graphWarningLabel, humanizeToken } =
+  useDisplayFormatters()
 
 const visibleEvidence = computed(
   () =>
@@ -30,7 +33,7 @@ const visibleProperties = computed(() =>
   (props.detail?.properties ?? [])
     .filter(([key]) => !['Projection', 'Canonical key'].includes(key))
     .slice(0, 3)
-    .map(([key, value]) => [propertyLabel(key), propertyValue(key, value)] as const),
+    .map(([key, value]) => [graphPropertyLabel(key), graphPropertyValue(key, value)] as const),
 )
 
 const detailSummary = computed(() => {
@@ -75,30 +78,6 @@ const graphQualitySummary = computed(() => {
   return lines
 })
 
-function propertyLabel(key: string): string {
-  switch (key) {
-    case 'Type':
-      return t('graph.propertyLabels.type')
-    case 'Support':
-      return t('graph.propertyLabels.support')
-    case 'Aliases':
-      return t('graph.propertyLabels.aliases')
-    case 'Source chunks':
-      return t('graph.propertyLabels.sourceChunks')
-    default:
-      return key
-    }
-}
-
-function propertyValue(key: string, value: string): string {
-  if (key === 'Type') {
-    if (value === 'document' || value === 'entity' || value === 'topic') {
-      return t(`graph.nodeTypes.${value}`)
-    }
-  }
-  return value
-}
-
 function reconciliationScopeLabel(status: string, count: number): string {
   return t(`graph.reconciliation.scope.${status}`, { count })
 }
@@ -128,10 +107,12 @@ function relationLabel(value: string): string {
     deployed_via: t('graph.relationLabels.deployedVia'),
     serves_static_for: t('graph.relationLabels.servesStaticFor'),
     delegates_auth_callbacks_to: t('graph.relationLabels.delegatesAuthCallbacksTo'),
+    subject: t('graph.relationLabels.subject'),
+    supported_by: t('graph.relationLabels.supportedBy'),
     requires: t('graph.relationLabels.requires'),
     includes: t('graph.relationLabels.includes'),
   }
-  return mapping[normalized] ?? value.replace(/[_-]+/g, ' ')
+  return mapping[normalized] ?? humanizeToken(value)
 }
 
 function normalizeEvidenceText(value: string): string {
@@ -152,7 +133,7 @@ const reconciliationSummary = computed(() => {
 
   const lines: string[] = []
   if (props.detail.warning) {
-    lines.push(props.detail.warning)
+    lines.push(graphWarningLabel(props.detail.warning) ?? props.detail.warning)
   }
   const scope = props.detail.reconciliationScope
   if (scope) {
@@ -168,7 +149,7 @@ const reconciliationSummary = computed(() => {
       }),
     )
     if (scope.fallbackReason) {
-      lines.push(scope.fallbackReason)
+      lines.push(graphWarningLabel(scope.fallbackReason) ?? scope.fallbackReason)
     }
   }
   if (props.detail.pendingDeleteCount > 0) {
@@ -236,7 +217,7 @@ const canonicalSummary = computed(() => props.detail?.canonicalSummary ?? null)
           v-if="canonicalSummary.warning"
           class="rr-graph-node-card__summary-warning"
         >
-          {{ canonicalSummary.warning }}
+          {{ graphWarningLabel(canonicalSummary.warning) ?? canonicalSummary.warning }}
         </p>
       </div>
 

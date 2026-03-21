@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use axum::{
     Router,
     body::Body,
@@ -18,10 +17,7 @@ use uuid::Uuid;
 use rustrag_backend::{
     app::{config::Settings, state::AppState},
     infra::{
-        graph_store::{
-            GraphProjectionData, GraphProjectionEdgeWrite, GraphProjectionNodeWrite,
-            GraphProjectionWriteError, GraphStore,
-        },
+        arangodb::client::ArangoClient,
         persistence::Persistence,
         repositories::{ai_repository, audit_repository, catalog_repository, iam_repository},
     },
@@ -46,49 +42,6 @@ struct GrantSpec {
     resource_kind: &'static str,
     resource_id: Uuid,
     permission_kind: String,
-}
-
-struct NoopGraphStore;
-
-#[async_trait]
-impl GraphStore for NoopGraphStore {
-    fn backend_name(&self) -> &'static str {
-        "noop"
-    }
-
-    async fn ping(&self) -> Result<()> {
-        Ok(())
-    }
-
-    async fn replace_library_projection(
-        &self,
-        _library_id: Uuid,
-        _projection_version: i64,
-        _nodes: &[GraphProjectionNodeWrite],
-        _edges: &[GraphProjectionEdgeWrite],
-    ) -> Result<(), GraphProjectionWriteError> {
-        Ok(())
-    }
-
-    async fn refresh_library_projection_targets(
-        &self,
-        _library_id: Uuid,
-        _projection_version: i64,
-        _remove_node_ids: &[Uuid],
-        _remove_edge_ids: &[Uuid],
-        _nodes: &[GraphProjectionNodeWrite],
-        _edges: &[GraphProjectionEdgeWrite],
-    ) -> Result<(), GraphProjectionWriteError> {
-        Ok(())
-    }
-
-    async fn load_library_projection(
-        &self,
-        _library_id: Uuid,
-        _projection_version: i64,
-    ) -> Result<GraphProjectionData> {
-        Ok(GraphProjectionData::default())
-    }
 }
 
 struct TempDatabase {
@@ -501,6 +454,7 @@ fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppState> {
         redis: redis::Client::open(settings.redis_url.clone())
             .context("failed to create redis client for governance auth test state")?,
     };
+    let arango_client = Arc::new(ArangoClient::from_settings(&settings)?);
 
     Ok(AppState::from_dependencies(
         Settings {
@@ -523,7 +477,7 @@ fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppState> {
             ..settings
         },
         persistence,
-        Arc::new(NoopGraphStore),
+        arango_client,
     ))
 }
 
@@ -655,7 +609,7 @@ fn tool_names(response: &Value) -> Result<Vec<String>> {
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn workspace_scoped_discovery_only_returns_visible_workspace_and_libraries() -> Result<()> {
     let fixture = GovernanceAuthFixture::create().await?;
 
@@ -690,7 +644,7 @@ async fn workspace_scoped_discovery_only_returns_visible_workspace_and_libraries
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn workspace_scoped_grants_match_between_discovery_and_mutation_probes() -> Result<()> {
     let fixture = GovernanceAuthFixture::create().await?;
 
@@ -741,7 +695,7 @@ async fn workspace_scoped_grants_match_between_discovery_and_mutation_probes() -
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn library_scoped_grants_match_between_discovery_and_mutation_probes() -> Result<()> {
     let fixture = GovernanceAuthFixture::create().await?;
 
@@ -803,7 +757,7 @@ async fn library_scoped_grants_match_between_discovery_and_mutation_probes() -> 
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn document_scoped_grants_match_between_discovery_and_mutation_probes() -> Result<()> {
     let fixture = GovernanceAuthFixture::create().await?;
 
@@ -865,7 +819,7 @@ async fn document_scoped_grants_match_between_discovery_and_mutation_probes() ->
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn library_scoped_binding_admin_can_create_library_binding() -> Result<()> {
     let fixture = GovernanceAuthFixture::create().await?;
 
@@ -938,7 +892,7 @@ async fn library_scoped_binding_admin_can_create_library_binding() -> Result<()>
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn mcp_tools_list_hides_unauthorized_mutation_and_admin_tools() -> Result<()> {
     let fixture = GovernanceAuthFixture::create().await?;
 
@@ -968,7 +922,7 @@ async fn mcp_tools_list_hides_unauthorized_mutation_and_admin_tools() -> Result<
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn mcp_tools_list_respects_system_workspace_library_and_document_grants() -> Result<()> {
     let fixture = GovernanceAuthFixture::create().await?;
 
@@ -1064,7 +1018,7 @@ async fn mcp_tools_list_respects_system_workspace_library_and_document_grants() 
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn anonymous_governance_and_operational_reads_are_rejected() -> Result<()> {
     let fixture = GovernanceAuthFixture::create().await?;
 
@@ -1099,7 +1053,7 @@ async fn anonymous_governance_and_operational_reads_are_rejected() -> Result<()>
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn workspace_audit_reader_gets_redacted_visible_events_only() -> Result<()> {
     let fixture = GovernanceAuthFixture::create().await?;
 

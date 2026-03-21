@@ -1,3 +1,4 @@
+pub mod bootstrap;
 pub mod config;
 pub mod shutdown;
 pub mod state;
@@ -19,8 +20,8 @@ use tower_http::{
 use tracing::{Span, error, info, warn};
 
 use crate::{
-    interfaces::http::{self, router_support, ui_auth},
-    services::{ingestion_worker, pricing_catalog},
+    interfaces::http::{self, router_support},
+    services::ingestion_worker,
 };
 
 /// Boots the HTTP server and serves the `RustRAG` API.
@@ -39,7 +40,7 @@ pub async fn run() -> anyhow::Result<()> {
         &config.destructive_fresh_bootstrap_settings(),
     )
     .await?;
-    let graph_backend = state.graph_store.backend_name();
+    let graph_backend = state.graph_runtime.backend_name.as_str();
     let shutdown = shutdown::ShutdownSignal::new();
     let signal_listener = spawn_signal_listener(shutdown.clone());
     let worker_handle = config
@@ -180,8 +181,9 @@ async fn run_http_api(
         service_role = %config.service_role,
         environment = %config.environment,
         graph_backend,
-        neo4j_uri = %state.graph_runtime.neo4j_uri,
-        neo4j_database = %state.graph_runtime.neo4j_database,
+        arangodb_url = %state.arango_runtime.url,
+        arangodb_database = %state.arango_runtime.database,
+        knowledge_backend = %state.graph_runtime.backend_name,
         query_intent_cache_ttl_hours = state.retrieval_intelligence.query_intent_cache_ttl_hours,
         rerank_enabled = state.retrieval_intelligence.rerank_enabled,
         extraction_recovery_enabled = state.retrieval_intelligence.extraction_recovery_enabled,
@@ -199,7 +201,6 @@ async fn run_http_api(
         mcp_memory_default_search_limit = state.mcp_memory.default_search_limit,
         mcp_memory_max_search_limit = state.mcp_memory.max_search_limit,
         mcp_memory_audit_enabled = state.mcp_memory.audit_enabled,
-        queue_isolation_enabled = state.pipeline_hardening.queue_isolation_enabled,
         minimum_slice_capacity = state.pipeline_hardening.minimum_slice_capacity,
         token_touch_min_interval_seconds = state.pipeline_hardening.token_touch_min_interval_seconds,
         heartbeat_write_min_interval_seconds = state
@@ -208,10 +209,7 @@ async fn run_http_api(
         graph_progress_checkpoint_interval_seconds = state
             .pipeline_hardening
             .graph_progress_checkpoint_interval_seconds,
-        projection_retry_limit = state.resolve_settle_blockers.projection_retry_limit,
-        diagnostics_snapshot_stale_after_seconds = state
-            .resolve_settle_blockers
-            .diagnostics_snapshot_stale_after_seconds,
+        graph_retry_limit = state.resolve_settle_blockers.projection_retry_limit,
         provider_request_size_soft_limit_bytes = state
             .resolve_settle_blockers
             .provider_request_size_soft_limit_bytes,
@@ -232,45 +230,43 @@ async fn run_http_api(
 async fn run_startup_bootstraps(
     state: &state::AppState,
     bootstrap_settings: &config::BootstrapSettings,
-    ai_catalog_validation: &config::AiCatalogValidationSettings,
+    _ai_catalog_validation: &config::AiCatalogValidationSettings,
     destructive_bootstrap: &config::DestructiveFreshBootstrapSettings,
 ) -> anyhow::Result<()> {
     if destructive_bootstrap.required
         && !destructive_bootstrap.allow_legacy_startup_side_effects
-        && (bootstrap_settings.legacy_ui_bootstrap_enabled || ai_catalog_validation.seed_from_env)
+        && bootstrap_settings.legacy_ui_bootstrap_enabled
     {
         anyhow::bail!(
-            "destructive fresh bootstrap mode forbids legacy startup side effects; disable legacy_ui_bootstrap_enabled and runtime_pricing_seed_from_env"
+            "destructive fresh bootstrap mode forbids startup bootstrap side effects; disable legacy_ui_bootstrap_enabled"
         );
     }
 
-    if bootstrap_settings.legacy_ui_bootstrap_enabled
-        && crate::infra::persistence::legacy_ui_bootstrap_tables_present(
+    if bootstrap_settings.legacy_ui_bootstrap_enabled {
+        if crate::infra::persistence::legacy_ui_bootstrap_tables_present(
             &state.persistence.postgres,
         )
         .await?
-    {
-        ui_auth::ensure_bootstrap_admin(state)
-            .await
-            .map_err(|error| anyhow::anyhow!("failed to initialize bootstrap ui admin: {error}"))?;
+        {
+            bootstrap::ensure_bootstrap_admin(state).await.map_err(|error| {
+                anyhow::anyhow!("failed to initialize legacy bootstrap admin: {error}")
+            })?;
+        } else if crate::infra::persistence::canonical_ui_bootstrap_tables_present(
+            &state.persistence.postgres,
+        )
+        .await?
+        {
+            bootstrap::ensure_canonical_bootstrap_admin(state).await.map_err(|error| {
+                anyhow::anyhow!("failed to initialize canonical bootstrap admin: {error}")
+            })?;
+        } else {
+            info!("bootstrap admin side effect not required at startup");
+        }
     } else {
-        info!("legacy ui bootstrap side effect disabled at startup");
+        info!("bootstrap admin side effect not required at startup");
     }
 
-    if ai_catalog_validation.seed_from_env
-        && crate::infra::persistence::legacy_pricing_catalog_tables_present(
-            &state.persistence.postgres,
-        )
-        .await?
-        && !crate::infra::persistence::canonical_ai_catalog_seeded(&state.persistence.postgres)
-            .await?
-    {
-        pricing_catalog::bootstrap_from_env_if_enabled(state)
-            .await
-            .map_err(|error| anyhow::anyhow!("failed to bootstrap pricing catalog: {error}"))?;
-    } else {
-        info!("legacy pricing bootstrap side effect disabled at startup");
-    }
+    info!("pricing catalog bootstrap side effect not required at startup");
 
     Ok(())
 }

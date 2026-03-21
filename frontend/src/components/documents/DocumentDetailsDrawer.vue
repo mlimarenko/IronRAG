@@ -7,6 +7,7 @@ import type {
   DocumentActivityStatus,
   DocumentCollectionDiagnostics,
   DocumentDetail,
+  DocumentKnowledgeReadiness,
   DocumentStatus,
 } from 'src/models/ui/documents'
 
@@ -26,6 +27,7 @@ interface DrawerTruthState {
 const props = defineProps<{
   open: boolean
   detail: DocumentDetail | null
+  graphBackend: string | null
   libraryDiagnostics: DocumentCollectionDiagnostics | null
   workspaceName: string | null
   loading: boolean
@@ -171,8 +173,82 @@ function summaryTone(tone: StatusPillTone): DocumentStatus {
   return tone
 }
 
+function readinessTone(status: string): DocumentStatus {
+  if (status === 'ready') {
+    return 'ready'
+  }
+  if (status === 'failed') {
+    return 'failed'
+  }
+  if (status === 'accepted' || status === 'processing' || status === 'queued') {
+    return 'processing'
+  }
+  return 'processing'
+}
+
+function readinessLabel(status: string): string {
+  switch (status) {
+    case 'ready':
+      return i18n.t('documents.status.ready')
+    case 'accepted':
+      return i18n.t('documents.mutation.status.accepted')
+    case 'processing':
+      return i18n.t('documents.status.processing')
+    case 'queued':
+      return i18n.t('documents.status.queued')
+    case 'failed':
+      return i18n.t('documents.status.failed')
+    default:
+      return status
+  }
+}
+
+function readinessCardNote(value: string | null): string {
+  return value
+    ? i18n.t('documents.details.readyAt', { value: formatDate(value) })
+    : i18n.t('documents.details.stillSettling')
+}
+
 const resolvedDiagnostics = computed(() => {
   return props.detail?.collectionDiagnostics ?? props.libraryDiagnostics ?? null
+})
+
+const knowledgeReadiness = computed<DocumentKnowledgeReadiness | null>(
+  () => props.detail?.knowledgeReadiness ?? null,
+)
+const backendLabel = computed(
+  () => props.graphBackend ?? i18n.t('documents.workspace.backends.canonical_arango'),
+)
+
+const readinessCards = computed(() => {
+  const readiness = knowledgeReadiness.value
+  if (!readiness) {
+    return []
+  }
+
+  return [
+    {
+      key: 'text',
+      label: i18n.t('documents.details.textReadiness'),
+      tone: readinessTone(readiness.textState),
+      value: readinessLabel(readiness.textState),
+      note: readinessCardNote(readiness.textReadableAt),
+    },
+    {
+      key: 'vector',
+      label: i18n.t('documents.details.vectorReadiness'),
+      tone: readinessTone(readiness.vectorState),
+      value: readinessLabel(readiness.vectorState),
+      note: readinessCardNote(readiness.vectorReadyAt),
+    },
+    {
+      key: 'graph',
+      label: i18n.t('documents.details.graphReadiness'),
+      tone: readinessTone(readiness.graphState),
+      value: readinessLabel(readiness.graphState),
+      note: readinessCardNote(readiness.graphReadyAt),
+    },
+  ]
 })
 
 const readableTruth = computed<DrawerTruthState | null>(() => {
@@ -190,17 +266,25 @@ const readableTruth = computed<DrawerTruthState | null>(() => {
   if (readableNow) {
     return {
       tone: truthToneReady(detail.status),
-      label: detail.status === 'ready_no_graph' ? 'Readable with graph catch-up' : 'Readable',
+      label:
+        detail.status === 'ready_no_graph'
+          ? i18n.t('documents.details.truth.readableWithGraphCatchUp')
+          : i18n.t('documents.details.truth.readable'),
       note:
         detail.extractedStats.previewTruncated || detail.status === 'ready_no_graph'
-          ? 'Text is already usable while downstream graph work is still catching up.'
-          : 'Current extracted text is ready for read and search flows.',
+          ? i18n.t('documents.details.truthNotes.readableWhileCatchingUp', {
+              backend: backendLabel.value,
+            })
+          : i18n.t('documents.details.truthNotes.readableReady'),
     }
   }
 
   return {
     tone: detail.status === 'failed' ? 'failed' : detail.status === 'queued' ? 'queued' : 'processing',
-    label: detail.status === 'failed' ? 'Readable state unavailable' : 'Not readable yet',
+    label:
+      detail.status === 'failed'
+        ? i18n.t('documents.details.truth.readableUnavailable')
+        : i18n.t('documents.details.truth.notReadableYet'),
     note: detail.errorMessage ?? stageLabel(detail.stage),
   }
 })
@@ -224,40 +308,56 @@ const settledTruth = computed<DrawerTruthState | null>(() => {
   if (terminal?.terminalState === 'failed_with_residual_work') {
     return {
       tone: 'failed' as DocumentStatus,
-      label: 'Residual failure',
-      note: terminal.residualReason ?? detail.errorMessage ?? 'Downstream work settled in failure.',
+      label: i18n.t('documents.details.truth.residualFailure'),
+      note:
+        terminal.residualReason ??
+        detail.errorMessage ??
+        i18n.t('documents.details.truthNotes.downstreamFailure'),
     }
   }
 
   if (settlement?.isFullySettled || terminal?.terminalState === 'fully_settled') {
     return {
       tone: 'ready' as DocumentStatus,
-      label: 'Settled',
+      label: i18n.t('documents.details.truth.settled'),
       note: terminal?.settledAt
-        ? `Settled at ${formatDate(terminal.settledAt)}`
+        ? i18n.t('documents.terminal.blockers.settledAt', {
+            value: formatDate(terminal.settledAt),
+          })
         : settlement?.settledAt
-          ? `Settled at ${formatDate(settlement.settledAt)}`
-          : 'No in-flight work remains for this document context.',
+          ? i18n.t('documents.terminal.blockers.settledAt', {
+              value: formatDate(settlement.settledAt),
+            })
+          : i18n.t('documents.details.truthNotes.noInflightWork'),
     }
   }
 
   if (activeWork) {
     return {
       tone: 'processing' as DocumentStatus,
-      label: 'Settling',
+      label: i18n.t('documents.details.truth.settling'),
       note: [
-        detail.inFlightStageCount > 0 ? `${detail.inFlightStageCount} live stage(s)` : null,
-        detail.missingStageCount > 0 ? `${detail.missingStageCount} missing stage(s)` : null,
+        detail.inFlightStageCount > 0
+          ? i18n.t('documents.details.liveStages', { count: detail.inFlightStageCount })
+          : null,
+        detail.missingStageCount > 0
+          ? i18n.t('documents.details.missingStages', { count: detail.missingStageCount })
+          : null,
       ]
         .filter(Boolean)
-        .join(' · ') || 'Mutation or ingest work is still in progress.',
+        .join(' · ') || i18n.t('documents.details.truthNotes.settlingInProgress'),
     }
   }
 
   return {
     tone: detail.status === 'failed' ? ('failed' as DocumentStatus) : ('ready_no_graph' as DocumentStatus),
-    label: detail.status === 'failed' ? 'Failed' : 'Open',
-    note: 'Readable state is known, but final settlement has not been confirmed yet.',
+    label:
+      detail.status === 'failed'
+        ? i18n.t('documents.details.truth.failed')
+        : i18n.t('documents.details.truth.open'),
+    note: i18n.t('documents.details.truthNotes.readableStoredPendingSettlement', {
+      backend: backendLabel.value,
+    }),
   }
 })
 
@@ -272,19 +372,19 @@ const summaryCards = computed(() => {
       key: 'revision',
       tone: truthToneReady(detail.status),
       value: detail.activeRevisionNo ? `#${String(detail.activeRevisionNo)}` : '—',
-      label: 'Active revision',
+      label: i18n.t('documents.details.activeRevision'),
     },
     {
       key: 'attempt',
       tone: detail.status,
       value: detail.latestAttemptNo > 0 ? `#${String(detail.latestAttemptNo)}` : '—',
-      label: 'Latest attempt',
+      label: i18n.t('documents.details.latestAttempt'),
     },
     {
       key: 'stage',
       tone: detail.status,
       value: stageLabel(detail.stage),
-      label: 'Current stage',
+      label: i18n.t('documents.details.currentStage'),
     },
     {
       key: 'cost',
@@ -293,7 +393,10 @@ const summaryCards = computed(() => {
         detail.settledEstimatedCost !== null
           ? formatMoney(detail.settledEstimatedCost, detail.currency)
           : formatMoney(detail.totalEstimatedCost, detail.currency),
-      label: detail.settledEstimatedCost !== null ? 'Settled cost' : 'Estimated cost',
+      label:
+        detail.settledEstimatedCost !== null
+          ? i18n.t('documents.details.settledCost')
+          : i18n.t('documents.details.estimatedCost'),
     },
   ]
 })
@@ -304,13 +407,13 @@ const metadataRows = computed(() => {
     return []
   }
   return [
-    { key: 'workspace', label: 'Workspace', value: props.workspaceName ?? '—' },
-    { key: 'library', label: 'Library', value: detail.libraryName },
-    { key: 'uploaded', label: 'Uploaded', value: formatDate(detail.uploadedAt) },
-    { key: 'fileType', label: 'File type', value: detail.fileType },
-    { key: 'fileSize', label: 'File size', value: detail.fileSizeLabel },
-    { key: 'requestedBy', label: 'Requested by', value: detail.requestedBy ?? '—' },
-    { key: 'accounting', label: 'Accounting', value: detail.accountingStatus },
+    { key: 'workspace', label: i18n.t('documents.details.workspace'), value: props.workspaceName ?? '—' },
+    { key: 'library', label: i18n.t('documents.details.library'), value: detail.libraryName },
+    { key: 'uploaded', label: i18n.t('documents.details.uploaded'), value: formatDate(detail.uploadedAt) },
+    { key: 'fileType', label: i18n.t('documents.details.fileType'), value: detail.fileType },
+    { key: 'fileSize', label: i18n.t('documents.details.fileSize'), value: detail.fileSizeLabel },
+    { key: 'requestedBy', label: i18n.t('documents.details.requestedBy'), value: detail.requestedBy ?? '—' },
+    { key: 'accounting', label: i18n.t('documents.details.accounting'), value: detail.accountingStatus },
   ]
 })
 
@@ -322,22 +425,22 @@ const mutationRows = computed(() => {
   return [
     {
       key: 'kind',
-      label: 'Operation',
-      value: mutationKindLabel(detail.mutation.kind) ?? 'No active mutation',
+      label: i18n.t('documents.details.operation'),
+      value: mutationKindLabel(detail.mutation.kind) ?? i18n.t('documents.details.noActiveMutation'),
     },
     {
       key: 'status',
-      label: 'Status',
-      value: mutationLabel(detail.mutation.status) ?? 'Idle',
+      label: i18n.t('documents.headers.status'),
+      value: mutationLabel(detail.mutation.status) ?? i18n.t('documents.details.idle'),
     },
     {
       key: 'warning',
-      label: 'Warning',
+      label: i18n.t('documents.details.warnings'),
       value: detail.mutation.warning ?? '—',
     },
     {
       key: 'error',
-      label: 'Error',
+      label: i18n.t('documents.details.error'),
       value: detail.errorMessage ?? '—',
     },
   ]
@@ -354,14 +457,18 @@ const revisionTimeline = computed(() => {
     subtitle: [
       revision.status,
       revision.sourceFileName,
-      revision.isActive ? 'Active head' : null,
+      revision.isActive ? i18n.t('documents.details.activeHead') : null,
     ]
       .filter(Boolean)
       .join(' · '),
     timestamp: [
-      `Accepted ${formatDate(revision.acceptedAt)}`,
-      revision.activatedAt ? `Activated ${formatDate(revision.activatedAt)}` : null,
-      revision.supersededAt ? `Superseded ${formatDate(revision.supersededAt)}` : null,
+      i18n.t('documents.details.acceptedAt', { value: formatDate(revision.acceptedAt) }),
+      revision.activatedAt
+        ? i18n.t('documents.details.activatedAt', { value: formatDate(revision.activatedAt) })
+        : null,
+      revision.supersededAt
+        ? i18n.t('documents.details.supersededAt', { value: formatDate(revision.supersededAt) })
+        : null,
     ]
       .filter(Boolean)
       .join(' · '),
@@ -376,29 +483,33 @@ const attemptSections = computed(() => {
   }
   return detail.attempts.map((attempt) => ({
     key: `${detail.id}-${String(attempt.attemptNo)}`,
-    heading: `Attempt #${String(attempt.attemptNo)}`,
+    heading: i18n.t('documents.details.attemptHeading', { number: attempt.attemptNo }),
     subtitle: [
       attemptKindLabel(attempt.attemptKind),
-      attempt.revisionNo ? `Revision #${String(attempt.revisionNo)}` : null,
+      attempt.revisionNo
+        ? i18n.t('documents.details.revisionLabel', { number: attempt.revisionNo })
+        : null,
       attempt.status,
       activityLabel(attempt.activityStatus),
     ]
       .filter(Boolean)
       .join(' · '),
     meta: [
-      `Last activity ${formatDate(attempt.lastActivityAt)}`,
-      `Queue ${formatDuration(attempt.queueElapsedMs)}`,
-      `Total ${formatDuration(attempt.totalElapsedMs)}`,
-      `Accounting ${attempt.summary.accountingStatus}`,
-      `Cost ${formatMoney(attempt.summary.totalEstimatedCost, attempt.summary.currency)}`,
+      i18n.t('documents.details.lastActivityAt', { value: formatDate(attempt.lastActivityAt) }),
+      i18n.t('documents.details.queueDuration', { value: formatDuration(attempt.queueElapsedMs) }),
+      i18n.t('documents.details.totalDuration', { value: formatDuration(attempt.totalElapsedMs) }),
+      `${i18n.t('documents.details.accounting')} ${attempt.summary.accountingStatus}`,
+      `${i18n.t('documents.details.totalCost')} ${formatMoney(attempt.summary.totalEstimatedCost, attempt.summary.currency)}`,
       attempt.summary.settledEstimatedCost !== null
-        ? `Settled ${formatMoney(attempt.summary.settledEstimatedCost, attempt.summary.currency)}`
+        ? i18n.t('documents.details.settledAmount', {
+            value: formatMoney(attempt.summary.settledEstimatedCost, attempt.summary.currency),
+          })
         : null,
       attempt.summary.inFlightStageCount > 0
-        ? `${attempt.summary.inFlightStageCount} live stage(s)`
+        ? i18n.t('documents.details.liveStages', { count: attempt.summary.inFlightStageCount })
         : null,
       attempt.summary.missingStageCount > 0
-        ? `${attempt.summary.missingStageCount} missing stage(s)`
+        ? i18n.t('documents.details.missingStages', { count: attempt.summary.missingStageCount })
         : null,
     ].filter((value): value is string => Boolean(value)),
     benchmarks: attempt.benchmarks.map((benchmark, index) => ({
@@ -487,7 +598,7 @@ const disableReprocess = computed(
     <aside class="rr-documents-drawer__panel">
       <header class="rr-documents-drawer__head">
         <div>
-          <span class="rr-documents-drawer__eyebrow">Document</span>
+          <span class="rr-documents-drawer__eyebrow">{{ $t('documents.headers.document') }}</span>
           <h2 v-if="props.detail">{{ props.detail.fileName }}</h2>
           <h2 v-else>{{ $t('documents.actions.details') }}</h2>
           <p v-if="props.detail">{{ [props.workspaceName ?? '—', props.detail.libraryName].join(' / ') }}</p>
@@ -497,7 +608,7 @@ const disableReprocess = computed(
           class="rr-button rr-button--ghost rr-button--tiny"
           @click="emit('close')"
         >
-          {{ $t('common.close') }}
+          {{ $t('dialogs.close') }}
         </button>
       </header>
 
@@ -505,7 +616,7 @@ const disableReprocess = computed(
         v-if="props.loading"
         class="rr-page-card rr-documents-drawer__section"
       >
-        <p>{{ $t('common.loading') }}</p>
+        <p>{{ $t('documents.loadingDetail') }}</p>
       </div>
 
       <div
@@ -544,7 +655,7 @@ const disableReprocess = computed(
               v-if="readableTruth"
               class="rr-documents-drawer__soft-card"
             >
-              <span>Readable truth</span>
+              <span>{{ $t('documents.details.readableTruth') }}</span>
               <strong>{{ readableTruth.label }}</strong>
               <p>{{ readableTruth.note }}</p>
             </article>
@@ -552,9 +663,27 @@ const disableReprocess = computed(
               v-if="settledTruth"
               class="rr-documents-drawer__soft-card"
             >
-              <span>Settled truth</span>
+              <span>{{ $t('documents.details.settledTruth') }}</span>
               <strong>{{ settledTruth.label }}</strong>
               <p>{{ settledTruth.note }}</p>
+            </article>
+          </div>
+        </section>
+
+        <section
+          v-if="readinessCards.length"
+          class="rr-page-card rr-documents-drawer__section"
+        >
+          <h3>{{ $t('documents.details.knowledgeReadiness') }}</h3>
+          <div class="rr-documents-drawer__truth-grid">
+            <article
+              v-for="card in readinessCards"
+              :key="card.key"
+              class="rr-documents-drawer__soft-card"
+            >
+              <span>{{ card.label }}</span>
+              <strong>{{ card.value }}</strong>
+              <p>{{ card.note }}</p>
             </article>
           </div>
         </section>
@@ -570,7 +699,7 @@ const disableReprocess = computed(
         </section>
 
         <section class="rr-page-card rr-documents-drawer__section">
-          <h3>Overview</h3>
+          <h3>{{ $t('documents.details.overview') }}</h3>
           <dl class="rr-documents-drawer__meta-grid">
             <template
               v-for="item in metadataRows"
@@ -587,7 +716,7 @@ const disableReprocess = computed(
           class="rr-page-card rr-documents-drawer__section"
         >
           <div class="rr-documents-drawer__section-head">
-            <h3>Readable text</h3>
+            <h3>{{ $t('documents.details.readableText') }}</h3>
             <button
               class="rr-button rr-button--ghost rr-button--tiny"
               type="button"
@@ -601,7 +730,7 @@ const disableReprocess = computed(
         </section>
 
         <section class="rr-page-card rr-documents-drawer__section">
-          <h3>Mutation</h3>
+          <h3>{{ $t('documents.details.mutationSection') }}</h3>
           <dl class="rr-documents-drawer__meta-grid">
             <template
               v-for="item in mutationRows"
@@ -617,7 +746,7 @@ const disableReprocess = computed(
           v-if="revisionTimeline.length"
           class="rr-page-card rr-documents-drawer__section"
         >
-          <h3>Revision history</h3>
+          <h3>{{ $t('documents.details.revisionHistory') }}</h3>
           <ol class="rr-documents-drawer__timeline">
             <li
               v-for="revision in revisionTimeline"
@@ -636,7 +765,7 @@ const disableReprocess = computed(
           v-if="attemptSections.length"
           class="rr-page-card rr-documents-drawer__section"
         >
-          <h3>Attempt stages</h3>
+          <h3>{{ $t('documents.details.attemptStages') }}</h3>
           <article
             v-for="attempt in attemptSections"
             :key="attempt.key"

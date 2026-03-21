@@ -45,9 +45,9 @@ export type DocumentCollectionTerminalState =
   | 'failed_with_residual_work'
 
 export type DocumentCollectionResidualReason =
-  | 'projection_contention'
+  | 'graph_write_contention'
   | 'graph_persistence_integrity'
-  | 'settlement_refresh_failed'
+  | 'graph_state_refresh_failed'
   | 'provider_failure'
   | 'diagnostics_unavailable'
   | 'upload_limit_exceeded'
@@ -55,7 +55,7 @@ export type DocumentCollectionResidualReason =
 
 export type DocumentGraphProgressCadence = 'fast' | 'watch' | 'calm'
 
-export type DocumentGraphProjectionHealth =
+export type DocumentGraphWriteHealth =
   | 'healthy'
   | 'retrying_contention'
   | 'degraded'
@@ -217,6 +217,18 @@ export interface DocumentCanonicalState {
   latestAttemptStages: CanonicalIngestStageEvent[]
 }
 
+export interface DocumentKnowledgeReadiness {
+  revisionId: string | null
+  revisionNo: number | null
+  revisionKind: string | null
+  textState: string
+  vectorState: string
+  graphState: string
+  textReadableAt: string | null
+  vectorReadyAt: string | null
+  graphReadyAt: string | null
+}
+
 export interface DocumentExtractionRecovery {
   status: DocumentExtractionRecoveryStatus
   parserRepairApplied: boolean
@@ -288,6 +300,7 @@ export interface DocumentRow {
   partialHistoryReason: string | null
   graphThroughput: DocumentGraphThroughputSummary | null
   mutation: DocumentMutationState
+  knowledgeReadiness: DocumentKnowledgeReadiness | null
   canRetry: boolean
   canAppend: boolean
   canReplace: boolean
@@ -406,10 +419,10 @@ export interface DocumentTerminalOutcomeSummary {
 }
 
 export interface DocumentGraphHealthSummary {
-  projectionHealth: DocumentGraphProjectionHealth
-  activeProjectionCount: number
-  retryingProjectionCount: number
-  failedProjectionCount: number
+  writeHealth: DocumentGraphWriteHealth
+  activeWriteCount: number
+  retryingWriteCount: number
+  failedWriteCount: number
   pendingNodeWriteCount: number
   pendingEdgeWriteCount: number
   lastFailureKind: string | null
@@ -508,6 +521,7 @@ export interface DocumentDetail {
   reconciliationScope: DocumentMutationImpactScopeSummary | null
   providerFailure: DocumentProviderFailureSummary | null
   graphThroughput: DocumentGraphThroughputSummary | null
+  knowledgeReadiness: DocumentKnowledgeReadiness | null
   extractedStats: DocumentExtractedStats
   graphStats: DocumentGraphStats
   collectionDiagnostics: DocumentCollectionDiagnostics | null

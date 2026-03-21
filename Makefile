@@ -1,7 +1,7 @@
 DOCKER_COMPOSE ?= docker compose
 DOCKER_COMPOSE_FILE ?= docker-compose.yml
 LOCAL_DOCKER_APP_SERVICES ?= backend frontend
-LOCAL_DOCKER_ALL_SERVICES ?= postgres redis neo4j backend frontend
+LOCAL_DOCKER_ALL_SERVICES ?= postgres redis arangodb backend frontend
 
 .PHONY: \
 	backend-fmt \

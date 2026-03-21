@@ -6,6 +6,22 @@ Scope: [backend](/home/leader/sources/RustRAG/rustrag/backend)
 
 Assumption: no legacy compatibility is preserved. The target is an ideal schema and domain model as if the system were being written from scratch today. Destructive changes, renames, table drops, aggregate redesign, and baseline reset are all allowed.
 
+## Implemented State Snapshot
+
+The rewrite has already locked in these baseline decisions:
+
+- PostgreSQL runs on ordinary `postgres:18-alpine`.
+- `backend/migrations/0001_init.sql` no longer enables the Postgres `vector` extension.
+- canonical identifiers in the baseline use `uuidv7()`.
+- Postgres-side embedding tables `search_chunk_embedding` and `search_graph_node_embedding` were removed from the baseline.
+- `backend/src/infra/vector_search.rs` and `backend/src/infra/repositories/search_repository.rs` are already gone.
+- the legacy graph-database adapter file is already gone.
+- `backend/src/interfaces/http/ui_auth.rs`, `backend/src/interfaces/http/ui_shell.rs`, and `backend/src/infra/ui_queries.rs` are already gone.
+- `backend/src/services/chat_sessions.rs` and the dead `domains::legacy` / retrieval-only domain files are already gone.
+- dead backend UI domain models `ui_admin`, `ui_identity`, `ui_chat`, and `ui_graph` are already gone.
+
+The remaining work is not to debate these choices. The remaining work is to finish removing the still-live services and routes that still speak in runtime-era vocabulary.
+
 ## Verdict
 
 The current schema is not one coherent model. It is a historical accumulation of:
@@ -512,4 +528,3 @@ Approve in bundles:
    one query execution model and typed conversation turns.
 6. Ops reset:
    one derived library state model instead of many snapshot tables.
-

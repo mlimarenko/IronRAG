@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: ${RUSTRAG_POSTGRES_IMAGE:-pgvector/pgvector:0.8.2-pg18-trixie}
+    image: ${RUSTRAG_POSTGRES_IMAGE:-postgres:18-alpine}
     security_opt:
       - apparmor=unconfined
     environment:
@@ -13,6 +13,8 @@ services:
       timeout: 5s
       retries: 20
     volumes:
+      # postgres:18-alpine stores PGDATA under /var/lib/postgresql by default.
+      # Mount the parent path to avoid anonymous volume allocation.
       - ./data/postgres:/var/lib/postgresql
 
   redis:
@@ -24,25 +26,30 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
-  neo4j:
-    image: ${RUSTRAG_NEO4J_IMAGE:-neo4j:5.26.0}
+  arangodb:
+    image: ${RUSTRAG_ARANGODB_IMAGE:-arangodb:3.12.4}
     security_opt:
       - apparmor=unconfined
     environment:
-      NEO4J_AUTH: ${RUSTRAG_NEO4J_AUTH:-neo4j/rustrag-dev}
-      NEO4J_server_memory_pagecache_size: ${RUSTRAG_NEO4J_PAGECACHE_SIZE:-256M}
-      NEO4J_server_memory_heap_initial__size: ${RUSTRAG_NEO4J_HEAP_INITIAL_SIZE:-256M}
-      NEO4J_server_memory_heap_max__size: ${RUSTRAG_NEO4J_HEAP_MAX_SIZE:-256M}
+      ARANGO_ROOT_PASSWORD: ${RUSTRAG_ARANGODB_ROOT_PASSWORD:-rustrag-dev}
+    command:
+      - arangod
+      - --server.authentication=true
+      - --experimental-vector-index=true
+      - --database.directory=/var/lib/arangodb3
     healthcheck:
-      test: ["CMD-SHELL", "cypher-shell -a bolt://localhost:7687 -u ${RUSTRAG_NEO4J_USERNAME:-neo4j} -p ${RUSTRAG_NEO4J_PASSWORD:-rustrag-dev} 'RETURN 1;' >/dev/null 2>&1"]
-      interval: 10s
-      timeout: 10s
+      test:
+        [
+          "CMD-SHELL",
+          "arangosh --server.endpoint tcp://127.0.0.1:8529 --server.username root --server.password \"$$ARANGO_ROOT_PASSWORD\" --javascript.execute-string \"db._version()\" >/dev/null 2>&1 || exit 1",
+        ]
+      interval: 5s
+      timeout: 5s
       retries: 20
     expose:
-      - "7474"
-      - "7687"
+      - "8529"
     volumes:
-      - ./data/neo4j:/data
+      - ./data/arangodb:/var/lib/arangodb3
 
   backend:
     image: ${RUSTRAG_BACKEND_IMAGE}
@@ -56,7 +63,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      neo4j:
+      arangodb:
         condition: service_healthy
     environment:
       bind_addr: 0.0.0.0:8080
@@ -66,11 +73,14 @@ services:
       database_url: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       database_max_connections: ${RUSTRAG_DATABASE_MAX_CONNECTIONS:-20}
       redis_url: redis://redis:6379
-      neo4j_uri: neo4j:7687
-      neo4j_username: ${RUSTRAG_NEO4J_USERNAME:-neo4j}
-      neo4j_password: ${RUSTRAG_NEO4J_PASSWORD:-rustrag-dev}
-      neo4j_database: ${RUSTRAG_NEO4J_DATABASE:-neo4j}
-      neo4j_max_connections: ${RUSTRAG_NEO4J_MAX_CONNECTIONS:-16}
+      arangodb_url: http://arangodb:8529
+      arangodb_database: ${RUSTRAG_ARANGODB_DATABASE:-rustrag}
+      arangodb_username: ${RUSTRAG_ARANGODB_USERNAME:-root}
+      arangodb_password: ${RUSTRAG_ARANGODB_PASSWORD:-rustrag-dev}
+      arangodb_request_timeout_seconds: ${RUSTRAG_ARANGODB_REQUEST_TIMEOUT_SECONDS:-15}
+      arangodb_bootstrap_collections: ${RUSTRAG_ARANGODB_BOOTSTRAP_COLLECTIONS:-true}
+      arangodb_bootstrap_views: ${RUSTRAG_ARANGODB_BOOTSTRAP_VIEWS:-true}
+      arangodb_bootstrap_graph: ${RUSTRAG_ARANGODB_BOOTSTRAP_GRAPH:-true}
       log_filter: ${RUSTRAG_LOG_FILTER:-info}
       frontend_origin: ${RUSTRAG_FRONTEND_ORIGIN:-https://graph.piping.space}
       bootstrap_token: ${RUSTRAG_BOOTSTRAP_TOKEN:-bootstrap-local}
@@ -109,7 +119,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      neo4j:
+      arangodb:
         condition: service_healthy
     environment:
       service_role: worker
@@ -119,11 +129,14 @@ services:
       database_url: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       database_max_connections: ${RUSTRAG_DATABASE_MAX_CONNECTIONS:-20}
       redis_url: redis://redis:6379
-      neo4j_uri: neo4j:7687
-      neo4j_username: ${RUSTRAG_NEO4J_USERNAME:-neo4j}
-      neo4j_password: ${RUSTRAG_NEO4J_PASSWORD:-rustrag-dev}
-      neo4j_database: ${RUSTRAG_NEO4J_DATABASE:-neo4j}
-      neo4j_max_connections: ${RUSTRAG_NEO4J_MAX_CONNECTIONS:-16}
+      arangodb_url: http://arangodb:8529
+      arangodb_database: ${RUSTRAG_ARANGODB_DATABASE:-rustrag}
+      arangodb_username: ${RUSTRAG_ARANGODB_USERNAME:-root}
+      arangodb_password: ${RUSTRAG_ARANGODB_PASSWORD:-rustrag-dev}
+      arangodb_request_timeout_seconds: ${RUSTRAG_ARANGODB_REQUEST_TIMEOUT_SECONDS:-15}
+      arangodb_bootstrap_collections: ${RUSTRAG_ARANGODB_BOOTSTRAP_COLLECTIONS:-true}
+      arangodb_bootstrap_views: ${RUSTRAG_ARANGODB_BOOTSTRAP_VIEWS:-true}
+      arangodb_bootstrap_graph: ${RUSTRAG_ARANGODB_BOOTSTRAP_GRAPH:-true}
       log_filter: ${RUSTRAG_LOG_FILTER:-info}
       frontend_origin: ${RUSTRAG_FRONTEND_ORIGIN:-https://graph.piping.space}
       bootstrap_token: ${RUSTRAG_BOOTSTRAP_TOKEN:-bootstrap-local}
@@ -162,7 +175,7 @@ services:
     depends_on:
       - backend
       - frontend
-      - neo4j
+      - arangodb
     volumes:
       - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     ports:

@@ -1,4 +1,4 @@
-use crate::domains::operational::HealthState;
+use crate::domains::ops::HealthState;
 
 #[must_use]
 pub fn summarize_health_state(states: &[HealthState]) -> HealthState {

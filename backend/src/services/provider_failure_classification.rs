@@ -292,4 +292,62 @@ mod tests {
         assert!(service.is_transient_retryable_failure(&retryable_rejection));
         assert!(!service.is_transient_retryable_failure(&terminal_rejection));
     }
+
+    #[test]
+    fn provider_failure_classes_remain_distinct() {
+        let service = ProviderFailureClassificationService::default();
+
+        let timeout = service.classify_failure(
+            "openai",
+            "gpt-5-mini",
+            "provider request failed: provider=openai status=504 body={}",
+            "graph_extract_v3:initial:segments_3:trimmed",
+            32_000,
+            Some(1),
+            Some(30_000),
+            Some("retrying_provider_call".to_string()),
+            false,
+        );
+        let rejection = service.classify_failure(
+            "openai",
+            "gpt-5-mini",
+            "provider request failed: provider=openai status=429 body={}",
+            "graph_extract_v3:initial:segments_1:full",
+            4_000,
+            Some(1),
+            Some(1_000),
+            Some("terminal_failure".to_string()),
+            false,
+        );
+        let invalid_output = service.classify_failure(
+            "openai",
+            "gpt-5-mini",
+            "invalid model output: schema mismatch",
+            "graph_extract_v3:provider_retry:segments_1:full",
+            4_000,
+            Some(1),
+            Some(800),
+            Some("terminal_failure".to_string()),
+            true,
+        );
+        let recovered = service.summarize(
+            RuntimeProviderFailureClass::RecoveredAfterRetry,
+            Some("openai".to_string()),
+            Some("gpt-5-mini".to_string()),
+            Some("graph_extract_v3:provider_retry:segments_1:full".to_string()),
+            Some(4_000),
+            Some(1),
+            None,
+            Some(900),
+            Some("recovered_after_retry".to_string()),
+            true,
+        );
+
+        assert_eq!(timeout.failure_class, RuntimeProviderFailureClass::UpstreamTimeout);
+        assert_eq!(timeout.upstream_status.as_deref(), Some("504"));
+        assert_eq!(rejection.failure_class, RuntimeProviderFailureClass::UpstreamRejection);
+        assert_eq!(rejection.upstream_status.as_deref(), Some("429"));
+        assert_eq!(invalid_output.failure_class, RuntimeProviderFailureClass::InvalidModelOutput);
+        assert_eq!(recovered.failure_class, RuntimeProviderFailureClass::RecoveredAfterRetry);
+    }
 }

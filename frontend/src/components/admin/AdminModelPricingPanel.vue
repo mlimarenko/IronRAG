@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useDisplayFormatters } from 'src/composables/useDisplayFormatters'
 import type { AdminAiConsoleState, AdminPriceCatalogEntry } from 'src/models/ui/admin'
 
 const props = defineProps<{
   settings: AdminAiConsoleState
 }>()
+const { enumLabel, formatDateTime } = useDisplayFormatters()
 
 const providerById = computed(
   () => new Map(props.settings.providers.map((provider) => [provider.id, provider])),
@@ -46,15 +48,7 @@ function modelLabel(price: AdminPriceCatalogEntry): string {
 
 function capabilityLabel(price: AdminPriceCatalogEntry): string {
   const model = modelById.value.get(price.modelCatalogId)
-  return model?.capabilityKind ?? '—'
-}
-
-function formatDate(value: string): string {
-  const parsed = new Date(value)
-  if (Number.isNaN(parsed.getTime())) {
-    return value
-  }
-  return parsed.toLocaleString()
+  return enumLabel('admin.pricing.capabilities', model?.capabilityKind ?? null)
 }
 
 function formatPrice(row: AdminPriceCatalogEntry): string {
@@ -112,8 +106,8 @@ function formatPrice(row: AdminPriceCatalogEntry): string {
             >
               <td>{{ providerById.get(model.providerCatalogId)?.displayName ?? '—' }}</td>
               <td><code>{{ model.modelName }}</code></td>
-              <td>{{ model.capabilityKind }}</td>
-              <td>{{ model.modalityKind }}</td>
+              <td>{{ enumLabel('admin.pricing.capabilities', model.capabilityKind) }}</td>
+              <td>{{ enumLabel('admin.pricing.modalities', model.modalityKind) }}</td>
               <td>{{ model.contextWindow ?? '—' }}</td>
             </tr>
           </tbody>
@@ -153,9 +147,9 @@ function formatPrice(row: AdminPriceCatalogEntry): string {
               <td>{{ providerLabel(price.modelCatalogId) }}</td>
               <td>{{ modelLabel(price) }}</td>
               <td>{{ capabilityLabel(price) }}</td>
-              <td>{{ price.billingUnit }}</td>
+              <td>{{ enumLabel('admin.pricing.billingUnits', price.billingUnit) }}</td>
               <td>{{ formatPrice(price) }}</td>
-              <td>{{ formatDate(price.effectiveFrom) }}</td>
+              <td>{{ formatDateTime(price.effectiveFrom) }}</td>
             </tr>
           </tbody>
         </table>

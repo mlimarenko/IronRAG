@@ -21,9 +21,9 @@ describe('documents store workspace ordering', () => {
       secondaryDiagnostics: [],
       degradedNotices: [
         {
-          kind: 'projection_contention',
-          title: 'Projection contention',
-          message: 'Projection retries are active.',
+          kind: 'graph_write_contention',
+          title: 'Graph write contention',
+          message: 'Graph write retries are active.',
         },
       ],
       informationalNotices: [
@@ -61,7 +61,7 @@ describe('documents store workspace ordering', () => {
 
     expect(store.workspacePrimarySummary?.progressLabel).toBe('193 / 280')
     expect(store.workspaceNoticeGroups.degraded.length).toBeGreaterThan(0)
-    expect(store.workspaceNoticeGroups.degraded[0]?.kind).toBe('projection_contention')
+    expect(store.workspaceNoticeGroups.degraded[0]?.kind).toBe('graph_write_contention')
     expect(
       store.workspaceNoticeGroups.degraded.some((notice) => notice.kind === 'provider_failure_count'),
     ).toBe(true)

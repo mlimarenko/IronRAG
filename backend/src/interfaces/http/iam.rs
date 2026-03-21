@@ -12,7 +12,10 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::iam::{Grant, GrantResourceKind, WorkspaceMembership},
-    infra::repositories::{ai_repository, catalog_repository, iam_repository},
+    infra::repositories::{
+        ai_repository, catalog_repository, content_repository, iam_repository, ops_repository,
+        query_repository,
+    },
     interfaces::http::{
         auth::{AuthContext, build_session_cookie_value},
         authorization::POLICY_IAM_ADMIN,
@@ -32,6 +35,8 @@ pub enum IamGrantResourceKind {
     Workspace,
     Library,
     Document,
+    QuerySession,
+    AsyncOperation,
     Connector,
     ProviderCredential,
     LibraryBinding,
@@ -859,17 +864,34 @@ async fn resolve_grant_workspace_id(
                 .map(|row| row.workspace_id)
         }
         IamGrantResourceKind::Document => {
-            sqlx::query_scalar::<_, Uuid>(
-                "select workspace_id from content_document where id = $1",
-            )
-            .bind(resource_id)
-            .fetch_optional(&state.persistence.postgres)
-            .await
-            .map_err(|error| {
-                error!(resource_id = %resource_id, ?error, "failed to load document for grant");
-                ApiError::Internal
-            })?
-            .ok_or_else(|| ApiError::resource_not_found("document", resource_id))
+            content_repository::get_document_by_id(&state.persistence.postgres, resource_id)
+                .await
+                .map_err(|error| {
+                    error!(resource_id = %resource_id, ?error, "failed to load document for grant");
+                    ApiError::Internal
+                })?
+                .ok_or_else(|| ApiError::resource_not_found("document", resource_id))
+                .map(|row| row.workspace_id)
+        }
+        IamGrantResourceKind::QuerySession => {
+            query_repository::get_conversation_by_id(&state.persistence.postgres, resource_id)
+                .await
+                .map_err(|error| {
+                    error!(resource_id = %resource_id, ?error, "failed to load query session for grant");
+                    ApiError::Internal
+                })?
+                .ok_or_else(|| ApiError::resource_not_found("query_session", resource_id))
+                .map(|row| row.workspace_id)
+        }
+        IamGrantResourceKind::AsyncOperation => {
+            ops_repository::get_async_operation_by_id(&state.persistence.postgres, resource_id)
+                .await
+                .map_err(|error| {
+                    error!(resource_id = %resource_id, ?error, "failed to load async operation for grant");
+                    ApiError::Internal
+                })?
+                .ok_or_else(|| ApiError::resource_not_found("async_operation", resource_id))
+                .map(|row| row.workspace_id)
         }
         IamGrantResourceKind::Connector => {
             catalog_repository::get_connector_by_id(&state.persistence.postgres, resource_id)
@@ -999,6 +1021,12 @@ fn validate_permission_kind_for_resource(
                 IamPermissionKind::DocumentRead | IamPermissionKind::DocumentWrite
             )
         }
+        IamGrantResourceKind::QuerySession => {
+            matches!(permission_kind, IamPermissionKind::QueryRun)
+        }
+        IamGrantResourceKind::AsyncOperation => {
+            matches!(permission_kind, IamPermissionKind::OpsRead | IamPermissionKind::AuditRead)
+        }
         IamGrantResourceKind::Connector => {
             matches!(permission_kind, IamPermissionKind::ConnectorAdmin)
         }
@@ -1113,6 +1141,8 @@ fn map_grant_resource_kind(value: &str) -> Result<IamGrantResourceKind, ApiError
         "workspace" => Ok(IamGrantResourceKind::Workspace),
         "library" => Ok(IamGrantResourceKind::Library),
         "document" => Ok(IamGrantResourceKind::Document),
+        "query_session" => Ok(IamGrantResourceKind::QuerySession),
+        "async_operation" => Ok(IamGrantResourceKind::AsyncOperation),
         "connector" => Ok(IamGrantResourceKind::Connector),
         "provider_credential" => Ok(IamGrantResourceKind::ProviderCredential),
         "library_binding" => Ok(IamGrantResourceKind::LibraryBinding),
@@ -1131,6 +1161,8 @@ fn map_domain_grant_resource_kind(
         GrantResourceKind::Workspace => Ok(IamGrantResourceKind::Workspace),
         GrantResourceKind::Library => Ok(IamGrantResourceKind::Library),
         GrantResourceKind::Document => Ok(IamGrantResourceKind::Document),
+        GrantResourceKind::QuerySession => Ok(IamGrantResourceKind::QuerySession),
+        GrantResourceKind::AsyncOperation => Ok(IamGrantResourceKind::AsyncOperation),
         GrantResourceKind::Connector => Ok(IamGrantResourceKind::Connector),
         GrantResourceKind::ProviderCredential => Ok(IamGrantResourceKind::ProviderCredential),
         GrantResourceKind::LibraryBinding => Ok(IamGrantResourceKind::LibraryBinding),
@@ -1167,6 +1199,8 @@ impl IamGrantResourceKind {
             Self::Workspace => "workspace",
             Self::Library => "library",
             Self::Document => "document",
+            Self::QuerySession => "query_session",
+            Self::AsyncOperation => "async_operation",
             Self::Connector => "connector",
             Self::ProviderCredential => "provider_credential",
             Self::LibraryBinding => "library_binding",
@@ -1180,6 +1214,8 @@ fn map_route_grant_resource_kind(value: IamGrantResourceKind) -> GrantResourceKi
         IamGrantResourceKind::Workspace => GrantResourceKind::Workspace,
         IamGrantResourceKind::Library => GrantResourceKind::Library,
         IamGrantResourceKind::Document => GrantResourceKind::Document,
+        IamGrantResourceKind::QuerySession => GrantResourceKind::QuerySession,
+        IamGrantResourceKind::AsyncOperation => GrantResourceKind::AsyncOperation,
         IamGrantResourceKind::Connector => GrantResourceKind::Connector,
         IamGrantResourceKind::ProviderCredential => GrantResourceKind::ProviderCredential,
         IamGrantResourceKind::LibraryBinding => GrantResourceKind::LibraryBinding,
@@ -1229,10 +1265,17 @@ mod tests {
             )
             .is_ok()
         );
-        assert!(matches!(
+        assert!(
             validate_permission_kind_for_resource(
                 IamGrantResourceKind::Library,
                 IamPermissionKind::DocumentWrite
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            validate_permission_kind_for_resource(
+                IamGrantResourceKind::Document,
+                IamPermissionKind::LibraryWrite
             ),
             Err(ApiError::BadRequest(_))
         ));

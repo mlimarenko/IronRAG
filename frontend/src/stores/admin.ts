@@ -4,6 +4,7 @@ import type {
   AdminApiTokenRow,
   AdminAuditEvent,
   AdminGrant,
+  AdminOpsLibrarySnapshot,
   AdminPermissionKind,
   AdminPrincipalSummary,
   AdminTab,
@@ -19,6 +20,7 @@ import {
   fetchAdminAiConsole,
   fetchAdminApiTokens,
   fetchAdminAuditEvents,
+  fetchAdminLibraryOpsState,
   fetchAdminPrincipal,
   revokeAdminApiToken,
   validateAdminLibraryBinding,
@@ -41,6 +43,7 @@ interface AdminState {
   tokens: AdminApiTokenRow[]
   aiConsole: AdminAiConsoleState | null
   auditEvents: AdminAuditEvent[]
+  opsSnapshot: AdminOpsLibrarySnapshot | null
   credentialSaving: boolean
   bindingValidatingId: string | null
   showCreateToken: boolean
@@ -86,6 +89,7 @@ export const useAdminStore = defineStore('admin', {
     tokens: [],
     aiConsole: null,
     auditEvents: [],
+    opsSnapshot: null,
     credentialSaving: false,
     bindingValidatingId: null,
     showCreateToken: false,
@@ -143,6 +147,7 @@ export const useAdminStore = defineStore('admin', {
       this.tokens = []
       this.aiConsole = null
       this.auditEvents = []
+      this.opsSnapshot = null
       this.latestPlaintextToken = null
       this.showCreateToken = false
     },
@@ -152,6 +157,7 @@ export const useAdminStore = defineStore('admin', {
       this.context = context
       try {
         this.principal = await fetchAdminPrincipal()
+        this.opsSnapshot = await fetchAdminLibraryOpsState(context.libraryId).catch(() => null)
         if (!this.tabAvailability[this.activeTab]) {
           const firstAvailable = (Object.entries(this.tabAvailability).find(
             ([, available]) => available,

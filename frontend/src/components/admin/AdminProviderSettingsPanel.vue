@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, watch } from 'vue'
+import { useDisplayFormatters } from 'src/composables/useDisplayFormatters'
 import type {
   AdminAiConsoleState,
   CreateAdminCredentialPayload,
@@ -10,6 +11,7 @@ const props = defineProps<{
   credentialSaving: boolean
   validatingBindingId: string | null
 }>()
+const { enumLabel, formatDateTime } = useDisplayFormatters()
 
 const emit = defineEmits<{
   createCredential: [payload: CreateAdminCredentialPayload]
@@ -76,21 +78,6 @@ const canCreateCredential = computed(
     credentialForm.providerCatalogId.length > 0,
 )
 
-function formatDate(value: string | null): string {
-  if (!value) {
-    return '—'
-  }
-  const parsed = new Date(value)
-  if (Number.isNaN(parsed.getTime())) {
-    return value
-  }
-  return parsed.toLocaleString()
-}
-
-function shortId(value: string): string {
-  return value.slice(0, 8)
-}
-
 function submitCredential(): void {
   if (!canCreateCredential.value) {
     return
@@ -148,9 +135,9 @@ function submitCredential(): void {
               :key="provider.id"
             >
               <td>{{ provider.displayName }}</td>
-              <td><code>{{ provider.apiStyle }}</code></td>
+              <td><code>{{ enumLabel('admin.aiCatalog.apiStyles', provider.apiStyle) }}</code></td>
               <td>{{ modelsByProviderId.get(provider.id) ?? 0 }}</td>
-              <td>{{ provider.lifecycleState }}</td>
+              <td>{{ enumLabel('admin.aiCatalog.providerStates', provider.lifecycleState) }}</td>
             </tr>
           </tbody>
         </table>
@@ -225,10 +212,10 @@ function submitCredential(): void {
               :key="credential.id"
             >
               <td>{{ credential.label }}</td>
-              <td>{{ credential.provider?.displayName ?? credential.providerCatalogId }}</td>
+              <td>{{ credential.provider?.displayName ?? '—' }}</td>
               <td><code>{{ credential.secretRef }}</code></td>
-              <td>{{ credential.credentialState }}</td>
-              <td>{{ formatDate(credential.updatedAt) }}</td>
+              <td>{{ enumLabel('admin.aiCatalog.credentialStates', credential.credentialState) }}</td>
+              <td>{{ formatDateTime(credential.updatedAt) }}</td>
             </tr>
           </tbody>
         </table>
@@ -269,18 +256,27 @@ function submitCredential(): void {
               v-for="binding in bindingRows"
               :key="binding.id"
             >
-              <td>{{ binding.bindingPurpose }}</td>
+              <td>{{ enumLabel('admin.aiCatalog.bindingPurposes', binding.bindingPurpose) }}</td>
               <td>{{ binding.provider?.displayName ?? '—' }}</td>
-              <td>{{ binding.credential?.label ?? shortId(binding.providerCredentialId) }}</td>
+              <td>{{ binding.credential?.label ?? '—' }}</td>
               <td>
                 <span v-if="binding.preset">{{ binding.preset.presetName }}</span>
-                <code v-else>{{ shortId(binding.modelPresetId) }}</code>
+                <span v-else>—</span>
               </td>
               <td>
                 <div class="rr-admin-token-status">
-                  <span>{{ binding.latestValidation?.validationState ?? binding.bindingState }}</span>
+                  <span>
+                    {{
+                      binding.latestValidation
+                        ? enumLabel(
+                            'admin.aiCatalog.validationStates',
+                            binding.latestValidation.validationState,
+                          )
+                        : enumLabel('admin.aiCatalog.bindingStates', binding.bindingState)
+                    }}
+                  </span>
                   <small v-if="binding.latestValidation">
-                    {{ formatDate(binding.latestValidation.checkedAt) }}
+                    {{ formatDateTime(binding.latestValidation.checkedAt) }}
                   </small>
                 </div>
               </td>

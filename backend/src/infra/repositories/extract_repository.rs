@@ -161,28 +161,6 @@ pub async fn upsert_extract_content(
     .await
 }
 
-pub async fn get_extract_chunk_result_by_id(
-    postgres: &PgPool,
-    chunk_result_id: Uuid,
-) -> Result<Option<ExtractChunkResultRow>, sqlx::Error> {
-    sqlx::query_as::<_, ExtractChunkResultRow>(
-        "select
-            id,
-            chunk_id,
-            attempt_id,
-            extract_state::text as extract_state,
-            provider_call_id,
-            started_at,
-            finished_at,
-            failure_code
-         from extract_chunk_result
-         where id = $1",
-    )
-    .bind(chunk_result_id)
-    .fetch_optional(postgres)
-    .await
-}
-
 pub async fn get_extract_chunk_result_by_chunk_and_attempt(
     postgres: &PgPool,
     chunk_id: Uuid,
@@ -309,42 +287,6 @@ pub async fn update_extract_chunk_result(
     .await
 }
 
-pub async fn create_extract_node_candidate(
-    postgres: &PgPool,
-    chunk_result_id: Uuid,
-    canonical_key: &str,
-    node_kind: &str,
-    display_label: &str,
-    summary: Option<&str>,
-) -> Result<ExtractNodeCandidateRow, sqlx::Error> {
-    sqlx::query_as::<_, ExtractNodeCandidateRow>(
-        "insert into extract_node_candidate (
-            id,
-            chunk_result_id,
-            canonical_key,
-            node_kind,
-            display_label,
-            summary
-        )
-        values ($1, $2, $3, $4, $5, $6)
-        returning
-            id,
-            chunk_result_id,
-            canonical_key,
-            node_kind,
-            display_label,
-            summary",
-    )
-    .bind(Uuid::now_v7())
-    .bind(chunk_result_id)
-    .bind(canonical_key)
-    .bind(node_kind)
-    .bind(display_label)
-    .bind(summary)
-    .fetch_one(postgres)
-    .await
-}
-
 pub async fn list_extract_node_candidates_by_chunk_result(
     postgres: &PgPool,
     chunk_result_id: Uuid,
@@ -411,46 +353,6 @@ pub async fn replace_extract_node_candidates(
 
     transaction.commit().await?;
     Ok(rows)
-}
-
-pub async fn create_extract_edge_candidate(
-    postgres: &PgPool,
-    chunk_result_id: Uuid,
-    canonical_key: &str,
-    edge_kind: &str,
-    from_canonical_key: &str,
-    to_canonical_key: &str,
-    summary: Option<&str>,
-) -> Result<ExtractEdgeCandidateRow, sqlx::Error> {
-    sqlx::query_as::<_, ExtractEdgeCandidateRow>(
-        "insert into extract_edge_candidate (
-            id,
-            chunk_result_id,
-            canonical_key,
-            edge_kind,
-            from_canonical_key,
-            to_canonical_key,
-            summary
-        )
-        values ($1, $2, $3, $4, $5, $6, $7)
-        returning
-            id,
-            chunk_result_id,
-            canonical_key,
-            edge_kind,
-            from_canonical_key,
-            to_canonical_key,
-            summary",
-    )
-    .bind(Uuid::now_v7())
-    .bind(chunk_result_id)
-    .bind(canonical_key)
-    .bind(edge_kind)
-    .bind(from_canonical_key)
-    .bind(to_canonical_key)
-    .bind(summary)
-    .fetch_one(postgres)
-    .await
 }
 
 pub async fn list_extract_edge_candidates_by_chunk_result(

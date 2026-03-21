@@ -16,6 +16,7 @@ pub struct ReadinessResponse {
     pub status: &'static str,
     pub postgres: &'static str,
     pub redis: &'static str,
+    pub arangodb: &'static str,
 }
 
 #[derive(Serialize)]
@@ -48,11 +49,13 @@ pub async fn readiness(State(state): State<AppState>) -> Json<ReadinessResponse>
             .unwrap_or(false),
         Err(_) => false,
     };
+    let arangodb_ok = state.arango_client.ping().await.is_ok();
 
     Json(ReadinessResponse {
-        status: if postgres_ok && redis_ok { "ready" } else { "degraded" },
+        status: if postgres_ok && redis_ok && arangodb_ok { "ready" } else { "degraded" },
         postgres: if postgres_ok { "ok" } else { "down" },
         redis: if redis_ok { "ok" } else { "down" },
+        arangodb: if arangodb_ok { "ok" } else { "down" },
     })
 }
 

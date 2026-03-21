@@ -5,7 +5,9 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::billing::{BillingCharge, BillingExecutionCost, BillingProviderCall},
+    domains::billing::{
+        BillingCharge, BillingExecutionCost, BillingExecutionOwnerKind, BillingProviderCall,
+    },
     infra::repositories::{ai_repository, billing_repository, ingest_repository, query_repository},
     interfaces::http::router_support::ApiError,
 };
@@ -55,29 +57,37 @@ impl BillingService {
         Self
     }
 
-    pub async fn list_provider_calls(
+    pub async fn list_execution_provider_calls(
         &self,
         state: &AppState,
-        library_id: Uuid,
+        execution_kind: &str,
+        execution_id: Uuid,
     ) -> Result<Vec<BillingProviderCall>, ApiError> {
-        let rows = billing_repository::list_provider_calls_by_library(
+        let execution_kind = parse_execution_owner_kind(execution_kind)?;
+        let rows = billing_repository::list_provider_calls_by_execution(
             &state.persistence.postgres,
-            library_id,
+            execution_owner_kind_key(execution_kind),
+            execution_id,
         )
         .await
         .map_err(|_| ApiError::Internal)?;
-        Ok(rows.into_iter().map(map_provider_call_row).collect())
+        rows.into_iter().map(map_provider_call_row).collect()
     }
 
-    pub async fn list_charges(
+    pub async fn list_execution_charges(
         &self,
         state: &AppState,
-        library_id: Uuid,
+        execution_kind: &str,
+        execution_id: Uuid,
     ) -> Result<Vec<BillingCharge>, ApiError> {
-        let rows =
-            billing_repository::list_charges_by_library(&state.persistence.postgres, library_id)
-                .await
-                .map_err(|_| ApiError::Internal)?;
+        let execution_kind = parse_execution_owner_kind(execution_kind)?;
+        let rows = billing_repository::list_charges_by_execution(
+            &state.persistence.postgres,
+            execution_owner_kind_key(execution_kind),
+            execution_id,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?;
         Ok(rows.into_iter().map(map_charge_row).collect())
     }
 
@@ -87,15 +97,16 @@ impl BillingService {
         execution_kind: &str,
         execution_id: Uuid,
     ) -> Result<BillingExecutionCost, ApiError> {
+        let execution_kind = parse_execution_owner_kind(execution_kind)?;
         let row = billing_repository::get_execution_cost(
             &state.persistence.postgres,
-            execution_kind,
+            execution_owner_kind_key(execution_kind),
             execution_id,
         )
         .await
         .map_err(|_| ApiError::Internal)?
         .ok_or_else(|| ApiError::resource_not_found("billing_execution_cost", execution_id))?;
-        Ok(map_execution_cost_row(row))
+        map_execution_cost_row(row)
     }
 
     pub async fn resolve_execution_library_id(
@@ -104,39 +115,14 @@ impl BillingService {
         execution_kind: &str,
         execution_id: Uuid,
     ) -> Result<Uuid, ApiError> {
-        match execution_kind {
-            "query_execution" => {
-                let execution = query_repository::get_execution_by_id(
-                    &state.persistence.postgres,
-                    execution_id,
-                )
-                .await
-                .map_err(|_| ApiError::Internal)?
-                .ok_or_else(|| ApiError::resource_not_found("query_execution", execution_id))?;
-                Ok(execution.library_id)
-            }
-            "ingest_attempt" => {
-                let attempt = ingest_repository::get_ingest_attempt_by_id(
-                    &state.persistence.postgres,
-                    execution_id,
-                )
-                .await
-                .map_err(|_| ApiError::Internal)?
-                .ok_or_else(|| ApiError::resource_not_found("ingest_attempt", execution_id))?;
-                let job = ingest_repository::get_ingest_job_by_id(
-                    &state.persistence.postgres,
-                    attempt.job_id,
-                )
-                .await
-                .map_err(|_| ApiError::Internal)?
-                .ok_or_else(|| ApiError::resource_not_found("ingest_job", attempt.job_id))?;
-                Ok(job.library_id)
-            }
-            "binding_validation" => Err(ApiError::BadRequest(
-                "binding_validation execution billing lookup is not implemented yet".to_string(),
-            )),
-            other => Err(ApiError::BadRequest(format!("unsupported executionKind '{other}'"))),
-        }
+        let scope = self
+            .resolve_execution_scope(
+                state,
+                parse_execution_owner_kind(execution_kind)?,
+                execution_id,
+            )
+            .await?;
+        Ok(scope.library_id)
     }
 
     pub async fn capture_query_execution(
@@ -188,6 +174,22 @@ impl BillingService {
         state: &AppState,
         command: CaptureExecutionBillingCommand,
     ) -> Result<Option<BillingExecutionCost>, ApiError> {
+        let owning_execution_kind = parse_execution_owner_kind(&command.owning_execution_kind)?;
+        let execution_scope = self
+            .resolve_execution_scope(state, owning_execution_kind, command.owning_execution_id)
+            .await?;
+        if execution_scope.workspace_id != command.workspace_id {
+            return Err(ApiError::Conflict(format!(
+                "execution {} belongs to workspace {}, not {}",
+                command.owning_execution_id, execution_scope.workspace_id, command.workspace_id
+            )));
+        }
+        if execution_scope.library_id != command.library_id {
+            return Err(ApiError::Conflict(format!(
+                "execution {} belongs to library {}, not {}",
+                command.owning_execution_id, execution_scope.library_id, command.library_id
+            )));
+        }
         let Some(provider_catalog) = ai_repository::get_provider_catalog_by_kind(
             &state.persistence.postgres,
             &command.provider_kind,
@@ -214,7 +216,7 @@ impl BillingService {
                 workspace_id: command.workspace_id,
                 library_id: command.library_id,
                 binding_id: command.binding_id,
-                owning_execution_kind: &command.owning_execution_kind,
+                owning_execution_kind: execution_owner_kind_key(owning_execution_kind),
                 owning_execution_id: command.owning_execution_id,
                 provider_catalog_id: provider_catalog.id,
                 model_catalog_id: model_catalog.id,
@@ -262,7 +264,7 @@ impl BillingService {
 
         self.roll_up_execution_cost(
             state,
-            &command.owning_execution_kind,
+            execution_owner_kind_key(owning_execution_kind),
             command.owning_execution_id,
         )
         .await
@@ -274,16 +276,17 @@ impl BillingService {
         execution_kind: &str,
         execution_id: Uuid,
     ) -> Result<Option<BillingExecutionCost>, ApiError> {
+        let execution_kind = parse_execution_owner_kind(execution_kind)?;
         let provider_call_count = billing_repository::count_provider_calls_by_execution(
             &state.persistence.postgres,
-            execution_kind,
+            execution_owner_kind_key(execution_kind),
             execution_id,
         )
         .await
         .map_err(|_| ApiError::Internal)?;
         let rollups = billing_repository::list_execution_cost_rollups(
             &state.persistence.postgres,
-            execution_kind,
+            execution_owner_kind_key(execution_kind),
             execution_id,
         )
         .await
@@ -294,7 +297,8 @@ impl BillingService {
         }
         if rollups.len() > 1 {
             return Err(ApiError::Conflict(format!(
-                "execution {execution_kind}:{execution_id} has charges in multiple currencies"
+                "execution {}:{execution_id} has charges in multiple currencies",
+                execution_owner_kind_key(execution_kind)
             )));
         }
 
@@ -303,7 +307,7 @@ impl BillingService {
         let row = billing_repository::upsert_execution_cost(
             &state.persistence.postgres,
             &billing_repository::UpsertBillingExecutionCost {
-                owning_execution_kind: execution_kind,
+                owning_execution_kind: execution_owner_kind_key(execution_kind),
                 owning_execution_id: execution_id,
                 total_cost: rollup.total_cost,
                 currency_code: &rollup.currency_code,
@@ -312,7 +316,66 @@ impl BillingService {
         )
         .await
         .map_err(|_| ApiError::Internal)?;
-        Ok(Some(map_execution_cost_row(row)))
+        Ok(Some(map_execution_cost_row(row)?))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BillingExecutionScope {
+    workspace_id: Uuid,
+    library_id: Uuid,
+}
+
+impl BillingService {
+    async fn resolve_execution_scope(
+        &self,
+        state: &AppState,
+        execution_kind: BillingExecutionOwnerKind,
+        execution_id: Uuid,
+    ) -> Result<BillingExecutionScope, ApiError> {
+        match execution_kind {
+            BillingExecutionOwnerKind::QueryExecution => {
+                let execution = query_repository::get_execution_by_id(
+                    &state.persistence.postgres,
+                    execution_id,
+                )
+                .await
+                .map_err(|_| ApiError::Internal)?
+                .ok_or_else(|| ApiError::resource_not_found("query_execution", execution_id))?;
+                Ok(BillingExecutionScope {
+                    workspace_id: execution.workspace_id,
+                    library_id: execution.library_id,
+                })
+            }
+            BillingExecutionOwnerKind::IngestAttempt => {
+                let attempt = ingest_repository::get_ingest_attempt_by_id(
+                    &state.persistence.postgres,
+                    execution_id,
+                )
+                .await
+                .map_err(|_| ApiError::Internal)?
+                .ok_or_else(|| ApiError::resource_not_found("ingest_attempt", execution_id))?;
+                let job = ingest_repository::get_ingest_job_by_id(
+                    &state.persistence.postgres,
+                    attempt.job_id,
+                )
+                .await
+                .map_err(|_| ApiError::Internal)?
+                .ok_or_else(|| ApiError::resource_not_found("ingest_job", attempt.job_id))?;
+                Ok(BillingExecutionScope {
+                    workspace_id: job.workspace_id,
+                    library_id: job.library_id,
+                })
+            }
+        }
+    }
+}
+
+fn parse_execution_owner_kind(value: &str) -> Result<BillingExecutionOwnerKind, ApiError> {
+    match value {
+        "query_execution" => Ok(BillingExecutionOwnerKind::QueryExecution),
+        "ingest_attempt" => Ok(BillingExecutionOwnerKind::IngestAttempt),
+        other => Err(ApiError::BadRequest(format!("unsupported executionKind '{other}'"))),
     }
 }
 
@@ -357,13 +420,15 @@ fn parse_usage_quantity(usage_json: &Value, keys: &[&str]) -> Option<Decimal> {
         .filter(|value| *value > Decimal::ZERO)
 }
 
-fn map_provider_call_row(row: billing_repository::BillingProviderCallRow) -> BillingProviderCall {
-    BillingProviderCall {
+fn map_provider_call_row(
+    row: billing_repository::BillingProviderCallRow,
+) -> Result<BillingProviderCall, ApiError> {
+    Ok(BillingProviderCall {
         id: row.id,
         workspace_id: row.workspace_id,
         library_id: row.library_id,
         binding_id: row.binding_id,
-        owning_execution_kind: row.owning_execution_kind,
+        owning_execution_kind: parse_execution_owner_kind(&row.owning_execution_kind)?,
         owning_execution_id: row.owning_execution_id,
         provider_catalog_id: row.provider_catalog_id,
         model_catalog_id: row.model_catalog_id,
@@ -371,7 +436,7 @@ fn map_provider_call_row(row: billing_repository::BillingProviderCallRow) -> Bil
         call_state: row.call_state,
         started_at: row.started_at,
         completed_at: row.completed_at,
-    }
+    })
 }
 
 fn map_charge_row(row: billing_repository::BillingChargeRow) -> BillingCharge {
@@ -388,14 +453,21 @@ fn map_charge_row(row: billing_repository::BillingChargeRow) -> BillingCharge {
 
 fn map_execution_cost_row(
     row: billing_repository::BillingExecutionCostRow,
-) -> BillingExecutionCost {
-    BillingExecutionCost {
+) -> Result<BillingExecutionCost, ApiError> {
+    Ok(BillingExecutionCost {
         id: row.id,
-        owning_execution_kind: row.owning_execution_kind,
+        owning_execution_kind: parse_execution_owner_kind(&row.owning_execution_kind)?,
         owning_execution_id: row.owning_execution_id,
         total_cost: row.total_cost,
         currency_code: row.currency_code,
         provider_call_count: row.provider_call_count,
         updated_at: row.updated_at,
+    })
+}
+
+fn execution_owner_kind_key(value: BillingExecutionOwnerKind) -> &'static str {
+    match value {
+        BillingExecutionOwnerKind::QueryExecution => "query_execution",
+        BillingExecutionOwnerKind::IngestAttempt => "ingest_attempt",
     }
 }

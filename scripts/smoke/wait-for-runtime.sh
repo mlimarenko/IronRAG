@@ -10,7 +10,7 @@ api_base=${RUSTRAG_SMOKE_API_BASE:-http://127.0.0.1:19000/v1}
 frontend_base=${RUSTRAG_SMOKE_FRONTEND_BASE:-http://127.0.0.1:19000}
 timeout_seconds=${RUSTRAG_SMOKE_WAIT_TIMEOUT_SECONDS:-180}
 sleep_seconds=${RUSTRAG_SMOKE_WAIT_SLEEP_SECONDS:-2}
-services=(postgres redis neo4j backend frontend nginx)
+services=(postgres redis backend frontend nginx)
 
 service_status() {
   local service=$1

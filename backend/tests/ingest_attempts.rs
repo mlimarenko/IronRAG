@@ -1,7 +1,6 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration as StdDuration};
 
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
@@ -9,9 +8,9 @@ use uuid::Uuid;
 use rustrag_backend::{
     app::{config::Settings, state::AppState},
     infra::{
-        graph_store::{
-            GraphProjectionData, GraphProjectionEdgeWrite, GraphProjectionNodeWrite,
-            GraphProjectionWriteError, GraphStore,
+        arangodb::{
+            bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
+            client::ArangoClient,
         },
         persistence::Persistence,
     },
@@ -21,51 +20,13 @@ use rustrag_backend::{
             AdmitIngestJobCommand, FinalizeAttemptCommand, LeaseAttemptCommand,
             RecordStageEventCommand,
         },
+        knowledge_service::{
+            CreateKnowledgeDocumentCommand, CreateKnowledgeRevisionCommand,
+            PromoteKnowledgeDocumentCommand, RefreshKnowledgeLibraryGenerationCommand,
+        },
+        ops_service::CreateAsyncOperationCommand,
     },
 };
-
-struct NoopGraphStore;
-
-#[async_trait]
-impl GraphStore for NoopGraphStore {
-    fn backend_name(&self) -> &'static str {
-        "noop"
-    }
-
-    async fn ping(&self) -> Result<()> {
-        Ok(())
-    }
-
-    async fn replace_library_projection(
-        &self,
-        _library_id: Uuid,
-        _projection_version: i64,
-        _nodes: &[GraphProjectionNodeWrite],
-        _edges: &[GraphProjectionEdgeWrite],
-    ) -> Result<(), GraphProjectionWriteError> {
-        Ok(())
-    }
-
-    async fn refresh_library_projection_targets(
-        &self,
-        _library_id: Uuid,
-        _projection_version: i64,
-        _remove_node_ids: &[Uuid],
-        _remove_edge_ids: &[Uuid],
-        _nodes: &[GraphProjectionNodeWrite],
-        _edges: &[GraphProjectionEdgeWrite],
-    ) -> Result<(), GraphProjectionWriteError> {
-        Ok(())
-    }
-
-    async fn load_library_projection(
-        &self,
-        _library_id: Uuid,
-        _projection_version: i64,
-    ) -> Result<GraphProjectionData> {
-        Ok(GraphProjectionData::default())
-    }
-}
 
 struct TempDatabase {
     name: String,
@@ -117,21 +78,87 @@ impl TempDatabase {
     }
 }
 
+struct TempArangoDatabase {
+    base_url: String,
+    username: String,
+    password: String,
+    name: String,
+    http: reqwest::Client,
+}
+
+impl TempArangoDatabase {
+    async fn create(settings: &Settings) -> Result<Self> {
+        let base_url = settings.arangodb_url.trim().trim_end_matches('/').to_string();
+        let name = format!("ingest_attempts_{}", Uuid::now_v7().simple());
+        let http = reqwest::Client::builder()
+            .timeout(StdDuration::from_secs(settings.arangodb_request_timeout_seconds.max(1)))
+            .build()
+            .context("failed to build ArangoDB admin http client")?;
+        let response = http
+            .post(format!("{base_url}/_api/database"))
+            .basic_auth(&settings.arangodb_username, Some(&settings.arangodb_password))
+            .json(&serde_json::json!({ "name": name }))
+            .send()
+            .await
+            .context("failed to create temp ArangoDB database for ingest_attempts")?;
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "failed to create temp ArangoDB database {}: status {}",
+                name,
+                response.status()
+            ));
+        }
+
+        Ok(Self {
+            base_url,
+            username: settings.arangodb_username.clone(),
+            password: settings.arangodb_password.clone(),
+            name,
+            http,
+        })
+    }
+
+    async fn drop(self) -> Result<()> {
+        let response = self
+            .http
+            .delete(format!("{}/_api/database/{}", self.base_url, self.name))
+            .basic_auth(&self.username, Some(&self.password))
+            .send()
+            .await
+            .context("failed to drop temp ArangoDB database for ingest_attempts")?;
+        if response.status() != reqwest::StatusCode::NOT_FOUND && !response.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "failed to drop temp ArangoDB database {}: status {}",
+                self.name,
+                response.status()
+            ));
+        }
+        Ok(())
+    }
+}
+
 struct IngestAttemptsFixture {
     state: AppState,
     temp_database: TempDatabase,
+    temp_arango: TempArangoDatabase,
     workspace_id: Uuid,
     library_id: Uuid,
+    document_id: Uuid,
+    revision_id: Uuid,
+    generation_id: Uuid,
 }
 
 impl IngestAttemptsFixture {
     async fn create() -> Result<Self> {
-        let settings =
+        let mut settings =
             Settings::from_env().context("failed to load settings for ingest_attempts test")?;
         let temp_database = TempDatabase::create(&settings.database_url).await?;
+        let temp_arango = TempArangoDatabase::create(&settings).await?;
+        settings.database_url = temp_database.database_url.clone();
+        settings.arangodb_database = temp_arango.name.clone();
         let postgres = PgPoolOptions::new()
             .max_connections(4)
-            .connect(&temp_database.database_url)
+            .connect(&settings.database_url)
             .await
             .context("failed to connect ingest_attempts postgres")?;
 
@@ -140,7 +167,32 @@ impl IngestAttemptsFixture {
             .await
             .context("failed to apply canonical 0001_init.sql for ingest_attempts test")?;
 
-        let state = build_test_state(settings, postgres)?;
+        let arango_client = Arc::new(
+            ArangoClient::from_settings(&settings).context("failed to build arango client")?,
+        );
+        arango_client.ping().await.context("failed to ping temp ArangoDB for ingest_attempts")?;
+        bootstrap_knowledge_plane(
+            &arango_client,
+            &ArangoBootstrapOptions {
+                collections: true,
+                views: false,
+                graph: true,
+                vector_indexes: false,
+                vector_dimensions: 3072,
+                vector_index_n_lists: 100,
+                vector_index_default_n_probe: 8,
+                vector_index_training_iterations: 25,
+            },
+        )
+        .await
+        .context("failed to bootstrap Arango knowledge plane for ingest_attempts")?;
+
+        let persistence = Persistence {
+            postgres,
+            redis: redis::Client::open(settings.redis_url.clone())
+                .context("failed to create redis client for ingest_attempts test state")?,
+        };
+        let state = AppState::from_dependencies(settings, persistence, arango_client);
         let workspace = state
             .canonical_services
             .catalog
@@ -170,22 +222,111 @@ impl IngestAttemptsFixture {
             .await
             .context("failed to create ingest_attempts library")?;
 
-        Ok(Self { state, temp_database, workspace_id: workspace.id, library_id: library.id })
+        let document_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        state
+            .canonical_services
+            .knowledge
+            .create_document_shell(
+                &state,
+                CreateKnowledgeDocumentCommand {
+                    document_id,
+                    workspace_id: workspace.id,
+                    library_id: library.id,
+                    external_key: format!("ingest-attempts-doc-{}", Uuid::now_v7().simple()),
+                    document_state: "active".to_string(),
+                },
+            )
+            .await
+            .context("failed to create ingest_attempts document shell")?;
+        state
+            .canonical_services
+            .knowledge
+            .write_revision(
+                &state,
+                CreateKnowledgeRevisionCommand {
+                    revision_id,
+                    workspace_id: workspace.id,
+                    library_id: library.id,
+                    document_id,
+                    revision_number: 1,
+                    revision_state: "active".to_string(),
+                    revision_kind: "upload".to_string(),
+                    storage_ref: Some(format!("memory://ingest-attempts/{revision_id}")),
+                    source_uri: Some(format!("memory://ingest-attempts/source/{revision_id}")),
+                    mime_type: "text/plain".to_string(),
+                    checksum: format!("checksum-{revision_id}"),
+                    byte_size: 128,
+                    title: Some("Ingest Attempts Fixture".to_string()),
+                    normalized_text: Some(
+                        "Ingest attempts fixture text for readiness and async operation proof."
+                            .to_string(),
+                    ),
+                    text_checksum: Some(format!("text-checksum-{revision_id}")),
+                    text_state: "readable".to_string(),
+                    vector_state: "pending".to_string(),
+                    graph_state: "pending".to_string(),
+                    text_readable_at: Some(Utc::now()),
+                    vector_ready_at: None,
+                    graph_ready_at: None,
+                    superseded_by_revision_id: None,
+                },
+            )
+            .await
+            .context("failed to write ingest_attempts revision")?;
+        state
+            .canonical_services
+            .knowledge
+            .promote_document(
+                &state,
+                PromoteKnowledgeDocumentCommand {
+                    document_id,
+                    document_state: "active".to_string(),
+                    active_revision_id: Some(revision_id),
+                    readable_revision_id: Some(revision_id),
+                    latest_revision_no: Some(1),
+                    deleted_at: None,
+                },
+            )
+            .await
+            .context("failed to promote ingest_attempts document")?;
+
+        let generation_id = Uuid::now_v7();
+        state
+            .canonical_services
+            .knowledge
+            .refresh_library_generation(
+                &state,
+                RefreshKnowledgeLibraryGenerationCommand {
+                    generation_id,
+                    workspace_id: workspace.id,
+                    library_id: library.id,
+                    active_text_generation: 1,
+                    active_vector_generation: 0,
+                    active_graph_generation: 0,
+                    degraded_state: "extracting".to_string(),
+                },
+            )
+            .await
+            .context("failed to refresh ingest_attempts knowledge generation")?;
+
+        Ok(Self {
+            state,
+            temp_database,
+            temp_arango,
+            workspace_id: workspace.id,
+            library_id: library.id,
+            document_id,
+            revision_id,
+            generation_id,
+        })
     }
 
     async fn cleanup(self) -> Result<()> {
         self.state.persistence.postgres.close().await;
+        self.temp_arango.drop().await?;
         self.temp_database.drop().await
     }
-}
-
-fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppState> {
-    let persistence = Persistence {
-        postgres,
-        redis: redis::Client::open(settings.redis_url.clone())
-            .context("failed to create redis client for ingest_attempts test state")?,
-    };
-    Ok(AppState::from_dependencies(settings, persistence, Arc::new(NoopGraphStore)))
 }
 
 fn replace_database_name(database_url: &str, new_database: &str) -> Result<String> {
@@ -226,6 +367,27 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
         let ingest = &fixture.state.canonical_services.ingest;
         let dedupe_key = format!("ingest-job-{}", Uuid::now_v7());
         let mutation_id = Some(Uuid::now_v7());
+        let async_operation = fixture
+            .state
+            .canonical_services
+            .ops
+            .create_async_operation(
+                &fixture.state,
+                CreateAsyncOperationCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    operation_kind: "content_mutation".to_string(),
+                    surface_kind: "rest".to_string(),
+                    requested_by_principal_id: None,
+                    status: "accepted".to_string(),
+                    subject_kind: "knowledge_revision".to_string(),
+                    subject_id: Some(fixture.revision_id),
+                    completed_at: None,
+                    failure_code: None,
+                },
+            )
+            .await
+            .context("failed to create async operation for ingest attempts")?;
 
         let job = ingest
             .admit_job(
@@ -235,6 +397,9 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
                     library_id: fixture.library_id,
                     mutation_id,
                     connector_id: None,
+                    async_operation_id: Some(async_operation.id),
+                    knowledge_document_id: Some(fixture.document_id),
+                    knowledge_revision_id: Some(fixture.revision_id),
                     job_kind: "content_mutation".to_string(),
                     priority: 100,
                     dedupe_key: Some(dedupe_key.clone()),
@@ -246,6 +411,19 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
         assert_eq!(job.queue_state, "queued");
         assert_eq!(job.priority, 100);
         assert_eq!(job.mutation_id, mutation_id);
+        assert_eq!(job.async_operation_id, Some(async_operation.id));
+        assert_eq!(job.knowledge_document_id, Some(fixture.document_id));
+        assert_eq!(job.knowledge_revision_id, Some(fixture.revision_id));
+
+        let admitted_handle = ingest
+            .get_job_handle(&fixture.state, job.id)
+            .await
+            .context("failed to load admitted ingest job handle")?;
+        assert_eq!(admitted_handle.job.id, job.id);
+        assert_eq!(
+            admitted_handle.async_operation.as_ref().map(|operation| operation.status.as_str()),
+            Some("accepted")
+        );
 
         let deduped = ingest
             .admit_job(
@@ -255,6 +433,9 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
                     library_id: fixture.library_id,
                     mutation_id,
                     connector_id: None,
+                    async_operation_id: Some(async_operation.id),
+                    knowledge_document_id: Some(fixture.document_id),
+                    knowledge_revision_id: Some(fixture.revision_id),
                     job_kind: "content_mutation".to_string(),
                     priority: 5,
                     dedupe_key: Some(dedupe_key),
@@ -273,6 +454,7 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
                     job_id: job.id,
                     worker_principal_id: Some(worker_a),
                     lease_token: Some("lease-a".to_string()),
+                    knowledge_generation_id: Some(fixture.generation_id),
                     current_stage: Some("queued".to_string()),
                 },
             )
@@ -281,12 +463,25 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
         assert_eq!(first_attempt.attempt_number, 1);
         assert_eq!(first_attempt.worker_principal_id, Some(worker_a));
         assert_eq!(first_attempt.attempt_state, "leased");
+        assert_eq!(first_attempt.knowledge_generation_id, Some(fixture.generation_id));
+
+        let leased_handle = ingest
+            .get_attempt_handle(&fixture.state, first_attempt.id)
+            .await
+            .context("failed to load leased attempt handle")?;
+        assert_eq!(leased_handle.job.id, job.id);
+        assert_eq!(leased_handle.attempt.knowledge_generation_id, Some(fixture.generation_id));
+        assert_eq!(
+            leased_handle.async_operation.as_ref().map(|operation| operation.status.as_str()),
+            Some("processing")
+        );
 
         let _ = ingest
             .heartbeat_attempt(
                 &fixture.state,
                 rustrag_backend::services::ingest_service::HeartbeatAttemptCommand {
                     attempt_id: first_attempt.id,
+                    knowledge_generation_id: Some(fixture.generation_id),
                     current_stage: Some("extracting".to_string()),
                 },
             )
@@ -330,7 +525,8 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
                 &fixture.state,
                 FinalizeAttemptCommand {
                     attempt_id: first_attempt.id,
-                    attempt_state: "abandoned".to_string(),
+                    knowledge_generation_id: Some(fixture.generation_id),
+                    attempt_state: "failed".to_string(),
                     current_stage: Some("extracting".to_string()),
                     failure_class: Some("lease_lost".to_string()),
                     failure_code: Some("lease_lost".to_string()),
@@ -338,14 +534,25 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
                 },
             )
             .await
-            .context("failed to finalize abandoned first attempt")?;
-        assert_eq!(first_attempt.attempt_state, "abandoned");
+            .context("failed to finalize retryable first attempt")?;
+        assert_eq!(first_attempt.attempt_state, "failed");
         assert_eq!(first_attempt.failure_class.as_deref(), Some("lease_lost"));
         assert!(first_attempt.retryable);
 
         let queued_job = ingest.get_job(&fixture.state, job.id).await?;
         assert_eq!(queued_job.queue_state, "queued");
         assert!(queued_job.completed_at.is_none());
+        assert_eq!(queued_job.knowledge_document_id, Some(fixture.document_id));
+        assert_eq!(queued_job.knowledge_revision_id, Some(fixture.revision_id));
+
+        let reaccepted_handle = ingest
+            .get_job_handle(&fixture.state, job.id)
+            .await
+            .context("failed to reload requeued ingest job handle")?;
+        assert_eq!(
+            reaccepted_handle.async_operation.as_ref().map(|operation| operation.status.as_str()),
+            Some("accepted")
+        );
 
         let worker_b = Uuid::now_v7();
         let second_attempt = ingest
@@ -355,6 +562,7 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
                     job_id: job.id,
                     worker_principal_id: Some(worker_b),
                     lease_token: Some("lease-b".to_string()),
+                    knowledge_generation_id: Some(fixture.generation_id),
                     current_stage: Some("extracting".to_string()),
                 },
             )
@@ -362,6 +570,7 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
             .context("failed to lease second attempt")?;
         assert_eq!(second_attempt.attempt_number, 2);
         assert_eq!(second_attempt.worker_principal_id, Some(worker_b));
+        assert_eq!(second_attempt.knowledge_generation_id, Some(fixture.generation_id));
 
         let _ = ingest
             .record_stage_event(
@@ -382,6 +591,7 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
                 &fixture.state,
                 FinalizeAttemptCommand {
                     attempt_id: second_attempt.id,
+                    knowledge_generation_id: Some(fixture.generation_id),
                     attempt_state: "succeeded".to_string(),
                     current_stage: Some("finalizing".to_string()),
                     failure_class: None,
@@ -407,6 +617,23 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
         let completed_job = ingest.get_job(&fixture.state, job.id).await?;
         assert_eq!(completed_job.queue_state, "completed");
         assert!(completed_job.completed_at.is_some());
+        assert_eq!(completed_job.knowledge_document_id, Some(fixture.document_id));
+        assert_eq!(completed_job.knowledge_revision_id, Some(fixture.revision_id));
+
+        let completed_handle = ingest
+            .get_attempt_handle(&fixture.state, second_attempt.id)
+            .await
+            .context("failed to load completed attempt handle")?;
+        assert_eq!(
+            completed_handle.async_operation.as_ref().map(|operation| operation.status.as_str()),
+            Some("ready")
+        );
+        assert!(completed_handle
+            .async_operation
+            .as_ref()
+            .and_then(|operation| operation.completed_at)
+            .is_some());
+        assert_eq!(completed_handle.attempt.knowledge_generation_id, Some(fixture.generation_id));
 
         let requeued = ingest
             .retry_job(&fixture.state, job.id, Some(Utc::now() + Duration::seconds(5)))
@@ -414,6 +641,15 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
             .context("failed to requeue completed job for explicit retry request")?;
         assert_eq!(requeued.queue_state, "queued");
         assert!(requeued.available_at > Utc::now());
+
+        let retried_handle = ingest
+            .get_job_handle(&fixture.state, job.id)
+            .await
+            .context("failed to load retried ingest job handle")?;
+        assert_eq!(
+            retried_handle.async_operation.as_ref().map(|operation| operation.status.as_str()),
+            Some("accepted")
+        );
 
         Ok(())
     }

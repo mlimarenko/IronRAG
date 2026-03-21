@@ -3,11 +3,12 @@ import type {
   GraphConvergenceStatus,
   GraphLayoutMode,
   GraphNode,
+  GraphNodeDetail,
   GraphNodeType,
   GraphSearchHit,
   GraphSurfaceResponse,
 } from 'src/models/ui/graph'
-import { fetchGraphSurface, searchGraphNodes } from 'src/services/api/graph'
+import { fetchGraphNodeDetail, fetchGraphSurface, searchGraphNodes } from 'src/services/api/graph'
 
 interface GraphCanvasControls {
   fitViewport: (() => void) | null
@@ -26,6 +27,8 @@ interface GraphState {
   showFilteredArtifacts: boolean
   layoutMode: GraphLayoutMode
   focusedNodeId: string | null
+  focusedNodeDetail: GraphNodeDetail | null
+  focusedNodeDetailLoading: boolean
   controls: GraphCanvasControls
 }
 
@@ -61,6 +64,8 @@ export const useGraphStore = defineStore('graph', {
     showFilteredArtifacts: false,
     layoutMode: 'cloud',
     focusedNodeId: null,
+    focusedNodeDetail: null,
+    focusedNodeDetailLoading: false,
     controls: {
       fitViewport: null,
       zoomIn: null,
@@ -81,7 +86,9 @@ export const useGraphStore = defineStore('graph', {
       return state.surface?.filteredArtifactCount ?? 0
     },
     refreshIntervalMs(state): number {
-      return state.surface?.graphStatus === 'building' || state.surface?.graphStatus === 'partial'
+      return state.surface?.graphStatus === 'building' ||
+        state.surface?.graphStatus === 'partial' ||
+        state.surface?.graphStatus === 'rebuilding'
         ? BUILDING_REFRESH_INTERVAL_MS
         : 0
     },
@@ -108,6 +115,7 @@ export const useGraphStore = defineStore('graph', {
         const surface = await fetchGraphSurface(libraryId)
         this.surface = surface
         this.focusedNodeId = resolveFocusedNodeId(surface.nodes, this.focusedNodeId)
+        await this.loadFocusedNodeDetail(libraryId, this.focusedNodeId)
       } catch (error) {
         this.error = error instanceof Error ? error.message : 'Failed to load graph surface'
         throw error
@@ -128,9 +136,12 @@ export const useGraphStore = defineStore('graph', {
     async focusNode(identifier: string): Promise<void> {
       const resolved = resolveFocusedNodeId(this.surface?.nodes ?? [], identifier)
       this.focusedNodeId = resolved
+      await this.loadFocusedNodeDetail(this.activeLibraryId, resolved)
     },
     clearFocus(): void {
       this.focusedNodeId = null
+      this.focusedNodeDetail = null
+      this.focusedNodeDetailLoading = false
     },
     setNodeTypeFilter(value: GraphNodeType | ''): void {
       this.nodeTypeFilter = value
@@ -143,6 +154,31 @@ export const useGraphStore = defineStore('graph', {
     },
     registerCanvasControls(controls: GraphCanvasControls): void {
       this.controls = controls
+    },
+    async loadFocusedNodeDetail(
+      libraryId?: string | null,
+      identifier?: string | null,
+    ): Promise<void> {
+      const resolvedLibraryId = libraryId ?? this.activeLibraryId
+      if (!resolvedLibraryId || !identifier) {
+        this.focusedNodeDetail = null
+        this.focusedNodeDetailLoading = false
+        return
+      }
+
+      this.focusedNodeDetailLoading = true
+
+      try {
+        this.focusedNodeDetail = await fetchGraphNodeDetail(
+          resolvedLibraryId,
+          this.surface?.nodes ?? [],
+          identifier,
+        )
+      } catch {
+        this.focusedNodeDetail = null
+      } finally {
+        this.focusedNodeDetailLoading = false
+      }
     },
     fitViewport(): void {
       this.controls.fitViewport?.()

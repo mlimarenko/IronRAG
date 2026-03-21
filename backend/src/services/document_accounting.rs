@@ -4,23 +4,15 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::{
-        pricing_catalog::{PricingBillingUnit, PricingCapability, PricingResolutionStatus},
-        runtime_ingestion::RuntimeAccountingTruthStatus,
-        usage_governance::{
-            RuntimeStageBillingPolicy, decorate_payload_with_stage_ownership,
-            runtime_stage_billing_policy, stage_native_ownership,
-        },
+    domains::billing::{
+        PricingBillingUnit, PricingCapability, PricingResolutionStatus, RuntimeStageBillingPolicy,
+        decorate_payload_with_stage_ownership, runtime_stage_billing_policy,
+        stage_native_ownership,
     },
     infra::repositories::{
-        self, AttemptStageAccountingRow, AttemptStageCostSummaryRow, CostLedgerRow,
-        RuntimeIngestionStageEventRow, UsageEventRow,
+        self, AttemptStageAccountingRow, AttemptStageCostSummaryRow, ai_repository,
     },
-    services::{pricing_catalog, runtime_ingestion},
 };
-
-#[derive(Debug, Clone, Default)]
-pub struct DocumentAccountingService;
 
 #[derive(Debug, Clone)]
 pub enum StageAccountingScope {
@@ -87,40 +79,11 @@ pub struct StageUsageAccountingRequest {
 }
 
 #[derive(Debug, Clone)]
-pub struct StageUsageAccountingResult {
-    pub usage_event: UsageEventRow,
-    pub cost_ledger: Option<CostLedgerRow>,
-    pub stage_accounting: AttemptStageAccountingRow,
-    pub attempt_summary: AttemptStageCostSummaryRow,
-}
-
-#[derive(Debug, Clone)]
-pub struct ResolvedStageAccountingView {
-    pub stage: String,
-    pub anchor_event_id: Option<Uuid>,
-    pub accounting_scope: String,
-    pub pricing_status: String,
-    pub estimated_cost: Option<Decimal>,
-    pub settled_estimated_cost: Option<Decimal>,
-    pub in_flight_estimated_cost: Option<Decimal>,
-    pub currency: Option<String>,
-    pub usage_event_id: Option<Uuid>,
-    pub cost_ledger_id: Option<Uuid>,
-    pub pricing_catalog_entry_id: Option<Uuid>,
-    pub attribution_source: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct AttemptAccountingSummaryView {
-    pub total_estimated_cost: Option<Decimal>,
-    pub settled_estimated_cost: Option<Decimal>,
-    pub in_flight_estimated_cost: Option<Decimal>,
-    pub currency: Option<String>,
-    pub priced_stage_count: i32,
-    pub unpriced_stage_count: i32,
-    pub in_flight_stage_count: i32,
-    pub missing_stage_count: i32,
-    pub accounting_status: String,
+struct UsageCostResolution {
+    status: PricingResolutionStatus,
+    entry_id: Option<Uuid>,
+    estimated_cost: Option<Decimal>,
+    pricing_snapshot_json: serde_json::Value,
 }
 
 #[derive(Debug, Clone)]
@@ -138,34 +101,6 @@ pub struct StageAccountingGapRequest {
     pub pricing_status: PricingResolutionStatus,
     pub token_usage_json: serde_json::Value,
     pub pricing_snapshot_json: serde_json::Value,
-}
-
-#[must_use]
-pub fn classify_accounting_truth_status(
-    priced_stage_count: i32,
-    unpriced_stage_count: i32,
-    in_flight_stage_count: i32,
-    missing_stage_count: i32,
-) -> RuntimeAccountingTruthStatus {
-    if in_flight_stage_count > 0 {
-        RuntimeAccountingTruthStatus::InFlightUnsettled
-    } else if priced_stage_count > 0 && unpriced_stage_count == 0 && missing_stage_count == 0 {
-        RuntimeAccountingTruthStatus::Priced
-    } else if priced_stage_count > 0 || unpriced_stage_count > 0 || missing_stage_count > 0 {
-        RuntimeAccountingTruthStatus::Partial
-    } else {
-        RuntimeAccountingTruthStatus::Unpriced
-    }
-}
-
-#[must_use]
-pub fn accounting_truth_status_key(status: &RuntimeAccountingTruthStatus) -> &'static str {
-    match status {
-        RuntimeAccountingTruthStatus::Priced => "priced",
-        RuntimeAccountingTruthStatus::Partial => "partial",
-        RuntimeAccountingTruthStatus::Unpriced => "unpriced",
-        RuntimeAccountingTruthStatus::InFlightUnsettled => "in_flight_unsettled",
-    }
 }
 
 pub async fn record_stage_accounting(
@@ -218,36 +153,10 @@ pub async fn refresh_attempt_cost_summary(
         .context("failed to refresh attempt cost summary")
 }
 
-async fn refresh_collection_settlement_if_possible(
-    state: &AppState,
-    ingestion_run_id: Uuid,
-    project_id: Option<Uuid>,
-) -> anyhow::Result<()> {
-    let resolved_project_id = match project_id {
-        Some(project_id) => Some(project_id),
-        None => repositories::get_runtime_ingestion_run_by_id(
-            &state.persistence.postgres,
-            ingestion_run_id,
-        )
-        .await
-        .context("failed to load ingestion run for collection settlement refresh")?
-        .map(|row| row.project_id),
-    };
-    if let Some(project_id) = resolved_project_id {
-        runtime_ingestion::refresh_library_collection_settlement_snapshots(state, project_id)
-            .await
-            .context("failed to refresh collection settlement snapshots")?;
-        runtime_ingestion::refresh_library_warning_snapshots(state, project_id)
-            .await
-            .context("failed to refresh collection warning snapshots")?;
-    }
-    Ok(())
-}
-
 pub async fn record_stage_usage_and_cost(
     state: &AppState,
     request: StageUsageAccountingRequest,
-) -> anyhow::Result<StageUsageAccountingResult> {
+) -> anyhow::Result<()> {
     validate_stage_usage_request(&request.stage, &request.capability, &request.billing_unit)?;
     let accounting_scope_label = request.accounting_scope.scope_label().to_string();
     let call_sequence_no = request.accounting_scope.call_sequence_no();
@@ -282,18 +191,11 @@ pub async fn record_stage_usage_and_cost(
             };
             let attempt_summary =
                 refresh_attempt_cost_summary(state, request.ingestion_run_id).await?;
-            refresh_collection_settlement_if_possible(
-                state,
-                request.ingestion_run_id,
-                request.project_id,
-            )
-            .await?;
-            return Ok(StageUsageAccountingResult {
-                usage_event,
-                cost_ledger,
-                stage_accounting: existing_stage_accounting,
-                attempt_summary,
-            });
+            let _ = usage_event;
+            let _ = cost_ledger;
+            let _ = existing_stage_accounting;
+            let _ = attempt_summary;
+            return Ok(());
         }
     }
     let stage_ownership =
@@ -317,19 +219,17 @@ pub async fn record_stage_usage_and_cost(
     .await
     .context("failed to create stage usage event")?;
 
-    let pricing_resolution = pricing_catalog::resolve_usage_cost(
+    let pricing_resolution = resolve_usage_cost(
         state,
-        pricing_catalog::UsageCostLookupRequest {
-            workspace_id: request.workspace_id,
-            provider_kind: request.provider_kind.clone(),
-            model_name: request.model_name.clone(),
-            capability: capability_as_str(&request.capability).to_string(),
-            billing_unit: billing_unit_as_str(&request.billing_unit).to_string(),
-            prompt_tokens: request.prompt_tokens,
-            completion_tokens: request.completion_tokens,
-            total_tokens: request.total_tokens,
-            at: usage_event.created_at,
-        },
+        request.workspace_id,
+        &request.provider_kind,
+        &request.model_name,
+        &request.capability,
+        &request.billing_unit,
+        request.prompt_tokens,
+        request.completion_tokens,
+        request.total_tokens,
+        usage_event.created_at,
     )
     .await
     .context("failed to resolve stage pricing")?;
@@ -358,7 +258,7 @@ pub async fn record_stage_usage_and_cost(
         None
     };
 
-    let stage_accounting = record_stage_accounting(
+    let _stage_accounting = record_stage_accounting(
         state,
         RecordStageAccountingRequest {
             ingestion_run_id: request.ingestion_run_id,
@@ -373,7 +273,7 @@ pub async fn record_stage_usage_and_cost(
             billing_unit: request.billing_unit,
             usage_event_id: Some(usage_event.id),
             cost_ledger_id: cost_ledger.as_ref().map(|row| row.id),
-            pricing_catalog_entry_id: pricing_resolution.entry.as_ref().map(|row| row.id),
+            pricing_catalog_entry_id: pricing_resolution.entry_id,
             pricing_status: pricing_resolution.status,
             estimated_cost: cost_ledger.as_ref().map(|row| row.estimated_cost),
             currency: cost_ledger.as_ref().map(|row| row.currency.clone()),
@@ -382,17 +282,15 @@ pub async fn record_stage_usage_and_cost(
         },
     )
     .await?;
-    let attempt_summary = refresh_attempt_cost_summary(state, request.ingestion_run_id).await?;
-    refresh_collection_settlement_if_possible(state, request.ingestion_run_id, request.project_id)
-        .await?;
+    let _attempt_summary = refresh_attempt_cost_summary(state, request.ingestion_run_id).await?;
 
-    Ok(StageUsageAccountingResult { usage_event, cost_ledger, stage_accounting, attempt_summary })
+    Ok(())
 }
 
 pub async fn record_stage_accounting_gap(
     state: &AppState,
     request: StageAccountingGapRequest,
-) -> anyhow::Result<(AttemptStageAccountingRow, AttemptStageCostSummaryRow)> {
+) -> anyhow::Result<()> {
     validate_stage_gap_request(
         &request.stage,
         &request.capability,
@@ -401,7 +299,7 @@ pub async fn record_stage_accounting_gap(
     )?;
     let stage_ownership =
         stage_native_ownership(request.ingestion_run_id, request.stage_event_id, &request.stage);
-    let stage_accounting = record_stage_accounting(
+    let _stage_accounting = record_stage_accounting(
         state,
         RecordStageAccountingRequest {
             ingestion_run_id: request.ingestion_run_id,
@@ -431,227 +329,8 @@ pub async fn record_stage_accounting_gap(
         },
     )
     .await?;
-    let attempt_summary = refresh_attempt_cost_summary(state, request.ingestion_run_id).await?;
-    refresh_collection_settlement_if_possible(state, request.ingestion_run_id, request.project_id)
-        .await?;
-    Ok((stage_accounting, attempt_summary))
-}
-
-#[must_use]
-pub fn resolve_attempt_stage_accounting(
-    attempt_stage_events: &[RuntimeIngestionStageEventRow],
-    stage_accounting: &[AttemptStageAccountingRow],
-) -> Vec<ResolvedStageAccountingView> {
-    let attempt_stage_event_ids = attempt_stage_events
-        .iter()
-        .map(|event| event.id)
-        .collect::<std::collections::BTreeSet<_>>();
-    let mut billable_stage_names = attempt_stage_events
-        .iter()
-        .filter_map(|event| match runtime_stage_billing_policy(&event.stage) {
-            RuntimeStageBillingPolicy::Billable { .. } => Some(event.stage.clone()),
-            RuntimeStageBillingPolicy::NonBillable => None,
-        })
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    billable_stage_names.sort();
-
-    billable_stage_names
-        .into_iter()
-        .map(|stage_name| {
-            let stage_rows = stage_accounting
-                .iter()
-                .filter(|row| {
-                    row.stage == stage_name && attempt_stage_event_ids.contains(&row.stage_event_id)
-                })
-                .collect::<Vec<_>>();
-            let anchor_event = attempt_stage_events
-                .iter()
-                .rev()
-                .find(|event| {
-                    event.stage == stage_name
-                        && matches!(event.status.as_str(), "completed" | "failed" | "skipped")
-                })
-                .or_else(|| {
-                    attempt_stage_events.iter().rev().find(|event| event.stage == stage_name)
-                });
-            let anchor_event_status = anchor_event.map(|event| event.status.as_str());
-            let anchor_event_id = anchor_event.map(|event| event.id);
-            let stage_rollup =
-                stage_rows.iter().rev().find(|row| row.accounting_scope == "stage_rollup");
-            let provider_calls = stage_rows
-                .iter()
-                .filter(|row| row.accounting_scope == "provider_call")
-                .copied()
-                .collect::<Vec<_>>();
-
-            if let Some(row) = stage_rollup {
-                ResolvedStageAccountingView {
-                    stage: stage_name,
-                    anchor_event_id,
-                    accounting_scope: "stage_rollup".to_string(),
-                    pricing_status: row.pricing_status.clone(),
-                    estimated_cost: row.estimated_cost,
-                    settled_estimated_cost: row.estimated_cost,
-                    in_flight_estimated_cost: None,
-                    currency: row.currency.clone(),
-                    usage_event_id: row.usage_event_id,
-                    cost_ledger_id: row.cost_ledger_id,
-                    pricing_catalog_entry_id: row.pricing_catalog_entry_id,
-                    attribution_source: stage_attribution_source(row, &row.stage).to_string(),
-                }
-            } else if !provider_calls.is_empty() {
-                provider_call_stage_accounting_view(
-                    &stage_name,
-                    anchor_event_id,
-                    anchor_event_status,
-                    &provider_calls,
-                )
-            } else {
-                ResolvedStageAccountingView {
-                    stage: stage_name,
-                    anchor_event_id,
-                    accounting_scope: "missing".to_string(),
-                    pricing_status: "unpriced".to_string(),
-                    estimated_cost: None,
-                    settled_estimated_cost: None,
-                    in_flight_estimated_cost: None,
-                    currency: None,
-                    usage_event_id: None,
-                    cost_ledger_id: None,
-                    pricing_catalog_entry_id: None,
-                    attribution_source: "stage_native".to_string(),
-                }
-            }
-        })
-        .collect()
-}
-
-fn provider_call_stage_accounting_view(
-    stage_name: &str,
-    anchor_event_id: Option<Uuid>,
-    anchor_event_status: Option<&str>,
-    provider_calls: &[&AttemptStageAccountingRow],
-) -> ResolvedStageAccountingView {
-    let estimated_cost = provider_calls
-        .iter()
-        .filter_map(|row| row.estimated_cost)
-        .fold(Decimal::ZERO, |acc, value| acc + value);
-    let has_estimated_cost = provider_calls.iter().any(|row| row.estimated_cost.is_some());
-    let has_unpriced_or_missing = provider_calls
-        .iter()
-        .any(|row| !matches!(row.pricing_status.as_str(), "priced" | "in_flight_unsettled"));
-    let is_terminal_stage = anchor_event_status
-        .map(|status| matches!(status, "completed" | "failed" | "skipped"))
-        .unwrap_or(false);
-    let pricing_status = if is_terminal_stage {
-        if has_estimated_cost && !has_unpriced_or_missing {
-            "priced"
-        } else if has_estimated_cost || has_unpriced_or_missing {
-            "partial"
-        } else {
-            "unpriced"
-        }
-    } else {
-        "in_flight_unsettled"
-    };
-
-    ResolvedStageAccountingView {
-        stage: stage_name.to_string(),
-        anchor_event_id,
-        accounting_scope: "provider_call".to_string(),
-        pricing_status: pricing_status.to_string(),
-        estimated_cost: has_estimated_cost.then_some(estimated_cost),
-        settled_estimated_cost: (is_terminal_stage && has_estimated_cost).then_some(estimated_cost),
-        // Provider-call rows remain visible before the stage rollup settles; once the stage is
-        // terminal they become the settled fallback source of truth if no stage rollup exists yet.
-        in_flight_estimated_cost: (!is_terminal_stage && has_estimated_cost)
-            .then_some(estimated_cost),
-        currency: provider_calls.iter().find_map(|row| row.currency.clone()),
-        usage_event_id: None,
-        cost_ledger_id: None,
-        pricing_catalog_entry_id: None,
-        attribution_source: "stage_native".to_string(),
-    }
-}
-
-#[must_use]
-pub fn summarize_resolved_attempt_stage_accounting(
-    resolved_stage_accounting: &[ResolvedStageAccountingView],
-) -> AttemptAccountingSummaryView {
-    let total_estimated_cost = resolved_stage_accounting
-        .iter()
-        .filter_map(|row| row.estimated_cost)
-        .fold(Decimal::ZERO, |acc, value| acc + value);
-    let settled_estimated_cost = resolved_stage_accounting
-        .iter()
-        .filter_map(|row| row.settled_estimated_cost)
-        .fold(Decimal::ZERO, |acc, value| acc + value);
-    let in_flight_estimated_cost = resolved_stage_accounting
-        .iter()
-        .filter_map(|row| row.in_flight_estimated_cost)
-        .fold(Decimal::ZERO, |acc, value| acc + value);
-    let priced_stage_count = i32::try_from(
-        resolved_stage_accounting
-            .iter()
-            .filter(|row| {
-                row.accounting_scope != "missing"
-                    && row.pricing_status == "priced"
-                    && row.in_flight_estimated_cost.is_none()
-            })
-            .count(),
-    )
-    .unwrap_or(i32::MAX);
-    let unpriced_stage_count = i32::try_from(
-        resolved_stage_accounting
-            .iter()
-            .filter(|row| {
-                row.accounting_scope != "missing"
-                    && row.pricing_status != "priced"
-                    && row.in_flight_estimated_cost.is_none()
-            })
-            .count(),
-    )
-    .unwrap_or(i32::MAX);
-    let in_flight_stage_count = i32::try_from(
-        resolved_stage_accounting
-            .iter()
-            .filter(|row| row.in_flight_estimated_cost.is_some())
-            .count(),
-    )
-    .unwrap_or(i32::MAX);
-    let missing_stage_count = i32::try_from(
-        resolved_stage_accounting.iter().filter(|row| row.accounting_scope == "missing").count(),
-    )
-    .unwrap_or(i32::MAX);
-    let accounting_status = classify_accounting_truth_status(
-        priced_stage_count,
-        unpriced_stage_count,
-        in_flight_stage_count,
-        missing_stage_count,
-    );
-
-    AttemptAccountingSummaryView {
-        total_estimated_cost: resolved_stage_accounting
-            .iter()
-            .any(|row| row.estimated_cost.is_some())
-            .then_some(total_estimated_cost),
-        settled_estimated_cost: resolved_stage_accounting
-            .iter()
-            .any(|row| row.settled_estimated_cost.is_some())
-            .then_some(settled_estimated_cost),
-        in_flight_estimated_cost: resolved_stage_accounting
-            .iter()
-            .any(|row| row.in_flight_estimated_cost.is_some())
-            .then_some(in_flight_estimated_cost),
-        currency: resolved_stage_accounting.iter().find_map(|row| row.currency.clone()),
-        priced_stage_count,
-        unpriced_stage_count,
-        in_flight_stage_count,
-        missing_stage_count,
-        accounting_status: accounting_truth_status_key(&accounting_status).to_string(),
-    }
+    let _attempt_summary = refresh_attempt_cost_summary(state, request.ingestion_run_id).await?;
+    Ok(())
 }
 
 trait AsRefStr {
@@ -698,6 +377,188 @@ impl AsRefStr for PricingResolutionStatus {
             Self::PricingMissing => "pricing_missing",
         }
     }
+}
+
+async fn resolve_usage_cost(
+    state: &AppState,
+    workspace_id: Option<Uuid>,
+    provider_kind: &str,
+    model_name: &str,
+    capability: &PricingCapability,
+    billing_unit: &PricingBillingUnit,
+    prompt_tokens: Option<i32>,
+    completion_tokens: Option<i32>,
+    total_tokens: Option<i32>,
+    observed_at: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<UsageCostResolution> {
+    let provider_kind = provider_kind.trim().to_ascii_lowercase();
+    let model_name = model_name.trim().to_string();
+    let capability_key = capability_as_str(capability).to_string();
+    let billing_unit_key = billing_unit_as_str(billing_unit).to_string();
+
+    let model = ai_repository::get_model_catalog_by_provider_and_name(
+        &state.persistence.postgres,
+        &provider_kind,
+        &model_name,
+    )
+    .await
+    .context("failed to resolve model catalog entry for usage pricing")?;
+
+    let Some(model) = model else {
+        let status = PricingResolutionStatus::PricingMissing;
+        return Ok(UsageCostResolution {
+            status: status.clone(),
+            entry_id: None,
+            estimated_cost: None,
+            pricing_snapshot_json: build_usage_pricing_snapshot(
+                None,
+                status,
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                &provider_kind,
+                &model_name,
+                &capability_key,
+                &billing_unit_key,
+                observed_at,
+            ),
+        });
+    };
+
+    let price = ai_repository::get_effective_price_catalog_entry(
+        &state.persistence.postgres,
+        model.id,
+        &billing_unit_key,
+        workspace_id,
+        observed_at,
+    )
+    .await
+    .context("failed to resolve effective ai price catalog entry for usage pricing")?;
+
+    let Some(price) = price else {
+        let status = PricingResolutionStatus::PricingMissing;
+        return Ok(UsageCostResolution {
+            status: status.clone(),
+            entry_id: None,
+            estimated_cost: None,
+            pricing_snapshot_json: build_usage_pricing_snapshot(
+                None,
+                status,
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                &provider_kind,
+                &model_name,
+                &capability_key,
+                &billing_unit_key,
+                observed_at,
+            ),
+        });
+    };
+
+    let (status, estimated_cost) = estimate_usage_cost_from_price_catalog(
+        &price,
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+    );
+    Ok(UsageCostResolution {
+        status: status.clone(),
+        entry_id: Some(price.id),
+        estimated_cost,
+        pricing_snapshot_json: build_usage_pricing_snapshot(
+            Some(&price),
+            status,
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            &provider_kind,
+            &model_name,
+            &capability_key,
+            &billing_unit_key,
+            observed_at,
+        ),
+    })
+}
+
+fn estimate_usage_cost_from_price_catalog(
+    price: &ai_repository::AiPriceCatalogRow,
+    prompt_tokens: Option<i32>,
+    completion_tokens: Option<i32>,
+    total_tokens: Option<i32>,
+) -> (PricingResolutionStatus, Option<Decimal>) {
+    match price.billing_unit.as_str() {
+        "per_1m_input_tokens" => {
+            let Some(tokens) = prompt_tokens.or(total_tokens) else {
+                return (PricingResolutionStatus::UsageMissing, None);
+            };
+            (PricingResolutionStatus::Priced, Some(scale_token_cost(tokens, price.unit_price)))
+        }
+        "per_1m_output_tokens" => {
+            let Some(tokens) = completion_tokens else {
+                return (PricingResolutionStatus::UsageMissing, None);
+            };
+            (PricingResolutionStatus::Priced, Some(scale_token_cost(tokens, price.unit_price)))
+        }
+        "fixed_per_call" => (PricingResolutionStatus::Priced, Some(price.unit_price)),
+        _ => {
+            let total_tokens = total_tokens.or_else(|| match (prompt_tokens, completion_tokens) {
+                (Some(prompt), Some(completion)) => Some(prompt.saturating_add(completion)),
+                (Some(prompt), None) => Some(prompt),
+                (None, Some(completion)) => Some(completion),
+                (None, None) => None,
+            });
+            let Some(tokens) = total_tokens else {
+                return (PricingResolutionStatus::UsageMissing, None);
+            };
+            (PricingResolutionStatus::Priced, Some(scale_token_cost(tokens, price.unit_price)))
+        }
+    }
+}
+
+fn build_usage_pricing_snapshot(
+    price: Option<&ai_repository::AiPriceCatalogRow>,
+    status: PricingResolutionStatus,
+    prompt_tokens: Option<i32>,
+    completion_tokens: Option<i32>,
+    total_tokens: Option<i32>,
+    provider_kind: &str,
+    model_name: &str,
+    capability: &str,
+    billing_unit: &str,
+    observed_at: chrono::DateTime<chrono::Utc>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "pricing_status": status.as_ref(),
+        "provider_kind": provider_kind,
+        "model_name": model_name,
+        "capability": capability,
+        "billing_unit": billing_unit,
+        "resolved_at": observed_at,
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        },
+        "catalog_entry": price.map(|row| serde_json::json!({
+            "id": row.id,
+            "model_catalog_id": row.model_catalog_id,
+            "billing_unit": row.billing_unit,
+            "unit_price": row.unit_price.normalize().to_string(),
+            "currency_code": row.currency_code,
+            "effective_from": row.effective_from,
+            "effective_to": row.effective_to,
+            "catalog_scope": row.catalog_scope,
+            "workspace_id": row.workspace_id,
+        })),
+    })
+}
+
+fn scale_token_cost(tokens: i32, price_per_million: Decimal) -> Decimal {
+    if tokens <= 0 {
+        return Decimal::ZERO;
+    }
+    (Decimal::from(tokens) * price_per_million) / Decimal::from(1_000_000u64)
 }
 
 fn validate_stage_usage_request(
@@ -805,28 +666,9 @@ fn validate_stage_accounting_request(
     }
 }
 
-fn stage_attribution_source(row: &AttemptStageAccountingRow, event_stage: &str) -> &'static str {
-    let metadata_source = row
-        .pricing_snapshot_json
-        .get("stage_ownership")
-        .or_else(|| row.token_usage_json.get("stage_ownership"))
-        .and_then(|value| value.get("attribution_source"))
-        .and_then(serde_json::Value::as_str);
-    match metadata_source {
-        Some("stage_native") => "stage_native",
-        Some("reconciled") => "reconciled",
-        _ if row.stage == event_stage => "stage_native",
-        _ => "reconciled",
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
-    use serde_json::json;
-
     use super::*;
-    use crate::infra::repositories::{AttemptStageAccountingRow, RuntimeIngestionStageEventRow};
 
     #[test]
     fn rejects_priced_non_billable_stage_accounting() {
@@ -865,135 +707,5 @@ mod tests {
             &PricingResolutionStatus::Unpriced,
         )
         .expect("non-billable unpriced gap remains representable");
-    }
-
-    #[test]
-    fn provider_call_accounting_is_visible_before_stage_rollup_exists() {
-        let stage_event_id = Uuid::now_v7();
-        let run_id = Uuid::now_v7();
-        let stage_events = vec![RuntimeIngestionStageEventRow {
-            id: stage_event_id,
-            ingestion_run_id: run_id,
-            attempt_no: 1,
-            stage: "extracting_graph".to_string(),
-            status: "started".to_string(),
-            message: None,
-            metadata_json: json!({}),
-            provider_kind: Some("openai".to_string()),
-            model_name: Some("gpt-5.4-mini".to_string()),
-            started_at: Utc::now(),
-            finished_at: None,
-            elapsed_ms: None,
-            created_at: Utc::now(),
-        }];
-        let stage_accounting = vec![AttemptStageAccountingRow {
-            id: Uuid::now_v7(),
-            ingestion_run_id: run_id,
-            stage_event_id,
-            stage: "extracting_graph".to_string(),
-            accounting_scope: "provider_call".to_string(),
-            call_sequence_no: 1,
-            workspace_id: None,
-            project_id: None,
-            provider_kind: Some("openai".to_string()),
-            model_name: Some("gpt-5.4-mini".to_string()),
-            capability: "graph_extract".to_string(),
-            billing_unit: "per_1m_tokens".to_string(),
-            usage_event_id: Some(Uuid::now_v7()),
-            cost_ledger_id: Some(Uuid::now_v7()),
-            pricing_catalog_entry_id: Some(Uuid::now_v7()),
-            pricing_status: "priced".to_string(),
-            estimated_cost: Some(Decimal::new(375, 5)),
-            currency: Some("USD".to_string()),
-            token_usage_json: json!({
-                "prompt_tokens": 1200,
-                "completion_tokens": 340,
-                "total_tokens": 1540,
-            }),
-            pricing_snapshot_json: json!({
-                "stage_ownership": {
-                    "attribution_source": "stage_native"
-                }
-            }),
-            created_at: Utc::now(),
-        }];
-
-        let resolved = resolve_attempt_stage_accounting(&stage_events, &stage_accounting);
-        let summary = summarize_resolved_attempt_stage_accounting(&resolved);
-
-        assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].accounting_scope, "provider_call");
-        assert_eq!(resolved[0].pricing_status, "in_flight_unsettled");
-        assert_eq!(resolved[0].estimated_cost, Some(Decimal::new(375, 5)));
-        assert_eq!(resolved[0].in_flight_estimated_cost, Some(Decimal::new(375, 5)));
-        assert_eq!(summary.accounting_status, "in_flight_unsettled");
-        assert_eq!(summary.in_flight_stage_count, 1);
-        assert_eq!(summary.total_estimated_cost, Some(Decimal::new(375, 5)));
-        assert_eq!(summary.in_flight_estimated_cost, Some(Decimal::new(375, 5)));
-    }
-
-    #[test]
-    fn partial_accounting_remains_distinct_from_unpriced_when_some_work_settles() {
-        let status = classify_accounting_truth_status(1, 0, 0, 1);
-
-        assert_eq!(status, RuntimeAccountingTruthStatus::Partial);
-        assert_eq!(accounting_truth_status_key(&status), "partial");
-    }
-
-    #[test]
-    fn provider_call_accounting_settles_when_stage_is_terminal_without_rollup() {
-        let stage_event_id = Uuid::now_v7();
-        let run_id = Uuid::now_v7();
-        let stage_events = vec![RuntimeIngestionStageEventRow {
-            id: stage_event_id,
-            ingestion_run_id: run_id,
-            attempt_no: 1,
-            stage: "extracting_graph".to_string(),
-            status: "failed".to_string(),
-            message: Some("upstream timeout".to_string()),
-            metadata_json: json!({}),
-            provider_kind: Some("openai".to_string()),
-            model_name: Some("gpt-5.4-mini".to_string()),
-            started_at: Utc::now(),
-            finished_at: Some(Utc::now()),
-            elapsed_ms: Some(9_000),
-            created_at: Utc::now(),
-        }];
-        let stage_accounting = vec![AttemptStageAccountingRow {
-            id: Uuid::now_v7(),
-            ingestion_run_id: run_id,
-            stage_event_id,
-            stage: "extracting_graph".to_string(),
-            accounting_scope: "provider_call".to_string(),
-            call_sequence_no: 1,
-            workspace_id: None,
-            project_id: None,
-            provider_kind: Some("openai".to_string()),
-            model_name: Some("gpt-5.4-mini".to_string()),
-            capability: "graph_extract".to_string(),
-            billing_unit: "per_1m_tokens".to_string(),
-            usage_event_id: Some(Uuid::now_v7()),
-            cost_ledger_id: Some(Uuid::now_v7()),
-            pricing_catalog_entry_id: Some(Uuid::now_v7()),
-            pricing_status: "priced".to_string(),
-            estimated_cost: Some(Decimal::new(420, 5)),
-            currency: Some("USD".to_string()),
-            token_usage_json: json!({ "total_tokens": 1540 }),
-            pricing_snapshot_json: json!({}),
-            created_at: Utc::now(),
-        }];
-
-        let resolved = resolve_attempt_stage_accounting(&stage_events, &stage_accounting);
-        let summary = summarize_resolved_attempt_stage_accounting(&resolved);
-
-        assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].accounting_scope, "provider_call");
-        assert_eq!(resolved[0].pricing_status, "priced");
-        assert_eq!(resolved[0].settled_estimated_cost, Some(Decimal::new(420, 5)));
-        assert_eq!(resolved[0].in_flight_estimated_cost, None);
-        assert_eq!(summary.accounting_status, "priced");
-        assert_eq!(summary.priced_stage_count, 1);
-        assert_eq!(summary.in_flight_stage_count, 0);
-        assert_eq!(summary.settled_estimated_cost, Some(Decimal::new(420, 5)));
     }
 }

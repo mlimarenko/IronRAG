@@ -44,6 +44,7 @@ import type {
   UploadRejectionDetails,
 } from 'src/models/ui/documents'
 import type { GraphCanonicalSummary } from 'src/models/ui/graph'
+import { i18n } from 'src/lib/i18n'
 import { useShellStore } from 'src/stores/shell'
 import { ApiClientError, apiHttp, unwrap } from './http'
 
@@ -115,15 +116,60 @@ interface RawContentDocumentDetailResponse {
   active_revision: RawContentRevision | null
 }
 
+interface RawKnowledgeRevisionRow {
+  key: string
+  arangoId?: string | null
+  arangoRev?: string | null
+  revisionId: string
+  workspaceId: string
+  libraryId: string
+  documentId: string
+  revisionNumber: number
+  revisionState: string
+  revisionKind: string
+  storageRef: string | null
+  mimeType: string
+  checksum: string
+  title: string | null
+  byteSize: number
+  normalizedText: string | null
+  textChecksum: string | null
+  textState: string
+  vectorState: string
+  graphState: string
+  textReadableAt: string | null
+  vectorReadyAt: string | null
+  graphReadyAt: string | null
+  supersededByRevisionId: string | null
+  createdAt: string
+}
+
+interface RawKnowledgeDocumentDetailResponse {
+  document: RawContentDocument
+  revisions: RawKnowledgeRevisionRow[]
+  latestRevision: RawKnowledgeRevisionRow | null
+  latestRevisionChunks: RawChunkSummary[]
+}
+
 interface RawContentMutationDetailResponse {
   mutation: RawContentMutation
   items: RawContentMutationItem[]
   job_id: string | null
+  async_operation_id?: string | null
+}
+
+interface RawContentMutationDetailResponseWire {
+  mutation: RawContentMutation
+  items: RawContentMutationItem[]
+  job_id?: string | null
+  jobId?: string | null
+  async_operation_id?: string | null
+  asyncOperationId?: string | null
 }
 
 interface RawCreateDocumentResponse {
   document: RawContentDocumentDetailResponse
-  mutation: RawContentMutationDetailResponse
+  mutation: RawContentMutationDetailResponseWire
 }
 
 interface RawIngestJob {
@@ -132,6 +178,7 @@ interface RawIngestJob {
   library_id: string
   mutation_id: string | null
   connector_id: string | null
+  async_operation_id?: string | null
   job_kind: string
   queue_state: 'queued' | 'leased' | 'completed' | 'failed' | 'canceled' | string
   priority: number
@@ -139,6 +186,10 @@ interface RawIngestJob {
   queued_at: string
   available_at: string
   completed_at: string | null
+}
+
+interface RawIngestJobResponse {
+  job: RawIngestJob
 }
 
 interface RawChunkSummary {
@@ -165,6 +216,8 @@ const DEFAULT_ACCEPTED_FORMATS = ['PDF', 'DOCX', 'TXT', 'MD', 'Images']
 const DEFAULT_UPLOAD_LIMIT_MB = 50
 const STALLED_ACTIVITY_AFTER_MS = 180_000
 
+type RawWireRecord = Record<string, unknown>
+
 function readString(record: Record<string, unknown>, key: string): string | null {
   const value = record[key]
   return typeof value === 'string' ? value : null
@@ -173,6 +226,19 @@ function readString(record: Record<string, unknown>, key: string): string | null
 function readNumber(record: Record<string, unknown>, key: string): number | null {
   const value = record[key]
   return typeof value === 'number' ? value : null
+}
+
+function normalizeContentDocumentDetailResponse(
+  payload: RawContentDocumentDetailResponse | RawWireRecord,
+): RawContentDocumentDetailResponse {
+  const detail = payload as RawContentDocumentDetailResponse & {
+    activeRevision?: RawContentRevision | null
+  }
+  return {
+    document: detail.document,
+    head: detail.head ?? null,
+    active_revision: detail.active_revision ?? detail.activeRevision ?? null,
+  }
 }
 
 function toHex(bytes: ArrayBuffer): string {
@@ -447,7 +513,11 @@ function buildDocumentFileType(
   if (!reference) {
     return inferFileType(document.external_key, null)
   }
-  return inferFileType(reference.title ?? document.external_key, reference.mime_type)
+  const fileNameReference =
+    reference.source_uri?.replace(/^upload:\/\//, '') ??
+    reference.title ??
+    document.external_key
+  return inferFileType(fileNameReference, reference.mime_type)
 }
 
 function buildMutationState(mutation: RawContentMutation | null): DocumentMutationState {
@@ -551,6 +621,26 @@ function buildCanonicalState(
   }
 }
 
+function buildKnowledgeReadiness(
+  revision: RawKnowledgeRevisionRow | null,
+): DocumentDetail['knowledgeReadiness'] {
+  if (!revision) {
+    return null
+  }
+
+  return {
+    revisionId: revision.revisionId,
+    revisionNo: revision.revisionNumber,
+    revisionKind: revision.revisionKind,
+    textState: revision.textState,
+    vectorState: revision.vectorState,
+    graphState: revision.graphState,
+    textReadableAt: revision.textReadableAt,
+    vectorReadyAt: revision.vectorReadyAt,
+    graphReadyAt: revision.graphReadyAt,
+  }
+}
+
 function buildGraphThroughput(
   activeCount: number,
   totalCount: number,
@@ -644,13 +734,13 @@ function buildCollectionDiagnostics(rows: DocumentRow[]): DocumentCollectionDiag
       isDegraded: true,
     })
   }
-  const projectionHealth: DocumentGraphHealthSummary['projectionHealth'] =
+  const writeHealth: DocumentGraphHealthSummary['writeHealth'] =
     failed > 0 ? 'failed' : activeBacklogCount > 0 ? 'retrying_contention' : 'healthy'
   const graphHealth: DocumentGraphHealthSummary = {
-    projectionHealth,
-    activeProjectionCount: ready,
-    retryingProjectionCount: processing,
-    failedProjectionCount: failed,
+    writeHealth,
+    activeWriteCount: ready,
+    retryingWriteCount: processing,
+    failedWriteCount: failed,
     pendingNodeWriteCount: activeBacklogCount,
     pendingEdgeWriteCount: activeBacklogCount,
     lastFailureKind: failed > 0 ? 'canonical_ingest_failed' : null,
@@ -737,33 +827,35 @@ function buildWorkspaceSummary(
     progressLabel: `${String(progressCount)} / ${String(rows.length)}`,
     spendLabel:
       backlogCount > 0
-        ? 'In flight'
+        ? i18n.global.t('documents.workspace.primaryValues.inFlight')
         : failed > 0
-          ? 'Residual work'
-          : 'Settled',
+          ? i18n.global.t('documents.workspace.primaryValues.residualWork')
+          : i18n.global.t('documents.workspace.primaryValues.settled'),
     backlogLabel:
-      backlogCount > 0 ? `${String(backlogCount)} pending` : 'Clear',
+      backlogCount > 0
+        ? i18n.global.t('documents.workspace.primaryValues.pending', { count: backlogCount })
+        : i18n.global.t('documents.workspace.primaryValues.clear'),
     terminalState: diagnostics.terminalOutcome?.terminalState ?? 'live_in_flight',
   }
   const secondaryDiagnostics: DocumentsWorkspaceDiagnosticChip[] = [
     {
       kind: 'documents',
-      label: 'Documents',
+      label: i18n.global.t('shell.documents'),
       value: String(rows.length),
     },
     {
       kind: 'queue',
-      label: 'Queued',
+      label: i18n.global.t('documents.queued'),
       value: String(queued),
     },
     {
       kind: 'processing',
-      label: 'Processing',
+      label: i18n.global.t('documents.processing'),
       value: String(processing),
     },
     {
       kind: 'failed',
-      label: 'Failed',
+      label: i18n.global.t('documents.failed'),
       value: String(failed),
     },
   ]
@@ -773,16 +865,20 @@ function buildWorkspaceSummary(
   if (backlogCount > 0) {
     informationalNotices.push({
       kind: 'ordinary_backlog',
-      title: 'Canonical ingestion is active',
-      message: `${String(backlogCount)} document(s) are still processing in the canonical pipeline.`,
+      title: i18n.global.t('documents.workspace.notices.pipelineActive.title'),
+      message: i18n.global.t('documents.workspace.notices.pipelineActive.message', {
+        count: backlogCount,
+      }),
     })
   }
 
   if (failed > 0) {
     degradedNotices.push({
       kind: 'failed_work',
-      title: 'Canonical ingestion failures',
-      message: `${String(failed)} document(s) failed in the canonical pipeline.`,
+      title: i18n.global.t('documents.workspace.notices.pipelineFailed.title'),
+      message: i18n.global.t('documents.workspace.notices.pipelineFailed.message', {
+        count: failed,
+      }),
     })
   }
 
@@ -918,6 +1014,7 @@ function mapSurfaceRow(
       activityStatus === 'queued' || activityStatus === 'active' ? 'elevated' : null,
     ),
     mutation: mutationState,
+    knowledgeReadiness: null,
     canRetry:
       latestJob?.queue_state === 'failed' ||
       latestJob?.queue_state === 'canceled' ||
@@ -1012,6 +1109,7 @@ function mapDocumentDetail(
   relatedJobs: RawIngestJob[],
   latestMutation: RawContentMutationDetailResponse | null,
   libraryName: string,
+  knowledgeRevision: RawKnowledgeRevisionRow | null,
 ): DocumentDetail {
   const activeRevision = document.active_revision
   const readableRevision =
@@ -1037,6 +1135,7 @@ function mapDocumentDetail(
     edgeCount: 0,
     evidenceCount: previewChunkCount,
   }
+  const knowledgeReadiness = buildKnowledgeReadiness(knowledgeRevision)
   const mutationState = buildMutationState(latestMutation?.mutation ?? null)
   const lastActivity = latestActivityAt(latestJob)
   const attemptGroups = mapDetailAttempts(relatedJobs, activeRevision)
@@ -1131,6 +1230,7 @@ function mapDocumentDetail(
       previewChunkCount,
       activityStatus === 'queued' || activityStatus === 'active' ? 'elevated' : null,
     ),
+    knowledgeReadiness,
     extractedStats: {
       chunkCount: previewChunkCount || null,
       documentId: document.document.id,
@@ -1199,12 +1299,12 @@ async function fetchCanonicalBundle(): Promise<CanonicalLibraryBundle> {
       }),
     ),
     unwrap(
-      apiHttp.get<RawContentMutationDetailResponse[]>('/content/mutations', {
+      apiHttp.get<RawContentMutationDetailResponseWire[]>('/content/mutations', {
         params: { libraryId },
       }),
     ),
     unwrap(
-      apiHttp.get<RawIngestJob[]>('/ingest/jobs', {
+      apiHttp.get<RawIngestJobResponse[]>('/ingest/jobs', {
         params: {
           libraryId,
           workspaceId: shellStore.context?.activeWorkspace.id,
@@ -1214,10 +1314,41 @@ async function fetchCanonicalBundle(): Promise<CanonicalLibraryBundle> {
   ])
 
   return {
-    documents,
-    mutations,
-    jobs,
+    documents: documents.map(normalizeContentDocumentDetailResponse),
+    mutations: mutations.map(normalizeContentMutationDetailResponse),
+    jobs: jobs.map(normalizeIngestJobResponse),
   }
+}
+
+function normalizeIngestJobResponse(response: RawIngestJobResponse | RawIngestJob): RawIngestJob {
+  if ('job' in response) {
+    return response.job
+  }
+  return response
+}
+
+function normalizeContentMutationDetailResponse(
+  response: RawContentMutationDetailResponseWire | RawContentMutationDetailResponse,
+): RawContentMutationDetailResponse {
+  const jobId = 'jobId' in response ? response.jobId : null
+  const asyncOperationId = 'asyncOperationId' in response ? response.asyncOperationId : null
+  return {
+    mutation: response.mutation,
+    items: response.items,
+    job_id: response.job_id ?? jobId ?? null,
+    async_operation_id: response.async_operation_id ?? asyncOperationId ?? null,
+  }
+}
+
+async function fetchKnowledgeDocumentDetail(
+  libraryId: string,
+  documentId: string,
+): Promise<RawKnowledgeDocumentDetailResponse> {
+  return unwrap(
+    apiHttp.get<RawKnowledgeDocumentDetailResponse>(
+      `/knowledge/libraries/${libraryId}/documents/${documentId}`,
+    ),
+  )
 }
 
 function buildRelationMaps(
@@ -1370,34 +1501,43 @@ export async function fetchDocumentsSurface(): Promise<DocumentsSurfaceResponse>
 
 export async function fetchDocumentDetail(id: string): Promise<DocumentDetail> {
   const shellStore = useShellStore()
-  const document = await unwrap(apiHttp.get<RawContentDocumentDetailResponse>(`/content/documents/${id}`))
-  const revisions = await unwrap(
-    apiHttp.get<RawContentRevision[]>(`/content/documents/${id}/revisions`),
+  const document = normalizeContentDocumentDetailResponse(
+    await unwrap(apiHttp.get<RawContentDocumentDetailResponse>(`/content/documents/${id}`)),
   )
-  const mutations = await unwrap(
-    apiHttp.get<RawContentMutationDetailResponse[]>('/content/mutations', {
-      params: { libraryId: document.document.library_id },
-    }),
-  )
-  const jobs = await unwrap(
-    apiHttp.get<RawIngestJob[]>('/ingest/jobs', {
-      params: {
-        libraryId: document.document.library_id,
-        workspaceId: document.document.workspace_id,
-      },
-    }),
-  )
-  const chunks = await unwrap(
-    apiHttp.get<RawChunkSummary[]>('/chunks', {
-      params: { document_id: id },
-    }),
-  )
+  const [revisions, mutations, jobs, chunks, knowledgeDetail] = await Promise.all([
+    unwrap(apiHttp.get<RawContentRevision[]>(`/content/documents/${id}/revisions`)),
+    unwrap(
+      apiHttp.get<RawContentMutationDetailResponseWire[]>('/content/mutations', {
+        params: { libraryId: document.document.library_id },
+      }),
+    ),
+    unwrap(
+      apiHttp.get<RawIngestJobResponse[]>('/ingest/jobs', {
+        params: {
+          libraryId: document.document.library_id,
+          workspaceId: document.document.workspace_id,
+        },
+      }),
+    ),
+    unwrap(
+      apiHttp.get<RawChunkSummary[]>('/chunks', {
+        params: { document_id: id },
+      }),
+    ),
+    fetchKnowledgeDocumentDetail(document.document.library_id, id),
+  ])
+  const normalizedMutations = mutations.map(normalizeContentMutationDetailResponse)
+  const normalizedJobs = jobs.map(normalizeIngestJobResponse)
   const relationMaps = buildRelationMaps({
     documents: [document],
-    mutations,
-    jobs,
+    mutations: normalizedMutations,
+    jobs: normalizedJobs,
   })
-  const relations = buildDocumentRelations(id, { documents: [document], mutations, jobs }, relationMaps)
+  const relations = buildDocumentRelations(
+    id,
+    { documents: [document], mutations: normalizedMutations, jobs: normalizedJobs },
+    relationMaps,
+  )
   const relatedMutations = relations.mutations
   const relatedJobs = relations.jobs
   const latestMutation = selectLatestMutation(document, relatedMutations)
@@ -1413,6 +1553,7 @@ export async function fetchDocumentDetail(id: string): Promise<DocumentDetail> {
     relatedJobs,
     latestMutation,
     shellStore.context?.activeLibrary.name ?? document.document.library_id,
+    knowledgeDetail.latestRevision,
   )
 
   if (readableRevision) {
@@ -1523,6 +1664,7 @@ async function fetchDocumentRowFromDetail(id: string): Promise<DocumentRow> {
     partialHistory: detail.partialHistory,
     partialHistoryReason: detail.partialHistoryReason,
     graphThroughput: detail.graphThroughput,
+    knowledgeReadiness: detail.knowledgeReadiness,
     mutation: detail.mutation,
     canRetry: detail.canRetry,
     canAppend: detail.canAppend,
@@ -1534,16 +1676,17 @@ async function fetchDocumentRowFromDetail(id: string): Promise<DocumentRow> {
 }
 
 async function buildMutationAcceptedResponse(
-  response: RawContentMutationDetailResponse,
+  response: RawContentMutationDetailResponseWire | RawContentMutationDetailResponse,
 ): Promise<DocumentMutationAccepted> {
+  const normalized = normalizeContentMutationDetailResponse(response)
   return {
     accepted: true,
-    operation: response.mutation.operation_kind,
-    trackId: response.job_id,
+    operation: normalized.mutation.operation_kind,
+    trackId: normalized.async_operation_id ?? normalized.job_id,
     revisionId:
-      response.items.find((item) => item.result_revision_id !== null)?.result_revision_id ?? null,
-    mutationId: response.mutation.id,
-    attemptNo: response.job_id ? 1 : null,
+      normalized.items.find((item) => item.result_revision_id !== null)?.result_revision_id ?? null,
+    mutationId: normalized.mutation.id,
+    attemptNo: normalized.job_id ? 1 : null,
   }
 }
 
@@ -1554,7 +1697,7 @@ export async function appendDocumentItem(
 ): Promise<DocumentMutationAccepted> {
   const checksum = await readTextChecksum(content)
   const response = await unwrap(
-    apiHttp.post<RawContentMutationDetailResponse>(`/content/documents/${id}/append`, {
+    apiHttp.post<RawContentMutationDetailResponseWire>(`/content/documents/${id}/append`, {
       appendedText: content,
       idempotencyKey: `append:${libraryId}:${id}:${checksum}`,
     }),
@@ -1572,7 +1715,7 @@ export async function replaceDocumentItem(
   formData.append('file', file, file.name)
   formData.append('idempotency_key', `replace:${libraryId}:${id}:${checksum}`)
   const response = await unwrap(
-    apiHttp.post<RawContentMutationDetailResponse>(
+    apiHttp.post<RawContentMutationDetailResponseWire>(
       `/content/documents/${id}/replace`,
       formData,
     ),

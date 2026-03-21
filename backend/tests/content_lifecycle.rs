@@ -1,7 +1,6 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
@@ -9,65 +8,21 @@ use uuid::Uuid;
 use rustrag_backend::{
     app::{config::Settings, state::AppState},
     infra::{
-        graph_store::{
-            GraphProjectionData, GraphProjectionEdgeWrite, GraphProjectionNodeWrite,
-            GraphProjectionWriteError, GraphStore,
+        arangodb::{
+            bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
+            client::ArangoClient,
         },
         persistence::Persistence,
-        repositories::content_repository,
     },
     services::{
         catalog_service::{CreateLibraryCommand, CreateWorkspaceCommand},
         content_service::{
             AcceptMutationCommand, CreateDocumentCommand, CreateMutationItemCommand,
             CreateRevisionCommand, PromoteHeadCommand, UpdateMutationCommand,
-            UpdateMutationItemCommand,
+            UpdateMutationItemCommand, UploadInlineDocumentCommand,
         },
     },
 };
-
-struct NoopGraphStore;
-
-#[async_trait]
-impl GraphStore for NoopGraphStore {
-    fn backend_name(&self) -> &'static str {
-        "noop"
-    }
-
-    async fn ping(&self) -> Result<()> {
-        Ok(())
-    }
-
-    async fn replace_library_projection(
-        &self,
-        _library_id: Uuid,
-        _projection_version: i64,
-        _nodes: &[GraphProjectionNodeWrite],
-        _edges: &[GraphProjectionEdgeWrite],
-    ) -> Result<(), GraphProjectionWriteError> {
-        Ok(())
-    }
-
-    async fn refresh_library_projection_targets(
-        &self,
-        _library_id: Uuid,
-        _projection_version: i64,
-        _remove_node_ids: &[Uuid],
-        _remove_edge_ids: &[Uuid],
-        _nodes: &[GraphProjectionNodeWrite],
-        _edges: &[GraphProjectionEdgeWrite],
-    ) -> Result<(), GraphProjectionWriteError> {
-        Ok(())
-    }
-
-    async fn load_library_projection(
-        &self,
-        _library_id: Uuid,
-        _projection_version: i64,
-    ) -> Result<GraphProjectionData> {
-        Ok(GraphProjectionData::default())
-    }
-}
 
 struct TempDatabase {
     name: String,
@@ -119,21 +74,84 @@ impl TempDatabase {
     }
 }
 
+struct TempArangoDatabase {
+    base_url: String,
+    username: String,
+    password: String,
+    name: String,
+    http: reqwest::Client,
+}
+
+impl TempArangoDatabase {
+    async fn create(settings: &Settings) -> Result<Self> {
+        let base_url = settings.arangodb_url.trim().trim_end_matches('/').to_string();
+        let name = format!("content_lifecycle_{}", Uuid::now_v7().simple());
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(settings.arangodb_request_timeout_seconds.max(1)))
+            .build()
+            .context("failed to build ArangoDB admin http client")?;
+        let response = http
+            .post(format!("{base_url}/_api/database"))
+            .basic_auth(&settings.arangodb_username, Some(&settings.arangodb_password))
+            .json(&serde_json::json!({ "name": name }))
+            .send()
+            .await
+            .context("failed to create temp ArangoDB database for content_lifecycle")?;
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "failed to create temp ArangoDB database {}: status {}",
+                name,
+                response.status()
+            ));
+        }
+
+        Ok(Self {
+            base_url,
+            username: settings.arangodb_username.clone(),
+            password: settings.arangodb_password.clone(),
+            name,
+            http,
+        })
+    }
+
+    async fn drop(self) -> Result<()> {
+        let response = self
+            .http
+            .delete(format!("{}/_api/database/{}", self.base_url, self.name))
+            .basic_auth(&self.username, Some(&self.password))
+            .send()
+            .await
+            .context("failed to drop temp ArangoDB database for content_lifecycle")?;
+        if response.status() != reqwest::StatusCode::NOT_FOUND && !response.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "failed to drop temp ArangoDB database {}: status {}",
+                self.name,
+                response.status()
+            ));
+        }
+        Ok(())
+    }
+}
+
 struct ContentLifecycleFixture {
     state: AppState,
     temp_database: TempDatabase,
+    temp_arango: TempArangoDatabase,
     workspace_id: Uuid,
     library_id: Uuid,
 }
 
 impl ContentLifecycleFixture {
     async fn create() -> Result<Self> {
-        let settings =
+        let mut settings =
             Settings::from_env().context("failed to load settings for content lifecycle test")?;
         let temp_database = TempDatabase::create(&settings.database_url).await?;
+        let temp_arango = TempArangoDatabase::create(&settings).await?;
+        settings.database_url = temp_database.database_url.clone();
+        settings.arangodb_database = temp_arango.name.clone();
         let postgres = PgPoolOptions::new()
             .max_connections(4)
-            .connect(&temp_database.database_url)
+            .connect(&settings.database_url)
             .await
             .context("failed to connect content lifecycle postgres")?;
 
@@ -142,7 +160,32 @@ impl ContentLifecycleFixture {
             .await
             .context("failed to apply canonical 0001_init.sql for content lifecycle test")?;
 
-        let state = build_test_state(settings, postgres)?;
+        let arango_client = Arc::new(
+            ArangoClient::from_settings(&settings).context("failed to build Arango client")?,
+        );
+        arango_client.ping().await.context("failed to ping temp ArangoDB for content lifecycle")?;
+        bootstrap_knowledge_plane(
+            &arango_client,
+            &ArangoBootstrapOptions {
+                collections: true,
+                views: false,
+                graph: true,
+                vector_indexes: false,
+                vector_dimensions: 3072,
+                vector_index_n_lists: 100,
+                vector_index_default_n_probe: 8,
+                vector_index_training_iterations: 25,
+            },
+        )
+        .await
+        .context("failed to bootstrap Arango knowledge plane for content lifecycle")?;
+
+        let persistence = Persistence {
+            postgres,
+            redis: redis::Client::open(settings.redis_url.clone())
+                .context("failed to create redis client for content lifecycle test state")?,
+        };
+        let state = AppState::from_dependencies(settings, persistence, arango_client);
         let workspace = state
             .canonical_services
             .catalog
@@ -172,26 +215,20 @@ impl ContentLifecycleFixture {
             .await
             .context("failed to create content lifecycle library")?;
 
-        Ok(Self { state, temp_database, workspace_id: workspace.id, library_id: library.id })
-    }
-
-    fn pool(&self) -> &PgPool {
-        &self.state.persistence.postgres
+        Ok(Self {
+            state,
+            temp_database,
+            temp_arango,
+            workspace_id: workspace.id,
+            library_id: library.id,
+        })
     }
 
     async fn cleanup(self) -> Result<()> {
         self.state.persistence.postgres.close().await;
+        self.temp_arango.drop().await?;
         self.temp_database.drop().await
     }
-}
-
-fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppState> {
-    let persistence = Persistence {
-        postgres,
-        redis: redis::Client::open(settings.redis_url.clone())
-            .context("failed to create redis client for content lifecycle test state")?,
-    };
-    Ok(AppState::from_dependencies(settings, persistence, Arc::new(NoopGraphStore)))
 }
 
 fn replace_database_name(database_url: &str, new_database: &str) -> Result<String> {
@@ -272,15 +309,15 @@ async fn canonical_content_lifecycle_preserves_logical_document_identity_and_rev
         assert_eq!(document.external_key, external_key);
         assert_eq!(document.document_state, "active");
 
-        let by_external_key = content_repository::get_document_by_external_key(
-            fixture.pool(),
-            fixture.library_id,
-            &external_key,
-        )
-        .await
-        .context("failed to load logical document by external key")?
-        .context("logical document missing by external key")?;
-        assert_eq!(by_external_key.id, document.id);
+        let knowledge_document = fixture
+            .state
+            .arango_document_store
+            .get_document(document.id)
+            .await
+            .context("failed to load knowledge document shell for content lifecycle")?
+            .context("knowledge document shell missing from arango")?;
+        assert_eq!(knowledge_document.external_key, external_key);
+        assert_eq!(knowledge_document.document_state, "active");
 
         let first_revision = fixture
             .state
@@ -351,6 +388,20 @@ async fn canonical_content_lifecycle_preserves_logical_document_identity_and_rev
             revisions.iter().map(|revision| revision.id).collect::<Vec<_>>(),
             vec![replaced_revision.id, appended_revision.id, first_revision.id]
         );
+
+        let knowledge_revisions = fixture
+            .state
+            .arango_document_store
+            .list_revisions_by_document(document.id)
+            .await
+            .context("failed to list knowledge revisions for content lifecycle")?;
+        assert_eq!(
+            knowledge_revisions.iter().map(|revision| revision.revision_id).collect::<Vec<_>>(),
+            vec![replaced_revision.id, appended_revision.id, first_revision.id]
+        );
+        assert_eq!(knowledge_revisions[0].revision_kind, "replace");
+        assert_eq!(knowledge_revisions[1].revision_kind, "append");
+        assert_eq!(knowledge_revisions[2].revision_kind, "upload");
 
         let summaries = fixture
             .state
@@ -463,32 +514,95 @@ async fn canonical_content_lifecycle_promotes_head_and_separates_readable_from_a
         assert_eq!(promoted_head.readable_revision_id, Some(readable_revision.id));
         assert_eq!(promoted_head.latest_mutation_id, Some(mutation.id));
 
-        let loaded_head = fixture
+        let knowledge_document = fixture
             .state
-            .canonical_services
-            .content
-            .get_document_head(&fixture.state, document.id)
+            .arango_document_store
+            .get_document(document.id)
             .await
-            .context("failed to load promoted head")?
-            .context("missing promoted head")?;
-        assert_eq!(loaded_head.active_revision_id, Some(active_revision.id));
-        assert_eq!(loaded_head.readable_revision_id, Some(readable_revision.id));
+            .context("failed to load promoted knowledge document")?
+            .context("missing promoted knowledge document")?;
+        assert_eq!(knowledge_document.document_state, "active");
+        assert_eq!(knowledge_document.active_revision_id, Some(active_revision.id));
+        assert_eq!(knowledge_document.readable_revision_id, Some(readable_revision.id));
+        assert_ne!(knowledge_document.readable_revision_id, knowledge_document.active_revision_id);
 
-        let summary = fixture
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with canonical extensions"]
+async fn canonical_content_lifecycle_inline_upload_persists_chunks_in_arango() -> Result<()> {
+    let fixture = ContentLifecycleFixture::create().await?;
+
+    let result = async {
+        let admission = fixture
             .state
             .canonical_services
             .content
-            .get_document(&fixture.state, document.id)
+            .upload_inline_document(
+                &fixture.state,
+                UploadInlineDocumentCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    external_key: Some(format!("inline-upload-{}", Uuid::now_v7())),
+                    idempotency_key: None,
+                    requested_by_principal_id: None,
+                    request_surface: "rest".to_string(),
+                    source_identity: Some("content-lifecycle-inline-upload".to_string()),
+                    file_name: "inline-upload.txt".to_string(),
+                    title: Some("Inline Upload".to_string()),
+                    mime_type: Some("text/plain".to_string()),
+                    file_bytes: b"Ada Lovelace wrote the note.\nCharles Babbage built the engine."
+                        .to_vec(),
+                },
+            )
             .await
-            .context("failed to load content document summary")?;
-        let summary_head = summary.head.context("missing summary head")?;
-        let summary_active_revision = summary.active_revision.context("missing active revision")?;
-        assert_eq!(summary.document.document_state, "active");
-        assert_eq!(summary_head.active_revision_id, Some(active_revision.id));
-        assert_eq!(summary_head.readable_revision_id, Some(readable_revision.id));
-        assert_eq!(summary_head.latest_mutation_id, Some(mutation.id));
-        assert_eq!(summary_active_revision.id, active_revision.id);
-        assert_ne!(summary_head.readable_revision_id, summary_head.active_revision_id);
+            .context("failed to upload inline content document")?;
+        let revision_id = admission
+            .mutation
+            .items
+            .first()
+            .and_then(|item| item.result_revision_id)
+            .context("inline upload did not create a result revision")?;
+
+        let postgres_chunks =
+            rustrag_backend::infra::repositories::content_repository::list_chunks_by_revision(
+                &fixture.state.persistence.postgres,
+                revision_id,
+            )
+            .await
+            .context("failed to list postgres chunks for inline upload")?;
+        let knowledge_chunks = fixture
+            .state
+            .arango_document_store
+            .list_chunks_by_revision(revision_id)
+            .await
+            .context("failed to list Arango knowledge chunks for inline upload")?;
+
+        assert!(!postgres_chunks.is_empty());
+        assert_eq!(knowledge_chunks.len(), postgres_chunks.len());
+        assert_eq!(
+            knowledge_chunks
+                .iter()
+                .map(|chunk| (chunk.chunk_id, chunk.chunk_index))
+                .collect::<Vec<_>>(),
+            postgres_chunks.iter().map(|chunk| (chunk.id, chunk.chunk_index)).collect::<Vec<_>>()
+        );
+        assert!(
+            knowledge_chunks
+                .iter()
+                .all(|chunk| chunk.document_id == admission.document.document.id)
+        );
+        assert!(
+            knowledge_chunks
+                .iter()
+                .all(|chunk| chunk.chunk_state == "ready" && chunk.text_generation == Some(1))
+        );
 
         Ok(())
     }
@@ -859,39 +973,18 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
         assert!(delete_item_states.contains(&"applied"));
         assert!(delete_item_states.contains(&"skipped"));
 
-        let persisted_document =
-            content_repository::get_document_by_id(fixture.pool(), document.id)
-                .await
-                .context("failed to reload deleted document")?
-                .context("deleted document missing from repository")?;
-        assert_eq!(persisted_document.document_state, "deleted");
-        assert!(persisted_document.deleted_at.is_some());
-
-        let post_delete_head = fixture
+        let knowledge_document = fixture
             .state
-            .canonical_services
-            .content
-            .get_document_head(&fixture.state, document.id)
+            .arango_document_store
+            .get_document(document.id)
             .await
-            .context("failed to load head after delete")?
-            .context("missing document head after delete")?;
-        assert_eq!(post_delete_head.active_revision_id, None);
-        assert_eq!(post_delete_head.readable_revision_id, Some(replaced_revision.id));
-        assert_eq!(post_delete_head.latest_mutation_id, Some(replace_mutation.id));
+            .context("failed to reload deleted knowledge document")?
+            .context("deleted knowledge document missing from arango")?;
+        assert_eq!(knowledge_document.document_state, "deleted");
+        assert_eq!(knowledge_document.active_revision_id, None);
+        assert_eq!(knowledge_document.readable_revision_id, Some(replaced_revision.id));
 
-        let post_delete_summary = fixture
-            .state
-            .canonical_services
-            .content
-            .get_document(&fixture.state, document.id)
-            .await
-            .context("failed to load document summary after delete")?;
-        assert_eq!(post_delete_summary.document.document_state, "deleted");
-        assert!(post_delete_summary.active_revision.is_none());
-        assert_eq!(
-            post_delete_summary.head.as_ref().and_then(|head| head.readable_revision_id),
-            Some(replaced_revision.id)
-        );
+        assert!(knowledge_document.deleted_at.is_some());
 
         Ok(())
     }

@@ -41,9 +41,9 @@ function submit() {
         <input
           id="login"
           v-model="form.login"
-          type="text"
-          placeholder="admin"
-          autocomplete="username"
+          type="email"
+          placeholder="founder@example.local"
+          autocomplete="email"
         >
       </div>
 

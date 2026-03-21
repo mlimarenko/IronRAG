@@ -108,7 +108,6 @@ pub struct GraphExtractionOutcome {
     pub usage_json: serde_json::Value,
     pub usage_calls: Vec<GraphExtractionUsageCall>,
     pub normalized: GraphExtractionCandidateSet,
-    pub lifecycle: GraphExtractionLifecycle,
     pub request_shape_key: String,
     pub request_size_bytes: usize,
     pub provider_failure: Option<RuntimeProviderFailureDetail>,
@@ -308,8 +307,9 @@ pub fn build_graph_extraction_prompt(request: &GraphExtractionRequest) -> String
     .prompt
 }
 
+#[cfg(test)]
 #[must_use]
-pub fn build_graph_extraction_prompt_preview(
+fn build_graph_extraction_prompt_preview(
     request: &GraphExtractionRequest,
     request_size_soft_limit_bytes: usize,
 ) -> (String, String, usize) {
@@ -502,94 +502,6 @@ pub fn summarize_graph_extraction_usage_calls(
     }
 }
 
-pub async fn extract_chunk_graph(
-    state: &AppState,
-    provider_profile: &EffectiveProviderProfile,
-    request: &GraphExtractionRequest,
-) -> Result<GraphExtractionOutcome> {
-    let resolved = resolve_graph_extraction(state, provider_profile, request)
-        .await
-        .map_err(|failure| anyhow!(failure.error_message))?;
-
-    Ok(GraphExtractionOutcome {
-        provider_kind: resolved.provider_kind.clone(),
-        model_name: resolved.model_name.clone(),
-        prompt_hash: resolved.prompt_hash.clone(),
-        raw_output_json: build_raw_output_json(
-            &resolved.output_text,
-            resolved.usage_json.clone(),
-            &resolved.lifecycle,
-            &resolved.recovery,
-            &resolved.recovery_summary,
-            &resolved.usage_calls,
-        ),
-        usage_json: resolved.usage_json.clone(),
-        usage_calls: resolved.usage_calls,
-        request_shape_key: resolved.request_shape_key,
-        request_size_bytes: resolved.request_size_bytes,
-        provider_failure: resolved.provider_failure,
-        normalized: resolved.normalized,
-        lifecycle: resolved.lifecycle,
-        recovery_summary: resolved.recovery_summary,
-        recovery_attempts: resolved.recovery_attempts,
-        resume_state: GraphExtractionResumeState {
-            resumed_from_checkpoint: false,
-            replay_count: request.resume_hint.as_ref().map(|hint| hint.replay_count).unwrap_or(0),
-            downgrade_level: normalized_downgrade_level(request),
-        },
-    })
-}
-
-pub async fn extract_and_persist_chunk_graph(
-    state: &AppState,
-    provider_profile: &EffectiveProviderProfile,
-    request: &GraphExtractionRequest,
-) -> Result<RuntimeGraphExtractionRecordRow> {
-    match resolve_graph_extraction(state, provider_profile, request).await {
-        Ok(resolved) => repositories::create_runtime_graph_extraction_record(
-            &state.persistence.postgres,
-            request.project_id,
-            request.document.id,
-            request.chunk.id,
-            &resolved.provider_kind,
-            &resolved.model_name,
-            GRAPH_EXTRACTION_VERSION,
-            &resolved.prompt_hash,
-            "ready",
-            build_raw_output_json(
-                &resolved.output_text,
-                resolved.usage_json,
-                &resolved.lifecycle,
-                &resolved.recovery,
-                &resolved.recovery_summary,
-                &resolved.usage_calls,
-            ),
-            serde_json::to_value(resolved.normalized).unwrap_or_else(|_| serde_json::json!({})),
-            i32::try_from(resolved.recovery.provider_attempt_count).unwrap_or(i32::MAX),
-            None,
-        )
-        .await
-        .context("failed to persist graph extraction record"),
-        Err(failure) => repositories::create_runtime_graph_extraction_record(
-            &state.persistence.postgres,
-            request.project_id,
-            request.document.id,
-            request.chunk.id,
-            &failure.provider_kind,
-            &failure.model_name,
-            GRAPH_EXTRACTION_VERSION,
-            &failure.prompt_hash,
-            "failed",
-            failure.raw_output_json,
-            serde_json::json!({ "entities": [], "relations": [] }),
-            i32::try_from(failure.provider_attempt_count).unwrap_or(i32::MAX),
-            Some(&failure.error_message),
-        )
-        .await
-        .context("failed to persist graph extraction failure record"),
-    }
-}
-
 pub async fn extract_and_persist_chunk_graph_result(
     state: &AppState,
     provider_profile: &EffectiveProviderProfile,
@@ -615,7 +527,6 @@ pub async fn extract_and_persist_chunk_graph_result(
                 request_size_bytes: resolved.request_size_bytes,
                 provider_failure: resolved.provider_failure.clone(),
                 normalized: resolved.normalized,
-                lifecycle: resolved.lifecycle,
                 recovery_summary: resolved.recovery_summary,
                 recovery_attempts: resolved.recovery_attempts,
                 resume_state: GraphExtractionResumeState {
@@ -761,13 +672,6 @@ pub fn extraction_outcome_from_resume_state(
         usage_json: serde_json::json!({}),
         usage_calls: Vec::new(),
         normalized,
-        lifecycle: row
-            .raw_output_json
-            .get("lifecycle")
-            .and_then(|value| {
-                serde_json::from_value::<GraphExtractionLifecycle>(value.clone()).ok()
-            })
-            .unwrap_or_default(),
         request_shape_key: row
             .request_shape_key
             .clone()
@@ -1381,13 +1285,6 @@ async fn request_graph_extraction_with_prompt_plan(
             &usage_json,
         ),
     })
-}
-
-#[must_use]
-pub fn extraction_provider_usage_json(
-    record: &RuntimeGraphExtractionRecordRow,
-) -> serde_json::Value {
-    record.raw_output_json.get("usage").cloned().unwrap_or_else(|| serde_json::json!({}))
 }
 
 fn build_raw_output_json(

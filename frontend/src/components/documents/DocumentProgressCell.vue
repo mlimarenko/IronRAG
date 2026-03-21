@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useDisplayFormatters } from 'src/composables/useDisplayFormatters'
 import type { DocumentActivityStatus, DocumentStatus } from 'src/models/ui/documents'
 
 const props = defineProps<{
@@ -11,13 +12,14 @@ const props = defineProps<{
 }>()
 
 const i18n = useI18n()
+const { humanizeToken } = useDisplayFormatters()
 
 const activityLabel = computed(() => {
   if (!props.activityStatus) {
     return null
   }
   const key = `documents.activity.${props.activityStatus}`
-  return i18n.te(key) ? i18n.t(key) : props.activityStatus
+  return i18n.te(key) ? i18n.t(key) : humanizeToken(props.activityStatus)
 })
 
 const progressLabel = computed(() => {

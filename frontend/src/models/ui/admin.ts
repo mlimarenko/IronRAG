@@ -190,6 +190,62 @@ export interface AdminAiConsoleState {
   bindings: AdminLibraryBinding[]
 }
 
+export interface AdminOpsAsyncOperation {
+  id: string
+  workspaceId: string
+  libraryId: string | null
+  operationKind: string
+  status: string
+  surfaceKind: string | null
+  subjectKind: string | null
+  subjectId: string | null
+  failureCode: string | null
+  createdAt: string
+  completedAt: string | null
+}
+
+export interface AdminKnowledgeGeneration {
+  key: string
+  bundleId?: string | null
+  generationId: string
+  workspaceId: string
+  libraryId: string
+  generationState: string
+  activeTextGeneration: number
+  activeVectorGeneration: number
+  activeGraphGeneration: number
+  degradedState: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AdminOpsLibraryState {
+  libraryId: string
+  queueDepth: number
+  runningAttempts: number
+  readableDocumentCount: number
+  failedDocumentCount: number
+  degradedState: string
+  latestKnowledgeGenerationId: string | null
+  knowledgeGenerationState: string | null
+  lastRecomputedAt: string
+}
+
+export interface AdminOpsLibraryWarning {
+  id: string
+  libraryId: string
+  warningKind: string
+  severity: string
+  createdAt: string
+  resolvedAt: string | null
+}
+
+export interface AdminOpsLibrarySnapshot {
+  state: AdminOpsLibraryState
+  knowledgeGenerations: AdminKnowledgeGeneration[]
+  warnings: AdminOpsLibraryWarning[]
+}
+
 export interface AdminAuditEventSubject {
   auditEventId: string
   subjectKind: string

@@ -107,7 +107,7 @@ pub async fn list_provider_catalog(
             default_base_url,
             capability_flags_json
          from ai_provider_catalog
-         order by provider_kind asc",
+         order by provider_kind asc, id asc",
     )
     .fetch_all(postgres)
     .await
@@ -132,7 +132,7 @@ pub async fn list_model_catalog(
                     metadata_json
                  from ai_model_catalog
                  where provider_catalog_id = $1
-                 order by model_name asc",
+                 order by model_name asc, capability_kind asc, id asc",
             )
             .bind(provider_catalog_id)
             .fetch_all(postgres)
@@ -151,7 +151,7 @@ pub async fn list_model_catalog(
                     lifecycle_state::text as lifecycle_state,
                     metadata_json
                  from ai_model_catalog
-                 order by model_name asc",
+                 order by model_name asc, capability_kind asc, id asc",
             )
             .fetch_all(postgres)
             .await
@@ -179,8 +179,11 @@ pub async fn list_price_catalog(
                     workspace_id
                  from ai_price_catalog
                  where model_catalog_id = $1
-                   and (workspace_id = $2 or workspace_id is null)
-                 order by effective_from desc",
+                   and (
+                        (catalog_scope = 'workspace_override' and workspace_id = $2)
+                        or (catalog_scope = 'system' and workspace_id is null)
+                   )
+                 order by catalog_scope asc, effective_from desc, id desc",
             )
             .bind(model_catalog_id)
             .bind(workspace_id)
@@ -201,7 +204,13 @@ pub async fn list_price_catalog(
                     workspace_id
                  from ai_price_catalog
                  where model_catalog_id = $1
-                 order by effective_from desc",
+                 order by
+                    case catalog_scope
+                        when 'workspace_override' then 0
+                        else 1
+                    end,
+                    effective_from desc,
+                    id desc",
             )
             .bind(model_catalog_id)
             .fetch_all(postgres)
@@ -221,7 +230,13 @@ pub async fn list_price_catalog(
                     workspace_id
                  from ai_price_catalog
                  where workspace_id = $1 or workspace_id is null
-                 order by effective_from desc",
+                 order by
+                    case catalog_scope
+                        when 'workspace_override' then 0
+                        else 1
+                    end,
+                    effective_from desc,
+                    id desc",
             )
             .bind(workspace_id)
             .fetch_all(postgres)
@@ -240,7 +255,13 @@ pub async fn list_price_catalog(
                     catalog_scope::text as catalog_scope,
                     workspace_id
                  from ai_price_catalog
-                 order by effective_from desc",
+                 order by
+                    case catalog_scope
+                        when 'workspace_override' then 0
+                        else 1
+                    end,
+                    effective_from desc,
+                    id desc",
             )
             .fetch_all(postgres)
             .await
@@ -262,7 +283,8 @@ pub async fn get_provider_catalog_by_kind(
             default_base_url,
             capability_flags_json
          from ai_provider_catalog
-         where provider_kind = $1",
+         where provider_kind = $1
+           and lifecycle_state = 'active'",
     )
     .bind(provider_kind)
     .fetch_optional(postgres)
@@ -288,15 +310,12 @@ pub async fn get_model_catalog_by_provider_and_name(
          from ai_model_catalog amc
          join ai_provider_catalog apc on apc.id = amc.provider_catalog_id
          where apc.provider_kind = $1
+           and apc.lifecycle_state = 'active'
            and amc.model_name = $2
+           and amc.lifecycle_state = 'active'
          order by
-            case amc.capability_kind
-                when 'chat' then 0
-                when 'embedding' then 1
-                else 2
-            end,
-            amc.lifecycle_state,
-            amc.id
+            amc.capability_kind asc,
+            amc.id asc
          limit 1",
     )
     .bind(provider_kind)
@@ -330,9 +349,15 @@ pub async fn get_effective_price_catalog_entry(
                    and billing_unit = $2::billing_unit
                    and effective_from <= $3
                    and (effective_to is null or effective_to > $3)
-                   and (workspace_id = $4 or workspace_id is null)
+                   and (
+                        (catalog_scope = 'workspace_override' and workspace_id = $4)
+                        or (catalog_scope = 'system' and workspace_id is null)
+                   )
                  order by
-                    case when workspace_id = $4 then 0 else 1 end,
+                    case catalog_scope
+                        when 'workspace_override' then 0
+                        else 1
+                    end,
                     effective_from desc,
                     id desc
                  limit 1",
@@ -361,7 +386,13 @@ pub async fn get_effective_price_catalog_entry(
                    and billing_unit = $2::billing_unit
                    and effective_from <= $3
                    and (effective_to is null or effective_to > $3)
-                 order by effective_from desc, id desc
+                 order by
+                    case catalog_scope
+                        when 'workspace_override' then 0
+                        else 1
+                    end,
+                    effective_from desc,
+                    id desc
                  limit 1",
             )
             .bind(model_catalog_id)
@@ -719,6 +750,7 @@ pub async fn get_active_library_binding_by_purpose(
          where library_id = $1
            and binding_purpose = $2::ai_binding_purpose
            and binding_state = 'active'
+         order by updated_at desc, id desc
          limit 1",
     )
     .bind(library_id)

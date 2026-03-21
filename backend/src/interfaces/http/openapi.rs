@@ -9,8 +9,8 @@ use crate::app::state::AppState;
 
 const OPENAPI_SPEC: &str = include_str!("../../../contracts/rustrag.openapi.yaml");
 const RELATIVE_API_ROOT: &str = "/v1";
-const PRIMARY_SERVER_DESCRIPTION: &str = "Primary public entrypoint";
-const ALLOWED_SERVER_DESCRIPTION: &str = "Allowed configured origin";
+const PRIMARY_SERVER_DESCRIPTION: &str = "Primary ArangoDB API origin";
+const ALLOWED_SERVER_DESCRIPTION: &str = "Allowed configured ArangoDB API origin";
 const RELATIVE_SERVER_DESCRIPTION: &str = "Relative API root";
 
 pub fn router() -> Router<crate::app::state::AppState> {

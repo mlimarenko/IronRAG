@@ -2,17 +2,15 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
-use chrono::Utc;
 use tokio::time::sleep;
 use uuid::Uuid;
 
-use crate::services::graph_projection_guard::GraphProjectionFailureDecision;
+use crate::services::graph_projection_guard::GraphWriteFailureDecision;
 use crate::{
     app::state::AppState,
     infra::{
-        graph_store::{
-            GraphProjectionEdgeWrite, GraphProjectionNodeWrite, GraphProjectionWriteError,
-            sanitize_projection_writes,
+        arangodb::graph_store::{
+            GraphViewEdgeWrite, GraphViewNodeWrite, GraphViewWriteError, sanitize_graph_view_writes,
         },
         repositories::{self, RuntimeGraphSnapshotRow},
     },
@@ -120,35 +118,6 @@ pub async fn ensure_empty_graph_snapshot(
     })
 }
 
-pub async fn mark_graph_snapshot_stale(
-    state: &AppState,
-    library_id: Uuid,
-    projection_version: i64,
-    node_count: usize,
-    edge_count: usize,
-    reason: Option<&str>,
-) -> anyhow::Result<GraphProjectionOutcome> {
-    repositories::upsert_runtime_graph_snapshot(
-        &state.persistence.postgres,
-        library_id,
-        "stale",
-        projection_version,
-        i32::try_from(node_count).unwrap_or(i32::MAX),
-        i32::try_from(edge_count).unwrap_or(i32::MAX),
-        Some(if node_count == 0 && edge_count == 0 { 0.0 } else { 100.0 }),
-        reason,
-    )
-    .await
-    .context("failed to mark graph snapshot as stale")?;
-
-    Ok(GraphProjectionOutcome {
-        projection_version,
-        node_count,
-        edge_count,
-        graph_status: "stale".to_string(),
-    })
-}
-
 pub async fn project_canonical_graph(
     state: &AppState,
     scope: &GraphProjectionScope,
@@ -194,7 +163,7 @@ pub async fn project_canonical_graph(
 
     let node_writes = nodes
         .iter()
-        .map(|node| GraphProjectionNodeWrite {
+        .map(|node| GraphViewNodeWrite {
             node_id: node.id,
             canonical_key: node.canonical_key.clone(),
             label: node.label.clone(),
@@ -207,7 +176,7 @@ pub async fn project_canonical_graph(
         .collect::<Vec<_>>();
     let edge_writes = edges
         .iter()
-        .map(|edge| GraphProjectionEdgeWrite {
+        .map(|edge| GraphViewEdgeWrite {
             edge_id: edge.id,
             from_node_id: edge.from_node_id,
             to_node_id: edge.to_node_id,
@@ -220,24 +189,18 @@ pub async fn project_canonical_graph(
         })
         .collect::<Vec<_>>();
     let (node_writes, edge_writes, _skipped_edge_count) =
-        sanitize_projection_writes(&node_writes, &edge_writes);
+        sanitize_graph_view_writes(&node_writes, &edge_writes);
 
-    if let Err(error) = execute_projection_write_with_guard(
-        state,
-        scope,
-        "library_projection",
-        node_writes.len(),
-        edge_writes.len(),
-        || {
-            state.graph_store.replace_library_projection(
+    if let Err(error) =
+        execute_projection_write_with_guard(state, scope, "library_projection", || {
+            state.arango_graph_store.replace_library_projection(
                 scope.library_id,
                 scope.projection_version,
                 &node_writes,
                 &edge_writes,
             )
-        },
-    )
-    .await
+        })
+        .await
     {
         let failure_message = error.to_string();
         repositories::upsert_runtime_graph_snapshot(
@@ -251,8 +214,8 @@ pub async fn project_canonical_graph(
             Some(&failure_message),
         )
         .await
-        .context("failed to mark graph snapshot as failed after Neo4j projection error")?;
-        return Err(error).context("failed to project canonical graph into Neo4j");
+        .context("failed to mark graph snapshot as failed after graph-store refresh error")?;
+        return Err(error).context("failed to refresh the canonical graph view");
     }
 
     repositories::upsert_runtime_graph_snapshot(
@@ -275,14 +238,6 @@ pub async fn project_canonical_graph(
         edge_count: edge_writes.len(),
         graph_status: "ready".to_string(),
     })
-}
-
-pub async fn rebuild_projection_from_canonical(
-    state: &AppState,
-    library_id: Uuid,
-    projection_version: i64,
-) -> anyhow::Result<GraphProjectionOutcome> {
-    project_canonical_graph(state, &GraphProjectionScope::new(library_id, projection_version)).await
 }
 
 async fn synchronize_projection_support_counts(
@@ -356,7 +311,7 @@ async fn project_targeted_canonical_graph(
 
     let node_writes = refreshed_nodes
         .iter()
-        .map(|node| GraphProjectionNodeWrite {
+        .map(|node| GraphViewNodeWrite {
             node_id: node.id,
             canonical_key: node.canonical_key.clone(),
             label: node.label.clone(),
@@ -369,7 +324,7 @@ async fn project_targeted_canonical_graph(
         .collect::<Vec<_>>();
     let edge_writes = refreshed_edges
         .iter()
-        .map(|edge| GraphProjectionEdgeWrite {
+        .map(|edge| GraphViewEdgeWrite {
             edge_id: edge.id,
             from_node_id: edge.from_node_id,
             to_node_id: edge.to_node_id,
@@ -382,27 +337,20 @@ async fn project_targeted_canonical_graph(
         })
         .collect::<Vec<_>>();
     let (node_writes, edge_writes, _skipped_edge_count) =
-        sanitize_projection_writes(&node_writes, &edge_writes);
+        sanitize_graph_view_writes(&node_writes, &edge_writes);
 
-    execute_projection_write_with_guard(
-        state,
-        scope,
-        "targeted_projection",
-        node_writes.len(),
-        edge_writes.len(),
-        || {
-            state.graph_store.refresh_library_projection_targets(
-                scope.library_id,
-                scope.projection_version,
-                &scope.targeted_node_ids,
-                &targeted_edge_ids,
-                &node_writes,
-                &edge_writes,
-            )
-        },
-    )
+    execute_projection_write_with_guard(state, scope, "targeted_projection", || {
+        state.arango_graph_store.refresh_library_projection_targets(
+            scope.library_id,
+            scope.projection_version,
+            &scope.targeted_node_ids,
+            &targeted_edge_ids,
+            &node_writes,
+            &edge_writes,
+        )
+    })
     .await
-    .context("failed to refresh targeted graph projection in Neo4j")?;
+    .context("failed to refresh targeted graph view")?;
 
     let counts = repositories::count_admitted_runtime_graph_projection(
         &state.persistence.postgres,
@@ -440,44 +388,14 @@ async fn project_targeted_canonical_graph(
 async fn execute_projection_write_with_guard<F, Fut>(
     state: &AppState,
     scope: &GraphProjectionScope,
-    scope_kind: &str,
-    pending_node_write_count: usize,
-    pending_edge_write_count: usize,
+    _scope_kind: &str,
     operation: F,
 ) -> anyhow::Result<()>
 where
     F: Fn() -> Fut,
-    Fut: std::future::Future<Output = Result<(), GraphProjectionWriteError>>,
+    Fut: std::future::Future<Output = Result<(), GraphViewWriteError>>,
 {
     let guard = &state.resolve_settle_blockers_services.graph_projection_guard;
-    let mut scope_row = repositories::create_runtime_graph_projection_scope(
-        &state.persistence.postgres,
-        &repositories::RuntimeGraphProjectionScopeInput {
-            id: Uuid::now_v7(),
-            project_id: scope.library_id,
-            scope_kind: scope_kind.to_string(),
-            attempt_no: 1,
-            lock_state: crate::domains::runtime_graph::RuntimeGraphProjectionLockState::Idle,
-            write_state: crate::domains::runtime_graph::RuntimeGraphProjectionWriteState::Pending,
-            deadlock_retry_count: 0,
-            failure_kind: None,
-            started_at: Utc::now(),
-            finished_at: None,
-        },
-    )
-    .await
-    .context("failed to create graph projection scope row")?;
-    persist_graph_diagnostics_snapshot(
-        state,
-        scope.library_id,
-        pending_node_write_count,
-        pending_edge_write_count,
-        None,
-        None,
-        true,
-    )
-    .await?;
-
     let projection_lock = repositories::acquire_runtime_library_projection_lock(
         &state.persistence.postgres,
         scope.library_id,
@@ -487,106 +405,14 @@ where
     let result = async {
         let mut contention_retries = 0usize;
         loop {
-            scope_row = repositories::update_runtime_graph_projection_scope(
-                &state.persistence.postgres,
-                scope_row.id,
-                &crate::domains::runtime_graph::RuntimeGraphProjectionLockState::Acquired,
-                &crate::domains::runtime_graph::RuntimeGraphProjectionWriteState::Pending,
-                contention_retries,
-                None,
-                None,
-            )
-            .await
-            .context("failed to mark graph projection scope as acquired")?
-            .ok_or_else(|| anyhow!("graph projection scope disappeared before write"))?;
-            persist_graph_diagnostics_snapshot(
-                state,
-                scope.library_id,
-                pending_node_write_count,
-                pending_edge_write_count,
-                None,
-                None,
-                true,
-            )
-            .await?;
-
             match operation().await {
-                Ok(()) => {
-                    scope_row = repositories::update_runtime_graph_projection_scope(
-                        &state.persistence.postgres,
-                        scope_row.id,
-                        &crate::domains::runtime_graph::RuntimeGraphProjectionLockState::Acquired,
-                        &crate::domains::runtime_graph::RuntimeGraphProjectionWriteState::Completed,
-                        contention_retries,
-                        None,
-                        Some(Utc::now()),
-                    )
-                    .await
-                    .context("failed to complete graph projection scope")?
-                    .ok_or_else(|| {
-                        anyhow!("graph projection scope disappeared after successful write")
-                    })?;
-                    let _ = scope_row;
-                    persist_graph_diagnostics_snapshot(
-                        state,
-                        scope.library_id,
-                        0,
-                        0,
-                        None,
-                        None,
-                        true,
-                    )
-                    .await?;
-                    return Ok(());
-                }
+                Ok(()) => return Ok(()),
                 Err(error) => match guard.classify_write_error(&error, contention_retries + 1) {
-                    GraphProjectionFailureDecision::RetryContention => {
+                    GraphWriteFailureDecision::RetryContention => {
                         contention_retries += 1;
-                        scope_row = repositories::update_runtime_graph_projection_scope(
-                                &state.persistence.postgres,
-                                scope_row.id,
-                                &crate::domains::runtime_graph::RuntimeGraphProjectionLockState::RetryingContention,
-                                &crate::domains::runtime_graph::RuntimeGraphProjectionWriteState::Pending,
-                                contention_retries,
-                                None,
-                                None,
-                            )
-                            .await
-                            .context("failed to persist retryable graph projection contention")?
-                            .ok_or_else(|| {
-                                anyhow!("graph projection scope disappeared after retryable contention")
-                            })?;
-                        persist_graph_diagnostics_snapshot(
-                                state,
-                                scope.library_id,
-                                pending_node_write_count,
-                                pending_edge_write_count,
-                                Some(
-                                    crate::domains::runtime_graph::RuntimeGraphWriteFailureKind::ProjectionContention,
-                                ),
-                                Some(Utc::now()),
-                                true,
-                            )
-                            .await?;
                         sleep(Duration::from_millis(200)).await;
                     }
-                    GraphProjectionFailureDecision::FailExplicitly(failure_kind) => {
-                        finalize_projection_scope_failure(
-                                state,
-                                &mut scope_row,
-                                if matches!(
-                                    failure_kind,
-                                    crate::domains::runtime_graph::RuntimeGraphWriteFailureKind::ProjectionContention
-                                ) {
-                                    crate::domains::runtime_graph::RuntimeGraphProjectionLockState::FailedContention
-                                } else {
-                                    crate::domains::runtime_graph::RuntimeGraphProjectionLockState::Acquired
-                                },
-                                failure_kind,
-                                pending_node_write_count,
-                                pending_edge_write_count,
-                            )
-                            .await?;
+                    GraphWriteFailureDecision::FailTerminal => {
                         return Err(anyhow!(error.to_string()));
                     }
                 },
@@ -603,205 +429,6 @@ where
         (Err(error), Ok(())) => Err(error),
         (Ok(()), Err(release_error)) => Err(release_error),
         (Err(error), Err(release_error)) => Err(release_error).context(error.to_string()),
-    }
-}
-
-async fn finalize_projection_scope_failure(
-    state: &AppState,
-    scope_row: &mut repositories::RuntimeGraphProjectionScopeRow,
-    lock_state: crate::domains::runtime_graph::RuntimeGraphProjectionLockState,
-    failure_kind: crate::domains::runtime_graph::RuntimeGraphWriteFailureKind,
-    pending_node_write_count: usize,
-    pending_edge_write_count: usize,
-) -> anyhow::Result<()> {
-    *scope_row = repositories::update_runtime_graph_projection_scope(
-        &state.persistence.postgres,
-        scope_row.id,
-        &lock_state,
-        &crate::domains::runtime_graph::RuntimeGraphProjectionWriteState::Failed,
-        usize::try_from(scope_row.deadlock_retry_count).unwrap_or_default(),
-        Some(&failure_kind),
-        Some(Utc::now()),
-    )
-    .await
-    .context("failed to persist graph projection failure scope")?
-    .ok_or_else(|| anyhow!("graph projection scope disappeared while finalizing failure"))?;
-    persist_graph_diagnostics_snapshot(
-        state,
-        scope_row.project_id,
-        pending_node_write_count,
-        pending_edge_write_count,
-        Some(failure_kind),
-        Some(Utc::now()),
-        true,
-    )
-    .await?;
-    Ok(())
-}
-
-async fn persist_graph_diagnostics_snapshot(
-    state: &AppState,
-    library_id: Uuid,
-    pending_node_write_count: usize,
-    pending_edge_write_count: usize,
-    explicit_failure_kind: Option<crate::domains::runtime_graph::RuntimeGraphWriteFailureKind>,
-    explicit_failure_at: Option<chrono::DateTime<Utc>>,
-    is_runtime_readable: bool,
-) -> anyhow::Result<()> {
-    let scope_counters = repositories::load_runtime_graph_projection_scope_counters(
-        &state.persistence.postgres,
-        library_id,
-    )
-    .await
-    .context("failed to load graph projection scope counters for diagnostics snapshot")?;
-    let snapshot = state.resolve_settle_blockers_services.graph_diagnostics_snapshot.summarize(
-        library_id,
-        usize::try_from(scope_counters.active_projection_count).unwrap_or_default(),
-        usize::try_from(scope_counters.retrying_projection_count).unwrap_or_default(),
-        usize::try_from(scope_counters.failed_projection_count).unwrap_or_default(),
-        pending_node_write_count,
-        pending_edge_write_count,
-        explicit_failure_kind.or_else(|| {
-            scope_counters
-                .last_failure_kind
-                .as_deref()
-                .and_then(parse_runtime_graph_write_failure_kind)
-        }),
-        explicit_failure_at.or(scope_counters.last_failure_at),
-        is_runtime_readable,
-    );
-    let previous_snapshot = repositories::load_runtime_graph_diagnostics_snapshot(
-        &state.persistence.postgres,
-        library_id,
-    )
-    .await
-    .context("failed to load previous runtime graph diagnostics snapshot")?
-    .as_ref()
-    .map(map_runtime_graph_diagnostics_snapshot_row);
-    if !state
-        .resolve_settle_blockers_services
-        .graph_diagnostics_snapshot
-        .should_persist(previous_snapshot.as_ref(), &snapshot)
-    {
-        return Ok(());
-    }
-    repositories::upsert_runtime_graph_diagnostics_snapshot(
-        &state.persistence.postgres,
-        &repositories::RuntimeGraphDiagnosticsSnapshotRow {
-            project_id: snapshot.library_id,
-            projection_health: runtime_graph_projection_health_key(&snapshot.projection_health)
-                .to_string(),
-            active_projection_count: i64::try_from(snapshot.active_projection_count)
-                .unwrap_or(i64::MAX),
-            retrying_projection_count: i64::try_from(snapshot.retrying_projection_count)
-                .unwrap_or(i64::MAX),
-            failed_projection_count: i64::try_from(snapshot.failed_projection_count)
-                .unwrap_or(i64::MAX),
-            pending_node_write_count: i64::try_from(snapshot.pending_node_write_count)
-                .unwrap_or(i64::MAX),
-            pending_edge_write_count: i64::try_from(snapshot.pending_edge_write_count)
-                .unwrap_or(i64::MAX),
-            last_projection_failure_kind: snapshot
-                .last_projection_failure_kind
-                .as_ref()
-                .map(runtime_graph_write_failure_kind_key)
-                .map(str::to_string),
-            last_projection_failure_at: snapshot.last_projection_failure_at,
-            is_runtime_readable: snapshot.is_runtime_readable,
-            snapshot_at: snapshot.snapshot_at,
-        },
-    )
-    .await
-    .context("failed to persist runtime graph diagnostics snapshot")?;
-    Ok(())
-}
-
-fn parse_runtime_graph_write_failure_kind(
-    value: &str,
-) -> Option<crate::domains::runtime_graph::RuntimeGraphWriteFailureKind> {
-    match value {
-        "projection_contention" => {
-            Some(crate::domains::runtime_graph::RuntimeGraphWriteFailureKind::ProjectionContention)
-        }
-        "graph_persistence_integrity" => Some(
-            crate::domains::runtime_graph::RuntimeGraphWriteFailureKind::GraphPersistenceIntegrity,
-        ),
-        "diagnostics_unavailable" => Some(
-            crate::domains::runtime_graph::RuntimeGraphWriteFailureKind::DiagnosticsUnavailable,
-        ),
-        "projection_failure" => {
-            Some(crate::domains::runtime_graph::RuntimeGraphWriteFailureKind::ProjectionFailure)
-        }
-        _ => None,
-    }
-}
-
-fn parse_runtime_graph_projection_health(
-    value: &str,
-) -> Option<crate::domains::runtime_graph::RuntimeGraphProjectionHealth> {
-    match value {
-        "healthy" => Some(crate::domains::runtime_graph::RuntimeGraphProjectionHealth::Healthy),
-        "retrying_contention" => {
-            Some(crate::domains::runtime_graph::RuntimeGraphProjectionHealth::RetryingContention)
-        }
-        "degraded" => Some(crate::domains::runtime_graph::RuntimeGraphProjectionHealth::Degraded),
-        "failed" => Some(crate::domains::runtime_graph::RuntimeGraphProjectionHealth::Failed),
-        _ => None,
-    }
-}
-
-fn map_runtime_graph_diagnostics_snapshot_row(
-    row: &repositories::RuntimeGraphDiagnosticsSnapshotRow,
-) -> crate::domains::runtime_graph::RuntimeGraphDiagnosticsSnapshot {
-    crate::domains::runtime_graph::RuntimeGraphDiagnosticsSnapshot {
-        library_id: row.project_id,
-        snapshot_at: row.snapshot_at,
-        projection_health: parse_runtime_graph_projection_health(&row.projection_health)
-            .unwrap_or(crate::domains::runtime_graph::RuntimeGraphProjectionHealth::Degraded),
-        active_projection_count: usize::try_from(row.active_projection_count).unwrap_or_default(),
-        retrying_projection_count: usize::try_from(row.retrying_projection_count)
-            .unwrap_or_default(),
-        failed_projection_count: usize::try_from(row.failed_projection_count).unwrap_or_default(),
-        pending_node_write_count: usize::try_from(row.pending_node_write_count).unwrap_or_default(),
-        pending_edge_write_count: usize::try_from(row.pending_edge_write_count).unwrap_or_default(),
-        last_projection_failure_kind: row
-            .last_projection_failure_kind
-            .as_deref()
-            .and_then(parse_runtime_graph_write_failure_kind),
-        last_projection_failure_at: row.last_projection_failure_at,
-        is_runtime_readable: row.is_runtime_readable,
-    }
-}
-
-fn runtime_graph_projection_health_key(
-    value: &crate::domains::runtime_graph::RuntimeGraphProjectionHealth,
-) -> &'static str {
-    match value {
-        crate::domains::runtime_graph::RuntimeGraphProjectionHealth::Healthy => "healthy",
-        crate::domains::runtime_graph::RuntimeGraphProjectionHealth::RetryingContention => {
-            "retrying_contention"
-        }
-        crate::domains::runtime_graph::RuntimeGraphProjectionHealth::Degraded => "degraded",
-        crate::domains::runtime_graph::RuntimeGraphProjectionHealth::Failed => "failed",
-    }
-}
-
-fn runtime_graph_write_failure_kind_key(
-    value: &crate::domains::runtime_graph::RuntimeGraphWriteFailureKind,
-) -> &'static str {
-    match value {
-        crate::domains::runtime_graph::RuntimeGraphWriteFailureKind::ProjectionContention => {
-            "projection_contention"
-        }
-        crate::domains::runtime_graph::RuntimeGraphWriteFailureKind::GraphPersistenceIntegrity => {
-            "graph_persistence_integrity"
-        }
-        crate::domains::runtime_graph::RuntimeGraphWriteFailureKind::DiagnosticsUnavailable => {
-            "diagnostics_unavailable"
-        }
-        crate::domains::runtime_graph::RuntimeGraphWriteFailureKind::ProjectionFailure => {
-            "projection_failure"
-        }
     }
 }
 

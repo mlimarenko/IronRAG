@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useI18n } from 'vue-i18n'
 import StatusPill from 'src/components/base/StatusPill.vue'
+import { useDisplayFormatters } from 'src/composables/useDisplayFormatters'
 import type {
   DocumentCollectionDiagnostics,
   DocumentRow,
@@ -24,6 +25,7 @@ const emit = defineEmits<{
 }>()
 
 const i18n = useI18n()
+const { humanizeToken, shortIdentifier } = useDisplayFormatters()
 
 function formatDate(value: string): string {
   const parsed = new Date(value)
@@ -40,17 +42,17 @@ function formatDate(value: string): string {
 
 function stageLabel(stage: string): string {
   const key = `documents.stage.${stage}`
-  return i18n.te(key) ? i18n.t(key) : stage
+  return i18n.te(key) ? i18n.t(key) : humanizeToken(stage)
 }
 
 function statusLabel(status: string): string {
   const key = `documents.status.${status}`
-  return i18n.te(key) ? i18n.t(key) : status
+  return i18n.te(key) ? i18n.t(key) : humanizeToken(status)
 }
 
 function activityLabel(status: string): string {
   const key = `documents.activity.${status}`
-  return i18n.te(key) ? i18n.t(key) : status
+  return i18n.te(key) ? i18n.t(key) : humanizeToken(status)
 }
 
 function revisionKindLabel(kind: string | null): string | null {
@@ -58,7 +60,7 @@ function revisionKindLabel(kind: string | null): string | null {
     return null
   }
   const key = `documents.revision.kind.${kind}`
-  return i18n.te(key) ? i18n.t(key) : kind
+  return i18n.te(key) ? i18n.t(key) : humanizeToken(kind)
 }
 
 function mutationLabel(status: string | null): string | null {
@@ -66,7 +68,7 @@ function mutationLabel(status: string | null): string | null {
     return null
   }
   const key = `documents.mutation.status.${status}`
-  return i18n.te(key) ? i18n.t(key) : status
+  return i18n.te(key) ? i18n.t(key) : humanizeToken(status)
 }
 
 function mutationKindLabel(kind: string | null): string | null {
@@ -74,7 +76,7 @@ function mutationKindLabel(kind: string | null): string | null {
     return null
   }
   const key = `documents.mutation.kind.${kind}`
-  return i18n.te(key) ? i18n.t(key) : kind
+  return i18n.te(key) ? i18n.t(key) : humanizeToken(kind)
 }
 
 function truthTone(kind: 'readable' | 'settled', row: DocumentRow): DocumentStatus {
@@ -113,21 +115,21 @@ function isSettling(row: DocumentRow): boolean {
 
 function readableTruthLabel(row: DocumentRow): string {
   if (row.status === 'ready_no_graph') {
-    return 'Readable with graph catch-up'
+    return i18n.t('documents.details.truth.readableWithGraphCatchUp')
   }
   if (isReadable(row)) {
-    return 'Readable'
+    return i18n.t('documents.details.truth.readable')
   }
   if (row.status === 'failed') {
-    return 'Readable state unavailable'
+    return i18n.t('documents.details.truth.readableUnavailable')
   }
-  return 'Not readable yet'
+  return i18n.t('documents.details.truth.notReadableYet')
 }
 
 function readableTruthNote(row: DocumentRow): string | null {
   if (isReadable(row)) {
     return row.chunkCount !== null
-      ? `${row.chunkCount} chunks ready for use`
+      ? i18n.t('documents.details.truthNotes.chunksReady', { count: row.chunkCount })
       : statusLabel(row.status)
   }
   if (row.status === 'failed') {
@@ -138,24 +140,34 @@ function readableTruthNote(row: DocumentRow): string | null {
 
 function settledTruthLabel(row: DocumentRow): string {
   if (row.status === 'failed' && !isSettling(row)) {
-    return 'Settled with failure'
+    return i18n.t('documents.details.truth.settledWithFailure')
   }
-  return isSettling(row) ? 'Settling' : 'Settled'
+  return isSettling(row)
+    ? i18n.t('documents.details.truth.settling')
+    : i18n.t('documents.details.truth.settled')
 }
 
 function settledTruthNote(row: DocumentRow): string | null {
   const notes = [
-    row.inFlightStageCount > 0 ? `${row.inFlightStageCount} live stage(s)` : null,
-    row.missingStageCount > 0 ? `${row.missingStageCount} missing stage(s)` : null,
+    row.inFlightStageCount > 0
+      ? i18n.t('documents.details.liveStages', { count: row.inFlightStageCount })
+      : null,
+    row.missingStageCount > 0
+      ? i18n.t('documents.details.missingStages', { count: row.missingStageCount })
+      : null,
     row.settledEstimatedCost !== null
-      ? `Settled cost ${formatMoney(row.settledEstimatedCost, row.currency)}`
+      ? i18n.t('documents.details.settledAmount', {
+          value: formatMoney(row.settledEstimatedCost, row.currency),
+        })
       : null,
   ].filter((value): value is string => Boolean(value))
 
   if (notes.length > 0) {
     return notes.join(' · ')
   }
-  return row.lastActivityAt ? `Last activity ${formatDate(row.lastActivityAt)}` : null
+  return row.lastActivityAt
+    ? i18n.t('documents.details.lastActivityAt', { value: formatDate(row.lastActivityAt) })
+    : null
 }
 
 function formatMoney(value: number | null, currency: string | null): string {
@@ -180,6 +192,13 @@ function revisionLabel(row: DocumentRow): string {
   }
   const kind = revisionKindLabel(row.activeRevisionKind)
   return kind ? `#${String(row.activeRevisionNo)} · ${kind}` : `#${String(row.activeRevisionNo)}`
+}
+
+function compactIdentifier(value: string | null): string | null {
+  if (!value) {
+    return null
+  }
+  return shortIdentifier(value)
 }
 
 function mutationSummary(row: DocumentRow): string {
@@ -207,11 +226,11 @@ function mutationSummary(row: DocumentRow): string {
         </colgroup>
         <thead>
           <tr>
-            <th class="rr-documents__col-file">Document</th>
+            <th class="rr-documents__col-file">{{ $t('documents.headers.document') }}</th>
             <th class="rr-documents__col-revision">{{ $t('documents.headers.revision') }}</th>
-            <th class="rr-documents__col-stage">Latest attempt</th>
+            <th class="rr-documents__col-stage">{{ $t('documents.headers.latestAttempt') }}</th>
             <th class="rr-documents__col-status">{{ $t('documents.headers.status') }}</th>
-            <th class="rr-documents__col-status">Truth</th>
+            <th class="rr-documents__col-status">{{ $t('documents.headers.truth') }}</th>
             <th class="rr-documents__col-progress">{{ $t('documents.headers.progress') }}</th>
             <th class="rr-documents__col-actions">{{ $t('documents.headers.actions') }}</th>
           </tr>
@@ -235,7 +254,12 @@ function mutationSummary(row: DocumentRow): string {
             <td class="rr-documents__cell-revision">
               <div class="rr-documents__meta-stack">
                 <strong>{{ revisionLabel(row) }}</strong>
-                <span v-if="row.logicalDocumentId">{{ row.logicalDocumentId }}</span>
+                <span v-if="row.activeRevisionId">
+                  {{ `rev ${compactIdentifier(row.activeRevisionId)}` }}
+                </span>
+                <span v-else-if="row.logicalDocumentId">
+                  {{ `doc ${compactIdentifier(row.logicalDocumentId)}` }}
+                </span>
               </div>
             </td>
 

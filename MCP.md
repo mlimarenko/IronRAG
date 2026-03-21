@@ -1,119 +1,222 @@
 # RustRAG MCP
 
-RustRAG exposes agent memory over MCP at `/v1/mcp`.
+RustRAG exposes automation and agent memory over MCP at `/v1/mcp`.
 
 Local compose ingress:
 
 - app + API: `http://127.0.0.1:19000`
 - MCP endpoint: `http://127.0.0.1:19000/v1/mcp`
 
-If RustRAG is behind nginx or another proxy, use the public ingress origin that your agent can actually reach.
+If RustRAG is behind nginx or another proxy, use the public origin that the agent can actually reach.
 
-If you run split API and worker processes, give them distinct `RUSTRAG_SERVICE_NAME` values such as
-`rustrag-backend` and `rustrag-worker`. That name is used as the stable namespace for worker leases,
-recovery logs and audit trails, so it must contain only ASCII letters, digits, `.`, `_` or `-`.
+## Architecture
 
-## Token Types
+RustRAG now splits responsibilities like this:
 
-Use the smallest token that matches the agent job.
+- Postgres: control plane, IAM, grants, async operations, billing, audit, ingest admission
+- ArangoDB: knowledge plane, document revisions, chunks, entities, relations, evidence, search context bundles
+- Redis: worker coordination and short-lived queue signaling
 
-- Read-only memory:
-  - `documents:read`
-- Read + upload/update existing documents:
-  - `documents:read`
-  - `documents:write`
-- Create libraries in a visible workspace:
-  - `projects:write`
-  - or `workspace:admin`
-- Review MCP audit / admin flows:
-  - `workspace:admin`
-- Create new workspaces and then keep working inside them:
-  - use an `instance_admin` token
+MCP sits on top of the canonical control-plane and knowledge-plane services. It is not a separate data path.
+
+## Canonical MCP Surface
+
+JSON-RPC route:
+
+- `POST /v1/mcp`
+
+Capability route:
+
+- `GET /v1/mcp/capabilities`
+
+Supported JSON-RPC methods:
+
+- `initialize`
+- `resources/list`
+- `resources/templates/list`
+- `tools/list`
+- `tools/call`
+
+Supported tool names:
+
+- `list_workspaces`
+- `list_libraries`
+- `create_workspace`
+- `create_library`
+- `search_documents`
+- `read_document`
+- `upload_documents`
+- `update_document`
+- `get_mutation_status`
 
 Important:
 
-- MCP tool visibility is token-scoped. If a token does not have a permission, that tool is not shown to the agent.
-- A workspace-scoped token can manage only its own workspace. For cross-workspace flows, mint an `instance_admin` token.
+- `resources/list` and `resources/templates/list` currently return empty lists. This is intentional so MCP clients can probe resources cleanly without a separate resource surface.
+- Tool visibility is grant-scoped. If the caller does not have permission for an action, that tool is not advertised in `tools/list`.
 
-## Create A Token
+## IAM Model
 
-### Option A: UI
+MCP access is controlled by canonical IAM principals and typed grants.
 
-1. Open RustRAG at `http://127.0.0.1:19000`
-2. Sign in with the local bootstrap account:
-   - login: `admin`
-   - password: `rustrag`
-3. Go to Admin -> API Tokens
-4. Create a token with the scopes you need
-5. Copy the plaintext token immediately. It is shown only once.
+There is no legacy scope JSON on tokens anymore. A token is just a principal. What it can do depends on grants attached to that principal.
 
-### Option B: Bootstrap API
+Relevant grant resource kinds:
 
-This is the fastest way to mint an `instance_admin` token in local compose.
+- `system`
+- `workspace`
+- `library`
+- `document`
+- `query_session`
+- `async_operation`
+
+Relevant permission kinds for MCP:
+
+- `workspace_admin`
+- `workspace_read`
+- `library_read`
+- `library_write`
+- `document_read`
+- `document_write`
+- `query_run`
+- `ops_read`
+- `audit_read`
+- `iam_admin`
+
+Effective behavior:
+
+- `list_workspaces` and `list_libraries` only show resources visible through grants.
+- `search_documents` and `read_document` require readable library or document access.
+- `upload_documents` requires write access to the target library.
+- `update_document` requires write access to the logical document or its library.
+- `get_mutation_status` follows the same visibility rules as the underlying async operation and document.
+- `create_library` requires administrative rights on the target workspace.
+- `create_workspace` is reserved for system-level administrators.
+
+## Bootstrap And Token Setup
+
+### 1. Claim the bootstrap administrator
+
+Fresh local setup:
 
 ```bash
-curl -sS -X POST http://127.0.0.1:19000/v1/auth/bootstrap-token \
+curl -sS -X POST http://127.0.0.1:19000/v1/iam/bootstrap/claim \
   -H 'content-type: application/json' \
   --data '{
-    "bootstrap_secret": "bootstrap-local",
-    "token_kind": "instance_admin",
-    "label": "codex-mcp-instance-admin",
-    "scopes": [
-      "workspace:admin",
-      "projects:write",
-      "documents:read",
-      "documents:write"
-    ]
+    "bootstrapSecret": "bootstrap-local",
+    "email": "admin@example.com",
+    "displayName": "RustRAG Admin",
+    "password": "rustrag-admin"
   }'
 ```
 
-For a workspace-scoped token through the UI session API:
-
-1. `POST /v1/ui/auth/login`
-2. Keep the `rustrag_ui_session` cookie
-3. `POST /v1/ui/admin/api-tokens`
-
-Example:
+### 2. Create a canonical session
 
 ```bash
-COOKIE_JAR=/tmp/rustrag-ui-cookie.txt
+COOKIE_JAR=/tmp/rustrag-iam-cookie.txt
 
-curl -sS -c "$COOKIE_JAR" -X POST http://127.0.0.1:19000/v1/ui/auth/login \
-  -H 'content-type: application/json' \
-  --data '{"login":"admin","password":"rustrag"}'
-
-curl -sS -b "$COOKIE_JAR" -X POST http://127.0.0.1:19000/v1/ui/admin/api-tokens \
+curl -sS -c "$COOKIE_JAR" -X POST http://127.0.0.1:19000/v1/iam/session/login \
   -H 'content-type: application/json' \
   --data '{
-    "label": "codex-mcp-readwrite",
-    "scopes": ["documents:read", "documents:write", "projects:write"],
-    "expires_in_days": 30
+    "email": "admin@example.com",
+    "password": "rustrag-admin",
+    "rememberMe": true
   }'
 ```
 
-## Connect In Codex
+### 3. Mint a token principal
 
-Set the token in the shell.
-Examples below use `RUSTRAG_MCP_WRITE_TOKEN`, but any env var name is valid if you reference the same name in Codex config.
+Workspace-scoped token:
 
 ```bash
-export RUSTRAG_MCP_WRITE_TOKEN='rtrg_...'
+curl -sS -b "$COOKIE_JAR" -X POST http://127.0.0.1:19000/v1/iam/tokens \
+  -H 'content-type: application/json' \
+  --data '{
+    "workspaceId": "00000000-0000-0000-0000-000000000000",
+    "label": "codex-mcp-workspace",
+    "expiresAt": null
+  }'
 ```
 
-Register the server in Codex:
+System token:
+
+```bash
+curl -sS -b "$COOKIE_JAR" -X POST http://127.0.0.1:19000/v1/iam/tokens \
+  -H 'content-type: application/json' \
+  --data '{
+    "workspaceId": null,
+    "label": "codex-mcp-system",
+    "expiresAt": null
+  }'
+```
+
+Response shape:
+
+- `token`: plaintext bearer token, shown once
+- `apiToken.principalId`: the token principal id used for grants
+
+### 4. Attach grants to the token principal
+
+Example: library-scoped read/write token.
+
+```bash
+TOKEN_PRINCIPAL_ID=00000000-0000-0000-0000-000000000000
+LIBRARY_ID=00000000-0000-0000-0000-000000000000
+
+curl -sS -b "$COOKIE_JAR" -X POST http://127.0.0.1:19000/v1/iam/grants \
+  -H 'content-type: application/json' \
+  --data "{
+    \"principalId\": \"$TOKEN_PRINCIPAL_ID\",
+    \"resourceKind\": \"library\",
+    \"resourceId\": \"$LIBRARY_ID\",
+    \"permissionKind\": \"library_write\",
+    \"expiresAt\": null
+  }"
+```
+
+Example: read-only token for one document.
+
+```bash
+DOCUMENT_ID=00000000-0000-0000-0000-000000000000
+
+curl -sS -b "$COOKIE_JAR" -X POST http://127.0.0.1:19000/v1/iam/grants \
+  -H 'content-type: application/json' \
+  --data "{
+    \"principalId\": \"$TOKEN_PRINCIPAL_ID\",
+    \"resourceKind\": \"document\",
+    \"resourceId\": \"$DOCUMENT_ID\",
+    \"permissionKind\": \"document_read\",
+    \"expiresAt\": null
+  }"
+```
+
+You can inspect the current session and effective grants through:
+
+- `GET /v1/iam/me`
+- `GET /v1/iam/tokens`
+- `GET /v1/iam/grants`
+
+## Connect From Codex
+
+Export the plaintext token:
+
+```bash
+export RUSTRAG_MCP_TOKEN='rtrg_...'
+```
+
+Register the MCP server:
 
 ```bash
 codex mcp add rustragMemory \
   --url http://127.0.0.1:19000/v1/mcp \
-  --bearer-token-env-var RUSTRAG_MCP_WRITE_TOKEN
+  --bearer-token-env-var RUSTRAG_MCP_TOKEN
 ```
 
-Resulting `~/.codex/config.toml` snippet:
+`~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.rustragMemory]
 url = "http://127.0.0.1:19000/v1/mcp"
-bearer_token_env_var = "RUSTRAG_MCP_WRITE_TOKEN"
+bearer_token_env_var = "RUSTRAG_MCP_TOKEN"
 ```
 
 Check that Codex sees it:
@@ -123,67 +226,34 @@ codex mcp list
 codex mcp get rustragMemory --json
 ```
 
-## Use From An Agent
+## Runtime Semantics
 
-Example prompt:
+RustRAG MCP is backed by canonical content, ingest, query, and knowledge services.
+
+Practical consequences:
+
+- `upload_documents` and `update_document` return receipts backed by shared async operations.
+- Poll `get_mutation_status` until the operation reaches a terminal state.
+- `search_documents` and `read_document` are grounded in Arango knowledge truth, not a separate graph projection.
+- Read results can include chunk, entity, relation, and evidence references that explain why the memory was returned.
+- Readability and async-operation completion are different milestones. A document can already be readable while its mutation operation is still settling.
+- `update_document` can return `conflicting_mutation` when another mutation for the same logical document is still running.
+
+## Operational Notes
+
+- `contentBase64` must be valid base64 without wrapped newlines.
+- Very large imports should be split into multiple `upload_documents` calls.
+- If the raw JSON body exceeds the MCP request body limit, `/v1/mcp` returns a JSON-RPC error with `error.data.errorKind = upload_limit_exceeded`.
+- If the request parses but a decoded file exceeds the upload limit, the tool returns `result.isError = true` with `structuredContent.errorKind = upload_limit_exceeded`.
+- Use distinct `RUSTRAG_SERVICE_NAME` values for backend and worker processes. That name is used in leases, recovery logging, and audit correlation and must contain only ASCII letters, digits, `.`, `_`, or `-`.
+
+## Minimal Agent Prompt
 
 ```text
 Use the MCP server named rustragMemory.
-List the visible tools first.
-Then list workspaces and libraries.
-Search for <query>.
-If a document is readable, read it in full mode.
+List the visible tools.
+List visible workspaces and libraries.
+Search for the topic.
+If a document is readable, read it in full mode and use the grounded references.
+If you need to write memory, upload or update the document and poll get_mutation_status.
 ```
-
-## Live Notes From Real Codex Smoke
-
-These behaviors were verified with real `codex exec` and raw JSON-RPC runs against the local stack on March 19, 2026:
-
-- `create_workspace` works end-to-end with an `instance_admin` token
-- `create_library` works end-to-end in the created workspace
-- both `create_workspace` and `create_library` accept an optional `slug`; if omitted, RustRAG derives a stable slug from `name`
-- if the derived or supplied slug already exists, RustRAG returns a conflict instead of silently renaming it
-- `upload_documents` works, but `documents[].contentBase64` must be valid single-line base64 without wrapped newlines
-- MCP upload sizing is now explicit and deterministic:
-  - each decoded file is limited by the configured upload cap
-  - one `upload_documents` call is also limited by the same decoded batch cap, so larger imports must be split into multiple calls
-  - if the JSON body itself is too large to buffer, `/v1/mcp` returns a JSON-RPC error with `error.data.errorKind = upload_limit_exceeded`
-  - if the request parses but the decoded file is too large, the tool returns `result.isError = true` with `structuredContent.errorKind = upload_limit_exceeded`
-- `resources/list` and `resources/templates/list` return empty lists, so Codex resource probes succeed cleanly
-- parallel `upload_documents` calls into the same library now settle successfully; the backend serializes library-scoped projection work instead of letting one mutation fail on graph contention
-- `update_document` returns `conflicting_mutation` while a prior mutation for the same logical document is still in-flight
-- appended text becomes visible through both `read_document` and `search_documents` before the append receipt reaches terminal `ready`
-- operator-visible ingestion stage truth now stays aligned with runtime truth; live validation showed `ingestion_job.stage` advancing through `embedding_chunks` and `extracting_graph` together with `runtime_ingestion_run.current_stage`
-- a real Codex session was able to discover tools, search `salmon-bridge`, read the full document, and extract the appended `nebula-anchor` note correctly
-
-One verified smoke result:
-
-- workspace: `019d068c-b47b-7c92-8fca-b0c28936a99a`
-- library: `019d068c-b49b-7bd2-ba25-85ad7ec1e774`
-- alpha document: `019d068c-e910-7410-9802-ee11b1856ce7`
-- beta document: `019d068c-e912-7063-b433-f948a47fd0a6`
-- upload receipts: `019d068c-e968-7272-a2c3-e9cdc351a287`, `019d068c-e966-7de3-baf1-9f7533982ac9`
-- append receipt: `019d068d-b0d4-79b1-9d76-2c87b4bfe300`
-- final state:
-  - both upload receipts reached `ready`
-  - `search_documents = readable`
-  - `read_document = readable`
-  - append content was already visible while append status was still `accepted`
-  - append receipt later reached `ready`
-
-## Quality Notes From Full-Cycle Validation
-
-The MCP surface now behaves like durable agent memory for the tested workflows: discovery, scoped search/read, create workspace/library, multi-document upload, and append.
-
-- `search_documents` and `read_document` stayed consistent for the verified documents; both returned `readable` content after upload completion.
-- concurrent uploads into one library no longer reproduced the earlier Neo4j projection contention failure.
-- `update_document` is still intentionally blocked during an in-flight mutation on the same logical document. Agents should treat `conflicting_mutation` as a retry-after-settle signal, not as a permanent failure.
-- the memory surface exposes appended text before the mutation receipt reaches terminal `ready`, which is useful for agent recall but means receipt state and read availability are not strictly identical milestones.
-- chunk retry cleanup no longer depends on unindexed FK cascades. Migration `0019_chunk_cleanup_fk_indexes.sql` adds the missing `chunk(document_id)` and FK-side `chunk_id` indexes; a live transactional benchmark deleting `900` chunks with matching extraction and evidence rows completed in about `13 ms`.
-- backend logs during the live run showed one slow SQL warning on a runtime graph projection query under background load. Correctness was unaffected, but large-library graph projections may still need performance profiling.
-
-Practical implication:
-
-- As a memory tool, the current implementation is ready for normal agent workflows: discover visible scopes, search memory, read full documents, upload new memory, and append to existing memory.
-- Agents should still poll `get_mutation_status` for write completion and retry `update_document` only after a `conflicting_mutation` settles.
-- Agents should split very large imports into multiple `upload_documents` calls instead of trying to send one oversized JSON batch.

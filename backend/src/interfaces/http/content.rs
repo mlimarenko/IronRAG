@@ -1,10 +1,8 @@
 use axum::{
     Json, Router,
     extract::{Multipart, Path, Query, State},
-    routing::get,
+    routing::{get, post},
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use uuid::Uuid;
@@ -15,6 +13,7 @@ use crate::{
         ContentDocument, ContentDocumentHead, ContentDocumentSummary, ContentMutation,
         ContentMutationItem, ContentRevision,
     },
+    infra::repositories,
     interfaces::http::{
         auth::AuthContext,
         authorization::{
@@ -23,17 +22,10 @@ use crate::{
         },
         router_support::ApiError,
     },
-    services::{
-        content_service::{
-            AcceptMutationCommand, CreateDocumentCommand, CreateMutationItemCommand,
-            CreateRevisionCommand, PromoteHeadCommand, UpdateMutationCommand,
-            UpdateMutationItemCommand,
-        },
-        ingest_service::AdmitIngestJobCommand,
-        mcp_memory::{
-            McpDocumentMutationKind, McpUpdateDocumentRequest, McpUploadDocumentInput,
-            McpUploadDocumentsRequest,
-        },
+    services::content_service::{
+        AdmitDocumentCommand, AdmitMutationCommand, AppendInlineMutationCommand,
+        ContentMutationAdmission, CreateDocumentAdmission, ReplaceInlineMutationCommand,
+        RevisionAdmissionMetadata, UploadInlineDocumentCommand,
     },
     shared::file_extract::{UploadAdmissionError, classify_multipart_file_body_error},
 };
@@ -49,6 +41,12 @@ pub struct ListDocumentsQuery {
 #[serde(rename_all = "camelCase")]
 pub struct ListMutationsQuery {
     pub library_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChunksQuery {
+    pub document_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,6 +91,12 @@ pub struct AppendDocumentBodyRequest {
     pub idempotency_key: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReprocessDocumentRequest {
+    pub idempotency_key: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContentDocumentDetailResponse {
@@ -108,6 +112,8 @@ pub struct ContentMutationDetailResponse {
     pub items: Vec<ContentMutationItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub job_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub async_operation_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -117,13 +123,27 @@ pub struct CreateDocumentResponse {
     pub mutation: ContentMutationDetailResponse,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChunkSummary {
+    pub id: Uuid,
+    pub document_id: Uuid,
+    pub project_id: Uuid,
+    pub ordinal: i32,
+    pub content: String,
+    pub token_count: Option<i32>,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/chunks", get(list_chunks))
         .route("/content/documents", get(list_documents).post(create_document))
         .route("/content/documents/upload", axum::routing::post(upload_document))
         .route("/content/documents/{document_id}", get(get_document).delete(delete_document))
         .route("/content/documents/{document_id}/append", axum::routing::post(append_document))
         .route("/content/documents/{document_id}/replace", axum::routing::post(replace_document))
+        .route("/content/documents/{document_id}/head", get(get_document_head))
+        .route("/content/documents/{document_id}/reprocess", post(reprocess_document))
         .route("/content/documents/{document_id}/revisions", get(list_revisions))
         .route("/content/mutations", get(list_mutations).post(create_mutation))
         .route("/content/mutations/{mutation_id}", get(get_mutation))
@@ -153,6 +173,35 @@ async fn list_documents(
     Ok(Json(items))
 }
 
+async fn list_chunks(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Query(query): Query<ChunksQuery>,
+) -> Result<Json<Vec<ChunkSummary>>, ApiError> {
+    auth.require_any_scope(POLICY_DOCUMENTS_READ)?;
+
+    let document_id =
+        query.document_id.ok_or_else(|| ApiError::BadRequest("document_id is required".into()))?;
+    load_content_document_and_authorize(&auth, &state, document_id, POLICY_DOCUMENTS_READ).await?;
+    let items = repositories::list_chunks_by_document(&state.persistence.postgres, document_id)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+
+    Ok(Json(
+        items
+            .into_iter()
+            .map(|row| ChunkSummary {
+                id: row.id,
+                document_id: row.document_id,
+                project_id: row.project_id,
+                ordinal: row.ordinal,
+                content: row.content,
+                token_count: row.token_count,
+            })
+            .collect(),
+    ))
+}
+
 async fn create_document(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -166,119 +215,26 @@ async fn create_document(
         ));
     }
 
-    let content_service = &state.canonical_services.content;
-    let ingest_service = &state.canonical_services.ingest;
-    let document = content_service
-        .create_document(
+    let admission = state
+        .canonical_services
+        .content
+        .admit_document(
             &state,
-            CreateDocumentCommand {
+            AdmitDocumentCommand {
                 workspace_id: payload.workspace_id,
                 library_id: payload.library_id,
                 external_key: payload.external_key.clone(),
-                created_by_principal_id: Some(auth.principal_id),
-            },
-        )
-        .await?;
-
-    let mutation = content_service
-        .accept_mutation(
-            &state,
-            AcceptMutationCommand {
-                workspace_id: payload.workspace_id,
-                library_id: payload.library_id,
-                operation_kind: "upload".to_string(),
-                requested_by_principal_id: Some(auth.principal_id),
-                request_surface: "rest".to_string(),
                 idempotency_key: payload.idempotency_key.clone(),
+                created_by_principal_id: Some(auth.principal_id),
+                request_surface: "rest".to_string(),
+                revision: build_revision_metadata(&payload)?,
             },
         )
         .await?;
-
-    let mut items = Vec::new();
-    let mut job_id = None;
-    if let Some(revision_command) =
-        build_revision_command(document.id, Some(auth.principal_id), &payload)?
-    {
-        let revision = content_service.create_revision(&state, revision_command).await?;
-        let item = content_service
-            .create_mutation_item(
-                &state,
-                CreateMutationItemCommand {
-                    mutation_id: mutation.id,
-                    document_id: Some(document.id),
-                    base_revision_id: None,
-                    result_revision_id: Some(revision.id),
-                    item_state: "pending".to_string(),
-                    message: Some("document revision accepted and queued for ingest".to_string()),
-                },
-            )
-            .await?;
-        items.push(item);
-        let head = content_service.get_document_head(&state, document.id).await?;
-        let _ = content_service
-            .promote_document_head(
-                &state,
-                PromoteHeadCommand {
-                    document_id: document.id,
-                    active_revision_id: Some(revision.id),
-                    readable_revision_id: head.and_then(|row| row.readable_revision_id),
-                    latest_mutation_id: Some(mutation.id),
-                    latest_successful_attempt_id: None,
-                },
-            )
-            .await?;
-        let job = ingest_service
-            .admit_job(
-                &state,
-                AdmitIngestJobCommand {
-                    workspace_id: payload.workspace_id,
-                    library_id: payload.library_id,
-                    mutation_id: Some(mutation.id),
-                    connector_id: None,
-                    job_kind: "content_mutation".to_string(),
-                    priority: 100,
-                    dedupe_key: payload.idempotency_key.clone(),
-                    available_at: None,
-                },
-            )
-            .await?;
-        job_id = Some(job.id);
-    } else {
-        let _ = content_service
-            .promote_document_head(
-                &state,
-                PromoteHeadCommand {
-                    document_id: document.id,
-                    active_revision_id: None,
-                    readable_revision_id: None,
-                    latest_mutation_id: Some(mutation.id),
-                    latest_successful_attempt_id: None,
-                },
-            )
-            .await?;
-        let mutation = content_service
-            .update_mutation(
-                &state,
-                UpdateMutationCommand {
-                    mutation_id: mutation.id,
-                    mutation_state: "applied".to_string(),
-                    completed_at: Some(Utc::now()),
-                    failure_code: None,
-                    conflict_code: None,
-                },
-            )
-            .await?;
-        let summary = content_service.get_document(&state, document.id).await?;
-        return Ok(Json(CreateDocumentResponse {
-            document: map_document_summary(summary),
-            mutation: ContentMutationDetailResponse { mutation, items, job_id },
-        }));
-    }
-
-    let summary = content_service.get_document(&state, document.id).await?;
+    let CreateDocumentAdmission { document, mutation } = admission;
     Ok(Json(CreateDocumentResponse {
-        document: map_document_summary(summary),
-        mutation: ContentMutationDetailResponse { mutation, items, job_id },
+        document: map_document_summary(document),
+        mutation: map_mutation_admission(mutation),
     }))
 }
 
@@ -289,29 +245,33 @@ async fn upload_document(
 ) -> Result<Json<CreateDocumentResponse>, ApiError> {
     auth.require_any_scope(POLICY_DOCUMENTS_WRITE)?;
     let payload = parse_upload_multipart(&state, multipart).await?;
-    let receipts = state
-        .mcp_memory_services
-        .memory
-        .upload_documents(
-            &auth,
+    let library =
+        load_library_and_authorize(&auth, &state, payload.library_id, POLICY_LIBRARY_WRITE).await?;
+    let response = state
+        .canonical_services
+        .content
+        .upload_inline_document(
             &state,
-            McpUploadDocumentsRequest {
-                library_id: payload.library_id,
+            UploadInlineDocumentCommand {
+                workspace_id: library.workspace_id,
+                library_id: library.id,
+                external_key: None,
                 idempotency_key: payload.idempotency_key.clone(),
-                documents: vec![McpUploadDocumentInput {
-                    file_name: payload.file_name,
-                    content_base64: BASE64_STANDARD.encode(payload.file_bytes),
-                    mime_type: payload.mime_type,
-                    title: payload.title,
-                }],
+                requested_by_principal_id: Some(auth.principal_id),
+                request_surface: "rest".to_string(),
+                source_identity: None,
+                file_name: payload.file_name,
+                title: payload.title,
+                mime_type: payload.mime_type,
+                file_bytes: payload.file_bytes,
             },
         )
         .await?;
-    let receipt = receipts.into_iter().next().ok_or(ApiError::Internal)?;
-    let document_id = receipt.document_id.ok_or(ApiError::Internal)?;
-    let document = state.canonical_services.content.get_document(&state, document_id).await?;
-    let mutation = load_mutation_detail_response(&state, receipt.receipt_id).await?;
-    Ok(Json(CreateDocumentResponse { document: map_document_summary(document), mutation }))
+    let CreateDocumentAdmission { document, mutation } = response;
+    Ok(Json(CreateDocumentResponse {
+        document: map_document_summary(document),
+        mutation: map_mutation_admission(mutation),
+    }))
 }
 
 async fn get_document(
@@ -325,6 +285,17 @@ async fn get_document(
     Ok(Json(map_document_summary(summary)))
 }
 
+async fn get_document_head(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(document_id): Path<Uuid>,
+) -> Result<Json<ContentDocumentHead>, ApiError> {
+    let _ = load_content_document_and_authorize(&auth, &state, document_id, POLICY_DOCUMENTS_READ)
+        .await?;
+    let head = state.canonical_services.content.get_document_head(&state, document_id).await?;
+    head.map(Json).ok_or_else(|| ApiError::resource_not_found("document_head", document_id))
+}
+
 async fn delete_document(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -333,61 +304,24 @@ async fn delete_document(
     let document =
         load_content_document_and_authorize(&auth, &state, document_id, POLICY_DOCUMENTS_WRITE)
             .await?;
-    let content_service = &state.canonical_services.content;
-    let current_head = content_service.get_document_head(&state, document_id).await?;
-    let mutation = content_service
-        .accept_mutation(
+    let admission = state
+        .canonical_services
+        .content
+        .admit_mutation(
             &state,
-            AcceptMutationCommand {
+            AdmitMutationCommand {
                 workspace_id: document.workspace_id,
                 library_id: document.library_id,
+                document_id,
                 operation_kind: "delete".to_string(),
+                idempotency_key: None,
                 requested_by_principal_id: Some(auth.principal_id),
                 request_surface: "rest".to_string(),
-                idempotency_key: None,
+                revision: None,
             },
         )
         .await?;
-    let mut item = content_service
-        .create_mutation_item(
-            &state,
-            CreateMutationItemCommand {
-                mutation_id: mutation.id,
-                document_id: Some(document_id),
-                base_revision_id: current_head.as_ref().and_then(|row| row.active_revision_id),
-                result_revision_id: None,
-                item_state: "pending".to_string(),
-                message: Some("document deletion accepted".to_string()),
-            },
-        )
-        .await?;
-    let _ = content_service.delete_document(&state, document_id).await?;
-    item = content_service
-        .update_mutation_item(
-            &state,
-            UpdateMutationItemCommand {
-                item_id: item.id,
-                document_id: Some(document_id),
-                base_revision_id: current_head.as_ref().and_then(|row| row.active_revision_id),
-                result_revision_id: None,
-                item_state: "applied".to_string(),
-                message: Some("document deleted".to_string()),
-            },
-        )
-        .await?;
-    let mutation = content_service
-        .update_mutation(
-            &state,
-            UpdateMutationCommand {
-                mutation_id: mutation.id,
-                mutation_state: "applied".to_string(),
-                completed_at: Some(Utc::now()),
-                failure_code: None,
-                conflict_code: None,
-            },
-        )
-        .await?;
-    Ok(Json(ContentMutationDetailResponse { mutation, items: vec![item], job_id: None }))
+    Ok(Json(map_mutation_admission(admission)))
 }
 
 async fn append_document(
@@ -399,25 +333,24 @@ async fn append_document(
     let document =
         load_content_document_and_authorize(&auth, &state, document_id, POLICY_DOCUMENTS_WRITE)
             .await?;
-    let receipt = state
-        .mcp_memory_services
-        .memory
-        .update_document(
-            &auth,
+    let admission = state
+        .canonical_services
+        .content
+        .append_inline_mutation(
             &state,
-            McpUpdateDocumentRequest {
+            AppendInlineMutationCommand {
+                workspace_id: document.workspace_id,
                 library_id: document.library_id,
                 document_id,
-                operation_kind: McpDocumentMutationKind::Append,
                 idempotency_key: payload.idempotency_key,
-                appended_text: Some(payload.appended_text),
-                replacement_file_name: None,
-                replacement_content_base64: None,
-                replacement_mime_type: None,
+                requested_by_principal_id: Some(auth.principal_id),
+                request_surface: "rest".to_string(),
+                source_identity: None,
+                appended_text: payload.appended_text,
             },
         )
         .await?;
-    Ok(Json(load_mutation_detail_response(&state, receipt.receipt_id).await?))
+    Ok(Json(map_mutation_admission(admission)))
 }
 
 async fn replace_document(
@@ -430,25 +363,26 @@ async fn replace_document(
         load_content_document_and_authorize(&auth, &state, document_id, POLICY_DOCUMENTS_WRITE)
             .await?;
     let payload = parse_replace_multipart(&state, multipart).await?;
-    let receipt = state
-        .mcp_memory_services
-        .memory
-        .update_document(
-            &auth,
+    let admission = state
+        .canonical_services
+        .content
+        .replace_inline_mutation(
             &state,
-            McpUpdateDocumentRequest {
+            ReplaceInlineMutationCommand {
+                workspace_id: document.workspace_id,
                 library_id: document.library_id,
                 document_id,
-                operation_kind: McpDocumentMutationKind::Replace,
                 idempotency_key: payload.idempotency_key,
-                appended_text: None,
-                replacement_file_name: Some(payload.file_name),
-                replacement_content_base64: Some(BASE64_STANDARD.encode(payload.file_bytes)),
-                replacement_mime_type: payload.mime_type,
+                requested_by_principal_id: Some(auth.principal_id),
+                request_surface: "rest".to_string(),
+                source_identity: None,
+                file_name: payload.file_name,
+                mime_type: payload.mime_type,
+                file_bytes: payload.file_bytes,
             },
         )
         .await?;
-    Ok(Json(load_mutation_detail_response(&state, receipt.receipt_id).await?))
+    Ok(Json(map_mutation_admission(admission)))
 }
 
 async fn list_revisions(
@@ -480,150 +414,37 @@ async fn create_mutation(
         ));
     }
 
-    let content_service = &state.canonical_services.content;
-    let ingest_service = &state.canonical_services.ingest;
-    let current_head = content_service.get_document_head(&state, document.id).await?;
-    let base_revision_id =
-        current_head.as_ref().and_then(|row| row.active_revision_id.or(row.readable_revision_id));
-
-    let mutation = content_service
-        .accept_mutation(
+    let admission = state
+        .canonical_services
+        .content
+        .admit_mutation(
             &state,
-            AcceptMutationCommand {
+            AdmitMutationCommand {
                 workspace_id: payload.workspace_id,
                 library_id: payload.library_id,
+                document_id: document.id,
                 operation_kind: payload.operation_kind.clone(),
+                idempotency_key: payload.idempotency_key.clone(),
                 requested_by_principal_id: Some(auth.principal_id),
                 request_surface: "rest".to_string(),
-                idempotency_key: payload.idempotency_key.clone(),
+                revision: build_revision_metadata(&CreateDocumentRequest {
+                    workspace_id: payload.workspace_id,
+                    library_id: payload.library_id,
+                    external_key: None,
+                    idempotency_key: payload.idempotency_key.clone(),
+                    content_source_kind: payload.content_source_kind.clone(),
+                    checksum: payload.checksum.clone(),
+                    mime_type: payload.mime_type.clone(),
+                    byte_size: payload.byte_size,
+                    title: payload.title.clone(),
+                    language_code: payload.language_code.clone(),
+                    source_uri: payload.source_uri.clone(),
+                    storage_key: payload.storage_key.clone(),
+                })?,
             },
         )
         .await?;
-
-    if payload.operation_kind == "delete" {
-        let item = content_service
-            .create_mutation_item(
-                &state,
-                CreateMutationItemCommand {
-                    mutation_id: mutation.id,
-                    document_id: Some(document.id),
-                    base_revision_id,
-                    result_revision_id: None,
-                    item_state: "pending".to_string(),
-                    message: Some("document deletion accepted".to_string()),
-                },
-            )
-            .await?;
-        let _ = content_service.delete_document(&state, document.id).await?;
-        let item = content_service
-            .update_mutation_item(
-                &state,
-                UpdateMutationItemCommand {
-                    item_id: item.id,
-                    document_id: Some(document.id),
-                    base_revision_id,
-                    result_revision_id: None,
-                    item_state: "applied".to_string(),
-                    message: Some("document deleted".to_string()),
-                },
-            )
-            .await?;
-        let mutation = content_service
-            .update_mutation(
-                &state,
-                UpdateMutationCommand {
-                    mutation_id: mutation.id,
-                    mutation_state: "applied".to_string(),
-                    completed_at: Some(Utc::now()),
-                    failure_code: None,
-                    conflict_code: None,
-                },
-            )
-            .await?;
-        return Ok(Json(ContentMutationDetailResponse {
-            mutation,
-            items: vec![item],
-            job_id: None,
-        }));
-    }
-
-    let revision_command = build_revision_command(
-        document.id,
-        Some(auth.principal_id),
-        &CreateDocumentRequest {
-            workspace_id: payload.workspace_id,
-            library_id: payload.library_id,
-            external_key: None,
-            idempotency_key: payload.idempotency_key.clone(),
-            content_source_kind: payload.content_source_kind.clone(),
-            checksum: payload.checksum.clone(),
-            mime_type: payload.mime_type.clone(),
-            byte_size: payload.byte_size,
-            title: payload.title.clone(),
-            language_code: payload.language_code.clone(),
-            source_uri: payload.source_uri.clone(),
-            storage_key: payload.storage_key.clone(),
-        },
-    )?
-    .ok_or_else(|| {
-        ApiError::BadRequest(
-            "revision metadata is required for non-delete document mutations".to_string(),
-        )
-    })?;
-
-    let revision = match payload.operation_kind.as_str() {
-        "append" => content_service.append_revision(&state, revision_command).await?,
-        "replace" => content_service.replace_revision(&state, revision_command).await?,
-        _ => {
-            return Err(ApiError::BadRequest(format!(
-                "unsupported mutation operationKind '{}'",
-                payload.operation_kind
-            )));
-        }
-    };
-
-    let item = content_service
-        .create_mutation_item(
-            &state,
-            CreateMutationItemCommand {
-                mutation_id: mutation.id,
-                document_id: Some(document.id),
-                base_revision_id,
-                result_revision_id: Some(revision.id),
-                item_state: "pending".to_string(),
-                message: Some("revision accepted and queued for ingest".to_string()),
-            },
-        )
-        .await?;
-    let _ = content_service
-        .promote_document_head(
-            &state,
-            PromoteHeadCommand {
-                document_id: document.id,
-                active_revision_id: Some(revision.id),
-                readable_revision_id: current_head.and_then(|row| row.readable_revision_id),
-                latest_mutation_id: Some(mutation.id),
-                latest_successful_attempt_id: None,
-            },
-        )
-        .await?;
-    let job = ingest_service
-        .admit_job(
-            &state,
-            AdmitIngestJobCommand {
-                workspace_id: payload.workspace_id,
-                library_id: payload.library_id,
-                mutation_id: Some(mutation.id),
-                connector_id: None,
-                job_kind: "content_mutation".to_string(),
-                priority: 100,
-                dedupe_key: payload.idempotency_key.clone(),
-                available_at: None,
-            },
-        )
-        .await?;
-
-    Ok(Json(ContentMutationDetailResponse { mutation, items: vec![item], job_id: Some(job.id) }))
+    Ok(Json(map_mutation_admission(admission)))
 }
 
 async fn list_mutations(
@@ -636,22 +457,12 @@ async fn list_mutations(
         .ok_or_else(|| ApiError::BadRequest("libraryId is required".to_string()))?;
     let library =
         load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_READ).await?;
-    let mutations = state.canonical_services.content.list_mutations(&state, library.id).await?;
-    let jobs = state
+    let admissions = state
         .canonical_services
-        .ingest
-        .list_jobs(&state, Some(library.workspace_id), Some(library.id))
+        .content
+        .list_mutation_admissions(&state, library.workspace_id, library.id)
         .await?;
-
-    let mut responses = Vec::with_capacity(mutations.len());
-    for mutation in mutations {
-        let items =
-            state.canonical_services.content.list_mutation_items(&state, mutation.id).await?;
-        let job_id = jobs.iter().find(|job| job.mutation_id == Some(mutation.id)).map(|job| job.id);
-        responses.push(ContentMutationDetailResponse { mutation, items, job_id });
-    }
-
-    Ok(Json(responses))
+    Ok(Json(admissions.into_iter().map(map_mutation_admission).collect()))
 }
 
 async fn get_mutation(
@@ -659,21 +470,15 @@ async fn get_mutation(
     State(state): State<AppState>,
     Path(mutation_id): Path<Uuid>,
 ) -> Result<Json<ContentMutationDetailResponse>, ApiError> {
-    let mutation = state.canonical_services.content.get_mutation(&state, mutation_id).await?;
+    let admission =
+        state.canonical_services.content.get_mutation_admission(&state, mutation_id).await?;
+    let mutation = &admission.mutation;
     let library =
         load_library_and_authorize(&auth, &state, mutation.library_id, POLICY_LIBRARY_READ).await?;
     if library.workspace_id != mutation.workspace_id {
         return Err(ApiError::Unauthorized);
     }
-    let items = state.canonical_services.content.list_mutation_items(&state, mutation_id).await?;
-    let jobs = state
-        .canonical_services
-        .ingest
-        .list_jobs(&state, Some(mutation.workspace_id), Some(mutation.library_id))
-        .await?;
-    let job_id =
-        jobs.into_iter().find(|job| job.mutation_id == Some(mutation_id)).map(|job| job.id);
-    Ok(Json(ContentMutationDetailResponse { mutation, items, job_id }))
+    Ok(Json(map_mutation_admission(admission)))
 }
 
 fn map_document_summary(summary: ContentDocumentSummary) -> ContentDocumentDetailResponse {
@@ -684,19 +489,16 @@ fn map_document_summary(summary: ContentDocumentSummary) -> ContentDocumentDetai
     }
 }
 
-fn build_revision_command(
-    document_id: Uuid,
-    created_by_principal_id: Option<Uuid>,
+fn build_revision_metadata(
     payload: &CreateDocumentRequest,
-) -> Result<Option<CreateRevisionCommand>, ApiError> {
+) -> Result<Option<RevisionAdmissionMetadata>, ApiError> {
     let checksum = payload.checksum.as_deref().map(str::trim).filter(|value| !value.is_empty());
     let mime_type = payload.mime_type.as_deref().map(str::trim).filter(|value| !value.is_empty());
     let byte_size = payload.byte_size;
 
     match (checksum, mime_type, byte_size) {
         (None, None, None) => Ok(None),
-        (Some(checksum), Some(mime_type), Some(byte_size)) => Ok(Some(CreateRevisionCommand {
-            document_id,
+        (Some(checksum), Some(mime_type), Some(byte_size)) => Ok(Some(RevisionAdmissionMetadata {
             content_source_kind: payload
                 .content_source_kind
                 .clone()
@@ -708,7 +510,6 @@ fn build_revision_command(
             language_code: payload.language_code.clone(),
             source_uri: payload.source_uri.clone(),
             storage_key: payload.storage_key.clone(),
-            created_by_principal_id,
         })),
         _ => Err(ApiError::BadRequest(
             "checksum, mimeType, and byteSize must be provided together".to_string(),
@@ -811,6 +612,48 @@ async fn parse_upload_multipart(
     })
 }
 
+async fn reprocess_document(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(document_id): Path<Uuid>,
+    Json(payload): Json<ReprocessDocumentRequest>,
+) -> Result<Json<ContentMutationDetailResponse>, ApiError> {
+    let document =
+        load_content_document_and_authorize(&auth, &state, document_id, POLICY_DOCUMENTS_WRITE)
+            .await?;
+    let summary = state.canonical_services.content.get_document(&state, document_id).await?;
+    let active_revision = summary.active_revision.ok_or_else(|| {
+        ApiError::BadRequest("document has no active revision to reprocess".to_string())
+    })?;
+    let admission = state
+        .canonical_services
+        .content
+        .admit_mutation(
+            &state,
+            AdmitMutationCommand {
+                workspace_id: document.workspace_id,
+                library_id: document.library_id,
+                document_id,
+                operation_kind: "reprocess".to_string(),
+                idempotency_key: payload.idempotency_key,
+                requested_by_principal_id: Some(auth.principal_id),
+                request_surface: "rest".to_string(),
+                revision: Some(RevisionAdmissionMetadata {
+                    content_source_kind: "reprocess".to_string(),
+                    checksum: active_revision.checksum,
+                    mime_type: active_revision.mime_type,
+                    byte_size: active_revision.byte_size,
+                    title: active_revision.title,
+                    language_code: active_revision.language_code,
+                    source_uri: active_revision.source_uri,
+                    storage_key: active_revision.storage_key,
+                }),
+            },
+        )
+        .await?;
+    Ok(Json(map_mutation_admission(admission)))
+}
+
 async fn parse_replace_multipart(
     state: &AppState,
     mut multipart: Multipart,
@@ -904,18 +747,11 @@ fn normalize_optional_text(value: String) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-async fn load_mutation_detail_response(
-    state: &AppState,
-    mutation_id: Uuid,
-) -> Result<ContentMutationDetailResponse, ApiError> {
-    let mutation = state.canonical_services.content.get_mutation(state, mutation_id).await?;
-    let items = state.canonical_services.content.list_mutation_items(state, mutation_id).await?;
-    let jobs = state
-        .canonical_services
-        .ingest
-        .list_jobs(state, Some(mutation.workspace_id), Some(mutation.library_id))
-        .await?;
-    let job_id =
-        jobs.into_iter().find(|job| job.mutation_id == Some(mutation_id)).map(|job| job.id);
-    Ok(ContentMutationDetailResponse { mutation, items, job_id })
+fn map_mutation_admission(admission: ContentMutationAdmission) -> ContentMutationDetailResponse {
+    ContentMutationDetailResponse {
+        mutation: admission.mutation,
+        items: admission.items,
+        job_id: admission.job_id,
+        async_operation_id: admission.async_operation_id,
+    }
 }

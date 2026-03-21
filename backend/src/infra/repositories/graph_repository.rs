@@ -4,12 +4,12 @@ use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, FromRow)]
-pub struct GraphProjectionRow {
+pub struct GraphViewRunRow {
     pub id: Uuid,
     pub workspace_id: Uuid,
     pub library_id: Uuid,
     pub source_attempt_id: Option<Uuid>,
-    pub projection_state: String,
+    pub view_state: String,
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
     pub superseded_at: Option<DateTime<Utc>>,
@@ -66,14 +66,14 @@ pub struct GraphEdgeEvidenceRow {
     pub evidence_weight: Decimal,
 }
 
-pub async fn create_graph_projection(
+pub async fn create_graph_view_run(
     pool: &PgPool,
     workspace_id: Uuid,
     library_id: Uuid,
     source_attempt_id: Option<Uuid>,
-    projection_state: &str,
-) -> Result<GraphProjectionRow, sqlx::Error> {
-    sqlx::query_as::<_, GraphProjectionRow>(
+    view_state: &str,
+) -> Result<GraphViewRunRow, sqlx::Error> {
+    sqlx::query_as::<_, GraphViewRunRow>(
         "insert into graph_projection (
             id,
             workspace_id,
@@ -90,7 +90,7 @@ pub async fn create_graph_projection(
             workspace_id,
             library_id,
             source_attempt_id,
-            projection_state::text as projection_state,
+            projection_state::text as view_state,
             started_at,
             completed_at,
             superseded_at",
@@ -99,45 +99,23 @@ pub async fn create_graph_projection(
     .bind(workspace_id)
     .bind(library_id)
     .bind(source_attempt_id)
-    .bind(projection_state)
+    .bind(view_state)
     .fetch_one(pool)
     .await
 }
 
-pub async fn get_graph_projection_by_id(
-    pool: &PgPool,
-    projection_id: Uuid,
-) -> Result<Option<GraphProjectionRow>, sqlx::Error> {
-    sqlx::query_as::<_, GraphProjectionRow>(
-        "select
-            id,
-            workspace_id,
-            library_id,
-            source_attempt_id,
-            projection_state::text as projection_state,
-            started_at,
-            completed_at,
-            superseded_at
-         from graph_projection
-         where id = $1",
-    )
-    .bind(projection_id)
-    .fetch_optional(pool)
-    .await
-}
-
-pub async fn list_graph_projections_by_library(
+pub async fn list_graph_view_runs_by_library(
     pool: &PgPool,
     workspace_id: Uuid,
     library_id: Uuid,
-) -> Result<Vec<GraphProjectionRow>, sqlx::Error> {
-    sqlx::query_as::<_, GraphProjectionRow>(
+) -> Result<Vec<GraphViewRunRow>, sqlx::Error> {
+    sqlx::query_as::<_, GraphViewRunRow>(
         "select
             id,
             workspace_id,
             library_id,
             source_attempt_id,
-            projection_state::text as projection_state,
+            projection_state::text as view_state,
             started_at,
             completed_at,
             superseded_at
@@ -148,59 +126,6 @@ pub async fn list_graph_projections_by_library(
     .bind(workspace_id)
     .bind(library_id)
     .fetch_all(pool)
-    .await
-}
-
-pub async fn update_graph_projection_state(
-    pool: &PgPool,
-    projection_id: Uuid,
-    projection_state: &str,
-    completed_at: Option<DateTime<Utc>>,
-    superseded_at: Option<DateTime<Utc>>,
-) -> Result<Option<GraphProjectionRow>, sqlx::Error> {
-    sqlx::query_as::<_, GraphProjectionRow>(
-        "update graph_projection
-         set projection_state = $2::graph_projection_state,
-             completed_at = $3,
-             superseded_at = $4
-         where id = $1
-         returning
-            id,
-            workspace_id,
-            library_id,
-            source_attempt_id,
-            projection_state::text as projection_state,
-            started_at,
-            completed_at,
-            superseded_at",
-    )
-    .bind(projection_id)
-    .bind(projection_state)
-    .bind(completed_at)
-    .bind(superseded_at)
-    .fetch_optional(pool)
-    .await
-}
-
-pub async fn delete_graph_projection(
-    pool: &PgPool,
-    projection_id: Uuid,
-) -> Result<Option<GraphProjectionRow>, sqlx::Error> {
-    sqlx::query_as::<_, GraphProjectionRow>(
-        "delete from graph_projection
-         where id = $1
-         returning
-            id,
-            workspace_id,
-            library_id,
-            source_attempt_id,
-            projection_state::text as projection_state,
-            started_at,
-            completed_at,
-            superseded_at",
-    )
-    .bind(projection_id)
-    .fetch_optional(pool)
     .await
 }
 
@@ -342,33 +267,6 @@ pub async fn get_graph_node_by_id(
     .await
 }
 
-pub async fn get_graph_node_by_key(
-    pool: &PgPool,
-    projection_id: Uuid,
-    canonical_key: &str,
-) -> Result<Option<GraphNodeRow>, sqlx::Error> {
-    sqlx::query_as::<_, GraphNodeRow>(
-        "select
-            id,
-            projection_id,
-            workspace_id,
-            library_id,
-            canonical_key,
-            node_kind,
-            display_label,
-            summary,
-            support_count,
-            created_at,
-            updated_at
-         from graph_node
-         where projection_id = $1 and canonical_key = $2",
-    )
-    .bind(projection_id)
-    .bind(canonical_key)
-    .fetch_optional(pool)
-    .await
-}
-
 pub async fn list_graph_nodes_by_projection(
     pool: &PgPool,
     projection_id: Uuid,
@@ -391,34 +289,6 @@ pub async fn list_graph_nodes_by_projection(
          order by node_kind asc, display_label asc, created_at asc",
     )
     .bind(projection_id)
-    .fetch_all(pool)
-    .await
-}
-
-pub async fn list_graph_nodes_by_projection_and_kind(
-    pool: &PgPool,
-    projection_id: Uuid,
-    node_kind: &str,
-) -> Result<Vec<GraphNodeRow>, sqlx::Error> {
-    sqlx::query_as::<_, GraphNodeRow>(
-        "select
-            id,
-            projection_id,
-            workspace_id,
-            library_id,
-            canonical_key,
-            node_kind,
-            display_label,
-            summary,
-            support_count,
-            created_at,
-            updated_at
-         from graph_node
-         where projection_id = $1 and node_kind = $2
-         order by display_label asc, created_at asc",
-    )
-    .bind(projection_id)
-    .bind(node_kind)
     .fetch_all(pool)
     .await
 }
@@ -457,31 +327,6 @@ pub async fn update_graph_node(
     .bind(display_label)
     .bind(summary)
     .bind(support_count)
-    .fetch_optional(pool)
-    .await
-}
-
-pub async fn delete_graph_node(
-    pool: &PgPool,
-    node_id: Uuid,
-) -> Result<Option<GraphNodeRow>, sqlx::Error> {
-    sqlx::query_as::<_, GraphNodeRow>(
-        "delete from graph_node
-         where id = $1
-         returning
-            id,
-            projection_id,
-            workspace_id,
-            library_id,
-            canonical_key,
-            node_kind,
-            display_label,
-            summary,
-            support_count,
-            created_at,
-            updated_at",
-    )
-    .bind(node_id)
     .fetch_optional(pool)
     .await
 }
@@ -634,34 +479,6 @@ pub async fn get_graph_edge_by_id(
     .await
 }
 
-pub async fn get_graph_edge_by_key(
-    pool: &PgPool,
-    projection_id: Uuid,
-    canonical_key: &str,
-) -> Result<Option<GraphEdgeRow>, sqlx::Error> {
-    sqlx::query_as::<_, GraphEdgeRow>(
-        "select
-            id,
-            projection_id,
-            workspace_id,
-            library_id,
-            canonical_key,
-            edge_kind,
-            from_node_id,
-            to_node_id,
-            summary,
-            support_count,
-            created_at,
-            updated_at
-         from graph_edge
-         where projection_id = $1 and canonical_key = $2",
-    )
-    .bind(projection_id)
-    .bind(canonical_key)
-    .fetch_optional(pool)
-    .await
-}
-
 pub async fn list_graph_edges_by_projection(
     pool: &PgPool,
     projection_id: Uuid,
@@ -685,35 +502,6 @@ pub async fn list_graph_edges_by_projection(
          order by edge_kind asc, created_at asc",
     )
     .bind(projection_id)
-    .fetch_all(pool)
-    .await
-}
-
-pub async fn list_graph_edges_by_projection_and_kind(
-    pool: &PgPool,
-    projection_id: Uuid,
-    edge_kind: &str,
-) -> Result<Vec<GraphEdgeRow>, sqlx::Error> {
-    sqlx::query_as::<_, GraphEdgeRow>(
-        "select
-            id,
-            projection_id,
-            workspace_id,
-            library_id,
-            canonical_key,
-            edge_kind,
-            from_node_id,
-            to_node_id,
-            summary,
-            support_count,
-            created_at,
-            updated_at
-         from graph_edge
-         where projection_id = $1 and edge_kind = $2
-         order by created_at asc",
-    )
-    .bind(projection_id)
-    .bind(edge_kind)
     .fetch_all(pool)
     .await
 }
@@ -760,32 +548,6 @@ pub async fn update_graph_edge(
     .await
 }
 
-pub async fn delete_graph_edge(
-    pool: &PgPool,
-    edge_id: Uuid,
-) -> Result<Option<GraphEdgeRow>, sqlx::Error> {
-    sqlx::query_as::<_, GraphEdgeRow>(
-        "delete from graph_edge
-         where id = $1
-         returning
-            id,
-            projection_id,
-            workspace_id,
-            library_id,
-            canonical_key,
-            edge_kind,
-            from_node_id,
-            to_node_id,
-            summary,
-            support_count,
-            created_at,
-            updated_at",
-    )
-    .bind(edge_id)
-    .fetch_optional(pool)
-    .await
-}
-
 pub async fn upsert_graph_node_evidence(
     pool: &PgPool,
     node_id: Uuid,
@@ -828,30 +590,6 @@ pub async fn upsert_graph_node_evidence(
     .await
 }
 
-pub async fn get_graph_node_evidence(
-    pool: &PgPool,
-    node_id: Uuid,
-    chunk_id: Uuid,
-    attempt_id: Uuid,
-) -> Result<Option<GraphNodeEvidenceRow>, sqlx::Error> {
-    sqlx::query_as::<_, GraphNodeEvidenceRow>(
-        "select
-            node_id,
-            chunk_id,
-            revision_id,
-            attempt_id,
-            candidate_node_id,
-            evidence_weight
-         from graph_node_evidence
-         where node_id = $1 and chunk_id = $2 and attempt_id = $3",
-    )
-    .bind(node_id)
-    .bind(chunk_id)
-    .bind(attempt_id)
-    .fetch_optional(pool)
-    .await
-}
-
 pub async fn list_graph_node_evidence_by_node(
     pool: &PgPool,
     node_id: Uuid,
@@ -870,51 +608,6 @@ pub async fn list_graph_node_evidence_by_node(
     )
     .bind(node_id)
     .fetch_all(pool)
-    .await
-}
-
-pub async fn list_graph_node_evidence_by_chunk(
-    pool: &PgPool,
-    chunk_id: Uuid,
-) -> Result<Vec<GraphNodeEvidenceRow>, sqlx::Error> {
-    sqlx::query_as::<_, GraphNodeEvidenceRow>(
-        "select
-            node_id,
-            chunk_id,
-            revision_id,
-            attempt_id,
-            candidate_node_id,
-            evidence_weight
-         from graph_node_evidence
-         where chunk_id = $1
-         order by node_id asc, attempt_id asc",
-    )
-    .bind(chunk_id)
-    .fetch_all(pool)
-    .await
-}
-
-pub async fn delete_graph_node_evidence(
-    pool: &PgPool,
-    node_id: Uuid,
-    chunk_id: Uuid,
-    attempt_id: Uuid,
-) -> Result<Option<GraphNodeEvidenceRow>, sqlx::Error> {
-    sqlx::query_as::<_, GraphNodeEvidenceRow>(
-        "delete from graph_node_evidence
-         where node_id = $1 and chunk_id = $2 and attempt_id = $3
-         returning
-            node_id,
-            chunk_id,
-            revision_id,
-            attempt_id,
-            candidate_node_id,
-            evidence_weight",
-    )
-    .bind(node_id)
-    .bind(chunk_id)
-    .bind(attempt_id)
-    .fetch_optional(pool)
     .await
 }
 
@@ -960,30 +653,6 @@ pub async fn upsert_graph_edge_evidence(
     .await
 }
 
-pub async fn get_graph_edge_evidence(
-    pool: &PgPool,
-    edge_id: Uuid,
-    chunk_id: Uuid,
-    attempt_id: Uuid,
-) -> Result<Option<GraphEdgeEvidenceRow>, sqlx::Error> {
-    sqlx::query_as::<_, GraphEdgeEvidenceRow>(
-        "select
-            edge_id,
-            chunk_id,
-            revision_id,
-            attempt_id,
-            candidate_edge_id,
-            evidence_weight
-         from graph_edge_evidence
-         where edge_id = $1 and chunk_id = $2 and attempt_id = $3",
-    )
-    .bind(edge_id)
-    .bind(chunk_id)
-    .bind(attempt_id)
-    .fetch_optional(pool)
-    .await
-}
-
 pub async fn list_graph_edge_evidence_by_edge(
     pool: &PgPool,
     edge_id: Uuid,
@@ -1002,50 +671,5 @@ pub async fn list_graph_edge_evidence_by_edge(
     )
     .bind(edge_id)
     .fetch_all(pool)
-    .await
-}
-
-pub async fn list_graph_edge_evidence_by_chunk(
-    pool: &PgPool,
-    chunk_id: Uuid,
-) -> Result<Vec<GraphEdgeEvidenceRow>, sqlx::Error> {
-    sqlx::query_as::<_, GraphEdgeEvidenceRow>(
-        "select
-            edge_id,
-            chunk_id,
-            revision_id,
-            attempt_id,
-            candidate_edge_id,
-            evidence_weight
-         from graph_edge_evidence
-         where chunk_id = $1
-         order by edge_id asc, attempt_id asc",
-    )
-    .bind(chunk_id)
-    .fetch_all(pool)
-    .await
-}
-
-pub async fn delete_graph_edge_evidence(
-    pool: &PgPool,
-    edge_id: Uuid,
-    chunk_id: Uuid,
-    attempt_id: Uuid,
-) -> Result<Option<GraphEdgeEvidenceRow>, sqlx::Error> {
-    sqlx::query_as::<_, GraphEdgeEvidenceRow>(
-        "delete from graph_edge_evidence
-         where edge_id = $1 and chunk_id = $2 and attempt_id = $3
-         returning
-            edge_id,
-            chunk_id,
-            revision_id,
-            attempt_id,
-            candidate_edge_id,
-            evidence_weight",
-    )
-    .bind(edge_id)
-    .bind(chunk_id)
-    .bind(attempt_id)
-    .fetch_optional(pool)
     .await
 }

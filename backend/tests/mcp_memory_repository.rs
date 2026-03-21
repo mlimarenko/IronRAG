@@ -227,7 +227,7 @@ async fn mcp_repository_helpers_persist_and_project_memory_truth() -> anyhow::Re
                 "Graph projection failed later, but readable memory still contains memory anchor.",
             ),
             &[],
-            Some("failed to project canonical graph into Neo4j"),
+            Some("failed to refresh the canonical graph view"),
         )
         .await?;
         create_document_state(

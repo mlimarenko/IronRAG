@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: pgvector/pgvector:0.8.2-pg18-trixie
+    image: postgres:18-alpine
     security_opt:
       - apparmor=unconfined
     environment:
@@ -13,6 +13,8 @@ services:
       timeout: 5s
       retries: 20
     volumes:
+      # postgres:18-alpine stores PGDATA under /var/lib/postgresql by default.
+      # Mount the parent path to avoid anonymous volume allocation.
       - postgres_data:/var/lib/postgresql
 
   redis:
@@ -24,25 +26,30 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
-  neo4j:
-    image: neo4j:5.26.0
+  arangodb:
+    image: arangodb:3.12.4
     security_opt:
       - apparmor=unconfined
     environment:
-      NEO4J_AUTH: neo4j/rustrag-dev
-      NEO4J_server_memory_pagecache_size: 256M
-      NEO4J_server_memory_heap_initial__size: 256M
-      NEO4J_server_memory_heap_max__size: 256M
+      ARANGO_ROOT_PASSWORD: rustrag-dev
+    command:
+      - arangod
+      - --server.authentication=true
+      - --experimental-vector-index=true
+      - --database.directory=/var/lib/arangodb3
     healthcheck:
-      test: ["CMD-SHELL", "cypher-shell -a bolt://localhost:7687 -u neo4j -p rustrag-dev 'RETURN 1;' >/dev/null 2>&1"]
-      interval: 10s
-      timeout: 10s
+      test:
+        [
+          "CMD-SHELL",
+          "arangosh --server.endpoint tcp://127.0.0.1:8529 --server.username root --server.password \"$$ARANGO_ROOT_PASSWORD\" --javascript.execute-string \"db._version()\" >/dev/null 2>&1 || exit 1",
+        ]
+      interval: 5s
+      timeout: 5s
       retries: 20
     expose:
-      - "7474"
-      - "7687"
+      - "8529"
     volumes:
-      - neo4j_data:/data
+      - arangodb_data:/var/lib/arangodb3
 
   backend:
     image: ${RUSTRAG_BACKEND_IMAGE:-rustrag-backend:local}
@@ -59,7 +66,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      neo4j:
+      arangodb:
         condition: service_healthy
     environment:
       bind_addr: 0.0.0.0:8080
@@ -69,11 +76,14 @@ services:
       database_url: postgres://postgres:postgres@postgres:5432/rustrag
       database_max_connections: 20
       redis_url: redis://redis:6379
-      neo4j_uri: neo4j:7687
-      neo4j_username: neo4j
-      neo4j_password: rustrag-dev
-      neo4j_database: neo4j
-      neo4j_max_connections: 16
+      arangodb_url: http://arangodb:8529
+      arangodb_database: rustrag
+      arangodb_username: root
+      arangodb_password: rustrag-dev
+      arangodb_request_timeout_seconds: 15
+      arangodb_bootstrap_collections: true
+      arangodb_bootstrap_views: true
+      arangodb_bootstrap_graph: true
       log_filter: info
       frontend_origin: http://127.0.0.1:19000,http://localhost:19000,http://127.0.0.1:9000,http://localhost:9000,http://127.0.0.1:3000,http://localhost:3000
       bootstrap_token: ${RUSTRAG_BOOTSTRAP_TOKEN:-bootstrap-local}
@@ -115,7 +125,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      neo4j:
+      arangodb:
         condition: service_healthy
     environment:
       service_role: worker
@@ -125,11 +135,14 @@ services:
       database_url: postgres://postgres:postgres@postgres:5432/rustrag
       database_max_connections: 20
       redis_url: redis://redis:6379
-      neo4j_uri: neo4j:7687
-      neo4j_username: neo4j
-      neo4j_password: rustrag-dev
-      neo4j_database: neo4j
-      neo4j_max_connections: 16
+      arangodb_url: http://arangodb:8529
+      arangodb_database: rustrag
+      arangodb_username: root
+      arangodb_password: rustrag-dev
+      arangodb_request_timeout_seconds: 15
+      arangodb_bootstrap_collections: true
+      arangodb_bootstrap_views: true
+      arangodb_bootstrap_graph: true
       log_filter: info
       frontend_origin: http://127.0.0.1:19000,http://localhost:19000,http://127.0.0.1:9000,http://localhost:9000,http://127.0.0.1:3000,http://localhost:3000
       bootstrap_token: ${RUSTRAG_BOOTSTRAP_TOKEN:-bootstrap-local}
@@ -171,7 +184,7 @@ services:
     depends_on:
       - backend
       - frontend
-      - neo4j
+      - arangodb
     volumes:
       - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
@@ -184,4 +197,4 @@ services:
 
 volumes:
   postgres_data:
-  neo4j_data:
+  arangodb_data:

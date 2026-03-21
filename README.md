@@ -26,7 +26,6 @@ docker compose up --build -d nginx
 
 - Ingress: `http://127.0.0.1:19000`
 - API: `http://127.0.0.1:19000/v1`
-- Neo4j Browser: `http://127.0.0.1:19000/browser/`
 - Default UI login: `admin / rustrag`
 
 ## Validation
@@ -35,8 +34,3 @@ docker compose up --build -d nginx
 make backend-change-gate
 cd frontend && npm run api:generate && npm run lint && npm run typecheck && npm run build
 ```
-
-Live-provider smoke and pricing validation flows are documented in:
-
-- `../rustrag.spec-kit/.specify/memory/operations/provider-smoke.md`
-- `../rustrag.spec-kit/.specify/memory/operations/model-pricing-catalog.md`

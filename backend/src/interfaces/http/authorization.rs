@@ -9,6 +9,8 @@ use crate::{
             self, CatalogLibraryConnectorRow, CatalogLibraryRow, CatalogWorkspaceRow,
         },
         content_repository::{self, ContentDocumentRow},
+        ops_repository::{self, OpsAsyncOperationRow},
+        query_repository::{self, QueryConversationRow},
     },
     interfaces::http::{auth::AuthContext, router_support::ApiError},
 };
@@ -61,6 +63,8 @@ pub const POLICY_DOCUMENTS_WRITE: &[&str] = &[
     PERMISSION_WORKSPACE_ADMIN,
     PERMISSION_IAM_ADMIN,
 ];
+pub const POLICY_KNOWLEDGE_READ: &[&str] = POLICY_GRAPH_READ;
+pub const POLICY_KNOWLEDGE_WRITE: &[&str] = POLICY_DOCUMENTS_WRITE;
 pub const POLICY_GRAPH_READ: &[&str] = &[
     PERMISSION_DOCUMENT_READ,
     PERMISSION_LIBRARY_READ,
@@ -174,6 +178,34 @@ pub fn authorize_document_permission(
         return Ok(());
     }
     Err(ApiError::Unauthorized)
+}
+
+pub fn authorize_knowledge_document_permission(
+    auth: &AuthContext,
+    workspace_id: Uuid,
+    library_id: Uuid,
+    document_id: Uuid,
+    accepted_permissions: &[&str],
+) -> Result<(), ApiError> {
+    authorize_document_permission(auth, workspace_id, library_id, document_id, accepted_permissions)
+}
+
+pub fn authorize_knowledge_bundle_permission(
+    auth: &AuthContext,
+    workspace_id: Uuid,
+    library_id: Uuid,
+    accepted_permissions: &[&str],
+) -> Result<(), ApiError> {
+    authorize_library_permission(auth, workspace_id, library_id, accepted_permissions)
+}
+
+pub fn authorize_query_session_permission(
+    auth: &AuthContext,
+    workspace_id: Uuid,
+    library_id: Uuid,
+    accepted_permissions: &[&str],
+) -> Result<(), ApiError> {
+    authorize_library_permission(auth, workspace_id, library_id, accepted_permissions)
 }
 
 pub fn authorize_connector_permission(
@@ -327,6 +359,71 @@ pub async fn load_library_binding_and_authorize(
         accepted_permissions,
     )?;
     Ok(binding)
+}
+
+pub async fn load_query_session_and_authorize(
+    auth: &AuthContext,
+    state: &AppState,
+    session_id: Uuid,
+    accepted_permissions: &[&str],
+) -> Result<QueryConversationRow, ApiError> {
+    let session = query_repository::get_conversation_by_id(&state.persistence.postgres, session_id)
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .ok_or_else(|| ApiError::resource_not_found("query_session", session_id))?;
+    authorize_query_session_permission(
+        auth,
+        session.workspace_id,
+        session.library_id,
+        accepted_permissions,
+    )?;
+    Ok(session)
+}
+
+pub async fn load_query_execution_and_authorize(
+    auth: &AuthContext,
+    state: &AppState,
+    execution_id: Uuid,
+    accepted_permissions: &[&str],
+) -> Result<query_repository::QueryExecutionRow, ApiError> {
+    let execution =
+        query_repository::get_execution_by_id(&state.persistence.postgres, execution_id)
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .ok_or_else(|| ApiError::resource_not_found("query_execution", execution_id))?;
+    authorize_library_permission(
+        auth,
+        execution.workspace_id,
+        execution.library_id,
+        accepted_permissions,
+    )?;
+    Ok(execution)
+}
+
+pub async fn load_async_operation_and_authorize(
+    auth: &AuthContext,
+    state: &AppState,
+    operation_id: Uuid,
+    accepted_permissions: &[&str],
+) -> Result<OpsAsyncOperationRow, ApiError> {
+    let operation =
+        ops_repository::get_async_operation_by_id(&state.persistence.postgres, operation_id)
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .ok_or_else(|| ApiError::resource_not_found("async_operation", operation_id))?;
+    match operation.library_id {
+        Some(library_id) => {
+            authorize_library_permission(
+                auth,
+                operation.workspace_id,
+                library_id,
+                accepted_permissions,
+            )?;
+        }
+        None if !auth.is_system_admin => return Err(ApiError::Unauthorized),
+        None => {}
+    }
+    Ok(operation)
 }
 
 pub async fn load_content_document_and_authorize(

@@ -254,6 +254,25 @@ impl GraphReconciliationScopeService {
     }
 }
 
+pub async fn persist_detected_scope(
+    state: &AppState,
+    mutation_workflow_id: Uuid,
+    detection: &MutationImpactScopeDetection,
+) -> anyhow::Result<()> {
+    repositories::update_document_mutation_impact_scope(
+        &state.persistence.postgres,
+        mutation_workflow_id,
+        &detection.scope_status,
+        &detection.confidence_status,
+        detection.affected_node_ids_json(),
+        detection.affected_relationship_ids_json(),
+        detection.fallback_reason.as_deref(),
+    )
+    .await
+    .context("failed to persist mutation impact scope")?;
+    Ok(())
+}
+
 fn collect_target_ids(
     evidence_rows: &[RuntimeGraphEvidenceLifecycleRow],
     target_kind: &str,

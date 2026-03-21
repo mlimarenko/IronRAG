@@ -60,7 +60,7 @@ Any other multipart field names are ignored by the document-upload routes.
 
 - `live_in_flight` means the library still has queue, active stage work, graph backlog, or visible in-flight provider-call accounting.
 - `fully_settled` means queue, processing, pending graph, and residual failure counters are all zero and collection totals are considered terminal.
-- `failed_with_residual_work` means the library reached a terminal failure boundary with explicit residual reasons such as `projection_contention`, `graph_persistence_integrity`, `settlement_refresh_failed`, `provider_failure`, `diagnostics_unavailable`, or `upload_limit_exceeded`.
+- `failed_with_residual_work` means the library reached a terminal failure boundary with explicit residual reasons such as `graph_write_contention`, `graph_persistence_integrity`, `graph_state_refresh_failed`, `provider_failure`, `diagnostics_unavailable`, or `upload_limit_exceeded`.
 - Provider graph-call failures now surface `requestShapeKey`, `requestSizeBytes`, `upstreamStatus`, and `retryDecision` so operators can distinguish RustRAG request invalidity from upstream timeout or rejection.
 
 ## Queue-isolation semantics

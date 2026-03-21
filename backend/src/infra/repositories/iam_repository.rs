@@ -712,6 +712,8 @@ pub async fn list_resolved_grants_by_principal(
                 when grant_row.resource_kind = 'workspace' then grant_row.resource_id
                 when grant_row.resource_kind = 'library' then library.workspace_id
                 when grant_row.resource_kind = 'document' then document.workspace_id
+                when grant_row.resource_kind = 'query_session' then query_session.workspace_id
+                when grant_row.resource_kind = 'async_operation' then operation.workspace_id
                 when grant_row.resource_kind = 'connector' then connector.workspace_id
                 when grant_row.resource_kind = 'provider_credential' then credential.workspace_id
                 when grant_row.resource_kind = 'library_binding' then binding.workspace_id
@@ -720,6 +722,8 @@ pub async fn list_resolved_grants_by_principal(
             case
                 when grant_row.resource_kind = 'library' then grant_row.resource_id
                 when grant_row.resource_kind = 'document' then document.library_id
+                when grant_row.resource_kind = 'query_session' then query_session.library_id
+                when grant_row.resource_kind = 'async_operation' then operation.library_id
                 when grant_row.resource_kind = 'connector' then connector.library_id
                 when grant_row.resource_kind = 'library_binding' then binding.library_id
                 else null
@@ -735,6 +739,12 @@ pub async fn list_resolved_grants_by_principal(
          left join content_document document
            on grant_row.resource_kind = 'document'
           and document.id = grant_row.resource_id
+         left join query_conversation query_session
+           on grant_row.resource_kind = 'query_session'
+          and query_session.id = grant_row.resource_id
+         left join ops_async_operation operation
+           on grant_row.resource_kind = 'async_operation'
+          and operation.id = grant_row.resource_id
          left join catalog_library_connector connector
            on grant_row.resource_kind = 'connector'
           and connector.id = grant_row.resource_id

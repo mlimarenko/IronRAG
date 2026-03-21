@@ -87,7 +87,7 @@ impl CatalogService {
             .into_iter()
             .filter(|row| workspace_filter.is_none_or(|workspace_id| row.id == workspace_id))
             .map(map_workspace_row)
-            .collect())
+            .collect::<Result<Vec<_>, _>>()?)
     }
 
     pub async fn get_workspace(
@@ -100,7 +100,7 @@ impl CatalogService {
                 .await
                 .map_err(|_| ApiError::Internal)?
                 .ok_or_else(|| ApiError::resource_not_found("workspace", workspace_id))?;
-        Ok(map_workspace_row(row))
+        Ok(map_workspace_row(row)?)
     }
 
     pub async fn create_workspace(
@@ -118,7 +118,7 @@ impl CatalogService {
         )
         .await
         .map_err(|error| map_workspace_create_error(error, &slug))?;
-        Ok(map_workspace_row(row))
+        Ok(map_workspace_row(row)?)
     }
 
     pub async fn update_workspace(
@@ -133,12 +133,12 @@ impl CatalogService {
             command.workspace_id,
             &slug,
             &display_name,
-            lifecycle_state_as_str(&command.lifecycle_state),
+            lifecycle_state_as_str(&command.lifecycle_state)?,
         )
         .await
         .map_err(|_| ApiError::Internal)?
         .ok_or_else(|| ApiError::resource_not_found("workspace", command.workspace_id))?;
-        Ok(map_workspace_row(row))
+        Ok(map_workspace_row(row)?)
     }
 
     pub async fn list_libraries(
@@ -150,7 +150,7 @@ impl CatalogService {
             catalog_repository::list_libraries(&state.persistence.postgres, Some(workspace_id))
                 .await
                 .map_err(|_| ApiError::Internal)?;
-        Ok(rows.into_iter().map(map_library_row).collect())
+        Ok(rows.into_iter().map(map_library_row).collect::<Result<Vec<_>, _>>()?)
     }
 
     pub async fn get_library(
@@ -162,7 +162,7 @@ impl CatalogService {
             .await
             .map_err(|_| ApiError::Internal)?
             .ok_or_else(|| ApiError::resource_not_found("library", library_id))?;
-        Ok(map_library_row(row))
+        Ok(map_library_row(row)?)
     }
 
     pub async fn create_library(
@@ -183,7 +183,7 @@ impl CatalogService {
         )
         .await
         .map_err(|error| map_library_create_error(error, command.workspace_id, &slug))?;
-        Ok(map_library_row(row))
+        Ok(map_library_row(row)?)
     }
 
     pub async fn update_library(
@@ -200,12 +200,12 @@ impl CatalogService {
             &slug,
             &display_name,
             description.as_deref(),
-            lifecycle_state_as_str(&command.lifecycle_state),
+            lifecycle_state_as_str(&command.lifecycle_state)?,
         )
         .await
         .map_err(|_| ApiError::Internal)?
         .ok_or_else(|| ApiError::resource_not_found("library", command.library_id))?;
-        Ok(map_library_row(row))
+        Ok(map_library_row(row)?)
     }
 
     pub async fn list_connectors(
@@ -217,7 +217,7 @@ impl CatalogService {
             catalog_repository::list_connectors_by_library(&state.persistence.postgres, library_id)
                 .await
                 .map_err(|_| ApiError::Internal)?;
-        Ok(rows.into_iter().map(map_connector_row).collect())
+        Ok(rows.into_iter().map(map_connector_row).collect::<Result<Vec<_>, _>>()?)
     }
 
     pub async fn get_connector(
@@ -230,7 +230,7 @@ impl CatalogService {
                 .await
                 .map_err(|_| ApiError::Internal)?
                 .ok_or_else(|| ApiError::resource_not_found("connector", connector_id))?;
-        Ok(map_connector_row(row))
+        Ok(map_connector_row(row)?)
     }
 
     pub async fn create_connector(
@@ -251,7 +251,7 @@ impl CatalogService {
         )
         .await
         .map_err(map_connector_write_error)?;
-        Ok(map_connector_row(row))
+        Ok(map_connector_row(row)?)
     }
 
     pub async fn update_connector(
@@ -271,7 +271,7 @@ impl CatalogService {
         .await
         .map_err(map_connector_write_error)?
         .ok_or_else(|| ApiError::resource_not_found("connector", command.connector_id))?;
-        Ok(map_connector_row(row))
+        Ok(map_connector_row(row)?)
     }
 }
 
@@ -295,51 +295,55 @@ fn normalize_optional_text(value: Option<&str>) -> Option<String> {
     value.map(str::trim).filter(|value| !value.is_empty()).map(ToString::to_string)
 }
 
-fn parse_lifecycle_state(value: &str) -> CatalogLifecycleState {
+fn parse_lifecycle_state(value: &str) -> Result<CatalogLifecycleState, ApiError> {
     match value {
-        "active" => CatalogLifecycleState::Active,
-        "archived" => CatalogLifecycleState::Archived,
-        "disabled" => CatalogLifecycleState::Disabled,
-        _ => CatalogLifecycleState::Active,
+        "active" => Ok(CatalogLifecycleState::Active),
+        "archived" => Ok(CatalogLifecycleState::Archived),
+        "disabled" => Err(ApiError::forbidden_vocabulary("lifecycleState", "disabled", "archived")),
+        _ => Err(ApiError::Internal),
     }
 }
 
-fn lifecycle_state_as_str(value: &CatalogLifecycleState) -> &'static str {
+fn lifecycle_state_as_str(value: &CatalogLifecycleState) -> Result<&'static str, ApiError> {
     match value {
-        CatalogLifecycleState::Active => "active",
-        CatalogLifecycleState::Disabled => "archived",
-        CatalogLifecycleState::Archived => "archived",
+        CatalogLifecycleState::Active => Ok("active"),
+        CatalogLifecycleState::Disabled => {
+            Err(ApiError::forbidden_vocabulary("lifecycleState", "disabled", "archived"))
+        }
+        CatalogLifecycleState::Archived => Ok("archived"),
     }
 }
 
-fn map_workspace_row(row: catalog_repository::CatalogWorkspaceRow) -> CatalogWorkspace {
-    CatalogWorkspace {
+fn map_workspace_row(
+    row: catalog_repository::CatalogWorkspaceRow,
+) -> Result<CatalogWorkspace, ApiError> {
+    Ok(CatalogWorkspace {
         id: row.id,
         slug: row.slug,
         display_name: row.display_name,
-        lifecycle_state: parse_lifecycle_state(&row.lifecycle_state),
+        lifecycle_state: parse_lifecycle_state(&row.lifecycle_state)?,
         created_at: row.created_at,
         updated_at: row.updated_at,
-    }
+    })
 }
 
-fn map_library_row(row: catalog_repository::CatalogLibraryRow) -> CatalogLibrary {
-    CatalogLibrary {
+fn map_library_row(row: catalog_repository::CatalogLibraryRow) -> Result<CatalogLibrary, ApiError> {
+    Ok(CatalogLibrary {
         id: row.id,
         workspace_id: row.workspace_id,
         slug: row.slug,
         display_name: row.display_name,
         description: row.description,
-        lifecycle_state: parse_lifecycle_state(&row.lifecycle_state),
+        lifecycle_state: parse_lifecycle_state(&row.lifecycle_state)?,
         created_at: row.created_at,
         updated_at: row.updated_at,
-    }
+    })
 }
 
 fn map_connector_row(
     row: catalog_repository::CatalogLibraryConnectorRow,
-) -> CatalogLibraryConnector {
-    CatalogLibraryConnector {
+) -> Result<CatalogLibraryConnector, ApiError> {
+    Ok(CatalogLibraryConnector {
         id: row.id,
         workspace_id: row.workspace_id,
         library_id: row.library_id,
@@ -348,7 +352,7 @@ fn map_connector_row(
         configuration_json: row.configuration_json,
         created_at: row.created_at,
         updated_at: row.updated_at,
-    }
+    })
 }
 
 fn map_connector_write_error(error: sqlx::Error) -> ApiError {

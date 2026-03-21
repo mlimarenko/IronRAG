@@ -1,5 +1,12 @@
 export type GraphNodeType = 'document' | 'entity' | 'topic'
-export type GraphStatus = 'empty' | 'building' | 'ready' | 'partial' | 'failed' | 'stale'
+export type GraphStatus =
+  | 'empty'
+  | 'building'
+  | 'rebuilding'
+  | 'ready'
+  | 'partial'
+  | 'failed'
+  | 'stale'
 export type GraphLayoutMode =
   | 'cloud'
   | 'circle'
@@ -46,8 +53,8 @@ export interface GraphLegendItem {
 export interface GraphSurfaceResponse {
   graphStatus: GraphStatus
   convergenceStatus: GraphConvergenceStatus | null
-  projectionVersion: number
-  projectionState?: string | null
+  graphGeneration: number
+  graphGenerationState?: string | null
   nodeCount: number
   relationCount: number
   filteredArtifactCount: number | null
@@ -135,10 +142,10 @@ export interface GraphDiagnostics {
   graphStatus: GraphStatus
   reconciliationStatus: string
   convergenceStatus: GraphConvergenceStatus | null
-  projectionVersion: number
+  graphGeneration: number
   nodeCount: number
   edgeCount: number
-  projectionFreshness: string
+  graphFreshness: string
   rebuildBacklogCount: number
   readyNoGraphCount: number
   pendingUpdateCount: number

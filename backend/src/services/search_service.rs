@@ -1,14 +1,24 @@
+use std::collections::BTreeSet;
+
 use anyhow::{Context, Result, anyhow};
+use chrono::Utc;
+use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    infra::repositories::{
-        self, ai_repository, catalog_repository, graph_repository,
-        search_repository::{self, SearchChunkEmbeddingRow, SearchGraphNodeEmbeddingRow},
+    infra::arangodb::{
+        collections::KNOWLEDGE_CHUNK_COLLECTION,
+        document_store::KnowledgeChunkRow,
+        graph_store::KnowledgeEntityRow,
+        search_store::{KnowledgeChunkVectorRow, KnowledgeEntityVectorRow},
     },
+    infra::repositories::ai_repository,
     integrations::llm::EmbeddingBatchRequest,
-    services::runtime_ingestion::resolve_effective_provider_profile,
+    services::{
+        knowledge_service::RefreshKnowledgeLibraryGenerationCommand,
+        runtime_ingestion::resolve_effective_provider_profile,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -37,41 +47,38 @@ impl SearchService {
     }
 
     #[must_use]
-    pub fn select_active_chunk_embedding<'a>(
+    pub fn select_current_chunk_vector<'a>(
         &self,
-        rows: &'a [SearchChunkEmbeddingRow],
-    ) -> Option<&'a SearchChunkEmbeddingRow> {
-        rows.iter()
-            .filter(|row| row.active)
-            .max_by_key(|row| row.embedded_at)
-            .or_else(|| rows.iter().max_by_key(|row| row.embedded_at))
+        rows: &'a [KnowledgeChunkVectorRow],
+    ) -> Option<&'a KnowledgeChunkVectorRow> {
+        rows.iter().max_by(|left, right| {
+            left.freshness_generation
+                .cmp(&right.freshness_generation)
+                .then_with(|| left.created_at.cmp(&right.created_at))
+                .then_with(|| left.vector_id.cmp(&right.vector_id))
+        })
     }
 
     #[must_use]
-    pub fn select_active_chunk_embedding_model_catalog_id(
+    pub fn select_current_entity_vector<'a>(
         &self,
-        rows: &[SearchChunkEmbeddingRow],
-    ) -> Option<Uuid> {
-        self.select_active_chunk_embedding(rows).map(|row| row.model_catalog_id)
+        rows: &'a [KnowledgeEntityVectorRow],
+    ) -> Option<&'a KnowledgeEntityVectorRow> {
+        rows.iter().max_by(|left, right| {
+            left.freshness_generation
+                .cmp(&right.freshness_generation)
+                .then_with(|| left.created_at.cmp(&right.created_at))
+                .then_with(|| left.vector_id.cmp(&right.vector_id))
+        })
     }
 
-    #[must_use]
-    pub fn select_active_graph_node_embedding<'a>(
+    pub async fn resolve_embedding_model_catalog_id(
         &self,
-        rows: &'a [SearchGraphNodeEmbeddingRow],
-    ) -> Option<&'a SearchGraphNodeEmbeddingRow> {
-        rows.iter()
-            .filter(|row| row.active)
-            .max_by_key(|row| row.embedded_at)
-            .or_else(|| rows.iter().max_by_key(|row| row.embedded_at))
-    }
-
-    #[must_use]
-    pub fn select_active_graph_node_embedding_model_catalog_id(
-        &self,
-        rows: &[SearchGraphNodeEmbeddingRow],
-    ) -> Option<Uuid> {
-        self.select_active_graph_node_embedding(rows).map(|row| row.model_catalog_id)
+        state: &AppState,
+        provider_kind: &str,
+        model_name: &str,
+    ) -> Result<Uuid> {
+        resolve_embedding_model_catalog_id(state, provider_kind, model_name).await
     }
 
     pub async fn persist_chunk_embeddings(
@@ -81,15 +88,42 @@ impl SearchService {
     ) -> Result<usize> {
         let mut written = 0usize;
         for write in writes {
-            search_repository::upsert_chunk_embedding(
-                &state.persistence.postgres,
-                write.chunk_id,
-                write.model_catalog_id,
-                Some(&write.embedding_vector),
-                write.active,
-            )
-            .await
-            .with_context(|| format!("failed to persist chunk embedding for {}", write.chunk_id))?;
+            let chunk = load_knowledge_chunk(state, write.chunk_id).await?;
+            let freshness_generation =
+                resolve_chunk_vector_generation(state, &chunk).await.with_context(|| {
+                    format!("failed to resolve vector generation for chunk {}", write.chunk_id)
+                })?;
+            let vector = write.embedding_vector.clone();
+            let row = KnowledgeChunkVectorRow {
+                key: build_chunk_vector_key(
+                    write.chunk_id,
+                    write.model_catalog_id,
+                    freshness_generation,
+                ),
+                arango_id: None,
+                arango_rev: None,
+                vector_id: Uuid::now_v7(),
+                workspace_id: chunk.workspace_id,
+                library_id: chunk.library_id,
+                chunk_id: chunk.chunk_id,
+                revision_id: chunk.revision_id,
+                embedding_model_key: write.model_catalog_id.to_string(),
+                vector_kind: "chunk_embedding".to_string(),
+                dimensions: embedding_dimensions(&vector).with_context(|| {
+                    format!("failed to resolve chunk embedding dimensions for {}", write.chunk_id)
+                })?,
+                vector,
+                freshness_generation,
+                created_at: Utc::now(),
+            };
+            let _ =
+                state.arango_search_store.upsert_chunk_vector(&row).await.with_context(|| {
+                    format!("failed to persist chunk vector for {}", write.chunk_id)
+                })?;
+            if write.active {
+                self.activate_chunk_embedding_index(state, write.chunk_id, write.model_catalog_id)
+                    .await?;
+            }
             written += 1;
         }
         Ok(written)
@@ -102,17 +136,53 @@ impl SearchService {
     ) -> Result<usize> {
         let mut written = 0usize;
         for write in writes {
-            search_repository::upsert_graph_node_embedding(
-                &state.persistence.postgres,
-                write.node_id,
-                write.model_catalog_id,
-                Some(&write.embedding_vector),
-                write.active,
-            )
-            .await
-            .with_context(|| {
-                format!("failed to persist graph node embedding for {}", write.node_id)
-            })?;
+            let entity = state
+                .arango_graph_store
+                .get_entity_by_id(write.node_id)
+                .await
+                .with_context(|| {
+                    format!("failed to load knowledge entity {}", write.node_id)
+                })?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "graph node {} is not a canonical knowledge entity; relation or projection node vectors are not supported by the Arango search store",
+                        write.node_id
+                    )
+                })?;
+            let vector = write.embedding_vector.clone();
+            let row = KnowledgeEntityVectorRow {
+                key: build_entity_vector_key(
+                    entity.entity_id,
+                    write.model_catalog_id,
+                    entity.freshness_generation,
+                ),
+                arango_id: None,
+                arango_rev: None,
+                vector_id: Uuid::now_v7(),
+                workspace_id: entity.workspace_id,
+                library_id: entity.library_id,
+                entity_id: entity.entity_id,
+                embedding_model_key: write.model_catalog_id.to_string(),
+                vector_kind: "entity_embedding".to_string(),
+                dimensions: embedding_dimensions(&vector).with_context(|| {
+                    format!("failed to resolve entity embedding dimensions for {}", write.node_id)
+                })?,
+                vector,
+                freshness_generation: entity.freshness_generation,
+                created_at: Utc::now(),
+            };
+            let _ =
+                state.arango_search_store.upsert_entity_vector(&row).await.with_context(|| {
+                    format!("failed to persist canonical entity vector for {}", write.node_id)
+                })?;
+            if write.active {
+                self.activate_graph_node_embedding_index(
+                    state,
+                    write.node_id,
+                    write.model_catalog_id,
+                )
+                .await?;
+            }
             written += 1;
         }
         Ok(written)
@@ -124,27 +194,19 @@ impl SearchService {
         chunk_id: Uuid,
         model_catalog_id: Uuid,
     ) -> Result<()> {
-        let rows = search_repository::list_chunk_embeddings_by_chunk(
-            &state.persistence.postgres,
-            chunk_id,
-        )
-        .await
-        .with_context(|| format!("failed to load chunk embeddings for {}", chunk_id))?;
-        for row in rows {
-            let should_be_active = row.model_catalog_id == model_catalog_id;
-            search_repository::set_chunk_embedding_active(
-                &state.persistence.postgres,
-                chunk_id,
-                row.model_catalog_id,
-                should_be_active,
-            )
+        let embedding_model_key = model_catalog_id.to_string();
+        let rows = state
+            .arango_search_store
+            .list_chunk_vectors_by_chunk(chunk_id)
             .await
-            .with_context(|| {
-                format!(
-                    "failed to update active chunk embedding {} for chunk {}",
-                    row.model_catalog_id, chunk_id
-                )
-            })?;
+            .with_context(|| format!("failed to load chunk vectors for {}", chunk_id))?;
+        let has_model = rows.iter().any(|row| row.embedding_model_key == embedding_model_key);
+        if !has_model {
+            return Err(anyhow!(
+                "chunk {} has no canonical vector for model {}",
+                chunk_id,
+                model_catalog_id
+            ));
         }
         Ok(())
     }
@@ -155,27 +217,19 @@ impl SearchService {
         node_id: Uuid,
         model_catalog_id: Uuid,
     ) -> Result<()> {
-        let rows = search_repository::list_graph_node_embeddings_by_node(
-            &state.persistence.postgres,
-            node_id,
-        )
-        .await
-        .with_context(|| format!("failed to load graph node embeddings for {}", node_id))?;
-        for row in rows {
-            let should_be_active = row.model_catalog_id == model_catalog_id;
-            search_repository::set_graph_node_embedding_active(
-                &state.persistence.postgres,
-                node_id,
-                row.model_catalog_id,
-                should_be_active,
-            )
+        let embedding_model_key = model_catalog_id.to_string();
+        let rows = state
+            .arango_search_store
+            .list_entity_vectors_by_entity(node_id)
             .await
-            .with_context(|| {
-                format!(
-                    "failed to update active graph node embedding {} for node {}",
-                    row.model_catalog_id, node_id
-                )
-            })?;
+            .with_context(|| format!("failed to load entity vectors for {}", node_id))?;
+        let has_model = rows.iter().any(|row| row.embedding_model_key == embedding_model_key);
+        if !has_model {
+            return Err(anyhow!(
+                "entity {} has no canonical vector for model {}",
+                node_id,
+                model_catalog_id
+            ));
         }
         Ok(())
     }
@@ -192,14 +246,15 @@ impl SearchService {
             &provider_profile.embedding.model_name,
         )
         .await?;
-        let chunks =
-            repositories::list_chunks_by_project(&state.persistence.postgres, library_id, i64::MAX)
-                .await
-                .context("failed to load chunks for chunk embedding rebuild")?;
+        let chunks = list_knowledge_chunks_by_library(state, library_id)
+            .await
+            .context("failed to load knowledge chunks for chunk embedding rebuild")?;
         if chunks.is_empty() {
             return Ok(0);
         }
 
+        let mut touched_revision_ids = BTreeSet::new();
+        let mut max_vector_generation = None::<i64>;
         let mut rebuilt = 0usize;
         for chunk_batch in chunks.chunks(64) {
             let batch_response = state
@@ -207,7 +262,7 @@ impl SearchService {
                 .embed_many(EmbeddingBatchRequest {
                     provider_kind: provider_profile.embedding.provider_kind.as_str().to_string(),
                     model_name: provider_profile.embedding.model_name.clone(),
-                    inputs: chunk_batch.iter().map(|chunk| chunk.content.clone()).collect(),
+                    inputs: chunk_batch.iter().map(|chunk| chunk.content_text.clone()).collect(),
                 })
                 .await
                 .context("failed to rebuild chunk embeddings")?;
@@ -220,20 +275,61 @@ impl SearchService {
             }
 
             for (chunk, embedding) in chunk_batch.iter().zip(batch_response.embeddings.iter()) {
-                search_repository::upsert_chunk_embedding(
-                    &state.persistence.postgres,
-                    chunk.id,
-                    model_catalog_id,
-                    Some(embedding.as_slice()),
-                    true,
-                )
-                .await
-                .with_context(|| {
-                    format!("failed to persist rebuilt chunk embedding for {}", chunk.id)
-                })?;
-                self.activate_chunk_embedding_index(state, chunk.id, model_catalog_id).await?;
+                let freshness_generation =
+                    resolve_chunk_vector_generation(state, chunk).await.with_context(|| {
+                        format!("failed to resolve chunk vector generation for {}", chunk.chunk_id)
+                    })?;
+                let row = KnowledgeChunkVectorRow {
+                    key: build_chunk_vector_key(
+                        chunk.chunk_id,
+                        model_catalog_id,
+                        freshness_generation,
+                    ),
+                    arango_id: None,
+                    arango_rev: None,
+                    vector_id: Uuid::now_v7(),
+                    workspace_id: chunk.workspace_id,
+                    library_id: chunk.library_id,
+                    chunk_id: chunk.chunk_id,
+                    revision_id: chunk.revision_id,
+                    embedding_model_key: model_catalog_id.to_string(),
+                    vector_kind: "chunk_embedding".to_string(),
+                    dimensions: embedding_dimensions(embedding.as_slice()).with_context(|| {
+                        format!(
+                            "failed to resolve rebuilt chunk vector dimensions for {}",
+                            chunk.chunk_id
+                        )
+                    })?,
+                    vector: embedding.clone(),
+                    freshness_generation,
+                    created_at: Utc::now(),
+                };
+                let _ = state.arango_search_store.upsert_chunk_vector(&row).await.with_context(
+                    || format!("failed to persist rebuilt chunk vector for {}", chunk.chunk_id),
+                )?;
+                self.activate_chunk_embedding_index(state, chunk.chunk_id, model_catalog_id)
+                    .await?;
+                touched_revision_ids.insert(chunk.revision_id);
+                max_vector_generation = Some(
+                    max_vector_generation
+                        .map_or(freshness_generation, |current| current.max(freshness_generation)),
+                );
                 rebuilt += 1;
             }
+        }
+
+        mark_revisions_vector_ready(state, &touched_revision_ids)
+            .await
+            .context("failed to mark rebuilt revisions as vector-ready")?;
+        if let Some(vector_generation) = max_vector_generation {
+            refresh_library_vector_generation_if_present(
+                state,
+                library_id,
+                chunks[0].workspace_id,
+                vector_generation,
+            )
+            .await
+            .context("failed to refresh library vector generation after chunk rebuild")?;
         }
 
         Ok(rebuilt)
@@ -244,11 +340,6 @@ impl SearchService {
         state: &AppState,
         library_id: Uuid,
     ) -> Result<usize> {
-        let library =
-            catalog_repository::get_library_by_id(&state.persistence.postgres, library_id)
-                .await
-                .context("failed to load library for graph node embedding rebuild")?
-                .ok_or_else(|| anyhow!("library {library_id} not found"))?;
         let provider_profile = resolve_effective_provider_profile(state, library_id).await?;
         let model_catalog_id = resolve_embedding_model_catalog_id(
             state,
@@ -256,66 +347,82 @@ impl SearchService {
             &provider_profile.embedding.model_name,
         )
         .await?;
-        let projections = graph_repository::list_graph_projections_by_library(
-            &state.persistence.postgres,
-            library.workspace_id,
-            library_id,
-        )
-        .await
-        .context("failed to load graph projections for node embedding rebuild")?;
-        let graph_service = crate::services::graph_service::GraphService::new();
-        let Some(active_projection) =
-            graph_service.select_active_projection(&projections).or_else(|| projections.first())
-        else {
-            return Ok(0);
-        };
-
-        let nodes = graph_repository::list_graph_nodes_by_projection(
-            &state.persistence.postgres,
-            active_projection.id,
-        )
-        .await
-        .context("failed to load graph nodes for node embedding rebuild")?;
-        let nodes =
-            nodes.into_iter().filter(|node| node.node_kind != "document").collect::<Vec<_>>();
-        if nodes.is_empty() {
+        let entities = state
+            .arango_graph_store
+            .list_entities_by_library(library_id)
+            .await
+            .context("failed to load knowledge entities for canonical vector rebuild")?;
+        if entities.is_empty() {
             return Ok(0);
         }
 
+        let mut max_vector_generation = None::<i64>;
         let mut rebuilt = 0usize;
-        for node_batch in nodes.chunks(64) {
+        for entity_batch in entities.chunks(64) {
             let batch_response = state
                 .llm_gateway
                 .embed_many(EmbeddingBatchRequest {
                     provider_kind: provider_profile.embedding.provider_kind.as_str().to_string(),
                     model_name: provider_profile.embedding.model_name.clone(),
-                    inputs: node_batch.iter().map(build_graph_node_embedding_input).collect(),
+                    inputs: entity_batch.iter().map(build_entity_embedding_input).collect(),
                 })
                 .await
-                .context("failed to rebuild graph node embeddings")?;
-            if batch_response.embeddings.len() != node_batch.len() {
+                .context("failed to rebuild entity vectors")?;
+            if batch_response.embeddings.len() != entity_batch.len() {
                 return Err(anyhow!(
-                    "embedding batch returned {} vectors for {} graph nodes",
+                    "embedding batch returned {} vectors for {} entities",
                     batch_response.embeddings.len(),
-                    node_batch.len()
+                    entity_batch.len()
                 ));
             }
 
-            for (node, embedding) in node_batch.iter().zip(batch_response.embeddings.iter()) {
-                search_repository::upsert_graph_node_embedding(
-                    &state.persistence.postgres,
-                    node.id,
-                    model_catalog_id,
-                    Some(embedding.as_slice()),
-                    true,
-                )
-                .await
-                .with_context(|| {
-                    format!("failed to persist rebuilt graph node embedding for {}", node.id)
-                })?;
-                self.activate_graph_node_embedding_index(state, node.id, model_catalog_id).await?;
+            for (entity, embedding) in entity_batch.iter().zip(batch_response.embeddings.iter()) {
+                let row = KnowledgeEntityVectorRow {
+                    key: build_entity_vector_key(
+                        entity.entity_id,
+                        model_catalog_id,
+                        entity.freshness_generation,
+                    ),
+                    arango_id: None,
+                    arango_rev: None,
+                    vector_id: Uuid::now_v7(),
+                    workspace_id: entity.workspace_id,
+                    library_id: entity.library_id,
+                    entity_id: entity.entity_id,
+                    embedding_model_key: model_catalog_id.to_string(),
+                    vector_kind: "entity_embedding".to_string(),
+                    dimensions: embedding_dimensions(embedding.as_slice()).with_context(|| {
+                        format!(
+                            "failed to resolve rebuilt entity vector dimensions for {}",
+                            entity.entity_id
+                        )
+                    })?,
+                    vector: embedding.clone(),
+                    freshness_generation: entity.freshness_generation,
+                    created_at: Utc::now(),
+                };
+                let _ = state.arango_search_store.upsert_entity_vector(&row).await.with_context(
+                    || format!("failed to persist rebuilt entity vector for {}", entity.entity_id),
+                )?;
+                self.activate_graph_node_embedding_index(state, entity.entity_id, model_catalog_id)
+                    .await?;
+                max_vector_generation =
+                    Some(max_vector_generation.map_or(entity.freshness_generation, |current| {
+                        current.max(entity.freshness_generation)
+                    }));
                 rebuilt += 1;
             }
+        }
+
+        if let Some(vector_generation) = max_vector_generation {
+            refresh_library_vector_generation_if_present(
+                state,
+                library_id,
+                entities[0].workspace_id,
+                vector_generation,
+            )
+            .await
+            .context("failed to refresh library vector generation after entity rebuild")?;
         }
 
         Ok(rebuilt)
@@ -342,13 +449,199 @@ async fn resolve_embedding_model_catalog_id(
         .ok_or_else(|| anyhow!("model catalog entry {provider_kind}/{model_name} not found"))
 }
 
-fn build_graph_node_embedding_input(node: &graph_repository::GraphNodeRow) -> String {
+fn build_entity_embedding_input(entity: &KnowledgeEntityRow) -> String {
     format!(
-        "node_kind: {}\ndisplay_label: {}\nsummary: {}",
-        node.node_kind,
-        node.display_label,
-        node.summary.clone().unwrap_or_default(),
+        "entity_type: {}\ncanonical_label: {}\naliases: {}\nsummary: {}",
+        entity.entity_type,
+        entity.canonical_label,
+        entity.aliases.join(", "),
+        entity.summary.clone().unwrap_or_default(),
     )
+}
+
+fn build_chunk_vector_key(
+    chunk_id: Uuid,
+    model_catalog_id: Uuid,
+    freshness_generation: i64,
+) -> String {
+    format!("{chunk_id}:{model_catalog_id}:{freshness_generation}")
+}
+
+fn build_entity_vector_key(
+    entity_id: Uuid,
+    model_catalog_id: Uuid,
+    freshness_generation: i64,
+) -> String {
+    format!("{entity_id}:{model_catalog_id}:{freshness_generation}")
+}
+
+fn embedding_dimensions(vector: &[f32]) -> Result<i32> {
+    if vector.is_empty() {
+        return Err(anyhow!("embedding vector must not be empty"));
+    }
+    i32::try_from(vector.len()).context("embedding vector dimension overflowed i32")
+}
+
+async fn load_knowledge_chunk(state: &AppState, chunk_id: Uuid) -> Result<KnowledgeChunkRow> {
+    let cursor = state
+        .arango_document_store
+        .client()
+        .query_json(
+            "FOR chunk IN @@collection
+             FILTER chunk.chunk_id == @chunk_id
+             LIMIT 1
+             RETURN chunk",
+            serde_json::json!({
+                "@collection": KNOWLEDGE_CHUNK_COLLECTION,
+                "chunk_id": chunk_id,
+            }),
+        )
+        .await
+        .with_context(|| format!("failed to load knowledge chunk {}", chunk_id))?;
+    decode_optional_single_result(cursor)?
+        .ok_or_else(|| anyhow!("knowledge chunk {} not found", chunk_id))
+}
+
+async fn list_knowledge_chunks_by_library(
+    state: &AppState,
+    library_id: Uuid,
+) -> Result<Vec<KnowledgeChunkRow>> {
+    let cursor = state
+        .arango_document_store
+        .client()
+        .query_json(
+            "FOR chunk IN @@collection
+             FILTER chunk.library_id == @library_id
+             SORT chunk.revision_id ASC, chunk.chunk_index ASC, chunk.chunk_id ASC
+             RETURN chunk",
+            serde_json::json!({
+                "@collection": KNOWLEDGE_CHUNK_COLLECTION,
+                "library_id": library_id,
+            }),
+        )
+        .await
+        .with_context(|| format!("failed to list knowledge chunks for library {}", library_id))?;
+    decode_many_results(cursor)
+}
+
+async fn resolve_chunk_vector_generation(
+    state: &AppState,
+    chunk: &KnowledgeChunkRow,
+) -> Result<i64> {
+    if let Some(generation) = chunk.vector_generation.or(chunk.text_generation) {
+        return Ok(generation);
+    }
+
+    let revision = state
+        .arango_document_store
+        .get_revision(chunk.revision_id)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load revision {} while resolving chunk generation",
+                chunk.revision_id
+            )
+        })?
+        .ok_or_else(|| anyhow!("knowledge revision {} not found", chunk.revision_id))?;
+    Ok(revision.revision_number)
+}
+
+async fn mark_revisions_vector_ready(
+    state: &AppState,
+    revision_ids: &BTreeSet<Uuid>,
+) -> Result<()> {
+    for revision_id in revision_ids {
+        let revision = state
+            .arango_document_store
+            .get_revision(*revision_id)
+            .await
+            .with_context(|| format!("failed to load revision {}", revision_id))?
+            .ok_or_else(|| anyhow!("knowledge revision {} not found", revision_id))?;
+        let updated = state
+            .arango_document_store
+            .update_revision_readiness(
+                revision.revision_id,
+                &revision.text_state,
+                "ready",
+                &revision.graph_state,
+                revision.text_readable_at,
+                Some(Utc::now()),
+                revision.graph_ready_at,
+                revision.superseded_by_revision_id,
+            )
+            .await
+            .with_context(|| format!("failed to update vector readiness for {}", revision_id))?;
+        if updated.is_none() {
+            return Err(anyhow!(
+                "knowledge revision {} disappeared during vector readiness update",
+                revision_id
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn refresh_library_vector_generation_if_present(
+    state: &AppState,
+    library_id: Uuid,
+    workspace_id: Uuid,
+    vector_generation: i64,
+) -> Result<()> {
+    let Some(existing) = state
+        .arango_document_store
+        .list_library_generations(library_id)
+        .await
+        .with_context(|| format!("failed to list library generations for {}", library_id))?
+        .into_iter()
+        .next()
+    else {
+        return Ok(());
+    };
+
+    state
+        .canonical_services
+        .knowledge
+        .refresh_library_generation(
+            state,
+            RefreshKnowledgeLibraryGenerationCommand {
+                generation_id: existing.generation_id,
+                workspace_id,
+                library_id,
+                active_text_generation: existing.active_text_generation,
+                active_vector_generation: existing.active_vector_generation.max(vector_generation),
+                active_graph_generation: existing.active_graph_generation,
+                degraded_state: existing.degraded_state,
+            },
+        )
+        .await
+        .map_err(|error| {
+            anyhow!("failed to refresh vector generation for library {}: {:?}", library_id, error)
+        })?;
+    Ok(())
+}
+
+fn decode_optional_single_result<T>(cursor: serde_json::Value) -> Result<Option<T>>
+where
+    T: DeserializeOwned,
+{
+    let result = cursor
+        .get("result")
+        .cloned()
+        .ok_or_else(|| anyhow!("ArangoDB cursor response is missing result"))?;
+    let mut rows: Vec<T> =
+        serde_json::from_value(result).context("failed to decode ArangoDB result rows")?;
+    Ok((!rows.is_empty()).then(|| rows.remove(0)))
+}
+
+fn decode_many_results<T>(cursor: serde_json::Value) -> Result<Vec<T>>
+where
+    T: DeserializeOwned,
+{
+    let result = cursor
+        .get("result")
+        .cloned()
+        .ok_or_else(|| anyhow!("ArangoDB cursor response is missing result"))?;
+    serde_json::from_value(result).context("failed to decode ArangoDB result rows")
 }
 
 #[cfg(test)]
@@ -357,46 +650,67 @@ mod tests {
     use chrono::{Duration, Utc};
 
     #[test]
-    fn active_chunk_embedding_selection_prefers_active_latest_row() {
-        let old = SearchChunkEmbeddingRow {
-            chunk_id: Uuid::now_v7(),
-            model_catalog_id: Uuid::now_v7(),
-            embedding_vector: None,
-            embedded_at: Utc::now() - Duration::minutes(10),
-            active: true,
+    fn current_chunk_vector_selection_prefers_latest_generation() {
+        let chunk_id = Uuid::now_v7();
+        let model_catalog_id = Uuid::now_v7();
+        let old = KnowledgeChunkVectorRow {
+            key: "old".to_string(),
+            arango_id: None,
+            arango_rev: None,
+            vector_id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            chunk_id,
+            revision_id: Uuid::now_v7(),
+            embedding_model_key: model_catalog_id.to_string(),
+            vector_kind: "chunk_embedding".to_string(),
+            dimensions: 3,
+            vector: vec![1.0, 2.0, 3.0],
+            freshness_generation: 1,
+            created_at: Utc::now() - Duration::minutes(1),
         };
-        let new = SearchChunkEmbeddingRow { embedded_at: Utc::now(), ..old.clone() };
+        let new = KnowledgeChunkVectorRow {
+            key: "new".to_string(),
+            freshness_generation: 2,
+            created_at: Utc::now(),
+            ..old.clone()
+        };
 
-        let chunk_rows = [old.clone(), new.clone()];
-        let selected = SearchService::new()
-            .select_active_chunk_embedding(&chunk_rows)
-            .expect("active chunk embedding");
-        assert_eq!(selected.embedded_at, new.embedded_at);
-        assert_eq!(
-            SearchService::new().select_active_chunk_embedding_model_catalog_id(&[old, new]),
-            Some(selected.model_catalog_id)
-        );
+        let candidates = [old, new.clone()];
+        let selected =
+            SearchService::new().select_current_chunk_vector(&candidates).expect("chunk vector");
+        assert_eq!(selected.freshness_generation, new.freshness_generation);
     }
 
     #[test]
-    fn active_graph_node_embedding_selection_falls_back_to_latest_row() {
-        let old = SearchGraphNodeEmbeddingRow {
-            node_id: Uuid::now_v7(),
-            model_catalog_id: Uuid::now_v7(),
-            embedding_vector: None,
-            embedded_at: Utc::now() - Duration::minutes(10),
-            active: false,
+    fn current_entity_vector_selection_prefers_latest_generation() {
+        let entity_id = Uuid::now_v7();
+        let model_catalog_id = Uuid::now_v7();
+        let old = KnowledgeEntityVectorRow {
+            key: "old".to_string(),
+            arango_id: None,
+            arango_rev: None,
+            vector_id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            entity_id,
+            embedding_model_key: model_catalog_id.to_string(),
+            vector_kind: "entity_embedding".to_string(),
+            dimensions: 3,
+            vector: vec![1.0, 2.0, 3.0],
+            freshness_generation: 1,
+            created_at: Utc::now() - Duration::minutes(1),
         };
-        let new = SearchGraphNodeEmbeddingRow { embedded_at: Utc::now(), ..old.clone() };
+        let new = KnowledgeEntityVectorRow {
+            key: "new".to_string(),
+            freshness_generation: 2,
+            created_at: Utc::now(),
+            ..old.clone()
+        };
 
-        let graph_rows = [old.clone(), new.clone()];
-        let selected = SearchService::new()
-            .select_active_graph_node_embedding(&graph_rows)
-            .expect("graph node embedding");
-        assert_eq!(selected.embedded_at, new.embedded_at);
-        assert_eq!(
-            SearchService::new().select_active_graph_node_embedding_model_catalog_id(&[old, new]),
-            Some(selected.model_catalog_id)
-        );
+        let candidates = [old, new.clone()];
+        let selected =
+            SearchService::new().select_current_entity_vector(&candidates).expect("entity vector");
+        assert_eq!(selected.freshness_generation, new.freshness_generation);
     }
 }

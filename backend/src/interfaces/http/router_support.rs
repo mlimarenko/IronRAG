@@ -76,7 +76,11 @@ pub enum ApiError {
     #[error("conflict: {0}")]
     MissingPrice(String),
     #[error("conflict: {0}")]
-    ProjectionContention(String),
+    KnowledgeNotReady(String),
+    #[error("service unavailable: {0}")]
+    ArangoBootstrapFailed(String),
+    #[error("conflict: {0}")]
+    GraphWriteContention(String),
     #[error("conflict: {0}")]
     GraphPersistenceIntegrity(String),
     #[error("conflict: {0}")]
@@ -121,6 +125,16 @@ impl ApiError {
     }
 
     #[must_use]
+    pub fn knowledge_not_ready(message: impl Into<String>) -> Self {
+        Self::KnowledgeNotReady(message.into())
+    }
+
+    #[must_use]
+    pub fn arango_bootstrap_failed(message: impl Into<String>) -> Self {
+        Self::ArangoBootstrapFailed(message.into())
+    }
+
+    #[must_use]
     pub fn bootstrap_already_claimed(message: impl Into<String>) -> Self {
         Self::BootstrapAlreadyClaimed(message.into())
     }
@@ -128,6 +142,11 @@ impl ApiError {
     #[must_use]
     pub fn resource_not_found(resource_kind: &'static str, id: impl std::fmt::Display) -> Self {
         Self::NotFound(format!("{resource_kind} {id} not found"))
+    }
+
+    #[must_use]
+    pub fn context_bundle_not_found(id: impl std::fmt::Display) -> Self {
+        Self::NotFound(format!("knowledge_bundle {id} not found"))
     }
 
     #[must_use]
@@ -155,10 +174,12 @@ impl ApiError {
             | Self::ConflictingMutation(_)
             | Self::IdempotencyConflict(_)
             | Self::MissingPrice(_)
-            | Self::ProjectionContention(_)
+            | Self::KnowledgeNotReady(_)
+            | Self::GraphWriteContention(_)
             | Self::GraphPersistenceIntegrity(_)
             | Self::SettlementRefreshFailed(_)
             | Self::ProviderFailure(_) => StatusCode::CONFLICT,
+            Self::ArangoBootstrapFailed(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::UploadRejected { .. } => StatusCode::BAD_REQUEST,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -181,9 +202,11 @@ impl ApiError {
             Self::ConflictingMutation(_) => "conflicting_mutation",
             Self::IdempotencyConflict(_) => "idempotency_conflict",
             Self::MissingPrice(_) => "missing_price",
-            Self::ProjectionContention(_) => "projection_contention",
+            Self::KnowledgeNotReady(_) => "knowledge_not_ready",
+            Self::ArangoBootstrapFailed(_) => "arangodb_bootstrap_failed",
+            Self::GraphWriteContention(_) => "graph_write_contention",
             Self::GraphPersistenceIntegrity(_) => "graph_persistence_integrity",
-            Self::SettlementRefreshFailed(_) => "settlement_refresh_failed",
+            Self::SettlementRefreshFailed(_) => "graph_state_refresh_failed",
             Self::ProviderFailure(_) => "provider_failure",
             Self::UploadRejected { error_kind, .. } => error_kind,
             Self::Internal => "internal",
@@ -233,11 +256,12 @@ pub fn map_runtime_lifecycle_error_message(message: String) -> ApiError {
     if normalized.contains("stale revision") {
         return ApiError::StaleRevision(message);
     }
-    if normalized.contains("projection contention")
+    if normalized.contains("graph write contention")
+        || normalized.contains("projection contention")
         || normalized.contains("deadlock")
         || normalized.contains("lock timeout")
     {
-        return ApiError::ProjectionContention(message);
+        return ApiError::GraphWriteContention(message);
     }
     if normalized.contains("graph persistence integrity")
         || normalized.contains("foreign key violation")
@@ -333,8 +357,8 @@ pub fn extraction_recovery_warning(message: impl Into<String>) -> ApiWarningBody
 }
 
 #[must_use]
-pub fn reconciliation_fallback_warning(message: impl Into<String>) -> ApiWarningBody {
-    ApiWarningBody { warning: message.into(), warning_kind: "reconciliation_fallback" }
+pub fn graph_refresh_fallback_warning(message: impl Into<String>) -> ApiWarningBody {
+    ApiWarningBody { warning: message.into(), warning_kind: "graph_refresh_fallback" }
 }
 
 impl IntoResponse for ApiError {
@@ -427,9 +451,9 @@ mod tests {
 
     use super::{
         ApiError, detect_forbidden_vocabulary, ensure_canonical_vocabulary,
-        extraction_recovery_warning, map_library_create_error, map_runtime_lifecycle_error_message,
-        map_runtime_upload_error, map_workspace_create_error, query_intent_degradation_warning,
-        reconciliation_fallback_warning, rerank_failure_warning,
+        extraction_recovery_warning, graph_refresh_fallback_warning, map_library_create_error,
+        map_runtime_lifecycle_error_message, map_runtime_upload_error, map_workspace_create_error,
+        query_intent_degradation_warning, rerank_failure_warning,
     };
     use crate::shared::file_extract::UploadAdmissionError;
 
@@ -509,11 +533,12 @@ mod tests {
     }
 
     #[test]
-    fn maps_projection_contention_errors_to_specific_kind() {
+    fn maps_graph_write_contention_errors_to_specific_kind() {
         let error = map_runtime_lifecycle_error_message(
-            "projection contention: Neo4j deadlock detected during graph projection".to_string(),
+            "graph write contention: graph-store deadlock detected during graph refresh"
+                .to_string(),
         );
-        assert!(matches!(error, ApiError::ProjectionContention(_)));
+        assert!(matches!(error, ApiError::GraphWriteContention(_)));
     }
 
     #[test]
@@ -652,10 +677,9 @@ mod tests {
     }
 
     #[test]
-    fn builds_reconciliation_fallback_warning() {
-        let warning =
-            reconciliation_fallback_warning("targeted refresh fell back to broad rebuild");
-        assert_eq!(warning.warning_kind, "reconciliation_fallback");
+    fn builds_graph_refresh_fallback_warning() {
+        let warning = graph_refresh_fallback_warning("targeted refresh fell back to broad rebuild");
+        assert_eq!(warning.warning_kind, "graph_refresh_fallback");
     }
 
     #[test]

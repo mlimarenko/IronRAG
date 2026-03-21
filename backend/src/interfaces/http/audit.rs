@@ -16,6 +16,7 @@ use crate::{
         },
         router_support::ApiError,
     },
+    services::audit_service::ListAuditEventSubjectFilter,
 };
 
 #[derive(Debug, Deserialize)]
@@ -24,6 +25,12 @@ pub struct AuditEventsQuery {
     pub actor_principal_id: Option<Uuid>,
     pub workspace_id: Option<Uuid>,
     pub library_id: Option<Uuid>,
+    pub knowledge_document_id: Option<Uuid>,
+    pub knowledge_revision_id: Option<Uuid>,
+    pub context_bundle_id: Option<Uuid>,
+    pub query_session_id: Option<Uuid>,
+    pub query_execution_id: Option<Uuid>,
+    pub async_operation_id: Option<Uuid>,
     pub internal: Option<bool>,
 }
 
@@ -36,6 +43,12 @@ pub struct AuditEventSubjectResponse {
     pub workspace_id: Option<Uuid>,
     pub library_id: Option<Uuid>,
     pub document_id: Option<Uuid>,
+    pub knowledge_document_id: Option<Uuid>,
+    pub knowledge_revision_id: Option<Uuid>,
+    pub query_session_id: Option<Uuid>,
+    pub query_execution_id: Option<Uuid>,
+    pub context_bundle_id: Option<Uuid>,
+    pub async_operation_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -92,6 +105,14 @@ async fn list_audit_events(
     } else {
         None
     };
+    let subject_filter = ListAuditEventSubjectFilter {
+        knowledge_document_id: query.knowledge_document_id,
+        knowledge_revision_id: query.knowledge_revision_id,
+        context_bundle_id: query.context_bundle_id,
+        query_session_id: query.query_session_id,
+        query_execution_id: query.query_execution_id,
+        async_operation_id: query.async_operation_id,
+    };
 
     let mut response_items = Vec::new();
     if internal {
@@ -103,6 +124,7 @@ async fn list_audit_events(
                 query.actor_principal_id,
                 workspace_filter,
                 library_filter,
+                &subject_filter,
             )
             .await?;
         for event in events {
@@ -127,6 +149,7 @@ async fn list_audit_events(
                 query.actor_principal_id,
                 workspace_filter,
                 library_filter,
+                &subject_filter,
             )
             .await?;
         for event in events {
@@ -214,12 +237,26 @@ fn map_redacted_event(
 }
 
 fn map_subject(subject: AuditEventSubject) -> AuditEventSubjectResponse {
+    let knowledge_document_id = match subject.subject_kind.as_str() {
+        "knowledge_document" => Some(subject.subject_id),
+        "knowledge_revision" => subject.document_id,
+        _ => None,
+    };
+    let knowledge_revision_id =
+        (subject.subject_kind == "knowledge_revision").then_some(subject.subject_id);
+
     AuditEventSubjectResponse {
         audit_event_id: subject.audit_event_id,
         subject_kind: subject.subject_kind,
         subject_id: subject.subject_id,
         workspace_id: subject.workspace_id,
         library_id: subject.library_id,
-        document_id: subject.document_id,
+        document_id: knowledge_document_id.or(subject.document_id),
+        knowledge_document_id,
+        knowledge_revision_id,
+        query_session_id: subject.query_session_id,
+        query_execution_id: subject.query_execution_id,
+        context_bundle_id: subject.context_bundle_id,
+        async_operation_id: subject.async_operation_id,
     }
 }

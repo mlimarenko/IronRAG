@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    infra::repositories::{self, RuntimeGraphExtractionRecordRow},
+    infra::repositories,
     services::{
         graph_extract::{
             GraphExtractionCandidateSet, extraction_lifecycle_from_record,
@@ -24,37 +24,6 @@ use crate::{
         },
     },
 };
-
-#[derive(Debug, Clone)]
-pub struct GraphRebuildPlan {
-    pub library_id: Uuid,
-    pub projection_version: i64,
-    pub surviving_extraction_count: usize,
-    pub surviving_document_count: usize,
-}
-
-pub async fn plan_graph_rebuild(
-    state: &AppState,
-    library_id: Uuid,
-) -> anyhow::Result<GraphRebuildPlan> {
-    let snapshot =
-        repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
-            .await
-            .context("failed to load graph snapshot while planning rebuild")?;
-    let extractions = repositories::list_runtime_graph_extraction_records_by_project(
-        &state.persistence.postgres,
-        library_id,
-    )
-    .await
-    .context("failed to load runtime graph extraction records while planning rebuild")?;
-
-    Ok(GraphRebuildPlan {
-        library_id,
-        projection_version: next_projection_version(snapshot.as_ref()),
-        surviving_document_count: count_surviving_documents(&extractions),
-        surviving_extraction_count: extractions.len(),
-    })
-}
 
 pub async fn rebuild_library_graph(
     state: &AppState,
@@ -79,7 +48,11 @@ pub async fn rebuild_library_graph(
         .await;
     }
 
-    let plan = plan_graph_rebuild(state, library_id).await?;
+    let snapshot =
+        repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
+            .await
+            .context("failed to load graph snapshot while planning rebuild")?;
+    let projection_version = next_projection_version(snapshot.as_ref());
     let provider_profile = resolve_effective_provider_profile(state, library_id).await?;
     let extractions = repositories::list_runtime_graph_extraction_records_by_project(
         &state.persistence.postgres,
@@ -89,7 +62,7 @@ pub async fn rebuild_library_graph(
     .context("failed to reload runtime graph extraction records for rebuild")?;
 
     if extractions.is_empty() {
-        return ensure_empty_graph_snapshot(state, library_id, plan.projection_version).await;
+        return ensure_empty_graph_snapshot(state, library_id, projection_version).await;
     }
 
     let mut merged_any = false;
@@ -132,7 +105,7 @@ pub async fn rebuild_library_graph(
             continue;
         }
 
-        let merge_scope = GraphMergeScope::new(library_id, plan.projection_version).with_lifecycle(
+        let merge_scope = GraphMergeScope::new(library_id, projection_version).with_lifecycle(
             extraction_lifecycle.revision_id.or(document.current_revision_id),
             extraction_lifecycle.activated_by_attempt_id,
         );
@@ -159,7 +132,7 @@ pub async fn rebuild_library_graph(
 
     reconcile_merge_support_counts(
         &state.persistence.postgres,
-        &GraphMergeScope::new(library_id, plan.projection_version),
+        &GraphMergeScope::new(library_id, projection_version),
         &changed_node_ids.iter().copied().collect::<Vec<_>>(),
         &changed_edge_ids.iter().copied().collect::<Vec<_>>(),
     )
@@ -169,20 +142,20 @@ pub async fn rebuild_library_graph(
     let merged_nodes = repositories::list_admitted_runtime_graph_nodes_by_projection(
         &state.persistence.postgres,
         library_id,
-        plan.projection_version,
+        projection_version,
     )
     .await
     .context("failed to load rebuilt graph nodes")?;
     let merged_edges = repositories::list_admitted_runtime_graph_edges_by_projection(
         &state.persistence.postgres,
         library_id,
-        plan.projection_version,
+        projection_version,
     )
     .await
     .context("failed to load rebuilt graph edges")?;
 
     if merged_nodes.is_empty() && merged_edges.is_empty() {
-        return ensure_empty_graph_snapshot(state, library_id, plan.projection_version).await;
+        return ensure_empty_graph_snapshot(state, library_id, projection_version).await;
     }
 
     if merged_any {
@@ -194,11 +167,12 @@ pub async fn rebuild_library_graph(
             .context("failed to embed rebuilt graph edges")?;
     }
 
-    let projection_scope = GraphProjectionScope::new(library_id, plan.projection_version);
+    let projection_scope = GraphProjectionScope::new(library_id, projection_version);
     run_rebuild_projection(state, &projection_scope, "failed to project rebuilt graph").await
 }
 
-fn count_surviving_documents(records: &[RuntimeGraphExtractionRecordRow]) -> usize {
+#[cfg(test)]
+fn count_surviving_documents(records: &[repositories::RuntimeGraphExtractionRecordRow]) -> usize {
     records.iter().map(|record| record.document_id).collect::<BTreeSet<_>>().len()
 }
 
@@ -235,6 +209,7 @@ async fn run_rebuild_projection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infra::repositories::RuntimeGraphExtractionRecordRow;
 
     #[test]
     fn counts_unique_documents_in_rebuild_plan() {

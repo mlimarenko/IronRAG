@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use axum::{
     Router,
     body::Body,
@@ -16,14 +15,12 @@ use uuid::Uuid;
 use rustrag_backend::{
     app::{config::Settings, state::AppState},
     infra::{
-        graph_store::{
-            GraphProjectionData, GraphProjectionEdgeWrite, GraphProjectionNodeWrite,
-            GraphProjectionWriteError, GraphStore,
-        },
+        arangodb::client::ArangoClient,
         persistence::Persistence,
         repositories::{ai_repository, audit_repository, catalog_repository, iam_repository},
     },
     interfaces::http::{auth::hash_token, router},
+    services::audit_service::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
 };
 
 const TEST_TOKEN_PREFIX: &str = "audit-events";
@@ -36,49 +33,6 @@ struct GrantSpec {
     resource_kind: &'static str,
     resource_id: Uuid,
     permission_kind: String,
-}
-
-struct NoopGraphStore;
-
-#[async_trait]
-impl GraphStore for NoopGraphStore {
-    fn backend_name(&self) -> &'static str {
-        "noop"
-    }
-
-    async fn ping(&self) -> Result<()> {
-        Ok(())
-    }
-
-    async fn replace_library_projection(
-        &self,
-        _library_id: Uuid,
-        _projection_version: i64,
-        _nodes: &[GraphProjectionNodeWrite],
-        _edges: &[GraphProjectionEdgeWrite],
-    ) -> Result<(), GraphProjectionWriteError> {
-        Ok(())
-    }
-
-    async fn refresh_library_projection_targets(
-        &self,
-        _library_id: Uuid,
-        _projection_version: i64,
-        _remove_node_ids: &[Uuid],
-        _remove_edge_ids: &[Uuid],
-        _nodes: &[GraphProjectionNodeWrite],
-        _edges: &[GraphProjectionEdgeWrite],
-    ) -> Result<(), GraphProjectionWriteError> {
-        Ok(())
-    }
-
-    async fn load_library_projection(
-        &self,
-        _library_id: Uuid,
-        _projection_version: i64,
-    ) -> Result<GraphProjectionData> {
-        Ok(GraphProjectionData::default())
-    }
 }
 
 struct TempDatabase {
@@ -341,6 +295,23 @@ impl AuditEventsFixture {
         Ok((status, response_json(response).await?))
     }
 
+    async fn rest_get(&self, token: &str, path: &str) -> Result<(StatusCode, Value)> {
+        let response = self
+            .app()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(path)
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .expect("build audit events GET request"),
+            )
+            .await
+            .with_context(|| format!("GET {path} failed"))?;
+        let status = response.status();
+        Ok((status, response_json(response).await?))
+    }
+
     async fn mcp_call(&self, token: &str, method: &str, params: Option<Value>) -> Result<Value> {
         let (status, json) = self
             .rest_post(
@@ -359,6 +330,34 @@ impl AuditEventsFixture {
         }
         Ok(json)
     }
+
+    async fn append_audit_event(
+        &self,
+        action_kind: &str,
+        subjects: Vec<AppendAuditEventSubjectCommand>,
+    ) -> Result<Uuid> {
+        let event = self
+            .state
+            .canonical_services
+            .audit
+            .append_event(
+                &self.state,
+                AppendAuditEventCommand {
+                    actor_principal_id: None,
+                    surface_kind: "rest".to_string(),
+                    action_kind: action_kind.to_string(),
+                    request_id: Some(format!("audit-events-{action_kind}")),
+                    trace_id: None,
+                    result_kind: "succeeded".to_string(),
+                    redacted_message: Some("canonical audit subject proof".to_string()),
+                    internal_message: Some("canonical audit subject proof".to_string()),
+                    subjects,
+                },
+            )
+            .await
+            .context("failed to append audit event")?;
+        Ok(event.id)
+    }
 }
 
 fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppState> {
@@ -367,7 +366,8 @@ fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppState> {
         redis: redis::Client::open(settings.redis_url.clone())
             .context("failed to create redis client for audit events state")?,
     };
-    Ok(AppState::from_dependencies(settings, persistence, Arc::new(NoopGraphStore)))
+    let arango_client = Arc::new(ArangoClient::from_settings(&settings)?);
+    Ok(AppState::from_dependencies(settings, persistence, arango_client))
 }
 
 fn replace_database_name(database_url: &str, new_database: &str) -> Result<String> {
@@ -436,7 +436,7 @@ async fn latest_audit_event_for_action(
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn token_mint_and_revoke_append_audit_events_with_api_token_subjects() -> Result<()> {
     let fixture = AuditEventsFixture::create().await?;
 
@@ -496,7 +496,7 @@ async fn token_mint_and_revoke_append_audit_events_with_api_token_subjects() -> 
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn governance_actions_and_denials_append_expected_audit_subjects() -> Result<()> {
     let fixture = AuditEventsFixture::create().await?;
 
@@ -601,6 +601,26 @@ async fn governance_actions_and_denials_append_expected_audit_subjects() -> Resu
         assert_eq!(library_subjects[0].subject_id, created_library_id);
         assert_eq!(library_subjects[0].workspace_id, Some(fixture.workspace_id));
 
+        let (status, body) = fixture
+            .rest_get(&workspace_admin, &format!("/v1/audit/events?libraryId={created_library_id}"))
+            .await?;
+        assert_eq!(status, StatusCode::OK);
+        let events = body.as_array().context("audit events response must be an array")?;
+        let library_event_response = events
+            .iter()
+            .find(|event| event["id"] == json!(library_event.id))
+            .context("expected MCP library create event in audit feed")?;
+        let subjects = library_event_response["subjects"]
+            .as_array()
+            .context("audit event subjects must be an array")?;
+        let subject = subjects
+            .iter()
+            .find(|subject| subject["subjectKind"] == json!("library"))
+            .context("expected library subject in MCP audit response")?;
+        assert_eq!(subject["subjectId"], json!(created_library_id));
+        assert_eq!(subject["libraryId"], json!(created_library_id));
+        assert_eq!(subject["workspaceId"], json!(fixture.workspace_id));
+
         let denied_response = fixture
             .rest_post(
                 &read_only,
@@ -623,6 +643,213 @@ async fn governance_actions_and_denials_append_expected_audit_subjects() -> Resu
         assert_eq!(denied_subjects[0].subject_kind, "workspace");
         assert_eq!(denied_subjects[0].subject_id, fixture.workspace_id);
         assert_eq!(denied_subjects[0].workspace_id, Some(fixture.workspace_id));
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango services"]
+async fn canonical_audit_subjects_surface_query_and_knowledge_ids_through_http() -> Result<()> {
+    let fixture = AuditEventsFixture::create().await?;
+
+    let result = async {
+        let system_admin = fixture.mint_system_admin_token("canonical-subjects").await?;
+
+        let query_session_id = Uuid::now_v7();
+        let query_execution_id = Uuid::now_v7();
+        let knowledge_document_id = Uuid::now_v7();
+        let knowledge_bundle_id = Uuid::now_v7();
+        let async_operation_id = Uuid::now_v7();
+
+        let audit_event_id = fixture
+            .append_audit_event(
+                "governance.canonical_subjects.proof",
+                vec![
+                    AppendAuditEventSubjectCommand {
+                        subject_kind: "query_session".to_string(),
+                        subject_id: query_session_id,
+                        workspace_id: Some(fixture.workspace_id),
+                        library_id: Some(fixture.library_id),
+                        document_id: None,
+                    },
+                    AppendAuditEventSubjectCommand {
+                        subject_kind: "query_execution".to_string(),
+                        subject_id: query_execution_id,
+                        workspace_id: Some(fixture.workspace_id),
+                        library_id: Some(fixture.library_id),
+                        document_id: None,
+                    },
+                    AppendAuditEventSubjectCommand {
+                        subject_kind: "knowledge_document".to_string(),
+                        subject_id: knowledge_document_id,
+                        workspace_id: Some(fixture.workspace_id),
+                        library_id: Some(fixture.library_id),
+                        document_id: Some(knowledge_document_id),
+                    },
+                    AppendAuditEventSubjectCommand {
+                        subject_kind: "knowledge_bundle".to_string(),
+                        subject_id: knowledge_bundle_id,
+                        workspace_id: Some(fixture.workspace_id),
+                        library_id: Some(fixture.library_id),
+                        document_id: None,
+                    },
+                    AppendAuditEventSubjectCommand {
+                        subject_kind: "async_operation".to_string(),
+                        subject_id: async_operation_id,
+                        workspace_id: Some(fixture.workspace_id),
+                        library_id: Some(fixture.library_id),
+                        document_id: None,
+                    },
+                ],
+            )
+            .await?;
+
+        let raw_subjects =
+            audit_repository::list_audit_event_subjects(fixture.pool(), audit_event_id).await?;
+        assert_eq!(raw_subjects.len(), 5);
+        assert!(raw_subjects.iter().any(|subject| subject.subject_kind == "query_session"));
+        assert!(raw_subjects.iter().any(|subject| subject.subject_kind == "query_execution"));
+        assert!(raw_subjects.iter().any(|subject| subject.subject_kind == "knowledge_document"));
+        assert!(raw_subjects.iter().any(|subject| subject.subject_kind == "knowledge_bundle"));
+        assert!(raw_subjects.iter().any(|subject| subject.subject_kind == "async_operation"));
+
+        let filters = [
+            ("querySessionId", query_session_id, "query_session", "querySessionId"),
+            ("queryExecutionId", query_execution_id, "query_execution", "queryExecutionId"),
+            (
+                "knowledgeDocumentId",
+                knowledge_document_id,
+                "knowledge_document",
+                "knowledgeDocumentId",
+            ),
+            ("contextBundleId", knowledge_bundle_id, "knowledge_bundle", "contextBundleId"),
+            ("asyncOperationId", async_operation_id, "async_operation", "asyncOperationId"),
+        ];
+
+        for (query_param, subject_id, subject_kind, canonical_field) in filters {
+            let (status, body) = fixture
+                .rest_get(&system_admin, &format!("/v1/audit/events?{query_param}={subject_id}"))
+                .await?;
+            assert_eq!(status, StatusCode::OK);
+            let events = body.as_array().context("audit events response must be an array")?;
+            assert_eq!(events.len(), 1, "expected one audit event for {query_param}");
+
+            let event = &events[0];
+            assert_eq!(event["id"], json!(audit_event_id));
+            let subjects =
+                event["subjects"].as_array().context("audit event subjects must be an array")?;
+            let subject = subjects
+                .iter()
+                .find(|subject| subject["subjectKind"] == json!(subject_kind))
+                .with_context(|| format!("missing {subject_kind} subject in audit response"))?;
+            assert_eq!(subject["subjectId"], json!(subject_id));
+            assert_eq!(subject[canonical_field], json!(subject_id));
+            assert_eq!(subject["workspaceId"], json!(fixture.workspace_id));
+            assert_eq!(subject["libraryId"], json!(fixture.library_id));
+        }
+
+        let (status, body) = fixture.rest_get(&system_admin, "/v1/audit/events").await?;
+        assert_eq!(status, StatusCode::OK);
+        let events = body.as_array().context("audit events response must be an array")?;
+        assert!(
+            events.iter().any(|event| event["id"] == json!(audit_event_id)),
+            "canonical audit proof event must be visible in the audit feed"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango services"]
+async fn canonical_agent_memory_audit_subjects_surface_knowledge_and_async_operation_ids()
+-> Result<()> {
+    let fixture = AuditEventsFixture::create().await?;
+
+    let result = async {
+        let system_admin = fixture.mint_system_admin_token("canonical-agent-memory").await?;
+        let knowledge_document_id = Uuid::now_v7();
+        let async_operation_id = Uuid::now_v7();
+
+        let audit_event_id = fixture
+            .append_audit_event(
+                "agent.memory.upload",
+                vec![
+                    AppendAuditEventSubjectCommand {
+                        subject_kind: "knowledge_document".to_string(),
+                        subject_id: knowledge_document_id,
+                        workspace_id: Some(fixture.workspace_id),
+                        library_id: Some(fixture.library_id),
+                        document_id: Some(knowledge_document_id),
+                    },
+                    AppendAuditEventSubjectCommand {
+                        subject_kind: "async_operation".to_string(),
+                        subject_id: async_operation_id,
+                        workspace_id: Some(fixture.workspace_id),
+                        library_id: Some(fixture.library_id),
+                        document_id: None,
+                    },
+                ],
+            )
+            .await?;
+
+        let raw_subjects =
+            audit_repository::list_audit_event_subjects(fixture.pool(), audit_event_id).await?;
+        assert_eq!(raw_subjects.len(), 2);
+        assert!(raw_subjects.iter().any(|subject| subject.subject_kind == "knowledge_document"));
+        assert!(raw_subjects.iter().any(|subject| subject.subject_kind == "async_operation"));
+
+        let (status, body) = fixture
+            .rest_get(
+                &system_admin,
+                &format!("/v1/audit/events?knowledgeDocumentId={knowledge_document_id}"),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::OK);
+        let events = body.as_array().context("audit events response must be an array")?;
+        let event = events
+            .iter()
+            .find(|event| event["id"] == json!(audit_event_id))
+            .context("expected agent.memory.upload event in audit feed by knowledgeDocumentId")?;
+        let subjects =
+            event["subjects"].as_array().context("audit event subjects must be an array")?;
+        let knowledge_document_subject = subjects
+            .iter()
+            .find(|subject| subject["subjectKind"] == json!("knowledge_document"))
+            .context("expected knowledge_document subject in audit response")?;
+        assert_eq!(knowledge_document_subject["knowledgeDocumentId"], json!(knowledge_document_id));
+        assert_eq!(knowledge_document_subject["documentId"], json!(knowledge_document_id));
+
+        let (status, body) = fixture
+            .rest_get(
+                &system_admin,
+                &format!("/v1/audit/events?asyncOperationId={async_operation_id}"),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::OK);
+        let events = body.as_array().context("audit events response must be an array")?;
+        let event = events
+            .iter()
+            .find(|event| event["id"] == json!(audit_event_id))
+            .context("expected agent.memory.upload event in audit feed by asyncOperationId")?;
+        let subjects =
+            event["subjects"].as_array().context("audit event subjects must be an array")?;
+        let async_operation_subject = subjects
+            .iter()
+            .find(|subject| subject["subjectKind"] == json!("async_operation"))
+            .context("expected async_operation subject in audit response")?;
+        assert_eq!(async_operation_subject["asyncOperationId"], json!(async_operation_id));
+        assert_eq!(async_operation_subject["workspaceId"], json!(fixture.workspace_id));
+        assert_eq!(async_operation_subject["libraryId"], json!(fixture.library_id));
 
         Ok(())
     }

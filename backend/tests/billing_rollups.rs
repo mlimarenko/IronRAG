@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use rust_decimal::Decimal;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
@@ -9,12 +8,7 @@ use uuid::Uuid;
 use rustrag_backend::{
     app::{config::Settings, state::AppState},
     infra::{
-        graph_store::{
-            GraphProjectionData, GraphProjectionEdgeWrite, GraphProjectionNodeWrite,
-            GraphProjectionWriteError, GraphStore,
-        },
-        persistence::Persistence,
-        repositories::query_repository,
+        arangodb::client::ArangoClient, persistence::Persistence, repositories::query_repository,
     },
     services::{
         billing_service::{
@@ -25,49 +19,6 @@ use rustrag_backend::{
         ingest_service::{AdmitIngestJobCommand, LeaseAttemptCommand},
     },
 };
-
-struct NoopGraphStore;
-
-#[async_trait]
-impl GraphStore for NoopGraphStore {
-    fn backend_name(&self) -> &'static str {
-        "noop"
-    }
-
-    async fn ping(&self) -> Result<()> {
-        Ok(())
-    }
-
-    async fn replace_library_projection(
-        &self,
-        _library_id: Uuid,
-        _projection_version: i64,
-        _nodes: &[GraphProjectionNodeWrite],
-        _edges: &[GraphProjectionEdgeWrite],
-    ) -> Result<(), GraphProjectionWriteError> {
-        Ok(())
-    }
-
-    async fn refresh_library_projection_targets(
-        &self,
-        _library_id: Uuid,
-        _projection_version: i64,
-        _remove_node_ids: &[Uuid],
-        _remove_edge_ids: &[Uuid],
-        _nodes: &[GraphProjectionNodeWrite],
-        _edges: &[GraphProjectionEdgeWrite],
-    ) -> Result<(), GraphProjectionWriteError> {
-        Ok(())
-    }
-
-    async fn load_library_projection(
-        &self,
-        _library_id: Uuid,
-        _projection_version: i64,
-    ) -> Result<GraphProjectionData> {
-        Ok(GraphProjectionData::default())
-    }
-}
 
 struct TempDatabase {
     name: String,
@@ -201,6 +152,8 @@ impl BillingRollupsFixture {
         let query_execution = query_repository::create_execution(
             &state.persistence.postgres,
             &query_repository::NewQueryExecution {
+                execution_id: Uuid::now_v7(),
+                context_bundle_id: Uuid::now_v7(),
                 workspace_id: workspace.id,
                 library_id: library.id,
                 conversation_id: conversation.id,
@@ -225,6 +178,9 @@ impl BillingRollupsFixture {
                     library_id: library.id,
                     mutation_id: None,
                     connector_id: None,
+                    async_operation_id: None,
+                    knowledge_document_id: None,
+                    knowledge_revision_id: None,
                     job_kind: "content_mutation".to_string(),
                     priority: 100,
                     dedupe_key: Some(format!("billing-ingest-{}", Uuid::now_v7())),
@@ -242,6 +198,7 @@ impl BillingRollupsFixture {
                     job_id: ingest_job.id,
                     worker_principal_id: None,
                     lease_token: Some("billing-rollup-lease".to_string()),
+                    knowledge_generation_id: None,
                     current_stage: Some("embedding_chunks".to_string()),
                 },
             )
@@ -270,7 +227,8 @@ fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppState> {
         redis: redis::Client::open(settings.redis_url.clone())
             .context("failed to create redis client for billing_rollups test state")?,
     };
-    Ok(AppState::from_dependencies(settings, persistence, Arc::new(NoopGraphStore)))
+    let arango_client = Arc::new(ArangoClient::from_settings(&settings)?);
+    Ok(AppState::from_dependencies(settings, persistence, arango_client))
 }
 
 fn replace_database_name(database_url: &str, new_database: &str) -> Result<String> {
@@ -401,20 +359,40 @@ async fn canonical_billing_rollups_cover_query_and_ingest_executions() -> Result
         assert_eq!(ingest_cost.total_cost, Decimal::new(156, 5));
         assert_eq!(ingest_cost.provider_call_count, 1);
 
-        let provider_calls = billing
-            .list_provider_calls(&fixture.state, fixture.library_id)
+        let mut provider_calls = billing
+            .list_execution_provider_calls(
+                &fixture.state,
+                "query_execution",
+                fixture.query_execution_id,
+            )
             .await
-            .context("failed to list provider calls")?;
+            .context("failed to list query execution provider calls")?;
+        provider_calls.extend(
+            billing
+                .list_execution_provider_calls(
+                    &fixture.state,
+                    "ingest_attempt",
+                    fixture.ingest_attempt_id,
+                )
+                .await
+                .context("failed to list ingest execution provider calls")?,
+        );
         assert_eq!(provider_calls.len(), 4);
         assert!(provider_calls.iter().any(|row| row.call_kind == "query_planning"));
         assert!(provider_calls.iter().any(|row| row.call_kind == "query_answer"));
         assert!(provider_calls.iter().any(|row| row.call_kind == "query_rerank"));
         assert!(provider_calls.iter().any(|row| row.call_kind == "embed_chunk_batch"));
 
-        let charges = billing
-            .list_charges(&fixture.state, fixture.library_id)
+        let mut charges = billing
+            .list_execution_charges(&fixture.state, "query_execution", fixture.query_execution_id)
             .await
-            .context("failed to list charges")?;
+            .context("failed to list query execution charges")?;
+        charges.extend(
+            billing
+                .list_execution_charges(&fixture.state, "ingest_attempt", fixture.ingest_attempt_id)
+                .await
+                .context("failed to list ingest execution charges")?,
+        );
         assert_eq!(charges.len(), 4);
         assert!(charges.iter().all(|row| row.currency_code == "USD"));
 

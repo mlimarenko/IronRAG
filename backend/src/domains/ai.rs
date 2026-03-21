@@ -3,6 +3,17 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AiBindingPurpose {
+    ExtractText,
+    ExtractGraph,
+    EmbedChunk,
+    QueryRetrieve,
+    QueryAnswer,
+    Vision,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderCatalogEntry {
     pub id: Uuid,
@@ -38,7 +49,7 @@ pub struct LibraryModelBinding {
     pub id: Uuid,
     pub workspace_id: Uuid,
     pub library_id: Uuid,
-    pub binding_purpose: String,
+    pub binding_purpose: AiBindingPurpose,
     pub provider_credential_id: Uuid,
     pub model_preset_id: Uuid,
     pub binding_state: String,

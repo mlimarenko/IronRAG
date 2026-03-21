@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use axum::{
     Router,
     body::Body,
@@ -16,10 +15,7 @@ use uuid::Uuid;
 use rustrag_backend::{
     app::{config::Settings, state::AppState},
     infra::{
-        graph_store::{
-            GraphProjectionData, GraphProjectionEdgeWrite, GraphProjectionNodeWrite,
-            GraphProjectionWriteError, GraphStore,
-        },
+        arangodb::client::ArangoClient,
         persistence::{Persistence, canonical_ai_catalog_seeded, canonical_baseline_present},
     },
     interfaces::http::router,
@@ -29,49 +25,6 @@ const SEEDED_PROVIDER_COUNT: i64 = 3;
 const SEEDED_MODEL_COUNT: i64 = 7;
 const SEEDED_PRICE_COUNT: i64 = 12;
 const TEST_BOOTSTRAP_SECRET: &str = "greenfield-bootstrap-secret";
-
-struct NoopGraphStore;
-
-#[async_trait]
-impl GraphStore for NoopGraphStore {
-    fn backend_name(&self) -> &'static str {
-        "noop"
-    }
-
-    async fn ping(&self) -> Result<()> {
-        Ok(())
-    }
-
-    async fn replace_library_projection(
-        &self,
-        _library_id: Uuid,
-        _projection_version: i64,
-        _nodes: &[GraphProjectionNodeWrite],
-        _edges: &[GraphProjectionEdgeWrite],
-    ) -> Result<(), GraphProjectionWriteError> {
-        Ok(())
-    }
-
-    async fn refresh_library_projection_targets(
-        &self,
-        _library_id: Uuid,
-        _projection_version: i64,
-        _remove_node_ids: &[Uuid],
-        _remove_edge_ids: &[Uuid],
-        _nodes: &[GraphProjectionNodeWrite],
-        _edges: &[GraphProjectionEdgeWrite],
-    ) -> Result<(), GraphProjectionWriteError> {
-        Ok(())
-    }
-
-    async fn load_library_projection(
-        &self,
-        _library_id: Uuid,
-        _projection_version: i64,
-    ) -> Result<GraphProjectionData> {
-        Ok(GraphProjectionData::default())
-    }
-}
 
 struct TempDatabase {
     name: String,
@@ -176,6 +129,7 @@ fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppState> {
         redis: redis::Client::open(settings.redis_url.clone())
             .context("failed to create redis client for bootstrap test state")?,
     };
+    let arango_client = Arc::new(ArangoClient::from_settings(&settings)?);
 
     Ok(AppState::from_dependencies(
         Settings {
@@ -198,7 +152,7 @@ fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppState> {
             ..settings
         },
         persistence,
-        Arc::new(NoopGraphStore),
+        arango_client,
     ))
 }
 

@@ -16,7 +16,7 @@ This note explains how the frontend presents retrieval intelligence and graph-qu
 ## Live Ask Flow
 
 1. Optimistic user and pending assistant messages are inserted locally.
-2. `/v1/ui/graph/ask` returns the live answer plus planning, rerank, context-assembly, grouped references, and warnings.
+2. `/v1/query/sessions/{sessionId}/turns` returns the live answer plus planning, rerank, context-assembly, grouped references, and warnings.
 3. The assistant rail renders grouped references instead of flat chips when support groups are available.
 
 ## Persisted History Hydration

@@ -1,4 +1,3 @@
-create extension vector;
 create extension pgcrypto;
 
 create type catalog_workspace_lifecycle_state as enum ('active', 'archived');
@@ -15,6 +14,8 @@ create type iam_grant_resource_kind as enum (
     'workspace',
     'library',
     'document',
+    'query_session',
+    'async_operation',
     'connector',
     'provider_credential',
     'library_binding'
@@ -107,7 +108,7 @@ create type ops_warning_severity as enum ('info', 'warn', 'error');
 create type audit_result_kind as enum ('succeeded', 'rejected', 'failed');
 
 create table iam_principal (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     principal_kind iam_principal_kind not null,
     display_label text not null,
     status iam_principal_status not null default 'active',
@@ -117,7 +118,7 @@ create table iam_principal (
 );
 
 create table catalog_workspace (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     slug text not null unique,
     display_name text not null,
     lifecycle_state catalog_workspace_lifecycle_state not null default 'active',
@@ -128,12 +129,13 @@ create table catalog_workspace (
 );
 
 create table catalog_library (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     workspace_id uuid not null references catalog_workspace(id) on delete cascade,
     slug text not null,
     display_name text not null,
     description text,
     lifecycle_state catalog_library_lifecycle_state not null default 'active',
+    source_truth_version bigint not null default 1,
     created_by_principal_id uuid references iam_principal(id) on delete set null,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
@@ -192,7 +194,7 @@ create table iam_user (
 );
 
 create table iam_session (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     principal_id uuid not null references iam_principal(id) on delete cascade,
     session_secret_hash text not null,
     issued_at timestamptz not null default now(),
@@ -232,7 +234,7 @@ create table iam_workspace_membership (
 );
 
 create table iam_grant (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     principal_id uuid not null references iam_principal(id) on delete cascade,
     resource_kind iam_grant_resource_kind not null,
     resource_id uuid not null,
@@ -244,7 +246,7 @@ create table iam_grant (
 );
 
 create table catalog_library_connector (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     workspace_id uuid not null,
     library_id uuid not null,
     connector_kind catalog_connector_kind not null,
@@ -261,7 +263,7 @@ create table catalog_library_connector (
 );
 
 create table ai_provider_credential (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     workspace_id uuid not null references catalog_workspace(id) on delete cascade,
     provider_catalog_id uuid not null references ai_provider_catalog(id) on delete restrict,
     label text not null,
@@ -275,10 +277,11 @@ create table ai_provider_credential (
 );
 
 create table ai_model_preset (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     workspace_id uuid not null references catalog_workspace(id) on delete cascade,
     model_catalog_id uuid not null references ai_model_catalog(id) on delete restrict,
     preset_name text not null,
+    system_prompt text,
     temperature double precision,
     top_p double precision,
     max_output_tokens_override integer,
@@ -291,7 +294,7 @@ create table ai_model_preset (
 );
 
 create table ai_library_model_binding (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     workspace_id uuid not null,
     library_id uuid not null,
     binding_purpose ai_binding_purpose not null,
@@ -314,7 +317,7 @@ create table ai_library_model_binding (
 );
 
 create table ai_binding_validation (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     binding_id uuid not null references ai_library_model_binding(id) on delete cascade,
     validation_state ai_validation_state not null,
     checked_at timestamptz not null default now(),
@@ -323,7 +326,7 @@ create table ai_binding_validation (
 );
 
 create table billing_provider_call (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     workspace_id uuid not null,
     library_id uuid not null,
     binding_id uuid references ai_library_model_binding(id) on delete set null,
@@ -341,7 +344,7 @@ create table billing_provider_call (
 );
 
 create table billing_usage (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     provider_call_id uuid not null references billing_provider_call(id) on delete cascade,
     usage_kind text not null,
     billing_unit billing_unit not null,
@@ -350,7 +353,7 @@ create table billing_usage (
 );
 
 create table billing_charge (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     usage_id uuid not null references billing_usage(id) on delete cascade,
     price_catalog_id uuid not null references ai_price_catalog(id) on delete restrict,
     currency_code text not null,
@@ -360,7 +363,7 @@ create table billing_charge (
 );
 
 create table billing_execution_cost (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     owning_execution_kind billing_owning_execution_kind not null,
     owning_execution_id uuid not null,
     total_cost numeric(18,8) not null default 0,
@@ -371,7 +374,7 @@ create table billing_execution_cost (
 );
 
 create table content_document (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     workspace_id uuid not null,
     library_id uuid not null,
     external_key text not null,
@@ -387,7 +390,7 @@ create table content_document (
 );
 
 create table content_revision (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     document_id uuid not null,
     workspace_id uuid not null,
     library_id uuid not null,
@@ -411,7 +414,7 @@ create table content_revision (
 );
 
 create table content_chunk (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     revision_id uuid not null references content_revision(id) on delete cascade,
     chunk_index integer not null,
     start_offset integer not null,
@@ -425,7 +428,7 @@ create table content_chunk (
 );
 
 create table content_mutation (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     workspace_id uuid not null,
     library_id uuid not null,
     operation_kind content_mutation_operation_kind not null,
@@ -443,7 +446,7 @@ create table content_mutation (
 );
 
 create table content_mutation_item (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     mutation_id uuid not null references content_mutation(id) on delete cascade,
     document_id uuid references content_document(id) on delete set null,
     base_revision_id uuid references content_revision(id) on delete set null,
@@ -452,12 +455,33 @@ create table content_mutation_item (
     message text
 );
 
+create table ops_async_operation (
+    id uuid primary key default uuidv7(),
+    workspace_id uuid not null,
+    library_id uuid not null,
+    operation_kind text not null,
+    surface_kind surface_kind not null,
+    requested_by_principal_id uuid references iam_principal(id) on delete set null,
+    status ops_async_operation_status not null default 'accepted',
+    subject_kind text not null,
+    subject_id uuid,
+    created_at timestamptz not null default now(),
+    completed_at timestamptz,
+    failure_code text,
+    foreign key (library_id, workspace_id)
+        references catalog_library(id, workspace_id)
+        on delete cascade
+);
+
 create table ingest_job (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     workspace_id uuid not null,
     library_id uuid not null,
     mutation_id uuid references content_mutation(id) on delete set null,
     connector_id uuid references catalog_library_connector(id) on delete set null,
+    async_operation_id uuid references ops_async_operation(id) on delete set null,
+    knowledge_document_id uuid,
+    knowledge_revision_id uuid,
     job_kind ingest_job_kind not null,
     queue_state ingest_queue_state not null default 'queued',
     priority integer not null default 100,
@@ -471,11 +495,12 @@ create table ingest_job (
 );
 
 create table ingest_attempt (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     job_id uuid not null references ingest_job(id) on delete cascade,
     attempt_number integer not null,
     worker_principal_id uuid references iam_principal(id) on delete set null,
     lease_token text,
+    knowledge_generation_id uuid,
     attempt_state ingest_attempt_state not null,
     current_stage text,
     started_at timestamptz not null default now(),
@@ -488,7 +513,7 @@ create table ingest_attempt (
 );
 
 create table ingest_stage_event (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     attempt_id uuid not null references ingest_attempt(id) on delete cascade,
     stage_name text not null,
     stage_state ingest_stage_state not null,
@@ -510,7 +535,7 @@ create table extract_content (
 );
 
 create table extract_chunk_result (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     chunk_id uuid not null references content_chunk(id) on delete cascade,
     attempt_id uuid not null references ingest_attempt(id) on delete cascade,
     extract_state extract_state not null,
@@ -522,7 +547,7 @@ create table extract_chunk_result (
 );
 
 create table extract_node_candidate (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     chunk_result_id uuid not null references extract_chunk_result(id) on delete cascade,
     canonical_key text not null,
     node_kind text not null,
@@ -531,7 +556,7 @@ create table extract_node_candidate (
 );
 
 create table extract_edge_candidate (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     chunk_result_id uuid not null references extract_chunk_result(id) on delete cascade,
     canonical_key text not null,
     edge_kind text not null,
@@ -549,7 +574,7 @@ create table extract_resume_cursor (
 );
 
 create table graph_projection (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     workspace_id uuid not null,
     library_id uuid not null,
     source_attempt_id uuid references ingest_attempt(id) on delete set null,
@@ -564,7 +589,7 @@ create table graph_projection (
 );
 
 create table graph_node (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     projection_id uuid not null references graph_projection(id) on delete cascade,
     workspace_id uuid not null,
     library_id uuid not null,
@@ -582,7 +607,7 @@ create table graph_node (
 );
 
 create table graph_edge (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     projection_id uuid not null references graph_projection(id) on delete cascade,
     workspace_id uuid not null,
     library_id uuid not null,
@@ -627,26 +652,8 @@ create table graph_summary (
     generated_at timestamptz
 );
 
-create table search_chunk_embedding (
-    chunk_id uuid not null references content_chunk(id) on delete cascade,
-    model_catalog_id uuid not null references ai_model_catalog(id) on delete restrict,
-    embedding_vector vector,
-    embedded_at timestamptz not null default now(),
-    active boolean not null default true,
-    primary key (chunk_id, model_catalog_id)
-);
-
-create table search_graph_node_embedding (
-    node_id uuid not null references graph_node(id) on delete cascade,
-    model_catalog_id uuid not null references ai_model_catalog(id) on delete restrict,
-    embedding_vector vector,
-    embedded_at timestamptz not null default now(),
-    active boolean not null default true,
-    primary key (node_id, model_catalog_id)
-);
-
 create table query_conversation (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     workspace_id uuid not null,
     library_id uuid not null,
     created_by_principal_id uuid references iam_principal(id) on delete set null,
@@ -661,10 +668,11 @@ create table query_conversation (
 );
 
 create table query_execution (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     workspace_id uuid not null,
     library_id uuid not null,
     conversation_id uuid not null references query_conversation(id) on delete cascade,
+    context_bundle_id uuid not null,
     request_turn_id uuid,
     response_turn_id uuid,
     binding_id uuid references ai_library_model_binding(id) on delete set null,
@@ -679,7 +687,7 @@ create table query_execution (
 );
 
 create table query_turn (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     conversation_id uuid not null references query_conversation(id) on delete cascade,
     turn_index integer not null,
     turn_kind query_turn_kind not null,
@@ -720,24 +728,6 @@ create table query_graph_edge_reference (
     primary key (execution_id, edge_id)
 );
 
-create table ops_async_operation (
-    id uuid primary key default gen_random_uuid(),
-    workspace_id uuid not null,
-    library_id uuid not null,
-    operation_kind text not null,
-    surface_kind surface_kind not null,
-    requested_by_principal_id uuid references iam_principal(id) on delete set null,
-    status ops_async_operation_status not null default 'accepted',
-    subject_kind text not null,
-    subject_id uuid,
-    created_at timestamptz not null default now(),
-    completed_at timestamptz,
-    failure_code text,
-    foreign key (library_id, workspace_id)
-        references catalog_library(id, workspace_id)
-        on delete cascade
-);
-
 create table ops_library_state (
     library_id uuid primary key references catalog_library(id) on delete cascade,
     queue_depth integer not null default 0,
@@ -750,7 +740,7 @@ create table ops_library_state (
 );
 
 create table ops_library_warning (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     library_id uuid not null references catalog_library(id) on delete cascade,
     warning_kind text not null,
     severity ops_warning_severity not null,
@@ -761,7 +751,7 @@ create table ops_library_warning (
 );
 
 create table audit_event (
-    id uuid primary key default gen_random_uuid(),
+    id uuid primary key default uuidv7(),
     actor_principal_id uuid references iam_principal(id) on delete set null,
     surface_kind surface_kind not null,
     action_kind text not null,

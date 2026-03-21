@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     domains::runtime_graph::RuntimeGraphArtifactFilterReason,
-    infra::graph_store::GraphProjectionData,
+    infra::arangodb::graph_store::GraphViewData,
 };
 
 const LOW_VALUE_RELATION_TYPES: &[&str] = &[
@@ -52,7 +52,7 @@ impl GraphQualityGuardService {
     }
 
     #[must_use]
-    pub fn filter_projection(&self, projection: &GraphProjectionData) -> GraphProjectionData {
+    pub fn filter_projection(&self, projection: &GraphViewData) -> GraphViewData {
         let node_key_index = projection
             .nodes
             .iter()
@@ -82,7 +82,7 @@ impl GraphQualityGuardService {
             })
             .cloned()
             .collect::<Vec<_>>();
-        GraphProjectionData { nodes, edges }
+        GraphViewData { nodes, edges }
     }
 
     #[must_use]
@@ -135,8 +135,8 @@ impl GraphQualityGuardService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infra::graph_store::{
-        GraphProjectionData, GraphProjectionEdgeWrite, GraphProjectionNodeWrite,
+    use crate::infra::arangodb::graph_store::{
+        GraphViewData, GraphViewEdgeWrite, GraphViewNodeWrite,
     };
     use uuid::Uuid;
 
@@ -183,9 +183,9 @@ mod tests {
         let document_id = Uuid::now_v7();
         let entity_id = Uuid::now_v7();
         let orphan_id = Uuid::now_v7();
-        let projection = GraphProjectionData {
+        let projection = GraphViewData {
             nodes: vec![
-                GraphProjectionNodeWrite {
+                GraphViewNodeWrite {
                     node_id: document_id,
                     canonical_key: "document:1".to_string(),
                     label: "Doc".to_string(),
@@ -195,7 +195,7 @@ mod tests {
                     aliases: Vec::new(),
                     metadata_json: serde_json::json!({}),
                 },
-                GraphProjectionNodeWrite {
+                GraphViewNodeWrite {
                     node_id: entity_id,
                     canonical_key: "entity:alpha".to_string(),
                     label: "Alpha".to_string(),
@@ -205,7 +205,7 @@ mod tests {
                     aliases: Vec::new(),
                     metadata_json: serde_json::json!({}),
                 },
-                GraphProjectionNodeWrite {
+                GraphViewNodeWrite {
                     node_id: orphan_id,
                     canonical_key: "entity:orphan".to_string(),
                     label: "Orphan".to_string(),
@@ -217,7 +217,7 @@ mod tests {
                 },
             ],
             edges: vec![
-                GraphProjectionEdgeWrite {
+                GraphViewEdgeWrite {
                     edge_id: Uuid::now_v7(),
                     from_node_id: document_id,
                     to_node_id: entity_id,
@@ -228,7 +228,7 @@ mod tests {
                     weight: None,
                     metadata_json: serde_json::json!({}),
                 },
-                GraphProjectionEdgeWrite {
+                GraphViewEdgeWrite {
                     edge_id: Uuid::now_v7(),
                     from_node_id: orphan_id,
                     to_node_id: orphan_id,

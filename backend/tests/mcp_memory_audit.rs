@@ -308,7 +308,7 @@ impl McpAuditFixture {
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn successful_mcp_actions_persist_audit_rows_with_expected_action_kinds() -> anyhow::Result<()>
 {
     let settings =
@@ -394,7 +394,7 @@ async fn successful_mcp_actions_persist_audit_rows_with_expected_action_kinds() 
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn rejected_and_failed_mcp_actions_persist_sanitized_audit_rows() -> anyhow::Result<()> {
     let settings = Settings::from_env().context("failed to load settings for audit error test")?;
     let fixture = McpAuditFixture::create(settings).await?;
@@ -493,7 +493,7 @@ async fn rejected_and_failed_mcp_actions_persist_sanitized_audit_rows() -> anyho
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn request_ids_appear_in_mcp_responses_and_persisted_audit_rows() -> anyhow::Result<()> {
     let settings =
         Settings::from_env().context("failed to load settings for audit request id test")?;
@@ -547,7 +547,7 @@ async fn request_ids_appear_in_mcp_responses_and_persisted_audit_rows() -> anyho
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn audit_review_is_limited_to_authorized_callers_and_workspace_scope() -> anyhow::Result<()> {
     let settings = Settings::from_env().context("failed to load settings for audit review test")?;
     let fixture = McpAuditFixture::create(settings).await?;

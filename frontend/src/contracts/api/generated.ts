@@ -94,6 +94,45 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/mcp": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * MCP JSON-RPC endpoint for canonical agent memory flows
+         * @description Bearer-token authenticated JSON-RPC transport for discovery, search, read, and document
+         *     mutation tools. Tool visibility and callable actions are derived from the authenticated
+         *     principal's typed grants.
+         */
+        post: operations["postMcpRequest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/mcp/capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Return the derived MCP capability snapshot for the current principal */
+        get: operations["getMcpCapabilities"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/catalog/workspaces": {
         parameters: {
             query?: never;
@@ -646,58 +685,212 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/graph/libraries/{libraryId}/projection": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get the active canonical graph projection for one library */
-        get: operations["getGraphProjection"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/graph/libraries/{libraryId}/nodes": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List canonical graph nodes for the active library projection */
-        get: operations["listGraphNodes"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/graph/libraries/{libraryId}/edges": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List canonical graph edges for the active library projection */
-        get: operations["listGraphEdges"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/v1/search/documents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Search documents, chunks, entities, and relations in one knowledge library */
+        get: operations["searchDocuments"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/knowledge/libraries/{libraryId}/documents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List documents in one knowledge library */
+        get: operations["listKnowledgeDocuments"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/knowledge/libraries/{libraryId}/documents/{documentId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get document detail with revisions and latest chunks */
+        get: operations["getKnowledgeDocument"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/knowledge/libraries/{libraryId}/context-bundles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List context bundles in one knowledge library */
+        get: operations["listKnowledgeContextBundles"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/knowledge/context-bundles/{bundleId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get one context bundle with traces and resolved knowledge rows */
+        get: operations["getKnowledgeContextBundle"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/knowledge/libraries/{libraryId}/entities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List graph entities in one knowledge library */
+        get: operations["listKnowledgeEntities"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/knowledge/libraries/{libraryId}/entities/{entityId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get entity detail with mention and provenance data */
+        get: operations["getKnowledgeEntity"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/knowledge/libraries/{libraryId}/relations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List graph relations in one knowledge library */
+        get: operations["listKnowledgeRelations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/knowledge/libraries/{libraryId}/relations/{relationId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get relation detail with provenance data */
+        get: operations["getKnowledgeRelation"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/knowledge/libraries/{libraryId}/search/documents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Search documents, chunks, entities, and relations in one knowledge library */
+        get: operations["searchKnowledgeDocuments"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/query/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List canonical query sessions for one library */
+        get: operations["listQuerySessions"];
+        put?: never;
+        /** Create one canonical query session */
+        post: operations["createQuerySession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/query/sessions/{sessionId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get canonical query session detail */
+        get: operations["getQuerySession"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/query/sessions/{sessionId}/turns": {
         parameters: {
             query?: never;
             header?: never;
@@ -706,8 +899,110 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Search readable documents in one library */
-        post: operations["searchDocuments"];
+        /** Submit a user turn and execute one grounded answer in a query session */
+        post: operations["createQuerySessionTurn"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/query/executions/{executionId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get canonical grounded execution detail */
+        get: operations["getQueryExecution"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/billing/provider-calls": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List canonical provider calls for one library */
+        get: operations["listBillingProviderCalls"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/billing/charges": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List canonical priced charges for one library */
+        get: operations["listBillingCharges"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/billing/executions/{executionKind}/{executionId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get canonical execution cost rollup */
+        get: operations["getBillingExecutionCost"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ops/operations/{operationId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get one canonical async operation */
+        get: operations["getAsyncOperation"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ops/libraries/{libraryId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get derived operational state for one library */
+        get: operations["getLibraryState"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -731,372 +1026,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/mcp": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * MCP JSON-RPC endpoint for agent memory discovery, search, reads, and mutations
-         * @description Bearer-token authenticated JSON-RPC transport for MCP memory tools.
-         *
-         *     Implemented tool families currently include:
-         *     - discovery: `list_workspaces`, `list_libraries`, `create_workspace`, `create_library`
-         *     - reads: `search_documents`, `read_document`
-         *     - mutations: `upload_documents`, `update_document`, `get_mutation_status`
-         *
-         *     Tool visibility is token-dependent. Read-only tokens do not receive mutation tools in
-         *     `tools/list`, and mutation attempts from insufficient tokens return a JSON-RPC tool result
-         *     with `isError=true`.
-         */
-        post: operations["postMcpRequest"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/mcp/capabilities": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Return the derived MCP memory capability snapshot for the current token
-         * @description Requires `bearerAuth`. The returned counts and `tools` list are token-dependent and
-         *     reflect only workspaces, libraries, create actions, and memory actions that the current
-         *     bearer token can already access through backend policy.
-         */
-        get: operations["getMcpCapabilities"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ui/auth/login": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Sign in with login and password for a browser UI session */
-        post: operations["uiLogin"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ui/auth/session": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get the current authenticated UI session */
-        get: operations["getUiSession"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ui/auth/logout": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** End the current browser UI session */
-        post: operations["uiLogout"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ui/context": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get the current authenticated shell context */
-        get: operations["getUiContext"];
-        /** Update the active workspace, library, or locale for the UI session */
-        put: operations["updateUiContext"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ui/workspaces": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List workspaces visible to the current UI session */
-        get: operations["listUiWorkspaces"];
-        put?: never;
-        /** Create a workspace from the authenticated shell */
-        post: operations["createUiWorkspace"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ui/libraries": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List libraries visible in the selected workspace */
-        get: operations["listUiLibraries"];
-        put?: never;
-        /** Create a library inside the selected workspace */
-        post: operations["createUiLibrary"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/workspaces": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List workspaces */
-        get: operations["listWorkspaces"];
-        put?: never;
-        /**
-         * Create workspace
-         * @description Requires `workspace:admin` scope or an `instance_admin` token.
-         */
-        post: operations["createWorkspace"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/workspaces/{id}/governance": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get workspace governance summary
-         * @description Requires `workspace:admin`, `usage:read`, `providers:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access their own workspace.
-         */
-        get: operations["getWorkspaceGovernance"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/sources": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List sources */
-        get: operations["listSources"];
-        put?: never;
-        /**
-         * Create source
-         * @description Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
-         */
-        post: operations["createSource"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ingestion-jobs": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List ingestion jobs */
-        get: operations["listIngestionJobs"];
-        put?: never;
-        /**
-         * Create ingestion job
-         * @description Requires `documents:write`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only create jobs for projects in their own workspace.
-         */
-        post: operations["createIngestionJob"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ingestion-jobs/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get ingestion job detail
-         * @description Requires `documents:read`, `documents:write`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access jobs in their own workspace.
-         */
-        get: operations["getIngestionJobDetail"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ingestion-jobs/{id}/retry": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Retry an ingestion job
-         * @description Requires `documents:write`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only retry jobs in their own workspace.
-         */
-        post: operations["retryIngestionJob"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/documents": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List documents */
-        get: operations["listDocuments"];
-        put?: never;
-        /**
-         * Create document metadata record
-         * @description Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
-         */
-        post: operations["createDocument"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/content/ingest-text": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Queue plain text for ingestion
-         * @description Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
-         *
-         *     The current backend enqueues an ingestion job and returns its queued lifecycle state; it does not synchronously create a document/chunk result in this response.
-         *     Workspace-scoped tokens may only queue jobs for projects in their own workspace.
-         */
-        post: operations["ingestText"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/content/search-chunks": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Lexically search chunks within a project
-         * @description Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token.
-         */
-        post: operations["searchChunks"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/content/embed-project": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Generate embeddings for project chunks
-         * @description Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
-         *
-         *     If `embedding_model_profile_id` is provided, the backend resolves provider/model from that profile;
-         *     otherwise it uses `provider_kind` and `model_name` directly.
-         */
-        post: operations["embedProjectChunks"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/v1/chunks": {
         parameters: {
             query?: never;
@@ -1105,7 +1034,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List chunks by document or project
+         * List chunks by document
          * @description Requires `documents:read`, `workspace:admin`, or an `instance_admin` token.
          */
         get: operations["listChunks"];
@@ -1117,3512 +1046,243 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/retrieval-runs": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List retrieval runs */
-        get: operations["listRetrievalRuns"];
-        put?: never;
-        /**
-         * Create a retrieval run record manually
-         * @description Requires `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only create runs for projects in their own workspace.
-         */
-        post: operations["createRetrievalRun"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/retrieval-runs/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get retrieval run detail
-         * @description Requires `query:run`, `workspace:admin`, `documents:read`, or an `instance_admin` token. Workspace-scoped tokens may only access runs in their own workspace.
-         */
-        get: operations["getRetrievalRunDetail"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/query": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Run live retrieval + generation query
-         * @description Requires `query:run`, `workspace:admin`, or an `instance_admin` token.
-         *
-         *     The backend combines lexical matching with optional semantic matching based on stored chunk embeddings,
-         *     then calls the configured LLM gateway to produce the final answer.
-         */
-        post: operations["runQuery"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/product/projects/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get product-oriented project overview
-         * @description Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
-         */
-        get: operations["getProductProjectOverview"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/product/projects/{id}/diagnostics": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get project diagnostics
-         * @description Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
-         */
-        get: operations["getProductProjectDiagnostics"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/product/projects/{id}/query-contract": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get product query contract description
-         * @description Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
-         */
-        get: operations["getProductProjectQueryContract"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/product/documents/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get product-oriented document overview
-         * @description Requires `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access documents in their own workspace. Usage and cost attribution are currently exposed at project scope because per-document attribution is not persisted yet.
-         */
-        get: operations["getProductDocumentOverview"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/product/documents/{id}/diagnostics": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get document diagnostics
-         * @description Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access documents in their own workspace.
-         */
-        get: operations["getProductDocumentDiagnostics"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/graph-products/{project_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get graph product snapshot
-         * @description Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
-         */
-        get: operations["getGraphProduct"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/graph-products/{project_id}/summary": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get graph project summary
-         * @description Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
-         */
-        get: operations["getGraphSummary"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/graph-products/{project_id}/diagnostics": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get graph project diagnostics
-         * @description Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Returns persisted content counts, graph provenance coverage, and concrete readiness blockers/next steps without mutating runtime state.
-         */
-        get: operations["getGraphDiagnostics"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/graph-products/{project_id}/search": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Search graph entities and relations
-         * @description Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Query parameter `q` must be non-empty.
-         */
-        get: operations["searchGraph"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/graph-products/{project_id}/entities/{entity_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get graph entity detail
-         * @description Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
-         */
-        get: operations["getGraphEntityDetail"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/graph-products/{project_id}/entities/{entity_id}/subgraph": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get a bounded subgraph around an entity
-         * @description Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Depth defaults to 1 and must be <= 3.
-         */
-        get: operations["getGraphSubgraph"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/usage-events": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List usage events
-         * @description Requires `usage:read`, `workspace:admin`, or an `instance_admin` token.
-         */
-        get: operations["listUsageEvents"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/cost-ledger": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List cost ledger entries
-         * @description Requires `usage:read`, `workspace:admin`, or an `instance_admin` token.
-         */
-        get: operations["listCostLedger"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/runtime/providers": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List configured runtime providers and allowed models */
-        get: operations["listRuntimeProviders"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/runtime/providers/validate": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Validate one provider and model combination */
-        post: operations["validateRuntimeProvider"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/runtime/libraries/{libraryId}/provider-profile": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get the effective runtime provider profile for one library */
-        get: operations["getRuntimeProviderProfile"];
-        /** Update the effective runtime provider profile for one library */
-        put: operations["updateRuntimeProviderProfile"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/runtime/libraries/{libraryId}/queries/answer": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Execute a grounded answer query against one library */
-        post: operations["runRuntimeAnswerQuery"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/runtime/libraries/{libraryId}/queries/data": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Execute a structured runtime query against one library */
-        post: operations["runRuntimeStructuredQuery"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/runtime/libraries/{libraryId}/queries/{queryId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get one persisted runtime query execution */
-        get: operations["getRuntimeQueryExecution"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/runtime/admin/model-pricing": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List effective-dated model pricing catalog entries */
-        get: operations["listRuntimeModelPricing"];
-        put?: never;
-        /** Create a new effective-dated pricing catalog entry */
-        post: operations["createRuntimeModelPricing"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/runtime/admin/model-pricing/{pricingId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        /** Update an existing pricing catalog entry without changing identity fields */
-        put: operations["updateRuntimeModelPricing"];
-        post?: never;
-        /** Deactivate a pricing catalog entry */
-        delete: operations["deleteRuntimeModelPricing"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        CatalogWorkspace: {
-            /** Format: uuid */
-            workspaceId: string;
-            slug: string;
-            name: string;
-            /** @enum {string} */
-            lifecycleState: "active" | "archived";
-        };
-        CatalogLibrary: {
-            /** Format: uuid */
-            libraryId: string;
-            /** Format: uuid */
-            workspaceId: string;
-            slug: string;
-            name: string;
-            /** @enum {string} */
-            lifecycleState: "active" | "archived";
-        };
-        IamPrincipal: {
-            /** Format: uuid */
-            principalId: string;
-            /** @enum {string} */
-            principalKind: "user" | "api_token" | "worker" | "bootstrap";
-            /** @enum {string} */
-            lifecycleState: "active" | "revoked" | "disabled";
-        };
-        BootstrapClaimRequest: {
-            bootstrapSecret: string;
-            /** Format: email */
-            email: string;
-            displayName: string;
-            password: string;
-        };
-        BootstrapClaimResponse: {
-            /** Format: uuid */
-            principalId: string;
-            /** Format: email */
-            email: string;
-            displayName: string;
-            /** Format: date-time */
-            claimedAt: string;
-        };
-        LoginSessionRequest: {
-            /** Format: email */
-            email: string;
-            password: string;
-            rememberMe?: boolean;
-        };
-        SessionUserResponse: {
-            /** Format: uuid */
-            principalId: string;
-            /** Format: email */
-            email: string;
-            displayName: string;
-        };
-        SessionResponse: {
-            /** Format: uuid */
-            sessionId: string;
-            /** Format: date-time */
-            expiresAt: string;
-            user: components["schemas"]["SessionUserResponse"];
-        };
-        CatalogWorkspaceResponse: {
-            /** Format: uuid */
-            id: string;
-            slug: string;
-            displayName: string;
-            /** @enum {string} */
-            lifecycleState: "active" | "disabled" | "archived";
-        };
-        CreateCatalogWorkspaceRequest: {
-            slug?: string | null;
-            displayName: string;
-        };
-        CatalogLibraryResponse: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            workspaceId: string;
-            slug: string;
-            displayName: string;
-            description?: string | null;
-            /** @enum {string} */
-            lifecycleState: "active" | "disabled" | "archived";
-        };
-        CreateCatalogLibraryRequest: {
-            slug?: string | null;
-            displayName: string;
-            description?: string | null;
-        };
-        PrincipalResponse: {
-            /** Format: uuid */
-            id: string;
-            /** @enum {string} */
-            principalKind: "user" | "api_token" | "worker" | "bootstrap";
-            status: string;
-            displayLabel: string;
-            /** Format: date-time */
-            createdAt: string;
-            /** Format: date-time */
-            disabledAt?: string | null;
-        };
-        UserResponse: {
-            /** Format: uuid */
-            principalId: string;
-            /** Format: email */
-            email: string;
-            displayName: string;
-            authProviderKind: string;
-            externalSubject?: string | null;
-        };
-        WorkspaceMembershipResponse: {
-            /** Format: uuid */
-            workspaceId: string;
-            /** Format: uuid */
-            principalId: string;
-            membershipState: string;
-            /** Format: date-time */
-            joinedAt: string;
-            /** Format: date-time */
-            endedAt?: string | null;
-        };
-        TokenResponse: {
-            /** Format: uuid */
-            principalId: string;
-            /** Format: uuid */
-            workspaceId?: string | null;
-            label: string;
-            tokenPrefix: string;
-            status: string;
-            /** Format: date-time */
-            expiresAt?: string | null;
-            /** Format: date-time */
-            revokedAt?: string | null;
-            /** Format: uuid */
-            issuedByPrincipalId?: string | null;
-            /** Format: date-time */
-            lastUsedAt?: string | null;
-        };
-        MintTokenRequest: {
-            /** Format: uuid */
-            workspaceId?: string | null;
-            label: string;
-            /** Format: date-time */
-            expiresAt?: string | null;
-        };
-        MintTokenResponse: {
-            token: string;
-            apiToken: components["schemas"]["TokenResponse"];
-        };
-        /** @enum {string} */
-        IamGrantResourceKind: "system" | "workspace" | "library" | "document" | "connector" | "provider_credential" | "library_binding";
-        /** @enum {string} */
-        IamPermissionKind: "workspace_admin" | "workspace_read" | "library_read" | "library_write" | "document_read" | "document_write" | "connector_admin" | "credential_admin" | "binding_admin" | "query_run" | "ops_read" | "audit_read" | "iam_admin";
-        CreateGrantRequest: {
-            /** Format: uuid */
-            principalId: string;
-            resourceKind: components["schemas"]["IamGrantResourceKind"];
-            /** Format: uuid */
-            resourceId: string;
-            permissionKind: components["schemas"]["IamPermissionKind"];
-            /** Format: date-time */
-            expiresAt?: string | null;
-        };
-        GrantResponse: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            principalId: string;
-            resourceKind: components["schemas"]["IamGrantResourceKind"];
-            /** Format: uuid */
-            resourceId: string;
-            permissionKind: components["schemas"]["IamPermissionKind"];
-            /** Format: uuid */
-            grantedByPrincipalId?: string | null;
-            /** Format: date-time */
-            grantedAt: string;
-            /** Format: date-time */
-            expiresAt?: string | null;
-        };
-        MeResponse: {
-            principal: components["schemas"]["PrincipalResponse"];
-            user?: components["schemas"]["UserResponse"] | null;
-            workspaceMemberships: components["schemas"]["WorkspaceMembershipResponse"][];
-            effectiveGrants: components["schemas"]["GrantResponse"][];
-        };
-        ProviderCatalogEntryResponse: {
-            /** Format: uuid */
-            id: string;
-            providerKind: string;
-            displayName: string;
-            apiStyle: string;
-            lifecycleState: string;
-        };
-        ModelCatalogEntryResponse: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            providerCatalogId: string;
-            modelName: string;
-            capabilityKind: string;
-            modalityKind: string;
-            contextWindow?: number | null;
-            maxOutputTokens?: number | null;
-        };
-        ModelPresetResponse: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            workspaceId: string;
-            /** Format: uuid */
-            modelCatalogId: string;
-            presetName: string;
-            systemPrompt?: string | null;
-            temperature?: number | null;
-            topP?: number | null;
-            maxOutputTokensOverride?: number | null;
-            extraParametersJson: Record<string, never>;
-            /** Format: date-time */
-            createdAt: string;
-            /** Format: date-time */
-            updatedAt: string;
-        };
-        PriceCatalogEntryResponse: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            modelCatalogId: string;
-            billingUnit: string;
-            unitPrice: string;
-            currencyCode: string;
-            /** Format: date-time */
-            effectiveFrom: string;
-        };
-        CreateProviderCredentialRequest: {
-            /** Format: uuid */
-            workspaceId: string;
-            /** Format: uuid */
-            providerCatalogId: string;
-            label: string;
-            secretRef: string;
-        };
-        ProviderCredentialResponse: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            workspaceId: string;
-            /** Format: uuid */
-            providerCatalogId: string;
-            label: string;
-            secretRef: string;
-            credentialState: string;
-            /** Format: date-time */
-            createdAt: string;
-            /** Format: date-time */
-            updatedAt: string;
-        };
-        CreateLibraryBindingRequest: {
-            /** Format: uuid */
-            workspaceId: string;
-            /** Format: uuid */
-            libraryId: string;
-            bindingPurpose: string;
-            /** Format: uuid */
-            providerCredentialId: string;
-            /** Format: uuid */
-            modelPresetId: string;
-        };
-        LibraryModelBindingResponse: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            workspaceId: string;
-            /** Format: uuid */
-            libraryId: string;
-            bindingPurpose: string;
-            /** Format: uuid */
-            providerCredentialId: string;
-            /** Format: uuid */
-            modelPresetId: string;
-            bindingState: string;
-        };
-        BindingValidationResponse: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            bindingId: string;
-            validationState: string;
-            /** Format: date-time */
-            checkedAt: string;
-            failureCode?: string | null;
-            message?: string | null;
-        };
-        AuditEventSubjectResponse: {
-            /** Format: uuid */
-            auditEventId: string;
-            subjectKind: string;
-            /** Format: uuid */
-            subjectId: string;
-            /** Format: uuid */
-            workspaceId?: string | null;
-            /** Format: uuid */
-            libraryId?: string | null;
-            /** Format: uuid */
-            documentId?: string | null;
-        };
-        AuditEventResponse: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            actorPrincipalId?: string | null;
-            surfaceKind: string;
-            actionKind: string;
-            resultKind: string;
-            requestId?: string | null;
-            traceId?: string | null;
-            /** Format: date-time */
-            createdAt: string;
-            redactedMessage?: string | null;
-            internalMessage?: string | null;
-            subjects: components["schemas"]["AuditEventSubjectResponse"][];
-        };
-        GreenfieldAiCatalogSeedSummary: {
-            providers: number;
-            models: number;
-            prices: number;
-        };
-        AiCatalogEntry: {
-            /** Format: uuid */
-            catalogId: string;
-            providerKey: string;
-            modelKey: string;
-            currency: string;
-        };
-        ContentDocument: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            workspaceId: string;
-            /** Format: uuid */
-            libraryId: string;
-            externalKey: string;
-            /** @enum {string} */
-            documentState: "active" | "deleted";
-            /** Format: date-time */
-            createdAt: string;
-        };
-        ContentDocumentHead: {
-            /** Format: uuid */
-            documentId: string;
-            /** Format: uuid */
-            activeRevisionId?: string | null;
-            /** Format: uuid */
-            readableRevisionId?: string | null;
-            /** Format: uuid */
-            latestMutationId?: string | null;
-            /** Format: uuid */
-            latestSuccessfulAttemptId?: string | null;
-            /** Format: date-time */
-            headUpdatedAt: string;
-        };
-        ContentRevision: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            documentId: string;
-            /** Format: uuid */
-            workspaceId: string;
-            /** Format: uuid */
-            libraryId: string;
-            revisionNumber: number;
-            /** Format: uuid */
-            parentRevisionId?: string | null;
-            contentSourceKind: string;
-            checksum: string;
-            mimeType: string;
-            byteSize: number;
-            title?: string | null;
-            languageCode?: string | null;
-            sourceUri?: string | null;
-            storageKey?: string | null;
-            /** Format: uuid */
-            createdByPrincipalId?: string | null;
-            /** Format: date-time */
-            createdAt: string;
-        };
-        ContentMutation: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            workspaceId: string;
-            /** Format: uuid */
-            libraryId: string;
-            operationKind: string;
-            mutationState: string;
-            /** Format: date-time */
-            requestedAt: string;
-            /** Format: date-time */
-            completedAt?: string | null;
-            /** Format: uuid */
-            requestedByPrincipalId?: string | null;
-            requestSurface: string;
-            idempotencyKey?: string | null;
-            failureCode?: string | null;
-            conflictCode?: string | null;
-        };
-        ContentMutationItem: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            mutationId: string;
-            /** Format: uuid */
-            documentId?: string | null;
-            /** Format: uuid */
-            baseRevisionId?: string | null;
-            /** Format: uuid */
-            resultRevisionId?: string | null;
-            itemState: string;
-            message?: string | null;
-        };
-        ContentDocumentDetailResponse: {
-            document: components["schemas"]["ContentDocument"];
-            head?: components["schemas"]["ContentDocumentHead"] | null;
-            activeRevision?: components["schemas"]["ContentRevision"] | null;
-        };
-        ContentMutationDetailResponse: {
-            mutation: components["schemas"]["ContentMutation"];
-            items: components["schemas"]["ContentMutationItem"][];
-            /** Format: uuid */
-            jobId?: string | null;
-        };
-        UploadContentDocumentRequest: {
-            /** Format: uuid */
-            library_id: string;
-            idempotency_key?: string | null;
-            title?: string | null;
-            /** Format: binary */
-            file: string;
+        ApiErrorBody: {
+            [key: string]: unknown;
         };
         AppendContentDocumentRequest: {
-            appendedText: string;
-            idempotencyKey?: string | null;
+            [key: string]: unknown;
         };
-        ReplaceContentDocumentRequest: {
-            idempotency_key?: string | null;
-            /** Format: binary */
-            file: string;
+        AuditEventResponse: {
+            [key: string]: unknown;
         };
-        CreateContentDocumentRequest: {
-            /** Format: uuid */
-            workspaceId: string;
-            /** Format: uuid */
-            libraryId: string;
-            externalKey?: string | null;
-            idempotencyKey?: string | null;
-            contentSourceKind?: string | null;
-            checksum?: string | null;
-            mimeType?: string | null;
-            byteSize?: number | null;
-            title?: string | null;
-            languageCode?: string | null;
-            sourceUri?: string | null;
-            storageKey?: string | null;
+        BillingCharge: {
+            [key: string]: unknown;
         };
-        CreateContentMutationRequest: {
-            /** Format: uuid */
-            workspaceId: string;
-            /** Format: uuid */
-            libraryId: string;
-            /** Format: uuid */
-            documentId: string;
-            operationKind: string;
-            idempotencyKey?: string | null;
-            contentSourceKind?: string | null;
-            checksum?: string | null;
-            mimeType?: string | null;
-            byteSize?: number | null;
-            title?: string | null;
-            languageCode?: string | null;
-            sourceUri?: string | null;
-            storageKey?: string | null;
+        BillingExecutionCost: {
+            [key: string]: unknown;
         };
-        CreateContentDocumentResponse: {
-            document: components["schemas"]["ContentDocumentDetailResponse"];
-            mutation: components["schemas"]["ContentMutationDetailResponse"];
+        BillingProviderCall: {
+            [key: string]: unknown;
         };
-        IngestJob: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            workspaceId: string;
-            /** Format: uuid */
-            libraryId: string;
-            /** Format: uuid */
-            mutationId?: string | null;
-            /** Format: uuid */
-            connectorId?: string | null;
-            jobKind: string;
-            queueState: string;
-            priority: number;
-            dedupeKey?: string | null;
-            /** Format: date-time */
-            queuedAt: string;
-            /** Format: date-time */
-            availableAt: string;
-            /** Format: date-time */
-            completedAt?: string | null;
+        BindingValidationResponse: {
+            [key: string]: unknown;
         };
-        IngestAttempt: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            jobId: string;
-            attemptNumber: number;
-            /** Format: uuid */
-            workerPrincipalId?: string | null;
-            leaseToken?: string | null;
-            attemptState: string;
-            currentStage?: string | null;
-            /** Format: date-time */
-            startedAt: string;
-            /** Format: date-time */
-            heartbeatAt?: string | null;
-            /** Format: date-time */
-            finishedAt?: string | null;
-            failureClass?: string | null;
-            failureCode?: string | null;
-            retryable?: boolean;
+        BootstrapClaimRequest: {
+            [key: string]: unknown;
         };
-        IngestStageEvent: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            attemptId: string;
-            stageName: string;
-            stageState: string;
-            ordinal: number;
-            message?: string | null;
-            detailsJson: Record<string, never>;
-            /** Format: date-time */
-            recordedAt: string;
+        BootstrapClaimResponse: {
+            [key: string]: unknown;
         };
-        GraphProjectionDetailResponse: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            workspaceId: string;
-            /** Format: uuid */
-            libraryId: string;
-            /** Format: uuid */
-            sourceAttemptId?: string | null;
-            projectionState: string;
-            /** Format: date-time */
-            startedAt: string;
-            /** Format: date-time */
-            completedAt?: string | null;
+        CatalogLibraryResponse: {
+            [key: string]: unknown;
         };
-        GraphNode: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            projectionId: string;
-            canonicalKey: string;
-            nodeKind: string;
-            displayLabel: string;
-            supportCount: number;
-        };
-        GraphEdge: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            projectionId: string;
-            canonicalKey: string;
-            edgeKind: string;
-            /** Format: uuid */
-            fromNodeId: string;
-            /** Format: uuid */
-            toNodeId: string;
-            supportCount: number;
-        };
-        SearchRequest: {
-            /** Format: uuid */
-            libraryId: string;
-            queryText: string;
-            limit: number;
-        };
-        SearchHit: {
-            /** Format: uuid */
-            subjectId: string;
-            score: number;
-            preview?: string | null;
-        };
-        OpsAsyncOperation: {
-            /** Format: uuid */
-            operationId: string;
-            operationKind: string;
-            /** @enum {string} */
-            lifecycleState: "accepted" | "processing" | "ready" | "failed" | "superseded";
-        };
-        AuditEvent: {
-            /** Format: uuid */
-            eventId: string;
-            actionKind: string;
-            /** @enum {string} */
-            requestSurface: "ui" | "rest" | "mcp" | "worker" | "bootstrap";
-            /** Format: date-time */
-            occurredAt: string;
-        };
-        McpJsonRpcRequest: {
-            /** @enum {string} */
-            jsonrpc: "2.0";
-            id?: string | number | Record<string, never> | unknown[];
-            method: string;
-            params?: {
-                [key: string]: unknown;
-            };
-        };
-        McpJsonRpcResponse: {
-            /** @enum {string} */
-            jsonrpc: "2.0";
-            id?: string | number | Record<string, never> | unknown[];
-            result?: {
-                [key: string]: unknown;
-            };
-            error?: {
-                code?: number;
-                message?: string;
-                data?: {
-                    [key: string]: unknown;
-                } | null;
-            } | null;
-        };
-        McpCapabilitySnapshot: {
-            /** Format: uuid */
-            tokenId: string;
-            tokenKind: string;
-            /** Format: uuid */
-            workspaceScope?: string | null;
-            visibleWorkspaceCount: number;
-            visibleLibraryCount: number;
-            /**
-             * @description Token-dependent tool list. Read-only callers do not receive creation or mutation
-             *     descriptors. Workspace-admin and project-write callers may additionally receive
-             *     `create_workspace` and `create_library`.
-             */
-            tools: string[];
-            /** Format: date-time */
-            generatedAt: string;
-        };
-        McpWorkspaceDescriptor: {
-            /** Format: uuid */
-            workspaceId: string;
-            slug: string;
-            name: string;
-            status: string;
-            visibleLibraryCount: number;
-            canWriteAnyLibrary: boolean;
-        };
-        McpLibraryDescriptor: {
-            /** Format: uuid */
-            libraryId: string;
-            /** Format: uuid */
-            workspaceId: string;
-            slug: string;
-            name: string;
-            description?: string | null;
-            documentCount: number;
-            readableDocumentCount: number;
-            processingDocumentCount: number;
-            failedDocumentCount: number;
-            /**
-             * @description Indicates that the caller may target this library in MCP search, even if all current
-             *     matching documents are still processing.
-             */
-            supportsSearch: boolean;
-            /**
-             * @description Indicates that the caller may issue MCP reads for documents in this library. A true
-             *     value does not imply that any current document is already readable.
-             */
-            supportsRead: boolean;
-            supportsWrite: boolean;
-        };
-        McpSearchDocumentsArguments: {
-            query: string;
-            /**
-             * @description Optional visible-library filter. If any provided id is outside token scope, the MCP
-             *     tool call is rejected instead of returning partial results.
-             */
-            libraryIds?: string[] | null;
-            limit?: number | null;
-        };
-        McpDocumentHit: {
-            /** Format: uuid */
-            documentId: string;
-            /** Format: uuid */
-            logicalDocumentId: string;
-            /** Format: uuid */
-            libraryId: string;
-            /** Format: uuid */
-            workspaceId: string;
-            documentTitle: string;
-            /** Format: uuid */
-            latestRevisionId: string | null;
-            /** Format: double */
-            score: number;
-            /** @description Present only when normalized extracted text is available. */
-            excerpt: string | null;
-            excerptStartOffset: number | null;
-            excerptEndOffset: number | null;
-            /** @enum {string} */
-            readabilityState: "readable" | "processing" | "failed" | "unavailable";
-            statusReason: string | null;
-        };
-        McpSearchDocumentsResponse: {
-            query: string;
-            limit: number;
-            libraryIds: string[];
-            hits: components["schemas"]["McpDocumentHit"][];
-        };
-        McpReadDocumentArguments: {
-            /** Format: uuid */
-            documentId?: string | null;
-            /** @enum {string|null} */
-            mode?: "full" | "excerpt" | null;
-            startOffset?: number | null;
-            length?: number | null;
-            /**
-             * @description Stateless token returned by a prior read slice. When present, it overrides
-             *     `documentId`, `mode`, `startOffset`, and `length`.
-             */
-            continuationToken?: string | null;
-        } | unknown | unknown;
-        McpReadDocumentResponse: {
-            /** Format: uuid */
-            documentId: string;
-            /** Format: uuid */
-            libraryId: string;
-            /** Format: uuid */
-            workspaceId: string;
-            /** Format: uuid */
-            latestRevisionId: string | null;
-            /** @enum {string} */
-            readMode: "full" | "excerpt";
-            /** @enum {string} */
-            readabilityState: "readable" | "processing" | "failed" | "unavailable";
-            statusReason: string | null;
-            content: string | null;
-            sliceStartOffset: number;
-            sliceEndOffset: number;
-            totalContentLength: number | null;
-            continuationToken: string | null;
-            hasMore: boolean;
-        };
-        McpAuditEventsResponse: {
-            events: components["schemas"]["McpAuditEvent"][];
-        };
-        McpAuditEvent: {
-            /** Format: uuid */
-            auditEventId: string;
-            requestId: string;
-            /** Format: uuid */
-            tokenId: string;
-            tokenKind: string;
-            /** @enum {string} */
-            actionKind: "capability_snapshot" | "list_workspaces" | "list_libraries" | "search_documents" | "read_document" | "create_workspace" | "create_library" | "upload_documents" | "update_document" | "get_mutation_status" | "review_audit";
-            /** Format: uuid */
-            workspaceId: string | null;
-            /** Format: uuid */
-            libraryId: string | null;
-            /** Format: uuid */
-            documentId: string | null;
-            /** @enum {string} */
-            status: "pending" | "succeeded" | "rejected" | "failed";
-            errorKind: string | null;
-            /** Format: date-time */
-            createdAt: string;
-        };
-        McpUploadDocumentInput: {
-            fileName: string;
-            /** @description Base64-encoded raw file body. */
-            contentBase64: string;
-            mimeType?: string | null;
-            title?: string | null;
-        };
-        McpUploadDocumentsArguments: {
-            /** Format: uuid */
-            libraryId: string;
-            /**
-             * @description Optional caller-supplied mutation key. When one batch contains multiple documents,
-             *     the backend derives a stable per-document suffix internally.
-             */
-            idempotencyKey?: string | null;
-            documents: components["schemas"]["McpUploadDocumentInput"][];
-        };
-        McpUpdateDocumentArguments: {
-            /** Format: uuid */
-            libraryId: string;
-            /** Format: uuid */
-            documentId: string;
-            /** @enum {string} */
-            operationKind: "append" | "replace";
-            idempotencyKey?: string | null;
-            appendedText?: string | null;
-            replacementFileName?: string | null;
-            /** @description Required for `replace`. Base64-encoded raw file body. */
-            replacementContentBase64?: string | null;
-            replacementMimeType?: string | null;
-        };
-        McpGetMutationStatusArguments: {
-            /** Format: uuid */
-            receiptId: string;
-        };
-        McpMutationReceipt: {
-            /** Format: uuid */
-            receiptId: string;
-            /** Format: uuid */
-            tokenId: string;
-            /** Format: uuid */
-            workspaceId: string;
-            /** Format: uuid */
-            libraryId: string;
-            /** Format: uuid */
-            documentId?: string | null;
-            /** @enum {string} */
-            operationKind: "upload" | "append" | "replace";
-            idempotencyKey: string;
-            /** @enum {string} */
-            status: "accepted" | "processing" | "ready" | "failed" | "superseded";
-            runtimeTrackingId?: string | null;
-            /** Format: date-time */
-            acceptedAt: string;
-            /** Format: date-time */
-            lastStatusAt: string;
-            failureKind?: string | null;
-        };
-        ApiErrorBody: {
-            error: string;
-            errorKind?: string | null;
-            details?: components["schemas"]["RuntimeUploadRejectionDetails"] | null;
-            requestId?: string | null;
-        };
-        ApiWarningBody: {
-            warning: string;
-            /** @enum {string} */
-            warningKind: "blocked_activity" | "stalled_activity" | "partial_accounting" | "partial_convergence";
-        };
-        HealthResponse: {
-            /** @example ok */
-            status: string;
-            /** @example rustrag-backend */
-            service: string;
-            /** @example local */
-            environment: string;
-        };
-        ReadinessResponse: {
-            /** @enum {string} */
-            status: "ready" | "degraded";
-            /** @enum {string} */
-            postgres: "ok" | "down";
-            /** @enum {string} */
-            redis: "ok" | "down";
-        };
-        /** @enum {string} */
-        HealthState: "healthy" | "degraded" | "failed" | "unknown";
-        VersionResponse: {
-            service: string;
-            /** @example 0.1.0 */
-            version: string;
-            environment: string;
-        };
-        CreateTokenRequest: {
-            /** Format: uuid */
-            workspace_id?: string | null;
-            /** @example workspace_api */
-            token_kind: string;
-            /** @example frontend-local */
-            label: string;
-            /**
-             * @example [
-             *       "documents:read",
-             *       "query:run"
-             *     ]
-             */
-            scopes: string[];
-        };
-        TokenCreateResponse: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            workspace_id?: string | null;
-            token_kind: string;
-            label: string;
-            /** @description Plaintext token shown only at creation time. */
-            token: string;
-            scopes: string[];
-        };
-        WorkspaceSummary: {
-            /** Format: uuid */
-            id: string;
-            slug: string;
-            name: string;
-            /** @example active */
-            status: string;
-        };
-        WorkspaceGovernanceSummary: {
-            /** Format: uuid */
-            id: string;
-            slug: string;
-            name: string;
-            status: string;
-            projects: number;
-            provider_accounts: number;
-            model_profiles: number;
-            api_tokens: number;
-            health_state: components["schemas"]["HealthState"];
-            usage: components["schemas"]["UsageGovernanceSummary"];
-        };
-        CreateWorkspaceRequest: {
-            slug: string;
-            name: string;
-        };
-        ProjectSummary: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            workspace_id: string;
-            slug: string;
-            name: string;
-            description?: string | null;
-        };
-        CreateProjectRequest: {
-            /** Format: uuid */
-            workspace_id: string;
-            slug: string;
-            name: string;
-            description?: string | null;
-        };
-        ProjectReadinessSummary: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            workspace_id: string;
-            slug: string;
-            name: string;
-            ingestion_jobs: number;
-            sources: number;
-            documents: number;
-            ready_for_query: boolean;
-            /** @example indexed */
-            indexing_state: string;
-            latest_ingestion_status?: string | null;
-            active_ingestion_jobs?: number;
-            completed_ingestion_jobs?: number;
-            failed_ingestion_jobs?: number;
-        };
-        ProviderAccountSummary: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            workspace_id: string;
-            /** @example openai */
-            provider_kind: string;
-            label: string;
-            /** @example active */
-            status: string;
-        };
-        CreateProviderAccountRequest: {
-            /** Format: uuid */
-            workspace_id: string;
-            provider_kind: string;
-            label: string;
-            /** Format: uri */
-            api_base_url?: string | null;
-        };
-        ModelProfileSummary: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            workspace_id: string;
-            /** Format: uuid */
-            provider_account_id: string;
-            /** @example chat */
-            profile_kind: string;
-            /** @example gpt-5.4 */
-            model_name: string;
-        };
-        CreateModelProfileRequest: {
-            /** Format: uuid */
-            workspace_id: string;
-            /** Format: uuid */
-            provider_account_id: string;
-            profile_kind: string;
-            model_name: string;
-            temperature?: number | null;
-            /** Format: int32 */
-            max_output_tokens?: number | null;
-        };
-        ProviderGovernanceSummary: {
-            /** Format: uuid */
-            workspace_id: string;
-            provider_accounts: components["schemas"]["ProviderAccountSummary"][];
-            model_profiles: components["schemas"]["ModelProfileSummary"][];
-            warning?: string | null;
-        };
-        SourceSummary: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            project_id: string;
-            /** @example upload */
-            source_kind: string;
-            label: string;
-            /** @example active */
-            status: string;
-        };
-        CreateSourceRequest: {
-            /** Format: uuid */
-            project_id: string;
-            source_kind: string;
-            label: string;
-        };
-        IngestionJobSummary: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            project_id: string;
-            /** Format: uuid */
-            source_id?: string | null;
-            trigger_kind: string;
-            /** @example queued */
-            status: string;
-            /** @example created */
-            stage: string;
-        };
-        CreateIngestionJobRequest: {
-            /** Format: uuid */
-            project_id: string;
-            /** Format: uuid */
-            source_id?: string | null;
-            trigger_kind: string;
-            requested_by?: string | null;
-        };
-        /** @enum {string} */
-        IngestionLifecycleState: "queued" | "validating" | "running" | "partial" | "completed" | "retryable_failed" | "canceled" | "failed";
-        IngestionJobDetail: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            project_id: string;
-            /** Format: uuid */
-            source_id?: string | null;
-            trigger_kind: string;
-            status: string;
-            stage: string;
-            requested_by?: string | null;
-            error_message?: string | null;
-            /** Format: date-time */
-            started_at?: string | null;
-            /** Format: date-time */
-            finished_at?: string | null;
-            retryable: boolean;
-            lifecycle: components["schemas"]["IngestionLifecycleState"];
-        };
-        DocumentSummary: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            project_id: string;
-            /** Format: uuid */
-            source_id?: string | null;
-            external_key: string;
-            title?: string | null;
-            mime_type?: string | null;
-            checksum?: string | null;
-        };
-        CreateDocumentRequest: {
-            /** Format: uuid */
-            project_id: string;
-            /** Format: uuid */
-            source_id?: string | null;
-            external_key: string;
-            title?: string | null;
-            mime_type?: string | null;
-            checksum?: string | null;
-        };
-        IngestTextRequest: {
-            /** Format: uuid */
-            project_id: string;
-            /** Format: uuid */
-            source_id?: string | null;
-            external_key: string;
-            title?: string | null;
-            text: string;
-        };
-        IngestTextResponse: {
-            /** Format: uuid */
-            ingestion_job_id: string;
-            /** @description Current ingestion job status, initially `queued`. */
-            status: string;
-            /** @description Current ingestion job stage, initially `queued`. */
-            stage: string;
-        };
-        SearchChunksRequest: {
-            /** Format: uuid */
-            project_id: string;
-            /** Format: uuid */
-            session_id?: string | null;
-            query_text: string;
-            /** Format: int32 */
-            top_k?: number | null;
-        };
-        ChunkResult: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            document_id: string;
-            /** Format: int32 */
-            ordinal: number;
-            content: string;
-        };
-        EmbedProjectChunksRequest: {
-            /** Format: uuid */
-            project_id: string;
-            provider_kind: string;
-            model_name: string;
-            /** Format: uuid */
-            embedding_model_profile_id?: string | null;
-            /** Format: int64 */
-            limit?: number | null;
-        };
-        EmbedProjectChunksResponse: {
-            /** Format: uuid */
-            project_id: string;
-            embedded_chunks: number;
-            provider_kind: string;
-            model_name: string;
+        CatalogWorkspaceResponse: {
+            [key: string]: unknown;
         };
         ChunkSummary: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            document_id: string;
-            /** Format: uuid */
-            project_id: string;
-            /** Format: int32 */
-            ordinal: number;
-            content: string;
-            /** Format: int32 */
-            token_count?: number | null;
-        };
-        RetrievalRunSummary: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            project_id: string;
-            query_text: string;
-            /** Format: uuid */
-            model_profile_id?: string | null;
-            /** Format: int32 */
-            top_k: number;
-            response_text?: string | null;
-            /** @example grounded */
-            answer_status: string;
-            weak_grounding: boolean;
-        };
-        RetrievalRunDetail: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            project_id: string;
-            query_text: string;
-            /** Format: uuid */
-            model_profile_id?: string | null;
-            /** Format: int32 */
-            top_k: number;
-            response_text?: string | null;
-            answer_status: string;
-            weak_grounding: boolean;
-            references: string[];
-            matched_chunk_ids: string[];
-            warning?: string | null;
-            debug_json: {
-                [key: string]: unknown;
-            };
-        };
-        CanonicalGraphSummary: {
-            text: string;
-            /** @enum {string} */
-            confidenceStatus: "strong" | "partial" | "weak" | "conflicted";
-            supportCount: number;
-            warning?: string | null;
-        };
-        ExtractionRecoverySummary: {
-            /** @enum {string} */
-            status: "clean" | "recovered" | "partial" | "failed";
-            parserRepairApplied: boolean;
-            secondPassApplied: boolean;
-            warning?: string | null;
-        };
-        MutationImpactScopeSummary: {
-            /** @enum {string} */
-            scopeStatus: "pending" | "targeted" | "fallback_broad" | "completed" | "failed";
-            /** @enum {string} */
-            confidenceStatus: "high" | "medium" | "low";
-            affectedNodeCount: number;
-            affectedRelationshipCount: number;
-            fallbackReason?: string | null;
-        };
-        CreateRetrievalRunRequest: {
-            /** Format: uuid */
-            project_id: string;
-            query_text: string;
-            /** Format: uuid */
-            model_profile_id?: string | null;
-            /** Format: int32 */
-            top_k?: number | null;
-            response_text?: string | null;
-        };
-        QueryRequest: {
-            /** Format: uuid */
-            project_id: string;
-            query_text: string;
-            /** Format: uuid */
-            model_profile_id?: string | null;
-            /** Format: uuid */
-            embedding_model_profile_id?: string | null;
-            /** Format: int32 */
-            top_k?: number | null;
-        };
-        QueryResponse: {
-            /** Format: uuid */
-            retrieval_run_id: string;
-            /** Format: uuid */
-            project_id: string;
-            answer: string;
-            /**
-             * @example [
-             *       "document:01958f52-1b41-7e1a-81f0-68bb2ac6df54:chunk:0"
-             *     ]
-             */
-            references: string[];
-            mode: string;
-            warning?: string | null;
-            /**
-             * @example gateway_live
-             * @enum {string|null}
-             */
-            warning_kind?: "partial_convergence" | "null" | null;
-            /** @example grounded */
-            answer_status: string;
-            weak_grounding: boolean;
-        };
-        UsageGovernanceSummary: {
-            /** Format: int64 */
-            usage_events: number;
-            /** Format: int64 */
-            prompt_tokens: number;
-            /** Format: int64 */
-            completion_tokens: number;
-            /** Format: int64 */
-            total_tokens: number;
-            /** Format: double */
-            estimated_cost: number;
-        };
-        UsageStageOwnership: {
-            /** Format: uuid */
-            ingestion_run_id: string;
-            /** Format: uuid */
-            stage_event_id: string;
-            stage: string;
-            /** @enum {string} */
-            attribution_source: "stage_native" | "reconciled";
-        };
-        QueryUsageAttribution: {
-            /** @enum {string} */
-            requested_mode: "document" | "local" | "global" | "hybrid" | "mix";
-            /** @enum {string} */
-            planned_mode: "document" | "local" | "global" | "hybrid" | "mix";
-            /** @enum {string} */
-            intent_cache_status: "miss" | "hit_fresh" | "hit_stale_recomputed";
-            /** @enum {string} */
-            rerank_status: "not_applicable" | "applied" | "skipped" | "failed";
-            rerank_candidate_count: number;
-            reranked_candidate_count?: number | null;
-            /** @enum {string} */
-            context_assembly_status: "document_only" | "graph_only" | "balanced_mixed" | "mixed_skewed";
-            reference_group_count: number;
-            warning_kind?: string | null;
-        };
-        UsageEventSummary: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            workspace_id?: string | null;
-            /** Format: uuid */
-            project_id?: string | null;
-            /** Format: uuid */
-            provider_account_id?: string | null;
-            /** Format: uuid */
-            model_profile_id?: string | null;
-            /** @example query */
-            usage_kind: string;
-            /** Format: int32 */
-            prompt_tokens?: number | null;
-            /** Format: int32 */
-            completion_tokens?: number | null;
-            /** Format: int32 */
-            total_tokens?: number | null;
-            raw_usage_json: {
-                [key: string]: unknown;
-            };
-            stage_ownership?: components["schemas"]["UsageStageOwnership"] | null;
-            query_usage_attribution?: components["schemas"]["QueryUsageAttribution"] | null;
-            /** Format: date-time */
-            created_at?: string;
-        };
-        CostLedgerSummary: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            workspace_id?: string | null;
-            /** Format: uuid */
-            project_id?: string | null;
-            /** Format: uuid */
-            usage_event_id: string;
-            provider_kind: string;
-            model_name: string;
-            /** @example USD */
-            currency: string;
-            /** Format: double */
-            estimated_cost: number;
-            pricing_status?: string | null;
-            /** Format: uuid */
-            pricing_catalog_entry_id?: string | null;
-            /** Format: date-time */
-            pricing_resolved_at?: string | null;
-            pricing_snapshot_json: {
-                [key: string]: unknown;
-            };
-            stage_ownership?: components["schemas"]["UsageStageOwnership"] | null;
-            query_usage_attribution?: components["schemas"]["QueryUsageAttribution"] | null;
-            /** Format: date-time */
-            created_at?: string;
-        };
-        BootstrapTokenRequest: {
-            /** Format: uuid */
-            workspace_id?: string | null;
-            /** @example workspace_token */
-            token_kind: string;
-            /** @example bootstrap-local */
-            label: string;
-            scopes: string[];
-            /** @description Must match the backend bootstrap token environment variable. */
-            bootstrap_secret?: string | null;
-        };
-        TokenSummary: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            workspace_id?: string | null;
-            token_kind: string;
-            label: string;
-            /** @example active */
-            status: string;
-            scopes: string[];
-            /** Format: date-time */
-            last_used_at?: string | null;
-            /** Format: date-time */
-            created_at: string;
-            /** Format: date-time */
-            updated_at: string;
-        };
-        IntegrationExampleProjectSummary: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            workspace_id: string;
-            slug: string;
-            name: string;
-        };
-        IntegrationTokenSummary: components["schemas"]["TokenSummary"];
-        IntegrationsWorkspaceSummary: {
-            /** Format: uuid */
-            workspace_id: string;
-            example_projects: components["schemas"]["IntegrationExampleProjectSummary"][];
-            api_tokens: components["schemas"]["IntegrationTokenSummary"][];
-        };
-        ProviderDefaultProfileDto: {
-            /** @enum {string} */
-            profile_kind: "chat" | "embedding" | "rerank";
-            model_name: string;
-            temperature?: number | null;
-            /** Format: int32 */
-            max_output_tokens?: number | null;
-        };
-        ProviderDefaultTemplateDto: {
-            /** @enum {string} */
-            provider_kind: "open_ai" | "deep_seek" | "open_ai_compatible";
-            label: string;
-            /** Format: uri */
-            api_base_url?: string | null;
-            chat_profile: components["schemas"]["ProviderDefaultProfileDto"];
-            embedding_profile?: components["schemas"]["ProviderDefaultProfileDto"] | null;
-            rerank_profile?: components["schemas"]["ProviderDefaultProfileDto"] | null;
-        };
-        OnboardingDefaultsSummary: {
-            /** Format: uuid */
-            workspace_id: string;
-            provider_defaults: components["schemas"]["ProviderDefaultTemplateDto"][];
-            project_defaults: components["schemas"]["ProjectDefaultsDto"];
-            persistence_state: string;
-            warning?: string | null;
-        };
-        ProjectDefaultsUpsertRequest: {
-            /** Format: uuid */
-            provider_account_id?: string | null;
-            /** Format: uuid */
-            chat_model_profile_id?: string | null;
-            /** Format: uuid */
-            embedding_model_profile_id?: string | null;
-            /** Format: uuid */
-            rerank_model_profile_id?: string | null;
-            /** Format: int32 */
-            retrieval_top_k?: number | null;
-            /** Format: int32 */
-            chunk_size?: number | null;
-            /** Format: int32 */
-            chunk_overlap?: number | null;
-        };
-        ProjectDefaultsDto: {
-            /** Format: uuid */
-            workspace_id: string;
-            /** Format: uuid */
-            project_id?: string | null;
-            /** Format: uuid */
-            provider_account_id?: string | null;
-            /** Format: uuid */
-            chat_model_profile_id?: string | null;
-            /** Format: uuid */
-            embedding_model_profile_id?: string | null;
-            /** Format: uuid */
-            rerank_model_profile_id?: string | null;
-            /** Format: int32 */
-            retrieval_top_k: number;
-            /** Format: int32 */
-            chunk_size: number;
-            /** Format: int32 */
-            chunk_overlap: number;
-        };
-        PlaceholderCapabilityDto: {
-            implemented: boolean;
-            /** @enum {string} */
-            status: "ready" | "partial" | "planned";
-            reason: string;
-        };
-        CitationReferenceDto: {
-            kind: string;
-            label: string;
-            /** Format: uuid */
-            chunk_id?: string | null;
-            /** Format: uuid */
-            document_id?: string | null;
-            /** Format: uuid */
-            source_id?: string | null;
-            /** Format: double */
-            score?: number | null;
-        };
-        RetrievalDebugMetadataDto: {
-            matched_chunk_ids: string[];
-            references: string[];
-            warning?: string | null;
-            answer_status: string;
-            weak_grounding: boolean;
-        };
-        OperationalObservabilityDto: {
-            trace_hint: string;
-            metrics_hint: string;
-            logging_hint: string;
-        };
-        ProductProjectReadinessDto: {
-            /** Format: uuid */
-            project_id: string;
-            /** Format: uuid */
-            workspace_id: string;
-            documents: number;
-            sources: number;
-            ingestion_jobs: number;
-            ready_for_query: boolean;
-            indexing_state: string;
-        };
-        ProductQueryContractDto: {
-            route: string;
-            method: string;
-            request_fields: string[];
-            response_fields: string[];
-            citation_fields: string[];
-            debug_fields: string[];
-        };
-        ProductProjectCapabilitiesDto: {
-            query_contract: components["schemas"]["PlaceholderCapabilityDto"];
-            citations: components["schemas"]["PlaceholderCapabilityDto"];
-            retrieval_debug_metadata: components["schemas"]["PlaceholderCapabilityDto"];
-            diagnostics: components["schemas"]["PlaceholderCapabilityDto"];
-        };
-        ProductProjectOverviewDto: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            workspace_id: string;
-            slug: string;
-            name: string;
-            description?: string | null;
-            readiness: components["schemas"]["ProductProjectReadinessDto"];
-            query_contract: components["schemas"]["ProductQueryContractDto"];
-            citations: components["schemas"]["CitationReferenceDto"][];
-            retrieval_debug?: components["schemas"]["RetrievalDebugMetadataDto"] | null;
-            observability: components["schemas"]["OperationalObservabilityDto"];
-            capabilities: components["schemas"]["ProductProjectCapabilitiesDto"];
-        };
-        ProductProjectDiagnosticsDto: {
-            /** Format: uuid */
-            project_id: string;
-            /** Format: uuid */
-            workspace_id: string;
-            latest_ingestion_job?: components["schemas"]["IngestionJobSummary"] | null;
-            latest_retrieval_run?: components["schemas"]["RetrievalRunSummary"] | null;
-            retrieval_debug?: components["schemas"]["RetrievalDebugMetadataDto"] | null;
-            observability: components["schemas"]["OperationalObservabilityDto"];
-        };
-        ProductDocumentCapabilitiesDto: {
-            provider_usage_attribution: components["schemas"]["PlaceholderCapabilityDto"];
-            cost_accounting: components["schemas"]["PlaceholderCapabilityDto"];
-            workspace_project_attribution: components["schemas"]["PlaceholderCapabilityDto"];
-            citations: components["schemas"]["PlaceholderCapabilityDto"];
-        };
-        ProductDocumentOverviewDto: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            project_id: string;
-            /** Format: uuid */
-            source_id?: string | null;
-            external_key: string;
-            title?: string | null;
-            mime_type?: string | null;
-            checksum?: string | null;
-            usage: components["schemas"]["UsageEventSummary"][];
-            costs: components["schemas"]["CostLedgerSummary"][];
-            capabilities: components["schemas"]["ProductDocumentCapabilitiesDto"];
-        };
-        ProductDocumentDiagnosticsDto: {
-            /** Format: uuid */
-            document_id: string;
-            /** Format: uuid */
-            project_id: string;
-            /** Format: uuid */
-            project_workspace_id: string;
-            ingestion_jobs: components["schemas"]["IngestionJobSummary"][];
-            citations: components["schemas"]["CitationReferenceDto"][];
-            usage: components["schemas"]["UsageEventSummary"][];
-            costs: components["schemas"]["CostLedgerSummary"][];
-        };
-        GraphCoverageSummary: {
-            /** Format: uuid */
-            project_id: string;
-            entity_count: number;
-            relation_count: number;
-            extraction_runs: number;
-            status: string;
-            warning?: string | null;
-        };
-        GraphEntitySummary: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            project_id: string;
-            canonical_name: string;
-            entity_type?: string | null;
-            source_chunk_count: number;
-        };
-        GraphRelationSummary: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            project_id: string;
-            relation_type: string;
-            /** Format: uuid */
-            from_entity_id: string;
-            /** Format: uuid */
-            to_entity_id: string;
-            source_chunk_count: number;
-        };
-        GraphProductSnapshot: {
-            /** Format: uuid */
-            project_id: string;
-            coverage: components["schemas"]["GraphCoverageSummary"];
-            entities: components["schemas"]["GraphEntitySummary"][];
-            relations: components["schemas"]["GraphRelationSummary"][];
-            /** Format: date-time */
-            generated_at: string;
-        };
-        GraphProductResponse: {
-            snapshot: components["schemas"]["GraphProductSnapshot"];
-        };
-        GraphKindCount: {
-            name: string;
-            count: number;
-        };
-        GraphProjectSummaryResponse: {
-            /** Format: uuid */
-            project_id: string;
-            coverage: components["schemas"]["GraphCoverageSummary"];
-            entity_kinds: components["schemas"]["GraphKindCount"][];
-            relation_kinds: components["schemas"]["GraphKindCount"][];
-            top_entities: components["schemas"]["GraphEntitySummary"][];
-            sample_relations: components["schemas"]["GraphRelationSummary"][];
-            /** Format: date-time */
-            generated_at: string;
-        };
-        GraphContentSummary: {
-            persisted_document_count: number;
-            persisted_chunk_count: number;
-            embedded_chunk_count: number;
-            retrieval_run_count: number;
-            referenced_document_count: number;
-            referenced_chunk_count: number;
-        };
-        GraphProvenanceSummary: {
-            entities_with_document_refs: number;
-            entities_with_chunk_refs: number;
-            entities_without_chunk_refs: number;
-            relations_with_document_refs: number;
-            relations_with_chunk_refs: number;
-            relations_without_chunk_refs: number;
-        };
-        GraphReadinessSummary: {
-            /** @example awaiting_graph_rows */
-            status: string;
-            blockers: string[];
-            next_steps: string[];
-        };
-        GraphProjectDiagnosticsResponse: {
-            /** Format: uuid */
-            project_id: string;
-            coverage: components["schemas"]["GraphCoverageSummary"];
-            content: components["schemas"]["GraphContentSummary"];
-            provenance: components["schemas"]["GraphProvenanceSummary"];
-            readiness: components["schemas"]["GraphReadinessSummary"];
-            /** Format: date-time */
-            generated_at: string;
-        };
-        GraphEntitySearchHit: {
-            entity: components["schemas"]["GraphEntitySummary"];
-            match_reasons: string[];
-        };
-        GraphRelationSearchHit: {
-            relation: components["schemas"]["GraphRelationSummary"];
-            from_entity_name: string;
-            to_entity_name: string;
-            match_reasons: string[];
-        };
-        GraphSearchResponse: {
-            /** Format: uuid */
-            project_id: string;
-            query: string;
-            searched_fields: string[];
-            result_count: number;
-            entity_results: components["schemas"]["GraphEntitySearchHit"][];
-            relation_results: components["schemas"]["GraphRelationSearchHit"][];
-            /** Format: date-time */
-            generated_at: string;
-            warning?: string | null;
-        };
-        GraphRelationDetail: {
-            relation: components["schemas"]["GraphRelationSummary"];
-            from_entity_name: string;
-            to_entity_name: string;
-        };
-        GraphEntityDetailResponse: {
-            /** Format: uuid */
-            project_id: string;
-            entity: components["schemas"]["GraphEntitySummary"];
-            aliases: string[];
-            source_document_ids: string[];
-            source_chunk_ids: string[];
-            observed_relation_count: number;
-            incoming_relations: components["schemas"]["GraphRelationDetail"][];
-            outgoing_relations: components["schemas"]["GraphRelationDetail"][];
-            /** Format: date-time */
-            generated_at: string;
-            warning?: string | null;
-        };
-        GraphSubgraphResponse: {
-            /** Format: uuid */
-            project_id: string;
-            /** Format: uuid */
-            focus_entity_id: string;
-            depth: number;
-            entity_count: number;
-            relation_count: number;
-            entities: components["schemas"]["GraphEntitySummary"][];
-            relations: components["schemas"]["GraphRelationDetail"][];
-            /** Format: date-time */
-            generated_at: string;
-            warning?: string | null;
-        };
-        IntegrationsProductSnapshot: {
-            /** Format: uuid */
-            workspace_id: string;
-            provider_accounts: components["schemas"]["ProviderAccountSummary"][];
-            model_profiles: components["schemas"]["ModelProfileSummary"][];
-            projects: components["schemas"]["ProjectSummary"][];
-            available_scopes: string[];
-            /** Format: date-time */
-            generated_at: string;
-            warning?: string | null;
-        };
-        IntegrationsProductResponse: {
-            snapshot: components["schemas"]["IntegrationsProductSnapshot"];
-        };
-        UiLoginRequest: {
-            login: string;
-            password: string;
-            remember_me?: boolean;
-            /** @enum {string} */
-            locale?: "en" | "ru";
-        };
-        UiSessionUser: {
-            /** Format: uuid */
-            id: string;
-            /** Format: email */
-            email: string;
-            display_name: string;
-            role_label: string;
-            initials: string;
-        };
-        UiSessionResponse: {
-            /** Format: uuid */
-            session_id: string;
-            /** @enum {string} */
-            locale: "en" | "ru";
-            /** Format: uuid */
-            active_workspace_id?: string | null;
-            /** Format: uuid */
-            active_library_id?: string | null;
-            /** Format: date-time */
-            expires_at: string;
-            user: components["schemas"]["UiSessionUser"];
-        };
-        UiOkResponse: {
-            ok: boolean;
-        };
-        UiWorkspaceOption: {
-            /** Format: uuid */
-            id: string;
-            slug: string;
-            name: string;
-        };
-        UiLibraryOption: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            workspace_id: string;
-            slug: string;
-            name: string;
-        };
-        UiShellUser: {
-            /** Format: uuid */
-            id: string;
-            /** Format: email */
-            email: string;
-            display_name: string;
-            role_label: string;
-            initials: string;
-        };
-        UiShellContextResponse: {
-            /** @enum {string} */
-            locale: "en" | "ru";
-            admin_enabled: boolean;
-            current_user: components["schemas"]["UiShellUser"];
-            active_workspace: components["schemas"]["UiWorkspaceOption"];
-            active_library: components["schemas"]["UiLibraryOption"];
-            workspaces: components["schemas"]["UiWorkspaceOption"][];
-            libraries: components["schemas"]["UiLibraryOption"][];
-        };
-        UiUpdateContextRequest: {
-            /** Format: uuid */
-            workspace_id?: string;
-            /** Format: uuid */
-            library_id?: string;
-            /** @enum {string} */
-            locale?: "en" | "ru";
-        };
-        UiCreateWorkspaceRequest: {
-            name: string;
-        };
-        UiCreateLibraryRequest: {
-            /** Format: uuid */
-            workspace_id: string;
-            name: string;
-            description?: string | null;
-        };
-        UiDocumentSummaryCounters: {
-            queued: number;
-            processing: number;
-            ready: number;
-            ready_no_graph: number;
-            failed: number;
-        };
-        UiDocumentFilterValues: {
-            statuses: string[];
-            file_types: string[];
-        };
-        UiDocumentMutationState: {
-            kind?: string | null;
-            status?: string | null;
-            warning?: string | null;
-        };
-        UiDocumentCollectionAccountingSummary: {
-            /** Format: double */
-            total_estimated_cost?: number | null;
-            /** Format: double */
-            settled_estimated_cost?: number | null;
-            /** Format: double */
-            in_flight_estimated_cost?: number | null;
-            currency?: string | null;
-            prompt_tokens: number;
-            completion_tokens: number;
-            total_tokens: number;
-            priced_stage_count: number;
-            unpriced_stage_count: number;
-            in_flight_stage_count: number;
-            missing_stage_count: number;
-            /** @enum {string} */
-            accounting_status: "priced" | "partial" | "unpriced" | "in_flight_unsettled";
-        };
-        UiDocumentCollectionProgressCounters: {
-            accepted: number;
-            content_extracted: number;
-            chunked: number;
-            embedded: number;
-            extracting_graph: number;
-            graph_ready: number;
-            ready: number;
-            failed: number;
-        };
-        UiDocumentCollectionStageDiagnostics: {
-            stage: string;
-            active_count: number;
-            completed_count: number;
-            failed_count: number;
-            avg_elapsed_ms?: number | null;
-            max_elapsed_ms?: number | null;
-            /** Format: double */
-            total_estimated_cost?: number | null;
-            /** Format: double */
-            settled_estimated_cost?: number | null;
-            /** Format: double */
-            in_flight_estimated_cost?: number | null;
-            currency?: string | null;
-            prompt_tokens: number;
-            completion_tokens: number;
-            total_tokens: number;
-            /** @enum {string} */
-            accounting_status: "priced" | "partial" | "unpriced" | "in_flight_unsettled";
-        };
-        UiDocumentCollectionFormatDiagnostics: {
-            file_type: string;
-            document_count: number;
-            queued_count: number;
-            processing_count: number;
-            ready_count: number;
-            ready_no_graph_count: number;
-            failed_count: number;
-            content_extracted_count: number;
-            chunked_count: number;
-            embedded_count: number;
-            extracting_graph_count: number;
-            graph_ready_count: number;
-            avg_queue_elapsed_ms?: number | null;
-            max_queue_elapsed_ms?: number | null;
-            avg_total_elapsed_ms?: number | null;
-            max_total_elapsed_ms?: number | null;
-            bottleneck_stage?: string | null;
-            bottleneck_avg_elapsed_ms?: number | null;
-            bottleneck_max_elapsed_ms?: number | null;
-            /** Format: double */
-            total_estimated_cost?: number | null;
-            /** Format: double */
-            settled_estimated_cost?: number | null;
-            /** Format: double */
-            in_flight_estimated_cost?: number | null;
-            currency?: string | null;
-            prompt_tokens: number;
-            completion_tokens: number;
-            total_tokens: number;
-            /** @enum {string} */
-            accounting_status: "priced" | "partial" | "unpriced" | "in_flight_unsettled";
-        };
-        UiDocumentQueueIsolationSummary: {
-            /** @enum {string} */
-            waiting_reason: "ordinary_backlog" | "isolated_capacity_wait" | "blocked" | "degraded";
-            queued_count: number;
-            processing_count: number;
-            isolated_capacity_count: number;
-            available_capacity_count: number;
-            /** Format: date-time */
-            last_claimed_at?: string | null;
-            /** Format: date-time */
-            last_progress_at?: string | null;
-        };
-        UiDocumentCollectionGraphThroughputSummary: {
-            tracked_document_count: number;
-            active_document_count: number;
-            processed_chunks: number;
-            total_chunks: number;
-            progress_percent?: number | null;
-            provider_call_count: number;
-            avg_call_elapsed_ms?: number | null;
-            avg_chunk_elapsed_ms?: number | null;
-            /** Format: double */
-            avg_chars_per_second?: number | null;
-            /** Format: double */
-            avg_tokens_per_second?: number | null;
-            /** Format: date-time */
-            last_provider_call_at?: string | null;
-            /** Format: date-time */
-            last_checkpoint_at: string;
-            last_checkpoint_elapsed_ms: number;
-            next_checkpoint_eta_ms?: number | null;
-            pressure_kind?: string | null;
-            /** @enum {string} */
-            cadence: "fast" | "watch" | "calm";
-            recommended_poll_interval_ms: number;
-            bottleneck_rank?: number | null;
-        };
-        UiDocumentCollectionSettlementSummary: {
-            /** @enum {string} */
-            progress_state: "live_in_flight" | "settling" | "fully_settled" | "failed_with_residual_work";
-            /** Format: double */
-            live_total_estimated_cost?: number | null;
-            /** Format: double */
-            settled_total_estimated_cost?: number | null;
-            /** Format: double */
-            missing_total_estimated_cost?: number | null;
-            currency?: string | null;
-            is_fully_settled: boolean;
-            /** Format: date-time */
-            settled_at?: string | null;
-        };
-        UiDocumentTerminalOutcomeSummary: {
-            /** @enum {string} */
-            terminal_state: "live_in_flight" | "fully_settled" | "failed_with_residual_work";
-            residual_reason?: string | null;
-            queued_count: number;
-            processing_count: number;
-            pending_graph_count: number;
-            failed_document_count: number;
-            /** Format: date-time */
-            settled_at?: string | null;
-        };
-        UiDocumentGraphHealthSummary: {
-            /** @enum {string} */
-            projection_health: "healthy" | "retrying_contention" | "degraded" | "failed";
-            active_projection_count: number;
-            retrying_projection_count: number;
-            failed_projection_count: number;
-            pending_node_write_count: number;
-            pending_edge_write_count: number;
-            last_failure_kind?: string | null;
-            is_runtime_readable: boolean;
-        };
-        UiDocumentProviderFailureSummary: {
-            /** @enum {string} */
-            failure_class: "internal_request_invalid" | "upstream_protocol_failure" | "upstream_timeout" | "upstream_rejection" | "invalid_model_output" | "recovered_after_retry";
-            provider_kind?: string | null;
-            model_name?: string | null;
-            request_shape_key?: string | null;
-            request_size_bytes?: number | null;
-            upstream_status?: string | null;
-            elapsed_ms?: number | null;
-            retry_decision?: string | null;
-            usage_visible: boolean;
-        };
-        UiDocumentCollectionWarning: {
-            warning_kind: string;
-            /** @enum {string} */
-            warning_scope: "library" | "collection" | "document" | "stage";
-            warning_message: string;
-            is_degraded: boolean;
-        };
-        UiDocumentCollectionDiagnostics: {
-            progress: components["schemas"]["UiDocumentCollectionProgressCounters"];
-            queue_backlog_count: number;
-            processing_backlog_count: number;
-            active_backlog_count: number;
-            queue_isolation?: components["schemas"]["UiDocumentQueueIsolationSummary"] | null;
-            graph_throughput?: components["schemas"]["UiDocumentCollectionGraphThroughputSummary"] | null;
-            settlement?: components["schemas"]["UiDocumentCollectionSettlementSummary"] | null;
-            terminal_outcome?: components["schemas"]["UiDocumentTerminalOutcomeSummary"] | null;
-            graph_health?: components["schemas"]["UiDocumentGraphHealthSummary"] | null;
-            warnings?: components["schemas"]["UiDocumentCollectionWarning"][];
-            per_stage: components["schemas"]["UiDocumentCollectionStageDiagnostics"][];
-            per_format: components["schemas"]["UiDocumentCollectionFormatDiagnostics"][];
-        };
-        UiAdminTabCounts: {
-            api_tokens: number;
-            members: number;
-            library_access: number;
-            settings: number;
-        };
-        UiAdminTabAvailability: {
-            api_tokens: boolean;
-            members: boolean;
-            library_access: boolean;
-            settings: boolean;
-        };
-        UiAdminOverview: {
-            /** @enum {string} */
-            active_tab: "api_tokens" | "members" | "library_access" | "settings";
-            workspace_name: string;
-            counts: components["schemas"]["UiAdminTabCounts"];
-            availability: components["schemas"]["UiAdminTabAvailability"];
-        };
-        UiAdminApiTokenRow: {
-            id: string;
-            label: string;
-            masked_token: string;
-            scopes: string[];
-            /** Format: date-time */
-            created_at: string;
-            /** Format: date-time */
-            last_used_at?: string | null;
-            /** Format: date-time */
-            expires_at?: string | null;
-            can_revoke: boolean;
-        };
-        UiAdminApiTokensResponse: {
-            rows: components["schemas"]["UiAdminApiTokenRow"][];
-        };
-        UiAdminCreateApiTokenRequest: {
-            label: string;
-            scopes: string[];
-            expires_in_days?: number | null;
-        };
-        UiAdminCreateApiTokenResult: {
-            row: components["schemas"]["UiAdminApiTokenRow"];
-            plaintext_token: string;
-        };
-        UiAdminMemberRow: {
-            id: string;
-            display_name: string;
-            /** Format: email */
-            email: string;
-            role_label: string;
-        };
-        UiAdminMembersResponse: {
-            rows: components["schemas"]["UiAdminMemberRow"][];
-        };
-        UiAdminLibraryAccessRow: {
-            id: string;
-            library_name: string;
-            principal_label: string;
-            access_level: string;
-        };
-        UiAdminLibraryAccessResponse: {
-            rows: components["schemas"]["UiAdminLibraryAccessRow"][];
-        };
-        UiAdminSettingItem: {
-            id: string;
-            label: string;
-            value: string;
-        };
-        UiAdminPricingCatalogEntry: {
-            id: string;
-            workspace_id?: string | null;
-            provider_kind: string;
-            model_name: string;
-            capability: string;
-            billing_unit: string;
-            input_price?: string | null;
-            output_price?: string | null;
-            currency: string;
-            status: string;
-            source_kind: string;
-            note?: string | null;
-            /** Format: date-time */
-            effective_from: string;
-            /** Format: date-time */
-            effective_to?: string | null;
-        };
-        UiAdminProviderCatalogItem: {
-            provider_kind: string;
-            supported_capabilities: string[];
-            default_models: {
-                [key: string]: string;
-            };
-            available_models: {
-                [key: string]: string[];
-            };
-            is_configured: boolean;
-        };
-        UiAdminProviderProfile: {
-            library_id: string;
-            library_name: string;
-            indexing_provider_kind: string;
-            indexing_model_name: string;
-            embedding_provider_kind: string;
-            embedding_model_name: string;
-            answer_provider_kind: string;
-            answer_model_name: string;
-            vision_provider_kind: string;
-            vision_model_name: string;
-            /** Format: date-time */
-            last_validated_at?: string | null;
-            last_validation_status?: string | null;
-            last_validation_error?: string | null;
-        };
-        UiAdminProviderValidationCheck: {
-            provider_kind: string;
-            model_name: string;
-            capability: string;
-            status: string;
-            /** Format: date-time */
-            checked_at: string;
-            error?: string | null;
-        };
-        UiAdminProviderValidation: {
-            status?: string | null;
-            /** Format: date-time */
-            checked_at?: string | null;
-            error?: string | null;
-            checks: components["schemas"]["UiAdminProviderValidationCheck"][];
-        };
-        UiPricingCoverageWarning: {
-            provider_kind: string;
-            model_name: string;
-            capability: string;
-            billing_unit: string;
-            message: string;
-        };
-        UiPricingCoverageSummary: {
-            /** @enum {string} */
-            status: "covered" | "partial" | "missing";
-            covered_targets: number;
-            missing_targets: number;
-            warnings: components["schemas"]["UiPricingCoverageWarning"][];
-        };
-        UiAdminSettingsResponse: {
-            items: components["schemas"]["UiAdminSettingItem"][];
-            provider_catalog: components["schemas"]["UiAdminProviderCatalogItem"][];
-            provider_profile: components["schemas"]["UiAdminProviderProfile"];
-            provider_validation: components["schemas"]["UiAdminProviderValidation"];
-            pricing_catalog: components["schemas"]["UiAdminPricingCatalogEntry"][];
-            pricing_coverage: components["schemas"]["UiPricingCoverageSummary"];
-            live_validation_enabled: boolean;
-            supported_provider_kinds: string[];
-        };
-        UiAdminProviderProfileUpdateRequest: {
-            indexingProviderKind: string;
-            indexingModelName: string;
-            embeddingProviderKind: string;
-            embeddingModelName: string;
-            answerProviderKind: string;
-            answerModelName: string;
-            visionProviderKind: string;
-            visionModelName: string;
-        };
-        UiAdminProviderProfileResponse: {
-            profile: components["schemas"]["UiAdminProviderProfile"];
-        };
-        UiAdminProviderValidationResponse: {
-            profile: components["schemas"]["UiAdminProviderProfile"];
-            validation: components["schemas"]["UiAdminProviderValidation"];
-        };
-        /** @enum {string} */
-        RuntimeQueryMode: "document" | "local" | "global" | "hybrid" | "mix";
-        RuntimeProviderDescriptor: {
-            providerKind: string;
-            modelName: string;
-        };
-        RuntimeProviderCatalogResponse: {
-            providers: components["schemas"]["RuntimeSupportedProvider"][];
-        };
-        RuntimeSupportedProvider: {
-            providerKind: string;
-            supportedCapabilities: string[];
-            defaultModels: {
-                [key: string]: string;
-            };
-            availableModels: {
-                [key: string]: string[];
-            };
-            isConfigured: boolean;
-        };
-        RuntimeLibraryProviderProfile: {
-            /** Format: uuid */
-            libraryId: string;
-            indexingProviderKind: string;
-            indexingModelName: string;
-            embeddingProviderKind: string;
-            embeddingModelName: string;
-            answerProviderKind: string;
-            answerModelName: string;
-            visionProviderKind: string;
-            visionModelName: string;
-            /** Format: date-time */
-            lastValidatedAt?: string | null;
-            lastValidationStatus?: string | null;
-            lastValidationError?: string | null;
-        };
-        RuntimeLibraryProviderProfileUpdate: {
-            indexingProviderKind: string;
-            indexingModelName: string;
-            embeddingProviderKind: string;
-            embeddingModelName: string;
-            answerProviderKind: string;
-            answerModelName: string;
-            visionProviderKind: string;
-            visionModelName: string;
-        };
-        RuntimeProviderValidationRequest: {
-            providerKind: string;
-            modelName: string;
-            capability: string;
-            /** Format: uuid */
-            libraryId?: string | null;
-        };
-        RuntimeProviderValidationResponse: {
-            providerKind: string;
-            modelName: string;
-            capability: string;
-            status: string;
-            /** Format: date-time */
-            checkedAt: string;
-            error?: string | null;
-        };
-        RuntimeDocumentSummary: {
-            queued: number;
-            processing: number;
-            ready: number;
-            readyNoGraph: number;
-            failed: number;
-        };
-        RuntimeDocumentRow: {
-            /** Format: uuid */
-            id: string;
-            trackId: string;
-            fileName: string;
-            fileType: string;
-            /** @enum {string} */
-            status: "queued" | "processing" | "ready" | "ready_no_graph" | "failed";
-            stage: string;
-            progressPercent?: number | null;
-            /** @enum {string} */
-            activityStatus: "queued" | "active" | "blocked" | "retrying" | "stalled" | "ready" | "failed";
-            /** Format: date-time */
-            lastActivityAt?: string | null;
-            stalledReason?: string | null;
-            chunkCount?: number | null;
-            graphNodeCount?: number | null;
-            graphEdgeCount?: number | null;
-            latestError?: string | null;
-            activeRevisionNo?: number | null;
-            latestAttemptNo: number;
-            /** Format: double */
-            totalCost?: number | null;
-            /** Format: double */
-            settledTotalCost?: number | null;
-            /** Format: double */
-            inFlightTotalCost?: number | null;
-            currency?: string | null;
-            /** @enum {string} */
-            accountingStatus: "priced" | "partial" | "unpriced" | "in_flight_unsettled";
-            inFlightStageCount: number;
-            missingStageCount: number;
-            partialHistory: boolean;
-            partialHistoryReason?: string | null;
-            graphThroughput?: components["schemas"]["RuntimeGraphThroughputResponse"] | null;
-        };
-        RuntimeUploadAcceptedResponse: {
-            /** Format: uuid */
-            uploadBatchId: string;
-            accepted: components["schemas"]["RuntimeDocumentRow"][];
-        };
-        RuntimeDocumentSurfaceResponse: {
-            summary: components["schemas"]["RuntimeDocumentSummary"];
-            warnings: components["schemas"]["ApiWarningBody"][];
-            rows: components["schemas"]["RuntimeDocumentRow"][];
-        };
-        RuntimeCollectionProgressCountersResponse: {
-            accepted: number;
-            contentExtracted: number;
-            chunked: number;
-            embedded: number;
-            extractingGraph: number;
-            graphReady: number;
-            ready: number;
-            failed: number;
-        };
-        RuntimeGraphThroughputResponse: {
-            trackedDocumentCount?: number | null;
-            activeDocumentCount?: number | null;
-            processedChunks: number;
-            totalChunks: number;
-            progressPercent?: number | null;
-            providerCallCount: number;
-            avgCallElapsedMs?: number | null;
-            avgChunkElapsedMs?: number | null;
-            /** Format: double */
-            avgCharsPerSecond?: number | null;
-            /** Format: double */
-            avgTokensPerSecond?: number | null;
-            /** Format: date-time */
-            lastProviderCallAt?: string | null;
-            /** Format: date-time */
-            lastCheckpointAt: string;
-            /** Format: int64 */
-            lastCheckpointElapsedMs: number;
-            /** Format: int64 */
-            nextCheckpointEtaMs?: number | null;
-            pressureKind?: string | null;
-            cadence: string;
-            /** Format: int64 */
-            recommendedPollIntervalMs: number;
-            bottleneckRank?: number | null;
-        };
-        RuntimeCollectionStageDiagnosticsResponse: {
-            stage: string;
-            activeCount: number;
-            completedCount: number;
-            failedCount: number;
-            avgElapsedMs?: number | null;
-            maxElapsedMs?: number | null;
-            /** Format: double */
-            totalEstimatedCost?: number | null;
-            /** Format: double */
-            settledEstimatedCost?: number | null;
-            /** Format: double */
-            inFlightEstimatedCost?: number | null;
-            currency?: string | null;
-            promptTokens: number;
-            completionTokens: number;
-            totalTokens: number;
-            /** @enum {string} */
-            accountingStatus: "priced" | "partial" | "unpriced" | "in_flight_unsettled";
-        };
-        RuntimeCollectionFormatDiagnosticsResponse: {
-            fileType: string;
-            documentCount: number;
-            queuedCount: number;
-            processingCount: number;
-            readyCount: number;
-            readyNoGraphCount: number;
-            failedCount: number;
-            contentExtractedCount: number;
-            chunkedCount: number;
-            embeddedCount: number;
-            extractingGraphCount: number;
-            graphReadyCount: number;
-            avgQueueElapsedMs?: number | null;
-            maxQueueElapsedMs?: number | null;
-            avgTotalElapsedMs?: number | null;
-            maxTotalElapsedMs?: number | null;
-            bottleneckStage?: string | null;
-            bottleneckAvgElapsedMs?: number | null;
-            bottleneckMaxElapsedMs?: number | null;
-            /** Format: double */
-            totalEstimatedCost?: number | null;
-            /** Format: double */
-            settledEstimatedCost?: number | null;
-            /** Format: double */
-            inFlightEstimatedCost?: number | null;
-            currency?: string | null;
-            promptTokens: number;
-            completionTokens: number;
-            totalTokens: number;
-            /** @enum {string} */
-            accountingStatus: "priced" | "partial" | "unpriced" | "in_flight_unsettled";
-        };
-        RuntimeCollectionDiagnosticsResponse: {
-            documentCount: number;
-            progress: components["schemas"]["RuntimeCollectionProgressCountersResponse"];
-            queueIsolation?: components["schemas"]["RuntimeQueueIsolationSummaryResponse"] | null;
-            graphThroughput?: components["schemas"]["RuntimeGraphThroughputResponse"] | null;
-            settlement: components["schemas"]["RuntimeCollectionSettlementResponse"];
-            terminalOutcome?: components["schemas"]["RuntimeTerminalOutcomeResponse"] | null;
-            graphHealth?: components["schemas"]["RuntimeGraphHealthResponse"] | null;
-            warnings: components["schemas"]["RuntimeCollectionWarningResponse"][];
-            queueBacklogCount: number;
-            processingBacklogCount: number;
-            activeBacklogCount: number;
-            /** Format: double */
-            totalEstimatedCost?: number | null;
-            /** Format: double */
-            settledEstimatedCost?: number | null;
-            /** Format: double */
-            inFlightEstimatedCost?: number | null;
-            currency?: string | null;
-            promptTokens: number;
-            completionTokens: number;
-            totalTokens: number;
-            pricedStageCount: number;
-            unpricedStageCount: number;
-            inFlightStageCount: number;
-            missingStageCount: number;
-            /** @enum {string} */
-            accountingStatus: "priced" | "partial" | "unpriced" | "in_flight_unsettled";
-            perStage: components["schemas"]["RuntimeCollectionStageDiagnosticsResponse"][];
-            perFormat: components["schemas"]["RuntimeCollectionFormatDiagnosticsResponse"][];
-        };
-        RuntimeExtractionDetail: {
-            extractionKind: string;
-            pageCount?: number | null;
-            charCount?: number | null;
-            previewText?: string | null;
-            previewTruncated: boolean;
-            warningCount: number;
-            normalizationStatus: string;
-            ocrSource?: string | null;
-            recovery?: components["schemas"]["ExtractionRecoverySummary"] | null;
-            warnings: string[];
-        };
-        RuntimeGraphContributionSummary: {
-            nodeCount: number;
-            edgeCount: number;
-            evidenceCount: number;
-        };
-        RuntimeStageEventResponse: {
-            stage: string;
-            status: string;
-            message?: string | null;
-            /** Format: date-time */
-            timestamp: string;
-        };
-        RuntimeDocumentDetailResponse: components["schemas"]["RuntimeDocumentRow"] & {
-            warnings: components["schemas"]["ApiWarningBody"][];
-            extraction?: components["schemas"]["RuntimeExtractionDetail"] | null;
-            graph: components["schemas"]["RuntimeGraphContributionSummary"];
-            providerFailure?: components["schemas"]["RuntimeProviderFailureResponse"] | null;
-            graphThroughput?: components["schemas"]["RuntimeGraphThroughputResponse"] | null;
-            collectionDiagnostics?: components["schemas"]["RuntimeCollectionDiagnosticsResponse"] | null;
-            reconciliationScope?: components["schemas"]["MutationImpactScopeSummary"] | null;
-            stageHistory: components["schemas"]["RuntimeStageEventResponse"][];
-            revisions: components["schemas"]["RuntimeRevisionResponse"][];
-            attempts: components["schemas"]["RuntimeAttemptResponse"][];
-        };
-        RuntimeMutationAccepted: {
-            accepted: boolean;
-            operation: string;
-            trackId?: string | null;
-            /** Format: uuid */
-            revisionId?: string | null;
-            /** Format: uuid */
-            mutationId?: string | null;
-            attemptNo?: number | null;
-        };
-        RuntimeAppendDocumentRequest: {
-            content: string;
-        };
-        RuntimeRevisionResponse: {
-            /** Format: uuid */
-            id: string;
-            revisionNo: number;
-            revisionKind: string;
-            status: string;
-            sourceFileName: string;
-            /** Format: date-time */
-            acceptedAt: string;
-            /** Format: date-time */
-            activatedAt?: string | null;
-            /** Format: date-time */
-            supersededAt?: string | null;
-            isActive: boolean;
-        };
-        RuntimeAttemptResponse: {
-            attemptNo: number;
-            revisionNo?: number | null;
-            /** Format: uuid */
-            revisionId?: string | null;
-            attemptKind?: string | null;
-            status: string;
-            /** @enum {string} */
-            activityStatus: "queued" | "active" | "blocked" | "retrying" | "stalled" | "ready" | "failed";
-            /** Format: date-time */
-            lastActivityAt?: string | null;
-            chunkCount?: number | null;
-            graphNodeCount?: number | null;
-            graphEdgeCount?: number | null;
-            /** Format: int64 */
-            queueElapsedMs?: number | null;
-            /** Format: int64 */
-            totalElapsedMs?: number | null;
-            /** Format: date-time */
-            startedAt?: string | null;
-            /** Format: date-time */
-            finishedAt?: string | null;
-            partialHistory: boolean;
-            partialHistoryReason?: string | null;
-            costSummary: components["schemas"]["RuntimeAttemptCostSummaryResponse"];
-            stageBenchmarks: components["schemas"]["RuntimeStageBenchmarkResponse"][];
-            warnings: components["schemas"]["ApiWarningBody"][];
-        };
-        RuntimeAttemptCostSummaryResponse: {
-            /** Format: double */
-            totalEstimatedCost?: number | null;
-            currency?: string | null;
-            pricedStageCount: number;
-            unpricedStageCount: number;
-            /** @enum {string} */
-            accountingStatus: "priced" | "partial" | "unpriced";
-        };
-        RuntimeQueueIsolationSummaryResponse: {
-            /** @enum {string} */
-            waitingReason: "ordinary_backlog" | "isolated_capacity_wait" | "blocked" | "degraded";
-            queuedCount: number;
-            processingCount: number;
-            isolatedCapacityCount: number;
-            availableCapacityCount: number;
-            /** Format: date-time */
-            lastClaimedAt?: string | null;
-            /** Format: date-time */
-            lastProgressAt?: string | null;
-        };
-        RuntimeCollectionSettlementResponse: {
-            /** @enum {string} */
-            progressState: "live_in_flight" | "settling" | "fully_settled" | "failed_with_residual_work";
-            /** Format: double */
-            liveTotalEstimatedCost?: number | null;
-            /** Format: double */
-            settledTotalEstimatedCost?: number | null;
-            /** Format: double */
-            missingTotalEstimatedCost?: number | null;
-            currency?: string | null;
-            isFullySettled: boolean;
-            /** Format: date-time */
-            settledAt?: string | null;
-        };
-        /**
-         * @example {
-         *       "terminalState": "failed_with_residual_work",
-         *       "residualReason": "provider_failure_residual",
-         *       "queuedCount": 46,
-         *       "processingCount": 30,
-         *       "pendingGraphCount": 12,
-         *       "failedDocumentCount": 11,
-         *       "settledAt": "2026-03-19T07:55:00Z",
-         *       "lastTransitionAt": "2026-03-19T07:55:00Z"
-         *     }
-         */
-        RuntimeTerminalOutcomeResponse: {
-            /** @enum {string} */
-            terminalState: "live_in_flight" | "fully_settled" | "failed_with_residual_work";
-            residualReason?: string | null;
-            queuedCount: number;
-            processingCount: number;
-            pendingGraphCount: number;
-            failedDocumentCount: number;
-            /** Format: date-time */
-            settledAt?: string | null;
-            /** Format: date-time */
-            lastTransitionAt: string;
-        };
-        /**
-         * @example {
-         *       "projectionHealth": "retrying_contention",
-         *       "activeProjectionCount": 3,
-         *       "retryingProjectionCount": 1,
-         *       "failedProjectionCount": 0,
-         *       "pendingNodeWriteCount": 42,
-         *       "pendingEdgeWriteCount": 17,
-         *       "lastFailureKind": "neo4j_contention",
-         *       "lastFailureAt": "2026-03-19T07:42:18Z",
-         *       "isRuntimeReadable": true,
-         *       "snapshotAt": "2026-03-19T07:42:30Z"
-         *     }
-         */
-        RuntimeGraphHealthResponse: {
-            /** @enum {string} */
-            projectionHealth: "healthy" | "retrying_contention" | "degraded" | "failed";
-            activeProjectionCount: number;
-            retryingProjectionCount: number;
-            failedProjectionCount: number;
-            pendingNodeWriteCount: number;
-            pendingEdgeWriteCount: number;
-            lastFailureKind?: string | null;
-            /** Format: date-time */
-            lastFailureAt?: string | null;
-            isRuntimeReadable: boolean;
-            /** Format: date-time */
-            snapshotAt: string;
-        };
-        /**
-         * @example {
-         *       "failureClass": "upstream_timeout",
-         *       "providerKind": "openai",
-         *       "modelName": "gpt-5.4",
-         *       "requestShapeKey": "chunk_segmented_v2",
-         *       "requestSizeBytes": 14220,
-         *       "upstreamStatus": "504",
-         *       "elapsedMs": 30001,
-         *       "retryDecision": "retried_then_failed",
-         *       "usageVisible": true
-         *     }
-         */
-        RuntimeProviderFailureResponse: {
-            /** @enum {string} */
-            failureClass: "internal_request_invalid" | "upstream_protocol_failure" | "upstream_timeout" | "upstream_rejection" | "invalid_model_output" | "recovered_after_retry" | "unknown";
-            providerKind?: string | null;
-            modelName?: string | null;
-            requestShapeKey?: string | null;
-            requestSizeBytes?: number | null;
-            upstreamStatus?: string | null;
-            elapsedMs?: number | null;
-            retryDecision?: string | null;
-            usageVisible: boolean;
-        };
-        RuntimeCollectionWarningResponse: {
-            /** @enum {string} */
-            warningKind: "ordinary_backlog" | "isolated_capacity_wait" | "in_flight_accounting" | "missing_accounting" | "liveness_loss" | "failed_work" | "degraded_extraction";
-            /** @enum {string} */
-            warningScope: "library" | "collection" | "document" | "stage";
-            warningMessage: string;
-            isDegraded: boolean;
-        };
-        /**
-         * @example {
-         *       "fileName": "oversized.txt",
-         *       "rejectionKind": "invalid_file_body",
-         *       "detectedFormat": "text",
-         *       "mimeType": "text/plain",
-         *       "fileSizeBytes": 73400320,
-         *       "uploadLimitMb": 50,
-         *       "rejectionCause": "upload_limit_exceeded",
-         *       "operatorAction": "Reduce the file size or split it before upload."
-         *     }
-         */
-        RuntimeUploadRejectionDetails: {
-            fileName?: string | null;
-            rejectionKind?: string | null;
-            detectedFormat?: string | null;
-            mimeType?: string | null;
-            /** Format: int64 */
-            fileSizeBytes?: number | null;
-            uploadLimitMb?: number | null;
-            /** @enum {string|null} */
-            rejectionCause?: "invalid_multipart_payload" | "invalid_file_body" | "upload_limit_exceeded" | "unsupported_upload_type" | "invalid_text_encoding" | "upload_extraction_failed" | "missing_upload_file" | "multipart_stream_failure" | "null" | null;
-            operatorAction?: string | null;
-        };
-        /**
-         * @example {
-         *       "failureClass": "upstream_timeout",
-         *       "count": 4
-         *     }
-         */
-        RuntimeGraphProviderFailureCountResponse: {
-            failureClass: string;
-            count: number;
-        };
-        /**
-         * @example {
-         *       "failureClass": "provider_failure_residual",
-         *       "scope": "document",
-         *       "count": 11
-         *     }
-         */
-        RuntimeGraphResidualFailureCountResponse: {
-            failureClass: string;
-            scope: string;
-            count: number;
-        };
-        RuntimeStageBenchmarkResponse: {
-            stage: string;
-            status: string;
-            message?: string | null;
-            providerKind?: string | null;
-            modelName?: string | null;
-            /** Format: date-time */
-            startedAt: string;
-            /** Format: date-time */
-            finishedAt?: string | null;
-            /** Format: int64 */
-            elapsedMs?: number | null;
-            accounting?: components["schemas"]["RuntimeStageAccountingResponse"] | null;
-        };
-        RuntimeStageAccountingResponse: {
-            /** @enum {string} */
-            pricingStatus: "priced" | "usage_missing" | "price_missing" | "unpriced";
-            /** Format: uuid */
-            usageEventId?: string | null;
-            /** Format: uuid */
-            costLedgerId?: string | null;
-            /** Format: uuid */
-            pricingCatalogEntryId?: string | null;
-            /** Format: double */
-            estimatedCost?: number | null;
-            currency?: string | null;
-            /** @enum {string} */
-            attributionSource: "stage_native" | "reconciled";
-        };
-        RuntimePricingCatalogResponse: {
-            rows: components["schemas"]["RuntimePricingCatalogEntryResponse"][];
-        };
-        RuntimePricingCatalogEntryResponse: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            workspaceId?: string | null;
-            providerKind: string;
-            modelName: string;
-            capability: string;
-            billingUnit: string;
-            inputPrice?: string | null;
-            outputPrice?: string | null;
-            currency: string;
-            status: string;
-            sourceKind: string;
-            note?: string | null;
-            /** Format: date-time */
-            effectiveFrom: string;
-            /** Format: date-time */
-            effectiveTo?: string | null;
-            /** Format: date-time */
-            createdAt: string;
-            /** Format: date-time */
-            updatedAt: string;
-        };
-        RuntimePricingCatalogUpsertRequest: {
-            /** Format: uuid */
-            workspaceId?: string | null;
-            providerKind: string;
-            modelName: string;
-            capability: string;
-            billingUnit: string;
-            /** Format: double */
-            inputPrice?: number | null;
-            /** Format: double */
-            outputPrice?: number | null;
-            currency: string;
-            note?: string | null;
-            /** Format: date-time */
-            effectiveFrom: string;
-        };
-        RuntimeGraphLegendItem: {
-            key: string;
-            label: string;
-        };
-        RuntimeGraphSurfaceNode: {
-            id: string;
-            label: string;
-            nodeType: string;
-            secondaryLabel?: string | null;
-            supportCount: number;
-        };
-        RuntimeGraphSurfaceEdge: {
-            id: string;
-            source: string;
-            target: string;
-            relationType: string;
-            supportCount: number;
-        };
-        RuntimeGraphSurfaceResponse: {
-            libraryId: string;
-            graphStatus: string;
-            /** @enum {string} */
-            convergenceStatus: "partial" | "current" | "degraded";
-            projectionVersion: number;
-            nodeCount: number;
-            relationCount: number;
-            filteredArtifactCount: number;
-            /** Format: date-time */
-            lastBuiltAt?: string | null;
-            warning?: string | null;
-            warnings: components["schemas"]["ApiWarningBody"][];
-            nodes: components["schemas"]["RuntimeGraphSurfaceNode"][];
-            edges: components["schemas"]["RuntimeGraphSurfaceEdge"][];
-            legend: components["schemas"]["RuntimeGraphLegendItem"][];
-        };
-        RuntimeGraphSearchHit: {
-            id: string;
-            label: string;
-            nodeType: string;
-            secondaryLabel?: string | null;
-        };
-        RuntimeGraphRelatedEdge: {
-            id: string;
-            relationType: string;
-            otherNodeId: string;
-            otherNodeLabel: string;
-            supportCount: number;
-        };
-        RuntimeGraphEvidence: {
-            id: string;
-            documentId?: string | null;
-            documentLabel?: string | null;
-            chunkId?: string | null;
-            pageRef?: string | null;
-            evidenceText: string;
-            /** Format: float */
-            confidenceScore?: number | null;
-            createdAt: string;
-            activeProvenanceOnly: boolean;
-        };
-        RuntimeGraphNodeDetailResponse: {
-            id: string;
-            label: string;
-            nodeType: string;
-            summary: string;
-            properties: [
-                string,
-                string
-            ][];
-            relatedDocuments: components["schemas"]["RuntimeGraphSearchHit"][];
-            connectedNodes: components["schemas"]["RuntimeGraphSearchHit"][];
-            relatedEdges: components["schemas"]["RuntimeGraphRelatedEdge"][];
-            evidence: components["schemas"]["RuntimeGraphEvidence"][];
-            relationCount: number;
-            canonicalSummary?: components["schemas"]["CanonicalGraphSummary"] | null;
-            extractionRecovery?: components["schemas"]["ExtractionRecoverySummary"] | null;
-            reconciliationScope?: components["schemas"]["MutationImpactScopeSummary"] | null;
-            reconciliationStatus?: string | null;
-            /** @enum {string} */
-            convergenceStatus: "partial" | "current" | "degraded";
-            pendingUpdateCount: number;
-            pendingDeleteCount: number;
-            activeProvenanceOnly: boolean;
-            filteredArtifactCount: number;
-            warning?: string | null;
-            warnings: components["schemas"]["ApiWarningBody"][];
-        };
-        /**
-         * @example {
-         *       "libraryId": "3b94ff53-dc5e-4a2d-b0ca-0a8275db7d10",
-         *       "graphStatus": "building",
-         *       "reconciliationStatus": "retrying",
-         *       "convergenceStatus": "degraded",
-         *       "projectionVersion": 17,
-         *       "nodeCount": 934,
-         *       "edgeCount": 1821,
-         *       "projectionFreshness": "stale",
-         *       "rebuildBacklogCount": 2,
-         *       "readyNoGraphCount": 0,
-         *       "pendingUpdateCount": 4,
-         *       "pendingDeleteCount": 0,
-         *       "activeMutationScope": null,
-         *       "filteredArtifactCount": 13,
-         *       "filteredEmptyRelationCount": 9,
-         *       "filteredDegenerateLoopCount": 4,
-         *       "provenanceCoveragePercent": 97.2,
-         *       "lastBuiltAt": "2026-03-19T07:41:54Z",
-         *       "lastErrorMessage": null,
-         *       "lastMutationWarning": "Projection retries are still in progress.",
-         *       "activeProvenanceOnly": true,
-         *       "blockers": [
-         *         "projection_contention"
-         *       ],
-         *       "warning": "Graph projection is retrying after contention.",
-         *       "warnings": [
-         *         {
-         *           "warning": "Graph projection is retrying after contention.",
-         *           "warningKind": "partial_convergence"
-         *         }
-         *       ],
-         *       "providerFailureCounts": [
-         *         {
-         *           "failureClass": "upstream_timeout",
-         *           "count": 4
-         *         }
-         *       ],
-         *       "recentProviderFailureClasses": [
-         *         "upstream_timeout",
-         *         "recovered_after_retry"
-         *       ],
-         *       "residualFailureCounts": [
-         *         {
-         *           "failureClass": "provider_failure_residual",
-         *           "scope": "document",
-         *           "count": 11
-         *         }
-         *       ],
-         *       "graphBackend": "neo4j"
-         *     }
-         */
-        RuntimeGraphDiagnosticsResponse: {
-            libraryId: string;
-            graphStatus: string;
-            reconciliationStatus: string;
-            /** @enum {string} */
-            convergenceStatus: "partial" | "current" | "degraded";
-            projectionVersion: number;
-            nodeCount: number;
-            edgeCount: number;
-            projectionFreshness: string;
-            rebuildBacklogCount: number;
-            readyNoGraphCount: number;
-            pendingUpdateCount: number;
-            pendingDeleteCount: number;
-            activeMutationScope?: components["schemas"]["MutationImpactScopeSummary"] | null;
-            filteredArtifactCount: number;
-            filteredEmptyRelationCount: number;
-            filteredDegenerateLoopCount: number;
-            /** Format: float */
-            provenanceCoveragePercent?: number | null;
-            /** Format: date-time */
-            lastBuiltAt?: string | null;
-            lastErrorMessage?: string | null;
-            lastMutationWarning?: string | null;
-            activeProvenanceOnly: boolean;
-            blockers: string[];
-            warning?: string | null;
-            warnings: components["schemas"]["ApiWarningBody"][];
-            providerFailureCounts?: components["schemas"]["RuntimeGraphProviderFailureCountResponse"][];
-            recentProviderFailureClasses?: string[];
-            residualFailureCounts?: components["schemas"]["RuntimeGraphResidualFailureCountResponse"][];
-            graphBackend: string;
-        };
-        RuntimeQueryRequest: {
-            question: string;
-            mode: components["schemas"]["RuntimeQueryMode"];
-            topK?: number | null;
-            includeDebug?: boolean | null;
-        };
-        RuntimeQueryReference: {
-            kind: string;
-            /** Format: uuid */
-            referenceId: string;
-            excerpt?: string | null;
-            rank: number;
-            /** Format: float */
-            score?: number | null;
-        };
-        RuntimeMatchedEntity: {
-            /** Format: uuid */
-            nodeId: string;
-            label: string;
-            nodeType: string;
-            /** Format: float */
-            score?: number | null;
-        };
-        RuntimeMatchedRelationship: {
-            /** Format: uuid */
-            edgeId: string;
-            relationType: string;
-            /** Format: uuid */
-            fromNodeId: string;
-            /** Format: uuid */
-            toNodeId: string;
-            /** Format: float */
-            score?: number | null;
-        };
-        RuntimeMatchedChunk: {
-            /** Format: uuid */
-            chunkId: string;
-            /** Format: uuid */
-            documentId: string;
-            excerpt: string;
-            /** Format: float */
-            score?: number | null;
-        };
-        QueryIntentKeywords: {
-            highLevel: string[];
-            lowLevel: string[];
-        };
-        QueryPlanningMetadata: {
-            /** @enum {string} */
-            requestedMode: "document" | "local" | "global" | "hybrid" | "mix";
-            /** @enum {string} */
-            plannedMode: "document" | "local" | "global" | "hybrid" | "mix";
-            intentCacheStatus: string;
-            keywords: components["schemas"]["QueryIntentKeywords"];
-            warnings: string[];
-        };
-        QueryRerankMetadata: {
-            status: string;
-            candidateCount: number;
-            reorderedCount?: number | null;
-        };
-        QueryContextAssemblyMetadata: {
-            status: string;
-            warning?: string | null;
-        };
-        QueryGroupedReference: {
-            id: string;
-            /** @enum {string} */
-            kind: "document" | "relationship" | "entity" | "mixed";
-            rank: number;
-            title: string;
-            excerpt?: string | null;
-            evidenceCount: number;
-            supportIds: string[];
-        };
-        RuntimeAnswerQueryResponse: {
-            /** Format: uuid */
-            queryId: string;
-            mode: components["schemas"]["RuntimeQueryMode"];
-            answer: string;
-            /** @enum {string} */
-            groundingStatus: "grounded" | "partial" | "weak" | "none";
-            references: components["schemas"]["RuntimeQueryReference"][];
-            provider: components["schemas"]["RuntimeProviderDescriptor"];
-            planning: components["schemas"]["QueryPlanningMetadata"];
-            rerank: components["schemas"]["QueryRerankMetadata"];
-            contextAssembly: components["schemas"]["QueryContextAssemblyMetadata"];
-            groupedReferences: components["schemas"]["QueryGroupedReference"][];
-            warning?: string | null;
-            /** @enum {string|null} */
-            warningKind?: "partial_convergence" | "query_intent_degradation" | "rerank_failure" | "extraction_recovery" | "reconciliation_fallback" | "null" | null;
-        };
-        RuntimeStructuredQueryResponse: {
-            /** Format: uuid */
-            queryId: string;
-            mode: components["schemas"]["RuntimeQueryMode"];
-            entities: components["schemas"]["RuntimeMatchedEntity"][];
-            relationships: components["schemas"]["RuntimeMatchedRelationship"][];
-            chunks: components["schemas"]["RuntimeMatchedChunk"][];
-            references: components["schemas"]["RuntimeQueryReference"][];
-            provider: components["schemas"]["RuntimeProviderDescriptor"];
-            planning: components["schemas"]["QueryPlanningMetadata"];
-            rerank: components["schemas"]["QueryRerankMetadata"];
-            contextAssembly: components["schemas"]["QueryContextAssemblyMetadata"];
-            groupedReferences: components["schemas"]["QueryGroupedReference"][];
-        };
-        RuntimeQueryExecutionDetailResponse: {
-            /** Format: uuid */
-            queryId: string;
-            mode: components["schemas"]["RuntimeQueryMode"];
-            question: string;
-            answer?: string | null;
-            /** @enum {string} */
-            groundingStatus: "grounded" | "partial" | "weak" | "none";
-            references: components["schemas"]["RuntimeQueryReference"][];
-            provider: components["schemas"]["RuntimeProviderDescriptor"];
-            planning: components["schemas"]["QueryPlanningMetadata"];
-            rerank: components["schemas"]["QueryRerankMetadata"];
-            contextAssembly: components["schemas"]["QueryContextAssemblyMetadata"];
-            groupedReferences: components["schemas"]["QueryGroupedReference"][];
-            warning?: string | null;
-            /** @enum {string|null} */
-            warningKind?: "partial_convergence" | "query_intent_degradation" | "rerank_failure" | "extraction_recovery" | "reconciliation_fallback" | "null" | null;
+            [key: string]: unknown;
+        };
+        ContentDocumentDetailResponse: {
+            [key: string]: unknown;
+        };
+        ContentMutationDetailResponse: {
+            [key: string]: unknown;
+        };
+        ContentRevision: {
+            [key: string]: unknown;
+        };
+        CreateCatalogLibraryRequest: {
+            [key: string]: unknown;
+        };
+        CreateCatalogWorkspaceRequest: {
+            [key: string]: unknown;
+        };
+        CreateContentDocumentRequest: {
+            [key: string]: unknown;
+        };
+        CreateContentDocumentResponse: {
+            [key: string]: unknown;
+        };
+        CreateContentMutationRequest: {
+            [key: string]: unknown;
+        };
+        CreateGrantRequest: {
+            [key: string]: unknown;
+        };
+        CreateLibraryBindingRequest: {
+            [key: string]: unknown;
+        };
+        CreateProviderCredentialRequest: {
+            [key: string]: unknown;
+        };
+        CreateQueryConversationRequest: {
+            [key: string]: unknown;
+        };
+        CreateQueryTurnRequest: {
+            [key: string]: unknown;
+        };
+        GrantResponse: {
+            [key: string]: unknown;
+        };
+        HealthResponse: {
+            [key: string]: unknown;
+        };
+        IngestAttempt: {
+            [key: string]: unknown;
+        };
+        IngestJob: {
+            [key: string]: unknown;
+        };
+        IngestStageEvent: {
+            [key: string]: unknown;
+        };
+        InternalError: {
+            [key: string]: unknown;
+        };
+        KnowledgeBundleChunkEdgeRow: {
+            [key: string]: unknown;
+        };
+        KnowledgeBundleEntityEdgeRow: {
+            [key: string]: unknown;
+        };
+        KnowledgeBundleEvidenceEdgeRow: {
+            [key: string]: unknown;
+        };
+        KnowledgeBundleRelationEdgeRow: {
+            [key: string]: unknown;
+        };
+        KnowledgeChunkRow: {
+            [key: string]: unknown;
+        };
+        KnowledgeChunkSearchRow: {
+            [key: string]: unknown;
+        };
+        KnowledgeChunkVectorSearchRow: {
+            [key: string]: unknown;
+        };
+        KnowledgeContextBundleRow: {
+            [key: string]: unknown;
+        };
+        KnowledgeDocumentRow: {
+            [key: string]: unknown;
+        };
+        KnowledgeEntityRow: {
+            [key: string]: unknown;
+        };
+        KnowledgeEntitySearchRow: {
+            [key: string]: unknown;
+        };
+        KnowledgeEntityVectorSearchRow: {
+            [key: string]: unknown;
+        };
+        KnowledgeEvidenceRow: {
+            [key: string]: unknown;
+        };
+        KnowledgeLibraryGeneration: {
+            [key: string]: unknown;
+        };
+        KnowledgeRelationRow: {
+            [key: string]: unknown;
+        };
+        KnowledgeRelationSearchRow: {
+            [key: string]: unknown;
+        };
+        KnowledgeRetrievalTraceRow: {
+            [key: string]: unknown;
+        };
+        KnowledgeRevisionRow: {
+            [key: string]: unknown;
+        };
+        LibraryModelBindingResponse: {
+            [key: string]: unknown;
+        };
+        LoginSessionRequest: {
+            [key: string]: unknown;
+        };
+        McpCapabilitySnapshot: {
+            [key: string]: unknown;
+        };
+        McpJsonRpcRequest: {
+            [key: string]: unknown;
+        };
+        McpJsonRpcResponse: {
+            [key: string]: unknown;
+        };
+        MeResponse: {
+            [key: string]: unknown;
+        };
+        MintTokenRequest: {
+            [key: string]: unknown;
+        };
+        MintTokenResponse: {
+            [key: string]: unknown;
+        };
+        ModelCatalogEntryResponse: {
+            [key: string]: unknown;
+        };
+        ModelPresetResponse: {
+            [key: string]: unknown;
+        };
+        NotFound: {
+            [key: string]: unknown;
+        };
+        OpsAsyncOperation: {
+            [key: string]: unknown;
+        };
+        OpsLibraryState: {
+            [key: string]: unknown;
+        };
+        OpsLibraryStateResponse: {
+            [key: string]: unknown;
+        };
+        OpsLibraryWarning: {
+            [key: string]: unknown;
+        };
+        PriceCatalogEntryResponse: {
+            [key: string]: unknown;
+        };
+        ProviderCatalogEntryResponse: {
+            [key: string]: unknown;
+        };
+        ProviderCredentialResponse: {
+            [key: string]: unknown;
+        };
+        QueryConversation: {
+            [key: string]: unknown;
+        };
+        QueryConversationDetailResponse: {
+            [key: string]: unknown;
+        };
+        QueryExecutionDetailResponse: {
+            [key: string]: unknown;
+        };
+        QueryTurnExecutionResponse: {
+            [key: string]: unknown;
+        };
+        ReadinessResponse: {
+            [key: string]: unknown;
+        };
+        ReplaceContentDocumentRequest: {
+            [key: string]: unknown;
+        };
+        SessionResponse: {
+            [key: string]: unknown;
+        };
+        TokenResponse: {
+            [key: string]: unknown;
+        };
+        Unauthorized: {
+            [key: string]: unknown;
+        };
+        UploadContentDocumentRequest: {
+            [key: string]: unknown;
+        };
+        VersionResponse: {
+            [key: string]: unknown;
         };
     };
     responses: {
@@ -4632,27 +1292,31 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "application/json": components["schemas"]["ApiErrorBody"];
+                "application/json": {
+                    [key: string]: unknown;
+                };
             };
         };
         /** @description Unauthorized */
         Unauthorized: {
             headers: {
-                "WWW-Authenticate"?: string;
                 [name: string]: unknown;
             };
             content: {
-                "application/json": components["schemas"]["ApiErrorBody"];
-                "text/plain": string;
+                "application/json": {
+                    [key: string]: unknown;
+                };
             };
         };
-        /** @description Resource not found */
+        /** @description Not found */
         NotFound: {
             headers: {
                 [name: string]: unknown;
             };
             content: {
-                "application/json": components["schemas"]["ApiErrorBody"];
+                "application/json": {
+                    [key: string]: unknown;
+                };
             };
         };
         /** @description Conflict */
@@ -4661,31 +1325,26 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "application/json": components["schemas"]["ApiErrorBody"];
+                "application/json": {
+                    [key: string]: unknown;
+                };
             };
         };
-        /** @description Internal server error */
+        /** @description Internal error */
         InternalError: {
             headers: {
                 [name: string]: unknown;
             };
             content: {
-                "application/json": components["schemas"]["ApiErrorBody"];
-                "text/plain": string;
+                "application/json": {
+                    [key: string]: unknown;
+                };
             };
         };
     };
     parameters: {
-        id: string;
         workspaceId: string;
-        projectIdOptional: string;
         documentId: string;
-        limit: number;
-        libraryId: string;
-        runtimeDocumentId: string;
-        pricingId: string;
-        runtimeNodeId: string;
-        runtimeQueryId: string;
     };
     requestBodies: never;
     headers: never;
@@ -4831,6 +1490,54 @@ export interface operations {
                     "application/json": components["schemas"]["ApiErrorBody"];
                 };
             };
+        };
+    };
+    postMcpRequest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["McpJsonRpcRequest"];
+            };
+        };
+        responses: {
+            /** @description JSON-RPC response envelope */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpJsonRpcResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getMcpCapabilities: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Derived capability snapshot */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpCapabilitySnapshot"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
         };
     };
     listCatalogWorkspaces: {
@@ -6369,146 +3076,69 @@ export interface operations {
             };
         };
     };
-    getGraphProjection: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                libraryId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Active graph projection */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["GraphProjectionDetailResponse"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Graph projection not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    listGraphNodes: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                libraryId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Canonical graph nodes for the active projection */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["GraphNode"][];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Graph projection not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    listGraphEdges: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                libraryId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Canonical graph edges for the active projection */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["GraphEdge"][];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Graph projection not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
     searchDocuments: {
         parameters: {
-            query?: never;
+            query: {
+                libraryId: string;
+                query: string;
+                limit?: number;
+                chunkHitLimitPerDocument?: number;
+                evidenceSampleLimit?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["SearchRequest"];
-            };
-        };
+        requestBody?: never;
         responses: {
-            /** @description Ranked document hits */
+            /** @description Hybrid knowledge search response with lexical and vector candidates, document hits, and provenance summaries */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SearchHit"][];
+                    "application/json": {
+                        /** Format: uuid */
+                        libraryId: string;
+                        queryText: string;
+                        /** Format: int32 */
+                        limit: number;
+                        embeddingProviderKind: string;
+                        embeddingModelName: string;
+                        /** Format: uuid */
+                        embeddingModelCatalogId: string;
+                        /** Format: int64 */
+                        freshnessGeneration: number;
+                        documentHits: {
+                            document: components["schemas"]["KnowledgeDocumentRow"];
+                            revision: components["schemas"]["KnowledgeRevisionRow"];
+                            /** Format: double */
+                            score: number;
+                            /** Format: int32 */
+                            lexicalRank?: number | null;
+                            /** Format: int32 */
+                            vectorRank?: number | null;
+                            /** Format: double */
+                            lexicalScore?: number | null;
+                            /** Format: double */
+                            vectorScore?: number | null;
+                            chunkHits: components["schemas"]["KnowledgeChunkSearchRow"][];
+                            vectorChunkHits: components["schemas"]["KnowledgeChunkVectorSearchRow"][];
+                            evidenceSamples: components["schemas"]["KnowledgeEvidenceRow"][];
+                            provenanceSummary: {
+                                /** Format: int32 */
+                                supportingEvidenceCount: number;
+                                /** Format: int32 */
+                                lexicalChunkCount: number;
+                                /** Format: int32 */
+                                vectorChunkCount: number;
+                            };
+                        }[];
+                        entityHits: components["schemas"]["KnowledgeEntitySearchRow"][];
+                        relationHits: components["schemas"]["KnowledgeRelationSearchRow"][];
+                        vectorChunkHits: components["schemas"]["KnowledgeChunkVectorSearchRow"][];
+                        vectorEntityHits: components["schemas"]["KnowledgeEntityVectorSearchRow"][];
+                    };
                 };
             };
             /** @description Invalid search request */
@@ -6529,6 +3159,552 @@ export interface operations {
                     "application/json": components["schemas"]["ApiErrorBody"];
                 };
             };
+        };
+    };
+    listKnowledgeDocuments: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Documents visible to the authenticated principal */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KnowledgeDocumentRow"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getKnowledgeDocument: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: string;
+                documentId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Document detail payload */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        document: components["schemas"]["KnowledgeDocumentRow"];
+                        revisions: components["schemas"]["KnowledgeRevisionRow"][];
+                        latestRevision?: components["schemas"]["KnowledgeRevisionRow"] | null;
+                        latestRevisionChunks: components["schemas"]["KnowledgeChunkRow"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listKnowledgeContextBundles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Context bundles visible to the authenticated principal */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KnowledgeContextBundleRow"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getKnowledgeContextBundle: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bundleId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Context bundle detail payload */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        bundle: components["schemas"]["KnowledgeContextBundleRow"];
+                        traces: components["schemas"]["KnowledgeRetrievalTraceRow"][];
+                        chunkEdges: components["schemas"]["KnowledgeBundleChunkEdgeRow"][];
+                        entityEdges: components["schemas"]["KnowledgeBundleEntityEdgeRow"][];
+                        relationEdges: components["schemas"]["KnowledgeBundleRelationEdgeRow"][];
+                        evidenceEdges: components["schemas"]["KnowledgeBundleEvidenceEdgeRow"][];
+                        chunks: components["schemas"]["KnowledgeChunkRow"][];
+                        entities: components["schemas"]["KnowledgeEntityRow"][];
+                        relations: components["schemas"]["KnowledgeRelationRow"][];
+                        evidence: components["schemas"]["KnowledgeEvidenceRow"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listKnowledgeEntities: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Knowledge entities */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KnowledgeEntityRow"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getKnowledgeEntity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: string;
+                entityId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Entity detail payload */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        entity: components["schemas"]["KnowledgeEntityRow"];
+                        mentionEdges: Record<string, never>[];
+                        mentionedChunks: components["schemas"]["KnowledgeChunkRow"][];
+                        supportingEvidenceEdges: Record<string, never>[];
+                        supportingEvidence: components["schemas"]["KnowledgeEvidenceRow"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listKnowledgeRelations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Knowledge relations */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KnowledgeRelationRow"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getKnowledgeRelation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: string;
+                relationId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Relation detail payload */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        relation: components["schemas"]["KnowledgeRelationRow"];
+                        supportingEvidenceEdges: Record<string, never>[];
+                        supportingEvidence: components["schemas"]["KnowledgeEvidenceRow"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    searchKnowledgeDocuments: {
+        parameters: {
+            query: {
+                query: string;
+                limit?: number;
+                chunkHitLimitPerDocument?: number;
+                evidenceSampleLimit?: number;
+            };
+            header?: never;
+            path: {
+                libraryId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Hybrid knowledge search response with lexical and vector candidates, document hits, and provenance summaries */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** Format: uuid */
+                        libraryId: string;
+                        queryText: string;
+                        /** Format: int32 */
+                        limit: number;
+                        embeddingProviderKind: string;
+                        embeddingModelName: string;
+                        /** Format: uuid */
+                        embeddingModelCatalogId: string;
+                        /** Format: int64 */
+                        freshnessGeneration: number;
+                        documentHits: {
+                            document: components["schemas"]["KnowledgeDocumentRow"];
+                            revision: components["schemas"]["KnowledgeRevisionRow"];
+                            /** Format: double */
+                            score: number;
+                            /** Format: int32 */
+                            lexicalRank?: number | null;
+                            /** Format: int32 */
+                            vectorRank?: number | null;
+                            /** Format: double */
+                            lexicalScore?: number | null;
+                            /** Format: double */
+                            vectorScore?: number | null;
+                            chunkHits: components["schemas"]["KnowledgeChunkSearchRow"][];
+                            vectorChunkHits: components["schemas"]["KnowledgeChunkVectorSearchRow"][];
+                            evidenceSamples: components["schemas"]["KnowledgeEvidenceRow"][];
+                            provenanceSummary: {
+                                /** Format: int32 */
+                                supportingEvidenceCount: number;
+                                /** Format: int32 */
+                                lexicalChunkCount: number;
+                                /** Format: int32 */
+                                vectorChunkCount: number;
+                            };
+                        }[];
+                        entityHits: components["schemas"]["KnowledgeEntitySearchRow"][];
+                        relationHits: components["schemas"]["KnowledgeRelationSearchRow"][];
+                        vectorChunkHits: components["schemas"]["KnowledgeChunkVectorSearchRow"][];
+                        vectorEntityHits: components["schemas"]["KnowledgeEntityVectorSearchRow"][];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listQuerySessions: {
+        parameters: {
+            query: {
+                libraryId: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Visible query sessions ordered by most recent activity */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QueryConversation"][];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    createQuerySession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateQueryConversationRequest"];
+            };
+        };
+        responses: {
+            /** @description Query session created */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QueryConversation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    getQuerySession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Query session detail with turns and executions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QueryConversationDetailResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    createQuerySessionTurn: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateQueryTurnRequest"];
+            };
+        };
+        responses: {
+            /** @description User turn accepted and grounded answer completed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QueryTurnExecutionResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    getQueryExecution: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                executionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Execution detail with typed references */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QueryExecutionDetailResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listBillingProviderCalls: {
+        parameters: {
+            query: {
+                libraryId: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Provider calls attributed to canonical executions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BillingProviderCall"][];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    listBillingCharges: {
+        parameters: {
+            query: {
+                libraryId: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Charges derived from canonical provider calls */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BillingCharge"][];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    getBillingExecutionCost: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                executionKind: string;
+                executionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Cost rollup for one execution owner */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BillingExecutionCost"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    getAsyncOperation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                operationId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Canonical async operation detail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpsAsyncOperation"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    getLibraryState: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Derived operational state and knowledge generation snapshot */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpsLibraryStateResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
         };
     };
     listAuditEvents: {
@@ -6574,641 +3750,10 @@ export interface operations {
             };
         };
     };
-    postMcpRequest: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["McpJsonRpcRequest"];
-            };
-        };
-        responses: {
-            /** @description JSON-RPC response envelope */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["McpJsonRpcResponse"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    getMcpCapabilities: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Derived capability snapshot */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["McpCapabilitySnapshot"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    uiLogin: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["UiLoginRequest"];
-            };
-        };
-        responses: {
-            /** @description Current UI session */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["UiSessionResponse"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    getUiSession: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Current UI session */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["UiSessionResponse"];
-                };
-            };
-            /** @description No active UI session */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            500: components["responses"]["InternalError"];
-        };
-    };
-    uiLogout: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Logout acknowledgement */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["UiOkResponse"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    getUiContext: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Active workspace, library, locale, and user chip data */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["UiShellContextResponse"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    updateUiContext: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["UiUpdateContextRequest"];
-            };
-        };
-        responses: {
-            /** @description Updated shell context */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["UiShellContextResponse"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            409: components["responses"]["Conflict"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    listUiWorkspaces: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Visible workspace options */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["UiWorkspaceOption"][];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    createUiWorkspace: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["UiCreateWorkspaceRequest"];
-            };
-        };
-        responses: {
-            /** @description Created workspace option */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["UiWorkspaceOption"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    listUiLibraries: {
-        parameters: {
-            query?: {
-                workspace_id?: components["parameters"]["workspaceId"];
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Visible library options */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["UiLibraryOption"][];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    createUiLibrary: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["UiCreateLibraryRequest"];
-            };
-        };
-        responses: {
-            /** @description Created library option */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["UiLibraryOption"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    listWorkspaces: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Workspace list */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WorkspaceSummary"][];
-                };
-            };
-            500: components["responses"]["InternalError"];
-        };
-    };
-    createWorkspace: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateWorkspaceRequest"];
-            };
-        };
-        responses: {
-            /** @description Created workspace */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WorkspaceSummary"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    getWorkspaceGovernance: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: components["parameters"]["id"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Workspace governance summary */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WorkspaceGovernanceSummary"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    listSources: {
-        parameters: {
-            query?: {
-                project_id?: components["parameters"]["projectIdOptional"];
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Source list */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SourceSummary"][];
-                };
-            };
-            500: components["responses"]["InternalError"];
-        };
-    };
-    createSource: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateSourceRequest"];
-            };
-        };
-        responses: {
-            /** @description Created source */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SourceSummary"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    listIngestionJobs: {
-        parameters: {
-            query?: {
-                project_id?: components["parameters"]["projectIdOptional"];
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Ingestion job list */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["IngestionJobSummary"][];
-                };
-            };
-            500: components["responses"]["InternalError"];
-        };
-    };
-    createIngestionJob: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateIngestionJobRequest"];
-            };
-        };
-        responses: {
-            /** @description Created ingestion job */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["IngestionJobSummary"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    getIngestionJobDetail: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: components["parameters"]["id"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Ingestion job detail */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["IngestionJobDetail"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    retryIngestionJob: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: components["parameters"]["id"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Newly created retry ingestion job detail */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["IngestionJobDetail"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    listDocuments: {
-        parameters: {
-            query?: {
-                project_id?: components["parameters"]["projectIdOptional"];
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Document list */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["DocumentSummary"][];
-                };
-            };
-            500: components["responses"]["InternalError"];
-        };
-    };
-    createDocument: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateDocumentRequest"];
-            };
-        };
-        responses: {
-            /** @description Created document */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["DocumentSummary"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    ingestText: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["IngestTextRequest"];
-            };
-        };
-        responses: {
-            /** @description Ingestion job accepted and queued */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["IngestTextResponse"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    searchChunks: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["SearchChunksRequest"];
-            };
-        };
-        responses: {
-            /** @description Matching chunk list */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ChunkResult"][];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    embedProjectChunks: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["EmbedProjectChunksRequest"];
-            };
-        };
-        responses: {
-            /** @description Embedding job result summary */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["EmbedProjectChunksResponse"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
     listChunks: {
         parameters: {
-            query?: {
-                project_id?: components["parameters"]["projectIdOptional"];
-                document_id?: components["parameters"]["documentId"];
-                limit?: components["parameters"]["limit"];
+            query: {
+                documentId: components["parameters"]["documentId"];
             };
             header?: never;
             path?: never;
@@ -7227,745 +3772,6 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    listRetrievalRuns: {
-        parameters: {
-            query?: {
-                project_id?: components["parameters"]["projectIdOptional"];
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Retrieval run list */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RetrievalRunSummary"][];
-                };
-            };
-            500: components["responses"]["InternalError"];
-        };
-    };
-    createRetrievalRun: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateRetrievalRunRequest"];
-            };
-        };
-        responses: {
-            /** @description Created retrieval run */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RetrievalRunSummary"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    getRetrievalRunDetail: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: components["parameters"]["id"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Retrieval run detail */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RetrievalRunDetail"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    runQuery: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["QueryRequest"];
-            };
-        };
-        responses: {
-            /** @description Query result */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["QueryResponse"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    getProductProjectOverview: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: components["parameters"]["id"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Project overview with readiness, query contract, citations, and capability hints */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ProductProjectOverviewDto"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    getProductProjectDiagnostics: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: components["parameters"]["id"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Project diagnostics */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ProductProjectDiagnosticsDto"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    getProductProjectQueryContract: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: components["parameters"]["id"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Query contract descriptor */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ProductQueryContractDto"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    getProductDocumentOverview: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: components["parameters"]["id"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Document overview */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ProductDocumentOverviewDto"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    getProductDocumentDiagnostics: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: components["parameters"]["id"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Document diagnostics */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ProductDocumentDiagnosticsDto"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    getGraphProduct: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                project_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Graph snapshot */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["GraphProductResponse"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    getGraphSummary: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                project_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Graph summary */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["GraphProjectSummaryResponse"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    getGraphDiagnostics: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                project_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Graph diagnostics */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["GraphProjectDiagnosticsResponse"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    searchGraph: {
-        parameters: {
-            query: {
-                q: string;
-                limit?: number;
-            };
-            header?: never;
-            path: {
-                project_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Graph search results */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["GraphSearchResponse"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    getGraphEntityDetail: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                project_id: string;
-                entity_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Graph entity detail */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["GraphEntityDetailResponse"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    getGraphSubgraph: {
-        parameters: {
-            query?: {
-                depth?: number;
-            };
-            header?: never;
-            path: {
-                project_id: string;
-                entity_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Graph subgraph response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["GraphSubgraphResponse"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    listUsageEvents: {
-        parameters: {
-            query?: {
-                project_id?: components["parameters"]["projectIdOptional"];
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Usage event list */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["UsageEventSummary"][];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    listCostLedger: {
-        parameters: {
-            query?: {
-                project_id?: components["parameters"]["projectIdOptional"];
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Cost ledger entry list */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CostLedgerSummary"][];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    listRuntimeProviders: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Runtime provider catalog */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RuntimeProviderCatalogResponse"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    validateRuntimeProvider: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["RuntimeProviderValidationRequest"];
-            };
-        };
-        responses: {
-            /** @description Runtime provider validation result */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RuntimeProviderValidationResponse"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    getRuntimeProviderProfile: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                libraryId: components["parameters"]["libraryId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Active runtime provider profile */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RuntimeLibraryProviderProfile"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    updateRuntimeProviderProfile: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                libraryId: components["parameters"]["libraryId"];
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["RuntimeLibraryProviderProfileUpdate"];
-            };
-        };
-        responses: {
-            /** @description Updated runtime provider profile */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RuntimeLibraryProviderProfile"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    runRuntimeAnswerQuery: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                libraryId: components["parameters"]["libraryId"];
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["RuntimeQueryRequest"];
-            };
-        };
-        responses: {
-            /** @description Runtime answer query result */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RuntimeAnswerQueryResponse"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            409: components["responses"]["Conflict"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    runRuntimeStructuredQuery: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                libraryId: components["parameters"]["libraryId"];
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["RuntimeQueryRequest"];
-            };
-        };
-        responses: {
-            /** @description Runtime structured query result */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RuntimeStructuredQueryResponse"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            409: components["responses"]["Conflict"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    getRuntimeQueryExecution: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                libraryId: components["parameters"]["libraryId"];
-                queryId: components["parameters"]["runtimeQueryId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Runtime query execution detail */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RuntimeQueryExecutionDetailResponse"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    listRuntimeModelPricing: {
-        parameters: {
-            query?: {
-                workspaceId?: string;
-                providerKind?: string;
-                modelName?: string;
-                capability?: string;
-                status?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Pricing catalog payload */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RuntimePricingCatalogResponse"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    createRuntimeModelPricing: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["RuntimePricingCatalogUpsertRequest"];
-            };
-        };
-        responses: {
-            /** @description Created pricing catalog entry */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RuntimePricingCatalogEntryResponse"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            409: components["responses"]["Conflict"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    updateRuntimeModelPricing: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                pricingId: components["parameters"]["pricingId"];
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["RuntimePricingCatalogUpsertRequest"];
-            };
-        };
-        responses: {
-            /** @description Updated pricing catalog entry */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RuntimePricingCatalogEntryResponse"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    deleteRuntimeModelPricing: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                pricingId: components["parameters"]["pricingId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Deactivated pricing catalog entry */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RuntimePricingCatalogEntryResponse"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
             500: components["responses"]["InternalError"];
         };
     };

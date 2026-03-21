@@ -14,27 +14,38 @@ use uuid::Uuid;
 use crate::{
     app::config::Settings,
     app::state::AppState,
-    domains::pricing_catalog::{PricingBillingUnit, PricingCapability, PricingResolutionStatus},
-    infra::repositories::{self, IngestionJobRow},
+    domains::{
+        billing::{PricingBillingUnit, PricingCapability, PricingResolutionStatus},
+        runtime_graph::RuntimeNodeType,
+    },
+    infra::{
+        arangodb::document_store::{KnowledgeLibraryGenerationRow, KnowledgeRevisionRow},
+        repositories::{self, IngestionJobRow},
+    },
     services::{
         document_accounting,
-        document_reconciliation::{advance_project_source_truth, persist_mutation_impact_scope},
         graph_extract::{
-            GraphExtractionRecoveryRecord, GraphExtractionRequest, GraphExtractionResumeHint,
-            GraphExtractionTelemetrySummary, extract_and_persist_chunk_graph_result,
-            extraction_outcome_from_resume_state, summarize_graph_extraction_usage_calls,
+            GraphExtractionCandidateSet, GraphExtractionRecoveryRecord, GraphExtractionRequest,
+            GraphExtractionResumeHint, GraphExtractionTelemetrySummary,
+            extract_and_persist_chunk_graph_result, extraction_outcome_from_resume_state,
+            summarize_graph_extraction_usage_calls,
         },
         graph_merge::{
             GraphMergeScope, merge_chunk_graph_candidates, reconcile_merge_support_counts,
         },
         graph_projection::{project_canonical_graph, resolve_projection_scope},
+        graph_reconciliation_scope::persist_detected_scope,
         graph_summary::GraphSummaryRefreshRequest,
+        knowledge_service::{
+            CreateKnowledgeChunkCommand, CreateKnowledgeDocumentCommand,
+            CreateKnowledgeRevisionCommand, PromoteKnowledgeDocumentCommand,
+            RefreshKnowledgeLibraryGenerationCommand,
+        },
+        query_support::invalidate_library_source_truth,
         runtime_ingestion::{
             JobLeaseHeartbeat, RuntimeStageUsageSummary, embed_runtime_chunks,
             embed_runtime_graph_edges, embed_runtime_graph_nodes,
-            persist_extracted_content_from_payload, persist_library_queue_isolation_waiting_reason,
-            refresh_library_collection_settlement_snapshots, refresh_library_warning_snapshots,
-            release_library_queue_isolation_slot, resolve_runtime_run_provider_profile,
+            persist_extracted_content_from_payload, resolve_runtime_run_provider_profile,
             upsert_runtime_document_chunk_contribution_summary,
             upsert_runtime_document_graph_contribution_summary,
         },
@@ -66,6 +77,7 @@ struct WorkerDocumentContext {
     document: repositories::DocumentRow,
     document_for_processing: repositories::DocumentRow,
     target_revision_id: Option<Uuid>,
+    target_revision: Option<repositories::DocumentRevisionRow>,
     previous_active_revision: Option<repositories::DocumentRevisionRow>,
     old_chunk_ids: Vec<Uuid>,
 }
@@ -152,6 +164,39 @@ impl GraphStageProgressTracker {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreservedFailureRevisionTruth {
+    text_state: String,
+    vector_state: String,
+    graph_state: String,
+    text_readable_at: Option<DateTime<Utc>>,
+    vector_ready_at: Option<DateTime<Utc>>,
+    graph_ready_at: Option<DateTime<Utc>>,
+}
+
+impl PreservedFailureRevisionTruth {
+    fn text_ready(&self) -> bool {
+        self.text_readable_at.is_some() || text_stage_is_ready(&self.text_state)
+    }
+
+    fn vector_ready(&self) -> bool {
+        self.vector_ready_at.is_some() || vector_stage_is_ready(&self.vector_state)
+    }
+
+    fn graph_ready(&self) -> bool {
+        self.graph_ready_at.is_some() || graph_stage_is_ready(&self.graph_state)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FailureGenerationSnapshot {
+    generation_id: Uuid,
+    active_text_generation: i64,
+    active_vector_generation: i64,
+    active_graph_generation: i64,
+    degraded_state: String,
+}
+
 fn graph_extraction_downgrade_level(state: &AppState, replay_count: usize) -> usize {
     let level_one =
         state.resolve_settle_blockers.extraction_resume_downgrade_level_one_after_replays;
@@ -177,7 +222,27 @@ pub fn spawn_ingestion_worker(
     })
 }
 
-async fn run_ingestion_worker_pool(state: Arc<AppState>, shutdown: broadcast::Receiver<()>) {
+async fn run_ingestion_worker_pool(state: Arc<AppState>, mut shutdown: broadcast::Receiver<()>) {
+    let legacy_runtime_tables_present =
+        match crate::infra::persistence::legacy_runtime_repair_tables_present(
+            &state.persistence.postgres,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                warn!(?error, "failed to inspect legacy runtime ingestion tables");
+                false
+            }
+        };
+    if !legacy_runtime_tables_present {
+        info!(
+            "legacy runtime ingestion queue tables are absent; worker loop stays idle on canonical stack"
+        );
+        let _ = shutdown.recv().await;
+        return;
+    }
+
     let worker_concurrency = state.settings.ingestion_worker_concurrency.max(1);
     info!(worker_concurrency, "starting ingestion worker pool");
 
@@ -339,9 +404,6 @@ async fn execute_job(
         )
         .await
         .context("failed to mark runtime ingestion run as claimed")?;
-        persist_library_queue_isolation_waiting_reason(state.as_ref(), job.project_id)
-            .await
-            .context("failed to persist queue-isolation waiting reason after runtime claim")?;
     }
     let mutation_document = if let Some(document_id) =
         payload.logical_document_id.or(runtime_run.as_ref().and_then(|row| row.document_id))
@@ -523,15 +585,24 @@ async fn execute_job(
     let checksum = sha256_hex(text);
     let document_context = ensure_worker_document(
         state.as_ref(),
+        workspace_id,
         &payload,
         runtime_ingestion_run_id,
         mutation_document,
         previous_active_revision,
         &checksum,
+        text.len(),
     )
     .await?;
     let document = document_context.document.clone();
     let document_for_processing = document_context.document_for_processing.clone();
+    let target_revision = document_context.target_revision.as_ref().with_context(|| {
+        format!(
+            "ingestion job {} missing target revision context after document preparation",
+            job.id
+        )
+    })?;
+    let revision_generation = i64::from(target_revision.revision_no);
 
     info!(
         job_id = %job.id,
@@ -627,6 +698,16 @@ async fn execute_job(
             }),
         )
         .await?;
+        persist_worker_chunk_knowledge(
+            state.as_ref(),
+            workspace_id,
+            payload.project_id,
+            target_revision,
+            &chunk,
+            "chunked",
+            None,
+        )
+        .await?;
         persisted_chunks.push(chunk);
         chunk_count += 1;
     }
@@ -691,6 +772,25 @@ async fn execute_job(
         Some(&mut lease_heartbeat),
     )
     .await?;
+    let vectorized_chunk_count = persist_worker_chunk_vectors(
+        state.as_ref(),
+        workspace_id,
+        payload.project_id,
+        target_revision,
+        revision_generation,
+        &persisted_chunks,
+    )
+    .await?;
+    if vectorized_chunk_count != persisted_chunks.len() {
+        warn!(
+            job_id = %job.id,
+            %worker_id,
+            document_id = %document.id,
+            expected_chunk_vectors = persisted_chunks.len(),
+            written_chunk_vectors = vectorized_chunk_count,
+            "not all chunk vectors could be mirrored into ArangoDB"
+        );
+    }
     if let Some(runtime_ingestion_run_id) = runtime_ingestion_run_id {
         let embedding_chunks_event = complete_runtime_stage(
             state.as_ref(),
@@ -1086,6 +1186,26 @@ async fn execute_job(
         graph_extract_usage.absorb_usage_json(&extracted.usage_json);
         graph_progress_tracker
             .record_extraction(&summarize_graph_extraction_usage_calls(&extracted.usage_calls));
+        if let Err(error) = persist_worker_graph_candidates(
+            state.as_ref(),
+            workspace_id,
+            payload.project_id,
+            &document_for_processing,
+            &chunk,
+            document_context.target_revision_id.or(document.current_revision_id),
+            &extracted.normalized,
+        )
+        .await
+        {
+            warn!(
+                job_id = %job.id,
+                %worker_id,
+                chunk_id = %chunk.id,
+                revision_id = ?document_context.target_revision_id.or(document.current_revision_id),
+                error = %error,
+                "failed to mirror graph candidates into Arango"
+            );
+        }
         if !extracted.normalized.entities.is_empty() || !extracted.normalized.relations.is_empty() {
             chunk_graph_results.push((
                 chunk.clone(),
@@ -1185,23 +1305,48 @@ async fn execute_job(
     )
     .await?;
 
+    let changed_edge_rows = repositories::list_admitted_runtime_graph_edges_by_ids(
+        &state.persistence.postgres,
+        payload.project_id,
+        projection_scope.projection_version,
+        &changed_edge_ids.iter().copied().collect::<Vec<_>>(),
+    )
+    .await
+    .context("failed to load changed graph edges after merge stage")?;
+    let changed_node_rows = repositories::list_admitted_runtime_graph_nodes_by_ids(
+        &state.persistence.postgres,
+        payload.project_id,
+        projection_scope.projection_version,
+        &changed_node_ids.iter().copied().collect::<Vec<_>>(),
+    )
+    .await
+    .context("failed to load changed graph nodes after merge stage")?;
+    let canonical_graph_ready = match persist_worker_graph_truth(
+        state.as_ref(),
+        workspace_id,
+        payload.project_id,
+        &document_for_processing,
+        document_context.target_revision_id.or(document.current_revision_id),
+        projection_scope.projection_version,
+        &changed_node_rows,
+        &changed_edge_rows,
+    )
+    .await
+    {
+        Ok(ready) => ready,
+        Err(error) => {
+            warn!(
+                job_id = %job.id,
+                %worker_id,
+                project_id = %payload.project_id,
+                error = %error,
+                "failed to mirror canonical graph truth into Arango"
+            );
+            false
+        }
+    };
+
     if merge_follow_up_required {
-        let changed_edge_rows = repositories::list_admitted_runtime_graph_edges_by_ids(
-            &state.persistence.postgres,
-            payload.project_id,
-            projection_scope.projection_version,
-            &changed_edge_ids.iter().copied().collect::<Vec<_>>(),
-        )
-        .await
-        .context("failed to load changed graph edges after merge stage")?;
-        let changed_node_rows = repositories::list_admitted_runtime_graph_nodes_by_ids(
-            &state.persistence.postgres,
-            payload.project_id,
-            projection_scope.projection_version,
-            &changed_node_ids.iter().copied().collect::<Vec<_>>(),
-        )
-        .await
-        .context("failed to load changed graph nodes after merge stage")?;
         let supporting_node_rows = if changed_edge_rows.is_empty() {
             Vec::new()
         } else {
@@ -1282,9 +1427,10 @@ async fn execute_job(
         )
         .await?
     } else {
-        let source_truth_version = advance_project_source_truth(state.as_ref(), payload.project_id)
-            .await
-            .context("failed to advance project source truth after document upload")?;
+        let source_truth_version =
+            invalidate_library_source_truth(state.as_ref(), payload.project_id)
+                .await
+                .context("failed to advance project source truth after document upload")?;
         let summary_refresh = if changed_node_ids.is_empty() && changed_edge_ids.is_empty() {
             GraphSummaryRefreshRequest::broad()
         } else {
@@ -1379,12 +1525,11 @@ async fn execute_job(
         None,
     )
     .await?;
-    let terminal_status =
-        if graph_contribution_count > 0 && projection_outcome.graph_status == "ready" {
-            "ready"
-        } else {
-            "ready_no_graph"
-        };
+    let terminal_status = if canonical_graph_ready && projection_outcome.graph_status == "ready" {
+        "ready"
+    } else {
+        "ready_no_graph"
+    };
 
     repositories::complete_ingestion_job(
         &state.persistence.postgres,
@@ -1432,14 +1577,8 @@ async fn execute_job(
         )
         .await?;
     }
-    release_library_queue_isolation_slot(state.as_ref(), job.project_id)
-        .await
-        .context("failed to release queue-isolation slot after job completion")?;
     finalize_document_attempt_success(state.as_ref(), &payload, &document_context, terminal_status)
         .await?;
-    refresh_terminal_library_settlement(state.as_ref(), job.project_id)
-        .await
-        .context("failed to refresh final collection settlement after job completion")?;
 
     info!(
         job_id = %job.id,
@@ -1454,13 +1593,36 @@ async fn execute_job(
 
 async fn ensure_worker_document(
     state: &AppState,
+    workspace_id: Option<Uuid>,
     payload: &repositories::IngestionExecutionPayload,
     runtime_ingestion_run_id: Option<Uuid>,
     existing_document: Option<repositories::DocumentRow>,
     previous_active_revision: Option<repositories::DocumentRevisionRow>,
     checksum: &str,
+    text_len: usize,
 ) -> anyhow::Result<WorkerDocumentContext> {
     if let Some(document) = existing_document {
+        let target_revision_id =
+            payload.target_revision_id.or(document.current_revision_id).with_context(|| {
+                format!(
+                    "document {} is missing a target or active revision during worker sync",
+                    document.id
+                )
+            })?;
+        let target_revision = repositories::get_document_revision_by_id(
+            &state.persistence.postgres,
+            target_revision_id,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load target revision {} for document {}",
+                target_revision_id, document.id
+            )
+        })?
+        .with_context(|| {
+            format!("target revision {} for document {} not found", target_revision_id, document.id)
+        })?;
         let old_chunk_ids =
             repositories::list_chunks_by_document(&state.persistence.postgres, document.id)
                 .await
@@ -1484,7 +1646,7 @@ async fn ensure_worker_document(
                 &state.persistence.postgres,
                 runtime_ingestion_run_id,
                 document.id,
-                payload.target_revision_id.or(document.current_revision_id),
+                Some(target_revision.id),
             )
             .await?;
             persist_extracted_content_from_payload(
@@ -1495,10 +1657,21 @@ async fn ensure_worker_document(
             )
             .await?;
         }
+        sync_worker_knowledge_document(
+            state,
+            workspace_id,
+            payload,
+            &document,
+            &target_revision,
+            checksum,
+            text_len,
+        )
+        .await?;
         return Ok(WorkerDocumentContext {
             document,
             document_for_processing,
-            target_revision_id: payload.target_revision_id,
+            target_revision_id: Some(target_revision.id),
+            target_revision: Some(target_revision),
             previous_active_revision,
             old_chunk_ids,
         });
@@ -1535,6 +1708,21 @@ async fn ensure_worker_document(
     .with_context(|| {
         format!("failed to update logical document {} current revision", document.id)
     })?;
+    let target_revision =
+        repositories::get_document_revision_by_id(&state.persistence.postgres, target_revision.id)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to reload initial revision {} for document {}",
+                    target_revision.id, document.id
+                )
+            })?
+            .with_context(|| {
+                format!(
+                    "initial revision {} for document {} not found",
+                    target_revision.id, document.id
+                )
+            })?;
     if let Some(runtime_ingestion_run_id) = runtime_ingestion_run_id {
         repositories::attach_runtime_ingestion_run_document(
             &state.persistence.postgres,
@@ -1551,14 +1739,800 @@ async fn ensure_worker_document(
         )
         .await?;
     }
+    sync_worker_knowledge_document(
+        state,
+        workspace_id,
+        payload,
+        &document,
+        &target_revision,
+        checksum,
+        text_len,
+    )
+    .await?;
 
     Ok(WorkerDocumentContext {
         document: document.clone(),
         document_for_processing: document,
         target_revision_id: Some(target_revision.id),
+        target_revision: Some(target_revision),
         previous_active_revision: None,
         old_chunk_ids: Vec::new(),
     })
+}
+
+async fn sync_worker_knowledge_document(
+    state: &AppState,
+    workspace_id: Option<Uuid>,
+    payload: &repositories::IngestionExecutionPayload,
+    document: &repositories::DocumentRow,
+    target_revision: &repositories::DocumentRevisionRow,
+    checksum: &str,
+    text_len: usize,
+) -> anyhow::Result<()> {
+    let workspace_id = workspace_id.with_context(|| {
+        format!(
+            "missing workspace for project {} while syncing knowledge document {}",
+            payload.project_id, document.id
+        )
+    })?;
+    let active_revision_id = document.current_revision_id.or(Some(target_revision.id));
+    let latest_revision_no = i64::from(target_revision.revision_no);
+    state
+        .canonical_services
+        .knowledge
+        .create_document_shell(
+            state,
+            CreateKnowledgeDocumentCommand {
+                document_id: document.id,
+                workspace_id,
+                library_id: payload.project_id,
+                external_key: document.external_key.clone(),
+                document_state: document.active_status.clone(),
+            },
+        )
+        .await
+        .with_context(|| format!("failed to sync knowledge document shell {}", document.id))?;
+    state
+        .canonical_services
+        .knowledge
+        .write_revision(
+            state,
+            CreateKnowledgeRevisionCommand {
+                revision_id: target_revision.id,
+                workspace_id,
+                library_id: payload.project_id,
+                document_id: document.id,
+                revision_number: i64::from(target_revision.revision_no),
+                revision_state: target_revision.status.clone(),
+                revision_kind: target_revision.revision_kind.clone(),
+                storage_ref: None,
+                source_uri: None,
+                mime_type: target_revision
+                    .mime_type
+                    .clone()
+                    .or_else(|| document.mime_type.clone())
+                    .or_else(|| payload.mime_type.clone())
+                    .unwrap_or_else(|| "application/octet-stream".to_string()),
+                checksum: checksum.to_string(),
+                byte_size: target_revision
+                    .file_size_bytes
+                    .or_else(|| payload.file_size_bytes.and_then(|value| i64::try_from(value).ok()))
+                    .unwrap_or_else(|| i64::try_from(text_len).unwrap_or(i64::MAX)),
+                title: document.title.clone().or_else(|| payload.title.clone()),
+                normalized_text: None,
+                text_checksum: Some(checksum.to_string()),
+                text_state: "ready".to_string(),
+                vector_state: "processing".to_string(),
+                graph_state: "processing".to_string(),
+                text_readable_at: Some(Utc::now()),
+                vector_ready_at: None,
+                graph_ready_at: None,
+                superseded_by_revision_id: None,
+            },
+        )
+        .await
+        .with_context(|| format!("failed to sync knowledge revision {}", target_revision.id))?;
+    state
+        .canonical_services
+        .knowledge
+        .set_revision_text_state(
+            state,
+            target_revision.id,
+            "ready",
+            None,
+            Some(checksum),
+            Some(Utc::now()),
+        )
+        .await
+        .with_context(|| {
+            format!("failed to mark knowledge revision {} as text-ready", target_revision.id)
+        })?;
+    state
+        .canonical_services
+        .knowledge
+        .promote_document(
+            state,
+            PromoteKnowledgeDocumentCommand {
+                document_id: document.id,
+                document_state: document.active_status.clone(),
+                active_revision_id,
+                readable_revision_id: active_revision_id,
+                latest_revision_no: Some(latest_revision_no),
+                deleted_at: document.deleted_at,
+            },
+        )
+        .await
+        .with_context(|| format!("failed to sync knowledge document pointers {}", document.id))?;
+
+    Ok(())
+}
+
+async fn persist_worker_chunk_knowledge(
+    state: &AppState,
+    workspace_id: Option<Uuid>,
+    library_id: Uuid,
+    revision: &repositories::DocumentRevisionRow,
+    chunk: &repositories::ChunkRow,
+    chunk_state: &str,
+    vector_generation: Option<i64>,
+) -> anyhow::Result<()> {
+    let workspace_id = workspace_id.with_context(|| {
+        format!(
+            "missing workspace for project {} while syncing knowledge chunk {}",
+            library_id, chunk.id
+        )
+    })?;
+    let normalized_text = chunk.content.split_whitespace().collect::<Vec<_>>().join(" ");
+    state
+        .canonical_services
+        .knowledge
+        .write_chunk(
+            state,
+            CreateKnowledgeChunkCommand {
+                chunk_id: chunk.id,
+                workspace_id,
+                library_id,
+                document_id: chunk.document_id,
+                revision_id: revision.id,
+                chunk_index: chunk.ordinal,
+                content_text: chunk.content.clone(),
+                normalized_text,
+                span_start: None,
+                span_end: None,
+                token_count: chunk.token_count,
+                section_path: Vec::new(),
+                heading_trail: Vec::new(),
+                chunk_state: chunk_state.to_string(),
+                text_generation: Some(i64::from(revision.revision_no)),
+                vector_generation,
+            },
+        )
+        .await
+        .with_context(|| format!("failed to sync knowledge chunk {}", chunk.id))?;
+    Ok(())
+}
+
+async fn persist_worker_chunk_vectors(
+    state: &AppState,
+    workspace_id: Option<Uuid>,
+    library_id: Uuid,
+    revision: &repositories::DocumentRevisionRow,
+    revision_generation: i64,
+    chunks: &[repositories::ChunkRow],
+) -> anyhow::Result<usize> {
+    let workspace_id = workspace_id.with_context(|| {
+        format!(
+            "missing workspace for project {} while syncing chunk vectors for revision {}",
+            library_id, revision.id
+        )
+    })?;
+    let mut written = 0usize;
+    for chunk in chunks {
+        let vector_rows =
+            state.arango_search_store.list_chunk_vectors_by_chunk(chunk.id).await.with_context(
+                || format!("failed to load canonical chunk vectors for {}", chunk.id),
+            )?;
+        let Some(vector_row) =
+            state.canonical_services.search.select_current_chunk_vector(&vector_rows)
+        else {
+            warn!(
+                chunk_id = %chunk.id,
+                revision_id = %revision.id,
+                "no canonical chunk vector found after chunk embedding stage"
+            );
+            continue;
+        };
+        persist_worker_chunk_knowledge(
+            state,
+            Some(workspace_id),
+            library_id,
+            revision,
+            chunk,
+            "ready",
+            Some(vector_row.freshness_generation.max(revision_generation)),
+        )
+        .await?;
+        written += 1;
+    }
+
+    if written > 0 && written == chunks.len() {
+        if let Some(existing_revision) = state
+            .arango_document_store
+            .get_revision(revision.id)
+            .await
+            .with_context(|| format!("failed to load knowledge revision {}", revision.id))?
+        {
+            let _ = state
+                .arango_document_store
+                .update_revision_readiness(
+                    revision.id,
+                    &existing_revision.text_state,
+                    "ready",
+                    &existing_revision.graph_state,
+                    existing_revision.text_readable_at,
+                    Some(Utc::now()),
+                    existing_revision.graph_ready_at,
+                    existing_revision.superseded_by_revision_id,
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to mark knowledge revision {} as vector-ready", revision.id)
+                })?;
+        }
+    }
+
+    Ok(written)
+}
+
+async fn persist_worker_graph_candidates(
+    state: &AppState,
+    workspace_id: Option<Uuid>,
+    library_id: Uuid,
+    document: &repositories::DocumentRow,
+    chunk: &repositories::ChunkRow,
+    revision_id: Option<Uuid>,
+    candidates: &GraphExtractionCandidateSet,
+) -> anyhow::Result<usize> {
+    let workspace_id = workspace_id.with_context(|| {
+        format!(
+            "missing workspace for project {} while mirroring graph candidates for chunk {}",
+            library_id, chunk.id
+        )
+    })?;
+    let revision_id = revision_id.with_context(|| {
+        format!("missing revision while mirroring graph candidates for chunk {}", chunk.id)
+    })?;
+    let extraction_method = "graph_extract".to_string();
+    let mut written = 0usize;
+
+    for entity in &candidates.entities {
+        let normalization_key = crate::services::graph_merge::canonical_node_key(
+            entity.node_type.clone(),
+            &entity.label,
+        );
+        let candidate_id = stable_uuid(&format!(
+            "arango-entity-candidate:{library_id}:{revision_id}:{}:{}:{}:{}",
+            chunk.id,
+            normalization_key,
+            entity.label,
+            worker_runtime_node_type_slug(&entity.node_type)
+        ));
+        state
+            .arango_graph_store
+            .upsert_entity_candidate(
+                &crate::infra::arangodb::graph_store::NewKnowledgeEntityCandidate {
+                    candidate_id,
+                    workspace_id,
+                    library_id,
+                    revision_id,
+                    chunk_id: Some(chunk.id),
+                    candidate_label: entity.label.clone(),
+                    candidate_type: worker_runtime_node_type_slug(&entity.node_type).to_string(),
+                    normalization_key,
+                    confidence: None,
+                    extraction_method: extraction_method.clone(),
+                    candidate_state: "active".to_string(),
+                    created_at: Some(Utc::now()),
+                    updated_at: Some(Utc::now()),
+                },
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to upsert knowledge entity candidate for document {} chunk {}",
+                    document.id, chunk.id
+                )
+            })?;
+        written += 1;
+    }
+
+    for relation in &candidates.relations {
+        let source_normalization_key = crate::services::graph_merge::canonical_node_key(
+            RuntimeNodeType::Entity,
+            &relation.source_label,
+        );
+        let target_normalization_key = crate::services::graph_merge::canonical_node_key(
+            RuntimeNodeType::Entity,
+            &relation.target_label,
+        );
+        let normalized_assertion = crate::services::graph_merge::canonical_edge_key(
+            &source_normalization_key,
+            &relation.relation_type,
+            &target_normalization_key,
+        );
+        let candidate_id = stable_uuid(&format!(
+            "arango-relation-candidate:{library_id}:{revision_id}:{}:{normalized_assertion}:{}:{}:{}",
+            chunk.id, relation.source_label, relation.target_label, relation.relation_type
+        ));
+        state
+            .arango_graph_store
+            .upsert_relation_candidate(
+                &crate::infra::arangodb::graph_store::NewKnowledgeRelationCandidate {
+                    candidate_id,
+                    workspace_id,
+                    library_id,
+                    revision_id,
+                    chunk_id: Some(chunk.id),
+                    subject_candidate_key: source_normalization_key,
+                    predicate: relation.relation_type.clone(),
+                    object_candidate_key: target_normalization_key,
+                    normalized_assertion,
+                    confidence: None,
+                    extraction_method: extraction_method.clone(),
+                    candidate_state: "active".to_string(),
+                    created_at: Some(Utc::now()),
+                    updated_at: Some(Utc::now()),
+                },
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to upsert knowledge relation candidate for document {} chunk {}",
+                    document.id, chunk.id
+                )
+            })?;
+        written += 1;
+    }
+
+    Ok(written)
+}
+
+async fn persist_worker_graph_truth(
+    state: &AppState,
+    workspace_id: Option<Uuid>,
+    library_id: Uuid,
+    document: &repositories::DocumentRow,
+    revision_id: Option<Uuid>,
+    projection_version: i64,
+    changed_node_rows: &[repositories::RuntimeGraphNodeRow],
+    changed_edge_rows: &[repositories::RuntimeGraphEdgeRow],
+) -> anyhow::Result<bool> {
+    let workspace_id = workspace_id.with_context(|| {
+        format!(
+            "missing workspace for project {} while mirroring canonical graph truth",
+            library_id
+        )
+    })?;
+    let revision_id = revision_id.with_context(|| {
+        format!(
+            "missing revision while mirroring canonical graph truth for document {}",
+            document.id
+        )
+    })?;
+    let existing_generation = state
+        .arango_document_store
+        .list_library_generations(library_id)
+        .await
+        .ok()
+        .and_then(|rows| rows.into_iter().next());
+
+    let mut node_rows_by_id = BTreeMap::<Uuid, &repositories::RuntimeGraphNodeRow>::new();
+    let mut edge_rows_by_id = BTreeMap::<Uuid, &repositories::RuntimeGraphEdgeRow>::new();
+    for row in changed_node_rows {
+        node_rows_by_id.insert(row.id, row);
+    }
+    for row in changed_edge_rows {
+        edge_rows_by_id.insert(row.id, row);
+    }
+
+    let mut entity_id_by_runtime_node_id = BTreeMap::<Uuid, Uuid>::new();
+    let mut relation_id_by_runtime_edge_id = BTreeMap::<Uuid, Uuid>::new();
+    let mut mirrored_anything = false;
+
+    for row in changed_node_rows {
+        let Some(node_type) = runtime_node_type_from_slug(&row.node_type) else {
+            warn!(
+                node_id = %row.id,
+                node_type = %row.node_type,
+                "skipping runtime node with unsupported type while mirroring canonical graph truth"
+            );
+            continue;
+        };
+        let aliases: Vec<String> = serde_json::from_value(row.aliases_json.clone())
+            .unwrap_or_else(|_| vec![row.label.clone()]);
+        let entity_id = stable_uuid(&format!(
+            "arango-entity:{library_id}:{}:{}",
+            row.node_type, row.canonical_key
+        ));
+        let entity = state
+            .arango_graph_store
+            .upsert_entity(&crate::infra::arangodb::graph_store::NewKnowledgeEntity {
+                entity_id,
+                workspace_id,
+                library_id,
+                canonical_label: row.label.clone(),
+                aliases: {
+                    let mut values = aliases;
+                    if !values.iter().any(|value| value == &row.label) {
+                        values.push(row.label.clone());
+                    }
+                    values.sort();
+                    values.dedup();
+                    values
+                },
+                entity_type: row.node_type.clone(),
+                summary: row.summary.clone(),
+                confidence: None,
+                support_count: i64::from(row.support_count),
+                freshness_generation: projection_version,
+                entity_state: "active".to_string(),
+                created_at: Some(row.created_at),
+                updated_at: Some(Utc::now()),
+            })
+            .await
+            .with_context(|| format!("failed to mirror canonical entity {} into Arango", row.id))?;
+        mirrored_anything = true;
+        entity_id_by_runtime_node_id.insert(row.id, entity.entity_id);
+        if matches!(node_type, RuntimeNodeType::Entity | RuntimeNodeType::Topic) {
+            mirrored_anything = true;
+        }
+    }
+
+    for row in changed_edge_rows {
+        if row.relation_type.trim().is_empty() {
+            warn!(
+                edge_id = %row.id,
+                "skipping runtime edge with empty relation type while mirroring canonical graph truth"
+            );
+            continue;
+        }
+        let subject_entity_id = entity_id_by_runtime_node_id.get(&row.from_node_id).copied();
+        let object_entity_id = entity_id_by_runtime_node_id.get(&row.to_node_id).copied();
+        let relation_id =
+            stable_uuid(&format!("arango-relation:{library_id}:{}", row.canonical_key));
+        let relation = state
+            .arango_graph_store
+            .upsert_relation_with_endpoints(
+                &crate::infra::arangodb::graph_store::NewKnowledgeRelation {
+                    relation_id,
+                    workspace_id,
+                    library_id,
+                    predicate: row.relation_type.clone(),
+                    normalized_assertion: row.canonical_key.clone(),
+                    confidence: row.weight,
+                    support_count: i64::from(row.support_count),
+                    contradiction_state: "unknown".to_string(),
+                    freshness_generation: projection_version,
+                    relation_state: "active".to_string(),
+                    created_at: Some(row.created_at),
+                    updated_at: Some(Utc::now()),
+                },
+                subject_entity_id,
+                object_entity_id,
+            )
+            .await
+            .with_context(|| {
+                format!("failed to mirror canonical relation {} into Arango", row.id)
+            })?;
+        mirrored_anything = true;
+        relation_id_by_runtime_edge_id.insert(row.id, relation.relation_id);
+    }
+
+    let runtime_evidence_rows =
+        repositories::list_active_runtime_graph_evidence_by_document_revision(
+            &state.persistence.postgres,
+            library_id,
+            document.id,
+            revision_id,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to list runtime graph evidence for document {} revision {}",
+                document.id, revision_id
+            )
+        })?;
+    for row in runtime_evidence_rows {
+        let (supporting_entity_id, supporting_relation_id, evidence_key, support_kind) = match row
+            .target_kind
+            .as_str()
+        {
+            "node" => {
+                let Some(runtime_node) = node_rows_by_id.get(&row.target_id) else {
+                    warn!(
+                        evidence_id = %row.id,
+                        target_id = %row.target_id,
+                        "skipping node evidence without a mirrored canonical entity"
+                    );
+                    continue;
+                };
+                (
+                    entity_id_by_runtime_node_id.get(&runtime_node.id).copied(),
+                    None,
+                    runtime_node.canonical_key.clone(),
+                    "node".to_string(),
+                )
+            }
+            "edge" => {
+                let Some(runtime_edge) = edge_rows_by_id.get(&row.target_id) else {
+                    warn!(
+                        evidence_id = %row.id,
+                        target_id = %row.target_id,
+                        "skipping edge evidence without a mirrored canonical relation"
+                    );
+                    continue;
+                };
+                (
+                    None,
+                    relation_id_by_runtime_edge_id.get(&runtime_edge.id).copied(),
+                    runtime_edge.canonical_key.clone(),
+                    "edge".to_string(),
+                )
+            }
+            other => {
+                warn!(
+                    evidence_id = %row.id,
+                    target_kind = other,
+                    "skipping unsupported runtime evidence kind while mirroring canonical graph truth"
+                );
+                continue;
+            }
+        };
+
+        let evidence_id = stable_uuid(&format!(
+            "arango-evidence:{library_id}:{revision_id}:{}:{}:{evidence_key}",
+            row.chunk_id.map_or_else(|| "none".to_string(), |value| value.to_string()),
+            support_kind,
+        ));
+        let _ = state
+            .arango_graph_store
+            .upsert_evidence_with_edges(
+                &crate::infra::arangodb::graph_store::NewKnowledgeEvidence {
+                    evidence_id,
+                    workspace_id,
+                    library_id,
+                    document_id: document.id,
+                    revision_id,
+                    chunk_id: row.chunk_id,
+                    span_start: None,
+                    span_end: None,
+                    excerpt: row.evidence_text.clone(),
+                    support_kind: support_kind.clone(),
+                    extraction_method: "runtime_graph_merge".to_string(),
+                    confidence: row.confidence_score,
+                    evidence_state: if row.is_active { "active" } else { "inactive" }.to_string(),
+                    freshness_generation: projection_version,
+                    created_at: Some(row.created_at),
+                    updated_at: Some(Utc::now()),
+                },
+                Some(revision_id),
+                supporting_entity_id,
+                supporting_relation_id,
+            )
+            .await
+            .with_context(|| {
+                format!("failed to mirror canonical evidence {} into Arango", row.id)
+            })?;
+        mirrored_anything = true;
+        if row.target_kind == "node" {
+            if let (Some(chunk_id), Some(entity_id)) = (row.chunk_id, supporting_entity_id) {
+                state
+                    .arango_graph_store
+                    .upsert_chunk_mentions_entity_edge(
+                        chunk_id,
+                        entity_id,
+                        None,
+                        row.confidence_score,
+                        Some("runtime_graph_evidence".to_string()),
+                    )
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to mirror chunk mentions edge for canonical evidence {}",
+                            row.id
+                        )
+                    })?;
+            }
+        }
+    }
+
+    let current_revision = state
+        .arango_document_store
+        .get_revision(revision_id)
+        .await
+        .with_context(|| format!("failed to load knowledge revision {}", revision_id))?
+        .with_context(|| {
+            format!("knowledge revision {} disappeared during graph mirror", revision_id)
+        })?;
+    let graph_ready = mirrored_anything;
+    let graph_state = if graph_ready { "ready" } else { "processing" };
+    let graph_ready_at = graph_ready.then(Utc::now);
+    state
+        .arango_document_store
+        .update_revision_readiness(
+            revision_id,
+            &current_revision.text_state,
+            &current_revision.vector_state,
+            graph_state,
+            current_revision.text_readable_at,
+            current_revision.vector_ready_at,
+            graph_ready_at,
+            current_revision.superseded_by_revision_id,
+        )
+        .await
+        .with_context(|| {
+            format!("failed to update knowledge revision {} graph readiness", revision_id)
+        })?;
+
+    let generation_id =
+        existing_generation.as_ref().map(|row| row.generation_id).unwrap_or_else(Uuid::now_v7);
+    let active_text_generation = if current_revision.text_state == "ready" {
+        current_revision.revision_number
+    } else {
+        existing_generation.as_ref().map(|row| row.active_text_generation).unwrap_or(0)
+    };
+    let active_vector_generation = if current_revision.vector_state == "ready" {
+        current_revision.revision_number
+    } else {
+        existing_generation.as_ref().map(|row| row.active_vector_generation).unwrap_or(0)
+    };
+    let active_graph_generation = if graph_ready {
+        projection_version
+    } else {
+        existing_generation.as_ref().map(|row| row.active_graph_generation).unwrap_or(0)
+    };
+    let degraded_state = if current_revision.text_state == "ready"
+        && current_revision.vector_state == "ready"
+        && graph_ready
+    {
+        "ready"
+    } else {
+        "degraded"
+    };
+    state
+        .canonical_services
+        .knowledge
+        .refresh_library_generation(
+            state,
+            RefreshKnowledgeLibraryGenerationCommand {
+                generation_id,
+                workspace_id,
+                library_id,
+                active_text_generation,
+                active_vector_generation,
+                active_graph_generation,
+                degraded_state: degraded_state.to_string(),
+            },
+        )
+        .await
+        .with_context(|| {
+            format!("failed to refresh knowledge library generation for {}", library_id)
+        })?;
+
+    Ok(graph_ready)
+}
+
+fn stable_uuid(seed: &str) -> Uuid {
+    let digest = Sha256::digest(seed.as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+fn text_stage_is_ready(state: &str) -> bool {
+    matches!(state, "ready" | "text_readable" | "vector_ready" | "graph_ready")
+}
+
+fn vector_stage_is_ready(state: &str) -> bool {
+    matches!(state, "ready" | "vector_ready" | "graph_ready")
+}
+
+fn graph_stage_is_ready(state: &str) -> bool {
+    matches!(state, "ready" | "graph_ready")
+}
+
+fn preserve_or_fail_stage_state(current: &str, stage_ready: bool) -> String {
+    if stage_ready || matches!(current, "failed" | "superseded") {
+        current.to_string()
+    } else {
+        "failed".to_string()
+    }
+}
+
+fn preserve_failure_revision_truth(
+    current: &KnowledgeRevisionRow,
+) -> PreservedFailureRevisionTruth {
+    let text_ready = current.text_readable_at.is_some() || text_stage_is_ready(&current.text_state);
+    let vector_ready =
+        current.vector_ready_at.is_some() || vector_stage_is_ready(&current.vector_state);
+    let graph_ready =
+        current.graph_ready_at.is_some() || graph_stage_is_ready(&current.graph_state);
+    PreservedFailureRevisionTruth {
+        text_state: preserve_or_fail_stage_state(&current.text_state, text_ready),
+        vector_state: preserve_or_fail_stage_state(&current.vector_state, vector_ready),
+        graph_state: preserve_or_fail_stage_state(&current.graph_state, graph_ready),
+        text_readable_at: current.text_readable_at,
+        vector_ready_at: current.vector_ready_at,
+        graph_ready_at: current.graph_ready_at,
+    }
+}
+
+fn build_failure_generation_snapshot(
+    existing: Option<&KnowledgeLibraryGenerationRow>,
+    revision: &KnowledgeRevisionRow,
+    preserved: &PreservedFailureRevisionTruth,
+) -> Option<FailureGenerationSnapshot> {
+    if existing.is_none()
+        && !preserved.text_ready()
+        && !preserved.vector_ready()
+        && !preserved.graph_ready()
+    {
+        return None;
+    }
+
+    let existing_text_generation = existing.map_or(0, |row| row.active_text_generation);
+    let existing_vector_generation = existing.map_or(0, |row| row.active_vector_generation);
+    let existing_graph_generation = existing.map_or(0, |row| row.active_graph_generation);
+    let active_text_generation = if preserved.text_ready() {
+        existing_text_generation.max(revision.revision_number)
+    } else {
+        existing_text_generation
+    };
+    let active_vector_generation = if preserved.vector_ready() {
+        existing_vector_generation.max(revision.revision_number)
+    } else {
+        existing_vector_generation
+    };
+    let active_graph_generation = if preserved.graph_ready() {
+        existing_graph_generation.max(revision.revision_number)
+    } else {
+        existing_graph_generation
+    };
+    let degraded_state =
+        if preserved.text_ready() && preserved.vector_ready() && preserved.graph_ready() {
+            "ready"
+        } else if preserved.text_ready() || preserved.vector_ready() || preserved.graph_ready() {
+            "degraded"
+        } else {
+            "failed"
+        };
+
+    Some(FailureGenerationSnapshot {
+        generation_id: existing.map_or_else(Uuid::now_v7, |row| row.generation_id),
+        active_text_generation,
+        active_vector_generation,
+        active_graph_generation,
+        degraded_state: degraded_state.to_string(),
+    })
+}
+
+fn worker_runtime_node_type_slug(node_type: &RuntimeNodeType) -> &'static str {
+    match node_type {
+        RuntimeNodeType::Document => "document",
+        RuntimeNodeType::Entity => "entity",
+        RuntimeNodeType::Topic => "topic",
+    }
+}
+
+fn runtime_node_type_from_slug(node_type: &str) -> Option<RuntimeNodeType> {
+    match node_type {
+        "document" => Some(RuntimeNodeType::Document),
+        "entity" => Some(RuntimeNodeType::Entity),
+        "topic" => Some(RuntimeNodeType::Topic),
+        _ => None,
+    }
 }
 
 async fn create_initial_document_revision(
@@ -1597,7 +2571,7 @@ async fn cleanup_retry_attempt_artifacts(
     let mut deleted_query_refs = 0_u64;
     let mut deactivated_evidence = 0_u64;
     if let Some(previous_active_revision) = previous_active_revision {
-        deleted_query_refs = repositories::delete_runtime_query_references_by_document_revision(
+        deleted_query_refs = repositories::delete_query_execution_references_by_document_revision(
             &state.persistence.postgres,
             payload.project_id,
             document.id,
@@ -1739,7 +2713,7 @@ async fn finalize_revision_mutation(
             )
             .await
             .context("failed to detect revision-mutation impact scope")?;
-        persist_mutation_impact_scope(state, mutation_workflow_id, &detected_scope).await?;
+        persist_detected_scope(state, mutation_workflow_id, &detected_scope).await?;
         if detected_scope.scope_status == "targeted" {
             targeted_node_ids = detected_scope.affected_node_ids.clone();
             targeted_edge_ids = detected_scope.affected_relationship_ids.clone();
@@ -1798,7 +2772,7 @@ async fn finalize_revision_mutation(
         )
     })?;
     if let Some(previous_active_revision) = &document_context.previous_active_revision {
-        repositories::delete_runtime_query_references_by_document_revision(
+        repositories::delete_query_execution_references_by_document_revision(
             &state.persistence.postgres,
             payload.project_id,
             document_context.document.id,
@@ -1855,7 +2829,7 @@ async fn finalize_revision_mutation(
     .with_context(|| {
         format!("failed to delete superseded chunks for document {}", document_context.document.id)
     })?;
-    let source_truth_version = advance_project_source_truth(state, payload.project_id)
+    let source_truth_version = invalidate_library_source_truth(state, payload.project_id)
         .await
         .context("failed to advance project source truth after revision activation")?;
     let mut projection_scope = projection_scope.clone();
@@ -1931,14 +2905,6 @@ async fn finalize_document_attempt_success(
     Ok(())
 }
 
-async fn refresh_terminal_library_settlement(
-    state: &AppState,
-    project_id: Uuid,
-) -> anyhow::Result<()> {
-    refresh_library_collection_settlement_snapshots(state, project_id).await?;
-    refresh_library_warning_snapshots(state, project_id).await
-}
-
 async fn finalize_document_attempt_failure(
     state: &AppState,
     payload: &repositories::IngestionExecutionPayload,
@@ -1952,6 +2918,85 @@ async fn finalize_document_attempt_failure(
         )
         .await
         .with_context(|| format!("failed to mark revision {target_revision_id} as failed"))?;
+
+        if let Some(current_revision) =
+            state.arango_document_store.get_revision(target_revision_id).await.with_context(
+                || format!("failed to load knowledge revision {target_revision_id}"),
+            )?
+        {
+            let preserved = preserve_failure_revision_truth(&current_revision);
+            let _ = state
+                .arango_document_store
+                .update_revision_readiness(
+                    target_revision_id,
+                    &preserved.text_state,
+                    &preserved.vector_state,
+                    &preserved.graph_state,
+                    preserved.text_readable_at,
+                    preserved.vector_ready_at,
+                    preserved.graph_ready_at,
+                    current_revision.superseded_by_revision_id,
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to preserve knowledge revision readiness {} after terminal failure",
+                        target_revision_id
+                    )
+                })?;
+
+            if let Some(project) =
+                repositories::get_project_by_id(&state.persistence.postgres, payload.project_id)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to load project {} while preserving failed knowledge truth",
+                            payload.project_id
+                        )
+                    })?
+            {
+                let existing_generation = state
+                    .arango_document_store
+                    .list_library_generations(payload.project_id)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to list knowledge generations for library {} after terminal failure",
+                            payload.project_id
+                        )
+                    })?
+                    .into_iter()
+                    .next();
+                if let Some(snapshot) = build_failure_generation_snapshot(
+                    existing_generation.as_ref(),
+                    &current_revision,
+                    &preserved,
+                ) {
+                    state
+                        .canonical_services
+                        .knowledge
+                        .refresh_library_generation(
+                            state,
+                            RefreshKnowledgeLibraryGenerationCommand {
+                                generation_id: snapshot.generation_id,
+                                workspace_id: project.workspace_id,
+                                library_id: payload.project_id,
+                                active_text_generation: snapshot.active_text_generation,
+                                active_vector_generation: snapshot.active_vector_generation,
+                                active_graph_generation: snapshot.active_graph_generation,
+                                degraded_state: snapshot.degraded_state,
+                            },
+                        )
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "failed to refresh knowledge generation for library {} after terminal failure",
+                                payload.project_id
+                            )
+                        })?;
+                }
+            }
+        }
     }
     if let Some(mutation_workflow_id) = payload.document_mutation_workflow_id {
         let _ = repositories::complete_document_mutation_impact_scope(
@@ -2111,17 +3156,6 @@ pub async fn fail_job(
             }
         }
     }
-    if let Some(project_id) = runtime_stage_snapshot.as_ref().map(|run| run.project_id) {
-        if let Err(queue_error) = release_library_queue_isolation_slot(state, project_id).await {
-            error!(
-                job_id = %job_id,
-                %worker_id,
-                project_id = %project_id,
-                ?queue_error,
-                "failed to release queue-isolation slot after job failure"
-            );
-        }
-    }
     match repositories::get_ingestion_job_by_id(&state.persistence.postgres, job_id).await {
         Ok(Some(job)) => match repositories::parse_ingestion_execution_payload(&job) {
             Ok(payload) => {
@@ -2133,16 +3167,6 @@ pub async fn fail_job(
                         %worker_id,
                         ?document_error,
                         "failed to finalize document lifecycle after ingestion failure"
-                    );
-                } else if let Err(settlement_error) =
-                    refresh_terminal_library_settlement(state, job.project_id).await
-                {
-                    error!(
-                        job_id = %job_id,
-                        %worker_id,
-                        project_id = %job.project_id,
-                        ?settlement_error,
-                        "failed to refresh final collection settlement after ingestion failure"
                     );
                 }
             }
@@ -2252,16 +3276,16 @@ fn merging_graph_completed_message(rebuild_follow_up: bool) -> &'static str {
 
 fn projecting_graph_stage_message(rebuild_follow_up: bool) -> &'static str {
     if rebuild_follow_up {
-        "refreshing Neo4j after a delete or reprocess mutation"
+        "refreshing the canonical graph view after a delete or reprocess mutation"
     } else {
-        "projecting canonical graph into Neo4j"
+        "refreshing the canonical graph view"
     }
 }
 
 fn projecting_graph_completed_message(rebuild_follow_up: bool, graph_status: &str) -> &'static str {
     match (rebuild_follow_up, graph_status) {
-        (_, "ready") if rebuild_follow_up => "stale graph projection refreshed in Neo4j",
-        (_, "ready") => "Neo4j projection refreshed",
+        (_, "ready") if rebuild_follow_up => "stale graph view refreshed",
+        (_, "ready") => "canonical graph view refreshed",
         (true, _) => {
             "projection skipped because the rebuild follow-up run produced no graph evidence"
         }
@@ -2801,15 +3825,11 @@ async fn latest_runtime_stage_span(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
     use crate::{
         app::{config::Settings, state::AppState},
+        infra::arangodb::document_store::{KnowledgeLibraryGenerationRow, KnowledgeRevisionRow},
         infra::repositories::{self, IngestionJobRow},
-        services::runtime_ingestion::{
-            QueueRuntimeUploadRequest, RuntimeUploadFileInput, queue_new_runtime_upload,
-        },
     };
 
     fn sample_job(trigger_kind: &str) -> IngestionJobRow {
@@ -2921,6 +3941,117 @@ mod tests {
     }
 
     #[test]
+    fn terminal_failure_preserves_reached_readiness_states() {
+        let now = Utc::now();
+        let revision = KnowledgeRevisionRow {
+            key: "revision-1".to_string(),
+            arango_id: None,
+            arango_rev: None,
+            revision_id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            document_id: Uuid::now_v7(),
+            revision_number: 7,
+            revision_state: "processing".to_string(),
+            revision_kind: "replace".to_string(),
+            storage_ref: None,
+            source_uri: None,
+            mime_type: "text/plain".to_string(),
+            checksum: "abc".to_string(),
+            title: Some("Document".to_string()),
+            byte_size: 128,
+            normalized_text: Some("hello".to_string()),
+            text_checksum: Some("def".to_string()),
+            text_state: "ready".to_string(),
+            vector_state: "ready".to_string(),
+            graph_state: "processing".to_string(),
+            text_readable_at: Some(now),
+            vector_ready_at: Some(now),
+            graph_ready_at: None,
+            superseded_by_revision_id: None,
+            created_at: now,
+        };
+
+        let preserved = preserve_failure_revision_truth(&revision);
+
+        assert_eq!(preserved.text_state, "ready");
+        assert_eq!(preserved.vector_state, "ready");
+        assert_eq!(preserved.graph_state, "failed");
+        assert_eq!(preserved.text_readable_at, Some(now));
+        assert_eq!(preserved.vector_ready_at, Some(now));
+        assert_eq!(preserved.graph_ready_at, None);
+
+        let existing_generation = KnowledgeLibraryGenerationRow {
+            key: "generation-1".to_string(),
+            arango_id: None,
+            arango_rev: None,
+            generation_id: Uuid::now_v7(),
+            workspace_id: revision.workspace_id,
+            library_id: revision.library_id,
+            active_text_generation: 3,
+            active_vector_generation: 4,
+            active_graph_generation: 0,
+            degraded_state: "degraded".to_string(),
+            updated_at: now,
+        };
+
+        let snapshot =
+            build_failure_generation_snapshot(Some(&existing_generation), &revision, &preserved)
+                .expect("snapshot should be produced when readability was reached");
+
+        assert_eq!(snapshot.active_text_generation, 7);
+        assert_eq!(snapshot.active_vector_generation, 7);
+        assert_eq!(snapshot.active_graph_generation, 0);
+        assert_eq!(snapshot.degraded_state, "degraded");
+    }
+
+    #[test]
+    fn terminal_failure_marks_unreached_readiness_failed() {
+        let now = Utc::now();
+        let revision = KnowledgeRevisionRow {
+            key: "revision-2".to_string(),
+            arango_id: None,
+            arango_rev: None,
+            revision_id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            document_id: Uuid::now_v7(),
+            revision_number: 4,
+            revision_state: "processing".to_string(),
+            revision_kind: "upload".to_string(),
+            storage_ref: None,
+            source_uri: None,
+            mime_type: "text/plain".to_string(),
+            checksum: "ghi".to_string(),
+            title: None,
+            byte_size: 64,
+            normalized_text: None,
+            text_checksum: None,
+            text_state: "processing".to_string(),
+            vector_state: "accepted".to_string(),
+            graph_state: "processing".to_string(),
+            text_readable_at: None,
+            vector_ready_at: None,
+            graph_ready_at: None,
+            superseded_by_revision_id: None,
+            created_at: now,
+        };
+
+        let preserved = preserve_failure_revision_truth(&revision);
+
+        assert_eq!(preserved.text_state, "failed");
+        assert_eq!(preserved.vector_state, "failed");
+        assert_eq!(preserved.graph_state, "failed");
+        assert_eq!(preserved.text_readable_at, None);
+        assert_eq!(preserved.vector_ready_at, None);
+        assert_eq!(preserved.graph_ready_at, None);
+        assert!(
+            build_failure_generation_snapshot(None, &revision, &preserved).is_none(),
+            "no generation snapshot should be emitted when no readiness was reached"
+        );
+    }
+
+    #[test]
     fn graph_edge_embedding_support_nodes_include_changed_edge_endpoints() {
         let changed_node_ids = BTreeSet::from([Uuid::now_v7()]);
         let source_node_id = Uuid::now_v7();
@@ -3014,7 +4145,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires local postgres, redis, and neo4j services"]
+    #[ignore = "requires local postgres, redis, and arango services"]
     async fn cleanup_retry_artifacts_deletes_stale_chunks_for_replayed_initial_uploads() {
         let state =
             AppState::new(Settings::from_env().expect("settings")).await.expect("app state");
@@ -3146,106 +4277,6 @@ mod tests {
                 .await
                 .expect("remaining chunks");
         assert!(remaining_chunks.is_empty());
-    }
-
-    #[tokio::test]
-    #[ignore = "requires local postgres, redis, and neo4j services"]
-    async fn runtime_worker_progresses_run_to_ready_no_graph() {
-        let state =
-            AppState::new(Settings::from_env().expect("settings")).await.expect("app state");
-        let slug = format!("rt-stage-{}", Uuid::now_v7().simple());
-        let workspace = repositories::create_workspace(
-            &state.persistence.postgres,
-            &slug,
-            "Runtime Stage Test Workspace",
-        )
-        .await
-        .expect("workspace");
-        let project = repositories::create_project(
-            &state.persistence.postgres,
-            workspace.id,
-            &format!("lib-{}", Uuid::now_v7().simple()),
-            "Runtime Stage Test Library",
-            Some("runtime ingestion stage progression test"),
-        )
-        .await
-        .expect("project");
-        let queued = queue_new_runtime_upload(
-            &state,
-            QueueRuntimeUploadRequest {
-                project_id: project.id,
-                upload_batch_id: Some(Uuid::now_v7()),
-                requested_by: Some("test@rustrag.local".to_string()),
-                trigger_kind: "runtime_test_upload".to_string(),
-                parent_job_id: None,
-                idempotency_key: None,
-                file: RuntimeUploadFileInput {
-                    source_id: None,
-                    file_name: "runtime-stage.txt".to_string(),
-                    mime_type: Some("text/plain".to_string()),
-                    file_bytes: b"Entity extraction begins here.\n\nChunked context follows."
-                        .to_vec(),
-                    title: Some("Runtime stage test".to_string()),
-                },
-            },
-        )
-        .await
-        .expect("queue runtime upload");
-
-        execute_job(Arc::new(state.clone()), "test-worker", queued.ingestion_job.clone())
-            .await
-            .expect("execute worker job");
-
-        let run = repositories::get_runtime_ingestion_run_by_id(
-            &state.persistence.postgres,
-            queued.runtime_run.id,
-        )
-        .await
-        .expect("load runtime run")
-        .expect("runtime run exists");
-        assert_eq!(run.status, "ready_no_graph");
-        assert_eq!(run.current_stage, "finalizing");
-        assert_eq!(run.progress_percent, Some(100));
-
-        let extracted = repositories::get_runtime_extracted_content_by_run(
-            &state.persistence.postgres,
-            queued.runtime_run.id,
-        )
-        .await
-        .expect("load extracted content")
-        .expect("extracted content exists");
-        assert_eq!(extracted.extraction_kind, "text_like");
-        assert!(
-            extracted
-                .content_text
-                .as_deref()
-                .is_some_and(|text| text.contains("Entity extraction"))
-        );
-
-        let events = repositories::list_runtime_stage_events_by_run(
-            &state.persistence.postgres,
-            queued.runtime_run.id,
-        )
-        .await
-        .expect("load stage events");
-        let stage_pairs = events
-            .into_iter()
-            .map(|event| format!("{}:{}", event.stage, event.status))
-            .collect::<Vec<_>>();
-        assert!(stage_pairs.iter().any(|value| value == "accepted:completed"));
-        assert!(stage_pairs.iter().any(|value| value == "extracting_content:started"));
-        assert!(stage_pairs.iter().any(|value| value == "extracting_content:completed"));
-        assert!(stage_pairs.iter().any(|value| value == "chunking:started"));
-        assert!(stage_pairs.iter().any(|value| value == "chunking:completed"));
-        assert!(stage_pairs.iter().any(|value| value == "finalizing:started"));
-        assert!(stage_pairs.iter().any(|value| value == "finalizing:completed"));
-
-        let document_id = run.document_id.expect("document persisted");
-        let chunks =
-            repositories::list_chunks_by_document(&state.persistence.postgres, document_id)
-                .await
-                .expect("load chunks");
-        assert!(!chunks.is_empty());
     }
 }
 
@@ -3418,24 +4449,6 @@ async fn handle_recovered_jobs(
             recovery_reason = per_job_log,
             "requeued abandoned ingestion job during recovery",
         );
-        if let Err(queue_error) = release_library_queue_isolation_slot(state, job.project_id).await
-        {
-            warn!(
-                %worker_id,
-                project_id = %job.project_id,
-                ?queue_error,
-                "failed to release queue-isolation slot during recovery"
-            );
-        } else if let Err(settlement_error) =
-            refresh_terminal_library_settlement(state, job.project_id).await
-        {
-            warn!(
-                %worker_id,
-                project_id = %job.project_id,
-                ?settlement_error,
-                "failed to refresh final collection settlement after recovery requeue"
-            );
-        }
     }
     if recovered_count > 0 {
         warn!(

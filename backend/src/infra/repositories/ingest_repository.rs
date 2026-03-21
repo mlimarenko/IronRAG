@@ -10,6 +10,9 @@ pub struct IngestJobRow {
     pub library_id: Uuid,
     pub mutation_id: Option<Uuid>,
     pub connector_id: Option<Uuid>,
+    pub async_operation_id: Option<Uuid>,
+    pub knowledge_document_id: Option<Uuid>,
+    pub knowledge_revision_id: Option<Uuid>,
     pub job_kind: String,
     pub queue_state: String,
     pub priority: i32,
@@ -25,6 +28,9 @@ pub struct NewIngestJob {
     pub library_id: Uuid,
     pub mutation_id: Option<Uuid>,
     pub connector_id: Option<Uuid>,
+    pub async_operation_id: Option<Uuid>,
+    pub knowledge_document_id: Option<Uuid>,
+    pub knowledge_revision_id: Option<Uuid>,
     pub job_kind: String,
     pub queue_state: String,
     pub priority: i32,
@@ -38,6 +44,9 @@ pub struct NewIngestJob {
 pub struct UpdateIngestJob {
     pub mutation_id: Option<Uuid>,
     pub connector_id: Option<Uuid>,
+    pub async_operation_id: Option<Uuid>,
+    pub knowledge_document_id: Option<Uuid>,
+    pub knowledge_revision_id: Option<Uuid>,
     pub job_kind: String,
     pub queue_state: String,
     pub priority: i32,
@@ -53,6 +62,7 @@ pub struct IngestAttemptRow {
     pub attempt_number: i32,
     pub worker_principal_id: Option<Uuid>,
     pub lease_token: Option<String>,
+    pub knowledge_generation_id: Option<Uuid>,
     pub attempt_state: String,
     pub current_stage: Option<String>,
     pub started_at: DateTime<Utc>,
@@ -69,6 +79,7 @@ pub struct NewIngestAttempt {
     pub attempt_number: i32,
     pub worker_principal_id: Option<Uuid>,
     pub lease_token: Option<String>,
+    pub knowledge_generation_id: Option<Uuid>,
     pub attempt_state: String,
     pub current_stage: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
@@ -83,6 +94,7 @@ pub struct NewIngestAttempt {
 pub struct UpdateIngestAttempt {
     pub worker_principal_id: Option<Uuid>,
     pub lease_token: Option<String>,
+    pub knowledge_generation_id: Option<Uuid>,
     pub attempt_state: String,
     pub current_stage: Option<String>,
     pub heartbeat_at: Option<DateTime<Utc>>,
@@ -126,6 +138,9 @@ pub async fn create_ingest_job(
             library_id,
             mutation_id,
             connector_id,
+            async_operation_id,
+            knowledge_document_id,
+            knowledge_revision_id,
             job_kind,
             queue_state,
             priority,
@@ -140,13 +155,16 @@ pub async fn create_ingest_job(
             $3,
             $4,
             $5,
-            $6::ingest_job_kind,
-            $7::ingest_queue_state,
+            $6,
+            $7,
             $8,
-            $9,
-            coalesce($10, now()),
-            coalesce($11, now()),
-            $12
+            $9::ingest_job_kind,
+            $10::ingest_queue_state,
+            $11,
+            $12,
+            coalesce($13, now()),
+            coalesce($14, now()),
+            $15
         )
         returning
             id,
@@ -154,6 +172,9 @@ pub async fn create_ingest_job(
             library_id,
             mutation_id,
             connector_id,
+            async_operation_id,
+            knowledge_document_id,
+            knowledge_revision_id,
             job_kind::text as job_kind,
             queue_state::text as queue_state,
             priority,
@@ -167,6 +188,9 @@ pub async fn create_ingest_job(
     .bind(input.library_id)
     .bind(input.mutation_id)
     .bind(input.connector_id)
+    .bind(input.async_operation_id)
+    .bind(input.knowledge_document_id)
+    .bind(input.knowledge_revision_id)
     .bind(&input.job_kind)
     .bind(&input.queue_state)
     .bind(input.priority)
@@ -189,6 +213,9 @@ pub async fn get_ingest_job_by_id(
             library_id,
             mutation_id,
             connector_id,
+            async_operation_id,
+            knowledge_document_id,
+            knowledge_revision_id,
             job_kind::text as job_kind,
             queue_state::text as queue_state,
             priority,
@@ -216,6 +243,9 @@ pub async fn get_ingest_job_by_dedupe_key(
             library_id,
             mutation_id,
             connector_id,
+            async_operation_id,
+            knowledge_document_id,
+            knowledge_revision_id,
             job_kind::text as job_kind,
             queue_state::text as queue_state,
             priority,
@@ -235,6 +265,175 @@ pub async fn get_ingest_job_by_dedupe_key(
     .await
 }
 
+pub async fn get_latest_ingest_job_by_mutation_id(
+    postgres: &PgPool,
+    mutation_id: Uuid,
+) -> Result<Option<IngestJobRow>, sqlx::Error> {
+    sqlx::query_as::<_, IngestJobRow>(
+        "select
+            id,
+            workspace_id,
+            library_id,
+            mutation_id,
+            connector_id,
+            async_operation_id,
+            knowledge_document_id,
+            knowledge_revision_id,
+            job_kind::text as job_kind,
+            queue_state::text as queue_state,
+            priority,
+            dedupe_key,
+            queued_at,
+            available_at,
+            completed_at
+         from ingest_job
+         where mutation_id = $1
+         order by queued_at desc, id desc
+         limit 1",
+    )
+    .bind(mutation_id)
+    .fetch_optional(postgres)
+    .await
+}
+
+pub async fn get_latest_ingest_job_by_async_operation_id(
+    postgres: &PgPool,
+    async_operation_id: Uuid,
+) -> Result<Option<IngestJobRow>, sqlx::Error> {
+    sqlx::query_as::<_, IngestJobRow>(
+        "select
+            id,
+            workspace_id,
+            library_id,
+            mutation_id,
+            connector_id,
+            async_operation_id,
+            knowledge_document_id,
+            knowledge_revision_id,
+            job_kind::text as job_kind,
+            queue_state::text as queue_state,
+            priority,
+            dedupe_key,
+            queued_at,
+            available_at,
+            completed_at
+         from ingest_job
+         where async_operation_id = $1
+         order by queued_at desc, id desc
+         limit 1",
+    )
+    .bind(async_operation_id)
+    .fetch_optional(postgres)
+    .await
+}
+
+pub async fn get_latest_ingest_job_by_knowledge_revision_id(
+    postgres: &PgPool,
+    knowledge_revision_id: Uuid,
+) -> Result<Option<IngestJobRow>, sqlx::Error> {
+    sqlx::query_as::<_, IngestJobRow>(
+        "select
+            id,
+            workspace_id,
+            library_id,
+            mutation_id,
+            connector_id,
+            async_operation_id,
+            knowledge_document_id,
+            knowledge_revision_id,
+            job_kind::text as job_kind,
+            queue_state::text as queue_state,
+            priority,
+            dedupe_key,
+            queued_at,
+            available_at,
+            completed_at
+         from ingest_job
+         where knowledge_revision_id = $1
+         order by queued_at desc, id desc
+         limit 1",
+    )
+    .bind(knowledge_revision_id)
+    .fetch_optional(postgres)
+    .await
+}
+
+pub async fn list_ingest_jobs_by_knowledge_document_id(
+    postgres: &PgPool,
+    workspace_id: Uuid,
+    library_id: Uuid,
+    knowledge_document_id: Uuid,
+) -> Result<Vec<IngestJobRow>, sqlx::Error> {
+    sqlx::query_as::<_, IngestJobRow>(
+        "select
+            id,
+            workspace_id,
+            library_id,
+            mutation_id,
+            connector_id,
+            async_operation_id,
+            knowledge_document_id,
+            knowledge_revision_id,
+            job_kind::text as job_kind,
+            queue_state::text as queue_state,
+            priority,
+            dedupe_key,
+            queued_at,
+            available_at,
+            completed_at
+         from ingest_job
+         where workspace_id = $1
+           and library_id = $2
+           and knowledge_document_id = $3
+         order by queued_at desc, id desc",
+    )
+    .bind(workspace_id)
+    .bind(library_id)
+    .bind(knowledge_document_id)
+    .fetch_all(postgres)
+    .await
+}
+
+pub async fn list_ingest_jobs_by_mutation_ids(
+    postgres: &PgPool,
+    workspace_id: Uuid,
+    library_id: Uuid,
+    mutation_ids: &[Uuid],
+) -> Result<Vec<IngestJobRow>, sqlx::Error> {
+    if mutation_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, IngestJobRow>(
+        "select
+            id,
+            workspace_id,
+            library_id,
+            mutation_id,
+            connector_id,
+            async_operation_id,
+            knowledge_document_id,
+            knowledge_revision_id,
+            job_kind::text as job_kind,
+            queue_state::text as queue_state,
+            priority,
+            dedupe_key,
+            queued_at,
+            available_at,
+            completed_at
+         from ingest_job
+         where workspace_id = $1
+           and library_id = $2
+           and mutation_id = any($3)
+         order by queued_at desc, id desc",
+    )
+    .bind(workspace_id)
+    .bind(library_id)
+    .bind(mutation_ids)
+    .fetch_all(postgres)
+    .await
+}
+
 pub async fn list_ingest_jobs(
     postgres: &PgPool,
     workspace_id: Option<Uuid>,
@@ -249,6 +448,9 @@ pub async fn list_ingest_jobs(
                     library_id,
                     mutation_id,
                     connector_id,
+                    async_operation_id,
+                    knowledge_document_id,
+                    knowledge_revision_id,
                     job_kind::text as job_kind,
                     queue_state::text as queue_state,
                     priority,
@@ -274,6 +476,9 @@ pub async fn list_ingest_jobs(
                     library_id,
                     mutation_id,
                     connector_id,
+                    async_operation_id,
+                    knowledge_document_id,
+                    knowledge_revision_id,
                     job_kind::text as job_kind,
                     queue_state::text as queue_state,
                     priority,
@@ -297,6 +502,9 @@ pub async fn list_ingest_jobs(
                     library_id,
                     mutation_id,
                     connector_id,
+                    async_operation_id,
+                    knowledge_document_id,
+                    knowledge_revision_id,
                     job_kind::text as job_kind,
                     queue_state::text as queue_state,
                     priority,
@@ -320,6 +528,9 @@ pub async fn list_ingest_jobs(
                     library_id,
                     mutation_id,
                     connector_id,
+                    async_operation_id,
+                    knowledge_document_id,
+                    knowledge_revision_id,
                     job_kind::text as job_kind,
                     queue_state::text as queue_state,
                     priority,
@@ -345,12 +556,15 @@ pub async fn update_ingest_job(
         "update ingest_job
          set mutation_id = $2,
              connector_id = $3,
-             job_kind = $4::ingest_job_kind,
-             queue_state = $5::ingest_queue_state,
-             priority = $6,
-             dedupe_key = $7,
-             available_at = $8,
-             completed_at = $9
+             async_operation_id = $4,
+             knowledge_document_id = $5,
+             knowledge_revision_id = $6,
+             job_kind = $7::ingest_job_kind,
+             queue_state = $8::ingest_queue_state,
+             priority = $9,
+             dedupe_key = $10,
+             available_at = $11,
+             completed_at = $12
          where id = $1
          returning
             id,
@@ -358,6 +572,9 @@ pub async fn update_ingest_job(
             library_id,
             mutation_id,
             connector_id,
+            async_operation_id,
+            knowledge_document_id,
+            knowledge_revision_id,
             job_kind::text as job_kind,
             queue_state::text as queue_state,
             priority,
@@ -369,6 +586,9 @@ pub async fn update_ingest_job(
     .bind(job_id)
     .bind(input.mutation_id)
     .bind(input.connector_id)
+    .bind(input.async_operation_id)
+    .bind(input.knowledge_document_id)
+    .bind(input.knowledge_revision_id)
     .bind(&input.job_kind)
     .bind(&input.queue_state)
     .bind(input.priority)
@@ -390,6 +610,7 @@ pub async fn create_ingest_attempt(
             attempt_number,
             worker_principal_id,
             lease_token,
+            knowledge_generation_id,
             attempt_state,
             current_stage,
             started_at,
@@ -405,14 +626,15 @@ pub async fn create_ingest_attempt(
             $3,
             $4,
             $5,
-            $6::ingest_attempt_state,
-            $7,
-            coalesce($8, now()),
-            $9,
+            $6,
+            $7::ingest_attempt_state,
+            $8,
+            coalesce($9, now()),
             $10,
             $11,
             $12,
-            $13
+            $13,
+            $14
         )
         returning
             id,
@@ -420,6 +642,7 @@ pub async fn create_ingest_attempt(
             attempt_number,
             worker_principal_id,
             lease_token,
+            knowledge_generation_id,
             attempt_state::text as attempt_state,
             current_stage,
             started_at,
@@ -434,6 +657,7 @@ pub async fn create_ingest_attempt(
     .bind(input.attempt_number)
     .bind(input.worker_principal_id)
     .bind(&input.lease_token)
+    .bind(input.knowledge_generation_id)
     .bind(&input.attempt_state)
     .bind(&input.current_stage)
     .bind(input.started_at)
@@ -457,6 +681,7 @@ pub async fn get_ingest_attempt_by_id(
             attempt_number,
             worker_principal_id,
             lease_token,
+            knowledge_generation_id,
             attempt_state::text as attempt_state,
             current_stage,
             started_at,
@@ -484,6 +709,7 @@ pub async fn list_ingest_attempts_by_job(
             attempt_number,
             worker_principal_id,
             lease_token,
+            knowledge_generation_id,
             attempt_state::text as attempt_state,
             current_stage,
             started_at,
@@ -512,6 +738,7 @@ pub async fn get_latest_ingest_attempt_by_job(
             attempt_number,
             worker_principal_id,
             lease_token,
+            knowledge_generation_id,
             attempt_state::text as attempt_state,
             current_stage,
             started_at,
@@ -539,13 +766,14 @@ pub async fn update_ingest_attempt(
         "update ingest_attempt
          set worker_principal_id = $2,
              lease_token = $3,
-             attempt_state = $4::ingest_attempt_state,
-             current_stage = $5,
-             heartbeat_at = $6,
-             finished_at = $7,
-             failure_class = $8,
-             failure_code = $9,
-             retryable = $10
+             knowledge_generation_id = $4,
+             attempt_state = $5::ingest_attempt_state,
+             current_stage = $6,
+             heartbeat_at = $7,
+             finished_at = $8,
+             failure_class = $9,
+             failure_code = $10,
+             retryable = $11
          where id = $1
          returning
             id,
@@ -553,6 +781,7 @@ pub async fn update_ingest_attempt(
             attempt_number,
             worker_principal_id,
             lease_token,
+            knowledge_generation_id,
             attempt_state::text as attempt_state,
             current_stage,
             started_at,
@@ -565,6 +794,7 @@ pub async fn update_ingest_attempt(
     .bind(attempt_id)
     .bind(input.worker_principal_id)
     .bind(&input.lease_token)
+    .bind(input.knowledge_generation_id)
     .bind(&input.attempt_state)
     .bind(&input.current_stage)
     .bind(input.heartbeat_at)

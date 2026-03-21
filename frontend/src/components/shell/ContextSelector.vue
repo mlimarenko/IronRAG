@@ -8,6 +8,7 @@ defineProps<{
   disabled?: boolean
   placeholder?: string
   canCreate?: boolean
+  createLabel?: string
 }>()
 
 const emit = defineEmits<{
@@ -44,6 +45,8 @@ const emit = defineEmits<{
       class="rr-selector__add"
       type="button"
       :disabled="!canCreate"
+      :aria-label="createLabel ?? label"
+      :title="createLabel ?? label"
       @click="emit('create')"
     >
       +

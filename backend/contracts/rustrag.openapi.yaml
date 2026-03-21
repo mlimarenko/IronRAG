@@ -3,7 +3,7 @@ info:
   title: RustRAG API
   version: 0.1.0
   description: |
-    Canonical API contract for the current RustRAG backend surface.
+    Canonical API contract for the current ArangoDB-centered RustRAG backend surface.
 
     This contract tracks the active public Axum routes mounted from `backend/src/interfaces/http`
     and is rewritten at request time with proxy-safe server origins for the current entrypoint.
@@ -17,6 +17,7 @@ tags:
   - name: catalog
   - name: iam
   - name: ai
+  - name: knowledge
   - name: ingest
   - name: search
   - name: query
@@ -24,22 +25,15 @@ tags:
   - name: ops
   - name: audit
   - name: automation
-  - name: ui-auth
-  - name: ui-shell
-  - name: workspaces
-  - name: ingestion
-  - name: documents
   - name: content
-  - name: product
-  - name: graph
 x-greenfield-scaffold:
   canonicalPathPrefixes:
     - /v1/catalog
     - /v1/iam
     - /v1/ai
+    - /v1/knowledge
     - /v1/content
     - /v1/ingest
-    - /v1/graph
     - /v1/search
     - /v1/query
     - /v1/billing
@@ -47,9 +41,9 @@ x-greenfield-scaffold:
     - /v1/audit
     - /v1/mcp
   forbiddenLegacyVocabulary:
-    - runtime_
-    - ui_
-    - mcp_
+    - runtime prefix
+    - ui prefix
+    - mcp memory module
   seededAiCatalog:
     providers: 3
     models: 7
@@ -1387,123 +1381,171 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiErrorBody"
-  /v1/graph/libraries/{libraryId}/projection:
-    get:
-      tags: [graph]
-      summary: Get the active canonical graph projection for one library
-      operationId: getGraphProjection
-      parameters:
-        - in: path
-          name: libraryId
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Active graph projection
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/GraphProjectionDetailResponse"
-        "401":
-          description: Missing or insufficient authorization
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiErrorBody"
-        "404":
-          description: Graph projection not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiErrorBody"
-  /v1/graph/libraries/{libraryId}/nodes:
-    get:
-      tags: [graph]
-      summary: List canonical graph nodes for the active library projection
-      operationId: listGraphNodes
-      parameters:
-        - in: path
-          name: libraryId
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Canonical graph nodes for the active projection
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/GraphNode"
-        "401":
-          description: Missing or insufficient authorization
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiErrorBody"
-        "404":
-          description: Graph projection not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiErrorBody"
-  /v1/graph/libraries/{libraryId}/edges:
-    get:
-      tags: [graph]
-      summary: List canonical graph edges for the active library projection
-      operationId: listGraphEdges
-      parameters:
-        - in: path
-          name: libraryId
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Canonical graph edges for the active projection
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/GraphEdge"
-        "401":
-          description: Missing or insufficient authorization
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiErrorBody"
-        "404":
-          description: Graph projection not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiErrorBody"
   /v1/search/documents:
-    post:
-      tags: [search]
-      summary: Search readable documents in one library
+    get:
+      tags: [knowledge]
+      summary: Search documents, chunks, entities, and relations in one knowledge library
       operationId: searchDocuments
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/SearchRequest"
+      parameters:
+        - in: query
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: query
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 50
+        - in: query
+          name: chunkHitLimitPerDocument
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 50
+        - in: query
+          name: evidenceSampleLimit
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 50
       responses:
         "200":
-          description: Ranked document hits
+          description: Hybrid knowledge search response with lexical and vector candidates, document hits, and provenance summaries
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/SearchHit"
+                type: object
+                required:
+                  [
+                    libraryId,
+                    queryText,
+                    limit,
+                    embeddingProviderKind,
+                    embeddingModelName,
+                    embeddingModelCatalogId,
+                    freshnessGeneration,
+                    documentHits,
+                    entityHits,
+                    relationHits,
+                    vectorChunkHits,
+                    vectorEntityHits,
+                  ]
+                properties:
+                  libraryId:
+                    type: string
+                    format: uuid
+                  queryText:
+                    type: string
+                  limit:
+                    type: integer
+                    format: int32
+                  embeddingProviderKind:
+                    type: string
+                  embeddingModelName:
+                    type: string
+                  embeddingModelCatalogId:
+                    type: string
+                    format: uuid
+                  freshnessGeneration:
+                    type: integer
+                    format: int64
+                  documentHits:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                        [
+                          document,
+                          revision,
+                          score,
+                          provenanceSummary,
+                          chunkHits,
+                          vectorChunkHits,
+                          evidenceSamples,
+                        ]
+                      properties:
+                        document:
+                          $ref: "#/components/schemas/KnowledgeDocumentRow"
+                        revision:
+                          $ref: "#/components/schemas/KnowledgeRevisionRow"
+                        score:
+                          type: number
+                          format: double
+                        lexicalRank:
+                          type:
+                            - integer
+                            - "null"
+                          format: int32
+                        vectorRank:
+                          type:
+                            - integer
+                            - "null"
+                          format: int32
+                        lexicalScore:
+                          type:
+                            - number
+                            - "null"
+                          format: double
+                        vectorScore:
+                          type:
+                            - number
+                            - "null"
+                          format: double
+                        chunkHits:
+                          type: array
+                          items:
+                            $ref: "#/components/schemas/KnowledgeChunkSearchRow"
+                        vectorChunkHits:
+                          type: array
+                          items:
+                            $ref: "#/components/schemas/KnowledgeChunkVectorSearchRow"
+                        evidenceSamples:
+                          type: array
+                          items:
+                            $ref: "#/components/schemas/KnowledgeEvidenceRow"
+                        provenanceSummary:
+                          type: object
+                          required: [supportingEvidenceCount, lexicalChunkCount, vectorChunkCount]
+                          properties:
+                            supportingEvidenceCount:
+                              type: integer
+                              format: int32
+                            lexicalChunkCount:
+                              type: integer
+                              format: int32
+                            vectorChunkCount:
+                              type: integer
+                              format: int32
+                  entityHits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeEntitySearchRow"
+                  relationHits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeRelationSearchRow"
+                  vectorChunkHits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeChunkVectorSearchRow"
+                  vectorEntityHits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeEntityVectorSearchRow"
         "400":
           description: Invalid search request
           content:
@@ -1516,11 +1558,488 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiErrorBody"
-  /v1/query/conversations:
+  /v1/knowledge/libraries/{libraryId}/documents:
+    get:
+      tags: [knowledge]
+      summary: List documents in one knowledge library
+      operationId: listKnowledgeDocuments
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Documents visible to the authenticated principal
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/KnowledgeDocumentRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/libraries/{libraryId}/documents/{documentId}:
+    get:
+      tags: [knowledge]
+      summary: Get document detail with revisions and latest chunks
+      operationId: getKnowledgeDocument
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: path
+          name: documentId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Document detail payload
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [document, revisions, latestRevisionChunks]
+                properties:
+                  document:
+                    $ref: "#/components/schemas/KnowledgeDocumentRow"
+                  revisions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeRevisionRow"
+                  latestRevision:
+                    oneOf:
+                      - $ref: "#/components/schemas/KnowledgeRevisionRow"
+                      - type: "null"
+                  latestRevisionChunks:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeChunkRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/libraries/{libraryId}/context-bundles:
+    get:
+      tags: [knowledge]
+      summary: List context bundles in one knowledge library
+      operationId: listKnowledgeContextBundles
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Context bundles visible to the authenticated principal
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/KnowledgeContextBundleRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/context-bundles/{bundleId}:
+    get:
+      tags: [knowledge]
+      summary: Get one context bundle with traces and resolved knowledge rows
+      operationId: getKnowledgeContextBundle
+      parameters:
+        - in: path
+          name: bundleId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Context bundle detail payload
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [bundle, traces, chunkEdges, entityEdges, relationEdges, evidenceEdges, chunks, entities, relations, evidence]
+                properties:
+                  bundle:
+                    $ref: "#/components/schemas/KnowledgeContextBundleRow"
+                  traces:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeRetrievalTraceRow"
+                  chunkEdges:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeBundleChunkEdgeRow"
+                  entityEdges:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeBundleEntityEdgeRow"
+                  relationEdges:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeBundleRelationEdgeRow"
+                  evidenceEdges:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeBundleEvidenceEdgeRow"
+                  chunks:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeChunkRow"
+                  entities:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeEntityRow"
+                  relations:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeRelationRow"
+                  evidence:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeEvidenceRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/libraries/{libraryId}/entities:
+    get:
+      tags: [knowledge]
+      summary: List graph entities in one knowledge library
+      operationId: listKnowledgeEntities
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Knowledge entities
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/KnowledgeEntityRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/libraries/{libraryId}/entities/{entityId}:
+    get:
+      tags: [knowledge]
+      summary: Get entity detail with mention and provenance data
+      operationId: getKnowledgeEntity
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: path
+          name: entityId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Entity detail payload
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entity, mentionEdges, mentionedChunks, supportingEvidenceEdges, supportingEvidence]
+                properties:
+                  entity:
+                    $ref: "#/components/schemas/KnowledgeEntityRow"
+                  mentionEdges:
+                    type: array
+                    items:
+                      type: object
+                  mentionedChunks:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeChunkRow"
+                  supportingEvidenceEdges:
+                    type: array
+                    items:
+                      type: object
+                  supportingEvidence:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeEvidenceRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/libraries/{libraryId}/relations:
+    get:
+      tags: [knowledge]
+      summary: List graph relations in one knowledge library
+      operationId: listKnowledgeRelations
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Knowledge relations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/KnowledgeRelationRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/libraries/{libraryId}/relations/{relationId}:
+    get:
+      tags: [knowledge]
+      summary: Get relation detail with provenance data
+      operationId: getKnowledgeRelation
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: path
+          name: relationId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Relation detail payload
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [relation, supportingEvidenceEdges, supportingEvidence]
+                properties:
+                  relation:
+                    $ref: "#/components/schemas/KnowledgeRelationRow"
+                  supportingEvidenceEdges:
+                    type: array
+                    items:
+                      type: object
+                  supportingEvidence:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeEvidenceRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/libraries/{libraryId}/search/documents:
+    get:
+      tags: [knowledge]
+      summary: Search documents, chunks, entities, and relations in one knowledge library
+      operationId: searchKnowledgeDocuments
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: query
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 50
+        - in: query
+          name: chunkHitLimitPerDocument
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 50
+        - in: query
+          name: evidenceSampleLimit
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 50
+      responses:
+        "200":
+          description: Hybrid knowledge search response with lexical and vector candidates, document hits, and provenance summaries
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  [
+                    libraryId,
+                    queryText,
+                    limit,
+                    embeddingProviderKind,
+                    embeddingModelName,
+                    embeddingModelCatalogId,
+                    freshnessGeneration,
+                    documentHits,
+                    entityHits,
+                    relationHits,
+                    vectorChunkHits,
+                    vectorEntityHits,
+                  ]
+                properties:
+                  libraryId:
+                    type: string
+                    format: uuid
+                  queryText:
+                    type: string
+                  limit:
+                    type: integer
+                    format: int32
+                  embeddingProviderKind:
+                    type: string
+                  embeddingModelName:
+                    type: string
+                  embeddingModelCatalogId:
+                    type: string
+                    format: uuid
+                  freshnessGeneration:
+                    type: integer
+                    format: int64
+                  documentHits:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                        [
+                          document,
+                          revision,
+                          score,
+                          provenanceSummary,
+                          chunkHits,
+                          vectorChunkHits,
+                          evidenceSamples,
+                        ]
+                      properties:
+                        document:
+                          $ref: "#/components/schemas/KnowledgeDocumentRow"
+                        revision:
+                          $ref: "#/components/schemas/KnowledgeRevisionRow"
+                        score:
+                          type: number
+                          format: double
+                        lexicalRank:
+                          type:
+                            - integer
+                            - "null"
+                          format: int32
+                        vectorRank:
+                          type:
+                            - integer
+                            - "null"
+                          format: int32
+                        lexicalScore:
+                          type:
+                            - number
+                            - "null"
+                          format: double
+                        vectorScore:
+                          type:
+                            - number
+                            - "null"
+                          format: double
+                        chunkHits:
+                          type: array
+                          items:
+                            $ref: "#/components/schemas/KnowledgeChunkSearchRow"
+                        vectorChunkHits:
+                          type: array
+                          items:
+                            $ref: "#/components/schemas/KnowledgeChunkVectorSearchRow"
+                        evidenceSamples:
+                          type: array
+                          items:
+                            $ref: "#/components/schemas/KnowledgeEvidenceRow"
+                        provenanceSummary:
+                          type: object
+                          required: [supportingEvidenceCount, lexicalChunkCount, vectorChunkCount]
+                          properties:
+                            supportingEvidenceCount:
+                              type: integer
+                              format: int32
+                            lexicalChunkCount:
+                              type: integer
+                              format: int32
+                            vectorChunkCount:
+                              type: integer
+                              format: int32
+                  entityHits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeEntitySearchRow"
+                  relationHits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeRelationSearchRow"
+                  vectorChunkHits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeChunkVectorSearchRow"
+                  vectorEntityHits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeEntityVectorSearchRow"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/query/sessions:
     get:
       tags: [query]
-      summary: List canonical conversations for one library
-      operationId: listQueryConversations
+      summary: List canonical query sessions for one library
+      operationId: listQuerySessions
       parameters:
         - in: query
           name: libraryId
@@ -1530,7 +2049,7 @@ paths:
             format: uuid
       responses:
         "200":
-          description: Visible conversations ordered by most recent activity
+          description: Visible query sessions ordered by most recent activity
           content:
             application/json:
               schema:
@@ -1543,8 +2062,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
     post:
       tags: [query]
-      summary: Create one canonical conversation
-      operationId: createQueryConversation
+      summary: Create one canonical query session
+      operationId: createQuerySession
       requestBody:
         required: true
         content:
@@ -1553,7 +2072,7 @@ paths:
               $ref: "#/components/schemas/CreateQueryConversationRequest"
       responses:
         "200":
-          description: Conversation created
+          description: Query session created
           content:
             application/json:
               schema:
@@ -1562,21 +2081,21 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
-  /v1/query/conversations/{conversationId}:
+  /v1/query/sessions/{sessionId}:
     get:
       tags: [query]
-      summary: Get canonical conversation detail
-      operationId: getQueryConversation
+      summary: Get canonical query session detail
+      operationId: getQuerySession
       parameters:
         - in: path
-          name: conversationId
+          name: sessionId
           required: true
           schema:
             type: string
             format: uuid
       responses:
         "200":
-          description: Conversation detail with turns and executions
+          description: Query session detail with turns and executions
           content:
             application/json:
               schema:
@@ -1585,14 +2104,14 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
-  /v1/query/conversations/{conversationId}/turns:
+  /v1/query/sessions/{sessionId}/turns:
     post:
       tags: [query]
-      summary: Submit a user turn and execute one grounded answer
-      operationId: createQueryTurn
+      summary: Submit a user turn and execute one grounded answer in a query session
+      operationId: createQuerySessionTurn
       parameters:
         - in: path
-          name: conversationId
+          name: sessionId
           required: true
           schema:
             type: string
@@ -1721,6 +2240,52 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+  /v1/ops/operations/{operationId}:
+    get:
+      tags: [ops]
+      summary: Get one canonical async operation
+      operationId: getAsyncOperation
+      parameters:
+        - in: path
+          name: operationId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Canonical async operation detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpsAsyncOperation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/ops/libraries/{libraryId}:
+    get:
+      tags: [ops]
+      summary: Get derived operational state for one library
+      operationId: getLibraryState
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Derived operational state and knowledge generation snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpsLibraryStateResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /v1/audit/events:
     get:
       tags: [audit]
@@ -1771,532 +2336,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiErrorBody"
-  /v1/ui/auth/login:
-    post:
-      tags: [ui-auth]
-      summary: Sign in with login and password for a browser UI session
-      operationId: uiLogin
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/UiLoginRequest"
-      responses:
-        "200":
-          description: Current UI session
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UiSessionResponse"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/ui/auth/session:
-    get:
-      tags: [ui-auth]
-      summary: Get the current authenticated UI session
-      operationId: getUiSession
-      security:
-        - uiSessionCookie: []
-      responses:
-        "200":
-          description: Current UI session
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UiSessionResponse"
-        "204":
-          description: No active UI session
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/ui/auth/logout:
-    post:
-      tags: [ui-auth]
-      summary: End the current browser UI session
-      operationId: uiLogout
-      security:
-        - uiSessionCookie: []
-      responses:
-        "200":
-          description: Logout acknowledgement
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UiOkResponse"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/ui/context:
-    get:
-      tags: [ui-shell]
-      summary: Get the current authenticated shell context
-      operationId: getUiContext
-      security:
-        - uiSessionCookie: []
-      responses:
-        "200":
-          description: Active workspace, library, locale, and user chip data
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UiShellContextResponse"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalError"
-    put:
-      tags: [ui-shell]
-      summary: Update the active workspace, library, or locale for the UI session
-      operationId: updateUiContext
-      security:
-        - uiSessionCookie: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/UiUpdateContextRequest"
-      responses:
-        "200":
-          description: Updated shell context
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UiShellContextResponse"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "409":
-          $ref: "#/components/responses/Conflict"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/ui/workspaces:
-    get:
-      tags: [ui-shell]
-      summary: List workspaces visible to the current UI session
-      operationId: listUiWorkspaces
-      security:
-        - uiSessionCookie: []
-      responses:
-        "200":
-          description: Visible workspace options
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/UiWorkspaceOption"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalError"
-    post:
-      tags: [ui-shell]
-      summary: Create a workspace from the authenticated shell
-      operationId: createUiWorkspace
-      security:
-        - uiSessionCookie: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/UiCreateWorkspaceRequest"
-      responses:
-        "200":
-          description: Created workspace option
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UiWorkspaceOption"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/ui/libraries:
-    get:
-      tags: [ui-shell]
-      summary: List libraries visible in the selected workspace
-      operationId: listUiLibraries
-      security:
-        - uiSessionCookie: []
-      parameters:
-        - $ref: "#/components/parameters/workspaceId"
-      responses:
-        "200":
-          description: Visible library options
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/UiLibraryOption"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalError"
-    post:
-      tags: [ui-shell]
-      summary: Create a library inside the selected workspace
-      operationId: createUiLibrary
-      security:
-        - uiSessionCookie: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/UiCreateLibraryRequest"
-      responses:
-        "200":
-          description: Created library option
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UiLibraryOption"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/workspaces:
-    get:
-      tags: [workspaces]
-      summary: List workspaces
-      operationId: listWorkspaces
-      security: []
-      responses:
-        "200":
-          description: Workspace list
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/WorkspaceSummary"
-        "500":
-          $ref: "#/components/responses/InternalError"
-    post:
-      tags: [workspaces]
-      summary: Create workspace
-      operationId: createWorkspace
-      description: Requires `workspace:admin` scope or an `instance_admin` token.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CreateWorkspaceRequest"
-      responses:
-        "200":
-          description: Created workspace
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/WorkspaceSummary"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/workspaces/{id}/governance:
-    get:
-      tags: [workspaces, usage]
-      summary: Get workspace governance summary
-      operationId: getWorkspaceGovernance
-      description: Requires `workspace:admin`, `usage:read`, `providers:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access their own workspace.
-      parameters:
-        - $ref: "#/components/parameters/id"
-      responses:
-        "200":
-          description: Workspace governance summary
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/WorkspaceGovernanceSummary"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/sources:
-    get:
-      tags: [ingestion]
-      summary: List sources
-      operationId: listSources
-      security: []
-      parameters:
-        - $ref: "#/components/parameters/projectIdOptional"
-      responses:
-        "200":
-          description: Source list
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/SourceSummary"
-        "500":
-          $ref: "#/components/responses/InternalError"
-    post:
-      tags: [ingestion]
-      summary: Create source
-      operationId: createSource
-      description: Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CreateSourceRequest"
-      responses:
-        "200":
-          description: Created source
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SourceSummary"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/ingestion-jobs:
-    get:
-      tags: [ingestion]
-      summary: List ingestion jobs
-      operationId: listIngestionJobs
-      security: []
-      parameters:
-        - $ref: "#/components/parameters/projectIdOptional"
-      responses:
-        "200":
-          description: Ingestion job list
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/IngestionJobSummary"
-        "500":
-          $ref: "#/components/responses/InternalError"
-    post:
-      tags: [ingestion]
-      summary: Create ingestion job
-      operationId: createIngestionJob
-      description: Requires `documents:write`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only create jobs for projects in their own workspace.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CreateIngestionJobRequest"
-      responses:
-        "200":
-          description: Created ingestion job
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/IngestionJobSummary"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/ingestion-jobs/{id}:
-    get:
-      tags: [ingestion]
-      summary: Get ingestion job detail
-      operationId: getIngestionJobDetail
-      description: Requires `documents:read`, `documents:write`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access jobs in their own workspace.
-      parameters:
-        - $ref: "#/components/parameters/id"
-      responses:
-        "200":
-          description: Ingestion job detail
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/IngestionJobDetail"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/ingestion-jobs/{id}/retry:
-    post:
-      tags: [ingestion]
-      summary: Retry an ingestion job
-      operationId: retryIngestionJob
-      description: Requires `documents:write`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only retry jobs in their own workspace.
-      parameters:
-        - $ref: "#/components/parameters/id"
-      responses:
-        "200":
-          description: Newly created retry ingestion job detail
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/IngestionJobDetail"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/documents:
-    get:
-      tags: [documents]
-      summary: List documents
-      operationId: listDocuments
-      security: []
-      parameters:
-        - $ref: "#/components/parameters/projectIdOptional"
-      responses:
-        "200":
-          description: Document list
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/DocumentSummary"
-        "500":
-          $ref: "#/components/responses/InternalError"
-    post:
-      tags: [documents]
-      summary: Create document metadata record
-      operationId: createDocument
-      description: Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CreateDocumentRequest"
-      responses:
-        "200":
-          description: Created document
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/DocumentSummary"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/content/ingest-text:
-    post:
-      tags: [content]
-      summary: Queue plain text for ingestion
-      operationId: ingestText
-      description: |
-        Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
-
-        The current backend enqueues an ingestion job and returns its queued lifecycle state; it does not synchronously create a document/chunk result in this response.
-        Workspace-scoped tokens may only queue jobs for projects in their own workspace.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/IngestTextRequest"
-      responses:
-        "200":
-          description: Ingestion job accepted and queued
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/IngestTextResponse"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "409":
-          $ref: "#/components/responses/Conflict"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/content/search-chunks:
-    post:
-      tags: [content]
-      summary: Lexically search chunks within a project
-      operationId: searchChunks
-      description: Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/SearchChunksRequest"
-      responses:
-        "200":
-          description: Matching chunk list
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/ChunkResult"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/content/embed-project:
-    post:
-      tags: [content]
-      summary: Generate embeddings for project chunks
-      operationId: embedProjectChunks
-      description: |
-        Requires `documents:write`, `workspace:admin`, or an `instance_admin` token.
-
-        If `embedding_model_profile_id` is provided, the backend resolves provider/model from that profile;
-        otherwise it uses `provider_kind` and `model_name` directly.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/EmbedProjectChunksRequest"
-      responses:
-        "200":
-          description: Embedding job result summary
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/EmbedProjectChunksResponse"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
   /v1/chunks:
     get:
-      tags: [documents]
-      summary: List chunks by document or project
+      tags: [content]
+      summary: List chunks by document
       operationId: listChunks
       description: Requires `documents:read`, `workspace:admin`, or an `instance_admin` token.
       parameters:
-        - $ref: "#/components/parameters/projectIdOptional"
         - $ref: "#/components/parameters/documentId"
-        - $ref: "#/components/parameters/limit"
       responses:
         "200":
           description: Chunk list
@@ -2312,301 +2359,129 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/InternalError"
-  /v1/product/projects/{id}:
-    get:
-      tags: [product, projects]
-      summary: Get product-oriented project overview
-      operationId: getProductProjectOverview
-      description: Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
-      parameters:
-        - $ref: "#/components/parameters/id"
-      responses:
-        "200":
-          description: Project overview with readiness, query contract, citations, and capability hints
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ProductProjectOverviewDto"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/product/projects/{id}/diagnostics:
-    get:
-      tags: [product, projects]
-      summary: Get project diagnostics
-      operationId: getProductProjectDiagnostics
-      description: Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
-      parameters:
-        - $ref: "#/components/parameters/id"
-      responses:
-        "200":
-          description: Project diagnostics
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ProductProjectDiagnosticsDto"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/product/projects/{id}/query-contract:
-    get:
-      tags: [product, projects]
-      summary: Get product query contract description
-      operationId: getProductProjectQueryContract
-      description: Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
-      parameters:
-        - $ref: "#/components/parameters/id"
-      responses:
-        "200":
-          description: Query contract descriptor
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ProductQueryContractDto"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/product/documents/{id}:
-    get:
-      tags: [product, documents]
-      summary: Get product-oriented document overview
-      operationId: getProductDocumentOverview
-      description: Requires `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access documents in their own workspace. Usage and cost attribution are currently exposed at project scope because per-document attribution is not persisted yet.
-      parameters:
-        - $ref: "#/components/parameters/id"
-      responses:
-        "200":
-          description: Document overview
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ProductDocumentOverviewDto"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/product/documents/{id}/diagnostics:
-    get:
-      tags: [product, documents]
-      summary: Get document diagnostics
-      operationId: getProductDocumentDiagnostics
-      description: Requires one of `documents:read`, `query:run`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access documents in their own workspace.
-      parameters:
-        - $ref: "#/components/parameters/id"
-      responses:
-        "200":
-          description: Document diagnostics
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ProductDocumentDiagnosticsDto"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/graph-products/{project_id}:
-    get:
-      tags: [graph, product]
-      summary: Get graph product snapshot
-      operationId: getGraphProduct
-      description: Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
-      parameters:
-        - name: project_id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Graph snapshot
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/GraphProductResponse"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/graph-products/{project_id}/summary:
-    get:
-      tags: [graph, product]
-      summary: Get graph project summary
-      operationId: getGraphSummary
-      description: Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
-      parameters:
-        - name: project_id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Graph summary
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/GraphProjectSummaryResponse"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/graph-products/{project_id}/diagnostics:
-    get:
-      tags: [graph, product]
-      summary: Get graph project diagnostics
-      operationId: getGraphDiagnostics
-      description: Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Returns persisted content counts, graph provenance coverage, and concrete readiness blockers/next steps without mutating runtime state.
-      parameters:
-        - name: project_id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Graph diagnostics
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/GraphProjectDiagnosticsResponse"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/graph-products/{project_id}/search:
-    get:
-      tags: [graph, product]
-      summary: Search graph entities and relations
-      operationId: searchGraph
-      description: Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Query parameter `q` must be non-empty.
-      parameters:
-        - name: project_id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-        - name: q
-          in: query
-          required: true
-          schema:
-            type: string
-        - name: limit
-          in: query
-          required: false
-          schema:
-            type: integer
-            format: int32
-            minimum: 1
-            maximum: 50
-      responses:
-        "200":
-          description: Graph search results
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/GraphSearchResponse"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/graph-products/{project_id}/entities/{entity_id}:
-    get:
-      tags: [graph, product]
-      summary: Get graph entity detail
-      operationId: getGraphEntityDetail
-      description: Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Workspace-scoped tokens may only access projects in their own workspace.
-      parameters:
-        - name: project_id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-        - name: entity_id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Graph entity detail
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/GraphEntityDetailResponse"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/graph-products/{project_id}/entities/{entity_id}/subgraph:
-    get:
-      tags: [graph, product]
-      summary: Get a bounded subgraph around an entity
-      operationId: getGraphSubgraph
-      description: Requires one of `query:run`, `documents:read`, `workspace:admin`, or an `instance_admin` token. Depth defaults to 1 and must be <= 3.
-      parameters:
-        - name: project_id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-        - name: entity_id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-        - name: depth
-          in: query
-          required: false
-          schema:
-            type: integer
-            format: int32
-            minimum: 0
-            maximum: 3
-      responses:
-        "200":
-          description: Graph subgraph response
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/GraphSubgraphResponse"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    workspaceId:
+      name: workspaceId
+      in: query
+      required: true
+      schema: &uuidString
+        type: string
+        format: uuid
+    documentId:
+      name: documentId
+      in: query
+      required: true
+      schema: *uuidString
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema: &genericObject
+            type: object
+            additionalProperties: true
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema: *genericObject
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema: *genericObject
+    Conflict:
+      description: Conflict
+      content:
+        application/json:
+          schema: *genericObject
+    InternalError:
+      description: Internal error
+      content:
+        application/json:
+          schema: *genericObject
+  schemas:
+    ApiErrorBody: *genericObject
+    AppendContentDocumentRequest: *genericObject
+    AuditEventResponse: *genericObject
+    BillingCharge: *genericObject
+    BillingExecutionCost: *genericObject
+    BillingProviderCall: *genericObject
+    BindingValidationResponse: *genericObject
+    BootstrapClaimRequest: *genericObject
+    BootstrapClaimResponse: *genericObject
+    CatalogLibraryResponse: *genericObject
+    CatalogWorkspaceResponse: *genericObject
+    ChunkSummary: *genericObject
+    ContentDocumentDetailResponse: *genericObject
+    ContentMutationDetailResponse: *genericObject
+    ContentRevision: *genericObject
+    CreateCatalogLibraryRequest: *genericObject
+    CreateCatalogWorkspaceRequest: *genericObject
+    CreateContentDocumentRequest: *genericObject
+    CreateContentDocumentResponse: *genericObject
+    CreateContentMutationRequest: *genericObject
+    CreateGrantRequest: *genericObject
+    CreateLibraryBindingRequest: *genericObject
+    CreateProviderCredentialRequest: *genericObject
+    CreateQueryConversationRequest: *genericObject
+    CreateQueryTurnRequest: *genericObject
+    GrantResponse: *genericObject
+    HealthResponse: *genericObject
+    IngestAttempt: *genericObject
+    IngestJob: *genericObject
+    IngestStageEvent: *genericObject
+    InternalError: *genericObject
+    KnowledgeBundleChunkEdgeRow: *genericObject
+    KnowledgeBundleEntityEdgeRow: *genericObject
+    KnowledgeBundleEvidenceEdgeRow: *genericObject
+    KnowledgeBundleRelationEdgeRow: *genericObject
+    KnowledgeChunkRow: *genericObject
+    KnowledgeChunkSearchRow: *genericObject
+    KnowledgeChunkVectorSearchRow: *genericObject
+    KnowledgeContextBundleRow: *genericObject
+    KnowledgeDocumentRow: *genericObject
+    KnowledgeEntityRow: *genericObject
+    KnowledgeEntitySearchRow: *genericObject
+    KnowledgeEntityVectorSearchRow: *genericObject
+    KnowledgeEvidenceRow: *genericObject
+    KnowledgeLibraryGeneration: *genericObject
+    KnowledgeRelationRow: *genericObject
+    KnowledgeRelationSearchRow: *genericObject
+    KnowledgeRetrievalTraceRow: *genericObject
+    KnowledgeRevisionRow: *genericObject
+    LibraryModelBindingResponse: *genericObject
+    LoginSessionRequest: *genericObject
+    McpCapabilitySnapshot: *genericObject
+    McpJsonRpcRequest: *genericObject
+    McpJsonRpcResponse: *genericObject
+    MeResponse: *genericObject
+    MintTokenRequest: *genericObject
+    MintTokenResponse: *genericObject
+    ModelCatalogEntryResponse: *genericObject
+    ModelPresetResponse: *genericObject
+    NotFound: *genericObject
+    OpsAsyncOperation: *genericObject
+    OpsLibraryState: *genericObject
+    OpsLibraryStateResponse: *genericObject
+    OpsLibraryWarning: *genericObject
+    PriceCatalogEntryResponse: *genericObject
+    ProviderCatalogEntryResponse: *genericObject
+    ProviderCredentialResponse: *genericObject
+    QueryConversation: *genericObject
+    QueryConversationDetailResponse: *genericObject
+    QueryExecutionDetailResponse: *genericObject
+    QueryTurnExecutionResponse: *genericObject
+    ReadinessResponse: *genericObject
+    ReplaceContentDocumentRequest: *genericObject
+    SessionResponse: *genericObject
+    TokenResponse: *genericObject
+    Unauthorized: *genericObject
+    UploadContentDocumentRequest: *genericObject
+    VersionResponse: *genericObject

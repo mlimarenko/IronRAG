@@ -27,10 +27,12 @@ Those changes must also produce destructive fresh-bootstrap evidence:
 
 1. Start from an empty database or a temporary database created for the run.
 2. Apply the canonical migration set from `backend/migrations/`.
-3. Prove the expected seeded catalog rows exist.
-4. Prove no default workspace, library, or connector is created as a side effect.
-5. Prove the one-time bootstrap-admin claim works exactly once and writes a canonical `audit_event`.
-6. Prove legacy tables from the removed baseline do not appear in the fresh schema.
+3. Bootstrap the canonical ArangoDB knowledge collections, edges, search view, and named graph.
+4. Prove the expected seeded catalog rows exist.
+5. Prove no default workspace, library, or connector is created as a side effect.
+6. Prove the one-time bootstrap-admin claim works exactly once and writes a canonical `audit_event`.
+7. Prove legacy tables from the removed baseline do not appear in the fresh schema.
+8. Prove no separate graph-database projection truth is required to answer a grounded knowledge query; the Arango-backed knowledge plane remains the source of truth.
 
 The current executable proof for that flow is:
 

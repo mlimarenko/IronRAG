@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::domains::{query_intelligence::QueryPlanningMetadata, query_modes::RuntimeQueryMode};
+use crate::domains::query::{QueryPlanningMetadata, RuntimeQueryMode};
 
 const MAX_TOP_K: usize = 12;
 const DEFAULT_TOP_K: usize = 8;
@@ -173,8 +173,8 @@ mod tests {
         let metadata = QueryPlanningMetadata {
             requested_mode: RuntimeQueryMode::Hybrid,
             planned_mode: RuntimeQueryMode::Global,
-            intent_cache_status: crate::domains::query_intelligence::QueryIntentCacheStatus::Miss,
-            keywords: crate::domains::query_intelligence::IntentKeywords {
+            intent_cache_status: crate::domains::query::QueryIntentCacheStatus::Miss,
+            keywords: crate::domains::query::IntentKeywords {
                 high_level: vec!["budget".to_string(), "approval".to_string()],
                 low_level: vec!["sarah".to_string(), "chen".to_string()],
             },

@@ -12,6 +12,10 @@ import type {
   AdminProviderCatalogEntry,
   AdminProviderCredential,
   AdminLibraryBinding,
+  AdminOpsLibrarySnapshot,
+  AdminOpsLibraryState,
+  AdminOpsLibraryWarning,
+  AdminKnowledgeGeneration,
   AdminModelCatalogEntry,
   AdminPriceCatalogEntry,
   AdminWorkspaceMembership,
@@ -169,6 +173,116 @@ interface RawAuditEvent {
   redactedMessage: string | null
   internalMessage?: string | null
   subjects: RawAuditEventSubject[]
+}
+
+interface RawOpsLibraryState {
+  libraryId: string
+  queueDepth: number
+  runningAttempts: number
+  readableDocumentCount: number
+  failedDocumentCount: number
+  degradedState: string
+  latestKnowledgeGenerationId: string | null
+  knowledgeGenerationState: string | null
+  lastRecomputedAt: string
+}
+
+interface RawOpsLibraryStateWire {
+  libraryId?: string
+  queueDepth?: number
+  runningAttempts?: number
+  readableDocumentCount?: number
+  failedDocumentCount?: number
+  degradedState?: string
+  latestKnowledgeGenerationId?: string | null
+  knowledgeGenerationState?: string | null
+  lastRecomputedAt?: string
+  library_id?: string
+  queue_depth?: number
+  running_attempts?: number
+  readable_document_count?: number
+  failed_document_count?: number
+  degraded_state?: string
+  latest_knowledge_generation_id?: string | null
+  knowledge_generation_state?: string | null
+  last_recomputed_at?: string
+}
+
+interface RawKnowledgeGeneration {
+  key: string
+  arangoId?: string | null
+  arangoRev?: string | null
+  generationId: string
+  workspaceId: string
+  libraryId: string
+  generationState: string
+  activeTextGeneration: number
+  activeVectorGeneration: number
+  activeGraphGeneration: number
+  degradedState: string
+  createdAt: string
+  updatedAt: string
+}
+
+interface RawKnowledgeGenerationWire {
+  key: string
+  arangoId?: string | null
+  arangoRev?: string | null
+  generationId?: string
+  workspaceId?: string
+  libraryId?: string
+  generationState?: string
+  activeTextGeneration?: number
+  activeVectorGeneration?: number
+  activeGraphGeneration?: number
+  degradedState?: string
+  createdAt?: string
+  updatedAt?: string
+  generation_id?: string
+  workspace_id?: string
+  library_id?: string
+  generation_state?: string
+  active_text_generation?: number
+  active_vector_generation?: number
+  active_graph_generation?: number
+  degraded_state?: string
+  created_at?: string
+  updated_at?: string
+}
+
+interface RawOpsLibraryWarning {
+  id: string
+  libraryId: string
+  warningKind: string
+  severity: string
+  createdAt: string
+  resolvedAt: string | null
+}
+
+interface RawOpsLibraryWarningWire {
+  id: string
+  libraryId?: string
+  warningKind?: string
+  severity: string
+  createdAt?: string
+  resolvedAt?: string | null
+  library_id?: string
+  warning_kind?: string
+  created_at?: string
+  resolved_at?: string | null
+}
+
+interface RawOpsLibrarySnapshot {
+  state: RawOpsLibraryState
+  knowledgeGenerations: RawKnowledgeGeneration[]
+  warnings: RawOpsLibraryWarning[]
+}
+
+interface RawOpsLibrarySnapshotWire {
+  state: RawOpsLibraryStateWire
+  knowledgeGenerations?: RawKnowledgeGenerationWire[]
+  warnings: RawOpsLibraryWarningWire[]
+  knowledge_generations?: RawKnowledgeGenerationWire[]
 }
 
 function mapTokenRow(
@@ -348,6 +462,76 @@ function mapAuditEvent(row: RawAuditEvent): AdminAuditEvent {
   }
 }
 
+function mapOpsLibraryState(row: RawOpsLibraryState | RawOpsLibraryStateWire): AdminOpsLibraryState {
+  const libraryId = 'library_id' in row ? row.library_id : null
+  const queueDepth = 'queue_depth' in row ? row.queue_depth : null
+  const runningAttempts = 'running_attempts' in row ? row.running_attempts : null
+  const readableDocumentCount = 'readable_document_count' in row ? row.readable_document_count : null
+  const failedDocumentCount = 'failed_document_count' in row ? row.failed_document_count : null
+  const degradedState = 'degraded_state' in row ? row.degraded_state : null
+  const latestKnowledgeGenerationId =
+    'latest_knowledge_generation_id' in row ? row.latest_knowledge_generation_id : null
+  const knowledgeGenerationState =
+    'knowledge_generation_state' in row ? row.knowledge_generation_state : null
+  const lastRecomputedAt = 'last_recomputed_at' in row ? row.last_recomputed_at : null
+  return {
+    libraryId: row.libraryId ?? libraryId ?? '',
+    queueDepth: row.queueDepth ?? queueDepth ?? 0,
+    runningAttempts: row.runningAttempts ?? runningAttempts ?? 0,
+    readableDocumentCount: row.readableDocumentCount ?? readableDocumentCount ?? 0,
+    failedDocumentCount: row.failedDocumentCount ?? failedDocumentCount ?? 0,
+    degradedState: row.degradedState ?? degradedState ?? 'healthy',
+    latestKnowledgeGenerationId: row.latestKnowledgeGenerationId ?? latestKnowledgeGenerationId ?? null,
+    knowledgeGenerationState: row.knowledgeGenerationState ?? knowledgeGenerationState ?? null,
+    lastRecomputedAt: row.lastRecomputedAt ?? lastRecomputedAt ?? '',
+  }
+}
+
+function mapKnowledgeGeneration(
+  row: RawKnowledgeGeneration | RawKnowledgeGenerationWire,
+): AdminKnowledgeGeneration {
+  const generationId = 'generation_id' in row ? row.generation_id : null
+  const workspaceId = 'workspace_id' in row ? row.workspace_id : null
+  const libraryId = 'library_id' in row ? row.library_id : null
+  const generationState = 'generation_state' in row ? row.generation_state : null
+  const activeTextGeneration = 'active_text_generation' in row ? row.active_text_generation : null
+  const activeVectorGeneration = 'active_vector_generation' in row ? row.active_vector_generation : null
+  const activeGraphGeneration = 'active_graph_generation' in row ? row.active_graph_generation : null
+  const degradedState = 'degraded_state' in row ? row.degraded_state : null
+  const createdAt = 'created_at' in row ? row.created_at : null
+  const updatedAt = 'updated_at' in row ? row.updated_at : null
+  return {
+    key: row.key,
+    generationId: row.generationId ?? generationId ?? '',
+    workspaceId: row.workspaceId ?? workspaceId ?? '',
+    libraryId: row.libraryId ?? libraryId ?? '',
+    generationState: row.generationState ?? generationState ?? 'ready',
+    activeTextGeneration: row.activeTextGeneration ?? activeTextGeneration ?? 0,
+    activeVectorGeneration: row.activeVectorGeneration ?? activeVectorGeneration ?? 0,
+    activeGraphGeneration: row.activeGraphGeneration ?? activeGraphGeneration ?? 0,
+    degradedState: row.degradedState ?? degradedState ?? 'healthy',
+    createdAt: row.createdAt ?? createdAt ?? '',
+    updatedAt: row.updatedAt ?? updatedAt ?? '',
+  }
+}
+
+function mapOpsLibraryWarning(
+  row: RawOpsLibraryWarning | RawOpsLibraryWarningWire,
+): AdminOpsLibraryWarning {
+  const libraryId = 'library_id' in row ? row.library_id : null
+  const warningKind = 'warning_kind' in row ? row.warning_kind : null
+  const createdAt = 'created_at' in row ? row.created_at : null
+  const resolvedAt = 'resolved_at' in row ? row.resolved_at : null
+  return {
+    id: row.id,
+    libraryId: row.libraryId ?? libraryId ?? '',
+    warningKind: row.warningKind ?? warningKind ?? 'warning',
+    severity: row.severity,
+    createdAt: row.createdAt ?? createdAt ?? '',
+    resolvedAt: row.resolvedAt ?? resolvedAt ?? null,
+  }
+}
+
 function toExpiresAt(expiresInDays: number | null): string | null {
   if (expiresInDays === null) {
     return null
@@ -511,6 +695,21 @@ export async function fetchAdminAuditEvents(params: {
       params,
     }),
   ).then((rows) => rows.map((row) => mapAuditEvent(row)))
+}
+
+export async function fetchAdminLibraryOpsState(
+  libraryId: string,
+): Promise<AdminOpsLibrarySnapshot> {
+  const payload = await unwrap(
+    apiHttp.get<RawOpsLibrarySnapshotWire>(`/ops/libraries/${libraryId}`),
+  )
+  return {
+    state: mapOpsLibraryState(payload.state),
+    knowledgeGenerations: (payload.knowledgeGenerations ?? payload.knowledge_generations ?? []).map((row) =>
+      mapKnowledgeGeneration(row),
+    ),
+    warnings: payload.warnings.map((row) => mapOpsLibraryWarning(row)),
+  }
 }
 
 export async function fetchAdminAiConsole(payload: {

@@ -23,9 +23,16 @@ defineProps<{
         :class="{
           'is-provider-failure': notice.kind.includes('provider_failure'),
           'is-residual': notice.kind.startsWith('residual:'),
+          'is-readiness': notice.kind.startsWith('readiness:'),
         }"
       >
         <strong>{{ notice.title }}</strong>
+        <span
+          v-if="notice.kind.startsWith('readiness:')"
+          class="rr-documents-notice-stack__badge"
+        >
+          Knowledge readiness
+        </span>
         <p>{{ notice.message }}</p>
       </article>
     </div>
@@ -38,9 +45,18 @@ defineProps<{
         v-for="notice in informational"
         :key="`${notice.kind}:${notice.message}`"
         class="rr-documents-notice-stack__notice"
-        :class="{ 'is-residual': notice.kind.startsWith('residual:') }"
+        :class="{
+          'is-residual': notice.kind.startsWith('residual:'),
+          'is-readiness': notice.kind.startsWith('readiness:'),
+        }"
       >
         <strong>{{ notice.title }}</strong>
+        <span
+          v-if="notice.kind.startsWith('readiness:')"
+          class="rr-documents-notice-stack__badge"
+        >
+          Knowledge readiness
+        </span>
         <p>{{ notice.message }}</p>
       </article>
     </div>

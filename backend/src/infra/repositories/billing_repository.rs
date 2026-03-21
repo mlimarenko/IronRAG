@@ -181,9 +181,10 @@ pub async fn update_provider_call_state(
     .await
 }
 
-pub async fn list_provider_calls_by_library(
+pub async fn list_provider_calls_by_execution(
     postgres: &PgPool,
-    library_id: Uuid,
+    owning_execution_kind: &str,
+    owning_execution_id: Uuid,
 ) -> Result<Vec<BillingProviderCallRow>, sqlx::Error> {
     sqlx::query_as::<_, BillingProviderCallRow>(
         "select
@@ -200,10 +201,12 @@ pub async fn list_provider_calls_by_library(
             started_at,
             completed_at
          from billing_provider_call
-         where library_id = $1
+         where owning_execution_kind = $1::billing_owning_execution_kind
+           and owning_execution_id = $2
          order by started_at desc, id desc",
     )
-    .bind(library_id)
+    .bind(owning_execution_kind)
+    .bind(owning_execution_id)
     .fetch_all(postgres)
     .await
 }
@@ -296,9 +299,10 @@ pub async fn create_charge(
     .await
 }
 
-pub async fn list_charges_by_library(
+pub async fn list_charges_by_execution(
     postgres: &PgPool,
-    library_id: Uuid,
+    owning_execution_kind: &str,
+    owning_execution_id: Uuid,
 ) -> Result<Vec<BillingChargeRow>, sqlx::Error> {
     sqlx::query_as::<_, BillingChargeRow>(
         "select
@@ -312,10 +316,12 @@ pub async fn list_charges_by_library(
          from billing_charge bc
          join billing_usage bu on bu.id = bc.usage_id
          join billing_provider_call bpc on bpc.id = bu.provider_call_id
-         where bpc.library_id = $1
+         where bpc.owning_execution_kind = $1::billing_owning_execution_kind
+           and bpc.owning_execution_id = $2
          order by bc.priced_at desc, bc.id desc",
     )
-    .bind(library_id)
+    .bind(owning_execution_kind)
+    .bind(owning_execution_id)
     .fetch_all(postgres)
     .await
 }

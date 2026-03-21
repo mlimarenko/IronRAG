@@ -6,9 +6,9 @@ const CANONICAL_TAGS: &[&str] = &[
     "catalog",
     "iam",
     "ai",
+    "knowledge",
     "content",
     "ingest",
-    "graph",
     "search",
     "query",
     "billing",
@@ -21,9 +21,9 @@ const CANONICAL_PATH_PREFIXES: &[&str] = &[
     "/v1/catalog",
     "/v1/iam",
     "/v1/ai",
+    "/v1/knowledge",
     "/v1/content",
     "/v1/ingest",
-    "/v1/graph",
     "/v1/search",
     "/v1/query",
     "/v1/billing",
@@ -42,7 +42,6 @@ const FORBIDDEN_LEGACY_VOCABULARY: &[&str] = &[
     "mcp_memory",
     "provider_account",
     "model_profile",
-    "retrieval",
 ];
 
 #[must_use]
@@ -178,9 +177,9 @@ tags:
   - name: catalog
   - name: iam
   - name: ai
+  - name: knowledge
   - name: content
   - name: ingest
-  - name: graph
   - name: search
   - name: query
   - name: billing
@@ -192,9 +191,9 @@ x-greenfield-scaffold:
     - /v1/catalog
     - /v1/iam
     - /v1/ai
+    - /v1/knowledge
     - /v1/content
     - /v1/ingest
-    - /v1/graph
     - /v1/search
     - /v1/query
     - /v1/billing
@@ -205,11 +204,11 @@ paths:
   /v1/catalog/workspaces: {}
   /v1/iam/me: {}
   /v1/ai/providers: {}
+  /v1/knowledge/libraries/{libraryId}/entities: {}
   /v1/content/documents: {}
   /v1/ingest/jobs/{jobId}: {}
-  /v1/graph/libraries/{libraryId}/projection: {}
   /v1/search/documents: {}
-  /v1/query/conversations: {}
+  /v1/query/sessions: {}
   /v1/billing/provider-calls: {}
   /v1/ops/operations/{operationId}: {}
   /v1/audit/events: {}
@@ -250,12 +249,14 @@ fn actual_contract_contains_greenfield_scaffold_markers() {
 }
 
 #[test]
-fn actual_contract_still_reports_legacy_vocabulary_debt_separately() {
+fn actual_contract_no_longer_reports_legacy_vocabulary_debt() {
     let contract = load_openapi_contract_text();
     let result = detect_legacy_vocabulary_occurrences(&contract);
 
-    assert!(!result.is_empty());
-    assert!(result.iter().any(|token| token == "project"));
+    assert!(
+        result.is_empty(),
+        "expected actual contract to be free of legacy vocabulary debt, found: {result:?}"
+    );
 }
 
 #[test]
@@ -272,6 +273,7 @@ fn actual_contract_exposes_canonical_session_and_admin_support_routes() {
     assert!(contract.contains("/v1/iam/session/logout"));
     assert!(contract.contains("/v1/iam/grants"));
     assert!(contract.contains("/v1/ai/model-presets"));
+    assert!(contract.contains("/v1/query/sessions"));
 }
 
 #[test]
@@ -282,8 +284,6 @@ fn actual_contract_exposes_canonical_content_and_processing_routes() {
     assert!(contract.contains("/v1/content/mutations"));
     assert!(contract.contains("/v1/ingest/jobs/{jobId}"));
     assert!(contract.contains("/v1/ingest/attempts/{attemptId}"));
-    assert!(contract.contains("/v1/graph/libraries/{libraryId}/projection"));
-    assert!(contract.contains("/v1/graph/libraries/{libraryId}/nodes"));
-    assert!(contract.contains("/v1/graph/libraries/{libraryId}/edges"));
+    assert!(contract.contains("/v1/knowledge/libraries/{libraryId}/search/documents"));
     assert!(contract.contains("/v1/search/documents"));
 }

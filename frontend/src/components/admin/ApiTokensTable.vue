@@ -1,31 +1,32 @@
 <script setup lang="ts">
+import { useDisplayFormatters } from 'src/composables/useDisplayFormatters'
 import type { AdminApiTokenRow } from 'src/models/ui/admin'
 
-defineProps<{
+const props = defineProps<{
   rows: AdminApiTokenRow[]
+  currentPrincipalId: string | null
+  currentPrincipalLabel: string | null
+  workspaceName: string
 }>()
 
 const emit = defineEmits<{
   copy: [principalId: string]
   revoke: [principalId: string]
 }>()
+const { enumLabel, formatDateTime } = useDisplayFormatters()
 
-function formatDate(value: string | null): string {
-  if (!value) {
-    return '—'
+function principalLabel(row: AdminApiTokenRow): string {
+  if (props.currentPrincipalId && row.principalId === props.currentPrincipalId) {
+    return props.currentPrincipalLabel?.trim() || row.label
   }
-  const parsed = new Date(value)
-  if (Number.isNaN(parsed.getTime())) {
-    return value
-  }
-  return parsed.toLocaleString()
+  return enumLabel('admin.tokens.principalKinds', 'api_token')
 }
 
-function shortId(value: string | null): string {
-  if (!value) {
+function workspaceLabel(row: AdminApiTokenRow): string {
+  if (!row.workspaceId) {
     return '—'
   }
-  return value.slice(0, 8)
+  return props.workspaceName
 }
 
 function statusClass(status: string): string {
@@ -38,9 +39,6 @@ function statusClass(status: string): string {
   return 'is-muted'
 }
 
-function formatGrantLabel(permissionKind: string): string {
-  return permissionKind.replaceAll('_', ' ')
-}
 </script>
 
 <template>
@@ -73,10 +71,15 @@ function formatGrantLabel(permissionKind: string): string {
         >
           <td>{{ row.label }}</td>
           <td>
-            <code>{{ shortId(row.principalId) }}</code>
+            <div class="rr-admin-token-status">
+              <span>{{ principalLabel(row) }}</span>
+              <small v-if="currentPrincipalId && row.principalId === currentPrincipalId">
+                {{ $t('admin.tokens.currentPrincipal') }}
+              </small>
+            </div>
           </td>
           <td>
-            <code>{{ shortId(row.workspaceId) }}</code>
+            {{ workspaceLabel(row) }}
           </td>
           <td>
             <div
@@ -88,7 +91,9 @@ function formatGrantLabel(permissionKind: string): string {
                 :key="grant.id"
                 class="rr-status-pill is-muted"
               >
-                {{ formatGrantLabel(grant.permissionKind) }}
+                {{ $t(`admin.tokens.permissions.${grant.permissionKind}`) }}
+                ·
+                {{ enumLabel('admin.tokens.resourceKinds', grant.resourceKind) }}
               </span>
             </div>
             <span v-else>—</span>
@@ -114,11 +119,11 @@ function formatGrantLabel(permissionKind: string): string {
               >
                 {{ $t(`admin.tokens.status.${row.status}`) }}
               </span>
-              <small v-if="row.revokedAt">{{ formatDate(row.revokedAt) }}</small>
+              <small v-if="row.revokedAt">{{ formatDateTime(row.revokedAt) }}</small>
             </div>
           </td>
-          <td>{{ formatDate(row.lastUsedAt) }}</td>
-          <td>{{ formatDate(row.expiresAt) }}</td>
+          <td>{{ formatDateTime(row.lastUsedAt) }}</td>
+          <td>{{ formatDateTime(row.expiresAt) }}</td>
           <td>
             <button
               v-if="row.status === 'active'"

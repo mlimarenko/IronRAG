@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useDisplayFormatters } from 'src/composables/useDisplayFormatters'
 import type { AdminPrincipalSummary } from 'src/models/ui/admin'
 
 const props = defineProps<{
@@ -7,15 +8,9 @@ const props = defineProps<{
   workspaceName: string
   libraryName: string
 }>()
+const { enumLabel } = useDisplayFormatters()
 
 const visibleGrants = computed(() => props.principal?.effectiveGrants ?? [])
-
-function shortId(value: string | null): string {
-  if (!value) {
-    return '—'
-  }
-  return value.slice(0, 8)
-}
 </script>
 
 <template>
@@ -32,15 +27,14 @@ function shortId(value: string | null): string {
       <header>
         <strong>{{ $t('admin.tokens.currentPrincipal') }}</strong>
         <span class="rr-status-pill is-configured">
-          {{ principal.principalKind }}
+          {{ enumLabel('admin.tokens.principalKinds', principal.principalKind) }}
         </span>
       </header>
 
       <div class="rr-admin-banner__facts">
-        <span>{{ principal.displayLabel }}</span>
-        <span><code>{{ shortId(principal.id) }}</code></span>
-        <span v-if="principal.email">{{ principal.email }}</span>
-        <span>{{ $t('admin.tokens.scopeLine', { workspace: workspaceName, library: libraryName }) }}</span>
+        <div>{{ principal.displayLabel }}</div>
+        <div v-if="principal.email">{{ principal.email }}</div>
+        <div>{{ $t('admin.tokens.scopeLine', { workspace: workspaceName, library: libraryName }) }}</div>
       </div>
 
       <div class="rr-admin-banner__grants">
@@ -53,10 +47,7 @@ function shortId(value: string | null): string {
           >
             {{ $t(`admin.tokens.permissions.${grant.permissionKind}`) }}
             ·
-            {{ grant.resourceKind }}
-            <template v-if="grant.resourceKind !== 'system'">
-              :{{ shortId(grant.resourceId) }}
-            </template>
+            {{ enumLabel('admin.tokens.resourceKinds', grant.resourceKind) }}
           </span>
         </div>
       </div>

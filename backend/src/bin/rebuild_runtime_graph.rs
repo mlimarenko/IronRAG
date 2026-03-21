@@ -2,7 +2,6 @@ use anyhow::Context;
 use rustrag_backend::{
     app::{config::Settings, state::AppState},
     infra::repositories,
-    services::graph_rebuild::rebuild_library_graph,
 };
 use tracing::info;
 use uuid::Uuid;
@@ -31,7 +30,10 @@ async fn main() -> anyhow::Result<()> {
 
     for library in libraries {
         info!(library_id = %library.id, library_name = %library.name, "rebuilding runtime graph");
-        let outcome = rebuild_library_graph(&state, library.id)
+        let outcome = state
+            .canonical_services
+            .graph
+            .rebuild_library_graph(&state, library.id)
             .await
             .with_context(|| format!("failed to rebuild graph for library {}", library.id))?;
         info!(

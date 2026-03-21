@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
@@ -9,14 +8,11 @@ use uuid::Uuid;
 use rustrag_backend::{
     app::{config::Settings, state::AppState},
     infra::{
-        graph_store::{
-            GraphProjectionData, GraphProjectionEdgeWrite, GraphProjectionNodeWrite,
-            GraphProjectionWriteError, GraphStore,
+        arangodb::{
+            bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
+            client::ArangoClient,
         },
-        repositories::{
-            ai_repository, catalog_repository, content_repository, graph_repository,
-            search_repository,
-        },
+        repositories::{ai_repository, catalog_repository, content_repository, graph_repository},
     },
     services::{
         extract_service::{
@@ -78,49 +74,6 @@ impl TempDatabase {
     }
 }
 
-struct StaticGraphStore;
-
-#[async_trait]
-impl GraphStore for StaticGraphStore {
-    fn backend_name(&self) -> &'static str {
-        "static-test"
-    }
-
-    async fn ping(&self) -> Result<()> {
-        Ok(())
-    }
-
-    async fn replace_library_projection(
-        &self,
-        _library_id: Uuid,
-        _projection_version: i64,
-        _nodes: &[GraphProjectionNodeWrite],
-        _edges: &[GraphProjectionEdgeWrite],
-    ) -> Result<(), GraphProjectionWriteError> {
-        Ok(())
-    }
-
-    async fn refresh_library_projection_targets(
-        &self,
-        _library_id: Uuid,
-        _projection_version: i64,
-        _remove_node_ids: &[Uuid],
-        _remove_edge_ids: &[Uuid],
-        _nodes: &[GraphProjectionNodeWrite],
-        _edges: &[GraphProjectionEdgeWrite],
-    ) -> Result<(), GraphProjectionWriteError> {
-        Ok(())
-    }
-
-    async fn load_library_projection(
-        &self,
-        _library_id: Uuid,
-        _projection_version: i64,
-    ) -> Result<GraphProjectionData> {
-        Ok(GraphProjectionData::default())
-    }
-}
-
 struct ExtractGraphFixture {
     temp_database: TempDatabase,
     state: AppState,
@@ -155,7 +108,7 @@ impl ExtractGraphFixture {
             .await
             .context("failed to apply extract_graph migrations")?;
 
-        let state = build_test_state(settings, postgres)?;
+        let state = build_test_state(settings, postgres).await?;
         let fixture = Self {
             temp_database,
             state,
@@ -459,14 +412,33 @@ impl ExtractGraphFixture {
     }
 }
 
-fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppState> {
+async fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppState> {
     let persistence = rustrag_backend::infra::persistence::Persistence {
         postgres,
         redis: redis::Client::open(settings.redis_url.clone())
             .context("failed to create redis client for extract_graph test state")?,
     };
+    let arango_client = Arc::new(
+        ArangoClient::from_settings(&settings)
+            .context("failed to build Arango client for extract_graph test state")?,
+    );
+    bootstrap_knowledge_plane(
+        &arango_client,
+        &ArangoBootstrapOptions {
+            collections: true,
+            views: true,
+            graph: true,
+            vector_indexes: false,
+            vector_dimensions: 3072,
+            vector_index_n_lists: 100,
+            vector_index_default_n_probe: 8,
+            vector_index_training_iterations: 25,
+        },
+    )
+    .await
+    .context("failed to bootstrap Arango knowledge plane for extract_graph test state")?;
 
-    Ok(AppState::from_dependencies(settings, persistence, Arc::new(StaticGraphStore)))
+    Ok(AppState::from_dependencies(settings, persistence, arango_client))
 }
 
 fn replace_database_name(database_url: &str, new_database: &str) -> Result<String> {
@@ -696,69 +668,49 @@ async fn chunk_and_graph_embeddings_rebuild_and_select_active_indexes() -> Resul
             .context("failed to persist graph node embeddings")?;
         assert_eq!(graph_rebuilt, 2);
 
-        let chunk_rows = search_repository::list_active_chunk_embeddings_by_chunk(
-            &fixture.state.persistence.postgres,
-            fixture.chunk_id,
-        )
-        .await
-        .context("failed to list active chunk embeddings")?;
-        assert_eq!(chunk_rows.len(), 1);
-        assert_eq!(chunk_rows[0].model_catalog_id, fixture.alternate_model_catalog_id);
-        assert!(chunk_rows[0].embedding_vector.is_some());
+        let chunk_rows = fixture
+            .state
+            .arango_search_store
+            .list_chunk_vectors_by_chunk(fixture.chunk_id)
+            .await
+            .context("failed to list canonical chunk vectors")?;
+        let chunk_model_keys =
+            chunk_rows.iter().map(|row| row.embedding_model_key.as_str()).collect::<Vec<_>>();
+        assert_eq!(chunk_rows.len(), 2);
+        assert!(chunk_model_keys.contains(&fixture.primary_model_catalog_id.to_string().as_str()));
+        assert!(
+            chunk_model_keys.contains(&fixture.alternate_model_catalog_id.to_string().as_str())
+        );
 
-        let node_rows = search_repository::list_active_graph_node_embeddings_by_node(
-            &fixture.state.persistence.postgres,
-            fixture.node_id,
-        )
-        .await
-        .context("failed to list active graph node embeddings")?;
-        assert_eq!(node_rows.len(), 1);
-        assert_eq!(node_rows[0].model_catalog_id, fixture.alternate_model_catalog_id);
-        assert!(node_rows[0].embedding_vector.is_some());
+        let node_rows = fixture
+            .state
+            .arango_search_store
+            .list_entity_vectors_by_entity(fixture.node_id)
+            .await
+            .context("failed to list canonical entity vectors")?;
+        let node_model_keys =
+            node_rows.iter().map(|row| row.embedding_model_key.as_str()).collect::<Vec<_>>();
+        assert_eq!(node_rows.len(), 2);
+        assert!(node_model_keys.contains(&fixture.primary_model_catalog_id.to_string().as_str()));
+        assert!(node_model_keys.contains(&fixture.alternate_model_catalog_id.to_string().as_str()));
 
-        let extra_chunk_embedding = search_repository::upsert_chunk_embedding(
-            &fixture.state.persistence.postgres,
-            fixture.chunk_id,
-            fixture.primary_model_catalog_id,
-            Some(&[0.25, 0.5, 0.75]),
-            true,
-        )
-        .await
-        .context("failed to insert extra chunk embedding")?;
-        assert_eq!(extra_chunk_embedding.model_catalog_id, fixture.primary_model_catalog_id);
-        let active_chunk_model = SearchService::new()
-            .select_active_chunk_embedding_model_catalog_id(
-                &search_repository::list_chunk_embeddings_by_chunk(
-                    &fixture.state.persistence.postgres,
-                    fixture.chunk_id,
-                )
-                .await
-                .context("failed to reload chunk embeddings")?,
-            )
-            .context("missing active chunk embedding")?;
-        assert_eq!(active_chunk_model, fixture.primary_model_catalog_id);
+        let current_chunk_vector = SearchService::new()
+            .select_current_chunk_vector(&chunk_rows)
+            .context("missing current canonical chunk vector")?;
+        assert_eq!(current_chunk_vector.chunk_id, fixture.chunk_id);
+        assert_eq!(
+            current_chunk_vector.embedding_model_key,
+            fixture.alternate_model_catalog_id.to_string()
+        );
 
-        let extra_node_embedding = search_repository::upsert_graph_node_embedding(
-            &fixture.state.persistence.postgres,
-            fixture.node_id,
-            fixture.primary_model_catalog_id,
-            Some(&[0.1, 0.2, 0.3]),
-            true,
-        )
-        .await
-        .context("failed to insert extra graph node embedding")?;
-        assert_eq!(extra_node_embedding.model_catalog_id, fixture.primary_model_catalog_id);
-        let active_node_model = SearchService::new()
-            .select_active_graph_node_embedding_model_catalog_id(
-                &search_repository::list_graph_node_embeddings_by_node(
-                    &fixture.state.persistence.postgres,
-                    fixture.node_id,
-                )
-                .await
-                .context("failed to reload graph node embeddings")?,
-            )
-            .context("missing active graph node embedding")?;
-        assert_eq!(active_node_model, fixture.primary_model_catalog_id);
+        let current_node_vector = SearchService::new()
+            .select_current_entity_vector(&node_rows)
+            .context("missing current canonical entity vector")?;
+        assert_eq!(current_node_vector.entity_id, fixture.node_id);
+        assert_eq!(
+            current_node_vector.embedding_model_key,
+            fixture.alternate_model_catalog_id.to_string()
+        );
 
         assert_legacy_truth_tables_absent(&fixture.state.persistence.postgres).await
     }

@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use sqlx::FromRow;
 use sqlx::PgPool;
+use sqlx::{Postgres, QueryBuilder};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, FromRow)]
@@ -46,6 +47,16 @@ pub struct NewAuditEventSubject {
     pub workspace_id: Option<Uuid>,
     pub library_id: Option<Uuid>,
     pub document_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AuditEventSubjectFilter {
+    pub knowledge_document_id: Option<Uuid>,
+    pub knowledge_revision_id: Option<Uuid>,
+    pub context_bundle_id: Option<Uuid>,
+    pub query_session_id: Option<Uuid>,
+    pub query_execution_id: Option<Uuid>,
+    pub async_operation_id: Option<Uuid>,
 }
 
 pub async fn append_audit_event(
@@ -121,145 +132,116 @@ pub async fn list_audit_events(
     actor_principal_id: Option<Uuid>,
     workspace_id: Option<Uuid>,
     library_id: Option<Uuid>,
+    subject_filter: &AuditEventSubjectFilter,
 ) -> Result<Vec<AuditEventRow>, sqlx::Error> {
-    match (actor_principal_id, workspace_id, library_id) {
-        (Some(actor_principal_id), Some(workspace_id), Some(library_id)) => {
-            sqlx::query_as::<_, AuditEventRow>(
-                "select distinct
-                    ae.id,
-                    ae.actor_principal_id,
-                    ae.surface_kind::text as surface_kind,
-                    ae.action_kind,
-                    ae.request_id,
-                    ae.trace_id,
-                    ae.result_kind::text as result_kind,
-                    ae.created_at,
-                    ae.redacted_message,
-                    ae.internal_message
-                 from audit_event ae
-                 join audit_event_subject aes on aes.audit_event_id = ae.id
-                 where ae.actor_principal_id = $1
-                   and aes.workspace_id = $2
-                   and aes.library_id = $3
-                 order by ae.created_at desc",
-            )
-            .bind(actor_principal_id)
-            .bind(workspace_id)
-            .bind(library_id)
-            .fetch_all(postgres)
-            .await
-        }
-        (Some(actor_principal_id), Some(workspace_id), None) => {
-            sqlx::query_as::<_, AuditEventRow>(
-                "select distinct
-                    ae.id,
-                    ae.actor_principal_id,
-                    ae.surface_kind::text as surface_kind,
-                    ae.action_kind,
-                    ae.request_id,
-                    ae.trace_id,
-                    ae.result_kind::text as result_kind,
-                    ae.created_at,
-                    ae.redacted_message,
-                    ae.internal_message
-                 from audit_event ae
-                 join audit_event_subject aes on aes.audit_event_id = ae.id
-                 where ae.actor_principal_id = $1
-                   and aes.workspace_id = $2
-                 order by ae.created_at desc",
-            )
-            .bind(actor_principal_id)
-            .bind(workspace_id)
-            .fetch_all(postgres)
-            .await
-        }
-        (Some(actor_principal_id), None, None) => {
-            sqlx::query_as::<_, AuditEventRow>(
-                "select
-                    id,
-                    actor_principal_id,
-                    surface_kind::text as surface_kind,
-                    action_kind,
-                    request_id,
-                    trace_id,
-                    result_kind::text as result_kind,
-                    created_at,
-                    redacted_message,
-                    internal_message
-                 from audit_event
-                 where actor_principal_id = $1
-                 order by created_at desc",
-            )
-            .bind(actor_principal_id)
-            .fetch_all(postgres)
-            .await
-        }
-        (None, Some(workspace_id), Some(library_id)) => {
-            sqlx::query_as::<_, AuditEventRow>(
-                "select distinct
-                    ae.id,
-                    ae.actor_principal_id,
-                    ae.surface_kind::text as surface_kind,
-                    ae.action_kind,
-                    ae.request_id,
-                    ae.trace_id,
-                    ae.result_kind::text as result_kind,
-                    ae.created_at,
-                    ae.redacted_message,
-                    ae.internal_message
-                 from audit_event ae
-                 join audit_event_subject aes on aes.audit_event_id = ae.id
-                 where aes.workspace_id = $1
-                   and aes.library_id = $2
-                 order by ae.created_at desc",
-            )
-            .bind(workspace_id)
-            .bind(library_id)
-            .fetch_all(postgres)
-            .await
-        }
-        (None, Some(workspace_id), None) => {
-            sqlx::query_as::<_, AuditEventRow>(
-                "select distinct
-                    ae.id,
-                    ae.actor_principal_id,
-                    ae.surface_kind::text as surface_kind,
-                    ae.action_kind,
-                    ae.request_id,
-                    ae.trace_id,
-                    ae.result_kind::text as result_kind,
-                    ae.created_at,
-                    ae.redacted_message,
-                    ae.internal_message
-                 from audit_event ae
-                 join audit_event_subject aes on aes.audit_event_id = ae.id
-                 where aes.workspace_id = $1
-                 order by ae.created_at desc",
-            )
-            .bind(workspace_id)
-            .fetch_all(postgres)
-            .await
-        }
-        _ => {
-            sqlx::query_as::<_, AuditEventRow>(
-                "select
-                    id,
-                    actor_principal_id,
-                    surface_kind::text as surface_kind,
-                    action_kind,
-                    request_id,
-                    trace_id,
-                    result_kind::text as result_kind,
-                    created_at,
-                    redacted_message,
-                    internal_message
-                 from audit_event
-                 order by created_at desc",
-            )
-            .fetch_all(postgres)
-            .await
-        }
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "select
+            ae.id,
+            ae.actor_principal_id,
+            ae.surface_kind::text as surface_kind,
+            ae.action_kind,
+            ae.request_id,
+            ae.trace_id,
+            ae.result_kind::text as result_kind,
+            ae.created_at,
+            ae.redacted_message,
+            ae.internal_message
+         from audit_event ae
+         where 1 = 1",
+    );
+
+    if let Some(actor_principal_id) = actor_principal_id {
+        builder.push(" and ae.actor_principal_id = ");
+        builder.push_bind(actor_principal_id);
     }
+
+    if let Some(workspace_id) = workspace_id {
+        builder.push(
+            " and exists (
+                select 1
+                from audit_event_subject aes
+                where aes.audit_event_id = ae.id
+                  and aes.workspace_id = ",
+        );
+        builder.push_bind(workspace_id);
+        builder.push(")");
+    }
+
+    if let Some(library_id) = library_id {
+        builder.push(
+            " and exists (
+                select 1
+                from audit_event_subject aes
+                where aes.audit_event_id = ae.id
+                  and aes.library_id = ",
+        );
+        builder.push_bind(library_id);
+        builder.push(")");
+    }
+
+    if let Some(knowledge_document_id) = subject_filter.knowledge_document_id {
+        builder.push(
+            " and exists (
+                select 1
+                from audit_event_subject aes
+                where aes.audit_event_id = ae.id
+                  and (
+                        aes.document_id = ",
+        );
+        builder.push_bind(knowledge_document_id);
+        builder.push(
+            "        or (
+                            aes.subject_kind = 'knowledge_document'
+                        and aes.subject_id = ",
+        );
+        builder.push_bind(knowledge_document_id);
+        builder.push(
+            "           )
+                  )
+            )",
+        );
+    }
+
+    if let Some(knowledge_revision_id) = subject_filter.knowledge_revision_id {
+        push_exact_subject_filter(&mut builder, "knowledge_revision", knowledge_revision_id);
+    }
+
+    if let Some(context_bundle_id) = subject_filter.context_bundle_id {
+        push_exact_subject_filter(&mut builder, "knowledge_bundle", context_bundle_id);
+    }
+
+    if let Some(query_session_id) = subject_filter.query_session_id {
+        push_exact_subject_filter(&mut builder, "query_session", query_session_id);
+    }
+
+    if let Some(query_execution_id) = subject_filter.query_execution_id {
+        push_exact_subject_filter(&mut builder, "query_execution", query_execution_id);
+    }
+
+    if let Some(async_operation_id) = subject_filter.async_operation_id {
+        push_exact_subject_filter(&mut builder, "async_operation", async_operation_id);
+    }
+
+    builder.push(" order by ae.created_at desc");
+    builder.build_query_as::<AuditEventRow>().fetch_all(postgres).await
+}
+
+fn push_exact_subject_filter(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    subject_kind: &'static str,
+    subject_id: Uuid,
+) {
+    builder.push(
+        " and exists (
+            select 1
+            from audit_event_subject aes
+            where aes.audit_event_id = ae.id
+              and aes.subject_kind = ",
+    );
+    builder.push_bind(subject_kind);
+    builder.push(" and aes.subject_id = ");
+    builder.push_bind(subject_id);
+    builder.push(")");
 }
 
 pub async fn list_audit_event_subjects(

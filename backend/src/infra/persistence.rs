@@ -111,8 +111,13 @@ pub async fn legacy_ui_bootstrap_tables_present(postgres: &PgPool) -> anyhow::Re
         && table_exists(postgres, "project").await?)
 }
 
-pub async fn legacy_pricing_catalog_tables_present(postgres: &PgPool) -> anyhow::Result<bool> {
-    table_exists(postgres, "model_pricing_catalog").await
+pub async fn canonical_ui_bootstrap_tables_present(postgres: &PgPool) -> anyhow::Result<bool> {
+    Ok(table_exists(postgres, "iam_principal").await?
+        && table_exists(postgres, "iam_user").await?
+        && table_exists(postgres, "iam_grant").await?
+        && table_exists(postgres, "iam_workspace_membership").await?
+        && table_exists(postgres, "catalog_workspace").await?
+        && table_exists(postgres, "catalog_library").await?)
 }
 
 async fn table_exists(postgres: &PgPool, table_name: &str) -> anyhow::Result<bool> {

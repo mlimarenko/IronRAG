@@ -41,7 +41,7 @@ pub struct CatalogLibraryConnectorRow {
 
 pub async fn list_workspaces(postgres: &PgPool) -> Result<Vec<CatalogWorkspaceRow>, sqlx::Error> {
     sqlx::query_as::<_, CatalogWorkspaceRow>(
-        "select id, slug, display_name, lifecycle_state, created_at, updated_at
+        "select id, slug, display_name, lifecycle_state::text as lifecycle_state, created_at, updated_at
          from catalog_workspace
          order by created_at desc",
     )
@@ -54,7 +54,7 @@ pub async fn get_workspace_by_id(
     workspace_id: Uuid,
 ) -> Result<Option<CatalogWorkspaceRow>, sqlx::Error> {
     sqlx::query_as::<_, CatalogWorkspaceRow>(
-        "select id, slug, display_name, lifecycle_state, created_at, updated_at
+        "select id, slug, display_name, lifecycle_state::text as lifecycle_state, created_at, updated_at
          from catalog_workspace
          where id = $1",
     )
@@ -68,7 +68,7 @@ pub async fn get_workspace_by_slug(
     slug: &str,
 ) -> Result<Option<CatalogWorkspaceRow>, sqlx::Error> {
     sqlx::query_as::<_, CatalogWorkspaceRow>(
-        "select id, slug, display_name, lifecycle_state, created_at, updated_at
+        "select id, slug, display_name, lifecycle_state::text as lifecycle_state, created_at, updated_at
          from catalog_workspace
          where slug = $1",
     )
@@ -94,7 +94,7 @@ pub async fn create_workspace(
             updated_at
         )
         values ($1, $2, $3, 'active', $4, now(), now())
-        returning id, slug, display_name, lifecycle_state, created_at, updated_at",
+        returning id, slug, display_name, lifecycle_state::text as lifecycle_state, created_at, updated_at",
     )
     .bind(Uuid::now_v7())
     .bind(slug)
@@ -118,7 +118,7 @@ pub async fn update_workspace(
              lifecycle_state = $4::catalog_workspace_lifecycle_state,
              updated_at = now()
          where id = $1
-         returning id, slug, display_name, lifecycle_state, created_at, updated_at",
+         returning id, slug, display_name, lifecycle_state::text as lifecycle_state, created_at, updated_at",
     )
     .bind(workspace_id)
     .bind(slug)
@@ -135,7 +135,7 @@ pub async fn list_libraries(
     match workspace_id {
         Some(workspace_id) => {
             sqlx::query_as::<_, CatalogLibraryRow>(
-                "select id, workspace_id, slug, display_name, description, lifecycle_state, created_at, updated_at
+                "select id, workspace_id, slug, display_name, description, lifecycle_state::text as lifecycle_state, created_at, updated_at
                  from catalog_library
                  where workspace_id = $1
                  order by created_at desc",
@@ -146,7 +146,7 @@ pub async fn list_libraries(
         }
         None => {
             sqlx::query_as::<_, CatalogLibraryRow>(
-                "select id, workspace_id, slug, display_name, description, lifecycle_state, created_at, updated_at
+                "select id, workspace_id, slug, display_name, description, lifecycle_state::text as lifecycle_state, created_at, updated_at
                  from catalog_library
                  order by created_at desc",
             )
@@ -161,7 +161,7 @@ pub async fn get_library_by_id(
     library_id: Uuid,
 ) -> Result<Option<CatalogLibraryRow>, sqlx::Error> {
     sqlx::query_as::<_, CatalogLibraryRow>(
-        "select id, workspace_id, slug, display_name, description, lifecycle_state, created_at, updated_at
+        "select id, workspace_id, slug, display_name, description, lifecycle_state::text as lifecycle_state, created_at, updated_at
          from catalog_library
          where id = $1",
     )
@@ -191,7 +191,7 @@ pub async fn create_library(
             updated_at
         )
         values ($1, $2, $3, $4, $5, 'active', $6, now(), now())
-        returning id, workspace_id, slug, display_name, description, lifecycle_state, created_at, updated_at",
+        returning id, workspace_id, slug, display_name, description, lifecycle_state::text as lifecycle_state, created_at, updated_at",
     )
     .bind(Uuid::now_v7())
     .bind(workspace_id)
@@ -219,7 +219,7 @@ pub async fn update_library(
              lifecycle_state = $5::catalog_library_lifecycle_state,
              updated_at = now()
          where id = $1
-         returning id, workspace_id, slug, display_name, description, lifecycle_state, created_at, updated_at",
+         returning id, workspace_id, slug, display_name, description, lifecycle_state::text as lifecycle_state, created_at, updated_at",
     )
     .bind(library_id)
     .bind(slug)

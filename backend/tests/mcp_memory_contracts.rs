@@ -6,14 +6,14 @@ use uuid::Uuid;
 
 use rustrag_backend::{
     app::{config::Settings, state::AppState},
-    domains::mcp_memory::{
+    infra::repositories,
+    interfaces::http::router_support::ApiError,
+    interfaces::http::{auth::hash_token, router},
+    mcp_types::{
         McpCapabilitySnapshot, McpDocumentHit, McpMutationOperationKind, McpMutationReceipt,
         McpMutationReceiptStatus, McpReadDocumentResponse, McpReadMode, McpReadabilityState,
         McpSearchDocumentsResponse,
     },
-    infra::repositories,
-    interfaces::http::router_support::ApiError,
-    interfaces::http::{auth::hash_token, router},
 };
 
 use anyhow::Context;
@@ -57,6 +57,10 @@ fn read_response_preserves_nullability_for_unreadable_payloads() {
         total_content_length: None,
         continuation_token: None,
         has_more: false,
+        chunk_references: Vec::new(),
+        entity_references: Vec::new(),
+        relation_references: Vec::new(),
+        evidence_references: Vec::new(),
     })
     .unwrap();
 
@@ -114,6 +118,10 @@ fn search_responses_preserve_hit_order_and_nullability_for_unavailable_hits() {
                 excerpt_end_offset: Some(26),
                 readability_state: McpReadabilityState::Readable,
                 status_reason: None,
+                chunk_references: Vec::new(),
+                entity_references: Vec::new(),
+                relation_references: Vec::new(),
+                evidence_references: Vec::new(),
             },
             McpDocumentHit {
                 document_id: unavailable_document_id,
@@ -130,6 +138,10 @@ fn search_responses_preserve_hit_order_and_nullability_for_unavailable_hits() {
                 status_reason: Some(
                     "document finished without normalized extracted text".to_string(),
                 ),
+                chunk_references: Vec::new(),
+                entity_references: Vec::new(),
+                relation_references: Vec::new(),
+                evidence_references: Vec::new(),
             },
         ],
     })
@@ -384,7 +396,7 @@ impl McpDiscoveryContractFixture {
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn no_access_discovery_returns_explicit_zero_counts_and_empty_arrays() -> anyhow::Result<()> {
     let settings =
         Settings::from_env().context("failed to load settings for mcp discovery contracts test")?;
@@ -420,7 +432,7 @@ async fn no_access_discovery_returns_explicit_zero_counts_and_empty_arrays() -> 
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn initialized_notifications_are_accepted_without_jsonrpc_error_bodies() -> anyhow::Result<()>
 {
     let settings = Settings::from_env()
@@ -444,7 +456,7 @@ async fn initialized_notifications_are_accepted_without_jsonrpc_error_bodies() -
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn resource_discovery_methods_return_empty_lists_instead_of_method_errors()
 -> anyhow::Result<()> {
     let settings =
@@ -469,7 +481,7 @@ async fn resource_discovery_methods_return_empty_lists_instead_of_method_errors(
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn create_tools_allow_omitting_slug_and_advertise_optional_slug_inputs() -> anyhow::Result<()>
 {
     let settings = Settings::from_env()

@@ -29,6 +29,23 @@ pub struct PublicOriginSettings {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArangoSettings {
+    pub url: String,
+    pub database: String,
+    pub username: String,
+    pub password: String,
+    pub request_timeout_seconds: u64,
+    pub bootstrap_collections: bool,
+    pub bootstrap_views: bool,
+    pub bootstrap_graph: bool,
+    pub bootstrap_vector_indexes: bool,
+    pub vector_dimensions: u64,
+    pub vector_index_n_lists: u64,
+    pub vector_index_default_n_probe: u64,
+    pub vector_index_training_iterations: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AiCatalogValidationSettings {
     pub live_validation_enabled: bool,
     pub seed_from_env: bool,
@@ -56,11 +73,19 @@ pub struct Settings {
     pub database_url: String,
     pub database_max_connections: u32,
     pub redis_url: String,
-    pub neo4j_uri: String,
-    pub neo4j_username: String,
-    pub neo4j_password: String,
-    pub neo4j_database: String,
-    pub neo4j_max_connections: usize,
+    pub arangodb_url: String,
+    pub arangodb_database: String,
+    pub arangodb_username: String,
+    pub arangodb_password: String,
+    pub arangodb_request_timeout_seconds: u64,
+    pub arangodb_bootstrap_collections: bool,
+    pub arangodb_bootstrap_views: bool,
+    pub arangodb_bootstrap_graph: bool,
+    pub arangodb_bootstrap_vector_indexes: bool,
+    pub arangodb_vector_dimensions: u64,
+    pub arangodb_vector_index_n_lists: u64,
+    pub arangodb_vector_index_default_n_probe: u64,
+    pub arangodb_vector_index_training_iterations: u64,
     pub service_name: String,
     pub environment: String,
     pub log_filter: String,
@@ -98,11 +123,11 @@ pub struct Settings {
     pub runtime_default_vision_provider: String,
     pub runtime_default_vision_model: String,
     pub runtime_live_validation_enabled: bool,
-    pub runtime_query_intent_cache_ttl_hours: u64,
-    pub runtime_query_intent_cache_max_entries_per_library: usize,
-    pub runtime_query_rerank_enabled: bool,
-    pub runtime_query_rerank_candidate_limit: usize,
-    pub runtime_query_balanced_context_enabled: bool,
+    pub query_intent_cache_ttl_hours: u64,
+    pub query_intent_cache_max_entries_per_library: usize,
+    pub query_rerank_enabled: bool,
+    pub query_rerank_candidate_limit: usize,
+    pub query_balanced_context_enabled: bool,
     pub runtime_graph_extract_recovery_enabled: bool,
     pub runtime_graph_extract_recovery_max_attempts: usize,
     pub runtime_graph_extract_resume_downgrade_level_one_after_replays: usize,
@@ -149,11 +174,19 @@ impl Settings {
             .set_default("database_url", "postgres://postgres:postgres@127.0.0.1:5432/rustrag")?
             .set_default("database_max_connections", 20)?
             .set_default("redis_url", "redis://127.0.0.1:6379")?
-            .set_default("neo4j_uri", "127.0.0.1:7687")?
-            .set_default("neo4j_username", "neo4j")?
-            .set_default("neo4j_password", "rustrag-dev")?
-            .set_default("neo4j_database", "neo4j")?
-            .set_default("neo4j_max_connections", 16)?
+            .set_default("arangodb_url", "http://127.0.0.1:8529")?
+            .set_default("arangodb_database", "rustrag")?
+            .set_default("arangodb_username", "root")?
+            .set_default("arangodb_password", "rustrag-dev")?
+            .set_default("arangodb_request_timeout_seconds", 15)?
+            .set_default("arangodb_bootstrap_collections", true)?
+            .set_default("arangodb_bootstrap_views", true)?
+            .set_default("arangodb_bootstrap_graph", true)?
+            .set_default("arangodb_bootstrap_vector_indexes", true)?
+            .set_default("arangodb_vector_dimensions", 3072)?
+            .set_default("arangodb_vector_index_n_lists", 100)?
+            .set_default("arangodb_vector_index_default_n_probe", 8)?
+            .set_default("arangodb_vector_index_training_iterations", 25)?
             .set_default("log_filter", "info")?
             .set_default(
                 "qwen_api_base_url",
@@ -187,11 +220,11 @@ impl Settings {
             .set_default("runtime_default_vision_provider", "openai")?
             .set_default("runtime_default_vision_model", "gpt-5-mini")?
             .set_default("runtime_live_validation_enabled", false)?
-            .set_default("runtime_query_intent_cache_ttl_hours", 24)?
-            .set_default("runtime_query_intent_cache_max_entries_per_library", 500)?
-            .set_default("runtime_query_rerank_enabled", true)?
-            .set_default("runtime_query_rerank_candidate_limit", 24)?
-            .set_default("runtime_query_balanced_context_enabled", true)?
+            .set_default("query_intent_cache_ttl_hours", 24)?
+            .set_default("query_intent_cache_max_entries_per_library", 500)?
+            .set_default("query_rerank_enabled", true)?
+            .set_default("query_rerank_candidate_limit", 24)?
+            .set_default("query_balanced_context_enabled", true)?
             .set_default("runtime_graph_extract_recovery_enabled", true)?
             .set_default("runtime_graph_extract_recovery_max_attempts", 2)?
             .set_default("runtime_graph_extract_resume_downgrade_level_one_after_replays", 3)?
@@ -230,6 +263,7 @@ impl Settings {
         settings.service_name = settings.service_name.trim().to_string();
         validate_service_role(&settings).map_err(config::ConfigError::Message)?;
         validate_service_name(&settings).map_err(config::ConfigError::Message)?;
+        validate_arangodb_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_mcp_memory_settings(&settings).map_err(config::ConfigError::Message)?;
 
         if settings.openai_api_key.as_deref().is_none_or(|value| value.trim().is_empty()) {
@@ -296,6 +330,25 @@ impl Settings {
                 .filter(|value| !value.is_empty())
                 .map(std::string::ToString::to_string)
                 .collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn arango_settings(&self) -> ArangoSettings {
+        ArangoSettings {
+            url: self.arangodb_url.clone(),
+            database: self.arangodb_database.clone(),
+            username: self.arangodb_username.clone(),
+            password: self.arangodb_password.clone(),
+            request_timeout_seconds: self.arangodb_request_timeout_seconds,
+            bootstrap_collections: self.arangodb_bootstrap_collections,
+            bootstrap_views: self.arangodb_bootstrap_views,
+            bootstrap_graph: self.arangodb_bootstrap_graph,
+            bootstrap_vector_indexes: self.arangodb_bootstrap_vector_indexes,
+            vector_dimensions: self.arangodb_vector_dimensions,
+            vector_index_n_lists: self.arangodb_vector_index_n_lists,
+            vector_index_default_n_probe: self.arangodb_vector_index_default_n_probe,
+            vector_index_training_iterations: self.arangodb_vector_index_training_iterations,
         }
     }
 
@@ -404,6 +457,34 @@ fn validate_service_name(settings: &Settings) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_arangodb_settings(settings: &Settings) -> Result<(), String> {
+    if settings.arangodb_url.trim().is_empty() {
+        return Err("arangodb_url must not be empty".into());
+    }
+    if settings.arangodb_database.trim().is_empty() {
+        return Err("arangodb_database must not be empty".into());
+    }
+    if settings.arangodb_username.trim().is_empty() {
+        return Err("arangodb_username must not be empty".into());
+    }
+    if settings.arangodb_request_timeout_seconds == 0 {
+        return Err("arangodb_request_timeout_seconds must be greater than zero".into());
+    }
+    if settings.arangodb_vector_dimensions == 0 {
+        return Err("arangodb_vector_dimensions must be greater than zero".into());
+    }
+    if settings.arangodb_vector_index_n_lists == 0 {
+        return Err("arangodb_vector_index_n_lists must be greater than zero".into());
+    }
+    if settings.arangodb_vector_index_default_n_probe == 0 {
+        return Err("arangodb_vector_index_default_n_probe must be greater than zero".into());
+    }
+    if settings.arangodb_vector_index_training_iterations == 0 {
+        return Err("arangodb_vector_index_training_iterations must be greater than zero".into());
+    }
+    Ok(())
+}
+
 fn validate_mcp_memory_settings(settings: &Settings) -> Result<(), String> {
     if settings.mcp_memory_default_read_window_chars == 0 {
         return Err("mcp_memory_default_read_window_chars must be greater than zero".into());
@@ -446,11 +527,19 @@ mod tests {
             database_url: "postgres://postgres:postgres@127.0.0.1:5432/rustrag".into(),
             database_max_connections: 20,
             redis_url: "redis://127.0.0.1:6379".into(),
-            neo4j_uri: "127.0.0.1:7687".into(),
-            neo4j_username: "neo4j".into(),
-            neo4j_password: "rustrag-dev".into(),
-            neo4j_database: "neo4j".into(),
-            neo4j_max_connections: 16,
+            arangodb_url: "http://127.0.0.1:8529".into(),
+            arangodb_database: "rustrag".into(),
+            arangodb_username: "root".into(),
+            arangodb_password: "rustrag-dev".into(),
+            arangodb_request_timeout_seconds: 15,
+            arangodb_bootstrap_collections: true,
+            arangodb_bootstrap_views: true,
+            arangodb_bootstrap_graph: true,
+            arangodb_bootstrap_vector_indexes: true,
+            arangodb_vector_dimensions: 3072,
+            arangodb_vector_index_n_lists: 100,
+            arangodb_vector_index_default_n_probe: 8,
+            arangodb_vector_index_training_iterations: 25,
             service_name: "rustrag-backend".into(),
             environment: "local".into(),
             log_filter: "info".into(),
@@ -488,11 +577,11 @@ mod tests {
             runtime_default_vision_provider: "openai".into(),
             runtime_default_vision_model: "gpt-5-mini".into(),
             runtime_live_validation_enabled: false,
-            runtime_query_intent_cache_ttl_hours: 24,
-            runtime_query_intent_cache_max_entries_per_library: 500,
-            runtime_query_rerank_enabled: true,
-            runtime_query_rerank_candidate_limit: 24,
-            runtime_query_balanced_context_enabled: true,
+            query_intent_cache_ttl_hours: 24,
+            query_intent_cache_max_entries_per_library: 500,
+            query_rerank_enabled: true,
+            query_rerank_candidate_limit: 24,
+            query_balanced_context_enabled: true,
             runtime_graph_extract_recovery_enabled: true,
             runtime_graph_extract_recovery_max_attempts: 2,
             runtime_graph_extract_resume_downgrade_level_one_after_replays: 3,
@@ -535,12 +624,12 @@ mod tests {
         assert_eq!(settings.environment, "local");
         assert_eq!(settings.database_max_connections, 20);
         assert_eq!(settings.redis_url, "redis://127.0.0.1:6379");
-        assert_eq!(settings.neo4j_uri, "127.0.0.1:7687");
-        assert_eq!(settings.neo4j_database, "neo4j");
+        assert_eq!(settings.arangodb_url, "http://127.0.0.1:8529");
+        assert_eq!(settings.arangodb_database, "rustrag");
         assert_eq!(settings.log_filter, "info");
         assert_eq!(settings.ingestion_worker_concurrency, 4);
-        assert_eq!(settings.runtime_query_intent_cache_ttl_hours, 24);
-        assert!(settings.runtime_query_rerank_enabled);
+        assert_eq!(settings.query_intent_cache_ttl_hours, 24);
+        assert!(settings.query_rerank_enabled);
         assert!(settings.runtime_graph_extract_recovery_enabled);
         assert_eq!(settings.runtime_document_activity_freshness_seconds, 45);
         assert_eq!(settings.runtime_document_stalled_after_seconds, 180);
@@ -652,6 +741,20 @@ mod tests {
         assert_eq!(ai_catalog.default_currency, "USD");
         assert_eq!(ai_catalog.default_embedding_model, "text-embedding-3-large");
         assert_eq!(ai_catalog.default_answer_model, "gpt-5.4");
+    }
+
+    #[test]
+    fn arango_settings_expose_bootstrap_toggles() {
+        let settings = sample_settings();
+        let arango = settings.arango_settings();
+
+        assert_eq!(arango.url, "http://127.0.0.1:8529");
+        assert_eq!(arango.database, "rustrag");
+        assert!(arango.bootstrap_collections);
+        assert!(arango.bootstrap_views);
+        assert!(arango.bootstrap_graph);
+        assert!(arango.bootstrap_vector_indexes);
+        assert_eq!(arango.vector_dimensions, 3072);
     }
 
     #[test]

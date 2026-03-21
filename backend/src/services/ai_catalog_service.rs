@@ -3,8 +3,8 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::ai::{
-        BindingValidation, LibraryModelBinding, ModelCatalogEntry, ModelPreset, PriceCatalogEntry,
-        ProviderCatalogEntry, ProviderCredential,
+        AiBindingPurpose, BindingValidation, LibraryModelBinding, ModelCatalogEntry, ModelPreset,
+        PriceCatalogEntry, ProviderCatalogEntry, ProviderCredential,
     },
     infra::repositories::ai_repository,
     interfaces::http::router_support::ApiError,
@@ -55,7 +55,7 @@ pub struct UpdateModelPresetCommand {
 pub struct CreateLibraryBindingCommand {
     pub workspace_id: Uuid,
     pub library_id: Uuid,
-    pub binding_purpose: String,
+    pub binding_purpose: AiBindingPurpose,
     pub provider_credential_id: Uuid,
     pub model_preset_id: Uuid,
     pub updated_by_principal_id: Option<Uuid>,
@@ -270,7 +270,7 @@ impl AiCatalogService {
         let rows = ai_repository::list_library_bindings(&state.persistence.postgres, library_id)
             .await
             .map_err(|_| ApiError::Internal)?;
-        Ok(rows.into_iter().map(map_library_binding_row).collect())
+        rows.into_iter().map(map_library_binding_row).collect()
     }
 
     pub async fn get_library_binding(
@@ -282,7 +282,7 @@ impl AiCatalogService {
             .await
             .map_err(|_| ApiError::Internal)?
             .ok_or_else(|| ApiError::resource_not_found("library_binding", binding_id))?;
-        Ok(map_library_binding_row(row))
+        map_library_binding_row(row)
     }
 
     pub async fn create_library_binding(
@@ -294,14 +294,14 @@ impl AiCatalogService {
             &state.persistence.postgres,
             command.workspace_id,
             command.library_id,
-            &command.binding_purpose,
+            binding_purpose_key(command.binding_purpose),
             command.provider_credential_id,
             command.model_preset_id,
             command.updated_by_principal_id,
         )
         .await
         .map_err(map_ai_write_error)?;
-        Ok(map_library_binding_row(row))
+        map_library_binding_row(row)
     }
 
     pub async fn update_library_binding(
@@ -320,7 +320,7 @@ impl AiCatalogService {
         .await
         .map_err(map_ai_write_error)?
         .ok_or_else(|| ApiError::resource_not_found("library_binding", command.binding_id))?;
-        Ok(map_library_binding_row(row))
+        map_library_binding_row(row)
     }
 
     pub async fn validate_binding(
@@ -430,16 +430,18 @@ fn map_model_preset_row(row: ai_repository::AiModelPresetRow) -> ModelPreset {
     }
 }
 
-fn map_library_binding_row(row: ai_repository::AiLibraryModelBindingRow) -> LibraryModelBinding {
-    LibraryModelBinding {
+fn map_library_binding_row(
+    row: ai_repository::AiLibraryModelBindingRow,
+) -> Result<LibraryModelBinding, ApiError> {
+    Ok(LibraryModelBinding {
         id: row.id,
         workspace_id: row.workspace_id,
         library_id: row.library_id,
-        binding_purpose: row.binding_purpose,
+        binding_purpose: parse_binding_purpose(&row.binding_purpose)?,
         provider_credential_id: row.provider_credential_id,
         model_preset_id: row.model_preset_id,
         binding_state: row.binding_state,
-    }
+    })
 }
 
 fn map_binding_validation_row(row: ai_repository::AiBindingValidationRow) -> BindingValidation {
@@ -450,5 +452,28 @@ fn map_binding_validation_row(row: ai_repository::AiBindingValidationRow) -> Bin
         checked_at: row.checked_at,
         failure_code: row.failure_code,
         message: row.message,
+    }
+}
+
+fn parse_binding_purpose(value: &str) -> Result<AiBindingPurpose, ApiError> {
+    match value {
+        "extract_text" => Ok(AiBindingPurpose::ExtractText),
+        "extract_graph" => Ok(AiBindingPurpose::ExtractGraph),
+        "embed_chunk" => Ok(AiBindingPurpose::EmbedChunk),
+        "query_retrieve" => Ok(AiBindingPurpose::QueryRetrieve),
+        "query_answer" => Ok(AiBindingPurpose::QueryAnswer),
+        "vision" => Ok(AiBindingPurpose::Vision),
+        _ => Err(ApiError::Internal),
+    }
+}
+
+fn binding_purpose_key(value: AiBindingPurpose) -> &'static str {
+    match value {
+        AiBindingPurpose::ExtractText => "extract_text",
+        AiBindingPurpose::ExtractGraph => "extract_graph",
+        AiBindingPurpose::EmbedChunk => "embed_chunk",
+        AiBindingPurpose::QueryRetrieve => "query_retrieve",
+        AiBindingPurpose::QueryAnswer => "query_answer",
+        AiBindingPurpose::Vision => "vision",
     }
 }

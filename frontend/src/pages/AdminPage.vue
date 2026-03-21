@@ -11,6 +11,7 @@ import AdminTabs from 'src/components/admin/AdminTabs.vue'
 import ApiTokensTable from 'src/components/admin/ApiTokensTable.vue'
 import CreateTokenDialog from 'src/components/admin/CreateTokenDialog.vue'
 import TokenSecurityBanner from 'src/components/admin/TokenSecurityBanner.vue'
+import { useDisplayFormatters } from 'src/composables/useDisplayFormatters'
 import type {
   CreateAdminCredentialPayload,
   CreateApiTokenPayload,
@@ -19,6 +20,7 @@ import { useAdminStore } from 'src/stores/admin'
 import { useShellStore } from 'src/stores/shell'
 
 const { t } = useI18n()
+const { enumLabel, formatDateTime, shortIdentifier } = useDisplayFormatters()
 const adminStore = useAdminStore()
 const shellStore = useShellStore()
 const {
@@ -31,6 +33,7 @@ const {
   error,
   latestPlaintextToken,
   loading,
+  opsSnapshot,
   principal,
   showCreateToken,
   tabLoading,
@@ -64,9 +67,9 @@ watch(
 
 const auditRows = computed(() =>
   auditEvents.value.map((event) => [
-    formatDate(event.createdAt),
-    event.actionKind,
-    event.resultKind,
+    formatDateTime(event.createdAt),
+    enumLabel('admin.audit.actions', event.actionKind),
+    enumLabel('admin.audit.results', event.resultKind),
     summarizeSubjects(event.subjects),
     event.redactedMessage ?? '—',
   ]),
@@ -98,21 +101,19 @@ async function validateBinding(bindingId: string) {
   await adminStore.validateBinding(bindingId)
 }
 
-function formatDate(value: string): string {
-  const parsed = new Date(value)
-  if (Number.isNaN(parsed.getTime())) {
-    return value
-  }
-  return parsed.toLocaleString()
-}
-
 function summarizeSubjects(
   subjects: { subjectKind: string; subjectId: string; libraryId: string | null; workspaceId: string | null }[],
 ): string {
   return subjects
-    .map((subject) => `${subject.subjectKind}:${subject.subjectId.slice(0, 8)}`)
+    .map(
+      (subject) =>
+        `${enumLabel('admin.audit.subjectKinds', subject.subjectKind)}:${shortIdentifier(subject.subjectId)}`,
+    )
     .join(', ')
 }
+
+const opsWarningsCount = computed(() => opsSnapshot.value?.warnings.length ?? 0)
+const opsGenerationState = computed(() => opsSnapshot.value?.state.knowledgeGenerationState ?? null)
 </script>
 
 <template>
@@ -127,6 +128,36 @@ function summarizeSubjects(
               library: context.libraryName,
             }) }}
           </p>
+          <div
+            v-if="opsSnapshot"
+            class="rr-admin__ops-summary"
+          >
+            <span class="rr-status-pill">
+              {{ $t('admin.ops.state', {
+                state: enumLabel('admin.ops.states', opsSnapshot.state.degradedState),
+              }) }}
+            </span>
+            <span class="rr-status-pill">
+              {{ $t('admin.ops.queue', { count: opsSnapshot.state.queueDepth }) }}
+            </span>
+            <span class="rr-status-pill">
+              {{ $t('admin.ops.running', { count: opsSnapshot.state.runningAttempts }) }}
+            </span>
+            <span
+              v-if="opsGenerationState"
+              class="rr-status-pill"
+            >
+              {{ $t('admin.ops.generationState', {
+                state: enumLabel('admin.ops.generationStates', opsGenerationState),
+              }) }}
+            </span>
+            <span
+              v-if="opsWarningsCount > 0"
+              class="rr-status-pill is-warning"
+            >
+              {{ $t('admin.ops.warnings', { count: opsWarningsCount }) }}
+            </span>
+          </div>
         </div>
         <button
           v-if="activeTab === 'tokens' && tabAvailability.tokens"
@@ -168,6 +199,9 @@ function summarizeSubjects(
         <template v-else-if="activeTab === 'tokens'">
           <ApiTokensTable
             :rows="tokens"
+            :workspace-name="context.workspaceName"
+            :current-principal-id="principal.id"
+            :current-principal-label="principal.displayLabel"
             @copy="adminStore.copyToken"
             @revoke="adminStore.revokeToken"
           />

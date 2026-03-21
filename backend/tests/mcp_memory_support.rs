@@ -5,13 +5,13 @@ use serde_json::json;
 use uuid::Uuid;
 
 use rustrag_backend::{
-    domains::mcp_memory::{
-        McpAuditActionKind, McpAuditStatus, McpMutationOperationKind, McpMutationReceiptStatus,
-        McpReadabilityState,
-    },
     infra::repositories::{
         ApiTokenRow, DocumentRow, McpAuditEventRow, McpMutationReceiptRow, ProjectRow,
         RuntimeIngestionRunRow, WorkspaceRow,
+    },
+    mcp_types::{
+        McpAuditActionKind, McpAuditStatus, McpMutationOperationKind, McpMutationReceiptStatus,
+        McpReadabilityState,
     },
 };
 

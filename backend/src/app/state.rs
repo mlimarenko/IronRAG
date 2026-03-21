@@ -3,28 +3,31 @@ use std::sync::Arc;
 use crate::{
     app::config::{Settings, UiBootstrapAdmin},
     domains::provider_profiles::{EffectiveProviderProfile, RuntimeProviderProfileDefaults},
-    infra::{graph_store::GraphStore, neo4j_store::Neo4jStore, persistence::Persistence},
+    infra::{
+        arangodb::{
+            bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
+            client::ArangoClient,
+            context_store::ArangoContextStore,
+            document_store::ArangoDocumentStore,
+            graph_store::ArangoGraphStore,
+            search_store::ArangoSearchStore,
+        },
+        persistence::Persistence,
+    },
     integrations::llm::{LlmGateway, UnifiedGateway},
     services::{
         ai_catalog_service::AiCatalogService, audit_service::AuditService,
         billing_service::BillingService, catalog_service::CatalogService,
-        collection_settlement::CollectionSettlementService, content_service::ContentService,
-        document_accounting::DocumentAccountingService,
-        document_reconciliation::DocumentReconciliationService,
-        documents_workspace::DocumentsWorkspaceService, extract_service::ExtractService,
+        content_service::ContentService, extract_service::ExtractService,
         extraction_recovery::ExtractionRecoveryService,
-        graph_diagnostics_snapshot::GraphDiagnosticsSnapshotService,
-        graph_projection_guard::GraphProjectionGuardService,
+        graph_projection_guard::GraphWriteGuardService,
         graph_quality_guard::GraphQualityGuardService,
         graph_reconciliation_scope::GraphReconciliationScopeService, graph_service::GraphService,
         graph_summary::GraphSummaryService, iam_service::IamService,
         ingest_activity::IngestActivityService, ingest_service::IngestService,
-        mcp_memory::McpMemoryService, operator_warning::OperatorWarningService,
-        ops_service::OpsService, pricing_catalog::PricingCatalogService,
+        knowledge_service::KnowledgeService, ops_service::OpsService,
         provider_failure_classification::ProviderFailureClassificationService,
-        query_intelligence::QueryIntelligenceService, query_service::QueryService,
-        queue_isolation::QueueIsolationService, search_service::SearchService,
-        terminal_settlement::TerminalSettlementService,
+        query_service::QueryService, search_service::SearchService,
     },
 };
 
@@ -45,16 +48,17 @@ pub struct UiSessionCookieConfig {
 
 #[derive(Clone)]
 pub struct GraphRuntimeSettings {
-    pub neo4j_uri: String,
-    pub neo4j_database: String,
-    pub neo4j_max_connections: usize,
+    pub backend_name: String,
     pub live_validation_enabled: bool,
 }
 
 #[derive(Clone)]
-pub struct PricingCatalogBootstrapSettings {
-    pub seed_from_env: bool,
-    pub default_currency: String,
+pub struct ArangoRuntimeSettings {
+    pub url: String,
+    pub database: String,
+    pub bootstrap_collections: bool,
+    pub bootstrap_views: bool,
+    pub bootstrap_graph: bool,
 }
 
 #[derive(Clone)]
@@ -116,7 +120,6 @@ impl McpMemorySettings {
 
 #[derive(Clone)]
 pub struct PipelineHardeningSettings {
-    pub queue_isolation_enabled: bool,
     pub minimum_slice_capacity: usize,
     pub total_worker_slots: usize,
     pub token_touch_min_interval_seconds: u64,
@@ -127,7 +130,6 @@ pub struct PipelineHardeningSettings {
 #[derive(Clone)]
 pub struct ResolveSettleBlockersSettings {
     pub projection_retry_limit: usize,
-    pub diagnostics_snapshot_stale_after_seconds: u64,
     pub provider_request_size_soft_limit_bytes: usize,
     pub provider_timeout_retry_limit: usize,
     pub extraction_resume_downgrade_level_one_after_replays: usize,
@@ -135,15 +137,7 @@ pub struct ResolveSettleBlockersSettings {
 }
 
 #[derive(Clone, Default)]
-pub struct LifecycleServices {
-    pub document_accounting: DocumentAccountingService,
-    pub document_reconciliation: DocumentReconciliationService,
-    pub pricing_catalog: PricingCatalogService,
-}
-
-#[derive(Clone, Default)]
 pub struct RetrievalIntelligenceServices {
-    pub query_intelligence: QueryIntelligenceService,
     pub extraction_recovery: ExtractionRecoveryService,
     pub graph_summary: GraphSummaryService,
     pub graph_reconciliation_scope: GraphReconciliationScopeService,
@@ -156,15 +150,11 @@ pub struct BulkIngestHardeningServices {
 }
 
 #[derive(Clone, Default)]
-pub struct McpMemoryServices {
-    pub memory: McpMemoryService,
-}
-
-#[derive(Clone, Default)]
 pub struct CanonicalServices {
     pub catalog: CatalogService,
     pub iam: IamService,
     pub ai_catalog: AiCatalogService,
+    pub knowledge: KnowledgeService,
     pub content: ContentService,
     pub ingest: IngestService,
     pub extract: ExtractService,
@@ -177,19 +167,9 @@ pub struct CanonicalServices {
 }
 
 #[derive(Clone, Default)]
-pub struct PipelineHardeningServices {
-    pub queue_isolation: QueueIsolationService,
-    pub collection_settlement: CollectionSettlementService,
-    pub operator_warning: OperatorWarningService,
-}
-
-#[derive(Clone, Default)]
 pub struct ResolveSettleBlockersServices {
-    pub terminal_settlement: TerminalSettlementService,
-    pub graph_projection_guard: GraphProjectionGuardService,
-    pub graph_diagnostics_snapshot: GraphDiagnosticsSnapshotService,
+    pub graph_projection_guard: GraphWriteGuardService,
     pub provider_failure_classification: ProviderFailureClassificationService,
-    pub documents_workspace: DocumentsWorkspaceService,
 }
 
 #[derive(Clone)]
@@ -197,22 +177,23 @@ pub struct AppState {
     pub settings: Settings,
     pub persistence: Persistence,
     pub llm_gateway: Arc<dyn LlmGateway>,
-    pub graph_store: Arc<dyn GraphStore>,
+    pub arango_client: Arc<ArangoClient>,
     pub ui_runtime: UiRuntimeSettings,
     pub ui_bootstrap_admin: Option<UiBootstrapAdmin>,
     pub ui_session_cookie: UiSessionCookieConfig,
+    pub arango_runtime: ArangoRuntimeSettings,
     pub graph_runtime: GraphRuntimeSettings,
-    pub pricing_catalog_bootstrap: PricingCatalogBootstrapSettings,
-    pub lifecycle_services: LifecycleServices,
+    pub arango_document_store: ArangoDocumentStore,
+    pub arango_graph_store: ArangoGraphStore,
+    pub arango_search_store: ArangoSearchStore,
+    pub arango_context_store: ArangoContextStore,
     pub retrieval_intelligence: RetrievalIntelligenceSettings,
     pub retrieval_intelligence_services: RetrievalIntelligenceServices,
     pub bulk_ingest_hardening: BulkIngestHardeningSettings,
     pub bulk_ingest_hardening_services: BulkIngestHardeningServices,
     pub mcp_memory: McpMemorySettings,
-    pub mcp_memory_services: McpMemoryServices,
     pub canonical_services: CanonicalServices,
     pub pipeline_hardening: PipelineHardeningSettings,
-    pub pipeline_hardening_services: PipelineHardeningServices,
     pub resolve_settle_blockers: ResolveSettleBlockersSettings,
     pub resolve_settle_blockers_services: ResolveSettleBlockersServices,
     pub runtime_provider_defaults: RuntimeProviderProfileDefaults,
@@ -223,10 +204,9 @@ impl AppState {
     pub fn from_dependencies(
         settings: Settings,
         persistence: Persistence,
-        graph_store: Arc<dyn GraphStore>,
+        arango_client: Arc<ArangoClient>,
     ) -> Self {
         let bootstrap_settings = settings.bootstrap_settings();
-        let ai_catalog_validation = settings.ai_catalog_validation_settings();
         let public_origin_settings = settings.public_origin_settings();
         let ui_bootstrap_admin = bootstrap_settings.legacy_ui_bootstrap_admin;
         let ui_runtime = UiRuntimeSettings {
@@ -239,23 +219,27 @@ impl AppState {
             ttl_hours: settings.ui_session_ttl_hours,
         };
         let graph_runtime = GraphRuntimeSettings {
-            neo4j_uri: settings.neo4j_uri.clone(),
-            neo4j_database: settings.neo4j_database.clone(),
-            neo4j_max_connections: settings.neo4j_max_connections,
+            backend_name: "arangodb".to_string(),
             live_validation_enabled: settings.runtime_live_validation_enabled,
         };
-        let pricing_catalog_bootstrap = PricingCatalogBootstrapSettings {
-            seed_from_env: ai_catalog_validation.seed_from_env,
-            default_currency: ai_catalog_validation.default_currency,
+        let arango_runtime = ArangoRuntimeSettings {
+            url: settings.arangodb_url.clone(),
+            database: settings.arangodb_database.clone(),
+            bootstrap_collections: settings.arangodb_bootstrap_collections,
+            bootstrap_views: settings.arangodb_bootstrap_views,
+            bootstrap_graph: settings.arangodb_bootstrap_graph,
         };
-        let lifecycle_services = LifecycleServices::default();
+        let arango_document_store = ArangoDocumentStore::new(Arc::clone(&arango_client));
+        let arango_graph_store = ArangoGraphStore::new(Arc::clone(&arango_client));
+        let arango_search_store = ArangoSearchStore::new(Arc::clone(&arango_client));
+        let arango_context_store = ArangoContextStore::new(Arc::clone(&arango_client));
         let retrieval_intelligence = RetrievalIntelligenceSettings {
-            query_intent_cache_ttl_hours: settings.runtime_query_intent_cache_ttl_hours,
+            query_intent_cache_ttl_hours: settings.query_intent_cache_ttl_hours,
             query_intent_cache_max_entries_per_library: settings
-                .runtime_query_intent_cache_max_entries_per_library,
-            rerank_enabled: settings.runtime_query_rerank_enabled,
-            rerank_candidate_limit: settings.runtime_query_rerank_candidate_limit,
-            balanced_context_enabled: settings.runtime_query_balanced_context_enabled,
+                .query_intent_cache_max_entries_per_library,
+            rerank_enabled: settings.query_rerank_enabled,
+            rerank_candidate_limit: settings.query_rerank_candidate_limit,
+            balanced_context_enabled: settings.query_balanced_context_enabled,
             extraction_recovery_enabled: settings.runtime_graph_extract_recovery_enabled,
             extraction_recovery_max_attempts: settings.runtime_graph_extract_recovery_max_attempts,
             summary_refresh_batch_size: settings.runtime_graph_summary_refresh_batch_size,
@@ -292,12 +276,11 @@ impl AppState {
             audit_enabled: settings.mcp_memory_audit_enabled,
             upload_max_size_mb: settings.upload_max_size_mb,
         };
-        let mcp_memory_services =
-            McpMemoryServices { memory: McpMemoryService::new(mcp_memory.clone()) };
         let canonical_services = CanonicalServices {
             catalog: CatalogService::new(),
             iam: IamService::new(),
             ai_catalog: AiCatalogService::new(),
+            knowledge: KnowledgeService::new(),
             content: ContentService::new(),
             ingest: IngestService::new(),
             extract: ExtractService::new(),
@@ -309,7 +292,6 @@ impl AppState {
             audit: AuditService::new(),
         };
         let pipeline_hardening = PipelineHardeningSettings {
-            queue_isolation_enabled: true,
             minimum_slice_capacity: 1,
             total_worker_slots: settings.ingestion_worker_concurrency.max(1),
             token_touch_min_interval_seconds: settings
@@ -322,20 +304,8 @@ impl AppState {
                 .ingestion_worker_heartbeat_interval_seconds
                 .max(1),
         };
-        let pipeline_hardening_services = PipelineHardeningServices {
-            queue_isolation: QueueIsolationService::new(
-                pipeline_hardening.total_worker_slots,
-                pipeline_hardening.minimum_slice_capacity,
-            ),
-            collection_settlement: CollectionSettlementService::new(),
-            operator_warning: OperatorWarningService::new(),
-        };
         let resolve_settle_blockers = ResolveSettleBlockersSettings {
             projection_retry_limit: 3,
-            diagnostics_snapshot_stale_after_seconds: settings
-                .ingestion_worker_heartbeat_interval_seconds
-                .saturating_mul(3)
-                .max(3),
             provider_request_size_soft_limit_bytes: 256 * 1024,
             provider_timeout_retry_limit: 1,
             extraction_resume_downgrade_level_one_after_replays: settings
@@ -344,40 +314,36 @@ impl AppState {
                 .runtime_graph_extract_resume_downgrade_level_two_after_replays,
         };
         let resolve_settle_blockers_services = ResolveSettleBlockersServices {
-            terminal_settlement: TerminalSettlementService::new(),
-            graph_projection_guard: GraphProjectionGuardService::new(
+            graph_projection_guard: GraphWriteGuardService::new(
                 resolve_settle_blockers.projection_retry_limit,
-            ),
-            graph_diagnostics_snapshot: GraphDiagnosticsSnapshotService::new(
-                resolve_settle_blockers.diagnostics_snapshot_stale_after_seconds,
             ),
             provider_failure_classification: ProviderFailureClassificationService::new(
                 resolve_settle_blockers.provider_request_size_soft_limit_bytes,
             ),
-            documents_workspace: DocumentsWorkspaceService::new(),
         };
         let runtime_provider_defaults = RuntimeProviderProfileDefaults::from_settings(&settings);
 
         Self {
             llm_gateway: Arc::new(UnifiedGateway::from_settings(&settings)),
-            graph_store,
+            arango_client,
             settings,
             persistence,
             ui_runtime,
             ui_bootstrap_admin,
             ui_session_cookie,
+            arango_runtime,
             graph_runtime,
-            pricing_catalog_bootstrap,
-            lifecycle_services,
+            arango_document_store,
+            arango_graph_store,
+            arango_search_store,
+            arango_context_store,
             retrieval_intelligence,
             retrieval_intelligence_services,
             bulk_ingest_hardening,
             bulk_ingest_hardening_services,
             mcp_memory,
-            mcp_memory_services,
             canonical_services,
             pipeline_hardening,
-            pipeline_hardening_services,
             resolve_settle_blockers,
             resolve_settle_blockers_services,
             runtime_provider_defaults,
@@ -404,9 +370,23 @@ impl AppState {
                 anyhow::anyhow!("failed to repair queued runtime ingestion attempts: {error}")
             })?;
         }
-        let graph_store = Arc::new(Neo4jStore::connect(&settings)?);
-        graph_store.ping().await?;
-        Ok(Self::from_dependencies(settings, persistence, graph_store))
+        let arango_client = Arc::new(ArangoClient::from_settings(&settings)?);
+        arango_client.ensure_database().await?;
+        let bootstrap_options = ArangoBootstrapOptions {
+            collections: settings.arangodb_bootstrap_collections,
+            views: settings.arangodb_bootstrap_views,
+            graph: settings.arangodb_bootstrap_graph,
+            vector_indexes: settings.arangodb_bootstrap_vector_indexes,
+            vector_dimensions: settings.arangodb_vector_dimensions,
+            vector_index_n_lists: settings.arangodb_vector_index_n_lists,
+            vector_index_default_n_probe: settings.arangodb_vector_index_default_n_probe,
+            vector_index_training_iterations: settings.arangodb_vector_index_training_iterations,
+        };
+        if bootstrap_options.any_enabled() {
+            bootstrap_knowledge_plane(&arango_client, &bootstrap_options).await?;
+        }
+        ArangoGraphStore::new(Arc::clone(&arango_client)).ping().await?;
+        Ok(Self::from_dependencies(settings, persistence, arango_client))
     }
 
     #[must_use]

@@ -16,6 +16,8 @@ pub enum GrantResourceKind {
     Workspace,
     Library,
     Document,
+    QuerySession,
+    AsyncOperation,
     Connector,
     ProviderCredential,
     LibraryBinding,

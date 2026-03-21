@@ -266,7 +266,7 @@ impl McpPermissionsFixture {
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn workspace_scoped_tokens_only_see_their_workspace_in_capabilities_and_discovery()
 -> anyhow::Result<()> {
     let settings =
@@ -306,7 +306,7 @@ async fn workspace_scoped_tokens_only_see_their_workspace_in_capabilities_and_di
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn read_only_tokens_do_not_receive_writable_tool_descriptors() -> anyhow::Result<()> {
     let settings =
         Settings::from_env().context("failed to load settings for mcp permissions test")?;
@@ -341,7 +341,7 @@ async fn read_only_tokens_do_not_receive_writable_tool_descriptors() -> anyhow::
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn instance_admin_tokens_can_discover_all_visible_workspaces_and_libraries()
 -> anyhow::Result<()> {
     let settings =
@@ -408,7 +408,7 @@ async fn instance_admin_tokens_can_discover_all_visible_workspaces_and_libraries
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and neo4j services"]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn foreign_scope_rejections_do_not_leak_library_or_document_metadata() -> anyhow::Result<()> {
     let settings =
         Settings::from_env().context("failed to load settings for mcp permissions test")?;

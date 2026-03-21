@@ -32,6 +32,7 @@ pub struct QueryExecutionRow {
     pub workspace_id: Uuid,
     pub library_id: Uuid,
     pub conversation_id: Uuid,
+    pub context_bundle_id: Uuid,
     pub request_turn_id: Option<Uuid>,
     pub response_turn_id: Option<Uuid>,
     pub binding_id: Option<Uuid>,
@@ -40,30 +41,6 @@ pub struct QueryExecutionRow {
     pub failure_code: Option<String>,
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, FromRow)]
-pub struct QueryChunkReferenceRow {
-    pub execution_id: Uuid,
-    pub chunk_id: Uuid,
-    pub rank: i32,
-    pub score: f64,
-}
-
-#[derive(Debug, Clone, FromRow)]
-pub struct QueryGraphNodeReferenceRow {
-    pub execution_id: Uuid,
-    pub node_id: Uuid,
-    pub rank: i32,
-    pub score: f64,
-}
-
-#[derive(Debug, Clone, FromRow)]
-pub struct QueryGraphEdgeReferenceRow {
-    pub execution_id: Uuid,
-    pub edge_id: Uuid,
-    pub rank: i32,
-    pub score: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +63,8 @@ pub struct NewQueryTurn<'a> {
 
 #[derive(Debug, Clone)]
 pub struct NewQueryExecution<'a> {
+    pub execution_id: Uuid,
+    pub context_bundle_id: Uuid,
     pub workspace_id: Uuid,
     pub library_id: Uuid,
     pub conversation_id: Uuid,
@@ -104,27 +83,6 @@ pub struct UpdateQueryExecution<'a> {
     pub response_turn_id: Option<Uuid>,
     pub failure_code: Option<&'a str>,
     pub completed_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct NewQueryChunkReference {
-    pub chunk_id: Uuid,
-    pub rank: i32,
-    pub score: f64,
-}
-
-#[derive(Debug, Clone)]
-pub struct NewQueryGraphNodeReference {
-    pub node_id: Uuid,
-    pub rank: i32,
-    pub score: f64,
-}
-
-#[derive(Debug, Clone)]
-pub struct NewQueryGraphEdgeReference {
-    pub edge_id: Uuid,
-    pub rank: i32,
-    pub score: f64,
 }
 
 pub async fn list_conversations_by_library(
@@ -316,6 +274,7 @@ pub async fn list_executions_by_conversation(
     sqlx::query_as::<_, QueryExecutionRow>(
         "select
             id,
+            context_bundle_id,
             workspace_id,
             library_id,
             conversation_id,
@@ -329,7 +288,7 @@ pub async fn list_executions_by_conversation(
             completed_at
          from query_execution
          where conversation_id = $1
-         order by started_at asc",
+         order by started_at desc, id desc",
     )
     .bind(conversation_id)
     .fetch_all(postgres)
@@ -343,6 +302,7 @@ pub async fn get_execution_by_id(
     sqlx::query_as::<_, QueryExecutionRow>(
         "select
             id,
+            context_bundle_id,
             workspace_id,
             library_id,
             conversation_id,
@@ -372,6 +332,7 @@ pub async fn create_execution(
             workspace_id,
             library_id,
             conversation_id,
+            context_bundle_id,
             request_turn_id,
             response_turn_id,
             binding_id,
@@ -381,9 +342,10 @@ pub async fn create_execution(
             started_at,
             completed_at
         )
-        values ($1, $2, $3, $4, $5, $6, $7, $8::query_execution_state, $9, $10, now(), null)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9::query_execution_state, $10, $11, now(), null)
         returning
             id,
+            context_bundle_id,
             workspace_id,
             library_id,
             conversation_id,
@@ -396,10 +358,11 @@ pub async fn create_execution(
             started_at,
             completed_at",
     )
-    .bind(Uuid::now_v7())
+    .bind(input.execution_id)
     .bind(input.workspace_id)
     .bind(input.library_id)
     .bind(input.conversation_id)
+    .bind(input.context_bundle_id)
     .bind(input.request_turn_id)
     .bind(input.response_turn_id)
     .bind(input.binding_id)
@@ -425,6 +388,7 @@ pub async fn update_execution(
          where id = $1
          returning
             id,
+            context_bundle_id,
             workspace_id,
             library_id,
             conversation_id,
@@ -444,152 +408,5 @@ pub async fn update_execution(
     .bind(input.failure_code)
     .bind(input.completed_at)
     .fetch_optional(postgres)
-    .await
-}
-
-pub async fn replace_chunk_references(
-    postgres: &PgPool,
-    execution_id: Uuid,
-    references: &[NewQueryChunkReference],
-) -> Result<Vec<QueryChunkReferenceRow>, sqlx::Error> {
-    sqlx::query("delete from query_chunk_reference where execution_id = $1")
-        .bind(execution_id)
-        .execute(postgres)
-        .await?;
-
-    let mut rows = Vec::with_capacity(references.len());
-    for reference in references {
-        let row = sqlx::query_as::<_, QueryChunkReferenceRow>(
-            "insert into query_chunk_reference (
-                execution_id,
-                chunk_id,
-                rank,
-                score
-            )
-            values ($1, $2, $3, $4)
-            returning execution_id, chunk_id, rank, score",
-        )
-        .bind(execution_id)
-        .bind(reference.chunk_id)
-        .bind(reference.rank)
-        .bind(reference.score)
-        .fetch_one(postgres)
-        .await?;
-        rows.push(row);
-    }
-
-    Ok(rows)
-}
-
-pub async fn replace_graph_node_references(
-    postgres: &PgPool,
-    execution_id: Uuid,
-    references: &[NewQueryGraphNodeReference],
-) -> Result<Vec<QueryGraphNodeReferenceRow>, sqlx::Error> {
-    sqlx::query("delete from query_graph_node_reference where execution_id = $1")
-        .bind(execution_id)
-        .execute(postgres)
-        .await?;
-
-    let mut rows = Vec::with_capacity(references.len());
-    for reference in references {
-        let row = sqlx::query_as::<_, QueryGraphNodeReferenceRow>(
-            "insert into query_graph_node_reference (
-                execution_id,
-                node_id,
-                rank,
-                score
-            )
-            values ($1, $2, $3, $4)
-            returning execution_id, node_id, rank, score",
-        )
-        .bind(execution_id)
-        .bind(reference.node_id)
-        .bind(reference.rank)
-        .bind(reference.score)
-        .fetch_one(postgres)
-        .await?;
-        rows.push(row);
-    }
-
-    Ok(rows)
-}
-
-pub async fn replace_graph_edge_references(
-    postgres: &PgPool,
-    execution_id: Uuid,
-    references: &[NewQueryGraphEdgeReference],
-) -> Result<Vec<QueryGraphEdgeReferenceRow>, sqlx::Error> {
-    sqlx::query("delete from query_graph_edge_reference where execution_id = $1")
-        .bind(execution_id)
-        .execute(postgres)
-        .await?;
-
-    let mut rows = Vec::with_capacity(references.len());
-    for reference in references {
-        let row = sqlx::query_as::<_, QueryGraphEdgeReferenceRow>(
-            "insert into query_graph_edge_reference (
-                execution_id,
-                edge_id,
-                rank,
-                score
-            )
-            values ($1, $2, $3, $4)
-            returning execution_id, edge_id, rank, score",
-        )
-        .bind(execution_id)
-        .bind(reference.edge_id)
-        .bind(reference.rank)
-        .bind(reference.score)
-        .fetch_one(postgres)
-        .await?;
-        rows.push(row);
-    }
-
-    Ok(rows)
-}
-
-pub async fn list_chunk_references_by_execution(
-    postgres: &PgPool,
-    execution_id: Uuid,
-) -> Result<Vec<QueryChunkReferenceRow>, sqlx::Error> {
-    sqlx::query_as::<_, QueryChunkReferenceRow>(
-        "select execution_id, chunk_id, rank, score
-         from query_chunk_reference
-         where execution_id = $1
-         order by rank asc, chunk_id asc",
-    )
-    .bind(execution_id)
-    .fetch_all(postgres)
-    .await
-}
-
-pub async fn list_graph_node_references_by_execution(
-    postgres: &PgPool,
-    execution_id: Uuid,
-) -> Result<Vec<QueryGraphNodeReferenceRow>, sqlx::Error> {
-    sqlx::query_as::<_, QueryGraphNodeReferenceRow>(
-        "select execution_id, node_id, rank, score
-         from query_graph_node_reference
-         where execution_id = $1
-         order by rank asc, node_id asc",
-    )
-    .bind(execution_id)
-    .fetch_all(postgres)
-    .await
-}
-
-pub async fn list_graph_edge_references_by_execution(
-    postgres: &PgPool,
-    execution_id: Uuid,
-) -> Result<Vec<QueryGraphEdgeReferenceRow>, sqlx::Error> {
-    sqlx::query_as::<_, QueryGraphEdgeReferenceRow>(
-        "select execution_id, edge_id, rank, score
-         from query_graph_edge_reference
-         where execution_id = $1
-         order by rank asc, edge_id asc",
-    )
-    .bind(execution_id)
-    .fetch_all(postgres)
     .await
 }

@@ -1,12 +1,13 @@
 # RustRAG Backend
 
-The backend is being rewritten around one destructive greenfield schema. Fresh deployments are expected to come entirely from [0001_init.sql](/home/leader/sources/RustRAG/rustrag/backend/migrations/0001_init.sql); no legacy migration chain, backfill pass, or compatibility alias is authoritative anymore.
+The backend is being rewritten around one destructive greenfield schema and one canonical knowledge plane. Fresh deployments are expected to come entirely from [0001_init.sql](/home/leader/sources/RustRAG/rustrag/backend/migrations/0001_init.sql) plus ArangoDB bootstrap; no legacy migration chain, backfill pass, or compatibility alias is authoritative anymore.
 
 ## Greenfield Bootstrap
 
 Fresh environments are expected to start with:
 
-- canonical tables only: `catalog_*`, `iam_*`, `ai_*`, `content_*`, `ingest_*`, `extract_*`, `graph_*`, `search_*`, `query_*`, `billing_*`, `ops_*`, `audit_*`
+- canonical Postgres control-plane tables only: `catalog_*`, `iam_*`, `ai_*`, `ingest_*`, `query_*`, `billing_*`, `ops_*`, `audit_*`, `async_operation`
+- canonical ArangoDB knowledge collections only: `knowledge_document`, `knowledge_revision`, `knowledge_chunk`, `knowledge_entity`, `knowledge_relation`, `knowledge_evidence`, `knowledge_context_bundle`, and typed `knowledge_*_edge` collections
 - seeded AI catalog rows from the initial migration:
   - `3` providers
   - `7` models
@@ -54,7 +55,7 @@ For schema-wide work, the code gate is not enough. Fresh-database bootstrap evid
 
 ## Local Runtime
 
-Backend is expected to run against the compose stack from the repo root:
+Backend is expected to run against the compose stack from the repo root with Postgres, Redis, and ArangoDB:
 
 ```bash
 docker compose up --build -d backend

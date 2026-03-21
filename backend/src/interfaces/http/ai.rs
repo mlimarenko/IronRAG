@@ -9,8 +9,8 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::ai::{
-        BindingValidation, LibraryModelBinding, ModelCatalogEntry, ModelPreset, PriceCatalogEntry,
-        ProviderCatalogEntry, ProviderCredential,
+        AiBindingPurpose, BindingValidation, LibraryModelBinding, ModelCatalogEntry, ModelPreset,
+        PriceCatalogEntry, ProviderCatalogEntry, ProviderCredential,
     },
     interfaces::http::{
         auth::AuthContext,
@@ -67,7 +67,7 @@ pub struct CreateProviderCredentialRequest {
 pub struct CreateLibraryBindingRequest {
     pub workspace_id: Uuid,
     pub library_id: Uuid,
-    pub binding_purpose: String,
+    pub binding_purpose: AiBindingPurpose,
     pub provider_credential_id: Uuid,
     pub model_preset_id: Uuid,
 }
@@ -140,7 +140,7 @@ pub struct LibraryModelBindingResponse {
     pub id: Uuid,
     pub workspace_id: Uuid,
     pub library_id: Uuid,
-    pub binding_purpose: String,
+    pub binding_purpose: AiBindingPurpose,
     pub provider_credential_id: Uuid,
     pub model_preset_id: Uuid,
     pub binding_state: String,
