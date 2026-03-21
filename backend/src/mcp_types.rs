@@ -192,10 +192,16 @@ pub struct McpReadDocumentRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpUploadDocumentInput {
-    #[serde(alias = "file_name")]
-    pub file_name: String,
-    #[serde(alias = "content_base64")]
-    pub content_base64: String,
+    #[serde(default, alias = "file_name")]
+    pub file_name: Option<String>,
+    #[serde(default, alias = "content_base64")]
+    pub content_base64: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default, alias = "source_type")]
+    pub source_type: Option<String>,
+    #[serde(default, alias = "source_uri")]
+    pub source_uri: Option<String>,
     #[serde(default, alias = "mime_type")]
     pub mime_type: Option<String>,
     pub title: Option<String>,
@@ -298,6 +304,7 @@ pub struct McpAuditScope {
 #[serde(rename_all = "camelCase")]
 pub struct McpReadDocumentResponse {
     pub document_id: Uuid,
+    pub document_title: String,
     pub library_id: Uuid,
     pub workspace_id: Uuid,
     pub latest_revision_id: Option<Uuid>,
@@ -372,6 +379,25 @@ mod tests {
     }
 
     #[test]
+    fn upload_documents_request_accepts_inline_body_fields() {
+        let library_id = Uuid::now_v7();
+        let request: McpUploadDocumentsRequest = serde_json::from_value(json!({
+            "library_id": library_id,
+            "documents": [{
+                "body": "hello world",
+                "source_type": "inline",
+                "title": "Inline note"
+            }]
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(request.library_id, library_id);
+        assert_eq!(request.documents.len(), 1);
+        assert_eq!(request.documents[0].body.as_deref(), Some("hello world"));
+        assert_eq!(request.documents[0].source_type.as_deref(), Some("inline"));
+    }
+
+    #[test]
     fn update_document_request_accepts_snake_case_fields() {
         let request: McpUpdateDocumentRequest = serde_json::from_value(json!({
             "library_id": Uuid::nil(),
@@ -404,8 +430,22 @@ mod tests {
         }))
         .expect("input should deserialize");
 
-        assert_eq!(input.file_name, "demo.txt");
-        assert_eq!(input.content_base64, "ZGVtbw==");
+        assert_eq!(input.file_name.as_deref(), Some("demo.txt"));
+        assert_eq!(input.content_base64.as_deref(), Some("ZGVtbw=="));
+        assert_eq!(input.mime_type.as_deref(), Some("text/plain"));
+    }
+
+    #[test]
+    fn upload_document_input_accepts_inline_body_fields() {
+        let input: McpUploadDocumentInput = serde_json::from_value(json!({
+            "body": "demo",
+            "source_uri": "memory://demo.txt",
+            "mime_type": "text/plain"
+        }))
+        .expect("input should deserialize");
+
+        assert_eq!(input.body.as_deref(), Some("demo"));
+        assert_eq!(input.source_uri.as_deref(), Some("memory://demo.txt"));
         assert_eq!(input.mime_type.as_deref(), Some("text/plain"));
     }
 }

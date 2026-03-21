@@ -572,6 +572,55 @@ impl ArangoDocumentStore {
         decode_single_result(cursor)
     }
 
+    pub async fn insert_chunks(
+        &self,
+        rows: &[KnowledgeChunkRow],
+    ) -> anyhow::Result<Vec<KnowledgeChunkRow>> {
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let payload_rows = rows
+            .iter()
+            .map(|row| {
+                serde_json::json!({
+                    "_key": row.key,
+                    "chunk_id": row.chunk_id,
+                    "workspace_id": row.workspace_id,
+                    "library_id": row.library_id,
+                    "document_id": row.document_id,
+                    "revision_id": row.revision_id,
+                    "chunk_index": row.chunk_index,
+                    "content_text": row.content_text,
+                    "normalized_text": row.normalized_text,
+                    "span_start": row.span_start,
+                    "span_end": row.span_end,
+                    "token_count": row.token_count,
+                    "section_path": row.section_path,
+                    "heading_trail": row.heading_trail,
+                    "chunk_state": row.chunk_state,
+                    "text_generation": row.text_generation,
+                    "vector_generation": row.vector_generation,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let cursor = self
+            .client
+            .query_json(
+                "FOR row IN @rows
+                 INSERT row INTO @@collection
+                 RETURN NEW",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_CHUNK_COLLECTION,
+                    "rows": payload_rows,
+                }),
+            )
+            .await
+            .context("failed to insert knowledge chunks")?;
+        decode_many_results(cursor)
+    }
+
     pub async fn list_chunks_by_revision(
         &self,
         revision_id: Uuid,

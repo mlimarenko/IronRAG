@@ -216,6 +216,16 @@ struct InlineMutationFailure {
 }
 
 #[derive(Debug, Clone)]
+struct PendingChunkInsert {
+    chunk_index: i32,
+    start_offset: i32,
+    end_offset: i32,
+    token_count: Option<i32>,
+    normalized_text: String,
+    text_checksum: String,
+}
+
+#[derive(Debug, Clone)]
 enum InlineExtractOutcome {
     Ready(FileExtractionPlan),
     Failed(InlineMutationFailure),
@@ -239,11 +249,36 @@ impl ContentService {
             content_repository::list_documents_by_library(&state.persistence.postgres, library_id)
                 .await
                 .map_err(|_| ApiError::Internal)?;
-        let mut summaries = Vec::with_capacity(documents.len());
-        for row in documents {
-            summaries.push(self.build_document_summary(state, row).await?);
-        }
-        Ok(summaries)
+        let document_ids = documents.iter().map(|row| row.id).collect::<Vec<_>>();
+        let heads =
+            content_repository::list_document_heads_by_document_ids(
+                &state.persistence.postgres,
+                &document_ids,
+            )
+            .await
+            .map_err(|_| ApiError::Internal)?;
+        let head_map = heads
+            .into_iter()
+            .map(|row| (row.document_id, row))
+            .collect::<std::collections::HashMap<_, _>>();
+        let active_revision_ids = head_map
+            .values()
+            .filter_map(|row| row.active_revision_id)
+            .collect::<Vec<_>>();
+        let active_revision_map = content_repository::list_revisions_by_ids(
+            &state.persistence.postgres,
+            &active_revision_ids,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .into_iter()
+        .map(|row| (row.id, row))
+        .collect::<std::collections::HashMap<_, _>>();
+
+        Ok(documents
+            .into_iter()
+            .map(|row| self.build_document_summary_from_parts(row, &head_map, &active_revision_map))
+            .collect())
     }
 
     pub async fn get_document(
@@ -1673,53 +1708,66 @@ impl ContentService {
             state.canonical_services.knowledge.delete_revision_chunks(state, revision_id).await?;
         let chunks = split_text_into_chunks_with_profile(text, ChunkingProfile::default());
         let mut next_search_char = 0usize;
+        let mut pending_chunks = Vec::with_capacity(chunks.len());
+        let mut knowledge_chunks = Vec::with_capacity(chunks.len());
         for (chunk_index, chunk_text) in chunks.iter().enumerate() {
             let (start_offset, end_offset) =
                 locate_chunk_offsets(text, chunk_text, next_search_char);
             next_search_char = end_offset;
-            let text_checksum = sha256_hex_text(chunk_text);
-            let chunk = content_repository::create_chunk(
-                &state.persistence.postgres,
-                &content_repository::NewContentChunk {
-                    revision_id,
-                    chunk_index: i32::try_from(chunk_index).unwrap_or(i32::MAX),
-                    start_offset: i32::try_from(start_offset).unwrap_or(i32::MAX),
-                    end_offset: i32::try_from(end_offset).unwrap_or(i32::MAX),
-                    token_count: Some(
-                        i32::try_from(chunk_text.split_whitespace().count()).unwrap_or(i32::MAX),
-                    ),
-                    normalized_text: chunk_text,
-                    text_checksum: &text_checksum,
-                },
-            )
-            .await
-            .map_err(|_| ApiError::Internal)?;
-            let _ = state
-                .canonical_services
-                .knowledge
-                .write_chunk(
-                    state,
-                    CreateKnowledgeChunkCommand {
-                        chunk_id: chunk.id,
-                        workspace_id: revision.workspace_id,
-                        library_id: revision.library_id,
-                        document_id: revision.document_id,
-                        revision_id,
-                        chunk_index: chunk.chunk_index,
-                        content_text: chunk_text.to_string(),
-                        normalized_text: chunk.normalized_text,
-                        span_start: Some(chunk.start_offset),
-                        span_end: Some(chunk.end_offset),
-                        token_count: chunk.token_count,
-                        section_path: Vec::new(),
-                        heading_trail: Vec::new(),
-                        chunk_state: "ready".to_string(),
-                        text_generation: Some(i64::from(revision.revision_number)),
-                        vector_generation: None,
-                    },
-                )
-                .await?;
+            pending_chunks.push(PendingChunkInsert {
+                chunk_index: i32::try_from(chunk_index).unwrap_or(i32::MAX),
+                start_offset: i32::try_from(start_offset).unwrap_or(i32::MAX),
+                end_offset: i32::try_from(end_offset).unwrap_or(i32::MAX),
+                token_count: Some(
+                    i32::try_from(chunk_text.split_whitespace().count()).unwrap_or(i32::MAX),
+                ),
+                normalized_text: chunk_text.to_string(),
+                text_checksum: sha256_hex_text(chunk_text),
+            });
         }
+        let postgres_chunks = pending_chunks
+            .iter()
+            .map(|chunk| content_repository::NewContentChunk {
+                revision_id,
+                chunk_index: chunk.chunk_index,
+                start_offset: chunk.start_offset,
+                end_offset: chunk.end_offset,
+                token_count: chunk.token_count,
+                normalized_text: &chunk.normalized_text,
+                text_checksum: &chunk.text_checksum,
+            })
+            .collect::<Vec<_>>();
+        let created_chunks = content_repository::create_chunks(
+            &state.persistence.postgres,
+            &postgres_chunks,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?;
+        for (chunk, pending_chunk) in created_chunks.into_iter().zip(pending_chunks.iter()) {
+            knowledge_chunks.push(CreateKnowledgeChunkCommand {
+                chunk_id: chunk.id,
+                workspace_id: revision.workspace_id,
+                library_id: revision.library_id,
+                document_id: revision.document_id,
+                revision_id,
+                chunk_index: chunk.chunk_index,
+                content_text: pending_chunk.normalized_text.clone(),
+                normalized_text: chunk.normalized_text,
+                span_start: Some(chunk.start_offset),
+                span_end: Some(chunk.end_offset),
+                token_count: chunk.token_count,
+                section_path: Vec::new(),
+                heading_trail: Vec::new(),
+                chunk_state: "ready".to_string(),
+                text_generation: Some(i64::from(revision.revision_number)),
+                vector_generation: None,
+            });
+        }
+        let _ = state
+            .canonical_services
+            .knowledge
+            .write_chunks(state, knowledge_chunks)
+            .await?;
         Ok(())
     }
 
@@ -1828,6 +1876,26 @@ impl ContentService {
             head: head.map(map_document_head_row),
             active_revision,
         })
+    }
+
+    fn build_document_summary_from_parts(
+        &self,
+        document_row: content_repository::ContentDocumentRow,
+        head_map: &std::collections::HashMap<Uuid, content_repository::ContentDocumentHeadRow>,
+        active_revision_map: &std::collections::HashMap<Uuid, content_repository::ContentRevisionRow>,
+    ) -> ContentDocumentSummary {
+        let head = head_map.get(&document_row.id).cloned();
+        let active_revision = head
+            .as_ref()
+            .and_then(|row| row.active_revision_id)
+            .and_then(|revision_id| active_revision_map.get(&revision_id).cloned())
+            .map(map_revision_row);
+
+        ContentDocumentSummary {
+            document: map_document_row(document_row),
+            head: head.map(map_document_head_row),
+            active_revision,
+        }
     }
 
     async fn create_revision_from_metadata(

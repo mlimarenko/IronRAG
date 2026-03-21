@@ -813,7 +813,7 @@ export const useDocumentsStore = defineStore('documents', {
           this.surface.rows.find((row) => row.id === this.detail?.id),
         )
         this.providerFailureDetail = this.detail?.providerFailure ?? null
-        if (this.graphDiagnosticsRefreshIntervalMs > 0 || this.graphDiagnostics === null) {
+        if (this.graphDiagnostics === null) {
           await this.loadGraphDiagnostics({ silent: true }).catch(() => undefined)
         }
         if (options?.syncDetail) {

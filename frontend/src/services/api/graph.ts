@@ -212,7 +212,20 @@ interface RawKnowledgeSearchResponse {
   freshnessGeneration: number
   documentHits: Array<{
     document: RawKnowledgeDocumentRow
-    revision: RawKnowledgeRevisionRow
+    revision: {
+      revisionId: string
+      documentId: string
+      revisionNumber: number
+      revisionState: string
+      revisionKind: string
+      mimeType: string
+      title: string | null
+      byteSize: number
+      textState: string
+      vectorState: string
+      graphState: string
+      createdAt: string
+    }
     score: number
     lexicalRank: number | null
     vectorRank: number | null

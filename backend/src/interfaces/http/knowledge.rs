@@ -108,6 +108,23 @@ struct KnowledgeDocumentDetailResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct KnowledgeSearchRevisionSummary {
+    revision_id: Uuid,
+    document_id: Uuid,
+    revision_number: i64,
+    revision_state: String,
+    revision_kind: String,
+    mime_type: String,
+    title: Option<String>,
+    byte_size: i64,
+    text_state: String,
+    vector_state: String,
+    graph_state: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct KnowledgeEntityDetailResponse {
     entity: KnowledgeEntityRow,
     mention_edges: Vec<KnowledgeEntityMentionEdgeRow>,
@@ -128,7 +145,7 @@ struct KnowledgeRelationDetailResponse {
 #[serde(rename_all = "camelCase")]
 struct KnowledgeSearchDocumentHit {
     document: KnowledgeDocumentRow,
-    revision: KnowledgeRevisionRow,
+    revision: KnowledgeSearchRevisionSummary,
     score: f64,
     lexical_rank: Option<usize>,
     vector_rank: Option<usize>,
@@ -623,7 +640,7 @@ async fn search_documents_impl(
                 vector_chunk_count: accumulator.vector_chunk_hits.len(),
             },
             document: accumulator.document,
-            revision: accumulator.revision,
+            revision: map_search_revision_summary(accumulator.revision),
             score: accumulator.score,
             lexical_rank: accumulator.lexical_rank,
             vector_rank: accumulator.vector_rank,
@@ -669,6 +686,23 @@ async fn search_documents_impl(
         vector_chunk_hits,
         vector_entity_hits,
     }))
+}
+
+fn map_search_revision_summary(revision: KnowledgeRevisionRow) -> KnowledgeSearchRevisionSummary {
+    KnowledgeSearchRevisionSummary {
+        revision_id: revision.revision_id,
+        document_id: revision.document_id,
+        revision_number: revision.revision_number,
+        revision_state: revision.revision_state,
+        revision_kind: revision.revision_kind,
+        mime_type: revision.mime_type,
+        title: revision.title,
+        byte_size: revision.byte_size,
+        text_state: revision.text_state,
+        vector_state: revision.vector_state,
+        graph_state: revision.graph_state,
+        created_at: revision.created_at,
+    }
 }
 
 async fn resolve_hybrid_search_context(
@@ -794,39 +828,11 @@ async fn search_entities_by_library(
     query_text: &str,
     limit: usize,
 ) -> Result<Vec<KnowledgeEntitySearchRow>, ApiError> {
-    let query_lower = query_text.to_ascii_lowercase();
-    let mut hits = state
-        .arango_graph_store
-        .list_entities_by_library(library_id)
+    state
+        .arango_search_store
+        .search_entities(library_id, query_text, limit.max(1))
         .await
-        .map_err(|_| ApiError::Internal)?
-        .into_iter()
-        .filter_map(|entity| {
-            let score = lexical_candidate_score(
-                [entity.canonical_label.as_str(), entity.summary.as_deref().unwrap_or("")]
-                    .into_iter(),
-                &query_lower,
-            )?;
-            Some(KnowledgeEntitySearchRow {
-                entity_id: entity.entity_id,
-                workspace_id: entity.workspace_id,
-                library_id: entity.library_id,
-                canonical_name: entity.canonical_label,
-                entity_type: entity.entity_type,
-                summary: entity.summary,
-                score,
-            })
-        })
-        .collect::<Vec<_>>();
-    hits.sort_by(|left, right| {
-        right
-            .score
-            .partial_cmp(&left.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| left.entity_id.cmp(&right.entity_id))
-    });
-    hits.truncate(limit.max(1));
-    Ok(hits)
+        .map_err(|_| ApiError::Internal)
 }
 
 async fn search_relations_by_library(
@@ -835,57 +841,11 @@ async fn search_relations_by_library(
     query_text: &str,
     limit: usize,
 ) -> Result<Vec<KnowledgeRelationSearchRow>, ApiError> {
-    let query_lower = query_text.to_ascii_lowercase();
-    let mut hits = state
-        .arango_graph_store
-        .list_relations_by_library(library_id)
+    state
+        .arango_search_store
+        .search_relations(library_id, query_text, limit.max(1))
         .await
-        .map_err(|_| ApiError::Internal)?
-        .into_iter()
-        .filter_map(|relation| {
-            let predicate = relation.predicate;
-            let normalized_assertion = relation.normalized_assertion;
-            let contradiction_state = relation.contradiction_state;
-            let score = lexical_candidate_score(
-                [predicate.as_str(), normalized_assertion.as_str()]
-                    .into_iter()
-                    .chain(std::iter::once(contradiction_state.as_str())),
-                &query_lower,
-            )?;
-            Some(KnowledgeRelationSearchRow {
-                relation_id: relation.relation_id,
-                workspace_id: relation.workspace_id,
-                library_id: relation.library_id,
-                predicate: predicate.clone(),
-                canonical_label: predicate,
-                summary: Some(normalized_assertion),
-                score,
-            })
-        })
-        .collect::<Vec<_>>();
-    hits.sort_by(|left, right| {
-        right
-            .score
-            .partial_cmp(&left.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| left.relation_id.cmp(&right.relation_id))
-    });
-    hits.truncate(limit.max(1));
-    Ok(hits)
-}
-
-fn lexical_candidate_score<'a>(
-    fields: impl IntoIterator<Item = &'a str>,
-    query_lower: &str,
-) -> Option<f64> {
-    fields
-        .into_iter()
-        .filter(|field| !field.is_empty())
-        .filter_map(|field| {
-            let text_lower = field.to_ascii_lowercase();
-            text_lower.find(query_lower).map(|position| 1.0 / (1.0 + position as f64))
-        })
-        .max_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal))
+        .map_err(|_| ApiError::Internal)
 }
 
 async fn list_library_generations(

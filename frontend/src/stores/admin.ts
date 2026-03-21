@@ -42,6 +42,7 @@ interface AdminState {
   principal: AdminPrincipalSummary | null
   tokens: AdminApiTokenRow[]
   aiConsole: AdminAiConsoleState | null
+  aiConsoleContextKey: string | null
   auditEvents: AdminAuditEvent[]
   opsSnapshot: AdminOpsLibrarySnapshot | null
   credentialSaving: boolean
@@ -88,6 +89,7 @@ export const useAdminStore = defineStore('admin', {
     principal: null,
     tokens: [],
     aiConsole: null,
+    aiConsoleContextKey: null,
     auditEvents: [],
     opsSnapshot: null,
     credentialSaving: false,
@@ -146,6 +148,7 @@ export const useAdminStore = defineStore('admin', {
       this.principal = null
       this.tokens = []
       this.aiConsole = null
+      this.aiConsoleContextKey = null
       this.auditEvents = []
       this.opsSnapshot = null
       this.latestPlaintextToken = null
@@ -186,9 +189,15 @@ export const useAdminStore = defineStore('admin', {
             : []
         } else if (this.activeTab === 'aiCatalog' || this.activeTab === 'pricing') {
           if (this.tabAvailability.aiCatalog || this.tabAvailability.pricing) {
+            const contextKey = `${this.context.workspaceId}:${this.context.libraryId}`
+            if (this.aiConsole !== null && this.aiConsoleContextKey === contextKey) {
+              return
+            }
             this.aiConsole = await fetchAdminAiConsole(this.context)
+            this.aiConsoleContextKey = contextKey
           } else {
             this.aiConsole = null
+            this.aiConsoleContextKey = null
           }
         } else {
           this.auditEvents = this.tabAvailability.audit

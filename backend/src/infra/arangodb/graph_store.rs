@@ -1384,6 +1384,37 @@ impl ArangoGraphStore {
         .await
     }
 
+    pub async fn insert_revision_chunk_edges(
+        &self,
+        revision_id: Uuid,
+        chunk_ids: &[Uuid],
+    ) -> anyhow::Result<()> {
+        if chunk_ids.is_empty() {
+            return Ok(());
+        }
+
+        self.client
+            .query_json(
+                "FOR chunk_id IN @chunk_ids
+                 INSERT {
+                    _from: @from_id,
+                    _to: CONCAT(@to_collection, '/', chunk_id),
+                    created_at: @created_at
+                 } INTO @@collection
+                 RETURN NEW._id",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_REVISION_CHUNK_EDGE,
+                    "from_id": format!("{}/{}", KNOWLEDGE_REVISION_COLLECTION, revision_id),
+                    "to_collection": KNOWLEDGE_CHUNK_COLLECTION,
+                    "chunk_ids": chunk_ids,
+                    "created_at": Utc::now(),
+                }),
+            )
+            .await
+            .with_context(|| "failed to insert revision chunk edges".to_string())?;
+        Ok(())
+    }
+
     pub async fn delete_revision_chunk_edges(&self, revision_id: Uuid) -> anyhow::Result<u64> {
         let cursor = self
             .client

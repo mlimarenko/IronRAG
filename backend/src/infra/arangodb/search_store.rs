@@ -8,7 +8,8 @@ use uuid::Uuid;
 use crate::infra::arangodb::{
     client::ArangoClient,
     collections::{
-        KNOWLEDGE_CHUNK_VECTOR_COLLECTION, KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
+        KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
+        KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
         KNOWLEDGE_SEARCH_VIEW,
     },
 };
@@ -341,6 +342,8 @@ impl ArangoSearchStore {
         query: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<KnowledgeChunkSearchRow>> {
+        let normalized_limit = limit.max(1);
+        let query_lower = query.trim().to_ascii_lowercase();
         let cursor = self
             .client
             .query_json(
@@ -371,12 +374,93 @@ impl ArangoSearchStore {
                     "@view": KNOWLEDGE_SEARCH_VIEW,
                     "library_id": library_id,
                     "query": query,
-                    "limit": limit.max(1),
+                    "limit": normalized_limit,
                 }),
             )
             .await
             .context("failed to search knowledge chunks")?;
-        decode_many_results(cursor)
+        let mut rows = decode_many_results(cursor)?;
+        if query_lower.is_empty() {
+            return Ok(rows);
+        }
+
+        let should_merge_direct_scan =
+            rows.is_empty() || query_lower.split_whitespace().nth(1).is_some();
+        if !should_merge_direct_scan {
+            return Ok(rows);
+        }
+
+        // Arango search views can lag briefly behind chunk writes. Also, for multi-token
+        // queries they can surface partial token matches from older revisions before the
+        // freshly written exact phrase becomes visible. Merge in a direct collection scan
+        // so fresh exact-text hits are visible and rank above stale partial matches.
+        let cursor = self
+            .client
+            .query_json(
+                "FOR chunk IN @@collection
+                 FILTER chunk.library_id == @library_id
+                   AND chunk.chunk_state == 'ready'
+                   AND (
+                        CONTAINS(LOWER(chunk.normalized_text), @query_lower)
+                        OR CONTAINS(LOWER(chunk.content_text), @query_lower)
+                   )
+                 LET normalized_pos = FIND_FIRST(LOWER(chunk.normalized_text), @query_lower)
+                 LET content_pos = FIND_FIRST(LOWER(chunk.content_text), @query_lower)
+                 LET earliest_pos = MIN([
+                    normalized_pos >= 0 ? normalized_pos : 2147483647,
+                    content_pos >= 0 ? content_pos : 2147483647
+                 ])
+                 LET score = 1000000 - earliest_pos
+                 SORT score DESC, chunk.revision_id DESC, chunk.chunk_index ASC
+                 LIMIT @limit
+                 RETURN {
+                    chunk_id: chunk.chunk_id,
+                    workspace_id: chunk.workspace_id,
+                    library_id: chunk.library_id,
+                    revision_id: chunk.revision_id,
+                    content_text: chunk.content_text,
+                    normalized_text: chunk.normalized_text,
+                    section_path: chunk.section_path,
+                    heading_trail: chunk.heading_trail,
+                    score: score
+                 }",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_CHUNK_COLLECTION,
+                    "library_id": library_id,
+                    "query_lower": query_lower,
+                    "limit": normalized_limit,
+                }),
+            )
+            .await
+            .context("failed to search knowledge chunks via direct fallback scan")?;
+        let direct_rows: Vec<KnowledgeChunkSearchRow> = decode_many_results(cursor)?;
+        if direct_rows.is_empty() {
+            return Ok(rows);
+        }
+
+        let mut by_chunk_id = rows
+            .drain(..)
+            .map(|row| (row.chunk_id, row))
+            .collect::<std::collections::HashMap<_, _>>();
+        for row in direct_rows {
+            match by_chunk_id.entry(row.chunk_id) {
+                std::collections::hash_map::Entry::Occupied(mut existing) => {
+                    if row.score > existing.get().score {
+                        existing.insert(row);
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(vacant) => {
+                    vacant.insert(row);
+                }
+            }
+        }
+
+        let mut merged = by_chunk_id.into_values().collect::<Vec<_>>();
+        merged.sort_by(|left, right| {
+            right.score.total_cmp(&left.score).then_with(|| left.chunk_id.cmp(&right.chunk_id))
+        });
+        merged.truncate(normalized_limit);
+        Ok(merged)
     }
 
     pub async fn search_entities(

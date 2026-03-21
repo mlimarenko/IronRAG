@@ -52,18 +52,9 @@ pub async fn upload_documents(
     let mut receipts = Vec::with_capacity(request.documents.len());
     let mut total_upload_bytes = 0_u64;
     for (index, document) in request.documents.into_iter().enumerate() {
-        let file_name = document.file_name.trim();
-        if file_name.is_empty() {
-            return Err(ApiError::invalid_mcp_tool_call(format!(
-                "documents[{index}].fileName must not be empty"
-            )));
-        }
-
-        let file_bytes = BASE64_STANDARD.decode(document.content_base64.trim()).map_err(|_| {
-            ApiError::invalid_mcp_tool_call(format!(
-                "documents[{index}].contentBase64 must be valid base64"
-            ))
-        })?;
+        let file_name = resolve_upload_file_name(&document, index)?;
+        let mime_type = resolve_upload_mime_type(&document);
+        let file_bytes = resolve_upload_file_bytes(&document, index)?;
         if file_bytes.is_empty() {
             return Err(ApiError::invalid_mcp_tool_call(format!(
                 "documents[{index}] upload body must not be empty"
@@ -71,8 +62,8 @@ pub async fn upload_documents(
         }
         validate_mcp_upload_file_size(
             settings,
-            file_name,
-            document.mime_type.as_deref(),
+            &file_name,
+            mime_type.as_deref(),
             &file_bytes,
         )?;
         total_upload_bytes =
@@ -80,8 +71,8 @@ pub async fn upload_documents(
         validate_mcp_upload_batch_size(settings, total_upload_bytes)?;
 
         let payload_identity = hash_upload_payload(
-            file_name,
-            document.mime_type.as_deref(),
+            &file_name,
+            mime_type.as_deref(),
             document.title.as_deref(),
             &file_bytes,
         );
@@ -110,7 +101,9 @@ pub async fn upload_documents(
             &library,
             normalized_idempotency_key,
             payload_identity,
-            document,
+            document.title,
+            file_name,
+            mime_type,
             file_bytes,
         )
         .await?;
@@ -139,7 +132,7 @@ pub async fn update_document(
         .get_document(request.document_id)
         .await
         .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::resource_not_found("knowledge_document", request.document_id))?;
+        .ok_or_else(|| ApiError::resource_not_found("document", request.document_id))?;
     authorize_document_permission(
         auth,
         document.workspace_id,
@@ -351,7 +344,9 @@ pub(crate) async fn process_upload_mutation(
     library: &CatalogLibraryRow,
     idempotency_key: String,
     payload_identity: String,
-    document: McpUploadDocumentInput,
+    title: Option<String>,
+    file_name: String,
+    mime_type: Option<String>,
     file_bytes: Vec<u8>,
 ) -> Result<McpMutationReceipt, ApiError> {
     let admission = state
@@ -367,14 +362,172 @@ pub(crate) async fn process_upload_mutation(
                 requested_by_principal_id: Some(auth.principal_id),
                 request_surface: "mcp".to_string(),
                 source_identity: Some(payload_identity),
-                file_name: document.file_name.trim().to_string(),
-                title: document.title,
-                mime_type: document.mime_type,
+                file_name,
+                title,
+                mime_type,
                 file_bytes,
             },
         )
         .await?;
     resolve_mutation_receipt(state, auth, admission.mutation.mutation).await
+}
+
+fn resolve_upload_file_name(document: &McpUploadDocumentInput, index: usize) -> Result<String, ApiError> {
+    if let Some(file_name) = document
+        .file_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(file_name.to_string());
+    }
+
+    if document
+        .body
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
+    {
+        return Ok(default_inline_file_name(
+            document.title.as_deref(),
+            document.source_uri.as_deref(),
+            index,
+        ));
+    }
+
+    Err(ApiError::invalid_mcp_tool_call(format!(
+        "documents[{index}].fileName must not be empty"
+    )))
+}
+
+fn resolve_upload_mime_type(document: &McpUploadDocumentInput) -> Option<String> {
+    document
+        .mime_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            document
+                .body
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|_| "text/plain".to_string())
+        })
+}
+
+fn resolve_upload_file_bytes(
+    document: &McpUploadDocumentInput,
+    index: usize,
+) -> Result<Vec<u8>, ApiError> {
+    let source_type = document
+        .source_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    let has_base64 = document
+        .content_base64
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some();
+    let has_body = document
+        .body
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some();
+
+    if has_base64 && has_body {
+        return Err(ApiError::invalid_mcp_tool_call(format!(
+            "documents[{index}] must provide either contentBase64 or body, not both"
+        )));
+    }
+    if matches!(source_type.as_deref(), Some("inline")) && !has_body {
+        return Err(ApiError::invalid_mcp_tool_call(format!(
+            "documents[{index}].sourceType=inline requires body"
+        )));
+    }
+    if matches!(source_type.as_deref(), Some("file") | Some("binary")) && !has_base64 {
+        return Err(ApiError::invalid_mcp_tool_call(format!(
+            "documents[{index}].sourceType={} requires contentBase64",
+            source_type.as_deref().unwrap_or("file")
+        )));
+    }
+
+    if let Some(content_base64) = document
+        .content_base64
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return BASE64_STANDARD.decode(content_base64).map_err(|_| {
+            ApiError::invalid_mcp_tool_call(format!(
+                "documents[{index}].contentBase64 must be valid base64"
+            ))
+        });
+    }
+
+    if let Some(body) = document
+        .body
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(body.as_bytes().to_vec());
+    }
+
+    Err(ApiError::invalid_mcp_tool_call(format!(
+        "documents[{index}] requires either contentBase64 or body"
+    )))
+}
+
+fn default_inline_file_name(title: Option<&str>, source_uri: Option<&str>, index: usize) -> String {
+    if let Some(candidate) = source_uri
+        .and_then(|value| value.rsplit('/').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return candidate.to_string();
+    }
+
+    if let Some(candidate) = title
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(normalize_inline_file_stem)
+        .filter(|value| !value.is_empty())
+    {
+        return format!("{candidate}.txt");
+    }
+
+    format!("inline-{}.txt", index + 1)
+}
+
+fn normalize_inline_file_stem(title: &str) -> String {
+    let mut normalized = String::with_capacity(title.len());
+    let mut last_was_separator = false;
+    for ch in title.chars() {
+        let mapped = if ch.is_ascii_alphanumeric() {
+            last_was_separator = false;
+            Some(ch.to_ascii_lowercase())
+        } else if matches!(ch, ' ' | '-' | '_' | '.') {
+            if last_was_separator {
+                None
+            } else {
+                last_was_separator = true;
+                Some('-')
+            }
+        } else {
+            None
+        };
+        if let Some(ch) = mapped {
+            normalized.push(ch);
+        }
+    }
+    normalized.trim_matches('-').to_string()
 }
 
 pub(crate) async fn process_append_mutation(
@@ -463,7 +616,7 @@ pub(crate) async fn resolve_mutation_receipt(
             .get_document(document_id)
             .await
             .map_err(|_| ApiError::Internal)?
-            .ok_or_else(|| ApiError::resource_not_found("knowledge_document", document_id))?;
+            .ok_or_else(|| ApiError::resource_not_found("document", document_id))?;
         authorize_library_discovery(auth, document.workspace_id, document.library_id)?;
         authorize_document_permission(
             auth,

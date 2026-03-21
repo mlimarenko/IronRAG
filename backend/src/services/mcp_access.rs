@@ -38,6 +38,7 @@ pub(crate) struct VisibleLibraryContext {
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedDocumentState {
     pub(crate) document_id: Uuid,
+    pub(crate) document_title: String,
     pub(crate) library: CatalogLibraryRow,
     pub(crate) latest_revision_id: Option<Uuid>,
     pub(crate) readability_state: McpReadabilityState,
@@ -287,17 +288,13 @@ pub async fn search_documents(
                 .get_document(chunk.document_id)
                 .await
                 .map_err(|_| ApiError::Internal)?
-                .ok_or_else(|| {
-                    ApiError::resource_not_found("knowledge_document", chunk.document_id)
-                })?;
+                .ok_or_else(|| ApiError::resource_not_found("document", chunk.document_id))?;
             let revision = state
                 .arango_document_store
                 .get_revision(chunk.revision_id)
                 .await
                 .map_err(|_| ApiError::Internal)?
-                .ok_or_else(|| {
-                    ApiError::resource_not_found("knowledge_revision", chunk.revision_id)
-                })?;
+                .ok_or_else(|| ApiError::resource_not_found("revision", chunk.revision_id))?;
             let accumulator =
                 document_accumulators.entry(document.document_id).or_insert_with(|| {
                     McpDocumentAccumulator::from_knowledge(&document, &revision, hit)
@@ -321,17 +318,13 @@ pub async fn search_documents(
                 .get_document(chunk.document_id)
                 .await
                 .map_err(|_| ApiError::Internal)?
-                .ok_or_else(|| {
-                    ApiError::resource_not_found("knowledge_document", chunk.document_id)
-                })?;
+                .ok_or_else(|| ApiError::resource_not_found("document", chunk.document_id))?;
             let revision = state
                 .arango_document_store
                 .get_revision(chunk.revision_id)
                 .await
                 .map_err(|_| ApiError::Internal)?
-                .ok_or_else(|| {
-                    ApiError::resource_not_found("knowledge_revision", chunk.revision_id)
-                })?;
+                .ok_or_else(|| ApiError::resource_not_found("revision", chunk.revision_id))?;
             let accumulator =
                 document_accumulators.entry(document.document_id).or_insert_with(|| {
                     McpDocumentAccumulator::from_knowledge(
@@ -506,6 +499,7 @@ pub async fn read_document(
     if state_view.readability_state != McpReadabilityState::Readable {
         return Ok(McpReadDocumentResponse {
             document_id: state_view.document_id,
+            document_title: state_view.document_title,
             library_id: state_view.library.id,
             workspace_id: state_view.library.workspace_id,
             latest_revision_id,
@@ -545,6 +539,7 @@ pub async fn read_document(
 
     Ok(McpReadDocumentResponse {
         document_id: state_view.document_id,
+        document_title: state_view.document_title,
         library_id: state_view.library.id,
         workspace_id: state_view.library.workspace_id,
         latest_revision_id,
@@ -574,7 +569,7 @@ pub(crate) async fn resolve_document_state(
         .get_document(document_id)
         .await
         .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::resource_not_found("knowledge_document", document_id))?;
+        .ok_or_else(|| ApiError::resource_not_found("document", document_id))?;
     let library = catalog_repository::get_library_by_id(
         &state.persistence.postgres,
         knowledge_document.library_id,
@@ -593,6 +588,11 @@ pub(crate) async fn resolve_document_state(
             .map_err(|_| ApiError::Internal)?,
         None => None,
     };
+    let document_title = readable_revision
+        .as_ref()
+        .and_then(|revision| revision.title.clone())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| knowledge_document.external_key.clone());
     let (
         readability_state,
         status_reason,
@@ -670,6 +670,7 @@ pub(crate) async fn resolve_document_state(
     };
     Ok(ResolvedDocumentState {
         document_id,
+        document_title,
         library,
         latest_revision_id,
         readability_state,

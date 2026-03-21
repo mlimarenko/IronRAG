@@ -7,7 +7,7 @@ use ::http::Response;
 use axum::{
     Router,
     body::Body,
-    extract::MatchedPath,
+    extract::{DefaultBodyLimit, MatchedPath},
     http::{Method, Request, header},
     middleware,
 };
@@ -73,8 +73,10 @@ pub async fn run() -> anyhow::Result<()> {
 
 fn build_router(config: &config::Settings, state: state::AppState) -> Router {
     let public_origin_settings = config.public_origin_settings();
+    let max_request_body_bytes = state.mcp_memory.max_request_body_bytes();
     Router::new()
         .nest("/v1", http::router())
+        .layer(DefaultBodyLimit::max(max_request_body_bytes))
         .layer(middleware::map_request(inject_request_id))
         .layer(middleware::map_response(propagate_request_id))
         .layer(

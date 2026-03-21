@@ -259,6 +259,64 @@ impl KnowledgeService {
         Ok(map_chunk_row(row))
     }
 
+    pub async fn write_chunks(
+        &self,
+        state: &AppState,
+        commands: Vec<CreateKnowledgeChunkCommand>,
+    ) -> Result<Vec<KnowledgeChunk>, ApiError> {
+        if commands.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows = commands
+            .iter()
+            .map(|command| crate::infra::arangodb::document_store::KnowledgeChunkRow {
+                key: command.chunk_id.to_string(),
+                arango_id: None,
+                arango_rev: None,
+                chunk_id: command.chunk_id,
+                workspace_id: command.workspace_id,
+                library_id: command.library_id,
+                document_id: command.document_id,
+                revision_id: command.revision_id,
+                chunk_index: command.chunk_index,
+                content_text: command.content_text.clone(),
+                normalized_text: command.normalized_text.clone(),
+                span_start: command.span_start,
+                span_end: command.span_end,
+                token_count: command.token_count,
+                section_path: command.section_path.clone(),
+                heading_trail: command.heading_trail.clone(),
+                chunk_state: command.chunk_state.clone(),
+                text_generation: command.text_generation,
+                vector_generation: command.vector_generation,
+            })
+            .collect::<Vec<_>>();
+
+        let inserted = state
+            .arango_document_store
+            .insert_chunks(&rows)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+
+        let mut chunk_ids_by_revision = std::collections::BTreeMap::<Uuid, Vec<Uuid>>::new();
+        for command in &commands {
+            chunk_ids_by_revision
+                .entry(command.revision_id)
+                .or_default()
+                .push(command.chunk_id);
+        }
+        for (revision_id, chunk_ids) in chunk_ids_by_revision {
+            state
+                .arango_graph_store
+                .insert_revision_chunk_edges(revision_id, &chunk_ids)
+                .await
+                .map_err(|_| ApiError::Internal)?;
+        }
+
+        Ok(inserted.into_iter().map(map_chunk_row).collect())
+    }
+
     pub async fn list_revision_chunks(
         &self,
         state: &AppState,

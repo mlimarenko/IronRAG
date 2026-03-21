@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, PgPool};
+use sqlx::{FromRow, PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, FromRow)]
@@ -282,6 +282,30 @@ pub async fn get_document_head(
     .await
 }
 
+pub async fn list_document_heads_by_document_ids(
+    postgres: &PgPool,
+    document_ids: &[Uuid],
+) -> Result<Vec<ContentDocumentHeadRow>, sqlx::Error> {
+    if document_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, ContentDocumentHeadRow>(
+        "select
+            document_id,
+            active_revision_id,
+            readable_revision_id,
+            latest_mutation_id,
+            latest_successful_attempt_id,
+            head_updated_at
+         from content_document_head
+         where document_id = any($1)",
+    )
+    .bind(document_ids)
+    .fetch_all(postgres)
+    .await
+}
+
 pub async fn upsert_document_head(
     postgres: &PgPool,
     new_head: &NewContentDocumentHead,
@@ -377,6 +401,40 @@ pub async fn get_revision_by_id(
     )
     .bind(revision_id)
     .fetch_optional(postgres)
+    .await
+}
+
+pub async fn list_revisions_by_ids(
+    postgres: &PgPool,
+    revision_ids: &[Uuid],
+) -> Result<Vec<ContentRevisionRow>, sqlx::Error> {
+    if revision_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, ContentRevisionRow>(
+        "select
+            id,
+            document_id,
+            workspace_id,
+            library_id,
+            revision_number,
+            parent_revision_id,
+            content_source_kind::text as content_source_kind,
+            checksum,
+            mime_type,
+            byte_size,
+            title,
+            language_code,
+            source_uri,
+            storage_key,
+            created_by_principal_id,
+            created_at
+         from content_revision
+         where id = any($1)",
+    )
+    .bind(revision_ids)
+    .fetch_all(postgres)
     .await
 }
 
@@ -571,6 +629,53 @@ pub async fn create_chunk(
     .bind(new_chunk.text_checksum)
     .fetch_one(postgres)
     .await
+}
+
+pub async fn create_chunks(
+    postgres: &PgPool,
+    new_chunks: &[NewContentChunk<'_>],
+) -> Result<Vec<ContentChunkRow>, sqlx::Error> {
+    if new_chunks.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "insert into content_chunk (
+            id,
+            revision_id,
+            chunk_index,
+            start_offset,
+            end_offset,
+            token_count,
+            normalized_text,
+            text_checksum
+        ) ",
+    );
+
+    builder.push_values(new_chunks.iter(), |mut row, new_chunk| {
+        row.push_bind(Uuid::now_v7())
+            .push_bind(new_chunk.revision_id)
+            .push_bind(new_chunk.chunk_index)
+            .push_bind(new_chunk.start_offset)
+            .push_bind(new_chunk.end_offset)
+            .push_bind(new_chunk.token_count)
+            .push_bind(new_chunk.normalized_text)
+            .push_bind(new_chunk.text_checksum);
+    });
+
+    builder.push(
+        " returning
+            id,
+            revision_id,
+            chunk_index,
+            start_offset,
+            end_offset,
+            token_count,
+            normalized_text,
+            text_checksum",
+    );
+
+    builder.build_query_as::<ContentChunkRow>().fetch_all(postgres).await
 }
 
 pub async fn delete_chunks_by_revision(

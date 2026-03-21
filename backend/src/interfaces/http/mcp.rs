@@ -18,8 +18,7 @@ use crate::{
     interfaces::http::{
         auth::AuthContext,
         authorization::{
-            POLICY_DOCUMENTS_WRITE, POLICY_LIBRARY_WRITE, POLICY_MCP_MEMORY_READ,
-            POLICY_WORKSPACE_ADMIN,
+            POLICY_DOCUMENTS_WRITE, POLICY_MCP_MEMORY_READ, POLICY_WORKSPACE_ADMIN,
         },
         router_support::{ApiError, attach_request_id_header, ensure_or_generate_request_id},
     },
@@ -163,7 +162,7 @@ fn visible_tool_names(auth: &AuthContext) -> Vec<String> {
     if auth.can_read_any_document_memory(POLICY_MCP_MEMORY_READ) {
         tools.push("read_document".to_string());
     }
-    if auth.can_write_any_library_memory(POLICY_LIBRARY_WRITE) {
+    if auth.can_write_any_document_memory(POLICY_DOCUMENTS_WRITE) {
         tools.push("upload_documents".to_string());
     }
     if auth.can_write_any_document_memory(POLICY_DOCUMENTS_WRITE) {
@@ -524,7 +523,11 @@ async fn handle_tools_list(
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "workspaceId": { "type": "string", "format": "uuid" }
+                        "workspaceId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Workspace UUID. Also accepts snake_case alias workspace_id."
+                        }
                     }
                 }),
             }),
@@ -538,7 +541,8 @@ async fn handle_tools_list(
                         "query": { "type": "string" },
                         "libraryIds": {
                             "type": "array",
-                            "items": { "type": "string", "format": "uuid" }
+                            "items": { "type": "string", "format": "uuid" },
+                            "description": "Optional library UUID filter. Also accepts snake_case alias library_ids, or singular library_id for one library."
                         },
                         "limit": { "type": "integer", "minimum": 1 }
                     }
@@ -550,11 +554,22 @@ async fn handle_tools_list(
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "documentId": { "type": "string", "format": "uuid" },
+                        "documentId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Document UUID. Also accepts snake_case alias document_id."
+                        },
                         "mode": { "type": "string", "enum": ["full", "excerpt"] },
-                        "startOffset": { "type": "integer", "minimum": 0 },
+                        "startOffset": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Start character offset. Also accepts snake_case alias start_offset."
+                        },
                         "length": { "type": "integer", "minimum": 1 },
-                        "continuationToken": { "type": "string" }
+                        "continuationToken": {
+                            "type": "string",
+                            "description": "Opaque token returned by a previous read. Also accepts snake_case alias continuation_token."
+                        }
                     }
                 }),
             }),
@@ -565,18 +580,49 @@ async fn handle_tools_list(
                     "type": "object",
                     "required": ["libraryId", "documents"],
                     "properties": {
-                        "libraryId": { "type": "string", "format": "uuid" },
-                        "idempotencyKey": { "type": "string" },
+                        "libraryId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Target library UUID. Also accepts snake_case alias library_id."
+                        },
+                        "idempotencyKey": {
+                            "type": "string",
+                            "description": "Caller-chosen dedupe key. Also accepts snake_case alias idempotency_key."
+                        },
                         "documents": {
                             "type": "array",
                             "minItems": 1,
                             "items": {
                                 "type": "object",
-                                "required": ["fileName", "contentBase64"],
+                                "anyOf": [
+                                    { "required": ["contentBase64"] },
+                                    { "required": ["body"] }
+                                ],
                                 "properties": {
-                                    "fileName": { "type": "string" },
-                                    "contentBase64": { "type": "string" },
-                                    "mimeType": { "type": "string" },
+                                    "fileName": {
+                                        "type": "string",
+                                        "description": "Original file name. Optional for inline body uploads; autogenerated if omitted. Also accepts snake_case alias file_name."
+                                    },
+                                    "contentBase64": {
+                                        "type": "string",
+                                        "description": "Base64-encoded file payload for binary/file uploads. Also accepts snake_case alias content_base64."
+                                    },
+                                    "body": {
+                                        "type": "string",
+                                        "description": "Inline text body for agent-authored notes and snippets."
+                                    },
+                                    "sourceType": {
+                                        "type": "string",
+                                        "description": "Optional hint: use inline for text body uploads or file for base64 payload uploads. Also accepts snake_case alias source_type."
+                                    },
+                                    "sourceUri": {
+                                        "type": "string",
+                                        "description": "Optional logical source URI used to derive a default file name for inline uploads. Also accepts snake_case alias source_uri."
+                                    },
+                                    "mimeType": {
+                                        "type": "string",
+                                        "description": "Optional MIME type. Also accepts snake_case alias mime_type."
+                                    },
                                     "title": { "type": "string" }
                                 }
                             }
@@ -590,15 +636,52 @@ async fn handle_tools_list(
                 input_schema: json!({
                     "type": "object",
                     "required": ["libraryId", "documentId", "operationKind"],
+                    "allOf": [
+                        {
+                            "if": { "properties": { "operationKind": { "const": "append" } } },
+                            "then": { "required": ["appendedText"] }
+                        },
+                        {
+                            "if": { "properties": { "operationKind": { "const": "replace" } } },
+                            "then": { "required": ["replacementFileName", "replacementContentBase64"] }
+                        }
+                    ],
                     "properties": {
-                        "libraryId": { "type": "string", "format": "uuid" },
-                        "documentId": { "type": "string", "format": "uuid" },
-                        "operationKind": { "type": "string", "enum": ["append", "replace"] },
-                        "idempotencyKey": { "type": "string" },
-                        "appendedText": { "type": "string" },
-                        "replacementFileName": { "type": "string" },
-                        "replacementContentBase64": { "type": "string" },
-                        "replacementMimeType": { "type": "string" }
+                        "libraryId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Target library UUID. Also accepts snake_case alias library_id."
+                        },
+                        "documentId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Target document UUID. Also accepts snake_case alias document_id."
+                        },
+                        "operationKind": {
+                            "type": "string",
+                            "enum": ["append", "replace"],
+                            "description": "Mutation kind. Also accepts snake_case alias operation_kind."
+                        },
+                        "idempotencyKey": {
+                            "type": "string",
+                            "description": "Caller-chosen dedupe key. Also accepts snake_case alias idempotency_key."
+                        },
+                        "appendedText": {
+                            "type": "string",
+                            "description": "Required for append. Also accepts snake_case alias appended_text."
+                        },
+                        "replacementFileName": {
+                            "type": "string",
+                            "description": "Required for replace. Also accepts snake_case alias replacement_file_name."
+                        },
+                        "replacementContentBase64": {
+                            "type": "string",
+                            "description": "Required for replace. Also accepts snake_case alias replacement_content_base64."
+                        },
+                        "replacementMimeType": {
+                            "type": "string",
+                            "description": "Optional for replace. Also accepts snake_case alias replacement_mime_type."
+                        }
                     }
                 }),
             }),
@@ -609,7 +692,11 @@ async fn handle_tools_list(
                     "type": "object",
                     "required": ["receiptId"],
                     "properties": {
-                        "receiptId": { "type": "string", "format": "uuid" }
+                        "receiptId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Mutation receipt UUID. Also accepts snake_case alias receipt_id."
+                        }
                     }
                 }),
             }),
