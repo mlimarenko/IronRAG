@@ -227,6 +227,7 @@ async fn create_document(
                 idempotency_key: payload.idempotency_key.clone(),
                 created_by_principal_id: Some(auth.principal_id),
                 request_surface: "rest".to_string(),
+                source_identity: None,
                 revision: build_revision_metadata(&payload)?,
             },
         )
@@ -317,6 +318,7 @@ async fn delete_document(
                 idempotency_key: None,
                 requested_by_principal_id: Some(auth.principal_id),
                 request_surface: "rest".to_string(),
+                source_identity: None,
                 revision: None,
             },
         )
@@ -427,6 +429,7 @@ async fn create_mutation(
                 idempotency_key: payload.idempotency_key.clone(),
                 requested_by_principal_id: Some(auth.principal_id),
                 request_surface: "rest".to_string(),
+                source_identity: None,
                 revision: build_revision_metadata(&CreateDocumentRequest {
                     workspace_id: payload.workspace_id,
                     library_id: payload.library_id,
@@ -638,6 +641,7 @@ async fn reprocess_document(
                 idempotency_key: payload.idempotency_key,
                 requested_by_principal_id: Some(auth.principal_id),
                 request_surface: "rest".to_string(),
+                source_identity: None,
                 revision: Some(RevisionAdmissionMetadata {
                     content_source_kind: "reprocess".to_string(),
                     checksum: active_revision.checksum,

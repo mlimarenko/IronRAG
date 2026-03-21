@@ -71,6 +71,7 @@ pub struct AcceptMutationCommand {
     pub requested_by_principal_id: Option<Uuid>,
     pub request_surface: String,
     pub idempotency_key: Option<String>,
+    pub source_identity: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +123,7 @@ pub struct AdmitDocumentCommand {
     pub idempotency_key: Option<String>,
     pub created_by_principal_id: Option<Uuid>,
     pub request_surface: String,
+    pub source_identity: Option<String>,
     pub revision: Option<RevisionAdmissionMetadata>,
 }
 
@@ -134,6 +136,7 @@ pub struct AdmitMutationCommand {
     pub idempotency_key: Option<String>,
     pub requested_by_principal_id: Option<Uuid>,
     pub request_surface: String,
+    pub source_identity: Option<String>,
     pub revision: Option<RevisionAdmissionMetadata>,
 }
 
@@ -250,21 +253,18 @@ impl ContentService {
                 .await
                 .map_err(|_| ApiError::Internal)?;
         let document_ids = documents.iter().map(|row| row.id).collect::<Vec<_>>();
-        let heads =
-            content_repository::list_document_heads_by_document_ids(
-                &state.persistence.postgres,
-                &document_ids,
-            )
-            .await
-            .map_err(|_| ApiError::Internal)?;
+        let heads = content_repository::list_document_heads_by_document_ids(
+            &state.persistence.postgres,
+            &document_ids,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?;
         let head_map = heads
             .into_iter()
             .map(|row| (row.document_id, row))
             .collect::<std::collections::HashMap<_, _>>();
-        let active_revision_ids = head_map
-            .values()
-            .filter_map(|row| row.active_revision_id)
-            .collect::<Vec<_>>();
+        let active_revision_ids =
+            head_map.values().filter_map(|row| row.active_revision_id).collect::<Vec<_>>();
         let active_revision_map = content_repository::list_revisions_by_ids(
             &state.persistence.postgres,
             &active_revision_ids,
@@ -411,6 +411,7 @@ impl ContentService {
                     requested_by_principal_id: command.created_by_principal_id,
                     request_surface: command.request_surface.clone(),
                     idempotency_key: command.idempotency_key.clone(),
+                    source_identity: command.source_identity.clone(),
                 },
             )
             .await?;
@@ -565,6 +566,7 @@ impl ContentService {
                     idempotency_key: command.idempotency_key,
                     created_by_principal_id: command.requested_by_principal_id,
                     request_surface: command.request_surface.clone(),
+                    source_identity: command.source_identity.clone(),
                     revision: Some(RevisionAdmissionMetadata {
                         content_source_kind: "upload".to_string(),
                         checksum: format!("sha256:{}", sha256_hex_bytes(&command.file_bytes)),
@@ -711,6 +713,7 @@ impl ContentService {
                     requested_by_principal_id: command.requested_by_principal_id,
                     request_surface: command.request_surface.clone(),
                     idempotency_key: command.idempotency_key.clone(),
+                    source_identity: command.source_identity.clone(),
                 },
             )
             .await?;
@@ -860,6 +863,7 @@ impl ContentService {
     ) -> Result<ContentMutationAdmission, ApiError> {
         let appendable = self.load_appendable_document_context(state, command.document_id).await?;
         let merged_text = merge_appended_text(&appendable.current_content, &command.appended_text);
+        let source_identity = command.source_identity.clone();
         let admission = self
             .admit_mutation(
                 state,
@@ -871,6 +875,7 @@ impl ContentService {
                     idempotency_key: command.idempotency_key,
                     requested_by_principal_id: command.requested_by_principal_id,
                     request_surface: command.request_surface,
+                    source_identity: source_identity.clone(),
                     revision: Some(RevisionAdmissionMetadata {
                         content_source_kind: "append".to_string(),
                         checksum: format!("sha256:{}", sha256_hex_bytes(merged_text.as_bytes())),
@@ -880,7 +885,7 @@ impl ContentService {
                         language_code: appendable.language_code,
                         source_uri: Some(source_uri_for_inline_payload(
                             "append",
-                            command.source_identity.as_deref(),
+                            source_identity.as_deref(),
                             None,
                         )),
                         storage_key: None,
@@ -918,6 +923,7 @@ impl ContentService {
                     idempotency_key: command.idempotency_key,
                     requested_by_principal_id: command.requested_by_principal_id,
                     request_surface: command.request_surface,
+                    source_identity: command.source_identity.clone(),
                     revision: Some(RevisionAdmissionMetadata {
                         content_source_kind: "replace".to_string(),
                         checksum: format!("sha256:{}", sha256_hex_bytes(&command.file_bytes)),
@@ -1075,6 +1081,11 @@ impl ContentService {
             command.requested_by_principal_id,
             command.idempotency_key.as_deref().map(str::trim).filter(|value| !value.is_empty()),
         ) {
+            let request_source_identity = command
+                .source_identity
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
             if let Some(existing) = content_repository::find_mutation_by_idempotency(
                 &state.persistence.postgres,
                 principal_id,
@@ -1084,6 +1095,23 @@ impl ContentService {
             .await
             .map_err(|_| ApiError::Internal)?
             {
+                if let Some(request_source_identity) = request_source_identity {
+                    match existing.source_identity.as_deref() {
+                        Some(existing_source_identity)
+                            if existing_source_identity != request_source_identity =>
+                        {
+                            return Err(ApiError::idempotency_conflict(
+                                "the same idempotency key was already used with a different payload",
+                            ));
+                        }
+                        None => {
+                            return Err(ApiError::idempotency_conflict(
+                                "the same idempotency key was already used before payload identity tracking was available; retry with a new idempotency key",
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
                 return Ok(map_mutation_row(existing));
             }
         }
@@ -1097,6 +1125,7 @@ impl ContentService {
                 requested_by_principal_id: command.requested_by_principal_id,
                 request_surface: &command.request_surface,
                 idempotency_key: command.idempotency_key.as_deref(),
+                source_identity: command.source_identity.as_deref(),
                 mutation_state: "accepted",
                 failure_code: None,
                 conflict_code: None,
@@ -1737,12 +1766,10 @@ impl ContentService {
                 text_checksum: &chunk.text_checksum,
             })
             .collect::<Vec<_>>();
-        let created_chunks = content_repository::create_chunks(
-            &state.persistence.postgres,
-            &postgres_chunks,
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?;
+        let created_chunks =
+            content_repository::create_chunks(&state.persistence.postgres, &postgres_chunks)
+                .await
+                .map_err(|_| ApiError::Internal)?;
         for (chunk, pending_chunk) in created_chunks.into_iter().zip(pending_chunks.iter()) {
             knowledge_chunks.push(CreateKnowledgeChunkCommand {
                 chunk_id: chunk.id,
@@ -1763,11 +1790,7 @@ impl ContentService {
                 vector_generation: None,
             });
         }
-        let _ = state
-            .canonical_services
-            .knowledge
-            .write_chunks(state, knowledge_chunks)
-            .await?;
+        let _ = state.canonical_services.knowledge.write_chunks(state, knowledge_chunks).await?;
         Ok(())
     }
 
@@ -1882,7 +1905,10 @@ impl ContentService {
         &self,
         document_row: content_repository::ContentDocumentRow,
         head_map: &std::collections::HashMap<Uuid, content_repository::ContentDocumentHeadRow>,
-        active_revision_map: &std::collections::HashMap<Uuid, content_repository::ContentRevisionRow>,
+        active_revision_map: &std::collections::HashMap<
+            Uuid,
+            content_repository::ContentRevisionRow,
+        >,
     ) -> ContentDocumentSummary {
         let head = head_map.get(&document_row.id).cloned();
         let active_revision = head
@@ -1992,6 +2018,7 @@ fn map_mutation_row(row: content_repository::ContentMutationRow) -> ContentMutat
         requested_by_principal_id: row.requested_by_principal_id,
         request_surface: row.request_surface,
         idempotency_key: row.idempotency_key,
+        source_identity: row.source_identity,
         failure_code: row.failure_code,
         conflict_code: row.conflict_code,
     }

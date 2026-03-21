@@ -17,9 +17,7 @@ use crate::{
     app::state::AppState,
     interfaces::http::{
         auth::AuthContext,
-        authorization::{
-            POLICY_DOCUMENTS_WRITE, POLICY_MCP_MEMORY_READ, POLICY_WORKSPACE_ADMIN,
-        },
+        authorization::{POLICY_DOCUMENTS_WRITE, POLICY_MCP_MEMORY_READ, POLICY_WORKSPACE_ADMIN},
         router_support::{ApiError, attach_request_id_header, ensure_or_generate_request_id},
     },
     mcp_types::{

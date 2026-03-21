@@ -54,6 +54,7 @@ pub struct ContentMutation {
     pub requested_by_principal_id: Option<Uuid>,
     pub request_surface: String,
     pub idempotency_key: Option<String>,
+    pub source_identity: Option<String>,
     pub failure_code: Option<String>,
     pub conflict_code: Option<String>,
 }

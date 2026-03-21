@@ -301,10 +301,7 @@ impl KnowledgeService {
 
         let mut chunk_ids_by_revision = std::collections::BTreeMap::<Uuid, Vec<Uuid>>::new();
         for command in &commands {
-            chunk_ids_by_revision
-                .entry(command.revision_id)
-                .or_default()
-                .push(command.chunk_id);
+            chunk_ids_by_revision.entry(command.revision_id).or_default().push(command.chunk_id);
         }
         for (revision_id, chunk_ids) in chunk_ids_by_revision {
             state

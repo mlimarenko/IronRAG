@@ -111,12 +111,13 @@ async fn ensure_bootstrap_api_token(
     plaintext_token: &str,
 ) -> Result<(), ApiError> {
     let token_hash = hash_api_token(plaintext_token);
-    let token_principal_id = if let Some(existing) = iam_repository::find_active_api_token_by_secret_hash(
-        &state.persistence.postgres,
-        &token_hash,
-    )
-    .await
-    .map_err(|_| ApiError::Internal)?
+    let token_principal_id = if let Some(existing) =
+        iam_repository::find_active_api_token_by_secret_hash(
+            &state.persistence.postgres,
+            &token_hash,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?
     {
         existing.principal_id
     } else {
@@ -139,12 +140,10 @@ async fn ensure_bootstrap_api_token(
         .map_err(|_| ApiError::Internal)?;
         token.principal_id
     };
-    let grants = iam_repository::list_grants_by_principal(
-        &state.persistence.postgres,
-        token_principal_id,
-    )
-    .await
-    .map_err(|_| ApiError::Internal)?;
+    let grants =
+        iam_repository::list_grants_by_principal(&state.persistence.postgres, token_principal_id)
+            .await
+            .map_err(|_| ApiError::Internal)?;
     let has_admin_grant = grants.into_iter().any(|grant| {
         grant.resource_kind == "system"
             && grant.resource_id.is_nil()

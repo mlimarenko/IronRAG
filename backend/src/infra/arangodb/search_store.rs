@@ -9,8 +9,7 @@ use crate::infra::arangodb::{
     client::ArangoClient,
     collections::{
         KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
-        KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
-        KNOWLEDGE_SEARCH_VIEW,
+        KNOWLEDGE_ENTITY_VECTOR_COLLECTION, KNOWLEDGE_SEARCH_VIEW,
     },
 };
 

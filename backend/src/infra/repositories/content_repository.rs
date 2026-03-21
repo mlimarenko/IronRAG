@@ -65,6 +65,7 @@ pub struct ContentMutationRow {
     pub requested_by_principal_id: Option<Uuid>,
     pub request_surface: String,
     pub idempotency_key: Option<String>,
+    pub source_identity: Option<String>,
     pub mutation_state: String,
     pub requested_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -138,6 +139,7 @@ pub struct NewContentMutation<'a> {
     pub requested_by_principal_id: Option<Uuid>,
     pub request_surface: &'a str,
     pub idempotency_key: Option<&'a str>,
+    pub source_identity: Option<&'a str>,
     pub mutation_state: &'a str,
     pub failure_code: Option<&'a str>,
     pub conflict_code: Option<&'a str>,
@@ -702,6 +704,7 @@ pub async fn list_mutations_by_library(
             requested_by_principal_id,
             request_surface::text as request_surface,
             idempotency_key,
+            source_identity,
             mutation_state::text as mutation_state,
             requested_at,
             completed_at,
@@ -729,6 +732,7 @@ pub async fn get_mutation_by_id(
             requested_by_principal_id,
             request_surface::text as request_surface,
             idempotency_key,
+            source_identity,
             mutation_state::text as mutation_state,
             requested_at,
             completed_at,
@@ -757,6 +761,7 @@ pub async fn find_mutation_by_idempotency(
             requested_by_principal_id,
             request_surface::text as request_surface,
             idempotency_key,
+            source_identity,
             mutation_state::text as mutation_state,
             requested_at,
             completed_at,
@@ -787,6 +792,7 @@ pub async fn create_mutation(
             requested_by_principal_id,
             request_surface,
             idempotency_key,
+            source_identity,
             mutation_state,
             requested_at,
             completed_at,
@@ -801,11 +807,12 @@ pub async fn create_mutation(
             $5,
             $6::surface_kind,
             $7,
-            $8::content_mutation_state,
+            $8,
+            $9::content_mutation_state,
             now(),
             null,
-            $9,
-            $10
+            $10,
+            $11
         )
         returning
             id,
@@ -815,6 +822,7 @@ pub async fn create_mutation(
             requested_by_principal_id,
             request_surface::text as request_surface,
             idempotency_key,
+            source_identity,
             mutation_state::text as mutation_state,
             requested_at,
             completed_at,
@@ -828,6 +836,7 @@ pub async fn create_mutation(
     .bind(new_mutation.requested_by_principal_id)
     .bind(new_mutation.request_surface)
     .bind(new_mutation.idempotency_key)
+    .bind(new_mutation.source_identity)
     .bind(new_mutation.mutation_state)
     .bind(new_mutation.failure_code)
     .bind(new_mutation.conflict_code)
@@ -858,6 +867,7 @@ pub async fn update_mutation_status(
             requested_by_principal_id,
             request_surface::text as request_surface,
             idempotency_key,
+            source_identity,
             mutation_state::text as mutation_state,
             requested_at,
             completed_at,

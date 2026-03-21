@@ -60,12 +60,7 @@ pub async fn upload_documents(
                 "documents[{index}] upload body must not be empty"
             )));
         }
-        validate_mcp_upload_file_size(
-            settings,
-            &file_name,
-            mime_type.as_deref(),
-            &file_bytes,
-        )?;
+        validate_mcp_upload_file_size(settings, &file_name, mime_type.as_deref(), &file_bytes)?;
         total_upload_bytes =
             total_upload_bytes.saturating_add(u64::try_from(file_bytes.len()).unwrap_or(u64::MAX));
         validate_mcp_upload_batch_size(settings, total_upload_bytes)?;
@@ -304,27 +299,42 @@ pub(crate) async fn find_existing_mutation_by_idempotency(
     let Some(existing) = existing else {
         return Ok(None);
     };
-    ensure_matching_mutation_payload_identity(state, existing.id, payload_identity).await?;
+    ensure_matching_mutation_payload_identity(
+        state,
+        existing.id,
+        existing.source_identity.as_deref(),
+        payload_identity,
+    )
+    .await?;
     Ok(Some(existing))
 }
 
 pub(crate) async fn ensure_matching_mutation_payload_identity(
     state: &AppState,
     mutation_id: Uuid,
+    existing_source_identity: Option<&str>,
     payload_identity: &str,
 ) -> Result<(), ApiError> {
-    let items = state.canonical_services.content.list_mutation_items(state, mutation_id).await?;
-    let existing_payload_identity = if let Some(revision_id) =
-        items.iter().find_map(|item| item.result_revision_id)
+    let existing_payload_identity = if let Some(existing_source_identity) = existing_source_identity
     {
-        state
-            .arango_document_store
-            .get_revision(revision_id)
-            .await
-            .map_err(|_| ApiError::Internal)?
-            .and_then(|revision| payload_identity_from_source_uri(revision.source_uri.as_deref()))
+        Some(existing_source_identity.to_string())
     } else {
-        None
+        let items =
+            state.canonical_services.content.list_mutation_items(state, mutation_id).await?;
+        if let Some(revision_id) = items.iter().find_map(|item| item.result_revision_id) {
+            state
+                .arango_document_store
+                .get_revision(revision_id)
+                .await
+                .map_err(|_| ApiError::Internal)?
+                .and_then(|revision| {
+                    payload_identity_from_source_uri(revision.source_uri.as_deref())
+                })
+        } else {
+            return Err(ApiError::idempotency_conflict(
+                "the same idempotency key was already used before payload identity tracking was available; retry with a new idempotency key",
+            ));
+        }
     };
 
     if let Some(existing_payload_identity) = existing_payload_identity
@@ -372,23 +382,17 @@ pub(crate) async fn process_upload_mutation(
     resolve_mutation_receipt(state, auth, admission.mutation.mutation).await
 }
 
-fn resolve_upload_file_name(document: &McpUploadDocumentInput, index: usize) -> Result<String, ApiError> {
-    if let Some(file_name) = document
-        .file_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+fn resolve_upload_file_name(
+    document: &McpUploadDocumentInput,
+    index: usize,
+) -> Result<String, ApiError> {
+    if let Some(file_name) =
+        document.file_name.as_deref().map(str::trim).filter(|value| !value.is_empty())
     {
         return Ok(file_name.to_string());
     }
 
-    if document
-        .body
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_some()
-    {
+    if document.body.as_deref().map(str::trim).filter(|value| !value.is_empty()).is_some() {
         return Ok(default_inline_file_name(
             document.title.as_deref(),
             document.source_uri.as_deref(),
@@ -396,9 +400,7 @@ fn resolve_upload_file_name(document: &McpUploadDocumentInput, index: usize) -> 
         ));
     }
 
-    Err(ApiError::invalid_mcp_tool_call(format!(
-        "documents[{index}].fileName must not be empty"
-    )))
+    Err(ApiError::invalid_mcp_tool_call(format!("documents[{index}].fileName must not be empty")))
 }
 
 fn resolve_upload_mime_type(document: &McpUploadDocumentInput) -> Option<String> {
@@ -434,12 +436,8 @@ fn resolve_upload_file_bytes(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .is_some();
-    let has_body = document
-        .body
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_some();
+    let has_body =
+        document.body.as_deref().map(str::trim).filter(|value| !value.is_empty()).is_some();
 
     if has_base64 && has_body {
         return Err(ApiError::invalid_mcp_tool_call(format!(
@@ -458,11 +456,8 @@ fn resolve_upload_file_bytes(
         )));
     }
 
-    if let Some(content_base64) = document
-        .content_base64
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    if let Some(content_base64) =
+        document.content_base64.as_deref().map(str::trim).filter(|value| !value.is_empty())
     {
         return BASE64_STANDARD.decode(content_base64).map_err(|_| {
             ApiError::invalid_mcp_tool_call(format!(
@@ -471,12 +466,7 @@ fn resolve_upload_file_bytes(
         });
     }
 
-    if let Some(body) = document
-        .body
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(body) = document.body.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
         return Ok(body.as_bytes().to_vec());
     }
 
