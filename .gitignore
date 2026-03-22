@@ -23,6 +23,8 @@ frontend/.quasar/
 .vscode
 .idea
 .DS_Store
+.audit/
+**/.audit/
 
 # SQLx
 .sqlx
