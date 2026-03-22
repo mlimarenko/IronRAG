@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, PgPool, Postgres, QueryBuilder};
+use sqlx::{pool::PoolConnection, FromRow, PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, FromRow)]
@@ -842,6 +842,29 @@ pub async fn create_mutation(
     .bind(new_mutation.conflict_code)
     .fetch_one(postgres)
     .await
+}
+
+pub async fn acquire_content_mutation_lock(
+    postgres: &PgPool,
+    mutation_id: Uuid,
+) -> Result<PoolConnection<Postgres>, sqlx::Error> {
+    let mut connection = postgres.acquire().await?;
+    sqlx::query("select pg_advisory_lock(hashtextextended($1::text, 0))")
+        .bind(format!("content.mutation:{mutation_id}"))
+        .execute(&mut *connection)
+        .await?;
+    Ok(connection)
+}
+
+pub async fn release_content_mutation_lock(
+    mut connection: PoolConnection<Postgres>,
+    mutation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("select pg_advisory_unlock(hashtextextended($1::text, 0))")
+        .bind(format!("content.mutation:{mutation_id}"))
+        .execute(&mut *connection)
+        .await?;
+    Ok(())
 }
 
 pub async fn update_mutation_status(

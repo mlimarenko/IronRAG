@@ -389,18 +389,6 @@ impl ContentService {
         state: &AppState,
         command: AdmitDocumentCommand,
     ) -> Result<CreateDocumentAdmission, ApiError> {
-        let document = self
-            .create_document(
-                state,
-                CreateDocumentCommand {
-                    workspace_id: command.workspace_id,
-                    library_id: command.library_id,
-                    external_key: command.external_key,
-                    created_by_principal_id: command.created_by_principal_id,
-                },
-            )
-            .await?;
-
         let mutation = self
             .accept_mutation(
                 state,
@@ -415,132 +403,179 @@ impl ContentService {
                 },
             )
             .await?;
+        let mutation_lock = content_repository::acquire_content_mutation_lock(
+            &state.persistence.postgres,
+            mutation.id,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?;
 
-        let async_operation = state
-            .canonical_services
-            .ops
-            .create_async_operation(
-                state,
-                CreateAsyncOperationCommand {
-                    workspace_id: command.workspace_id,
-                    library_id: command.library_id,
-                    operation_kind: "content_mutation".to_string(),
-                    surface_kind: "rest".to_string(),
-                    requested_by_principal_id: command.created_by_principal_id,
-                    status: "accepted".to_string(),
-                    subject_kind: "content_mutation".to_string(),
-                    subject_id: Some(mutation.id),
-                    completed_at: None,
-                    failure_code: None,
-                },
-            )
-            .await?;
+        let result = async {
+            let existing_admission = self.get_mutation_admission(state, mutation.id).await?;
+            if let Some(existing_document_id) =
+                existing_admission.items.iter().find_map(|item| item.document_id)
+            {
+                let document = self.get_document(state, existing_document_id).await?;
+                return Ok(CreateDocumentAdmission {
+                    document,
+                    mutation: existing_admission,
+                });
+            }
 
-        let (items, job_id, async_operation_id) = if let Some(revision) = command.revision {
-            let revision = self
-                .create_revision_from_metadata(
+            let document = self
+                .create_document(
                     state,
-                    document.id,
-                    command.created_by_principal_id,
-                    revision,
-                )
-                .await?;
-            let item = self
-                .create_mutation_item(
-                    state,
-                    CreateMutationItemCommand {
-                        mutation_id: mutation.id,
-                        document_id: Some(document.id),
-                        base_revision_id: None,
-                        result_revision_id: Some(revision.id),
-                        item_state: "pending".to_string(),
-                        message: Some(
-                            "document revision accepted and queued for ingest".to_string(),
-                        ),
-                    },
-                )
-                .await?;
-            let head = self.get_document_head(state, document.id).await?;
-            let _ = self
-                .promote_document_head(
-                    state,
-                    PromoteHeadCommand {
-                        document_id: document.id,
-                        active_revision_id: Some(revision.id),
-                        readable_revision_id: head.and_then(|row| row.readable_revision_id),
-                        latest_mutation_id: Some(mutation.id),
-                        latest_successful_attempt_id: None,
-                    },
-                )
-                .await?;
-            let job = state
-                .canonical_services
-                .ingest
-                .admit_job(
-                    state,
-                    AdmitIngestJobCommand {
+                    CreateDocumentCommand {
                         workspace_id: command.workspace_id,
                         library_id: command.library_id,
-                        mutation_id: Some(mutation.id),
-                        connector_id: None,
-                        async_operation_id: Some(async_operation.id),
-                        knowledge_document_id: Some(document.id),
-                        knowledge_revision_id: Some(revision.id),
-                        job_kind: "content_mutation".to_string(),
-                        priority: 100,
-                        dedupe_key: command.idempotency_key,
-                        available_at: None,
+                        external_key: command.external_key,
+                        created_by_principal_id: command.created_by_principal_id,
                     },
                 )
                 .await?;
-            (vec![item], Some(job.id), Some(async_operation.id))
-        } else {
-            let _ = self
-                .promote_document_head(
-                    state,
-                    PromoteHeadCommand {
-                        document_id: document.id,
-                        active_revision_id: None,
-                        readable_revision_id: None,
-                        latest_mutation_id: Some(mutation.id),
-                        latest_successful_attempt_id: None,
-                    },
-                )
-                .await?;
-            let _ = self
-                .update_mutation(
-                    state,
-                    UpdateMutationCommand {
-                        mutation_id: mutation.id,
-                        mutation_state: "applied".to_string(),
-                        completed_at: Some(Utc::now()),
-                        failure_code: None,
-                        conflict_code: None,
-                    },
-                )
-                .await?;
-            let ready_operation = state
+
+            let async_operation = state
                 .canonical_services
                 .ops
-                .update_async_operation(
+                .create_async_operation(
                     state,
-                    UpdateAsyncOperationCommand {
-                        operation_id: async_operation.id,
-                        status: "ready".to_string(),
-                        completed_at: Some(Utc::now()),
+                    CreateAsyncOperationCommand {
+                        workspace_id: command.workspace_id,
+                        library_id: command.library_id,
+                        operation_kind: "content_mutation".to_string(),
+                        surface_kind: "rest".to_string(),
+                        requested_by_principal_id: command.created_by_principal_id,
+                        status: "accepted".to_string(),
+                        subject_kind: "content_mutation".to_string(),
+                        subject_id: Some(mutation.id),
+                        completed_at: None,
                         failure_code: None,
                     },
                 )
                 .await?;
-            (Vec::new(), None, Some(ready_operation.id))
-        };
 
-        let document = self.get_document(state, document.id).await?;
-        let mutation = self.get_mutation(state, mutation.id).await?;
-        Ok(CreateDocumentAdmission {
-            document,
-            mutation: ContentMutationAdmission { mutation, items, job_id, async_operation_id },
-        })
+            let (items, job_id, async_operation_id) = if let Some(revision) = command.revision {
+                let revision = self
+                    .create_revision_from_metadata(
+                        state,
+                        document.id,
+                        command.created_by_principal_id,
+                        revision,
+                    )
+                    .await?;
+                let item = self
+                    .create_mutation_item(
+                        state,
+                        CreateMutationItemCommand {
+                            mutation_id: mutation.id,
+                            document_id: Some(document.id),
+                            base_revision_id: None,
+                            result_revision_id: Some(revision.id),
+                            item_state: "pending".to_string(),
+                            message: Some(
+                                "document revision accepted and queued for ingest".to_string(),
+                            ),
+                        },
+                    )
+                    .await?;
+                let head = self.get_document_head(state, document.id).await?;
+                let _ = self
+                    .promote_document_head(
+                        state,
+                        PromoteHeadCommand {
+                            document_id: document.id,
+                            active_revision_id: Some(revision.id),
+                            readable_revision_id: head.and_then(|row| row.readable_revision_id),
+                            latest_mutation_id: Some(mutation.id),
+                            latest_successful_attempt_id: None,
+                        },
+                    )
+                    .await?;
+                let job = state
+                    .canonical_services
+                    .ingest
+                    .admit_job(
+                        state,
+                        AdmitIngestJobCommand {
+                            workspace_id: command.workspace_id,
+                            library_id: command.library_id,
+                            mutation_id: Some(mutation.id),
+                            connector_id: None,
+                            async_operation_id: Some(async_operation.id),
+                            knowledge_document_id: Some(document.id),
+                            knowledge_revision_id: Some(revision.id),
+                            job_kind: "content_mutation".to_string(),
+                            priority: 100,
+                            dedupe_key: command.idempotency_key,
+                            available_at: None,
+                        },
+                    )
+                    .await?;
+                (vec![item], Some(job.id), Some(async_operation.id))
+            } else {
+                let _ = self
+                    .promote_document_head(
+                        state,
+                        PromoteHeadCommand {
+                            document_id: document.id,
+                            active_revision_id: None,
+                            readable_revision_id: None,
+                            latest_mutation_id: Some(mutation.id),
+                            latest_successful_attempt_id: None,
+                        },
+                    )
+                    .await?;
+                let _ = self
+                    .update_mutation(
+                        state,
+                        UpdateMutationCommand {
+                            mutation_id: mutation.id,
+                            mutation_state: "applied".to_string(),
+                            completed_at: Some(Utc::now()),
+                            failure_code: None,
+                            conflict_code: None,
+                        },
+                    )
+                    .await?;
+                let ready_operation = state
+                    .canonical_services
+                    .ops
+                    .update_async_operation(
+                        state,
+                        UpdateAsyncOperationCommand {
+                            operation_id: async_operation.id,
+                            status: "ready".to_string(),
+                            completed_at: Some(Utc::now()),
+                            failure_code: None,
+                        },
+                    )
+                    .await?;
+                (Vec::new(), None, Some(ready_operation.id))
+            };
+
+            let document = self.get_document(state, document.id).await?;
+            let mutation = self.get_mutation(state, mutation.id).await?;
+            Ok(CreateDocumentAdmission {
+                document,
+                mutation: ContentMutationAdmission {
+                    mutation,
+                    items,
+                    job_id,
+                    async_operation_id,
+                },
+            })
+        }
+        .await;
+        let release_result =
+            content_repository::release_content_mutation_lock(mutation_lock, mutation.id)
+                .await
+                .map_err(|_| ApiError::Internal);
+        match (result, release_result) {
+            (Ok(admission), Ok(())) => Ok(admission),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(_), Err(error)) => Err(error),
+        }
     }
 
     pub async fn upload_inline_document(
@@ -1095,25 +1130,46 @@ impl ContentService {
             .await
             .map_err(|_| ApiError::Internal)?
             {
-                if let Some(request_source_identity) = request_source_identity {
-                    match existing.source_identity.as_deref() {
-                        Some(existing_source_identity)
-                            if existing_source_identity != request_source_identity =>
-                        {
-                            return Err(ApiError::idempotency_conflict(
-                                "the same idempotency key was already used with a different payload",
-                            ));
-                        }
-                        None => {
-                            return Err(ApiError::idempotency_conflict(
-                                "the same idempotency key was already used before payload identity tracking was available; retry with a new idempotency key",
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
+                ensure_existing_mutation_matches_request(&existing, request_source_identity)?;
                 return Ok(map_mutation_row(existing));
             }
+
+            let row = content_repository::create_mutation(
+                &state.persistence.postgres,
+                &NewContentMutation {
+                    workspace_id: command.workspace_id,
+                    library_id: command.library_id,
+                    operation_kind: &command.operation_kind,
+                    requested_by_principal_id: command.requested_by_principal_id,
+                    request_surface: &command.request_surface,
+                    idempotency_key: command.idempotency_key.as_deref(),
+                    source_identity: command.source_identity.as_deref(),
+                    mutation_state: "accepted",
+                    failure_code: None,
+                    conflict_code: None,
+                },
+            )
+            .await;
+            return match row {
+                Ok(row) => Ok(map_mutation_row(row)),
+                Err(error) if is_content_mutation_idempotency_violation(&error) => {
+                    let existing = content_repository::find_mutation_by_idempotency(
+                        &state.persistence.postgres,
+                        principal_id,
+                        &command.request_surface,
+                        idempotency_key,
+                    )
+                    .await
+                    .map_err(|_| ApiError::Internal)?
+                    .ok_or(ApiError::Internal)?;
+                    ensure_existing_mutation_matches_request(
+                        &existing,
+                        request_source_identity,
+                    )?;
+                    Ok(map_mutation_row(existing))
+                }
+                Err(_) => Err(ApiError::Internal),
+            };
         }
 
         let row = content_repository::create_mutation(
@@ -2033,6 +2089,37 @@ fn map_mutation_item_row(row: content_repository::ContentMutationItemRow) -> Con
         result_revision_id: row.result_revision_id,
         item_state: row.item_state,
         message: row.message,
+    }
+}
+
+fn ensure_existing_mutation_matches_request(
+    existing: &content_repository::ContentMutationRow,
+    request_source_identity: Option<&str>,
+) -> Result<(), ApiError> {
+    if let Some(request_source_identity) = request_source_identity {
+        match existing.source_identity.as_deref() {
+            Some(existing_source_identity) if existing_source_identity != request_source_identity => {
+                return Err(ApiError::idempotency_conflict(
+                    "the same idempotency key was already used with a different payload",
+                ));
+            }
+            None => {
+                return Err(ApiError::idempotency_conflict(
+                    "the same idempotency key was already used before payload identity tracking was available; retry with a new idempotency key",
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn is_content_mutation_idempotency_violation(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Database(database_error) if database_error.is_unique_violation() => {
+            database_error.constraint() == Some("idx_content_mutation_idempotency")
+        }
+        _ => false,
     }
 }
 
