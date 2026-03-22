@@ -436,6 +436,7 @@ create table content_mutation (
     requested_by_principal_id uuid references iam_principal(id) on delete set null,
     request_surface surface_kind not null,
     idempotency_key text,
+    source_identity text,
     mutation_state content_mutation_state not null default 'accepted',
     requested_at timestamptz not null default now(),
     completed_at timestamptz,
