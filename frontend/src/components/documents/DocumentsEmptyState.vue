@@ -1,28 +1,41 @@
 <script setup lang="ts">
-import EmptyStateCard from 'src/components/base/EmptyStateCard.vue'
+import FeedbackState from 'src/components/design-system/FeedbackState.vue'
 
-defineProps<{
+const props = defineProps<{
   loading: boolean
   hasDocuments?: boolean
   hasActiveFilters?: boolean
 }>()
+
+const emit = defineEmits<{
+  upload: []
+  clearFilters: []
+}>()
 </script>
 
 <template>
-  <EmptyStateCard
-    :title="
-      loading
-        ? $t('documents.loading')
-        : hasDocuments && hasActiveFilters
-          ? $t('documents.workspace.noMatchTitle')
-          : $t('documents.workspace.emptyTitle')
-    "
-    :description="
-      loading
-        ? $t('documents.loading')
-        : hasDocuments && hasActiveFilters
-          ? $t('documents.workspace.noMatchDescription')
-          : $t('documents.workspace.emptyDescription')
-    "
+  <FeedbackState
+    v-if="props.loading"
+    kind="loading"
+    :title="$t('documents.loading')"
+    :message="$t('documents.workspace.loadingDescription')"
+  />
+
+  <FeedbackState
+    v-else-if="!props.hasDocuments && !props.hasActiveFilters"
+    kind="empty"
+    :title="$t('documents.workspace.emptyTitle')"
+    :message="$t('documents.workspace.emptyDescription')"
+    :action-label="$t('documents.actions.upload')"
+    @action="emit('upload')"
+  />
+
+  <FeedbackState
+    v-else
+    kind="sparse"
+    :title="$t('documents.workspace.noMatchTitle')"
+    :message="$t('documents.workspace.noMatchDescription')"
+    :action-label="$t('documents.actions.clearFilters')"
+    @action="emit('clearFilters')"
   />
 </template>

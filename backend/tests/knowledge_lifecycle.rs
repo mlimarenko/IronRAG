@@ -667,3 +667,143 @@ async fn canonical_knowledge_lifecycle_handles_append_replace_and_delete_without
     fixture.cleanup().await?;
     result
 }
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango"]
+async fn knowledge_readiness_coherence_keeps_readable_pointer_until_new_revision_is_ready()
+-> Result<()> {
+    let fixture = KnowledgeLifecycleFixture::create().await?;
+
+    let result = async {
+        let document_id = Uuid::now_v7();
+        let readable_revision_id = Uuid::now_v7();
+        let active_revision_id = Uuid::now_v7();
+
+        fixture
+            .state
+            .canonical_services
+            .knowledge
+            .create_document_shell(
+                &fixture.state,
+                CreateKnowledgeDocumentCommand {
+                    document_id,
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    external_key: format!("readiness-doc-{}", document_id.simple()),
+                    document_state: "active".to_string(),
+                },
+            )
+            .await
+            .context("failed to create readiness coherence document shell")?;
+
+        fixture
+            .state
+            .canonical_services
+            .knowledge
+            .write_revision(
+                &fixture.state,
+                knowledge_revision_command(
+                    &fixture,
+                    document_id,
+                    readable_revision_id,
+                    1,
+                    "upload",
+                    "Readable Baseline",
+                    "Readable baseline memory for coherence checks.",
+                ),
+            )
+            .await
+            .context("failed to write readable baseline revision")?;
+        write_chunk(
+            &fixture,
+            document_id,
+            readable_revision_id,
+            0,
+            "Readable baseline memory for coherence checks.",
+        )
+        .await?;
+
+        let mut active_revision = knowledge_revision_command(
+            &fixture,
+            document_id,
+            active_revision_id,
+            2,
+            "append",
+            "Active But Not Readable",
+            "Active revision is newer but still processing downstream readiness.",
+        );
+        active_revision.vector_state = "pending".to_string();
+        active_revision.graph_state = "pending".to_string();
+        active_revision.vector_ready_at = None;
+        active_revision.graph_ready_at = None;
+
+        fixture
+            .state
+            .canonical_services
+            .knowledge
+            .write_revision(&fixture.state, active_revision)
+            .await
+            .context("failed to write active non-ready revision")?;
+        write_chunk(
+            &fixture,
+            document_id,
+            active_revision_id,
+            0,
+            "Active revision is newer but still processing downstream readiness.",
+        )
+        .await?;
+
+        fixture
+            .state
+            .canonical_services
+            .knowledge
+            .promote_document(
+                &fixture.state,
+                PromoteKnowledgeDocumentCommand {
+                    document_id,
+                    document_state: "active".to_string(),
+                    active_revision_id: Some(active_revision_id),
+                    readable_revision_id: Some(readable_revision_id),
+                    latest_revision_no: Some(2),
+                    deleted_at: None,
+                },
+            )
+            .await
+            .context("failed to promote split readiness pointers")?;
+
+        let document = fixture
+            .state
+            .arango_document_store
+            .get_document(document_id)
+            .await
+            .context("failed to reload readiness coherence document")?
+            .context("readiness coherence document missing")?;
+        assert_eq!(document.active_revision_id, Some(active_revision_id));
+        assert_eq!(document.readable_revision_id, Some(readable_revision_id));
+        assert_ne!(document.active_revision_id, document.readable_revision_id);
+        assert_eq!(document.latest_revision_no, Some(2));
+
+        let readable_chunks = fixture
+            .state
+            .arango_document_store
+            .list_chunks_by_revision(readable_revision_id)
+            .await
+            .context("failed to list readable baseline chunks")?;
+        let active_chunks = fixture
+            .state
+            .arango_document_store
+            .list_chunks_by_revision(active_revision_id)
+            .await
+            .context("failed to list active processing chunks")?;
+        assert!(!readable_chunks.is_empty());
+        assert!(!active_chunks.is_empty());
+        assert!(readable_chunks.iter().all(|chunk| chunk.chunk_state == "ready"));
+        assert!(active_chunks.iter().all(|chunk| chunk.chunk_state == "ready"));
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}

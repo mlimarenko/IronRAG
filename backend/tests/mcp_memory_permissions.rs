@@ -456,3 +456,35 @@ async fn foreign_scope_rejections_do_not_leak_library_or_document_metadata() -> 
     fixture.cleanup().await?;
     result
 }
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango"]
+async fn mcp_tool_visibility_matches_token_scope() -> anyhow::Result<()> {
+    let settings =
+        Settings::from_env().context("failed to load settings for mcp permissions test")?;
+    let fixture = McpPermissionsFixture::create(settings).await?;
+
+    let result = async {
+        let token =
+            fixture.bearer_token(&["documents:read", "documents:write"], "tool-visibility").await?;
+        let tools = fixture.mcp_tools_list(&token).await?;
+        let tool_names = tools["result"]["tools"]
+            .as_array()
+            .context("tools/list result must be an array")?
+            .iter()
+            .filter_map(|item| item["name"].as_str())
+            .collect::<Vec<_>>();
+
+        for expected in
+            ["search_documents", "upload_documents", "get_mutation_status", "read_document"]
+        {
+            assert!(tool_names.contains(&expected));
+        }
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}

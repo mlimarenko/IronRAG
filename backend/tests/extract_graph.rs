@@ -12,14 +12,13 @@ use rustrag_backend::{
             bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
             client::ArangoClient,
         },
-        repositories::{ai_repository, catalog_repository, content_repository, graph_repository},
+        repositories::{ai_repository, catalog_repository, content_repository},
     },
     services::{
         extract_service::{
             CheckpointResumeCursorCommand, ExtractService, MaterializeChunkResultCommand,
             NewEdgeCandidate, NewNodeCandidate, PersistExtractContentCommand,
         },
-        graph_service::GraphService,
         search_service::{ChunkEmbeddingWrite, GraphNodeEmbeddingWrite, SearchService},
     },
 };
@@ -83,10 +82,7 @@ struct ExtractGraphFixture {
     revision_id: Uuid,
     chunk_id: Uuid,
     attempt_id: Uuid,
-    projection_id: Uuid,
     node_id: Uuid,
-    other_node_id: Uuid,
-    edge_id: Uuid,
     primary_model_catalog_id: Uuid,
     alternate_model_catalog_id: Uuid,
 }
@@ -118,10 +114,7 @@ impl ExtractGraphFixture {
             revision_id: Uuid::nil(),
             chunk_id: Uuid::nil(),
             attempt_id: Uuid::nil(),
-            projection_id: Uuid::nil(),
             node_id: Uuid::nil(),
-            other_node_id: Uuid::nil(),
-            edge_id: Uuid::nil(),
             primary_model_catalog_id: Uuid::nil(),
             alternate_model_catalog_id: Uuid::nil(),
         };
@@ -318,89 +311,13 @@ impl ExtractGraphFixture {
         .find(|row| row.capability_kind == "embedding")
         .context("missing qwen embedding model catalog entry")?;
 
-        let projection = graph_repository::create_graph_projection(
-            &self.state.persistence.postgres,
-            workspace.id,
-            library.id,
-            Some(attempt),
-            "active",
-        )
-        .await
-        .context("failed to create graph projection")?;
-        let node = graph_repository::create_graph_node(
-            &self.state.persistence.postgres,
-            projection.id,
-            workspace.id,
-            library.id,
-            "entity:greenfield-test",
-            "entity",
-            "Greenfield Test",
-            Some("Typed node candidate"),
-            0,
-        )
-        .await
-        .context("failed to create graph node")?;
-        let other_node = graph_repository::create_graph_node(
-            &self.state.persistence.postgres,
-            projection.id,
-            workspace.id,
-            library.id,
-            "entity:greenfield-other",
-            "entity",
-            "Greenfield Other",
-            Some("Typed node target"),
-            0,
-        )
-        .await
-        .context("failed to create second graph node")?;
-        let edge = graph_repository::create_graph_edge(
-            &self.state.persistence.postgres,
-            projection.id,
-            workspace.id,
-            library.id,
-            "entity:greenfield-test--relates_to--entity:greenfield-other",
-            "relates_to",
-            node.id,
-            other_node.id,
-            Some("Typed edge candidate"),
-            0,
-        )
-        .await
-        .context("failed to create graph edge")?;
-
-        let _ = graph_repository::upsert_graph_node_evidence(
-            &self.state.persistence.postgres,
-            node.id,
-            chunk.id,
-            revision.id,
-            attempt,
-            Some(chunk_result.id),
-            rust_decimal::Decimal::new(125, 2),
-        )
-        .await
-        .context("failed to create graph node evidence")?;
-        let _ = graph_repository::upsert_graph_edge_evidence(
-            &self.state.persistence.postgres,
-            edge.id,
-            chunk.id,
-            revision.id,
-            attempt,
-            None,
-            rust_decimal::Decimal::new(150, 2),
-        )
-        .await
-        .context("failed to create graph edge evidence")?;
-
         self.workspace_id = workspace.id;
         self.library_id = library.id;
         self.document_id = document.id;
         self.revision_id = revision.id;
         self.chunk_id = chunk.id;
         self.attempt_id = cursor.attempt_id;
-        self.projection_id = projection.id;
-        self.node_id = node.id;
-        self.other_node_id = other_node.id;
-        self.edge_id = edge.id;
+        self.node_id = Uuid::now_v7();
         self.primary_model_catalog_id = openai_model.id;
         self.alternate_model_catalog_id = qwen_model.id;
         Ok(self)
@@ -544,70 +461,6 @@ async fn extract_flow_preserves_readable_text_chunk_results_and_resume_cursors()
             .await
             .context("failed to increment downgrade level")?;
         assert_eq!(downgrade.downgrade_level, 1);
-
-        assert_legacy_truth_tables_absent(&fixture.state.persistence.postgres).await
-    }
-    .await;
-
-    fixture.cleanup().await?;
-    result
-}
-
-#[tokio::test]
-#[ignore = "requires local postgres with canonical extensions"]
-async fn graph_evidence_refreshes_support_counts_on_canonical_projection() -> Result<()> {
-    let fixture = ExtractGraphFixture::create().await?;
-
-    let result = async {
-        let graph_service = GraphService::new();
-        let refresh = graph_service
-            .refresh_support_counts(
-                &fixture.state,
-                fixture.projection_id,
-                &[fixture.node_id],
-                &[fixture.edge_id],
-            )
-            .await
-            .context("failed to refresh graph support counts")?;
-        assert_eq!(refresh.scanned_nodes, 1);
-        assert_eq!(refresh.scanned_edges, 1);
-        assert_eq!(refresh.updated_nodes, 1);
-        assert_eq!(refresh.updated_edges, 1);
-
-        let node = graph_repository::get_graph_node_by_id(
-            &fixture.state.persistence.postgres,
-            fixture.node_id,
-        )
-        .await
-        .context("failed to load refreshed graph node")?
-        .context("missing graph node")?;
-        let edge = graph_repository::get_graph_edge_by_id(
-            &fixture.state.persistence.postgres,
-            fixture.edge_id,
-        )
-        .await
-        .context("failed to load refreshed graph edge")?
-        .context("missing graph edge")?;
-        assert_eq!(node.support_count, 1);
-        assert_eq!(edge.support_count, 1);
-
-        let node_evidence = graph_repository::list_graph_node_evidence_by_node(
-            &fixture.state.persistence.postgres,
-            fixture.node_id,
-        )
-        .await
-        .context("failed to list node evidence")?;
-        assert_eq!(node_evidence.len(), 1);
-        assert_eq!(node_evidence[0].chunk_id, fixture.chunk_id);
-
-        let edge_evidence = graph_repository::list_graph_edge_evidence_by_edge(
-            &fixture.state.persistence.postgres,
-            fixture.edge_id,
-        )
-        .await
-        .context("failed to list edge evidence")?;
-        assert_eq!(edge_evidence.len(), 1);
-        assert_eq!(edge_evidence[0].chunk_id, fixture.chunk_id);
 
         assert_legacy_truth_tables_absent(&fixture.state.persistence.postgres).await
     }

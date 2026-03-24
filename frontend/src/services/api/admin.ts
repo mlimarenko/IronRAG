@@ -19,9 +19,15 @@ import type {
   AdminModelCatalogEntry,
   AdminPriceCatalogEntry,
   AdminWorkspaceMembership,
+  CreateAdminPricePayload,
   CreateAdminCredentialPayload,
+  CreateAdminModelPresetPayload,
   CreateApiTokenPayload,
   CreateApiTokenResult,
+  SaveAdminLibraryBindingPayload,
+  UpdateAdminPricePayload,
+  UpdateAdminCredentialPayload,
+  UpdateAdminModelPresetPayload,
 } from 'src/models/ui/admin'
 import { apiHttp, unwrap } from './http'
 
@@ -86,6 +92,7 @@ interface RawMeResponse {
   }
   user: {
     principalId: string
+    login: string
     email: string
     displayName: string
     authProviderKind: string
@@ -120,6 +127,9 @@ interface RawPriceCatalogEntry {
   unitPrice: string | number
   currencyCode: string
   effectiveFrom: string
+  effectiveTo: string | null
+  catalogScope: string
+  workspaceId: string | null
 }
 
 interface RawProviderCredential {
@@ -127,7 +137,7 @@ interface RawProviderCredential {
   workspaceId: string
   providerCatalogId: string
   label: string
-  secretRef: string
+  apiKeySummary: string
   credentialState: string
   createdAt: string
   updatedAt: string
@@ -285,7 +295,7 @@ interface RawOpsLibrarySnapshotWire {
   knowledge_generations?: RawKnowledgeGenerationWire[]
 }
 
-function mapTokenRow(
+export function mapTokenRow(
   row: RawTokenResponse,
   plaintextToken: string | null = null,
   grants: AdminGrant[] = [],
@@ -305,7 +315,7 @@ function mapTokenRow(
   }
 }
 
-function mapGrant(row: RawGrantResponse): AdminGrant {
+export function mapGrant(row: RawGrantResponse): AdminGrant {
   return {
     id: row.id,
     principalId: row.principalId,
@@ -336,6 +346,7 @@ function mapPrincipal(item: RawMeResponse): AdminPrincipalSummary {
     principalKind: item.principal.principalKind,
     status: item.principal.status,
     displayLabel: item.principal.displayLabel,
+    login: item.user?.login ?? null,
     email: item.user?.email ?? null,
     displayName: item.user?.displayName ?? null,
     authProviderKind: item.user?.authProviderKind ?? null,
@@ -347,7 +358,7 @@ function mapPrincipal(item: RawMeResponse): AdminPrincipalSummary {
   }
 }
 
-function mapProvider(row: RawProviderCatalogEntry): AdminProviderCatalogEntry {
+export function mapProvider(row: RawProviderCatalogEntry): AdminProviderCatalogEntry {
   return {
     id: row.id,
     providerKind: row.providerKind,
@@ -357,7 +368,7 @@ function mapProvider(row: RawProviderCatalogEntry): AdminProviderCatalogEntry {
   }
 }
 
-function mapModel(row: RawModelCatalogEntry): AdminModelCatalogEntry {
+export function mapModel(row: RawModelCatalogEntry): AdminModelCatalogEntry {
   return {
     id: row.id,
     providerCatalogId: row.providerCatalogId,
@@ -369,7 +380,7 @@ function mapModel(row: RawModelCatalogEntry): AdminModelCatalogEntry {
   }
 }
 
-function mapPrice(row: RawPriceCatalogEntry): AdminPriceCatalogEntry {
+export function mapPrice(row: RawPriceCatalogEntry): AdminPriceCatalogEntry {
   return {
     id: row.id,
     modelCatalogId: row.modelCatalogId,
@@ -377,23 +388,26 @@ function mapPrice(row: RawPriceCatalogEntry): AdminPriceCatalogEntry {
     unitPrice: String(row.unitPrice),
     currencyCode: row.currencyCode,
     effectiveFrom: row.effectiveFrom,
+    effectiveTo: row.effectiveTo,
+    workspaceId: row.workspaceId,
+    setInWorkspace: row.catalogScope === 'workspace_override',
   }
 }
 
-function mapCredential(row: RawProviderCredential): AdminProviderCredential {
+export function mapCredential(row: RawProviderCredential): AdminProviderCredential {
   return {
     id: row.id,
     workspaceId: row.workspaceId,
     providerCatalogId: row.providerCatalogId,
     label: row.label,
-    secretRef: row.secretRef,
+    apiKeySummary: row.apiKeySummary,
     credentialState: row.credentialState,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
 }
 
-function mapModelPreset(row: RawModelPreset): AdminModelPreset {
+export function mapModelPreset(row: RawModelPreset): AdminModelPreset {
   return {
     id: row.id,
     workspaceId: row.workspaceId,
@@ -420,7 +434,7 @@ function mapBindingValidation(row: RawBindingValidation): AdminBindingValidation
   }
 }
 
-function mapBinding(row: RawLibraryBinding): AdminLibraryBinding {
+export function mapBinding(row: RawLibraryBinding): AdminLibraryBinding {
   return {
     id: row.id,
     workspaceId: row.workspaceId,
@@ -446,7 +460,7 @@ function mapAuditSubject(
   }
 }
 
-function mapAuditEvent(row: RawAuditEvent): AdminAuditEvent {
+export function mapAuditEvent(row: RawAuditEvent): AdminAuditEvent {
   return {
     id: row.id,
     actorPrincipalId: row.actorPrincipalId,
@@ -462,7 +476,7 @@ function mapAuditEvent(row: RawAuditEvent): AdminAuditEvent {
   }
 }
 
-function mapOpsLibraryState(row: RawOpsLibraryState | RawOpsLibraryStateWire): AdminOpsLibraryState {
+export function mapOpsLibraryState(row: RawOpsLibraryState | RawOpsLibraryStateWire): AdminOpsLibraryState {
   const libraryId = 'library_id' in row ? row.library_id : null
   const queueDepth = 'queue_depth' in row ? row.queue_depth : null
   const runningAttempts = 'running_attempts' in row ? row.running_attempts : null
@@ -660,7 +674,56 @@ export async function createAdminCredential(
         workspaceId: payload.workspaceId,
         providerCatalogId: payload.providerCatalogId,
         label: payload.label,
-        secretRef: payload.secretRef,
+        apiKey: payload.apiKey,
+      }),
+    ),
+  )
+}
+
+export async function updateAdminCredential(
+  payload: UpdateAdminCredentialPayload,
+): Promise<AdminProviderCredential> {
+  return mapCredential(
+    await unwrap(
+      apiHttp.put<RawProviderCredential>(`/ai/credentials/${payload.credentialId}`, {
+        label: payload.label,
+        apiKey: payload.apiKey,
+        credentialState: payload.credentialState,
+      }),
+    ),
+  )
+}
+
+export async function createAdminPrice(
+  payload: CreateAdminPricePayload,
+): Promise<AdminPriceCatalogEntry> {
+  return mapPrice(
+    await unwrap(
+      apiHttp.post<RawPriceCatalogEntry>('/ai/prices', {
+        workspaceId: payload.workspaceId,
+        modelCatalogId: payload.modelCatalogId,
+        billingUnit: payload.billingUnit,
+        unitPrice: payload.unitPrice,
+        currencyCode: payload.currencyCode,
+        effectiveFrom: payload.effectiveFrom,
+        effectiveTo: payload.effectiveTo,
+      }),
+    ),
+  )
+}
+
+export async function updateAdminPrice(
+  payload: UpdateAdminPricePayload,
+): Promise<AdminPriceCatalogEntry> {
+  return mapPrice(
+    await unwrap(
+      apiHttp.put<RawPriceCatalogEntry>(`/ai/prices/${payload.priceId}`, {
+        modelCatalogId: payload.modelCatalogId,
+        billingUnit: payload.billingUnit,
+        unitPrice: payload.unitPrice,
+        currencyCode: payload.currencyCode,
+        effectiveFrom: payload.effectiveFrom,
+        effectiveTo: payload.effectiveTo,
       }),
     ),
   )
@@ -670,8 +733,72 @@ export async function fetchAdminLibraryBindings(
   libraryId: string,
 ): Promise<AdminLibraryBinding[]> {
   return unwrap(
-    apiHttp.get<RawLibraryBinding[]>(`/ai/library-bindings/${libraryId}`),
+    apiHttp.get<RawLibraryBinding[]>(`/ai/libraries/${libraryId}/bindings`),
   ).then((rows) => rows.map((row) => mapBinding(row)))
+}
+
+export async function createAdminModelPreset(
+  payload: CreateAdminModelPresetPayload,
+): Promise<AdminModelPreset> {
+  return mapModelPreset(
+    await unwrap(
+      apiHttp.post<RawModelPreset>('/ai/model-presets', {
+        workspaceId: payload.workspaceId,
+        modelCatalogId: payload.modelCatalogId,
+        presetName: payload.presetName,
+        systemPrompt: payload.systemPrompt,
+        temperature: payload.temperature,
+        topP: payload.topP,
+        maxOutputTokensOverride: payload.maxOutputTokensOverride,
+        extraParametersJson: payload.extraParametersJson,
+      }),
+    ),
+  )
+}
+
+export async function updateAdminModelPreset(
+  payload: UpdateAdminModelPresetPayload,
+): Promise<AdminModelPreset> {
+  return mapModelPreset(
+    await unwrap(
+      apiHttp.put<RawModelPreset>(`/ai/model-presets/${payload.presetId}`, {
+        presetName: payload.presetName,
+        systemPrompt: payload.systemPrompt,
+        temperature: payload.temperature,
+        topP: payload.topP,
+        maxOutputTokensOverride: payload.maxOutputTokensOverride,
+        extraParametersJson: payload.extraParametersJson,
+      }),
+    ),
+  )
+}
+
+export async function saveAdminLibraryBinding(
+  payload: SaveAdminLibraryBindingPayload,
+): Promise<AdminLibraryBinding> {
+  if (payload.bindingId) {
+    return mapBinding(
+      await unwrap(
+        apiHttp.put<RawLibraryBinding>(`/ai/library-bindings/${payload.bindingId}`, {
+          providerCredentialId: payload.providerCredentialId,
+          modelPresetId: payload.modelPresetId,
+          bindingState: payload.bindingState,
+        }),
+      ),
+    )
+  }
+
+  return mapBinding(
+    await unwrap(
+      apiHttp.post<RawLibraryBinding>('/ai/library-bindings', {
+        workspaceId: payload.workspaceId,
+        libraryId: payload.libraryId,
+        bindingPurpose: payload.bindingPurpose,
+        providerCredentialId: payload.providerCredentialId,
+        modelPresetId: payload.modelPresetId,
+      }),
+    ),
+  )
 }
 
 export async function validateAdminLibraryBinding(

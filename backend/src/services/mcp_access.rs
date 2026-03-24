@@ -1,12 +1,11 @@
 use serde::Deserialize;
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    infra::repositories::{
-        ai_repository,
-        catalog_repository::{self, CatalogLibraryRow, CatalogWorkspaceRow},
-    },
+    domains::ai::AiBindingPurpose,
+    infra::repositories::catalog_repository::{self, CatalogLibraryRow, CatalogWorkspaceRow},
     integrations::llm::EmbeddingRequest,
     interfaces::http::{
         auth::AuthContext,
@@ -250,7 +249,7 @@ pub async fn search_documents(
         let embedding_context: Option<McpSearchEmbeddingContext> =
             resolve_search_embedding_context(state, library.library.id, query).await?;
         let vector_chunk_hits = if let Some(context) = embedding_context.as_ref() {
-            state
+            match state
                 .arango_search_store
                 .search_chunk_vectors_by_similarity(
                     library.library.id,
@@ -261,7 +260,19 @@ pub async fn search_documents(
                     Some(16),
                 )
                 .await
-                .map_err(|_| ApiError::Internal)?
+            {
+                Ok(rows) => rows,
+                Err(error) => {
+                    warn!(
+                        library_id = %library.library.id,
+                        model_catalog_id = %context.model_catalog_id,
+                        freshness_generation = context.freshness_generation,
+                        error = ?error,
+                        "mcp search vector lookup failed; degrading to lexical-only MCP search",
+                    );
+                    Vec::new()
+                }
+            }
         } else {
             Vec::new()
         };
@@ -829,43 +840,14 @@ pub(crate) async fn resolve_search_embedding_context(
     library_id: Uuid,
     query_text: &str,
 ) -> Result<Option<McpSearchEmbeddingContext>, ApiError> {
-    let Some(binding) = ai_repository::get_active_library_binding_by_purpose(
-        &state.persistence.postgres,
-        library_id,
-        "embed_chunk",
-    )
-    .await
-    .map_err(|_| ApiError::Internal)?
-    else {
-        return Ok(None);
-    };
-
-    let provider_credential = state
+    let Some(binding) = state
         .canonical_services
         .ai_catalog
-        .get_provider_credential(state, binding.provider_credential_id)
-        .await?;
-    let model_preset = state
-        .canonical_services
-        .ai_catalog
-        .get_model_preset(state, binding.model_preset_id)
-        .await?;
-    let providers = state.canonical_services.ai_catalog.list_provider_catalog(state).await?;
-    let models = state.canonical_services.ai_catalog.list_model_catalog(state, None).await?;
-    let Some(provider_kind) = providers
-        .into_iter()
-        .find(|provider| provider.id == provider_credential.provider_catalog_id)
-        .map(|provider| provider.provider_kind)
+        .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::EmbedChunk)
+        .await?
     else {
         return Ok(None);
     };
-    let Some(model) = models.into_iter().find(|model| model.id == model_preset.model_catalog_id)
-    else {
-        return Ok(None);
-    };
-    if model.provider_catalog_id != provider_credential.provider_catalog_id {
-        return Ok(None);
-    }
 
     let generations = state
         .arango_document_store
@@ -882,9 +864,11 @@ pub(crate) async fn resolve_search_embedding_context(
     let embedding = state
         .llm_gateway
         .embed(EmbeddingRequest {
-            provider_kind,
-            model_name: model.model_name.clone(),
+            provider_kind: binding.provider_kind.clone(),
+            model_name: binding.model_name.clone(),
             input: query_text.to_string(),
+            api_key_override: Some(binding.api_key),
+            base_url_override: binding.provider_base_url,
         })
         .await
         .map_err(|error| {
@@ -892,7 +876,7 @@ pub(crate) async fn resolve_search_embedding_context(
         })?;
 
     Ok(Some(McpSearchEmbeddingContext {
-        model_catalog_id: model.id,
+        model_catalog_id: binding.model_catalog_id,
         freshness_generation: generation.active_vector_generation,
         query_vector: embedding.embedding,
     }))

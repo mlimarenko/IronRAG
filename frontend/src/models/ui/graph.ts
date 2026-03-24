@@ -51,14 +51,20 @@ export interface GraphLegendItem {
 }
 
 export interface GraphSurfaceResponse {
+  loading: boolean
+  error: string | null
+  canvasMode: GraphCanvasMode
   graphStatus: GraphStatus
   convergenceStatus: GraphConvergenceStatus | null
   graphGeneration: number
   graphGenerationState?: string | null
   nodeCount: number
   relationCount: number
+  edgeCount: number
   filteredArtifactCount: number | null
   lastBuiltAt: string | null
+  overlay: GraphOverlayState
+  inspector: GraphInspectorState
   warning: string | null
   nodes: GraphNode[]
   edges: GraphEdge[]
@@ -163,3 +169,35 @@ export interface GraphDiagnostics {
   warning: string | null
   graphBackend: string
 }
+
+export type GraphCanvasMode = 'ready' | 'sparse' | 'building' | 'error' | 'empty'
+
+export interface GraphOverlayState {
+  searchQuery: string
+  searchHits: GraphSearchHit[]
+  nodeTypeFilter: GraphNodeType | ''
+  activeLayout: GraphLayoutMode
+  showFilteredArtifacts: boolean
+  filteredArtifactCount: number
+  nodeCount: number
+  edgeCount: number
+  showLegend: boolean
+  showFilters: boolean
+  zoomLevel: number
+}
+
+export interface GraphNodeSummary {
+  id: string
+  label: string
+  nodeType: GraphNodeType
+  supportCount: number
+}
+
+export interface GraphInspectorState {
+  focusedNodeId: string | null
+  loading: boolean
+  error: string | null
+  detail: GraphNodeDetail | null
+}
+
+export type GraphWorkspaceSurface = GraphSurfaceResponse

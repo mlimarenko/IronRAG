@@ -42,6 +42,9 @@ pub struct PriceCatalogEntry {
     pub unit_price: Decimal,
     pub currency_code: String,
     pub effective_from: DateTime<Utc>,
+    pub effective_to: Option<DateTime<Utc>>,
+    pub catalog_scope: String,
+    pub workspace_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,7 +64,7 @@ pub struct ProviderCredential {
     pub workspace_id: Uuid,
     pub provider_catalog_id: Uuid,
     pub label: String,
-    pub secret_ref: String,
+    pub api_key: String,
     pub credential_state: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

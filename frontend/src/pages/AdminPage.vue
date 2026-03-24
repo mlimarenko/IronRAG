@@ -1,46 +1,117 @@
 <script setup lang="ts">
-import { computed, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useI18n } from 'vue-i18n'
 import ErrorStateCard from 'src/components/base/ErrorStateCard.vue'
+import PageHeader from 'src/components/design-system/PageHeader.vue'
 import PageSurface from 'src/components/base/PageSurface.vue'
+import SurfacePanel from 'src/components/design-system/SurfacePanel.vue'
+import AdminAuditFeed from 'src/components/admin/AdminAuditFeed.vue'
 import AdminModelPricingPanel from 'src/components/admin/AdminModelPricingPanel.vue'
-import AdminPlaceholderPanel from 'src/components/admin/AdminPlaceholderPanel.vue'
+import AdminOperationsPanel from 'src/components/admin/AdminOperationsPanel.vue'
 import AdminProviderSettingsPanel from 'src/components/admin/AdminProviderSettingsPanel.vue'
-import AdminTabs from 'src/components/admin/AdminTabs.vue'
 import ApiTokensTable from 'src/components/admin/ApiTokensTable.vue'
 import CreateTokenDialog from 'src/components/admin/CreateTokenDialog.vue'
-import TokenSecurityBanner from 'src/components/admin/TokenSecurityBanner.vue'
-import { useDisplayFormatters } from 'src/composables/useDisplayFormatters'
 import type {
   CreateAdminCredentialPayload,
+  CreateAdminModelPresetPayload,
+  CreateAdminPricePayload,
   CreateApiTokenPayload,
+  SaveAdminLibraryBindingPayload,
+  UpdateAdminCredentialPayload,
+  UpdateAdminModelPresetPayload,
+  UpdateAdminPricePayload,
 } from 'src/models/ui/admin'
 import { useAdminStore } from 'src/stores/admin'
 import { useShellStore } from 'src/stores/shell'
 
-const { t } = useI18n()
-const { enumLabel, formatDateTime, shortIdentifier } = useDisplayFormatters()
+type AdminSectionId = 'access' | 'operations' | 'ai' | 'pricing'
+
 const adminStore = useAdminStore()
 const shellStore = useShellStore()
+const { t } = useI18n()
 const {
-  activeTab,
   aiConsole,
+  aiSetupError,
+  aiSetupSaving,
   auditEvents,
   bindingValidatingId,
+  canManageAccess,
+  canManageAi,
+  canReadAudit,
+  canReadOperations,
+  catalogCommitVersion,
   context,
-  credentialSaving,
   error,
   latestPlaintextToken,
   loading,
   opsSnapshot,
   principal,
+  pricesError,
+  pricesSaving,
   showCreateToken,
-  tabLoading,
   tokens,
-  tabAvailability,
-  tabCounts,
 } = storeToRefs(adminStore)
+
+const hasOperationsSurface = computed(() => canReadOperations.value || canReadAudit.value)
+const opsSignalCount = computed(
+  () =>
+    (opsSnapshot.value?.warnings.length ?? 0) +
+    (opsSnapshot.value?.state.failedDocumentCount ?? 0) +
+    (opsSnapshot.value?.state.runningAttempts ?? 0),
+)
+const aiSetupCount = computed(
+  () =>
+    (aiConsole.value?.credentials.length ?? 0) +
+    (aiConsole.value?.bindings.length ?? 0) +
+    (aiConsole.value?.modelPresets.length ?? 0),
+)
+const pricingCount = computed(() => aiConsole.value?.prices.length ?? 0)
+const activeSection = ref<AdminSectionId>('access')
+
+const sectionTabs = computed(() =>
+  [
+    canManageAccess.value
+      ? {
+          id: 'access' as AdminSectionId,
+          label: t('admin.sections.access.title'),
+          count: tokens.value.length,
+        }
+      : null,
+    hasOperationsSurface.value
+      ? {
+          id: 'operations' as AdminSectionId,
+          label: t('admin.sections.operations.title'),
+          count: opsSignalCount.value,
+        }
+      : null,
+    canManageAi.value && aiConsole.value
+      ? {
+          id: 'ai' as AdminSectionId,
+          label: t('admin.sections.ai.title'),
+          count: aiSetupCount.value,
+        }
+      : null,
+    canManageAi.value && aiConsole.value
+      ? {
+          id: 'pricing' as AdminSectionId,
+          label: t('admin.sections.pricing.title'),
+          count: pricingCount.value,
+        }
+      : null,
+  ].filter((item): item is { id: AdminSectionId; label: string; count: number } => item !== null),
+)
+
+watch(
+  sectionTabs,
+  (tabs) => {
+    if (tabs.some((tab) => tab.id === activeSection.value)) {
+      return
+    }
+    activeSection.value = tabs[0]?.id ?? 'access'
+  },
+  { immediate: true },
+)
 
 watch(
   () => {
@@ -60,19 +131,13 @@ watch(
       adminStore.clearState()
       return
     }
-    await adminStore.loadForContext(nextContext)
+    try {
+      await adminStore.loadForContext(nextContext)
+    } catch {
+      // Store error state is authoritative for page feedback.
+    }
   },
   { immediate: true, deep: true },
-)
-
-const auditRows = computed(() =>
-  auditEvents.value.map((event) => [
-    formatDateTime(event.createdAt),
-    enumLabel('admin.audit.actions', event.actionKind),
-    enumLabel('admin.audit.results', event.resultKind),
-    summarizeSubjects(event.subjects),
-    event.redactedMessage ?? '—',
-  ]),
 )
 
 async function copyLatestToken() {
@@ -97,78 +162,38 @@ async function createCredential(payload: CreateAdminCredentialPayload) {
   await adminStore.createCredential(payload)
 }
 
+async function updateCredential(payload: UpdateAdminCredentialPayload) {
+  await adminStore.updateCredential(payload)
+}
+
+async function createModelPreset(payload: CreateAdminModelPresetPayload) {
+  await adminStore.createModelPreset(payload)
+}
+
+async function updateModelPreset(payload: UpdateAdminModelPresetPayload) {
+  await adminStore.updateModelPreset(payload)
+}
+
+async function saveBinding(payload: SaveAdminLibraryBindingPayload) {
+  await adminStore.saveBinding(payload)
+}
+
+async function createPrice(payload: CreateAdminPricePayload) {
+  await adminStore.createPrice(payload)
+}
+
+async function updatePrice(payload: UpdateAdminPricePayload) {
+  await adminStore.updatePrice(payload)
+}
+
 async function validateBinding(bindingId: string) {
   await adminStore.validateBinding(bindingId)
 }
-
-function summarizeSubjects(
-  subjects: { subjectKind: string; subjectId: string; libraryId: string | null; workspaceId: string | null }[],
-): string {
-  return subjects
-    .map(
-      (subject) =>
-        `${enumLabel('admin.audit.subjectKinds', subject.subjectKind)}:${shortIdentifier(subject.subjectId)}`,
-    )
-    .join(', ')
-}
-
-const opsWarningsCount = computed(() => opsSnapshot.value?.warnings.length ?? 0)
-const opsGenerationState = computed(() => opsSnapshot.value?.state.knowledgeGenerationState ?? null)
 </script>
 
 <template>
-  <PageSurface>
-    <div class="rr-admin">
-      <header class="rr-admin__header">
-        <div>
-          <h1>{{ $t('admin.title') }}</h1>
-          <p v-if="context">
-            {{ $t('admin.subtitle', {
-              workspace: context.workspaceName,
-              library: context.libraryName,
-            }) }}
-          </p>
-          <div
-            v-if="opsSnapshot"
-            class="rr-admin__ops-summary"
-          >
-            <span class="rr-status-pill">
-              {{ $t('admin.ops.state', {
-                state: enumLabel('admin.ops.states', opsSnapshot.state.degradedState),
-              }) }}
-            </span>
-            <span class="rr-status-pill">
-              {{ $t('admin.ops.queue', { count: opsSnapshot.state.queueDepth }) }}
-            </span>
-            <span class="rr-status-pill">
-              {{ $t('admin.ops.running', { count: opsSnapshot.state.runningAttempts }) }}
-            </span>
-            <span
-              v-if="opsGenerationState"
-              class="rr-status-pill"
-            >
-              {{ $t('admin.ops.generationState', {
-                state: enumLabel('admin.ops.generationStates', opsGenerationState),
-              }) }}
-            </span>
-            <span
-              v-if="opsWarningsCount > 0"
-              class="rr-status-pill is-warning"
-            >
-              {{ $t('admin.ops.warnings', { count: opsWarningsCount }) }}
-            </span>
-          </div>
-        </div>
-        <button
-          v-if="activeTab === 'tokens' && tabAvailability.tokens"
-          class="rr-button"
-          type="button"
-          @click="adminStore.showCreateToken = true"
-        >
-          {{ $t('admin.createToken') }}
-        </button>
-      </header>
-
+  <PageSurface mode="full">
+    <div class="rr-admin-control">
       <ErrorStateCard
         v-if="error && !principal"
         :title="$t('admin.title')"
@@ -176,79 +201,196 @@ const opsGenerationState = computed(() => opsSnapshot.value?.state.knowledgeGene
       />
 
       <template v-else-if="context && principal">
-        <AdminTabs
-          :counts="tabCounts"
-          :availability="tabAvailability"
-          :active-tab="activeTab"
-          @change="adminStore.switchTab"
-        />
-
-        <ErrorStateCard
-          v-if="error"
+        <PageHeader
+          compact
+          :eyebrow="$t('shell.admin')"
           :title="$t('admin.title')"
-          :description="error"
+          :subtitle="$t('admin.subtitle')"
         />
 
-        <p
-          v-if="loading || tabLoading"
-          class="rr-admin__loading"
+        <SurfacePanel
+          v-if="loading"
+          class="rr-admin-control__notice"
         >
           {{ $t('admin.loading') }}
-        </p>
+        </SurfacePanel>
 
-        <template v-else-if="activeTab === 'tokens'">
-          <ApiTokensTable
-            :rows="tokens"
-            :workspace-name="context.workspaceName"
-            :current-principal-id="principal.id"
-            :current-principal-label="principal.displayLabel"
-            @copy="adminStore.copyToken"
-            @revoke="adminStore.revokeToken"
-          />
-          <TokenSecurityBanner
-            :principal="principal"
-            :workspace-name="context.workspaceName"
-            :library-name="context.libraryName"
-          />
-        </template>
+        <SurfacePanel
+          v-if="error"
+          class="rr-admin-control__notice rr-admin-control__notice--error"
+        >
+          {{ error }}
+        </SurfacePanel>
 
-        <template v-else-if="activeTab === 'aiCatalog' && aiConsole">
-          <AdminProviderSettingsPanel
-            :settings="aiConsole"
-            :credential-saving="credentialSaving"
-            :validating-binding-id="bindingValidatingId"
-            @create-credential="createCredential"
-            @validate-binding="validateBinding"
-          />
-        </template>
+        <div
+          v-if="sectionTabs.length"
+          class="rr-admin-control__layout"
+        >
+          <aside class="rr-admin-control__nav">
+            <SurfacePanel
+              tone="muted"
+              density="compact"
+              class="rr-admin-control__context-card"
+            >
+              <div class="rr-admin-control__context-row">
+                <span>{{ $t('shell.workspace') }}</span>
+                <strong>{{ context.workspaceName }}</strong>
+              </div>
+              <div class="rr-admin-control__context-row">
+                <span>{{ $t('shell.library') }}</span>
+                <strong>{{ context.libraryName }}</strong>
+              </div>
+            </SurfacePanel>
 
-        <template v-else-if="activeTab === 'pricing' && aiConsole">
-          <AdminModelPricingPanel :settings="aiConsole" />
-        </template>
+            <nav class="rr-admin-control__nav-list">
+              <button
+                v-for="tab in sectionTabs"
+                :key="tab.id"
+                type="button"
+                class="rr-admin-control__nav-button"
+                :class="{ 'is-active': activeSection === tab.id }"
+                @click="activeSection = tab.id"
+              >
+                <span>{{ tab.label }}</span>
+                <strong>{{ tab.count }}</strong>
+              </button>
+            </nav>
+          </aside>
 
-        <AdminPlaceholderPanel
-          v-else-if="activeTab === 'audit'"
-          :title="$t('admin.audit.title')"
-          :columns="[
-            t('admin.headers.created'),
-            t('admin.headers.action'),
-            t('admin.headers.result'),
-            t('admin.headers.subjects'),
-            t('admin.headers.message'),
-          ]"
-          :rows="auditRows"
-        />
+          <section class="rr-admin-control__content">
+            <section
+              v-if="activeSection === 'access' && canManageAccess"
+              class="rr-admin-pane"
+            >
+              <div class="rr-admin-section__head">
+                <div class="rr-admin-section__copy">
+                  <p class="rr-admin-section__eyebrow">{{ $t('admin.sections.access.eyebrow') }}</p>
+                  <h2>{{ $t('admin.sections.access.title') }}</h2>
+                  <p>{{ $t('admin.sections.access.subtitle') }}</p>
+                </div>
 
-        <ErrorStateCard
+                <button
+                  class="rr-button rr-button--primary"
+                  type="button"
+                  @click="adminStore.showCreateToken = true"
+                >
+                  {{ $t('admin.createToken') }}
+                </button>
+              </div>
+
+              <SurfacePanel class="rr-admin-pane__surface">
+                <ApiTokensTable
+                  embedded
+                  :rows="tokens"
+                  :current-principal-id="principal.id"
+                  :current-principal-label="principal.displayLabel"
+                  @create="adminStore.showCreateToken = true"
+                  @copy="adminStore.copyToken"
+                  @revoke="adminStore.revokeToken"
+                />
+              </SurfacePanel>
+            </section>
+
+            <section
+              v-else-if="activeSection === 'operations' && hasOperationsSurface"
+              class="rr-admin-pane"
+            >
+              <div class="rr-admin-section__head">
+                <div class="rr-admin-section__copy">
+                  <p class="rr-admin-section__eyebrow">{{ $t('admin.sections.operations.eyebrow') }}</p>
+                  <h2>{{ $t('admin.sections.operations.title') }}</h2>
+                  <p>{{ $t('admin.sections.operations.subtitle') }}</p>
+                </div>
+              </div>
+
+              <div class="rr-admin-pane__split">
+                <SurfacePanel
+                  v-if="canReadOperations"
+                  class="rr-admin-pane__surface"
+                >
+                  <AdminOperationsPanel :snapshot="opsSnapshot" />
+                </SurfacePanel>
+
+                <SurfacePanel
+                  v-if="canReadAudit"
+                  class="rr-admin-pane__surface"
+                >
+                  <AdminAuditFeed :events="auditEvents" />
+                </SurfacePanel>
+              </div>
+            </section>
+
+            <section
+              v-else-if="activeSection === 'ai' && canManageAi && aiConsole"
+              class="rr-admin-pane rr-admin-pane--editor"
+            >
+              <div class="rr-admin-section__head">
+                <div class="rr-admin-section__copy">
+                  <p class="rr-admin-section__eyebrow">{{ $t('admin.sections.ai.eyebrow') }}</p>
+                  <h2>{{ $t('admin.sections.ai.title') }}</h2>
+                  <p>{{ $t('admin.sections.ai.subtitle') }}</p>
+                </div>
+              </div>
+
+              <AdminProviderSettingsPanel
+                embedded
+                :settings="aiConsole"
+                :saving="aiSetupSaving"
+                :validating-binding-id="bindingValidatingId"
+                :commit-version="catalogCommitVersion"
+                :error-message="aiSetupError"
+                @create-credential="createCredential"
+                @update-credential="updateCredential"
+                @create-model-preset="createModelPreset"
+                @update-model-preset="updateModelPreset"
+                @save-binding="saveBinding"
+                @validate-binding="validateBinding"
+              />
+            </section>
+
+            <section
+              v-else-if="activeSection === 'pricing' && canManageAi && aiConsole"
+              class="rr-admin-pane rr-admin-pane--editor"
+            >
+              <div class="rr-admin-section__head">
+                <div class="rr-admin-section__copy">
+                  <p class="rr-admin-section__eyebrow">{{ $t('admin.sections.pricing.eyebrow') }}</p>
+                  <h2>{{ $t('admin.sections.pricing.title') }}</h2>
+                  <p>{{ $t('admin.sections.pricing.subtitle') }}</p>
+                </div>
+              </div>
+
+              <AdminModelPricingPanel
+                embedded
+                :settings="aiConsole"
+                :saving="pricesSaving"
+                :commit-version="catalogCommitVersion"
+                :error-message="pricesError"
+                @create-price="createPrice"
+                @update-price="updatePrice"
+              />
+            </section>
+
+            <SurfacePanel
+              v-else
+              class="rr-admin-control__notice"
+            >
+              {{ $t('admin.noVisibleSections') }}
+            </SurfacePanel>
+          </section>
+        </div>
+
+        <SurfacePanel
           v-else
-          :title="$t('admin.title')"
-          :description="$t('admin.emptyState')"
-        />
+          class="rr-admin-control__notice"
+        >
+          {{ $t('admin.noVisibleSections') }}
+        </SurfacePanel>
       </template>
     </div>
 
     <CreateTokenDialog
-      v-if="context"
+      v-if="context && canManageAccess"
       :open="showCreateToken"
       :plaintext-token="latestPlaintextToken"
       :workspace-id="context.workspaceId"
@@ -261,3 +403,101 @@ const opsGenerationState = computed(() => opsSnapshot.value?.state.knowledgeGene
     />
   </PageSurface>
 </template>
+
+<style scoped lang="scss">
+.rr-admin-control {
+  width: min(100%, 1600px);
+  margin: 0 auto;
+  display: grid;
+  gap: 1rem;
+}
+
+.rr-admin-control__layout {
+  display: grid;
+  grid-template-columns: minmax(230px, 290px) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.rr-admin-control__nav {
+  position: sticky;
+  top: 5.6rem;
+  display: grid;
+  gap: 0.7rem;
+}
+
+.rr-admin-control__content,
+.rr-admin-pane {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.rr-admin-section__head {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: end;
+}
+
+.rr-admin-section__copy h2 {
+  margin: 0.2rem 0 0.4rem;
+  font-size: clamp(1.25rem, 1.6vw, 1.55rem);
+  line-height: 1.1;
+}
+
+.rr-admin-section__copy p {
+  margin: 0;
+  color: var(--rr-text-secondary);
+  font-size: 0.98rem;
+  line-height: 1.55;
+}
+
+.rr-admin-control__nav-list {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.rr-admin-control__nav-button {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.8rem;
+  border: 1px solid var(--rr-border-soft);
+  border-radius: 14px;
+  padding: 0.72rem 0.82rem;
+  background: rgba(255, 255, 255, 0.78);
+  color: var(--rr-text-secondary);
+  font-size: 0.98rem;
+}
+
+.rr-admin-control__nav-button.is-active {
+  border-color: rgba(56, 87, 255, 0.25);
+  color: var(--rr-text-primary);
+  background: rgba(244, 247, 255, 0.96);
+}
+
+.rr-admin-control__nav-button strong {
+  color: var(--rr-text-primary);
+  font-size: 0.92rem;
+}
+
+.rr-admin-control__context-row span {
+  font-size: 0.8rem;
+  color: var(--rr-text-muted);
+}
+
+.rr-admin-control__context-row strong {
+  font-size: 0.94rem;
+}
+
+@media (max-width: 1080px) {
+  .rr-admin-control__layout {
+    grid-template-columns: 1fr;
+  }
+
+  .rr-admin-control__nav {
+    position: static;
+  }
+}
+</style>

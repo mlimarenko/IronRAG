@@ -656,3 +656,100 @@ async fn inaccessible_library_filters_reject_search_instead_of_returning_partial
     fixture.cleanup().await?;
     result
 }
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango services"]
+async fn search_documents_degrades_to_lexical_hits_when_vector_path_is_unavailable()
+-> anyhow::Result<()> {
+    let settings =
+        Settings::from_env().context("failed to load settings for mcp fallback search test")?;
+    let fixture = McpSearchFixture::create(settings).await?;
+
+    let result = async {
+        let token = fixture.bearer_token(&["documents:read"], "search-fallback").await?;
+        let _ = fixture
+            .create_document_state(
+                fixture.primary_library_id,
+                "fallback-beacon",
+                "ready",
+                Some("fallback-anchor remains searchable through lexical-only path"),
+                &["fallback-anchor remains searchable through lexical-only path"],
+                None,
+            )
+            .await?;
+
+        let response = fixture
+            .mcp_tool_call(
+                &token,
+                "search_documents",
+                json!({
+                    "query": "fallback-anchor",
+                    "libraryIds": [fixture.primary_library_id],
+                    "limit": 5
+                }),
+            )
+            .await?;
+        assert_eq!(response["result"]["isError"], json!(false));
+        let hits = response["result"]["structuredContent"]["hits"]
+            .as_array()
+            .context("fallback search hits missing")?;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["readabilityState"], json!("readable"));
+        assert!(
+            hits[0]["excerpt"].as_str().is_some_and(|excerpt| excerpt.contains("fallback-anchor"))
+        );
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango"]
+async fn search_documents_returns_structured_content_with_stable_envelope() -> anyhow::Result<()> {
+    let settings = Settings::from_env().context("failed to load settings for mcp search test")?;
+    let fixture = McpSearchFixture::create(settings).await?;
+
+    let result = async {
+        let token = fixture.bearer_token(&["documents:read"], "search-envelope").await?;
+        let _ = fixture
+            .create_document_state(
+                fixture.primary_library_id,
+                "envelope-beacon",
+                "ready",
+                Some("envelope-anchor text is searchable"),
+                &["envelope-anchor text"],
+                None,
+            )
+            .await?;
+
+        let response = fixture
+            .mcp_tool_call(
+                &token,
+                "search_documents",
+                json!({
+                    "query": "envelope-anchor",
+                    "libraryIds": [fixture.primary_library_id],
+                    "limit": 3
+                }),
+            )
+            .await?;
+
+        let result_value = response.get("result").context("missing result field")?;
+        assert_eq!(result_value["isError"], json!(false));
+
+        let has_structured_content =
+            result_value.get("structuredContent").is_some_and(|value| !value.is_null());
+        let has_content = result_value.get("content").is_some_and(|value| !value.is_null());
+        assert!(has_structured_content || has_content);
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}

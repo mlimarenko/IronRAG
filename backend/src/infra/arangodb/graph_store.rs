@@ -827,7 +827,7 @@ impl ArangoGraphStore {
                     workspace_id: @workspace_id,
                     library_id: @library_id,
                     canonical_label: @canonical_label,
-                    aliases: UNION_DISTINCT(COALESCE(OLD.aliases, []), @aliases),
+                   aliases: UNION_DISTINCT((OLD.aliases == null ? [] : OLD.aliases), @aliases),
                     entity_type: @entity_type,
                     summary: @summary,
                     confidence: @confidence,

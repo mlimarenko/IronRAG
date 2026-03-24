@@ -1,5 +1,3 @@
-export type AdminTab = 'tokens' | 'aiCatalog' | 'pricing' | 'audit'
-
 export type AdminGrantResourceKind =
   | 'system'
   | 'workspace'
@@ -23,20 +21,6 @@ export type AdminPermissionKind =
   | 'ops_read'
   | 'audit_read'
   | 'iam_admin'
-
-export interface AdminTabCounts {
-  tokens: number
-  aiCatalog: number
-  pricing: number
-  audit: number
-}
-
-export interface AdminTabAvailability {
-  tokens: boolean
-  aiCatalog: boolean
-  pricing: boolean
-  audit: boolean
-}
 
 export interface AdminWorkspaceMembership {
   workspaceId: string
@@ -62,6 +46,7 @@ export interface AdminPrincipalSummary {
   principalKind: string
   status: string
   displayLabel: string
+  login: string | null
   email: string | null
   displayName: string | null
   authProviderKind: string | null
@@ -123,6 +108,9 @@ export interface AdminPriceCatalogEntry {
   unitPrice: string
   currencyCode: string
   effectiveFrom: string
+  effectiveTo: string | null
+  workspaceId: string | null
+  setInWorkspace: boolean
 }
 
 export interface AdminProviderCredential {
@@ -130,7 +118,7 @@ export interface AdminProviderCredential {
   workspaceId: string
   providerCatalogId: string
   label: string
-  secretRef: string
+  apiKeySummary: string
   credentialState: string
   createdAt: string
   updatedAt: string
@@ -174,7 +162,65 @@ export interface CreateAdminCredentialPayload {
   workspaceId: string
   providerCatalogId: string
   label: string
-  secretRef: string
+  apiKey: string
+}
+
+export interface UpdateAdminCredentialPayload {
+  credentialId: string
+  label: string
+  apiKey: string | null
+  credentialState: string
+}
+
+export interface CreateAdminPricePayload {
+  workspaceId: string
+  modelCatalogId: string
+  billingUnit: string
+  unitPrice: string
+  currencyCode: string
+  effectiveFrom: string
+  effectiveTo: string | null
+}
+
+export interface UpdateAdminPricePayload {
+  priceId: string
+  modelCatalogId: string
+  billingUnit: string
+  unitPrice: string
+  currencyCode: string
+  effectiveFrom: string
+  effectiveTo: string | null
+}
+
+export interface CreateAdminModelPresetPayload {
+  workspaceId: string
+  modelCatalogId: string
+  presetName: string
+  systemPrompt: string | null
+  temperature: number | null
+  topP: number | null
+  maxOutputTokensOverride: number | null
+  extraParametersJson: unknown
+}
+
+export interface UpdateAdminModelPresetPayload {
+  presetId: string
+  presetName: string
+  systemPrompt: string | null
+  temperature: number | null
+  topP: number | null
+  maxOutputTokensOverride: number | null
+  extraParametersJson: unknown
+}
+
+export interface SaveAdminLibraryBindingPayload {
+  bindingId?: string
+  workspaceId: string
+  libraryId: string
+  bindingPurpose: string
+  providerCredentialId: string
+  modelPresetId: string
+  bindingState: string
 }
 
 export interface AdminAiConsoleState {
@@ -267,4 +313,54 @@ export interface AdminAuditEvent {
   redactedMessage: string | null
   internalMessage: string | null
   subjects: AdminAuditEventSubject[]
+}
+
+export interface AdminDraftState<T> {
+  dirty: boolean
+  draft: T | null
+  lastError: string | null
+  saving: boolean
+}
+
+export interface AdminAccessSurface {
+  loading: boolean
+  error: string | null
+  principals: AdminPrincipalSummary[]
+  tokens: AdminApiTokenRow[]
+  tokenDraft: AdminDraftState<CreateApiTokenPayload>
+}
+
+export interface AdminOperationsSurface {
+  loading: boolean
+  error: string | null
+  librarySnapshot: AdminOpsLibrarySnapshot | null
+  asyncOperations: AdminOpsAsyncOperation[]
+  auditEvents: AdminAuditEvent[]
+}
+
+export interface AdminAiSetupSurface {
+  loading: boolean
+  error: string | null
+  console: AdminAiConsoleState | null
+  credentialDraft: AdminDraftState<CreateAdminCredentialPayload>
+  presetDraft: AdminDraftState<CreateAdminModelPresetPayload>
+  bindingDraft: AdminDraftState<SaveAdminLibraryBindingPayload>
+}
+
+export interface AdminPriceEditorSurface {
+  loading: boolean
+  error: string | null
+  prices: AdminPriceCatalogEntry[]
+  selectedPriceId: string | null
+  priceDraft: AdminDraftState<CreateAdminPricePayload>
+}
+
+export type AdminSection = 'access' | 'operations' | 'ai' | 'prices'
+
+export interface AdminControlCenterSurface {
+  activeSection: AdminSection
+  access: AdminAccessSurface
+  operations: AdminOperationsSurface
+  aiSetup: AdminAiSetupSurface
+  prices: AdminPriceEditorSurface
 }

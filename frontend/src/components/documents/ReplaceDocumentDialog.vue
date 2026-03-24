@@ -6,6 +6,7 @@ const props = defineProps<{
   documentName: string | null
   acceptedFormats: string[]
   loading: boolean
+  error?: string | null
 }>()
 
 const emit = defineEmits<{
@@ -106,6 +107,12 @@ function submit(): void {
         class="rr-document-dialog__error"
       >
         {{ $t('documents.dialogs.replace.validationType') }}
+      </p>
+      <p
+        v-else-if="props.error"
+        class="rr-document-dialog__error"
+      >
+        {{ props.error }}
       </p>
 
       <div class="rr-dialog__actions">

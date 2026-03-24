@@ -465,7 +465,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/ai/library-bindings/{libraryId}": {
+    "/v1/ai/libraries/{libraryId}/bindings": {
         parameters: {
             query?: never;
             header?: never;
@@ -493,6 +493,23 @@ export interface paths {
         put?: never;
         /** Create or replace the active binding for one library purpose */
         post: operations["createAiLibraryBinding"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ai/library-bindings/{bindingId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update one existing library binding */
+        put: operations["updateAiLibraryBinding"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1317,6 +1334,9 @@ export interface components {
             [key: string]: unknown;
         };
         TokenResponse: {
+            [key: string]: unknown;
+        };
+        UpdateLibraryBindingRequest: {
             [key: string]: unknown;
         };
         Unauthorized: {
@@ -2457,6 +2477,59 @@ export interface operations {
             };
             /** @description Missing or insufficient authorization */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    updateAiLibraryBinding: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bindingId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateLibraryBindingRequest"];
+            };
+        };
+        responses: {
+            /** @description Library model binding updated */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LibraryModelBindingResponse"];
+                };
+            };
+            /** @description Invalid library binding payload */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Missing or insufficient authorization */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Binding not found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

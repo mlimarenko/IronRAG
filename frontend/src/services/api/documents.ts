@@ -31,7 +31,7 @@ import type {
   DocumentQueueIsolationSummary,
   DocumentQueueWaitingReason,
   DocumentRevisionHistoryItem,
-  DocumentRow,
+  DocumentRowSummary,
   DocumentStatus,
   DocumentSummaryCounters,
   DocumentsWorkspaceDiagnosticChip,
@@ -43,6 +43,7 @@ import type {
   UploadDocumentsResponse,
   UploadRejectionDetails,
 } from 'src/models/ui/documents'
+import type { DashboardRecentDocument } from 'src/models/ui/dashboard'
 import type { GraphCanonicalSummary } from 'src/models/ui/graph'
 import { i18n } from 'src/lib/i18n'
 import { useShellStore } from 'src/stores/shell'
@@ -287,6 +288,55 @@ function inferFileType(fileName: string, mimeType: string | null): string {
     return 'Text'
   }
   return extension ? extension.toUpperCase() : 'File'
+}
+
+function formatDateTime(value: string | null): string {
+  if (!value) {
+    return '—'
+  }
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) {
+    return value
+  }
+  return new Intl.DateTimeFormat(i18n.global.locale.value || undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(parsed)
+}
+
+function statusLabelFor(status: DocumentStatus): string {
+  const key = `documents.statuses.${status}`
+  return i18n.global.te(key) ? i18n.global.t(key) : status
+}
+
+function mutationLabelFor(mutation: RawContentMutation | null): string | null {
+  if (!mutation) {
+    return null
+  }
+  const kindKey = `documents.mutationKinds.${mutation.operation_kind}`
+  const kindLabel = i18n.global.te(kindKey)
+    ? i18n.global.t(kindKey)
+    : mutation.operation_kind
+  const statusValue = mutationStatusFromState(mutation.mutation_state)
+  const statusKey = `documents.mutation.status.${statusValue}`
+  const statusLabel = i18n.global.te(statusKey) ? i18n.global.t(statusKey) : statusValue
+  return `${kindLabel} · ${statusLabel}`
+}
+
+function mutationLabelFromState(mutation: DocumentMutationState | null): string | null {
+  if (!mutation || (!mutation.kind && !mutation.status)) {
+    return null
+  }
+  const kindKey = mutation.kind ? `documents.mutationKinds.${mutation.kind}` : null
+  const kindLabel =
+    kindKey && i18n.global.te(kindKey) ? i18n.global.t(kindKey) : mutation.kind ?? null
+  const statusKey = mutation.status ? `documents.mutation.status.${mutation.status}` : null
+  const statusLabel =
+    statusKey && i18n.global.te(statusKey) ? i18n.global.t(statusKey) : mutation.status ?? null
+  if (kindLabel && statusLabel) {
+    return `${kindLabel} · ${statusLabel}`
+  }
+  return kindLabel ?? statusLabel ?? null
 }
 
 function mutationStatusFromState(value: string): 'accepted' | 'reconciling' | 'completed' | 'failed' {
@@ -676,7 +726,7 @@ function buildGraphThroughput(
 }
 
 function buildCollectionAccounting(
-  rows: DocumentRow[],
+  rows: DocumentRowSummary[],
 ): DocumentCollectionAccountingSummary {
   const queued = rows.filter((row) => row.status === 'queued').length
   const processing = rows.filter((row) => row.status === 'processing').length
@@ -700,7 +750,7 @@ function buildCollectionAccounting(
   }
 }
 
-function buildCollectionDiagnostics(rows: DocumentRow[]): DocumentCollectionDiagnostics {
+function buildCollectionDiagnostics(rows: DocumentRowSummary[]): DocumentCollectionDiagnostics {
   const queued = rows.filter((row) => row.status === 'queued').length
   const processing = rows.filter((row) => row.status === 'processing').length
   const ready = rows.filter((row) => row.status === 'ready').length
@@ -778,8 +828,7 @@ function buildCollectionDiagnostics(rows: DocumentRow[]): DocumentCollectionDiag
     lastTransitionAt:
       rows.length > 0
         ? rows
-            .map((row) => row.lastActivityAt)
-            .filter((value): value is string => Boolean(value))
+            .map((row) => row.uploadedAt)
             .sort(compareIsoDates)
             [0] ?? null
         : null,
@@ -813,7 +862,7 @@ function buildCollectionDiagnostics(rows: DocumentRow[]): DocumentCollectionDiag
 }
 
 function buildWorkspaceSummary(
-  rows: DocumentRow[],
+  rows: DocumentRowSummary[],
   diagnostics: DocumentCollectionDiagnostics,
 ): DocumentsWorkspaceSummary {
   const queued = rows.filter((row) => row.status === 'queued').length
@@ -935,86 +984,28 @@ function mapSurfaceRow(
   document: RawContentDocumentDetailResponse,
   relatedMutations: RawContentMutationDetailResponse[],
   relatedJobs: RawIngestJob[],
-  libraryName: string,
-): DocumentRow {
+): DocumentRowSummary {
   const revisions = document.active_revision ? [document.active_revision] : []
   const latestMutation = selectLatestMutation(document, relatedMutations)
   const latestJob = selectLatestJob(latestMutation, relatedJobs)
   const readableRevisionPresent = document.head?.readable_revision_id !== null
   const documentStatus = documentStatusFromQueueState(latestJob?.queue_state ?? null, readableRevisionPresent)
-  const activityStatus = activityStatusFromQueueState(latestJob?.queue_state ?? null, latestActivityAt(latestJob))
   const activeRevision = document.active_revision
   const fileName = buildDocumentFileName(document.document, activeRevision, revisions)
   const fileType = buildDocumentFileType(document.document, activeRevision, revisions)
   const mutationState = buildMutationState(latestMutation?.mutation ?? null)
-  const documentHasActivity = Boolean(latestJob || latestMutation)
+  const lastActivity = latestActivityAt(latestJob) ?? document.document.created_at
 
   return {
     id: document.document.id,
-    logicalDocumentId: document.document.id,
-    readabilityState:
-      documentStatus === 'ready'
-        ? 'readable_active'
-        : documentStatus === 'ready_no_graph'
-          ? 'readable_stale'
-          : 'unreadable',
-    activeRevisionId: activeRevision?.id ?? null,
-    readableRevisionId:
-      document.head?.readable_revision_id ?? activeRevision?.id ?? null,
-    readableRevisionNo:
-      document.head?.readable_revision_id && activeRevision?.id === document.head.readable_revision_id
-        ? activeRevision?.revision_number ?? null
-        : null,
     fileName,
     fileType,
     fileSizeLabel: activeRevision ? formatFileSizeLabel(activeRevision.byte_size) : '—',
     uploadedAt: document.document.created_at,
-    libraryName,
-    stage: latestJob?.job_kind ?? activeRevision?.content_source_kind ?? document.document.document_state,
     status: documentStatus,
-    progressPercent:
-      documentStatus === 'ready'
-        ? 100
-        : documentStatus === 'ready_no_graph'
-          ? 95
-          : activityStatus === 'queued'
-            ? 0
-            : activityStatus === 'active'
-              ? 50
-              : activityStatus === 'stalled'
-                ? 25
-                : 100,
-    activityStatus,
-    lastActivityAt: latestActivityAt(latestJob),
-    stalledReason: stalledReason(activityStatus, latestActivityAt(latestJob)),
-    chunkCount: null,
-    graphNodeCount: activeRevision ? 1 : null,
-    graphEdgeCount: 0,
-    activeRevisionNo: activeRevision?.revision_number ?? null,
-    activeRevisionKind: activeRevision?.content_source_kind ?? null,
-    latestAttemptNo: Math.max(relatedJobs.length, documentHasActivity ? 1 : 0),
-    accountingStatus:
-      documentStatus === 'ready' || documentStatus === 'ready_no_graph'
-        ? 'priced'
-        : documentStatus === 'failed'
-          ? 'partial'
-          : 'in_flight_unsettled',
-    totalEstimatedCost: null,
-    settledEstimatedCost: null,
-    inFlightEstimatedCost: null,
-    currency: null,
-    inFlightStageCount: activityStatus === 'queued' || activityStatus === 'active' ? 1 : 0,
-    missingStageCount: 0,
-    partialHistory: relatedJobs.length > 1 || documentStatus !== 'ready',
-    partialHistoryReason: latestMutation?.mutation.failure_code ?? latestMutation?.mutation.conflict_code ?? null,
-    graphThroughput: buildGraphThroughput(
-      activityStatus === 'queued' || activityStatus === 'active' ? 1 : 0,
-      1,
-      documentStatus === 'ready' || documentStatus === 'ready_no_graph' ? 1 : 0,
-      activityStatus === 'queued' || activityStatus === 'active' ? 'elevated' : null,
-    ),
-    mutation: mutationState,
-    knowledgeReadiness: null,
+    statusLabel: statusLabelFor(documentStatus),
+    activityLabel: formatDateTime(lastActivity),
+    mutationLabel: mutationLabelFor(latestMutation?.mutation ?? null),
     canRetry:
       latestJob?.queue_state === 'failed' ||
       latestJob?.queue_state === 'canceled' ||
@@ -1023,16 +1014,6 @@ function mapSurfaceRow(
     canReplace: document.document.document_state === 'active',
     canRemove: document.document.document_state === 'active',
     detailAvailable: document.document.document_state === 'active',
-    canonical: buildCanonicalState(
-      document.document,
-      document.head,
-      activeRevision,
-      activeRevision,
-      latestMutation,
-      latestJob,
-      relatedMutations,
-      relatedJobs,
-    ),
   }
 }
 
@@ -1403,13 +1384,12 @@ function buildDocumentRelations(
 
 function buildSurfaceResponse(
   bundle: CanonicalLibraryBundle,
-  libraryName: string,
 ): DocumentsSurfaceResponse {
   const relationMaps = buildRelationMaps(bundle)
   const rows = bundle.documents
     .map((document) => {
       const relations = buildDocumentRelations(document.document.id, bundle, relationMaps)
-      return mapSurfaceRow(document, relations.mutations, relations.jobs, libraryName)
+      return mapSurfaceRow(document, relations.mutations, relations.jobs)
     })
     .sort((left, right) => compareIsoDates(left.uploadedAt, right.uploadedAt))
 
@@ -1449,20 +1429,52 @@ function buildSurfaceResponse(
     filters: {
       statuses: Array.from(new Set(rows.map((row) => row.status))).sort(),
       fileTypes: Array.from(new Set(rows.map((row) => row.fileType))).sort(),
-      accountingStatuses: Array.from(new Set(rows.map((row) => row.accountingStatus))).sort(),
-      mutationStatuses: Array.from(
-        new Set(
-          rows
-            .map((row) => row.mutation.status)
-            .filter((value): value is NonNullable<DocumentRow['mutation']['status']> => value !== null),
-        ),
-      ).sort(),
     },
     accounting: buildCollectionAccounting(rows),
     diagnostics,
     workspace: buildWorkspaceSummary(rows, diagnostics),
     rows,
   }
+}
+
+function dashboardRowPriority(row: DocumentRowSummary): number {
+  switch (row.status) {
+    case 'failed':
+      return 5
+    case 'processing':
+      return 4
+    case 'queued':
+      return 3
+    case 'ready_no_graph':
+      return 2
+    case 'ready':
+    default:
+      return 1
+  }
+}
+
+export function mapDashboardRecentDocuments(
+  rows: DocumentRowSummary[],
+  limit = 6,
+): DashboardRecentDocument[] {
+  return rows
+    .slice()
+    .sort((left, right) => {
+      const priorityDelta = dashboardRowPriority(right) - dashboardRowPriority(left)
+      if (priorityDelta !== 0) {
+        return priorityDelta
+      }
+      return compareIsoDates(left.uploadedAt, right.uploadedAt)
+    })
+    .slice(0, limit)
+    .map((row) => ({
+      id: row.id,
+      fileName: row.fileName,
+      fileType: row.fileType,
+      status: row.status,
+      statusLabel: row.statusLabel,
+      uploadedAt: row.uploadedAt,
+    }))
 }
 
 export function normalizeDocumentUploadFailure(
@@ -1489,14 +1501,13 @@ export function normalizeDocumentUploadFailure(
 
 export async function fetchDocumentsSurface(): Promise<DocumentsSurfaceResponse> {
   const shellStore = useShellStore()
-  const libraryName = shellStore.context?.activeLibrary.name ?? ''
   const bundle = await fetchCanonicalBundle()
 
   if (bundle.documents.length === 0) {
-    return buildSurfaceResponse(bundle, libraryName)
+    return buildSurfaceResponse(bundle)
   }
 
-  return buildSurfaceResponse(bundle, libraryName)
+  return buildSurfaceResponse(bundle)
 }
 
 export async function fetchDocumentDetail(id: string): Promise<DocumentDetail> {
@@ -1521,7 +1532,7 @@ export async function fetchDocumentDetail(id: string): Promise<DocumentDetail> {
     ),
     unwrap(
       apiHttp.get<RawChunkSummary[]>('/chunks', {
-        params: { document_id: id },
+        params: { documentId: id },
       }),
     ),
     fetchKnowledgeDocumentDetail(document.document.library_id, id),
@@ -1584,7 +1595,7 @@ async function readTextChecksum(content: string): Promise<string> {
   return sha256Hex(content)
 }
 
-export async function uploadDocument(file: File): Promise<DocumentRow> {
+export async function uploadDocument(file: File): Promise<DocumentRowSummary> {
   const { library } = buildMutationRequestBase()
   const formData = new FormData()
   formData.append('library_id', library.id)
@@ -1609,7 +1620,7 @@ export async function deleteDocumentItem(id: string): Promise<void> {
   await unwrap(apiHttp.delete<RawContentMutationDetailResponse>(`/content/documents/${id}`))
 }
 
-export async function retryDocumentItem(id: string): Promise<DocumentRow> {
+export async function retryDocumentItem(id: string): Promise<DocumentRowSummary> {
   const detail = await fetchDocumentDetail(id)
   const latestJob = detail.canonical.latestJob
   if (!latestJob) {
@@ -1628,50 +1639,23 @@ export async function reprocessDocumentItem(id: string): Promise<void> {
   await unwrap(apiHttp.post<RawIngestJob>(`/ingest/jobs/${latestJob.id}/retry`))
 }
 
-async function fetchDocumentRowFromDetail(id: string): Promise<DocumentRow> {
+async function fetchDocumentRowFromDetail(id: string): Promise<DocumentRowSummary> {
   const detail = await fetchDocumentDetail(id)
   return {
     id: detail.id,
-    logicalDocumentId: detail.logicalDocumentId,
-    readabilityState: detail.readabilityState,
-    activeRevisionId: detail.activeRevisionId,
-    readableRevisionId: detail.readableRevisionId,
-    readableRevisionNo: detail.readableRevisionNo,
     fileName: detail.fileName,
     fileType: detail.fileType,
     fileSizeLabel: detail.fileSizeLabel,
     uploadedAt: detail.uploadedAt,
-    libraryName: detail.libraryName,
-    stage: detail.stage,
     status: detail.status,
-    progressPercent: detail.progressPercent,
-    activityStatus: detail.activityStatus,
-    lastActivityAt: detail.lastActivityAt,
-    stalledReason: detail.stalledReason,
-    chunkCount: detail.extractedStats.chunkCount,
-    graphNodeCount: detail.graphStats.nodeCount,
-    graphEdgeCount: detail.graphStats.edgeCount,
-    activeRevisionNo: detail.activeRevisionNo,
-    activeRevisionKind: detail.activeRevisionKind,
-    latestAttemptNo: detail.latestAttemptNo,
-    accountingStatus: detail.accountingStatus,
-    totalEstimatedCost: detail.totalEstimatedCost,
-    settledEstimatedCost: detail.settledEstimatedCost,
-    inFlightEstimatedCost: detail.inFlightEstimatedCost,
-    currency: detail.currency,
-    inFlightStageCount: detail.inFlightStageCount,
-    missingStageCount: detail.missingStageCount,
-    partialHistory: detail.partialHistory,
-    partialHistoryReason: detail.partialHistoryReason,
-    graphThroughput: detail.graphThroughput,
-    knowledgeReadiness: detail.knowledgeReadiness,
-    mutation: detail.mutation,
+    statusLabel: statusLabelFor(detail.status),
+    activityLabel: formatDateTime(detail.lastActivityAt ?? detail.uploadedAt),
+    mutationLabel: mutationLabelFromState(detail.mutation),
     canRetry: detail.canRetry,
     canAppend: detail.canAppend,
     canReplace: detail.canReplace,
     canRemove: detail.canRemove,
     detailAvailable: detail.detailAvailable,
-    canonical: detail.canonical,
   }
 }
 
@@ -1726,7 +1710,7 @@ export async function replaceDocumentItem(
 export async function downloadDocumentExtractedText(id: string): Promise<Blob> {
   const chunks = await unwrap(
     apiHttp.get<RawChunkSummary[]>('/chunks', {
-      params: { document_id: id },
+      params: { documentId: id },
     }),
   )
   if (chunks.length === 0) {

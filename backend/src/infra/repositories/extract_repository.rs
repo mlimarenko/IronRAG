@@ -186,6 +186,28 @@ pub async fn get_extract_chunk_result_by_chunk_and_attempt(
     .await
 }
 
+pub async fn get_extract_chunk_result_by_id(
+    postgres: &PgPool,
+    chunk_result_id: Uuid,
+) -> Result<Option<ExtractChunkResultRow>, sqlx::Error> {
+    sqlx::query_as::<_, ExtractChunkResultRow>(
+        "select
+            id,
+            chunk_id,
+            attempt_id,
+            extract_state::text as extract_state,
+            provider_call_id,
+            started_at,
+            finished_at,
+            failure_code
+         from extract_chunk_result
+         where id = $1",
+    )
+    .bind(chunk_result_id)
+    .fetch_optional(postgres)
+    .await
+}
+
 pub async fn list_extract_chunk_results_by_attempt(
     postgres: &PgPool,
     attempt_id: Uuid,

@@ -489,6 +489,7 @@ async fn canonical_content_lifecycle_promotes_head_and_separates_readable_from_a
                     requested_by_principal_id: None,
                     request_surface: "rest".to_string(),
                     idempotency_key: None,
+                    source_identity: None,
                 },
             )
             .await
@@ -680,6 +681,7 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
                     requested_by_principal_id: None,
                     request_surface: "rest".to_string(),
                     idempotency_key: Some(format!("append-{}", Uuid::now_v7())),
+                    source_identity: None,
                 },
             )
             .await
@@ -806,6 +808,7 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
                     requested_by_principal_id: None,
                     request_surface: "rest".to_string(),
                     idempotency_key: Some(format!("replace-{}", Uuid::now_v7())),
+                    source_identity: None,
                 },
             )
             .await
@@ -893,6 +896,7 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
                     requested_by_principal_id: None,
                     request_surface: "rest".to_string(),
                     idempotency_key: Some(format!("delete-{}", Uuid::now_v7())),
+                    source_identity: None,
                 },
             )
             .await

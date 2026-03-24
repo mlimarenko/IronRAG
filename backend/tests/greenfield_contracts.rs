@@ -165,6 +165,7 @@ pub fn assert_fresh_deploy_surface_uses_canonical_vocabulary(contract: &str) {
 
     assert!(contract.contains("CatalogWorkspace"));
     assert!(contract.contains("CatalogLibrary"));
+    assert!(contract.contains("ArangoDB"));
     assert!(contract.contains("/v1/iam/bootstrap/claim"));
     assert!(contract.contains("/v1/openapi/rustrag.openapi.yaml"));
 }

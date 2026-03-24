@@ -2,6 +2,14 @@ use redis::Client as RedisClient;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
 use crate::app::config::Settings;
+use crate::infra::arangodb::{
+    client::ArangoClient,
+    collections::{
+        DOCUMENT_COLLECTIONS, KNOWLEDGE_CHUNK_VECTOR_COLLECTION, KNOWLEDGE_CHUNK_VECTOR_INDEX,
+        KNOWLEDGE_ENTITY_VECTOR_COLLECTION, KNOWLEDGE_ENTITY_VECTOR_INDEX, KNOWLEDGE_GRAPH_NAME,
+        KNOWLEDGE_SEARCH_VIEW,
+    },
+};
 
 const SEEDED_PROVIDER_KINDS: [&str; 3] = ["openai", "deepseek", "qwen"];
 const CANONICAL_BASELINE_TABLES: [&str; 7] = [
@@ -64,6 +72,59 @@ async fn validate_canonical_bootstrap_state(
     Ok(())
 }
 
+pub async fn validate_arango_bootstrap_state(
+    arango_client: &ArangoClient,
+    settings: &Settings,
+) -> anyhow::Result<()> {
+    if !settings.destructive_fresh_bootstrap_settings().required {
+        return Ok(());
+    }
+
+    for collection in DOCUMENT_COLLECTIONS {
+        anyhow::ensure!(
+            arango_client.collection_exists(collection).await?,
+            "canonical bootstrap validation failed: required Arango collection `{collection}` is missing",
+        );
+    }
+
+    if settings.arangodb_bootstrap_views {
+        anyhow::ensure!(
+            arango_client.view_exists(KNOWLEDGE_SEARCH_VIEW).await?,
+            "canonical bootstrap validation failed: required Arango view `{KNOWLEDGE_SEARCH_VIEW}` is missing",
+        );
+    }
+
+    if settings.arangodb_bootstrap_graph {
+        anyhow::ensure!(
+            arango_client.graph_exists(KNOWLEDGE_GRAPH_NAME).await?,
+            "canonical bootstrap validation failed: required Arango named graph `{KNOWLEDGE_GRAPH_NAME}` is missing",
+        );
+    }
+
+    if settings.arangodb_bootstrap_vector_indexes {
+        anyhow::ensure!(
+            arango_client
+                .vector_index_exists(
+                    KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
+                    KNOWLEDGE_CHUNK_VECTOR_INDEX
+                )
+                .await?,
+            "canonical bootstrap validation failed: chunk vector index `{KNOWLEDGE_CHUNK_VECTOR_INDEX}` is missing",
+        );
+        anyhow::ensure!(
+            arango_client
+                .vector_index_exists(
+                    KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
+                    KNOWLEDGE_ENTITY_VECTOR_INDEX
+                )
+                .await?,
+            "canonical bootstrap validation failed: entity vector index `{KNOWLEDGE_ENTITY_VECTOR_INDEX}` is missing",
+        );
+    }
+
+    Ok(())
+}
+
 pub async fn canonical_baseline_present(postgres: &PgPool) -> anyhow::Result<bool> {
     for table_name in CANONICAL_BASELINE_TABLES {
         if !table_exists(postgres, table_name).await? {
@@ -101,6 +162,16 @@ pub async fn canonical_ai_catalog_seeded(postgres: &PgPool) -> anyhow::Result<bo
 }
 
 pub async fn legacy_runtime_repair_tables_present(postgres: &PgPool) -> anyhow::Result<bool> {
+    // Legacy worker loops still rely on the old runtime queue schema.
+    Ok(table_exists(postgres, "ingestion_job").await?
+        && table_exists(postgres, "runtime_ingestion_run").await?)
+}
+
+pub async fn legacy_runtime_attempt_repair_tables_present(
+    postgres: &PgPool,
+) -> anyhow::Result<bool> {
+    // Old attempt-repair SQL still targets `ingestion_job`.
+    // Guard that path explicitly so canonical stacks can boot workers.
     Ok(table_exists(postgres, "ingestion_job").await?
         && table_exists(postgres, "runtime_ingestion_run").await?)
 }

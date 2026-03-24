@@ -115,6 +115,68 @@ impl ArangoClient {
         Ok(())
     }
 
+    pub async fn collection_exists(&self, name: &str) -> anyhow::Result<bool> {
+        let response = self
+            .request(Method::GET, &format!("_api/collection/{name}"))
+            .send()
+            .await
+            .with_context(|| format!("failed to read collection metadata for {name}"))?;
+        if response.status().as_u16() == 404 {
+            return Ok(false);
+        }
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "failed to read collection metadata for {name}: status {}",
+                response.status()
+            ));
+        }
+        Ok(true)
+    }
+
+    pub async fn view_exists(&self, name: &str) -> anyhow::Result<bool> {
+        let response = self
+            .request(Method::GET, &format!("_api/view/{name}"))
+            .send()
+            .await
+            .with_context(|| format!("failed to read view metadata for {name}"))?;
+        if response.status().as_u16() == 404 {
+            return Ok(false);
+        }
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "failed to read view metadata for {name}: status {}",
+                response.status()
+            ));
+        }
+        Ok(true)
+    }
+
+    pub async fn graph_exists(&self, name: &str) -> anyhow::Result<bool> {
+        let response = self
+            .request(Method::GET, &format!("_api/gharial/{name}"))
+            .send()
+            .await
+            .with_context(|| format!("failed to read named graph metadata for {name}"))?;
+        if response.status().as_u16() == 404 {
+            return Ok(false);
+        }
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "failed to read named graph metadata for {name}: status {}",
+                response.status()
+            ));
+        }
+        Ok(true)
+    }
+
+    pub async fn vector_index_exists(
+        &self,
+        collection: &str,
+        index_name: &str,
+    ) -> anyhow::Result<bool> {
+        self.index_exists(collection, index_name).await
+    }
+
     pub async fn ensure_document_collection(&self, name: &str) -> anyhow::Result<()> {
         self.ensure_collection(name, false).await
     }
@@ -239,11 +301,66 @@ impl ArangoClient {
             && (response_body.contains("Number of training points")
                 || response_body.contains("nx >= k"))
         {
-            return Ok(());
+            self.seed_vector_training_rows(collection, field, dimension, n_lists).await?;
+            let retry = self
+                .request(Method::POST, &format!("_api/index?collection={collection}"))
+                .json(&body)
+                .send()
+                .await?;
+            if retry.status().is_success() || retry.status().as_u16() == 409 {
+                return Ok(());
+            }
+            let retry_status = retry.status();
+            let retry_body = retry.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "failed to ensure vector index {index_name} on {collection} after seeding: status {retry_status}, body {retry_body}",
+            ));
         }
         Err(anyhow!(
             "failed to ensure vector index {index_name} on {collection}: status {status}, body {response_body}",
         ))
+    }
+
+    async fn seed_vector_training_rows(
+        &self,
+        collection: &str,
+        field: &str,
+        dimension: u64,
+        n_lists: u64,
+    ) -> anyhow::Result<()> {
+        let sample_count = n_lists.max(1);
+        let dimensions = usize::try_from(dimension).context("vector dimension is too large")?;
+        let mut rows = Vec::with_capacity(usize::try_from(sample_count).unwrap_or(0));
+        for i in 0..sample_count {
+            let value = (i + 1) as f64 / (sample_count as f64 + 1.0);
+            let vector = vec![value; dimensions];
+            let mut row = serde_json::Map::new();
+            row.insert(
+                "_key".to_string(),
+                serde_json::Value::String(format!("__bootstrap_vector_seed__{i}")),
+            );
+            row.insert("__bootstrap_vector_seed__".to_string(), serde_json::Value::Bool(true));
+            row.insert(
+                field.to_string(),
+                serde_json::to_value(vector).context("failed to encode seed vector")?,
+            );
+            rows.push(serde_json::Value::Object(row));
+        }
+
+        let _ = self
+            .query_json(
+                "FOR row IN @rows
+                 INSERT row INTO @@collection
+                 OPTIONS { overwriteMode: \"ignore\" }",
+                serde_json::json!({
+                    "@collection": collection,
+                    "rows": rows,
+                }),
+            )
+            .await
+            .with_context(|| format!("failed to seed vector training rows for {collection}"))?;
+
+        Ok(())
     }
 
     pub async fn query_json(

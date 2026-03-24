@@ -145,51 +145,6 @@ smoke_create_api_token() {
     "${api_base}/ui/admin/api-tokens"
 }
 
-smoke_apply_provider_profile() {
-  local api_base=$1
-  local token=$2
-  local library_id=$3
-  local indexing_provider_kind=$4
-  local indexing_model=$5
-  local embedding_provider_kind=$6
-  local embedding_model=$7
-  local answer_provider_kind=$8
-  local answer_model=$9
-  local vision_provider_kind=${10}
-  local vision_model=${11}
-  local output_file=${12}
-  local payload
-  payload=$(
-    jq -nc \
-      --arg indexing_provider_kind "${indexing_provider_kind}" \
-      --arg indexing_model "${indexing_model}" \
-      --arg embedding_provider_kind "${embedding_provider_kind}" \
-      --arg embedding_model "${embedding_model}" \
-      --arg answer_provider_kind "${answer_provider_kind}" \
-      --arg answer_model "${answer_model}" \
-      --arg vision_provider_kind "${vision_provider_kind}" \
-      --arg vision_model "${vision_model}" \
-      '{
-        indexingProviderKind: $indexing_provider_kind,
-        indexingModelName: $indexing_model,
-        embeddingProviderKind: $embedding_provider_kind,
-        embeddingModelName: $embedding_model,
-        answerProviderKind: $answer_provider_kind,
-        answerModelName: $answer_model,
-        visionProviderKind: $vision_provider_kind,
-        visionModelName: $vision_model
-      }'
-  )
-
-  smoke_request \
-    "${output_file}" \
-    -X PUT \
-    -H "Authorization: Bearer ${token}" \
-    -H 'Content-Type: application/json' \
-    -d "${payload}" \
-    "${api_base}/runtime/libraries/${library_id}/provider-profile"
-}
-
 smoke_validate_provider() {
   local api_base=$1
   local token=$2

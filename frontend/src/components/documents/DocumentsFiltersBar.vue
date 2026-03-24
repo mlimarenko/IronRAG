@@ -1,90 +1,105 @@
 <script setup lang="ts">
-import type {
-  DocumentAccountingStatus,
-  DocumentMutationStatus,
-  DocumentStatus,
-} from 'src/models/ui/documents'
+import { computed } from 'vue'
+import FilterBar from 'src/components/design-system/FilterBar.vue'
+import SearchField from 'src/components/design-system/SearchField.vue'
+import SelectField from 'src/components/design-system/SelectField.vue'
+import type { DocumentDisplayStatus } from 'src/models/ui/documents'
 
 const props = defineProps<{
   searchQuery: string
-  statusFilter: DocumentStatus | ''
-  accountingFilter: DocumentAccountingStatus | ''
-  mutationStatusFilter: DocumentMutationStatus | ''
-  fileTypeFilter: string
-  statusOptions: DocumentStatus[]
-  accountingOptions: DocumentAccountingStatus[]
-  mutationStatusOptions: DocumentMutationStatus[]
-  fileTypeOptions: string[]
+  statusFilter: DocumentDisplayStatus | ''
+  visibleCount?: number
+  totalCount?: number
+  showMeta?: boolean
 }>()
 
 const emit = defineEmits<{
   updateSearch: [value: string]
-  updateStatus: [value: DocumentStatus | '']
-  updateAccounting: [value: DocumentAccountingStatus | '']
-  updateMutationStatus: [value: DocumentMutationStatus | '']
-  updateFileType: [value: string]
+  updateStatus: [value: DocumentDisplayStatus | '']
 }>()
+
+const hasActiveFilter = computed(() => props.searchQuery.trim().length > 0 || props.statusFilter !== '')
+const activeFilterCount = computed(
+  () => Number(Boolean(props.searchQuery.trim())) + Number(props.statusFilter !== ''),
+)
+
+const metaLabel = computed(() => {
+  if (
+    !props.showMeta ||
+    typeof props.visibleCount !== 'number' ||
+    typeof props.totalCount !== 'number' ||
+    props.visibleCount === props.totalCount
+  ) {
+    return null
+  }
+  return {
+    key: 'documents.workspace.filteredDocuments',
+    params: {
+      visible: props.visibleCount,
+      total: props.totalCount,
+    },
+  }
+})
 </script>
 
 <template>
-  <section class="rr-documents__filters">
-    <input
-      :value="props.searchQuery"
-      type="search"
-      :placeholder="$t('documents.search')"
-      @input="emit('updateSearch', ($event.target as HTMLInputElement).value)"
-    >
-    <select
-      :value="props.statusFilter"
-      @change="emit('updateStatus', ($event.target as HTMLSelectElement).value as DocumentStatus | '')"
-    >
-      <option value="">{{ $t('documents.allStatuses') }}</option>
-      <option
-        v-for="status in props.statusOptions"
-        :key="status"
-        :value="status"
+  <FilterBar class="rr-documents-filters">
+    <template #search>
+      <SearchField
+        :model-value="props.searchQuery"
+        :placeholder="$t('documents.search')"
+        @update:model-value="emit('updateSearch', $event)"
+        @clear="emit('updateSearch', '')"
+      />
+    </template>
+
+    <template #filters>
+      <SelectField
+        :model-value="props.statusFilter"
+        :options="[
+          { id: '', label: $t('documents.allStatuses') },
+          { id: 'in_progress', label: $t('documents.displayStatus.in_progress') },
+          { id: 'ready', label: $t('documents.displayStatus.ready') },
+          { id: 'failed', label: $t('documents.displayStatus.failed') },
+        ]"
+        @update:model-value="emit('updateStatus', $event as DocumentDisplayStatus | '')"
+      />
+    </template>
+
+    <template #summary>
+      <p
+        v-if="metaLabel"
+        class="rr-documents-filters__caption"
       >
-        {{ $t(`documents.status.${status}`) }}
-      </option>
-    </select>
-    <select
-      :value="props.accountingFilter"
-      @change="emit('updateAccounting', ($event.target as HTMLSelectElement).value as DocumentAccountingStatus | '')"
-    >
-      <option value="">{{ $t('documents.allAccounting') }}</option>
-      <option
-        v-for="accountingStatus in props.accountingOptions"
-        :key="accountingStatus"
-        :value="accountingStatus"
+        {{ $t(metaLabel.key, metaLabel.params) }}
+      </p>
+      <p
+        v-else-if="hasActiveFilter"
+        class="rr-documents-filters__caption"
       >
-        {{ $t(`documents.accounting.${accountingStatus}`) }}
-      </option>
-    </select>
-    <select
-      :value="props.mutationStatusFilter"
-      @change="emit('updateMutationStatus', ($event.target as HTMLSelectElement).value as DocumentMutationStatus | '')"
-    >
-      <option value="">{{ $t('documents.allMutations') }}</option>
-      <option
-        v-for="mutationStatus in props.mutationStatusOptions"
-        :key="mutationStatus"
-        :value="mutationStatus"
-      >
-        {{ $t(`documents.mutation.status.${mutationStatus}`) }}
-      </option>
-    </select>
-    <select
-      :value="props.fileTypeFilter"
-      @change="emit('updateFileType', ($event.target as HTMLSelectElement).value)"
-    >
-      <option value="">{{ $t('documents.allTypes') }}</option>
-      <option
-        v-for="fileType in props.fileTypeOptions"
-        :key="fileType"
-        :value="fileType"
-      >
-        {{ fileType }}
-      </option>
-    </select>
-  </section>
+        {{ $t('documents.workspace.filtersApplied', { count: activeFilterCount }) }}
+      </p>
+    </template>
+  </FilterBar>
 </template>
+
+<style scoped lang="scss">
+.rr-documents-filters {
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.35rem 0.35rem 0;
+}
+
+.rr-documents-filters__caption {
+  margin: 0;
+  color: var(--rr-text-muted);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+@media (max-width: 720px) {
+  .rr-documents-filters {
+    padding-inline: 0;
+  }
+}
+</style>

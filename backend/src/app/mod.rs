@@ -36,7 +36,6 @@ pub async fn run() -> anyhow::Result<()> {
     run_startup_bootstraps(
         &state,
         &config.bootstrap_settings(),
-        &config.ai_catalog_validation_settings(),
         &config.destructive_fresh_bootstrap_settings(),
     )
     .await?;
@@ -232,7 +231,6 @@ async fn run_http_api(
 async fn run_startup_bootstraps(
     state: &state::AppState,
     bootstrap_settings: &config::BootstrapSettings,
-    _ai_catalog_validation: &config::AiCatalogValidationSettings,
     destructive_bootstrap: &config::DestructiveFreshBootstrapSettings,
 ) -> anyhow::Result<()> {
     let explicit_ui_bootstrap_admin = state.settings.has_explicit_ui_bootstrap_admin();

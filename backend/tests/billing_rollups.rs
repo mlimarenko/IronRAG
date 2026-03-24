@@ -437,3 +437,78 @@ async fn canonical_billing_rollups_cover_query_and_ingest_executions() -> Result
     fixture.cleanup().await?;
     result
 }
+
+#[tokio::test]
+#[ignore = "requires local postgres with canonical extensions"]
+async fn execution_cost_returns_zero_rollup_for_ingest_attempt_without_provider_calls() -> Result<()>
+{
+    let fixture = BillingRollupsFixture::create().await?;
+
+    let result = async {
+        let billing = &fixture.state.canonical_services.billing;
+        let zero_cost = billing
+            .get_execution_cost(&fixture.state, "ingest_attempt", fixture.ingest_attempt_id)
+            .await
+            .context("failed to load zero-cost ingest execution")?;
+        assert_eq!(zero_cost.total_cost, Decimal::ZERO);
+        assert_eq!(zero_cost.provider_call_count, 0);
+        assert_eq!(zero_cost.currency_code, "USD");
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango"]
+async fn inline_ingest_billing_capture_produces_provider_calls_and_rollup() -> Result<()> {
+    let fixture = BillingRollupsFixture::create().await?;
+
+    let result = async {
+        let billing = &fixture.state.canonical_services.billing;
+        let ingest_cost = billing
+            .capture_ingest_attempt(
+                &fixture.state,
+                CaptureIngestAttemptBillingCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    attempt_id: fixture.ingest_attempt_id,
+                    binding_id: None,
+                    provider_kind: "openai".to_string(),
+                    model_name: "gpt-5-mini".to_string(),
+                    call_kind: "extract_graph".to_string(),
+                    usage_json: serde_json::json!({
+                        "prompt_tokens": 8000,
+                        "completion_tokens": 2000,
+                        "total_tokens": 10000,
+                    }),
+                },
+            )
+            .await
+            .context("failed to capture inline ingest billing")?
+            .context("inline ingest capture should return priced rollup")?;
+
+        assert_ne!(ingest_cost.total_cost, Decimal::ZERO);
+        assert_eq!(ingest_cost.provider_call_count, 1);
+        assert_eq!(ingest_cost.currency_code, "USD");
+
+        let provider_calls = billing
+            .list_execution_provider_calls(
+                &fixture.state,
+                "ingest_attempt",
+                fixture.ingest_attempt_id,
+            )
+            .await
+            .context("failed to list ingest attempt provider calls")?;
+        assert!(provider_calls.len() >= 1);
+        assert!(provider_calls.iter().any(|row| row.call_kind == "extract_graph"));
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}

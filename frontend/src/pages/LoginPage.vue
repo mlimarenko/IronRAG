@@ -22,7 +22,7 @@ async function completeAuthTransition() {
   try {
     await shellStore.loadContext()
   } finally {
-    await router.push('/documents')
+    await router.push('/')
   }
 }
 

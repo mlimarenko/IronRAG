@@ -14,35 +14,48 @@ defineEmits<{
 }>()
 
 const { t } = useI18n()
-const { graphPropertyLabel, graphPropertyValue, graphWarningLabel, humanizeToken } =
-  useDisplayFormatters()
+const {
+  graphEvidenceLabel,
+  graphNodeKindLabel,
+  graphPropertyLabel,
+  graphPropertyValue,
+  graphWarningLabel,
+  humanizeToken,
+} = useDisplayFormatters()
 
 const visibleEvidence = computed(
   () =>
     props.detail?.evidence
       .filter((item) => item.activeProvenanceOnly)
-      .slice(0, 3)
+      .slice(0, 2)
       .map((item) => ({
         ...item,
         evidenceText: normalizeEvidenceText(item.evidenceText),
       })) ?? [],
 )
-const visibleLinks = computed(() => props.detail?.relatedEdges.slice(0, 5) ?? [])
+const visibleLinks = computed(() => props.detail?.relatedEdges.slice(0, 4) ?? [])
+const visibleConnectedNodes = computed(() => props.detail?.connectedNodes.slice(0, 4) ?? [])
+const evidenceCount = computed(() => props.detail?.evidence.length ?? 0)
+const relatedDocumentCount = computed(() => props.detail?.relatedDocuments.length ?? 0)
 
 const visibleProperties = computed(() =>
   (props.detail?.properties ?? [])
     .filter(([key]) => !['Projection', 'Canonical key'].includes(key))
-    .slice(0, 3)
+    .slice(0, 4)
     .map(([key, value]) => [graphPropertyLabel(key), graphPropertyValue(key, value)] as const),
 )
 
-const detailSummary = computed(() => {
+const primarySummary = computed(() => {
   if (!props.detail) {
     return ''
   }
 
+  if (props.detail.summary && props.detail.summary.trim() && props.detail.summary !== props.detail.label) {
+    return props.detail.summary
+  }
+
   if (props.detail.nodeType === 'document') {
-    return t('graph.nodeSummaries.document')
+    return ''
   }
 
   return t('graph.nodeSummaries.connected', { count: props.detail.relationCount })
@@ -173,77 +186,29 @@ const canonicalSummary = computed(() => props.detail?.canonicalSummary ?? null)
       {{ $t('graph.loadingNode') }}
     </p>
     <template v-else-if="props.detail">
-      <div class="rr-graph-node-card__eyebrow">
-        <span class="rr-graph-node-card__type">
-          {{ $t(`graph.nodeTypes.${props.detail.nodeType}`) }}
-        </span>
-        <span class="rr-graph-node-card__metric">
-          {{ $t('graph.relationCount', { count: props.detail.relationCount }) }}
-        </span>
-        <span
-          v-if="props.detail.convergenceStatus"
-          class="rr-graph-node-card__metric"
-        >
-          {{ $t(`graph.convergence.${props.detail.convergenceStatus}`) }}
-        </span>
-      </div>
-
-      <h3>{{ props.detail.label }}</h3>
-      <p>{{ detailSummary }}</p>
-
-      <div
-        v-if="canonicalSummary"
-        class="rr-graph-node-card__summary"
-      >
-        <div class="rr-graph-node-card__summary-meta">
-          <strong>{{ $t('graph.summary.title') }}</strong>
-          <span class="rr-graph-node-card__metric">
-            {{
-              $t('graph.summary.confidenceLine', {
-                value: summaryConfidenceLabel(canonicalSummary.confidenceStatus),
-              })
-            }}
+      <header class="rr-graph-node-card__head">
+        <div class="rr-graph-node-card__eyebrow">
+          <span class="rr-graph-node-card__type">
+            {{ graphNodeKindLabel(props.detail.nodeType) }}
           </span>
           <span class="rr-graph-node-card__metric">
-            {{
-              $t('graph.summary.supportCount', {
-                count: canonicalSummary.supportCount,
-              })
-            }}
+            {{ $t('graph.relationCount', { count: props.detail.relationCount }) }}
+          </span>
+          <span
+            v-if="props.detail.convergenceStatus"
+            class="rr-graph-node-card__metric"
+          >
+            {{ $t(`graph.convergence.${props.detail.convergenceStatus}`) }}
           </span>
         </div>
-        <p>{{ canonicalSummary.text }}</p>
-        <p
-          v-if="canonicalSummary.warning"
-          class="rr-graph-node-card__summary-warning"
-        >
-          {{ graphWarningLabel(canonicalSummary.warning) ?? canonicalSummary.warning }}
-        </p>
-      </div>
 
-      <div
-        v-if="reconciliationSummary.length"
-        class="rr-graph-node-card__warning"
-      >
-        <p
-          v-for="line in reconciliationSummary"
-          :key="line"
-        >
-          {{ line }}
-        </p>
-      </div>
-
-      <div
-        v-if="graphQualitySummary.length"
-        class="rr-graph-node-card__note"
-      >
-        <p
-          v-for="line in graphQualitySummary"
-          :key="line"
-        >
-          {{ line }}
-        </p>
-      </div>
+        <h3>{{ props.detail.label }}</h3>
+        <p v-if="primarySummary">{{ primarySummary }}</p>
+        <div class="rr-graph-node-card__stats">
+          <span>{{ $t('graph.relatedDocumentsCount', { count: relatedDocumentCount }) }}</span>
+          <span>{{ graphEvidenceLabel(evidenceCount) }}</span>
+        </div>
+      </header>
 
       <dl class="rr-graph-node-card__properties">
         <div
@@ -263,6 +228,24 @@ const canonicalSummary = computed(() => props.detail?.canonicalSummary ?? null)
         <div class="rr-graph-node-card__chips">
           <button
             v-for="item in props.detail.relatedDocuments.slice(0, 4)"
+            :key="item.id"
+            type="button"
+            class="rr-graph-node-card__chip"
+            @click="$emit('selectNode', item.id)"
+          >
+            {{ item.label }}
+          </button>
+        </div>
+      </div>
+
+      <div
+        v-if="visibleConnectedNodes.length"
+        class="rr-graph-node-card__section"
+      >
+        <strong>{{ $t('graph.connectedNodes') }}</strong>
+        <div class="rr-graph-node-card__chips">
+          <button
+            v-for="item in visibleConnectedNodes"
             :key="item.id"
             type="button"
             class="rr-graph-node-card__chip"
@@ -295,12 +278,70 @@ const canonicalSummary = computed(() => props.detail?.canonicalSummary ?? null)
         </ul>
       </div>
 
-      <div
-        v-if="visibleEvidence.length"
-        class="rr-graph-node-card__section"
+      <details
+        v-if="canonicalSummary || reconciliationSummary.length || graphQualitySummary.length || visibleEvidence.length"
+        class="rr-graph-node-card__disclosure"
       >
-        <strong>{{ $t('graph.evidence') }}</strong>
-        <ul class="rr-graph-node-card__evidence">
+        <summary>{{ $t('graph.evidence') }}</summary>
+
+        <div
+          v-if="canonicalSummary"
+          class="rr-graph-node-card__summary"
+        >
+          <div class="rr-graph-node-card__summary-meta">
+            <strong>{{ $t('graph.summary.title') }}</strong>
+            <span class="rr-graph-node-card__metric">
+              {{
+                $t('graph.summary.confidenceLine', {
+                  value: summaryConfidenceLabel(canonicalSummary.confidenceStatus),
+                })
+              }}
+            </span>
+            <span class="rr-graph-node-card__metric">
+              {{
+                $t('graph.summary.supportCount', {
+                  count: canonicalSummary.supportCount,
+                })
+              }}
+            </span>
+          </div>
+          <p>{{ canonicalSummary.text }}</p>
+          <p
+            v-if="canonicalSummary.warning"
+            class="rr-graph-node-card__summary-warning"
+          >
+            {{ graphWarningLabel(canonicalSummary.warning) ?? canonicalSummary.warning }}
+          </p>
+        </div>
+
+        <div
+          v-if="reconciliationSummary.length"
+          class="rr-graph-node-card__warning"
+        >
+          <p
+            v-for="line in reconciliationSummary"
+            :key="line"
+          >
+            {{ line }}
+          </p>
+        </div>
+
+        <div
+          v-if="graphQualitySummary.length"
+          class="rr-graph-node-card__note"
+        >
+          <p
+            v-for="line in graphQualitySummary"
+            :key="line"
+          >
+            {{ line }}
+          </p>
+        </div>
+
+        <ul
+          v-if="visibleEvidence.length"
+          class="rr-graph-node-card__evidence"
+        >
           <li
             v-for="item in visibleEvidence"
             :key="item.id"
@@ -312,7 +353,7 @@ const canonicalSummary = computed(() => props.detail?.canonicalSummary ?? null)
             <p>{{ item.evidenceText }}</p>
           </li>
         </ul>
-      </div>
+      </details>
     </template>
     <p
       v-else

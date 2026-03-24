@@ -47,7 +47,7 @@ pub struct AiProviderCredentialRow {
     pub workspace_id: Uuid,
     pub provider_catalog_id: Uuid,
     pub label: String,
-    pub secret_ref: String,
+    pub api_key: String,
     pub credential_state: String,
     pub created_by_principal_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
@@ -269,6 +269,29 @@ pub async fn list_price_catalog(
     }
 }
 
+pub async fn get_price_catalog_by_id(
+    postgres: &PgPool,
+    price_id: Uuid,
+) -> Result<Option<AiPriceCatalogRow>, sqlx::Error> {
+    sqlx::query_as::<_, AiPriceCatalogRow>(
+        "select
+            id,
+            model_catalog_id,
+            billing_unit::text as billing_unit,
+            unit_price,
+            currency_code,
+            effective_from,
+            effective_to,
+            catalog_scope::text as catalog_scope,
+            workspace_id
+         from ai_price_catalog
+         where id = $1",
+    )
+    .bind(price_id)
+    .fetch_optional(postgres)
+    .await
+}
+
 pub async fn get_provider_catalog_by_kind(
     postgres: &PgPool,
     provider_kind: &str,
@@ -414,7 +437,7 @@ pub async fn list_provider_credentials(
             workspace_id,
             provider_catalog_id,
             label,
-            secret_ref,
+            api_key,
             credential_state::text as credential_state,
             created_by_principal_id,
             created_at,
@@ -438,7 +461,7 @@ pub async fn get_provider_credential_by_id(
             workspace_id,
             provider_catalog_id,
             label,
-            secret_ref,
+            api_key,
             credential_state::text as credential_state,
             created_by_principal_id,
             created_at,
@@ -456,7 +479,7 @@ pub async fn create_provider_credential(
     workspace_id: Uuid,
     provider_catalog_id: Uuid,
     label: &str,
-    secret_ref: &str,
+    api_key: &str,
     created_by_principal_id: Option<Uuid>,
 ) -> Result<AiProviderCredentialRow, sqlx::Error> {
     sqlx::query_as::<_, AiProviderCredentialRow>(
@@ -465,7 +488,7 @@ pub async fn create_provider_credential(
             workspace_id,
             provider_catalog_id,
             label,
-            secret_ref,
+            api_key,
             credential_state,
             created_by_principal_id,
             created_at,
@@ -477,7 +500,7 @@ pub async fn create_provider_credential(
             workspace_id,
             provider_catalog_id,
             label,
-            secret_ref,
+            api_key,
             credential_state::text as credential_state,
             created_by_principal_id,
             created_at,
@@ -487,7 +510,7 @@ pub async fn create_provider_credential(
     .bind(workspace_id)
     .bind(provider_catalog_id)
     .bind(label)
-    .bind(secret_ref)
+    .bind(api_key)
     .bind(created_by_principal_id)
     .fetch_one(postgres)
     .await
@@ -497,13 +520,13 @@ pub async fn update_provider_credential(
     postgres: &PgPool,
     credential_id: Uuid,
     label: &str,
-    secret_ref: &str,
+    api_key: Option<&str>,
     credential_state: &str,
 ) -> Result<Option<AiProviderCredentialRow>, sqlx::Error> {
     sqlx::query_as::<_, AiProviderCredentialRow>(
         "update ai_provider_credential
          set label = $2,
-             secret_ref = $3,
+             api_key = coalesce($3, api_key),
              credential_state = $4::ai_credential_state,
              updated_at = now()
          where id = $1
@@ -512,7 +535,7 @@ pub async fn update_provider_credential(
             workspace_id,
             provider_catalog_id,
             label,
-            secret_ref,
+            api_key,
             credential_state::text as credential_state,
             created_by_principal_id,
             created_at,
@@ -520,8 +543,96 @@ pub async fn update_provider_credential(
     )
     .bind(credential_id)
     .bind(label)
-    .bind(secret_ref)
+    .bind(api_key)
     .bind(credential_state)
+    .fetch_optional(postgres)
+    .await
+}
+
+pub async fn create_workspace_price_override(
+    postgres: &PgPool,
+    workspace_id: Uuid,
+    model_catalog_id: Uuid,
+    billing_unit: &str,
+    unit_price: Decimal,
+    currency_code: &str,
+    effective_from: DateTime<Utc>,
+    effective_to: Option<DateTime<Utc>>,
+) -> Result<AiPriceCatalogRow, sqlx::Error> {
+    sqlx::query_as::<_, AiPriceCatalogRow>(
+        "insert into ai_price_catalog (
+            id,
+            model_catalog_id,
+            billing_unit,
+            unit_price,
+            currency_code,
+            effective_from,
+            effective_to,
+            catalog_scope,
+            workspace_id
+        )
+        values ($1, $2, $3::billing_unit, $4, $5, $6, $7, 'workspace_override', $8)
+        returning
+            id,
+            model_catalog_id,
+            billing_unit::text as billing_unit,
+            unit_price,
+            currency_code,
+            effective_from,
+            effective_to,
+            catalog_scope::text as catalog_scope,
+            workspace_id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(model_catalog_id)
+    .bind(billing_unit)
+    .bind(unit_price)
+    .bind(currency_code)
+    .bind(effective_from)
+    .bind(effective_to)
+    .bind(workspace_id)
+    .fetch_one(postgres)
+    .await
+}
+
+pub async fn update_workspace_price_override(
+    postgres: &PgPool,
+    price_id: Uuid,
+    model_catalog_id: Uuid,
+    billing_unit: &str,
+    unit_price: Decimal,
+    currency_code: &str,
+    effective_from: DateTime<Utc>,
+    effective_to: Option<DateTime<Utc>>,
+) -> Result<Option<AiPriceCatalogRow>, sqlx::Error> {
+    sqlx::query_as::<_, AiPriceCatalogRow>(
+        "update ai_price_catalog
+         set model_catalog_id = $2,
+             billing_unit = $3::billing_unit,
+             unit_price = $4,
+             currency_code = $5,
+             effective_from = $6,
+             effective_to = $7
+         where id = $1
+           and catalog_scope = 'workspace_override'
+         returning
+            id,
+            model_catalog_id,
+            billing_unit::text as billing_unit,
+            unit_price,
+            currency_code,
+            effective_from,
+            effective_to,
+            catalog_scope::text as catalog_scope,
+            workspace_id",
+    )
+    .bind(price_id)
+    .bind(model_catalog_id)
+    .bind(billing_unit)
+    .bind(unit_price)
+    .bind(currency_code)
+    .bind(effective_from)
+    .bind(effective_to)
     .fetch_optional(postgres)
     .await
 }

@@ -1,5 +1,16 @@
 import { MultiUndirectedGraph } from 'graphology'
-import type { GraphEdge, GraphLayoutMode, GraphNode, GraphNodeType } from 'src/models/ui/graph'
+import type {
+  GraphCanvasMode,
+  GraphEdge,
+  GraphInspectorState,
+  GraphLayoutMode,
+  GraphNode,
+  GraphNodeDetail,
+  GraphNodeType,
+  GraphOverlayState,
+  GraphSearchHit,
+  GraphStatus,
+} from 'src/models/ui/graph'
 
 export interface GraphCanvasNodeAttributes {
   label: string
@@ -793,4 +804,75 @@ export function createGraphModel(
 
   applyLayout(graph, nodes, edges, layoutMode)
   return graph
+}
+
+export function resolveGraphCanvasMode(options: {
+  graphStatus: GraphStatus
+  nodeCount: number
+  relationCount: number
+  nodes: GraphNode[]
+}): GraphCanvasMode {
+  const { graphStatus, nodeCount, relationCount, nodes } = options
+  if (graphStatus === 'failed') {
+    return 'error'
+  }
+  if (graphStatus === 'empty' && nodeCount === 0) {
+    return 'empty'
+  }
+  if ((graphStatus === 'building' || graphStatus === 'rebuilding') && nodeCount === 0) {
+    return 'building'
+  }
+  if (
+    relationCount === 0 &&
+    nodeCount > 0 &&
+    nodes.every((node) => node.nodeType === 'document') &&
+    graphStatus !== 'building' &&
+    graphStatus !== 'rebuilding' &&
+    graphStatus !== 'empty'
+  ) {
+    return 'sparse'
+  }
+  return 'ready'
+}
+
+export function createGraphOverlayState(options: {
+  nodeCount: number
+  edgeCount: number
+  filteredArtifactCount: number
+  searchQuery?: string
+  searchHits?: GraphSearchHit[]
+  nodeTypeFilter?: GraphNodeType | ''
+  activeLayout?: GraphLayoutMode
+  showFilteredArtifacts?: boolean
+  showLegend?: boolean
+  showFilters?: boolean
+  zoomLevel?: number
+}): GraphOverlayState {
+  return {
+    searchQuery: options.searchQuery ?? '',
+    searchHits: options.searchHits ?? [],
+    nodeTypeFilter: options.nodeTypeFilter ?? '',
+    activeLayout: options.activeLayout ?? 'cloud',
+    showFilteredArtifacts: options.showFilteredArtifacts ?? false,
+    filteredArtifactCount: options.filteredArtifactCount,
+    nodeCount: options.nodeCount,
+    edgeCount: options.edgeCount,
+    showLegend: options.showLegend ?? false,
+    showFilters: options.showFilters ?? false,
+    zoomLevel: options.zoomLevel ?? 1,
+  }
+}
+
+export function createGraphInspectorState(options?: {
+  focusedNodeId?: string | null
+  detail?: GraphNodeDetail | null
+  loading?: boolean
+  error?: string | null
+}): GraphInspectorState {
+  return {
+    focusedNodeId: options?.focusedNodeId ?? null,
+    loading: options?.loading ?? false,
+    error: options?.error ?? null,
+    detail: options?.detail ?? null,
+  }
 }

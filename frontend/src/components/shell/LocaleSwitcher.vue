@@ -15,14 +15,14 @@ const emit = defineEmits<{
       :class="{ 'is-active': locale === 'en' }"
       @click="emit('change', 'en')"
     >
-      🇬🇧 EN
+      EN
     </button>
     <button
       type="button"
       :class="{ 'is-active': locale === 'ru' }"
       @click="emit('change', 'ru')"
     >
-      🇷🇺 RU
+      RU
     </button>
   </div>
 </template>

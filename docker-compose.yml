@@ -88,29 +88,8 @@ services:
       frontend_origin: http://127.0.0.1:19000,http://localhost:19000,http://127.0.0.1:9000,http://localhost:9000,http://127.0.0.1:3000,http://localhost:3000
       bootstrap_token: ${RUSTRAG_BOOTSTRAP_TOKEN:-bootstrap-local}
       ui_bootstrap_admin_login: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN:-}
-      ui_bootstrap_admin_email: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_EMAIL:-}
-      ui_bootstrap_admin_name: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_NAME:-}
       ui_bootstrap_admin_password: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD:-}
       ui_bootstrap_admin_api_token: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN:-}
-      openai_api_key: ${RUSTRAG_OPENAI_API_KEY:-}
-      deepseek_api_key: ${RUSTRAG_DEEPSEEK_API_KEY:-}
-      qwen_api_key: ${RUSTRAG_QWEN_API_KEY:-}
-      qwen_api_base_url: ${RUSTRAG_QWEN_API_BASE_URL:-https://dashscope-intl.aliyuncs.com/compatible-mode/v1}
-      ingestion_worker_concurrency: ${RUSTRAG_INGESTION_WORKER_CONCURRENCY:-4}
-      runtime_default_indexing_provider: ${RUSTRAG_RUNTIME_DEFAULT_INDEXING_PROVIDER:-openai}
-      runtime_default_indexing_model: ${RUSTRAG_RUNTIME_DEFAULT_INDEXING_MODEL:-gpt-5-mini}
-      runtime_default_embedding_provider: ${RUSTRAG_RUNTIME_DEFAULT_EMBEDDING_PROVIDER:-openai}
-      runtime_default_embedding_model: ${RUSTRAG_RUNTIME_DEFAULT_EMBEDDING_MODEL:-text-embedding-3-large}
-      runtime_default_answer_provider: ${RUSTRAG_RUNTIME_DEFAULT_ANSWER_PROVIDER:-openai}
-      runtime_default_answer_model: ${RUSTRAG_RUNTIME_DEFAULT_ANSWER_MODEL:-gpt-5.4}
-      runtime_default_vision_provider: ${RUSTRAG_RUNTIME_DEFAULT_VISION_PROVIDER:-openai}
-      runtime_default_vision_model: ${RUSTRAG_RUNTIME_DEFAULT_VISION_MODEL:-gpt-5-mini}
-      runtime_live_validation_enabled: ${RUSTRAG_RUNTIME_LIVE_VALIDATION_ENABLED:-true}
-      qwen_input_price_per_1m: ${RUSTRAG_QWEN_INPUT_PRICE_PER_1M:-0.07}
-      qwen_chat_input_price_per_1m: ${RUSTRAG_QWEN_CHAT_INPUT_PRICE_PER_1M:-0}
-      qwen_chat_output_price_per_1m: ${RUSTRAG_QWEN_CHAT_OUTPUT_PRICE_PER_1M:-0}
-      qwen_vision_input_price_per_1m: ${RUSTRAG_QWEN_VISION_INPUT_PRICE_PER_1M:-0}
-      qwen_vision_output_price_per_1m: ${RUSTRAG_QWEN_VISION_OUTPUT_PRICE_PER_1M:-0}
       RUST_BACKTRACE: full
     expose:
       - "8080"
@@ -152,29 +131,8 @@ services:
       frontend_origin: http://127.0.0.1:19000,http://localhost:19000,http://127.0.0.1:9000,http://localhost:9000,http://127.0.0.1:3000,http://localhost:3000
       bootstrap_token: ${RUSTRAG_BOOTSTRAP_TOKEN:-bootstrap-local}
       ui_bootstrap_admin_login: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN:-}
-      ui_bootstrap_admin_email: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_EMAIL:-}
-      ui_bootstrap_admin_name: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_NAME:-}
       ui_bootstrap_admin_password: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD:-}
       ui_bootstrap_admin_api_token: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN:-}
-      openai_api_key: ${RUSTRAG_OPENAI_API_KEY:-}
-      deepseek_api_key: ${RUSTRAG_DEEPSEEK_API_KEY:-}
-      qwen_api_key: ${RUSTRAG_QWEN_API_KEY:-}
-      qwen_api_base_url: ${RUSTRAG_QWEN_API_BASE_URL:-https://dashscope-intl.aliyuncs.com/compatible-mode/v1}
-      ingestion_worker_concurrency: ${RUSTRAG_INGESTION_WORKER_CONCURRENCY:-4}
-      runtime_default_indexing_provider: ${RUSTRAG_RUNTIME_DEFAULT_INDEXING_PROVIDER:-openai}
-      runtime_default_indexing_model: ${RUSTRAG_RUNTIME_DEFAULT_INDEXING_MODEL:-gpt-5-mini}
-      runtime_default_embedding_provider: ${RUSTRAG_RUNTIME_DEFAULT_EMBEDDING_PROVIDER:-openai}
-      runtime_default_embedding_model: ${RUSTRAG_RUNTIME_DEFAULT_EMBEDDING_MODEL:-text-embedding-3-large}
-      runtime_default_answer_provider: ${RUSTRAG_RUNTIME_DEFAULT_ANSWER_PROVIDER:-openai}
-      runtime_default_answer_model: ${RUSTRAG_RUNTIME_DEFAULT_ANSWER_MODEL:-gpt-5.4}
-      runtime_default_vision_provider: ${RUSTRAG_RUNTIME_DEFAULT_VISION_PROVIDER:-openai}
-      runtime_default_vision_model: ${RUSTRAG_RUNTIME_DEFAULT_VISION_MODEL:-gpt-5-mini}
-      runtime_live_validation_enabled: ${RUSTRAG_RUNTIME_LIVE_VALIDATION_ENABLED:-true}
-      qwen_input_price_per_1m: ${RUSTRAG_QWEN_INPUT_PRICE_PER_1M:-0.07}
-      qwen_chat_input_price_per_1m: ${RUSTRAG_QWEN_CHAT_INPUT_PRICE_PER_1M:-0}
-      qwen_chat_output_price_per_1m: ${RUSTRAG_QWEN_CHAT_OUTPUT_PRICE_PER_1M:-0}
-      qwen_vision_input_price_per_1m: ${RUSTRAG_QWEN_VISION_INPUT_PRICE_PER_1M:-0}
-      qwen_vision_output_price_per_1m: ${RUSTRAG_QWEN_VISION_OUTPUT_PRICE_PER_1M:-0}
       RUST_BACKTRACE: full
 
   frontend:

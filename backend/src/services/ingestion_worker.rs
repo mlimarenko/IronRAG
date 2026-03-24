@@ -45,7 +45,8 @@ use crate::{
         runtime_ingestion::{
             JobLeaseHeartbeat, RuntimeStageUsageSummary, embed_runtime_chunks,
             embed_runtime_graph_edges, embed_runtime_graph_nodes,
-            persist_extracted_content_from_payload, resolve_runtime_run_provider_profile,
+            persist_extracted_content_from_payload, resolve_effective_provider_profile,
+            resolve_runtime_run_provider_profile,
             upsert_runtime_document_chunk_contribution_summary,
             upsert_runtime_document_graph_contribution_summary,
         },
@@ -392,10 +393,11 @@ async fn execute_job(
     } else {
         None
     };
-    let provider_profile = runtime_run
-        .as_ref()
-        .map(|row| resolve_runtime_run_provider_profile(state.as_ref(), row))
-        .unwrap_or_else(|| state.effective_provider_profile());
+    let provider_profile = if let Some(runtime_run) = runtime_run.as_ref() {
+        resolve_runtime_run_provider_profile(runtime_run)?
+    } else {
+        resolve_effective_provider_profile(state.as_ref(), payload.project_id).await?
+    };
     if let Some(runtime_ingestion_run_id) = runtime_ingestion_run_id {
         repositories::mark_runtime_ingestion_run_claimed(
             &state.persistence.postgres,

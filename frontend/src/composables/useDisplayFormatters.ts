@@ -115,13 +115,111 @@ export function useDisplayFormatters() {
     return value
   }
 
+  function statusBadgeLabel(status: string | null): string {
+    if (!status) return '—'
+    const key = `shared.statusBadge.${status}`
+    return te(key) ? t(key) : humanizeToken(status)
+  }
+
+  function documentStatusLabel(status: string | null): string {
+    return enumLabel('documents.statuses', status)
+  }
+
+  function mutationKindLabel(kind: string | null): string {
+    return enumLabel('documents.mutationKinds', kind)
+  }
+
+  function fileFormatLabel(mime: string | null): string {
+    if (!mime) return '—'
+    const raw = mime.split('/').pop() ?? mime
+    const normalized = raw.replace('.', '').toLowerCase()
+    const key = `documents.fileFormats.${normalized}`
+    return te(key) ? t(key) : raw.toUpperCase()
+  }
+
+  function documentMetadataLabel(key: string): string {
+    const labelKey = `documents.details.labels.${key}`
+    return te(labelKey) ? t(labelKey) : humanizeToken(key)
+  }
+
+  function inspectorMetadataLabel(key: string): string {
+    const metaKey = `documents.details.${key}`
+    return te(metaKey) ? t(metaKey) : humanizeToken(key)
+  }
+
+  function permissionLabel(kind: string | null): string {
+    return enumLabel('admin.permissions', kind)
+  }
+
+  function bindingPurposeLabel(purpose: string | null): string {
+    return enumLabel('admin.ai.bindingPurposes', purpose)
+  }
+
+  function providerStateLabel(state: string | null): string {
+    return enumLabel('admin.ai.providerStates', state)
+  }
+
+  function billingUnitLabel(unit: string | null): string {
+    return enumLabel('admin.ai.billingUnits', unit)
+  }
+
+  function graphHealthLabel(status: string | null): string {
+    if (!status) return '—'
+    const key = `graph.healthLabels.${status}`
+    if (te(key)) {
+      return t(key)
+    }
+    const fallbackKey = `graph.statuses.${status}`
+    return te(fallbackKey) ? t(fallbackKey) : humanizeToken(status)
+  }
+
+  function graphNodeKindLabel(kind: string | null): string {
+    if (!kind) return '—'
+    const key = `graph.nodeTypes.${kind}`
+    return te(key) ? t(key) : humanizeToken(kind)
+  }
+
+  function graphEvidenceLabel(count: number): string {
+    return t('graph.evidenceCount', { count })
+  }
+
+  function auditActionLabel(action: string | null): string {
+    return enumLabel('admin.audit.actionKinds', action)
+  }
+
+  function auditSubjectLabel(kind: string | null): string {
+    return enumLabel('admin.audit.subjectKinds', kind)
+  }
+
+  function priceOriginLabel(setInWorkspace: boolean): string {
+    return setInWorkspace
+      ? t('admin.pricing.originWorkspace')
+      : t('admin.pricing.originBaseline')
+  }
+
   return {
+    auditActionLabel,
+    auditSubjectLabel,
+    billingUnitLabel,
+    bindingPurposeLabel,
+    documentStatusLabel,
+    documentMetadataLabel,
     enumLabel,
+    fileFormatLabel,
     formatDateTime,
+    inspectorMetadataLabel,
+    graphEvidenceLabel,
+    graphHealthLabel,
+    graphNodeKindLabel,
     graphPropertyLabel,
     graphPropertyValue,
     graphWarningLabel,
     humanizeToken,
+    mutationKindLabel,
+    permissionLabel,
+    priceOriginLabel,
+    providerStateLabel,
     shortIdentifier,
+    statusBadgeLabel,
   }
 }

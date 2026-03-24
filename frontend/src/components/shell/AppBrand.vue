@@ -1,6 +1,9 @@
 <template>
-  <div class="rr-brand">
+  <RouterLink
+    class="rr-brand"
+    to="/"
+  >
     <span class="rr-brand__badge">RR</span>
-    <span>RustRAG</span>
-  </div>
+    <span class="rr-brand__name">RustRAG</span>
+  </RouterLink>
 </template>

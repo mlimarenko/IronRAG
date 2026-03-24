@@ -8,13 +8,29 @@ use crate::{
         ContentChunk, ContentDocument, ContentDocumentHead, ContentDocumentSummary,
         ContentMutation, ContentMutationItem, ContentRevision,
     },
-    infra::repositories::content_repository::{
-        self, NewContentDocument, NewContentDocumentHead, NewContentMutation,
-        NewContentMutationItem, NewContentRevision,
+    domains::{
+        ai::AiBindingPurpose, provider_profiles::ProviderModelSelection,
+        runtime_graph::RuntimeNodeType,
     },
+    infra::arangodb::document_store::{
+        KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeRevisionRow,
+    },
+    infra::repositories::{
+        catalog_repository,
+        content_repository::{
+            self, NewContentDocument, NewContentDocumentHead, NewContentMutation,
+            NewContentMutationItem, NewContentRevision,
+        },
+    },
+    integrations::llm::ChatRequest,
     interfaces::http::router_support::ApiError,
     services::{
-        extract_service::PersistExtractContentCommand,
+        billing_service::CaptureIngestAttemptBillingCommand,
+        extract_service::{
+            MaterializeChunkResultCommand, NewEdgeCandidate, NewNodeCandidate,
+            PersistExtractContentCommand,
+        },
+        graph_extract::parse_graph_extraction_output,
         ingest_service::AdmitIngestJobCommand,
         ingest_service::{FinalizeAttemptCommand, LeaseAttemptCommand, RecordStageEventCommand},
         knowledge_service::{
@@ -200,6 +216,8 @@ struct InlineMutationContext {
     mutation_id: Uuid,
     job_id: Uuid,
     item_id: Uuid,
+    workspace_id: Uuid,
+    library_id: Uuid,
     document_id: Uuid,
     revision_id: Uuid,
 }
@@ -248,37 +266,21 @@ impl ContentService {
         state: &AppState,
         library_id: Uuid,
     ) -> Result<Vec<ContentDocumentSummary>, ApiError> {
-        let documents =
-            content_repository::list_documents_by_library(&state.persistence.postgres, library_id)
+        let library =
+            catalog_repository::get_library_by_id(&state.persistence.postgres, library_id)
                 .await
-                .map_err(|_| ApiError::Internal)?;
-        let document_ids = documents.iter().map(|row| row.id).collect::<Vec<_>>();
-        let heads = content_repository::list_document_heads_by_document_ids(
-            &state.persistence.postgres,
-            &document_ids,
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?;
-        let head_map = heads
-            .into_iter()
-            .map(|row| (row.document_id, row))
-            .collect::<std::collections::HashMap<_, _>>();
-        let active_revision_ids =
-            head_map.values().filter_map(|row| row.active_revision_id).collect::<Vec<_>>();
-        let active_revision_map = content_repository::list_revisions_by_ids(
-            &state.persistence.postgres,
-            &active_revision_ids,
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .into_iter()
-        .map(|row| (row.id, row))
-        .collect::<std::collections::HashMap<_, _>>();
-
-        Ok(documents
-            .into_iter()
-            .map(|row| self.build_document_summary_from_parts(row, &head_map, &active_revision_map))
-            .collect())
+                .map_err(|_| ApiError::Internal)?
+                .ok_or_else(|| ApiError::resource_not_found("library", library_id))?;
+        let documents = state
+            .arango_document_store
+            .list_documents_by_library(library.workspace_id, library_id)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+        let mut summaries = Vec::with_capacity(documents.len());
+        for row in documents {
+            summaries.push(self.build_document_summary_from_knowledge(state, row).await?);
+        }
+        Ok(summaries)
     }
 
     pub async fn get_document(
@@ -286,11 +288,13 @@ impl ContentService {
         state: &AppState,
         document_id: Uuid,
     ) -> Result<ContentDocumentSummary, ApiError> {
-        let row = content_repository::get_document_by_id(&state.persistence.postgres, document_id)
+        let row = state
+            .arango_document_store
+            .get_document(document_id)
             .await
             .map_err(|_| ApiError::Internal)?
             .ok_or_else(|| ApiError::resource_not_found("document", document_id))?;
-        self.build_document_summary(state, row).await
+        self.build_document_summary_from_knowledge(state, row).await
     }
 
     pub async fn get_document_head(
@@ -298,10 +302,27 @@ impl ContentService {
         state: &AppState,
         document_id: Uuid,
     ) -> Result<Option<ContentDocumentHead>, ApiError> {
+        let document = state
+            .arango_document_store
+            .get_document(document_id)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+        let Some(document) = document else {
+            return Ok(None);
+        };
         let row = content_repository::get_document_head(&state.persistence.postgres, document_id)
             .await
             .map_err(|_| ApiError::Internal)?;
-        Ok(row.map(map_document_head_row))
+        Ok(Some(ContentDocumentHead {
+            document_id,
+            active_revision_id: document.active_revision_id,
+            readable_revision_id: document.readable_revision_id,
+            latest_mutation_id: row.as_ref().and_then(|head| head.latest_mutation_id),
+            latest_successful_attempt_id: row
+                .as_ref()
+                .and_then(|head| head.latest_successful_attempt_id),
+            head_updated_at: row.map_or(document.updated_at, |head| head.head_updated_at),
+        }))
     }
 
     pub async fn list_revisions(
@@ -309,13 +330,12 @@ impl ContentService {
         state: &AppState,
         document_id: Uuid,
     ) -> Result<Vec<ContentRevision>, ApiError> {
-        let rows = content_repository::list_revisions_by_document(
-            &state.persistence.postgres,
-            document_id,
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?;
-        Ok(rows.into_iter().map(map_revision_row).collect())
+        let rows = state
+            .arango_document_store
+            .list_revisions_by_document(document_id)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+        Ok(rows.into_iter().map(map_knowledge_revision_row).collect())
     }
 
     pub async fn list_chunks(
@@ -323,11 +343,12 @@ impl ContentService {
         state: &AppState,
         revision_id: Uuid,
     ) -> Result<Vec<ContentChunk>, ApiError> {
-        let rows =
-            content_repository::list_chunks_by_revision(&state.persistence.postgres, revision_id)
-                .await
-                .map_err(|_| ApiError::Internal)?;
-        Ok(rows.into_iter().map(map_chunk_row).collect())
+        let rows = state
+            .arango_document_store
+            .list_chunks_by_revision(revision_id)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+        Ok(rows.into_iter().map(map_knowledge_chunk_row).collect())
     }
 
     pub async fn create_document(
@@ -366,7 +387,14 @@ impl ContentService {
         )
         .await
         .map_err(|_| ApiError::Internal)?;
-        let document = map_document_row(row);
+        let document = ContentDocument {
+            id: row.id,
+            workspace_id: row.workspace_id,
+            library_id: row.library_id,
+            external_key: row.external_key.clone(),
+            document_state: row.document_state.clone(),
+            created_at: row.created_at,
+        };
         let _ = state
             .canonical_services
             .knowledge
@@ -416,10 +444,7 @@ impl ContentService {
                 existing_admission.items.iter().find_map(|item| item.document_id)
             {
                 let document = self.get_document(state, existing_document_id).await?;
-                return Ok(CreateDocumentAdmission {
-                    document,
-                    mutation: existing_admission,
-                });
+                return Ok(CreateDocumentAdmission { document, mutation: existing_admission });
             }
 
             let document = self
@@ -557,12 +582,7 @@ impl ContentService {
             let mutation = self.get_mutation(state, mutation.id).await?;
             Ok(CreateDocumentAdmission {
                 document,
-                mutation: ContentMutationAdmission {
-                    mutation,
-                    items,
-                    job_id,
-                    async_operation_id,
-                },
+                mutation: ContentMutationAdmission { mutation, items, job_id, async_operation_id },
             })
         }
         .await;
@@ -641,28 +661,31 @@ impl ContentService {
         state: &AppState,
         command: CreateRevisionCommand,
     ) -> Result<ContentRevision, ApiError> {
-        let document = content_repository::get_document_by_id(
-            &state.persistence.postgres,
-            command.document_id,
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::resource_not_found("document", command.document_id))?;
-        let latest = content_repository::get_latest_revision_for_document(
-            &state.persistence.postgres,
-            command.document_id,
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?;
-        let next_revision_number = latest.as_ref().map_or(1, |row| row.revision_number + 1);
+        let document = state
+            .arango_document_store
+            .get_document(command.document_id)
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .ok_or_else(|| ApiError::resource_not_found("document", command.document_id))?;
+        let latest = state
+            .arango_document_store
+            .list_revisions_by_document(command.document_id)
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .into_iter()
+            .max_by_key(|row| row.revision_number);
+        let next_revision_number = latest
+            .as_ref()
+            .and_then(|row| i32::try_from(row.revision_number).ok())
+            .map_or(1, |value| value.saturating_add(1));
         let row = content_repository::create_revision(
             &state.persistence.postgres,
             &NewContentRevision {
-                document_id: document.id,
+                document_id: document.document_id,
                 workspace_id: document.workspace_id,
                 library_id: document.library_id,
                 revision_number: next_revision_number,
-                parent_revision_id: latest.as_ref().map(|row| row.id),
+                parent_revision_id: latest.as_ref().map(|row| row.revision_id),
                 content_source_kind: &command.content_source_kind,
                 checksum: &command.checksum,
                 mime_type: &command.mime_type,
@@ -940,11 +963,11 @@ impl ContentService {
         let base_revision =
             match head.as_ref().and_then(|row| row.active_revision_id.or(row.readable_revision_id))
             {
-                Some(revision_id) => {
-                    content_repository::get_revision_by_id(&state.persistence.postgres, revision_id)
-                        .await
-                        .map_err(|_| ApiError::Internal)?
-                }
+                Some(revision_id) => state
+                    .arango_document_store
+                    .get_revision(revision_id)
+                    .await
+                    .map_err(|_| ApiError::Internal)?,
                 None => None,
             };
         let admission = self
@@ -975,7 +998,7 @@ impl ContentService {
                                 .filter(|value| !value.trim().is_empty())
                                 .unwrap_or_else(|| command.file_name.clone()),
                         ),
-                        language_code: base_revision.and_then(|row| row.language_code),
+                        language_code: None,
                         source_uri: Some(source_uri_for_inline_payload(
                             "replace",
                             command.source_identity.as_deref(),
@@ -1011,9 +1034,7 @@ impl ContentService {
         .map_err(|_| ApiError::Internal)?
         .ok_or_else(|| ApiError::resource_not_found("document", document_id))?;
 
-        let head = content_repository::get_document_head(&state.persistence.postgres, document_id)
-            .await
-            .map_err(|_| ApiError::Internal)?;
+        let head = self.get_document_head(state, document_id).await?;
         let readable_revision_id = head.as_ref().and_then(|row| row.readable_revision_id);
         let latest_mutation_id = head.as_ref().and_then(|row| row.latest_mutation_id);
         let latest_successful_attempt_id =
@@ -1046,7 +1067,14 @@ impl ContentService {
             )
             .await?;
 
-        Ok(map_document_row(document))
+        Ok(ContentDocument {
+            id: document.id,
+            workspace_id: document.workspace_id,
+            library_id: document.library_id,
+            external_key: document.external_key,
+            document_state: document.document_state,
+            created_at: document.created_at,
+        })
     }
 
     pub async fn promote_document_head(
@@ -1055,19 +1083,20 @@ impl ContentService {
         command: PromoteHeadCommand,
     ) -> Result<ContentDocumentHead, ApiError> {
         if let Some(active_revision_id) = command.active_revision_id {
-            content_repository::get_revision_by_id(&state.persistence.postgres, active_revision_id)
+            state
+                .arango_document_store
+                .get_revision(active_revision_id)
                 .await
                 .map_err(|_| ApiError::Internal)?
                 .ok_or_else(|| ApiError::resource_not_found("revision", active_revision_id))?;
         }
         if let Some(readable_revision_id) = command.readable_revision_id {
-            content_repository::get_revision_by_id(
-                &state.persistence.postgres,
-                readable_revision_id,
-            )
-            .await
-            .map_err(|_| ApiError::Internal)?
-            .ok_or_else(|| ApiError::resource_not_found("revision", readable_revision_id))?;
+            state
+                .arango_document_store
+                .get_revision(readable_revision_id)
+                .await
+                .map_err(|_| ApiError::Internal)?
+                .ok_or_else(|| ApiError::resource_not_found("revision", readable_revision_id))?;
         }
 
         let row = content_repository::upsert_document_head(
@@ -1082,13 +1111,12 @@ impl ContentService {
         )
         .await
         .map_err(|_| ApiError::Internal)?;
-        let document = content_repository::get_document_by_id(
-            &state.persistence.postgres,
-            command.document_id,
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::resource_not_found("document", command.document_id))?;
+        let document = state
+            .arango_document_store
+            .get_document(command.document_id)
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .ok_or_else(|| ApiError::resource_not_found("document", command.document_id))?;
         let _ = state
             .canonical_services
             .knowledge
@@ -1104,7 +1132,14 @@ impl ContentService {
                 },
             )
             .await?;
-        Ok(map_document_head_row(row))
+        Ok(ContentDocumentHead {
+            document_id: row.document_id,
+            active_revision_id: row.active_revision_id,
+            readable_revision_id: row.readable_revision_id,
+            latest_mutation_id: row.latest_mutation_id,
+            latest_successful_attempt_id: row.latest_successful_attempt_id,
+            head_updated_at: row.head_updated_at,
+        })
     }
 
     pub async fn accept_mutation(
@@ -1116,11 +1151,8 @@ impl ContentService {
             command.requested_by_principal_id,
             command.idempotency_key.as_deref().map(str::trim).filter(|value| !value.is_empty()),
         ) {
-            let request_source_identity = command
-                .source_identity
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty());
+            let request_source_identity =
+                command.source_identity.as_deref().map(str::trim).filter(|value| !value.is_empty());
             if let Some(existing) = content_repository::find_mutation_by_idempotency(
                 &state.persistence.postgres,
                 principal_id,
@@ -1162,10 +1194,7 @@ impl ContentService {
                     .await
                     .map_err(|_| ApiError::Internal)?
                     .ok_or(ApiError::Internal)?;
-                    ensure_existing_mutation_matches_request(
-                        &existing,
-                        request_source_identity,
-                    )?;
+                    ensure_existing_mutation_matches_request(&existing, request_source_identity)?;
                     Ok(map_mutation_row(existing))
                 }
                 Err(_) => Err(ApiError::Internal),
@@ -1493,7 +1522,10 @@ impl ContentService {
             )
             .await?;
 
-        match self.build_extract_outcome(state, file_name, mime_type, file_bytes).await {
+        match self
+            .build_extract_outcome(state, context.library_id, file_name, mime_type, file_bytes)
+            .await
+        {
             InlineExtractOutcome::Ready(plan) => {
                 let normalized_text = plan.extracted_text.clone().unwrap_or_default();
                 state
@@ -1589,6 +1621,7 @@ impl ContentService {
         context: &InlineMutationContext,
         attempt_id: Uuid,
     ) -> Result<ContentMutationAdmission, ApiError> {
+        self.run_inline_post_chunk_pipeline(state, context, attempt_id).await?;
         let _ = self
             .promote_document_head(
                 state,
@@ -1643,6 +1676,271 @@ impl ContentService {
             )
             .await?;
         self.get_mutation_admission(state, context.mutation_id).await
+    }
+
+    async fn run_inline_post_chunk_pipeline(
+        &self,
+        state: &AppState,
+        context: &InlineMutationContext,
+        attempt_id: Uuid,
+    ) -> Result<(), ApiError> {
+        state
+            .canonical_services
+            .ingest
+            .record_stage_event(
+                state,
+                RecordStageEventCommand {
+                    attempt_id,
+                    stage_name: "embed_chunk".to_string(),
+                    stage_state: "started".to_string(),
+                    message: Some("rebuilding chunk embeddings for inline mutation".to_string()),
+                    details_json: serde_json::json!({
+                        "libraryId": context.library_id,
+                        "revisionId": context.revision_id,
+                    }),
+                },
+            )
+            .await?;
+        state
+            .canonical_services
+            .ingest
+            .record_stage_event(
+                state,
+                RecordStageEventCommand {
+                    attempt_id,
+                    stage_name: "embed_chunk".to_string(),
+                    stage_state: "completed".to_string(),
+                    message: Some(
+                        "vector stage deferred to keep inline ingestion non-blocking".to_string(),
+                    ),
+                    details_json: serde_json::json!({
+                        "strategy": "deferred_non_blocking",
+                    }),
+                },
+            )
+            .await?;
+
+        state
+            .canonical_services
+            .ingest
+            .record_stage_event(
+                state,
+                RecordStageEventCommand {
+                    attempt_id,
+                    stage_name: "extract_graph".to_string(),
+                    stage_state: "started".to_string(),
+                    message: Some("extracting graph candidates from chunks".to_string()),
+                    details_json: serde_json::json!({
+                        "libraryId": context.library_id,
+                        "revisionId": context.revision_id,
+                    }),
+                },
+            )
+            .await?;
+        let (chunk_count, extracted_entities, extracted_relations) =
+            self.materialize_inline_graph_candidates(state, context, attempt_id).await?;
+        let graph_outcome = state
+            .canonical_services
+            .graph
+            .rebuild_arango_library_graph(state, context.library_id)
+            .await
+            .map_err(|error| {
+                ApiError::BadRequest(format!("inline graph stage failed: {error:#}"))
+            })?;
+        state
+            .canonical_services
+            .ingest
+            .record_stage_event(
+                state,
+                RecordStageEventCommand {
+                    attempt_id,
+                    stage_name: "extract_graph".to_string(),
+                    stage_state: "completed".to_string(),
+                    message: Some("graph candidates extracted and reconciled".to_string()),
+                    details_json: serde_json::json!({
+                        "chunksProcessed": chunk_count,
+                        "extractedEntityCandidates": extracted_entities,
+                        "extractedRelationCandidates": extracted_relations,
+                        "upsertedEntities": graph_outcome.upserted_entities,
+                        "upsertedRelations": graph_outcome.upserted_relations,
+                    }),
+                },
+            )
+            .await?;
+
+        let revision = state
+            .arango_document_store
+            .get_revision(context.revision_id)
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .ok_or_else(|| {
+                ApiError::resource_not_found("knowledge_revision", context.revision_id)
+            })?;
+        let now = Utc::now();
+        let _ = state
+            .arango_document_store
+            .update_revision_readiness(
+                revision.revision_id,
+                &revision.text_state,
+                "ready",
+                "ready",
+                revision.text_readable_at,
+                revision.vector_ready_at.or(Some(now)),
+                revision.graph_ready_at.or(Some(now)),
+                revision.superseded_by_revision_id,
+            )
+            .await
+            .map_err(|_| ApiError::Internal)?;
+
+        Ok(())
+    }
+
+    async fn materialize_inline_graph_candidates(
+        &self,
+        state: &AppState,
+        context: &InlineMutationContext,
+        attempt_id: Uuid,
+    ) -> Result<(usize, usize, usize), ApiError> {
+        let graph_binding = state
+            .canonical_services
+            .ai_catalog
+            .resolve_active_runtime_binding(
+                state,
+                context.library_id,
+                AiBindingPurpose::ExtractGraph,
+            )
+            .await?
+            .ok_or_else(|| {
+                ApiError::BadRequest(
+                    "active extract_graph binding is required for inline graph extraction"
+                        .to_string(),
+                )
+            })?;
+        let chunks = state
+            .arango_document_store
+            .list_chunks_by_revision(context.revision_id)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+        let mut extracted_entities = 0usize;
+        let mut extracted_relations = 0usize;
+
+        for chunk in &chunks {
+            let prompt = format!(
+                "Extract graph entities and relations from the text chunk.\n\
+Return STRICT JSON object:\n\
+{{\"entities\":[{{\"label\":\"...\",\"node_type\":\"entity|topic|document\",\"aliases\":[...],\"summary\":\"...\"}}],\"relations\":[{{\"source_label\":\"...\",\"target_label\":\"...\",\"relation_type\":\"...\",\"summary\":\"...\"}}]}}\n\
+No markdown and no prose.\n\
+Chunk:\n{}",
+                chunk.content_text
+            );
+            let response = state
+                .llm_gateway
+                .generate(ChatRequest {
+                    provider_kind: graph_binding.provider_kind.clone(),
+                    model_name: graph_binding.model_name.clone(),
+                    prompt,
+                    api_key_override: Some(graph_binding.api_key.clone()),
+                    base_url_override: graph_binding.provider_base_url.clone(),
+                    system_prompt: graph_binding.system_prompt.clone(),
+                    temperature: None,
+                    top_p: None,
+                    // Provider adapters in `UnifiedGateway` normalize output token controls.
+                    // Some OpenAI-compatible routes reject explicit max_output_tokens.
+                    max_output_tokens_override: None,
+                    extra_parameters_json: graph_binding.extra_parameters_json.clone(),
+                })
+                .await
+                .map_err(|error| {
+                    ApiError::BadRequest(format!(
+                        "inline graph provider call failed for chunk {}: {error:#}",
+                        chunk.chunk_id
+                    ))
+                })?;
+            let _ = state
+                .canonical_services
+                .billing
+                .capture_ingest_attempt(
+                    state,
+                    CaptureIngestAttemptBillingCommand {
+                        workspace_id: context.workspace_id,
+                        library_id: context.library_id,
+                        attempt_id,
+                        binding_id: Some(graph_binding.binding_id),
+                        provider_kind: response.provider_kind.clone(),
+                        model_name: response.model_name.clone(),
+                        call_kind: "extract_graph".to_string(),
+                        usage_json: response.usage_json.clone(),
+                    },
+                )
+                .await?;
+            let parsed = parse_graph_extraction_output(&response.output_text).map_err(|error| {
+                ApiError::BadRequest(format!(
+                    "inline graph parse failed for chunk {}: {error:#}",
+                    chunk.chunk_id
+                ))
+            })?;
+
+            let node_candidates = parsed
+                .entities
+                .iter()
+                .map(|entity| NewNodeCandidate {
+                    canonical_key: crate::services::graph_merge::canonical_node_key(
+                        entity.node_type.clone(),
+                        &entity.label,
+                    ),
+                    node_kind: inline_runtime_node_type_slug(&entity.node_type).to_string(),
+                    display_label: entity.label.clone(),
+                    summary: entity.summary.clone(),
+                })
+                .collect::<Vec<_>>();
+            let edge_candidates = parsed
+                .relations
+                .iter()
+                .map(|relation| {
+                    let from_key = crate::services::graph_merge::canonical_node_key(
+                        RuntimeNodeType::Entity,
+                        &relation.source_label,
+                    );
+                    let to_key = crate::services::graph_merge::canonical_node_key(
+                        RuntimeNodeType::Entity,
+                        &relation.target_label,
+                    );
+                    NewEdgeCandidate {
+                        canonical_key: crate::services::graph_merge::canonical_edge_key(
+                            &from_key,
+                            &relation.relation_type,
+                            &to_key,
+                        ),
+                        edge_kind: relation.relation_type.clone(),
+                        from_canonical_key: from_key,
+                        to_canonical_key: to_key,
+                        summary: relation.summary.clone(),
+                    }
+                })
+                .collect::<Vec<_>>();
+            extracted_entities += node_candidates.len();
+            extracted_relations += edge_candidates.len();
+
+            let _ = state
+                .canonical_services
+                .extract
+                .materialize_chunk_result(
+                    state,
+                    MaterializeChunkResultCommand {
+                        chunk_id: chunk.chunk_id,
+                        attempt_id,
+                        extract_state: "ready".to_string(),
+                        provider_call_id: None,
+                        finished_at: Some(Utc::now()),
+                        failure_code: None,
+                        node_candidates,
+                        edge_candidates,
+                    },
+                )
+                .await?;
+        }
+
+        Ok((chunks.len(), extracted_entities, extracted_relations))
     }
 
     async fn complete_failed_inline_mutation(
@@ -1735,15 +2033,47 @@ impl ContentService {
     async fn build_extract_outcome(
         &self,
         state: &AppState,
+        library_id: Uuid,
         file_name: &str,
         mime_type: Option<&str>,
         file_bytes: &[u8],
     ) -> InlineExtractOutcome {
         let file_size_bytes = u64::try_from(file_bytes.len()).unwrap_or(u64::MAX);
-        let profile = state.effective_provider_profile();
+        let vision_binding = state
+            .canonical_services
+            .ai_catalog
+            .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::Vision)
+            .await
+            .ok()
+            .flatten();
+
+        // If explicit vision binding is not configured, reuse extract_graph runtime binding.
+        // This keeps image/PDF OCR paths available in minimal setups.
+        let fallback_graph_binding = if vision_binding.is_none() {
+            state
+                .canonical_services
+                .ai_catalog
+                .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::ExtractGraph)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+
+        let active_vision_like_binding =
+            vision_binding.as_ref().or(fallback_graph_binding.as_ref());
+        let vision_provider = active_vision_like_binding.and_then(|binding| {
+            binding.provider_kind.parse().ok().map(|provider_kind| ProviderModelSelection {
+                provider_kind,
+                model_name: binding.model_name.clone(),
+            })
+        });
         match build_runtime_file_extraction_plan(
             state.llm_gateway.as_ref(),
-            &profile.vision,
+            vision_provider.as_ref(),
+            active_vision_like_binding.map(|binding| binding.api_key.as_str()),
+            active_vision_like_binding.and_then(|binding| binding.provider_base_url.as_deref()),
             Some(file_name),
             mime_type,
             file_bytes.to_vec(),
@@ -1780,11 +2110,12 @@ impl ContentService {
         revision_id: Uuid,
         text: &str,
     ) -> Result<(), ApiError> {
-        let revision =
-            content_repository::get_revision_by_id(&state.persistence.postgres, revision_id)
-                .await
-                .map_err(|_| ApiError::Internal)?
-                .ok_or_else(|| ApiError::resource_not_found("revision", revision_id))?;
+        let revision = state
+            .arango_document_store
+            .get_revision(revision_id)
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .ok_or_else(|| ApiError::resource_not_found("revision", revision_id))?;
         let _ =
             content_repository::delete_chunks_by_revision(&state.persistence.postgres, revision_id)
                 .await
@@ -1842,7 +2173,7 @@ impl ContentService {
                 section_path: Vec::new(),
                 heading_trail: Vec::new(),
                 chunk_state: "ready".to_string(),
-                text_generation: Some(i64::from(revision.revision_number)),
+                text_generation: Some(revision.revision_number),
                 vector_generation: None,
             });
         }
@@ -1859,6 +2190,8 @@ impl ContentService {
             mutation_id: admission.mutation.id,
             job_id: admission.job_id.ok_or_else(|| ApiError::Internal)?,
             item_id: item.id,
+            workspace_id: admission.mutation.workspace_id,
+            library_id: admission.mutation.library_id,
             document_id: item.document_id.ok_or_else(|| ApiError::Internal)?,
             revision_id: item.result_revision_id.ok_or_else(|| ApiError::Internal)?,
         })
@@ -1890,18 +2223,17 @@ impl ContentService {
                     "document is not readable enough for append".to_string(),
                 )
             })?;
-        let base_revision = content_repository::get_revision_by_id(
-            &state.persistence.postgres,
-            readable_revision_id,
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::resource_not_found("revision", readable_revision_id))?;
+        let base_revision = state
+            .arango_document_store
+            .get_revision(readable_revision_id)
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .ok_or_else(|| ApiError::resource_not_found("revision", readable_revision_id))?;
         Ok(AppendableDocumentContext {
             current_content,
             mime_type: base_revision.mime_type,
             title: base_revision.title.or_else(|| Some(document_id.to_string())),
-            language_code: base_revision.language_code,
+            language_code: None,
         })
     }
 
@@ -1931,53 +2263,35 @@ impl ContentService {
         Ok(())
     }
 
-    async fn build_document_summary(
+    async fn build_document_summary_from_knowledge(
         &self,
         state: &AppState,
-        document_row: content_repository::ContentDocumentRow,
+        document_row: KnowledgeDocumentRow,
     ) -> Result<ContentDocumentSummary, ApiError> {
-        let head =
-            content_repository::get_document_head(&state.persistence.postgres, document_row.id)
+        let active_revision = if let Some(revision_id) = document_row.active_revision_id {
+            state
+                .arango_document_store
+                .get_revision(revision_id)
                 .await
-                .map_err(|_| ApiError::Internal)?;
-        let active_revision =
-            if let Some(revision_id) = head.as_ref().and_then(|row| row.active_revision_id) {
-                content_repository::get_revision_by_id(&state.persistence.postgres, revision_id)
-                    .await
-                    .map_err(|_| ApiError::Internal)?
-                    .map(map_revision_row)
-            } else {
-                None
-            };
+                .map_err(|_| ApiError::Internal)?
+                .map(map_knowledge_revision_row)
+        } else {
+            None
+        };
+        let head = Some(ContentDocumentHead {
+            document_id: document_row.document_id,
+            active_revision_id: document_row.active_revision_id,
+            readable_revision_id: document_row.readable_revision_id,
+            latest_mutation_id: None,
+            latest_successful_attempt_id: None,
+            head_updated_at: document_row.updated_at,
+        });
 
         Ok(ContentDocumentSummary {
-            document: map_document_row(document_row),
-            head: head.map(map_document_head_row),
+            document: map_knowledge_document_row(document_row),
+            head,
             active_revision,
         })
-    }
-
-    fn build_document_summary_from_parts(
-        &self,
-        document_row: content_repository::ContentDocumentRow,
-        head_map: &std::collections::HashMap<Uuid, content_repository::ContentDocumentHeadRow>,
-        active_revision_map: &std::collections::HashMap<
-            Uuid,
-            content_repository::ContentRevisionRow,
-        >,
-    ) -> ContentDocumentSummary {
-        let head = head_map.get(&document_row.id).cloned();
-        let active_revision = head
-            .as_ref()
-            .and_then(|row| row.active_revision_id)
-            .and_then(|revision_id| active_revision_map.get(&revision_id).cloned())
-            .map(map_revision_row);
-
-        ContentDocumentSummary {
-            document: map_document_row(document_row),
-            head: head.map(map_document_head_row),
-            active_revision,
-        }
     }
 
     async fn create_revision_from_metadata(
@@ -2006,25 +2320,14 @@ impl ContentService {
     }
 }
 
-fn map_document_row(row: content_repository::ContentDocumentRow) -> ContentDocument {
+fn map_knowledge_document_row(row: KnowledgeDocumentRow) -> ContentDocument {
     ContentDocument {
-        id: row.id,
+        id: row.document_id,
         workspace_id: row.workspace_id,
         library_id: row.library_id,
         external_key: row.external_key,
         document_state: row.document_state,
         created_at: row.created_at,
-    }
-}
-
-fn map_document_head_row(row: content_repository::ContentDocumentHeadRow) -> ContentDocumentHead {
-    ContentDocumentHead {
-        document_id: row.document_id,
-        active_revision_id: row.active_revision_id,
-        readable_revision_id: row.readable_revision_id,
-        latest_mutation_id: row.latest_mutation_id,
-        latest_successful_attempt_id: row.latest_successful_attempt_id,
-        head_updated_at: row.head_updated_at,
     }
 }
 
@@ -2049,16 +2352,42 @@ fn map_revision_row(row: content_repository::ContentRevisionRow) -> ContentRevis
     }
 }
 
-fn map_chunk_row(row: content_repository::ContentChunkRow) -> ContentChunk {
+fn map_knowledge_revision_row(row: KnowledgeRevisionRow) -> ContentRevision {
+    ContentRevision {
+        id: row.revision_id,
+        document_id: row.document_id,
+        workspace_id: row.workspace_id,
+        library_id: row.library_id,
+        revision_number: i32::try_from(row.revision_number).unwrap_or(i32::MAX),
+        parent_revision_id: None,
+        content_source_kind: row.revision_kind,
+        checksum: row.checksum,
+        mime_type: row.mime_type,
+        byte_size: row.byte_size,
+        title: row.title,
+        language_code: None,
+        source_uri: row.source_uri,
+        storage_key: row.storage_ref,
+        created_by_principal_id: None,
+        created_at: row.created_at,
+    }
+}
+
+fn map_knowledge_chunk_row(row: KnowledgeChunkRow) -> ContentChunk {
+    let start_offset = row.span_start.unwrap_or(0);
+    let end_offset = row.span_end.unwrap_or_else(|| {
+        start_offset.saturating_add(i32::try_from(row.normalized_text.len()).unwrap_or(0))
+    });
+    let checksum = format!("sha256:{:x}", Sha256::digest(row.normalized_text.as_bytes()));
     ContentChunk {
-        id: row.id,
+        id: row.chunk_id,
         revision_id: row.revision_id,
         chunk_index: row.chunk_index,
-        start_offset: row.start_offset,
-        end_offset: row.end_offset,
+        start_offset,
+        end_offset,
         token_count: row.token_count,
         normalized_text: row.normalized_text,
-        text_checksum: row.text_checksum,
+        text_checksum: checksum,
     }
 }
 
@@ -2098,7 +2427,9 @@ fn ensure_existing_mutation_matches_request(
 ) -> Result<(), ApiError> {
     if let Some(request_source_identity) = request_source_identity {
         match existing.source_identity.as_deref() {
-            Some(existing_source_identity) if existing_source_identity != request_source_identity => {
+            Some(existing_source_identity)
+                if existing_source_identity != request_source_identity =>
+            {
                 return Err(ApiError::idempotency_conflict(
                     "the same idempotency key was already used with a different payload",
                 ));
@@ -2163,6 +2494,14 @@ fn infer_inline_mime_type(
 fn file_extension(file_name: &str) -> Option<String> {
     let (_, extension) = file_name.rsplit_once('.')?;
     Some(extension.trim().to_ascii_lowercase())
+}
+
+fn inline_runtime_node_type_slug(node_type: &RuntimeNodeType) -> &'static str {
+    match node_type {
+        RuntimeNodeType::Document => "document",
+        RuntimeNodeType::Entity => "entity",
+        RuntimeNodeType::Topic => "topic",
+    }
 }
 
 fn validate_extraction_plan(

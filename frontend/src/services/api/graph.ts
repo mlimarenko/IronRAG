@@ -12,6 +12,8 @@ import type {
   GraphStatus,
   GraphSurfaceResponse,
 } from 'src/models/ui/graph'
+import type { DashboardAttentionItem } from 'src/models/ui/dashboard'
+import { i18n } from 'src/lib/i18n'
 import { useShellStore } from 'src/stores/shell'
 import { ApiClientError, apiHttp, unwrap } from './http'
 
@@ -499,14 +501,37 @@ function buildLegend(nodes: GraphNode[], edgeCount: number): GraphLegendItem[] {
 
 function buildEmptySurface(): GraphSurfaceResponse {
   return {
+    loading: false,
+    error: null,
+    canvasMode: 'empty',
     graphStatus: 'empty',
     convergenceStatus: null,
     graphGeneration: 0,
     graphGenerationState: null,
     nodeCount: 0,
     relationCount: 0,
+    edgeCount: 0,
     filteredArtifactCount: 0,
     lastBuiltAt: null,
+    overlay: {
+      searchQuery: '',
+      searchHits: [],
+      nodeTypeFilter: '',
+      activeLayout: 'cloud',
+      showFilteredArtifacts: false,
+      filteredArtifactCount: 0,
+      nodeCount: 0,
+      edgeCount: 0,
+      showLegend: false,
+      showFilters: false,
+      zoomLevel: 1,
+    },
+    inspector: {
+      focusedNodeId: null,
+      loading: false,
+      error: null,
+      detail: null,
+    },
     warning: null,
     nodes: [],
     edges: [],
@@ -598,16 +623,58 @@ function buildSurface(
   const relationNodeCount = rawNodes.filter((node) => node.nodeType === 'topic').length
   const graphStatus = mapGraphStatus(generation, rawNodes.length, relationNodeCount)
   const generationState = generation?.degradedState ?? null
+  const filteredArtifactCount =
+    rawNodes.filter((node) => node.filteredArtifact).length +
+    rawEdges.filter((edge) => edge.filteredArtifact).length
+  const edgeCount = rawEdges.length
+  const canvasMode =
+    graphStatus === 'failed'
+      ? 'error'
+      : graphStatus === 'empty' && rawNodes.length === 0
+        ? 'empty'
+        : (graphStatus === 'building' || graphStatus === 'rebuilding') && rawNodes.length === 0
+          ? 'building'
+          : relationNodeCount === 0 &&
+              rawNodes.length > 0 &&
+              rawNodes.every((node) => node.nodeType === 'document') &&
+              graphStatus !== 'building' &&
+              graphStatus !== 'rebuilding' &&
+              graphStatus !== 'empty'
+            ? 'sparse'
+            : 'ready'
 
   return {
+    loading: false,
+    error: null,
+    canvasMode,
     graphStatus,
     convergenceStatus: mapConvergenceStatus(graphStatus, generationState),
     graphGeneration: graphGenerationOf(generation),
     graphGenerationState: generationState,
     nodeCount: rawNodes.length,
     relationCount: relationNodeCount,
-    filteredArtifactCount: 0,
+    edgeCount,
+    filteredArtifactCount,
     lastBuiltAt: generation?.updatedAt ?? null,
+    overlay: {
+      searchQuery: '',
+      searchHits: [],
+      nodeTypeFilter: '',
+      activeLayout: 'cloud',
+      showFilteredArtifacts: false,
+      filteredArtifactCount,
+      nodeCount: rawNodes.length,
+      edgeCount,
+      showLegend: false,
+      showFilters: false,
+      zoomLevel: 1,
+    },
+    inspector: {
+      focusedNodeId: null,
+      loading: false,
+      error: null,
+      detail: null,
+    },
     warning: projectionWarning(graphStatus, generationState),
     nodes: rawNodes,
     edges: rawEdges,
@@ -649,11 +716,38 @@ function findRelationNode(nodes: GraphNode[], relationId: string): GraphNode | n
   )
 }
 
+function looksOpaqueIdentifier(value: string): boolean {
+  const trimmed = value.trim()
+  return (
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed) ||
+    /^[0-9a-f]{4,}-[0-9a-f-]{20,}$/i.test(trimmed)
+  )
+}
+
+function compactOpaqueIdentifier(value: string): string {
+  const trimmed = value.trim()
+  if (trimmed.length <= 18) {
+    return trimmed
+  }
+  return `${trimmed.slice(0, 8)}…${trimmed.slice(-6)}`
+}
+
+function documentDisplayLabel(row: RawKnowledgeDocumentRow): string {
+  const externalKey = row.externalKey.trim()
+  if (!externalKey) {
+    return compactOpaqueIdentifier(row.documentId)
+  }
+  if (externalKey === row.documentId || looksOpaqueIdentifier(externalKey)) {
+    return compactOpaqueIdentifier(row.documentId)
+  }
+  return externalKey
+}
+
 function mapDocumentRow(row: RawKnowledgeDocumentRow): GraphNode {
   return {
     id: row.documentId,
     canonicalKey: `document:${row.documentId}`,
-    label: row.externalKey,
+    label: documentDisplayLabel(row),
     nodeType: 'document',
     secondaryLabel: row.documentState,
     supportCount: row.latestRevisionNo ?? 1,
@@ -784,7 +878,7 @@ function mapDocumentEvidence(
   return chunks.map((chunk) => ({
     id: chunk.chunkId,
     documentId: document.documentId,
-    documentLabel: document.externalKey,
+    documentLabel: documentDisplayLabel(document),
     chunkId: chunk.chunkId,
     pageRef: chunk.sectionPath.length > 0 ? chunk.sectionPath.join(' / ') : `chunk ${chunk.chunkIndex + 1}`,
     evidenceText: chunk.contentText,
@@ -986,9 +1080,9 @@ function mapDocumentDetail(
 
   return {
     id: document.documentId,
-    label: document.externalKey,
+    label: documentDisplayLabel(document),
     nodeType: 'document',
-    summary: summary?.text ?? document.externalKey,
+    summary: summary?.text ?? documentDisplayLabel(document),
     properties: [
       ['Type', 'document'],
       ['State', document.documentState],
@@ -1231,7 +1325,7 @@ function buildGraphDiagnostics(surface: GraphSurfaceResponse): GraphDiagnostics 
     convergenceStatus: surface.convergenceStatus,
     graphGeneration: surface.graphGeneration,
     nodeCount: surface.nodeCount,
-    edgeCount: surface.edges.length,
+    edgeCount: surface.edgeCount,
     graphFreshness:
       graphStatus === 'failed'
         ? 'failed'
@@ -1338,4 +1432,41 @@ export async function searchGraphNodes(
   return hits
     .sort((left, right) => (scores.get(right.id) ?? 0) - (scores.get(left.id) ?? 0))
     .slice(0, limit)
+}
+
+export function mapGraphDiagnosticsForDashboard(
+  diagnostics: GraphDiagnostics,
+): {
+  statusLabel: string
+  attentionItem: DashboardAttentionItem | null
+} {
+  const statusKey = `dashboard.graphStatus.${diagnostics.graphStatus}`
+  const statusLabel = i18n.global.te(statusKey)
+    ? i18n.global.t(statusKey)
+    : diagnostics.graphStatus
+
+  let severity: DashboardAttentionItem['severity'] | null = null
+  if (diagnostics.graphStatus === 'failed' || diagnostics.graphStatus === 'stale') {
+    severity = 'error'
+  } else if (
+    diagnostics.graphStatus === 'building' ||
+    diagnostics.graphStatus === 'partial' ||
+    diagnostics.graphStatus === 'rebuilding'
+  ) {
+    severity = 'warning'
+  }
+
+  return {
+    statusLabel,
+    attentionItem: severity
+      ? {
+          id: 'graph-status',
+          severity,
+          title: i18n.global.t('dashboard.attentionItems.graphTitle'),
+          message: i18n.global.t('dashboard.attentionItems.graphMessage', { status: statusLabel }),
+          targetRoute: '/graph',
+          actionLabel: i18n.global.t('dashboard.attentionItems.graphAction'),
+        }
+      : null,
+  }
 }

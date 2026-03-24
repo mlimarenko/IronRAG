@@ -512,7 +512,7 @@ async fn governance_actions_and_denials_append_expected_audit_subjects() -> Resu
                     "workspaceId": fixture.workspace_id,
                     "providerCatalogId": fixture.provider_catalog_id,
                     "label": TEST_PROVIDER_CREDENTIAL_LABEL,
-                    "secretRef": "secret://audit-events/provider-credential"
+                    "apiKey": "audit-events-provider-key"
                 }),
             )
             .await?;
@@ -629,7 +629,7 @@ async fn governance_actions_and_denials_append_expected_audit_subjects() -> Resu
                     "workspaceId": fixture.workspace_id,
                     "providerCatalogId": fixture.provider_catalog_id,
                     "label": "denied-credential",
-                    "secretRef": "secret://audit-events/denied-credential"
+                    "apiKey": "audit-events-denied-key"
                 }),
             )
             .await?;

@@ -658,3 +658,81 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
     fixture.cleanup().await?;
     result
 }
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango"]
+async fn ingest_attempt_emits_stage_events_for_worker_progress() -> Result<()> {
+    let fixture = IngestAttemptsFixture::create().await?;
+
+    let result = async {
+        let ingest = &fixture.state.canonical_services.ingest;
+        let job = ingest
+            .admit_job(
+                &fixture.state,
+                AdmitIngestJobCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    mutation_id: None,
+                    connector_id: None,
+                    async_operation_id: None,
+                    knowledge_document_id: Some(fixture.document_id),
+                    knowledge_revision_id: Some(fixture.revision_id),
+                    job_kind: "content_mutation".to_string(),
+                    priority: 50,
+                    dedupe_key: Some(format!("stage-events-{}", Uuid::now_v7())),
+                    available_at: None,
+                },
+            )
+            .await
+            .context("failed to admit stage-events ingest job")?;
+        let attempt = ingest
+            .lease_attempt(
+                &fixture.state,
+                LeaseAttemptCommand {
+                    job_id: job.id,
+                    worker_principal_id: None,
+                    lease_token: Some("stage-events-lease".to_string()),
+                    knowledge_generation_id: Some(fixture.generation_id),
+                    current_stage: Some("queued".to_string()),
+                },
+            )
+            .await
+            .context("failed to lease stage-events attempt")?;
+
+        for (stage_name, stage_state) in [("queued", "started"), ("extracting", "started")] {
+            let _ = ingest
+                .record_stage_event(
+                    &fixture.state,
+                    RecordStageEventCommand {
+                        attempt_id: attempt.id,
+                        stage_name: stage_name.to_string(),
+                        stage_state: stage_state.to_string(),
+                        message: Some(format!("{stage_name} {stage_state}")),
+                        details_json: serde_json::json!({
+                            "stage": stage_name,
+                            "state": stage_state,
+                        }),
+                    },
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to record stage event {stage_name}/{stage_state}")
+                })?;
+        }
+
+        let events = ingest
+            .list_stage_events(&fixture.state, attempt.id)
+            .await
+            .context("failed to list emitted stage events")?;
+        assert!(events.len() >= 2);
+        assert!(events.iter().any(|event| event.stage_name == "queued"));
+        assert!(events.iter().any(|event| event.stage_name == "extracting"));
+        assert!(events.iter().all(|event| event.attempt_id == attempt.id));
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}

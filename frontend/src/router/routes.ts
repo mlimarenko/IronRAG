@@ -1,9 +1,5 @@
 const routes = [
   {
-    path: '/',
-    redirect: '/documents',
-  },
-  {
     path: '/login',
     component: () => import('src/pages/LoginPage.vue'),
     meta: { guestOnly: true },
@@ -14,27 +10,40 @@ const routes = [
     meta: { requiresAuth: true },
     children: [
       {
+        path: '',
+        name: 'home',
+        component: () => import('src/pages/DashboardPage.vue'),
+        meta: { title: 'Home', widthMode: 'default' },
+      },
+      {
         path: 'documents',
+        name: 'documents',
         component: () => import('src/pages/DocumentsPage.vue'),
+        meta: { title: 'Documents', widthMode: 'wide' },
       },
       {
         path: 'graph',
+        name: 'graph',
         component: () => import('src/pages/GraphPage.vue'),
-      },
-      {
-        path: 'swagger',
-        component: () => import('src/pages/SwaggerPage.vue'),
+        meta: { title: 'Graph', widthMode: 'full' },
       },
       {
         path: 'admin',
+        name: 'admin',
         component: () => import('src/pages/AdminPage.vue'),
-        meta: { requiresAdmin: true },
+        meta: { title: 'Admin', widthMode: 'default', requiresAdmin: true },
+      },
+      {
+        path: 'swagger',
+        name: 'swagger',
+        component: () => import('src/pages/SwaggerPage.vue'),
+        meta: { title: 'API Reference', widthMode: 'wide' },
       },
     ],
   },
   {
     path: '/:pathMatch(.*)*',
-    redirect: '/documents',
+    redirect: '/',
   },
 ]
 

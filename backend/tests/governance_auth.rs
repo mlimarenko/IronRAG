@@ -546,6 +546,116 @@ async fn insert_content_document(
     .context("failed to insert content_document row")
 }
 
+async fn insert_content_revision(
+    postgres: &PgPool,
+    document_id: Uuid,
+    workspace_id: Uuid,
+    library_id: Uuid,
+    revision_number: i32,
+    checksum: &str,
+    title: &str,
+) -> Result<Uuid> {
+    sqlx::query_scalar::<_, Uuid>(
+        "insert into content_revision (
+            id,
+            document_id,
+            workspace_id,
+            library_id,
+            revision_number,
+            parent_revision_id,
+            content_source_kind,
+            checksum,
+            mime_type,
+            byte_size,
+            title,
+            language_code,
+            source_uri,
+            storage_key,
+            created_by_principal_id
+        )
+        values (
+            $1, $2, $3, $4, $5, null, 'upload', $6, 'text/markdown', 128, $7, 'ru', null, null, null
+        )
+        returning id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(document_id)
+    .bind(workspace_id)
+    .bind(library_id)
+    .bind(revision_number)
+    .bind(checksum)
+    .bind(title)
+    .fetch_one(postgres)
+    .await
+    .context("failed to insert content_revision row")
+}
+
+async fn upsert_content_document_head(
+    postgres: &PgPool,
+    document_id: Uuid,
+    revision_id: Uuid,
+) -> Result<()> {
+    sqlx::query(
+        "insert into content_document_head (
+            document_id,
+            active_revision_id,
+            readable_revision_id,
+            latest_mutation_id,
+            latest_successful_attempt_id,
+            head_updated_at
+        )
+        values ($1, $2, $2, null, null, now())
+        on conflict (document_id)
+        do update set
+            active_revision_id = excluded.active_revision_id,
+            readable_revision_id = excluded.readable_revision_id,
+            head_updated_at = excluded.head_updated_at",
+    )
+    .bind(document_id)
+    .bind(revision_id)
+    .execute(postgres)
+    .await
+    .context("failed to upsert content_document_head row")?;
+    Ok(())
+}
+
+async fn insert_content_chunk(
+    postgres: &PgPool,
+    revision_id: Uuid,
+    chunk_index: i32,
+    start_offset: i32,
+    end_offset: i32,
+    token_count: Option<i32>,
+    normalized_text: &str,
+    text_checksum: &str,
+) -> Result<Uuid> {
+    sqlx::query_scalar::<_, Uuid>(
+        "insert into content_chunk (
+            id,
+            revision_id,
+            chunk_index,
+            start_offset,
+            end_offset,
+            token_count,
+            normalized_text,
+            text_checksum
+        )
+        values ($1, $2, $3, $4, $5, $6, $7, $8)
+        returning id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(revision_id)
+    .bind(chunk_index)
+    .bind(start_offset)
+    .bind(end_offset)
+    .bind(token_count)
+    .bind(normalized_text)
+    .bind(text_checksum)
+    .fetch_one(postgres)
+    .await
+    .context("failed to insert content_chunk row")
+}
+
 async fn probe_workspace_admin(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -809,6 +919,85 @@ async fn document_scoped_grants_match_between_discovery_and_mutation_probes() ->
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         let (status, _) = fixture.rest_post(&token, &foreign_write, json!({})).await?;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango services"]
+async fn document_scoped_chunk_reads_use_canonical_content_chunks() -> Result<()> {
+    let fixture = GovernanceAuthFixture::create().await?;
+
+    let result = async {
+        let revision_id = insert_content_revision(
+            fixture.pool(),
+            fixture.document_id,
+            fixture.workspace_id,
+            fixture.library_id,
+            1,
+            "sha256:governance-chunks",
+            "Governance chunk revision",
+        )
+        .await?;
+        upsert_content_document_head(fixture.pool(), fixture.document_id, revision_id).await?;
+        let first_chunk_id = insert_content_chunk(
+            fixture.pool(),
+            revision_id,
+            0,
+            0,
+            14,
+            Some(3),
+            "first chunk text",
+            "sha256:governance-chunks-0",
+        )
+        .await?;
+        let second_chunk_id = insert_content_chunk(
+            fixture.pool(),
+            revision_id,
+            1,
+            15,
+            32,
+            Some(4),
+            "second chunk text",
+            "sha256:governance-chunks-1",
+        )
+        .await?;
+
+        let token = fixture
+            .mint_token_with_grants(
+                Some(fixture.workspace_id),
+                "document-chunks",
+                &[GrantSpec {
+                    resource_kind: "document",
+                    resource_id: fixture.document_id,
+                    permission_kind: "document_read".to_string(),
+                }],
+            )
+            .await?;
+
+        let path = format!("/v1/chunks?documentId={}", fixture.document_id);
+        let (status, body) = fixture.rest_get(&token, &path).await?;
+        assert_eq!(status, StatusCode::OK);
+
+        let chunks = body.as_array().context("/v1/chunks must return an array")?;
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0]["id"], json!(first_chunk_id));
+        assert_eq!(chunks[0]["documentId"], json!(fixture.document_id));
+        assert_eq!(chunks[0]["projectId"], json!(fixture.library_id));
+        assert_eq!(chunks[0]["ordinal"], json!(0));
+        assert_eq!(chunks[0]["content"], json!("first chunk text"));
+        assert_eq!(chunks[0]["tokenCount"], json!(3));
+        assert_eq!(chunks[1]["id"], json!(second_chunk_id));
+        assert_eq!(chunks[1]["documentId"], json!(fixture.document_id));
+        assert_eq!(chunks[1]["projectId"], json!(fixture.library_id));
+        assert_eq!(chunks[1]["ordinal"], json!(1));
+        assert_eq!(chunks[1]["content"], json!("second chunk text"));
+        assert_eq!(chunks[1]["tokenCount"], json!(4));
 
         Ok(())
     }

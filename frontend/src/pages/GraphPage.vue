@@ -3,52 +3,29 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import EmptyStateCard from 'src/components/base/EmptyStateCard.vue'
-import ErrorStateCard from 'src/components/base/ErrorStateCard.vue'
-import PageSurface from 'src/components/base/PageSurface.vue'
+import FeedbackState from 'src/components/design-system/FeedbackState.vue'
 import GraphCanvas from 'src/components/graph/GraphCanvas.vue'
 import GraphControls from 'src/components/graph/GraphControls.vue'
-import GraphLegend from 'src/components/graph/GraphLegend.vue'
 import GraphNodeDetailsCard from 'src/components/graph/GraphNodeDetailsCard.vue'
-import { useDisplayFormatters } from 'src/composables/useDisplayFormatters'
 import { useGraphStore } from 'src/stores/graph'
 import { useQueryStore } from 'src/stores/query'
 import { useShellStore } from 'src/stores/shell'
 
 const { t } = useI18n()
-const { enumLabel, graphWarningLabel, shortIdentifier } = useDisplayFormatters()
 const graphStore = useGraphStore()
 const queryStore = useQueryStore()
 const shellStore = useShellStore()
 const route = useRoute()
 const router = useRouter()
+
+queryStore.setGraphSurfacePriority('secondary')
 const {
   convergenceStatus,
-  error,
   filteredArtifactCount,
-  focusedNodeId,
-  focusedNodeDetail,
-  focusedNodeDetailLoading,
-  hasAdmittedOnlyTruth,
-  isPartiallyConverged,
-  layoutMode,
-  loading,
-  nodeTypeFilter,
   refreshIntervalMs,
-  searchHits,
-  searchQuery,
-  showFilteredArtifacts,
   surface,
+  routeWarning,
 } = storeToRefs(graphStore)
-const {
-  activeBundle,
-  activeExecution,
-  activeSession,
-  error: queryError,
-  loadingExecution,
-  loadingSessions,
-  sessions,
-} = storeToRefs(queryStore)
 
 let refreshTimer: number | null = null
 const focusActive = ref(false)
@@ -61,37 +38,115 @@ function stopPolling() {
 }
 
 const activeLibraryId = computed(() => shellStore.context?.activeLibrary.id ?? null)
-const bannerVisible = computed(
-  () => Boolean(surface.value) && (surface.value!.graphStatus !== 'ready' || Boolean(surface.value!.warning)),
+
+const canvasMode = computed(() => surface.value?.canvasMode ?? 'building')
+const overlay = computed(() => surface.value?.overlay ?? null)
+const inspector = computed(() => surface.value?.inspector ?? null)
+const focusedNodeId = computed(() => inspector.value?.focusedNodeId ?? null)
+const focusedNodeDetail = computed(() => inspector.value?.detail ?? null)
+const focusedNodeDetailLoading = computed(() => inspector.value?.loading ?? false)
+
+const showControlDock = computed(() => {
+  if (!surface.value || surface.value.nodeCount === 0) {
+    return false
+  }
+  return canvasMode.value === 'ready'
+})
+
+const showNodeInspector = computed(
+  () =>
+    Boolean(surface.value) &&
+    Boolean(focusedNodeId.value) &&
+    (focusedNodeDetailLoading.value || Boolean(focusedNodeDetail.value)),
 )
-const bannerDescription = computed(() => {
-  if (!surface.value) {
+
+const overlayState = computed(() => {
+  if (!surface.value || (surface.value.loading && surface.value.nodeCount === 0)) {
+    return {
+      title: t('graph.title'),
+      description: t('graph.loading'),
+      tone: 'loading',
+    }
+  }
+
+  if (canvasMode.value === 'building') {
+    return {
+      title: t('graph.title'),
+      description: t('graph.loading'),
+      tone: 'loading',
+    }
+  }
+
+  if (canvasMode.value === 'error') {
+    return {
+      title: t('graph.failedTitle'),
+      description:
+        surface.value?.error ??
+        routeWarning.value ??
+        surface.value?.warning ??
+        t('graph.failedDescription'),
+      tone: 'failed',
+    }
+  }
+
+  if (canvasMode.value === 'empty') {
+    return {
+      title: t('graph.emptyTitle'),
+      description: t('graph.emptyDescription'),
+      tone: 'empty',
+    }
+  }
+
+  if (canvasMode.value === 'sparse') {
+    return {
+      title: t('graph.sparseTitle'),
+      description: t('graph.sparseDescription'),
+      tone: 'sparse',
+    }
+  }
+
+  return null
+})
+
+const overlayPrimaryAction = computed(() => {
+  if (!overlayState.value) {
     return null
   }
-  if (surface.value.warning) {
-    return graphWarningLabel(surface.value.warning)
+
+  if (overlayState.value.tone === 'failed') {
+    return {
+      label: t('graph.retry'),
+      action: () => reloadSurface(),
+    }
   }
-  return `graph.statusDescriptions.${surface.value.graphStatus}`
+
+  if (overlayState.value.tone === 'empty') {
+    return {
+      label: t('graph.openDocuments'),
+      action: () => router.push('/documents'),
+    }
+  }
+
+  if (overlayState.value.tone === 'sparse') {
+    return {
+      label: t('graph.openDocuments'),
+      action: () => router.push('/documents'),
+    }
+  }
+
+  return null
 })
 
 watch(
   activeLibraryId,
   async (libraryId) => {
     if (!libraryId) {
-      queryStore.reset()
       return
     }
-    await graphStore.loadSurface(libraryId)
-    await queryStore.loadSessions(libraryId).catch(() => undefined)
-    if (
-      (!activeSession.value || activeSession.value.session.libraryId !== libraryId) &&
-      sessions.value.length > 0
-    ) {
-      await queryStore.loadSession(sessions.value[0].id).catch(() => undefined)
-      const latestExecution = queryStore.activeExecutions[0] ?? null
-      if (latestExecution) {
-        await queryStore.loadExecution(latestExecution.id).catch(() => undefined)
-      }
+    try {
+      await graphStore.loadSurface(libraryId)
+    } catch {
+      // Store error state is authoritative for page feedback.
     }
   },
   { immediate: true },
@@ -132,7 +187,7 @@ watch(
     }
 
     await graphStore.focusNode(nodeId)
-    focusActive.value = Boolean(graphStore.focusedNodeId)
+    focusActive.value = Boolean(graphStore.surface?.inspector.focusedNodeId)
   },
   { immediate: true },
 )
@@ -143,7 +198,7 @@ onBeforeUnmount(() => {
 
 async function focusNode(id: string) {
   await graphStore.focusNode(id)
-  const nextFocusedId = graphStore.focusedNodeId
+  const nextFocusedId = graphStore.surface?.inspector.focusedNodeId ?? null
 
   if (!nextFocusedId) {
     focusActive.value = false
@@ -159,7 +214,9 @@ async function focusNode(id: string) {
 
 async function selectHit(id: string) {
   await focusNode(id)
-  graphStore.searchHits = []
+  if (surface.value?.overlay) {
+    surface.value.overlay.searchHits = []
+  }
 }
 
 async function clearFocus() {
@@ -171,238 +228,111 @@ async function clearFocus() {
   graphStore.fitViewport()
 }
 
-function formatDate(value: string | null): string {
-  if (!value) {
-    return '—'
+async function reloadSurface() {
+  if (!activeLibraryId.value) {
+    return
   }
-  const parsed = new Date(value)
-  if (Number.isNaN(parsed.getTime())) {
-    return value
-  }
-  return parsed.toLocaleString(undefined, {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  })
-}
 
-function executionStateLabel(value: string | null): string {
-  return enumLabel('graph.groundedState.executionStates', value)
-}
-
-function bundleStrategyLabel(value: string | null): string {
-  return enumLabel('graph.groundedState.bundleStrategies', value)
-}
-
-function resolvedModeLabel(value: string | null): string {
-  return enumLabel('graph.queryModes', value)
-}
-
-function sessionTitle(value: string | null, id: string): string {
-  return value?.trim() || `${t('graph.groundedState.labels.session')} ${shortIdentifier(id)}`
-}
-
-function executionTitle(id: string): string {
-  return `${t('graph.groundedState.labels.execution')} ${shortIdentifier(id)}`
+  await graphStore.loadSurface(activeLibraryId.value, { preserveUi: true })
 }
 </script>
 
 <template>
-  <PageSurface wide>
-    <div class="rr-graph-page">
-      <ErrorStateCard
-        v-if="error && !surface"
-        :title="$t('graph.title')"
-        :description="error"
-      />
+  <div class="rr-graph-page rr-graph-page--immersive rr-graph-page--reset">
+    <h1 class="rr-screen-reader-only">{{ $t('shell.graph') }}</h1>
+    <section class="rr-graph-workbench rr-graph-workbench--immersive">
+        <template v-if="surface && surface.nodeCount > 0">
+          <GraphCanvas
+            :nodes="surface.nodes"
+            :edges="surface.edges"
+            :filter="overlay?.nodeTypeFilter ?? ''"
+            :focused-node-id="focusedNodeId"
+            :focus-active="focusActive"
+            :layout-mode="overlay?.activeLayout ?? 'cloud'"
+            :show-filtered-artifacts="overlay?.showFilteredArtifacts ?? false"
+            :surface-version="surface.graphGeneration"
+            @select-node="focusNode"
+            @clear-focus="clearFocus"
+            @ready="graphStore.registerCanvasControls"
+          />
+        </template>
 
-      <div
-        v-else
-        class="rr-graph-page__canvas-column"
-      >
         <div
-          v-if="surface && bannerVisible"
-          class="rr-graph-page__banner"
-          :class="`is-${isPartiallyConverged ? 'partial' : surface.graphStatus}`"
+          v-else
+          class="rr-graph-workbench__canvas-fallback"
+        />
+
+        <GraphControls
+          v-if="showControlDock"
+          class="rr-graph-workbench__controls"
+          :query="overlay?.searchQuery ?? ''"
+          :filter="overlay?.nodeTypeFilter ?? ''"
+          :hits="overlay?.searchHits ?? []"
+          :layout-mode="overlay?.activeLayout ?? 'cloud'"
+          :can-clear-focus="Boolean(focusedNodeId)"
+          :graph-status="overlayState ? null : (surface?.graphStatus ?? null)"
+          :convergence-status="overlayState ? null : convergenceStatus"
+          :filtered-artifact-count="filteredArtifactCount"
+          :show-filtered-artifacts="overlay?.showFilteredArtifacts ?? false"
+          :node-count="surface?.nodeCount ?? 0"
+          :edge-count="surface?.edgeCount ?? 0"
+          @zoom-in="graphStore.zoomIn"
+          @zoom-out="graphStore.zoomOut"
+          @fit="graphStore.fitViewport"
+          @set-layout="graphStore.setLayoutMode"
+          @clear-focus="clearFocus"
+          @toggle-filtered-artifacts="
+            graphStore.setShowFilteredArtifacts(!(overlay?.showFilteredArtifacts ?? false))
+          "
+          @update-query="graphStore.searchNodes"
+          @update-filter="graphStore.setNodeTypeFilter"
+          @select-hit="selectHit"
+        />
+
+        <aside
+          v-if="showNodeInspector"
+          class="rr-graph-workbench__inspector"
         >
-          <strong>{{ $t(`graph.statuses.${surface.graphStatus}`) }}</strong>
-          <p>{{ $t(bannerDescription ?? 'graph.statusDescriptions.default') }}</p>
-          <p
-            v-if="!focusedNodeId && surface.nodeCount > 120"
-            class="rr-graph-page__hint"
+          <button
+            class="rr-graph-workbench__inspector-close"
+            type="button"
+            :aria-label="$t('graph.closeInspector')"
+            :title="$t('graph.closeInspector')"
+            @click="clearFocus"
           >
-            {{ $t('graph.overviewHint') }}
-          </p>
+            <svg
+              viewBox="0 0 20 20"
+              fill="none"
+            >
+              <path
+                d="M6 6l8 8M14 6l-8 8"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-width="1.8"
+              />
+            </svg>
+          </button>
+          <GraphNodeDetailsCard
+            :detail="focusedNodeDetail"
+            :loading="focusedNodeDetailLoading"
+            @select-node="focusNode"
+          />
+        </aside>
+
+        <div
+          v-if="overlayState"
+          class="rr-graph-workbench__state"
+          :class="`is-${overlayState.tone}`"
+        >
+          <FeedbackState
+            :title="overlayState.title"
+            :message="overlayState.description ?? ''"
+            :kind="overlayState.tone === 'failed' ? 'error' : (overlayState.tone as 'loading' | 'empty' | 'sparse')"
+            :action-label="overlayPrimaryAction?.label"
+            @action="overlayPrimaryAction?.action()"
+          />
         </div>
 
-        <section class="rr-page-card rr-graph-page__grounding-panel">
-          <header class="rr-graph-page__panel-head">
-            <div>
-              <h3>{{ $t('graph.groundedState.title') }}</h3>
-              <p>{{ $t('graph.groundedState.subtitle') }}</p>
-            </div>
-            <span
-              v-if="activeExecution"
-              class="rr-status-pill"
-            >
-              {{ executionStateLabel(activeExecution.execution.executionState) }}
-            </span>
-          </header>
-
-          <p
-            v-if="loadingSessions || loadingExecution"
-            class="rr-graph-page__grounding-empty"
-          >
-            {{ $t('graph.groundedState.loading') }}
-          </p>
-          <p
-            v-else-if="queryError && !activeSession"
-            class="rr-graph-page__grounding-empty"
-          >
-            {{ queryError }}
-          </p>
-          <div
-            v-else-if="activeSession"
-            class="rr-graph-page__grounding-grid"
-          >
-            <article class="rr-graph-page__grounding-card">
-              <span>{{ $t('graph.groundedState.labels.session') }}</span>
-              <strong>{{ sessionTitle(activeSession.session.title, activeSession.session.id) }}</strong>
-              <p>
-                {{ $t('graph.groundedState.labels.turns') }} {{ activeSession.turns.length }}
-                ·
-                {{ $t('graph.groundedState.labels.executions') }} {{ activeSession.executions.length }}
-              </p>
-            </article>
-
-            <article
-              v-if="activeExecution"
-              class="rr-graph-page__grounding-card"
-            >
-              <span>{{ $t('graph.groundedState.labels.execution') }}</span>
-              <strong>{{ executionTitle(activeExecution.execution.id) }}</strong>
-              <p>
-                {{ $t('graph.groundedState.labels.started') }} {{ formatDate(activeExecution.execution.startedAt) }}
-              </p>
-              <p>{{ $t('graph.groundedState.labels.bundle') }} {{ shortIdentifier(activeExecution.contextBundleId) }}</p>
-            </article>
-
-            <article
-              v-if="activeBundle"
-              class="rr-graph-page__grounding-card"
-            >
-              <span>{{ $t('graph.groundedState.labels.groundedRefs') }}</span>
-              <strong>
-                {{ activeBundle.chunkReferences.length }} {{ $t('graph.groundedState.labels.chunks') }}
-              </strong>
-              <p>
-                {{ activeBundle.entityReferences.length }} {{ $t('graph.groundedState.labels.entities') }}
-                ·
-                {{ activeBundle.relationReferences.length }} {{ $t('graph.groundedState.labels.relations') }}
-                ·
-                {{ activeBundle.evidenceReferences.length }} {{ $t('graph.groundedState.labels.evidence') }}
-              </p>
-              <p>
-                {{ $t('graph.groundedState.labels.bundleStrategy') }} {{ bundleStrategyLabel(activeBundle.bundle.bundleStrategy) }}
-                ·
-                {{ $t('graph.groundedState.labels.resolvedMode') }} {{ resolvedModeLabel(activeBundle.bundle.resolvedMode) }}
-              </p>
-            </article>
-          </div>
-          <p
-            v-else
-            class="rr-graph-page__grounding-empty"
-          >
-            {{ $t('graph.groundedState.empty') }}
-          </p>
-        </section>
-
-        <section class="rr-graph-workspace">
-          <div
-            v-if="loading && !surface"
-            class="rr-graph-page__state"
-          >
-            {{ $t('graph.loading') }}
-          </div>
-
-          <div
-            v-else-if="
-              (surface?.graphStatus === 'building' || surface?.graphStatus === 'rebuilding') &&
-              surface.nodeCount === 0
-            "
-            class="rr-graph-page__state"
-          >
-            {{
-              $t(
-                surface?.graphStatus === 'rebuilding'
-                  ? 'graph.statusDescriptions.rebuilding'
-                  : 'graph.statusDescriptions.building',
-              )
-            }}
-          </div>
-
-          <ErrorStateCard
-            v-else-if="surface?.graphStatus === 'failed' && surface.nodeCount === 0"
-            :title="$t('graph.failedTitle')"
-            :description="surface.warning ?? $t('graph.failedDescription')"
-          />
-
-          <EmptyStateCard
-            v-else-if="surface && surface.graphStatus === 'empty' && surface.nodeCount === 0"
-            :title="$t('graph.emptyTitle')"
-            :description="$t('graph.emptyDescription')"
-          />
-
-          <template v-else-if="surface">
-            <GraphCanvas
-              :nodes="surface.nodes"
-              :edges="surface.edges"
-              :filter="nodeTypeFilter"
-              :focused-node-id="focusedNodeId"
-              :focus-active="focusActive"
-              :layout-mode="layoutMode"
-              :surface-version="surface.graphGeneration"
-              @select-node="focusNode"
-              @clear-focus="clearFocus"
-              @ready="graphStore.registerCanvasControls"
-            />
-            <GraphControls
-              :query="searchQuery"
-              :filter="nodeTypeFilter"
-              :hits="searchHits"
-              :layout-mode="layoutMode"
-              :can-clear-focus="Boolean(focusedNodeId)"
-              :graph-status="surface.graphStatus"
-              :convergence-status="convergenceStatus"
-              :node-count="surface.nodeCount"
-              :relation-count="surface.relationCount"
-              :filtered-artifact-count="filteredArtifactCount"
-              :show-filtered-artifacts="showFilteredArtifacts"
-              :show-status-summary="!bannerVisible"
-              @zoom-in="graphStore.zoomIn"
-              @zoom-out="graphStore.zoomOut"
-              @fit="graphStore.fitViewport"
-              @set-layout="graphStore.setLayoutMode"
-              @clear-focus="clearFocus"
-              @toggle-filtered-artifacts="graphStore.setShowFilteredArtifacts(!showFilteredArtifacts)"
-              @update-query="graphStore.searchNodes"
-              @update-filter="graphStore.setNodeTypeFilter"
-              @select-hit="selectHit"
-            />
-            <GraphLegend
-              :items="surface.legend"
-              :convergence-status="convergenceStatus"
-              :filtered-artifact-count="filteredArtifactCount"
-              :active-provenance-only="hasAdmittedOnlyTruth"
-              :show-filtered-artifacts="showFilteredArtifacts"
-            />
-            <GraphNodeDetailsCard
-              :detail="focusedNodeDetail"
-              :loading="focusedNodeDetailLoading"
-              @select-node="focusNode"
-            />
-          </template>
-        </section>
-      </div>
-    </div>
-  </PageSurface>
+      </section>
+  </div>
 </template>

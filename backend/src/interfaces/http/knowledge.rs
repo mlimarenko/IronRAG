@@ -6,32 +6,31 @@ use axum::{
     routing::get,
 };
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    infra::{
-        arangodb::{
-            collections::{
-                KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE,
-                KNOWLEDGE_EVIDENCE_SUPPORTS_ENTITY_EDGE, KNOWLEDGE_EVIDENCE_SUPPORTS_RELATION_EDGE,
-            },
-            context_store::{
-                KnowledgeBundleChunkReferenceRow, KnowledgeBundleEntityReferenceRow,
-                KnowledgeBundleEvidenceReferenceRow, KnowledgeBundleRelationReferenceRow,
-                KnowledgeContextBundleRow, KnowledgeRetrievalTraceRow,
-            },
-            document_store::{
-                KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeLibraryGenerationRow,
-                KnowledgeRevisionRow,
-            },
-            graph_store::{KnowledgeEntityRow, KnowledgeEvidenceRow, KnowledgeRelationTopologyRow},
-            search_store::{
-                KnowledgeChunkSearchRow, KnowledgeChunkVectorSearchRow, KnowledgeEntitySearchRow,
-                KnowledgeEntityVectorSearchRow, KnowledgeRelationSearchRow,
-            },
+    domains::ai::AiBindingPurpose,
+    infra::arangodb::{
+        collections::{
+            KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE,
+            KNOWLEDGE_EVIDENCE_SUPPORTS_ENTITY_EDGE, KNOWLEDGE_EVIDENCE_SUPPORTS_RELATION_EDGE,
         },
-        repositories::{ai_repository, ai_repository::AiLibraryModelBindingRow},
+        context_store::{
+            KnowledgeBundleChunkReferenceRow, KnowledgeBundleEntityReferenceRow,
+            KnowledgeBundleEvidenceReferenceRow, KnowledgeBundleRelationReferenceRow,
+            KnowledgeContextBundleRow, KnowledgeRetrievalTraceRow,
+        },
+        document_store::{
+            KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeLibraryGenerationRow,
+            KnowledgeRevisionRow,
+        },
+        graph_store::{KnowledgeEntityRow, KnowledgeEvidenceRow, KnowledgeRelationTopologyRow},
+        search_store::{
+            KnowledgeChunkSearchRow, KnowledgeChunkVectorSearchRow, KnowledgeEntitySearchRow,
+            KnowledgeEntityVectorSearchRow, KnowledgeRelationSearchRow,
+        },
     },
     integrations::llm::EmbeddingRequest,
     interfaces::http::{
@@ -439,7 +438,7 @@ async fn search_documents_impl(
     let hybrid_context = resolve_hybrid_search_context(&state, library_id, &query_text).await?;
     let vector_candidate_limit = limit.saturating_mul(2).max(1);
     let vector_chunk_hits = if let Some(context) = hybrid_context.as_ref() {
-        state
+        match state
             .arango_search_store
             .search_chunk_vectors_by_similarity(
                 library_id,
@@ -450,12 +449,24 @@ async fn search_documents_impl(
                 Some(16),
             )
             .await
-            .map_err(|_| ApiError::Internal)?
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                warn!(
+                    library_id = %library_id,
+                    model_catalog_id = %context.model_catalog_id,
+                    freshness_generation = context.freshness_generation,
+                    error = ?error,
+                    "hybrid knowledge chunk vector search failed; falling back to lexical-only hits",
+                );
+                Vec::new()
+            }
+        }
     } else {
         Vec::new()
     };
     let vector_entity_hits = if let Some(context) = hybrid_context.as_ref() {
-        state
+        match state
             .arango_search_store
             .search_entity_vectors_by_similarity(
                 library_id,
@@ -466,7 +477,19 @@ async fn search_documents_impl(
                 Some(16),
             )
             .await
-            .map_err(|_| ApiError::Internal)?
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                warn!(
+                    library_id = %library_id,
+                    model_catalog_id = %context.model_catalog_id,
+                    freshness_generation = context.freshness_generation,
+                    error = ?error,
+                    "hybrid knowledge entity vector search failed; returning lexical entity hits only",
+                );
+                Vec::new()
+            }
+        }
     } else {
         Vec::new()
     };
@@ -710,44 +733,14 @@ async fn resolve_hybrid_search_context(
     library_id: Uuid,
     query_text: &str,
 ) -> Result<Option<KnowledgeHybridSearchContext>, ApiError> {
-    let Some(binding): Option<AiLibraryModelBindingRow> =
-        ai_repository::get_active_library_binding_by_purpose(
-            &state.persistence.postgres,
-            library_id,
-            "embed_chunk",
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?
-    else {
-        return Ok(None);
-    };
-
-    let provider_credential = state
+    let Some(binding) = state
         .canonical_services
         .ai_catalog
-        .get_provider_credential(state, binding.provider_credential_id)
-        .await?;
-    let model_preset = state
-        .canonical_services
-        .ai_catalog
-        .get_model_preset(state, binding.model_preset_id)
-        .await?;
-    let providers = state.canonical_services.ai_catalog.list_provider_catalog(state).await?;
-    let models = state.canonical_services.ai_catalog.list_model_catalog(state, None).await?;
-    let Some(provider_kind) = providers
-        .into_iter()
-        .find(|provider| provider.id == provider_credential.provider_catalog_id)
-        .map(|provider| provider.provider_kind)
+        .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::EmbedChunk)
+        .await?
     else {
         return Ok(None);
     };
-    let Some(model) = models.into_iter().find(|model| model.id == model_preset.model_catalog_id)
-    else {
-        return Ok(None);
-    };
-    if model.provider_catalog_id != provider_credential.provider_catalog_id {
-        return Ok(None);
-    }
 
     let generations = state
         .arango_document_store
@@ -764,9 +757,11 @@ async fn resolve_hybrid_search_context(
     let embedding = state
         .llm_gateway
         .embed(EmbeddingRequest {
-            provider_kind: provider_kind.clone(),
-            model_name: model.model_name.clone(),
+            provider_kind: binding.provider_kind.clone(),
+            model_name: binding.model_name.clone(),
             input: query_text.to_string(),
+            api_key_override: Some(binding.api_key),
+            base_url_override: binding.provider_base_url.clone(),
         })
         .await
         .map_err(|error| {
@@ -774,9 +769,9 @@ async fn resolve_hybrid_search_context(
         })?;
 
     Ok(Some(KnowledgeHybridSearchContext {
-        provider_kind,
-        model_name: model.model_name,
-        model_catalog_id: model.id,
+        provider_kind: binding.provider_kind,
+        model_name: binding.model_name,
+        model_catalog_id: binding.model_catalog_id,
         freshness_generation: generation.active_vector_generation,
         query_vector: embedding.embedding,
     }))

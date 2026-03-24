@@ -1,8 +1,9 @@
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    routing::{get, post},
+    routing::{get, post, put},
 };
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -22,8 +23,10 @@ use crate::{
         router_support::{ApiError, RequestId},
     },
     services::ai_catalog_service::{
-        CreateBindingValidationCommand, CreateLibraryBindingCommand,
-        CreateProviderCredentialCommand,
+        CreateBindingValidationCommand, CreateLibraryBindingCommand, CreateModelPresetCommand,
+        CreateProviderCredentialCommand, CreateWorkspacePriceOverrideCommand,
+        UpdateLibraryBindingCommand, UpdateModelPresetCommand, UpdateProviderCredentialCommand,
+        UpdateWorkspacePriceOverrideCommand,
     },
     services::audit_service::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
 };
@@ -59,7 +62,62 @@ pub struct CreateProviderCredentialRequest {
     pub workspace_id: Uuid,
     pub provider_catalog_id: Uuid,
     pub label: String,
-    pub secret_ref: String,
+    pub api_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateProviderCredentialRequest {
+    pub label: String,
+    pub api_key: Option<String>,
+    pub credential_state: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateWorkspacePriceOverrideRequest {
+    pub workspace_id: Uuid,
+    pub model_catalog_id: Uuid,
+    pub billing_unit: String,
+    pub unit_price: Decimal,
+    pub currency_code: String,
+    pub effective_from: chrono::DateTime<chrono::Utc>,
+    pub effective_to: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateWorkspacePriceOverrideRequest {
+    pub model_catalog_id: Uuid,
+    pub billing_unit: String,
+    pub unit_price: Decimal,
+    pub currency_code: String,
+    pub effective_from: chrono::DateTime<chrono::Utc>,
+    pub effective_to: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateModelPresetRequest {
+    pub workspace_id: Uuid,
+    pub model_catalog_id: Uuid,
+    pub preset_name: String,
+    pub system_prompt: Option<String>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub max_output_tokens_override: Option<i32>,
+    pub extra_parameters_json: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateModelPresetRequest {
+    pub preset_name: String,
+    pub system_prompt: Option<String>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub max_output_tokens_override: Option<i32>,
+    pub extra_parameters_json: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +128,14 @@ pub struct CreateLibraryBindingRequest {
     pub binding_purpose: AiBindingPurpose,
     pub provider_credential_id: Uuid,
     pub model_preset_id: Uuid,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateLibraryBindingRequest {
+    pub provider_credential_id: Uuid,
+    pub model_preset_id: Uuid,
+    pub binding_state: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -103,6 +169,9 @@ pub struct PriceCatalogEntryResponse {
     pub unit_price: rust_decimal::Decimal,
     pub currency_code: String,
     pub effective_from: chrono::DateTime<chrono::Utc>,
+    pub effective_to: Option<chrono::DateTime<chrono::Utc>>,
+    pub catalog_scope: String,
+    pub workspace_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -112,7 +181,7 @@ pub struct ProviderCredentialResponse {
     pub workspace_id: Uuid,
     pub provider_catalog_id: Uuid,
     pub label: String,
-    pub secret_ref: String,
+    pub api_key_summary: String,
     pub credential_state: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
@@ -161,11 +230,15 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/ai/providers", get(list_providers))
         .route("/ai/models", get(list_models))
-        .route("/ai/model-presets", get(list_model_presets))
-        .route("/ai/prices", get(list_prices))
+        .route("/ai/model-presets", get(list_model_presets).post(create_model_preset))
+        .route("/ai/model-presets/{preset_id}", put(update_model_preset))
+        .route("/ai/prices", get(list_prices).post(create_price_override))
+        .route("/ai/prices/{price_id}", put(update_price_override))
         .route("/ai/credentials", get(list_credentials).post(create_credential))
-        .route("/ai/library-bindings/{library_id}", get(list_library_bindings))
+        .route("/ai/credentials/{credential_id}", put(update_credential))
+        .route("/ai/libraries/{library_id}/bindings", get(list_library_bindings))
         .route("/ai/library-bindings", post(create_library_binding))
+        .route("/ai/library-bindings/{binding_id}", put(update_library_binding))
         .route("/ai/library-bindings/{binding_id}/validate", post(validate_library_binding))
 }
 
@@ -278,7 +351,7 @@ async fn create_credential(
                 workspace_id: payload.workspace_id,
                 provider_catalog_id: payload.provider_catalog_id,
                 label: payload.label,
-                secret_ref: payload.secret_ref,
+                api_key: payload.api_key,
                 created_by_principal_id: Some(auth.principal_id),
             },
         )
@@ -304,6 +377,249 @@ async fn create_credential(
     )
     .await;
     Ok(Json(map_provider_credential(entry)))
+}
+
+async fn update_credential(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Path(credential_id): Path<Uuid>,
+    Json(payload): Json<UpdateProviderCredentialRequest>,
+) -> Result<Json<ProviderCredentialResponse>, ApiError> {
+    let credential =
+        state.canonical_services.ai_catalog.get_provider_credential(&state, credential_id).await?;
+    authorize_workspace_permission(&auth, credential.workspace_id, POLICY_PROVIDERS_ADMIN)?;
+    let entry = state
+        .canonical_services
+        .ai_catalog
+        .update_provider_credential(
+            &state,
+            UpdateProviderCredentialCommand {
+                credential_id,
+                label: payload.label,
+                api_key: payload.api_key,
+                credential_state: payload.credential_state,
+            },
+        )
+        .await?;
+    record_ai_audit_event(
+        &state,
+        &auth,
+        request_id.map(|value| value.0.0),
+        "ai.provider_credential.update",
+        "succeeded",
+        Some(format!("provider credential {} updated", entry.label)),
+        Some(format!(
+            "principal {} updated provider credential {} in workspace {}",
+            auth.principal_id, entry.id, entry.workspace_id
+        )),
+        vec![AppendAuditEventSubjectCommand {
+            subject_kind: "provider_credential".to_string(),
+            subject_id: entry.id,
+            workspace_id: Some(entry.workspace_id),
+            library_id: None,
+            document_id: None,
+        }],
+    )
+    .await;
+    Ok(Json(map_provider_credential(entry)))
+}
+
+async fn create_price_override(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Json(payload): Json<CreateWorkspacePriceOverrideRequest>,
+) -> Result<Json<PriceCatalogEntryResponse>, ApiError> {
+    authorize_workspace_permission(&auth, payload.workspace_id, POLICY_PROVIDERS_ADMIN)?;
+    let entry = state
+        .canonical_services
+        .ai_catalog
+        .create_workspace_price_override(
+            &state,
+            CreateWorkspacePriceOverrideCommand {
+                workspace_id: payload.workspace_id,
+                model_catalog_id: payload.model_catalog_id,
+                billing_unit: payload.billing_unit,
+                unit_price: payload.unit_price,
+                currency_code: payload.currency_code,
+                effective_from: payload.effective_from,
+                effective_to: payload.effective_to,
+            },
+        )
+        .await?;
+    record_ai_audit_event(
+        &state,
+        &auth,
+        request_id.map(|value| value.0.0),
+        "ai.price_override.create",
+        "succeeded",
+        Some(format!("workspace price override {} created", entry.id)),
+        Some(format!(
+            "principal {} created workspace price override {} in workspace {}",
+            auth.principal_id, entry.id, payload.workspace_id
+        )),
+        vec![AppendAuditEventSubjectCommand {
+            subject_kind: "workspace".to_string(),
+            subject_id: payload.workspace_id,
+            workspace_id: Some(payload.workspace_id),
+            library_id: None,
+            document_id: None,
+        }],
+    )
+    .await;
+    Ok(Json(map_price(entry)))
+}
+
+async fn update_price_override(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Path(price_id): Path<Uuid>,
+    Json(payload): Json<UpdateWorkspacePriceOverrideRequest>,
+) -> Result<Json<PriceCatalogEntryResponse>, ApiError> {
+    let price =
+        state.canonical_services.ai_catalog.get_price_catalog_entry(&state, price_id).await?;
+    let workspace_id = price
+        .workspace_id
+        .ok_or_else(|| ApiError::BadRequest("system catalog prices are read-only".to_string()))?;
+    if price.catalog_scope != "workspace_override" {
+        return Err(ApiError::BadRequest("system catalog prices are read-only".to_string()));
+    }
+    authorize_workspace_permission(&auth, workspace_id, POLICY_PROVIDERS_ADMIN)?;
+    let entry = state
+        .canonical_services
+        .ai_catalog
+        .update_workspace_price_override(
+            &state,
+            UpdateWorkspacePriceOverrideCommand {
+                price_id,
+                model_catalog_id: payload.model_catalog_id,
+                billing_unit: payload.billing_unit,
+                unit_price: payload.unit_price,
+                currency_code: payload.currency_code,
+                effective_from: payload.effective_from,
+                effective_to: payload.effective_to,
+            },
+        )
+        .await?;
+    record_ai_audit_event(
+        &state,
+        &auth,
+        request_id.map(|value| value.0.0),
+        "ai.price_override.update",
+        "succeeded",
+        Some(format!("workspace price override {} updated", entry.id)),
+        Some(format!(
+            "principal {} updated workspace price override {} in workspace {}",
+            auth.principal_id, entry.id, workspace_id
+        )),
+        vec![AppendAuditEventSubjectCommand {
+            subject_kind: "workspace".to_string(),
+            subject_id: workspace_id,
+            workspace_id: Some(workspace_id),
+            library_id: None,
+            document_id: None,
+        }],
+    )
+    .await;
+    Ok(Json(map_price(entry)))
+}
+
+async fn create_model_preset(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Json(payload): Json<CreateModelPresetRequest>,
+) -> Result<Json<ModelPresetResponse>, ApiError> {
+    authorize_workspace_permission(&auth, payload.workspace_id, POLICY_PROVIDERS_ADMIN)?;
+    let entry = state
+        .canonical_services
+        .ai_catalog
+        .create_model_preset(
+            &state,
+            CreateModelPresetCommand {
+                workspace_id: payload.workspace_id,
+                model_catalog_id: payload.model_catalog_id,
+                preset_name: payload.preset_name,
+                system_prompt: payload.system_prompt,
+                temperature: payload.temperature,
+                top_p: payload.top_p,
+                max_output_tokens_override: payload.max_output_tokens_override,
+                extra_parameters_json: payload.extra_parameters_json,
+                created_by_principal_id: Some(auth.principal_id),
+            },
+        )
+        .await?;
+    record_ai_audit_event(
+        &state,
+        &auth,
+        request_id.map(|value| value.0.0),
+        "ai.model_preset.create",
+        "succeeded",
+        Some(format!("model preset {} created", entry.preset_name)),
+        Some(format!(
+            "principal {} created model preset {} in workspace {}",
+            auth.principal_id, entry.id, entry.workspace_id
+        )),
+        vec![AppendAuditEventSubjectCommand {
+            subject_kind: "model_preset".to_string(),
+            subject_id: entry.id,
+            workspace_id: Some(entry.workspace_id),
+            library_id: None,
+            document_id: None,
+        }],
+    )
+    .await;
+    Ok(Json(map_model_preset(entry)))
+}
+
+async fn update_model_preset(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Path(preset_id): Path<Uuid>,
+    Json(payload): Json<UpdateModelPresetRequest>,
+) -> Result<Json<ModelPresetResponse>, ApiError> {
+    let preset = state.canonical_services.ai_catalog.get_model_preset(&state, preset_id).await?;
+    authorize_workspace_permission(&auth, preset.workspace_id, POLICY_PROVIDERS_ADMIN)?;
+    let entry = state
+        .canonical_services
+        .ai_catalog
+        .update_model_preset(
+            &state,
+            UpdateModelPresetCommand {
+                preset_id,
+                preset_name: payload.preset_name,
+                system_prompt: payload.system_prompt,
+                temperature: payload.temperature,
+                top_p: payload.top_p,
+                max_output_tokens_override: payload.max_output_tokens_override,
+                extra_parameters_json: payload.extra_parameters_json,
+            },
+        )
+        .await?;
+    record_ai_audit_event(
+        &state,
+        &auth,
+        request_id.map(|value| value.0.0),
+        "ai.model_preset.update",
+        "succeeded",
+        Some(format!("model preset {} updated", entry.preset_name)),
+        Some(format!(
+            "principal {} updated model preset {} in workspace {}",
+            auth.principal_id, entry.id, entry.workspace_id
+        )),
+        vec![AppendAuditEventSubjectCommand {
+            subject_kind: "model_preset".to_string(),
+            subject_id: entry.id,
+            workspace_id: Some(entry.workspace_id),
+            library_id: None,
+            document_id: None,
+        }],
+    )
+    .await;
+    Ok(Json(map_model_preset(entry)))
 }
 
 async fn list_library_bindings(
@@ -419,6 +735,53 @@ async fn create_library_binding(
     Ok(Json(map_library_binding(entry)))
 }
 
+async fn update_library_binding(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Path(binding_id): Path<Uuid>,
+    Json(payload): Json<UpdateLibraryBindingRequest>,
+) -> Result<Json<LibraryModelBindingResponse>, ApiError> {
+    let binding =
+        load_library_binding_and_authorize(&auth, &state, binding_id, POLICY_PROVIDERS_ADMIN)
+            .await?;
+    let entry = state
+        .canonical_services
+        .ai_catalog
+        .update_library_binding(
+            &state,
+            UpdateLibraryBindingCommand {
+                binding_id,
+                provider_credential_id: payload.provider_credential_id,
+                model_preset_id: payload.model_preset_id,
+                binding_state: payload.binding_state,
+                updated_by_principal_id: Some(auth.principal_id),
+            },
+        )
+        .await?;
+    record_ai_audit_event(
+        &state,
+        &auth,
+        request_id.map(|value| value.0.0),
+        "ai.library_binding.update",
+        "succeeded",
+        Some(format!("library binding {} updated", entry.id)),
+        Some(format!(
+            "principal {} updated library binding {} for library {}",
+            auth.principal_id, entry.id, entry.library_id
+        )),
+        vec![AppendAuditEventSubjectCommand {
+            subject_kind: "library_binding".to_string(),
+            subject_id: entry.id,
+            workspace_id: Some(binding.workspace_id),
+            library_id: Some(binding.library_id),
+            document_id: None,
+        }],
+    )
+    .await;
+    Ok(Json(map_library_binding(entry)))
+}
+
 async fn validate_library_binding(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -524,6 +887,9 @@ fn map_price(entry: PriceCatalogEntry) -> PriceCatalogEntryResponse {
         unit_price: entry.unit_price,
         currency_code: entry.currency_code,
         effective_from: entry.effective_from,
+        effective_to: entry.effective_to,
+        catalog_scope: entry.catalog_scope,
+        workspace_id: entry.workspace_id,
     }
 }
 
@@ -533,10 +899,25 @@ fn map_provider_credential(entry: ProviderCredential) -> ProviderCredentialRespo
         workspace_id: entry.workspace_id,
         provider_catalog_id: entry.provider_catalog_id,
         label: entry.label,
-        secret_ref: entry.secret_ref,
+        api_key_summary: summarize_api_key(&entry.api_key),
         credential_state: entry.credential_state,
         created_at: entry.created_at,
         updated_at: entry.updated_at,
+    }
+}
+
+fn summarize_api_key(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return "stored".to_string();
+    }
+    let prefix: String = trimmed.chars().take(4).collect();
+    let suffix =
+        trimmed.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect::<String>();
+    if trimmed.chars().count() <= 8 {
+        format!("{prefix}••••")
+    } else {
+        format!("{prefix}••••{suffix}")
     }
 }
 

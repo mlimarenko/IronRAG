@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
+    domains::ai::AiBindingPurpose,
     domains::catalog::CatalogLifecycleState,
     domains::query::{
         QueryChunkReference, QueryConversation, QueryConversationDetail, QueryExecution,
@@ -805,43 +806,14 @@ async fn resolve_query_embedding_context(
     library_id: Uuid,
     query_text: &str,
 ) -> Result<Option<QueryEmbeddingContext>, ApiError> {
-    let Some(binding) = ai_repository::get_active_library_binding_by_purpose(
-        &state.persistence.postgres,
-        library_id,
-        "embed_chunk",
-    )
-    .await
-    .map_err(|_| ApiError::Internal)?
-    else {
-        return Ok(None);
-    };
-
-    let provider_credential = state
+    let binding = state
         .canonical_services
         .ai_catalog
-        .get_provider_credential(state, binding.provider_credential_id)
+        .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::EmbedChunk)
         .await?;
-    let model_preset = state
-        .canonical_services
-        .ai_catalog
-        .get_model_preset(state, binding.model_preset_id)
-        .await?;
-    let providers = state.canonical_services.ai_catalog.list_provider_catalog(state).await?;
-    let models = state.canonical_services.ai_catalog.list_model_catalog(state, None).await?;
-    let Some(provider_kind) = providers
-        .into_iter()
-        .find(|provider| provider.id == provider_credential.provider_catalog_id)
-        .map(|provider| provider.provider_kind)
-    else {
+    let Some(binding) = binding else {
         return Ok(None);
     };
-    let Some(model) = models.into_iter().find(|model| model.id == model_preset.model_catalog_id)
-    else {
-        return Ok(None);
-    };
-    if model.provider_catalog_id != provider_credential.provider_catalog_id {
-        return Ok(None);
-    }
 
     let generations = state
         .arango_document_store
@@ -858,9 +830,11 @@ async fn resolve_query_embedding_context(
     let embedding = state
         .llm_gateway
         .embed(EmbeddingRequest {
-            provider_kind,
-            model_name: model.model_name.clone(),
+            provider_kind: binding.provider_kind.clone(),
+            model_name: binding.model_name.clone(),
             input: query_text.to_string(),
+            api_key_override: Some(binding.api_key),
+            base_url_override: binding.provider_base_url,
         })
         .await
         .map_err(|error| {
@@ -868,7 +842,7 @@ async fn resolve_query_embedding_context(
         })?;
 
     Ok(Some(QueryEmbeddingContext {
-        model_catalog_id: model.id,
+        model_catalog_id: binding.model_catalog_id,
         freshness_generation: generation.active_vector_generation,
         query_vector: embedding.embedding,
     }))

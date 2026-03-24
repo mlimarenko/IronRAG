@@ -21,7 +21,10 @@ use rustrag_backend::{
     infra::arangodb::{
         bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
         client::ArangoClient,
-        collections::{KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_SEARCH_VIEW},
+        collections::{
+            KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
+            KNOWLEDGE_ENTITY_VECTOR_COLLECTION, KNOWLEDGE_SEARCH_VIEW,
+        },
         document_store::{
             ArangoDocumentStore, KnowledgeChunkRow, KnowledgeDocumentRow,
             KnowledgeLibraryGenerationRow, KnowledgeRevisionRow,
@@ -90,6 +93,27 @@ impl TempArangoDatabase {
             return Err(anyhow!(
                 "failed to drop temp ArangoDB database {}: status {}",
                 self.name,
+                response.status()
+            ));
+        }
+        Ok(())
+    }
+
+    async fn drop_collection(&self, collection_name: &str) -> Result<()> {
+        let response = self
+            .http
+            .delete(format!(
+                "{}/_db/{}/_api/collection/{}",
+                self.base_url, self.name, collection_name
+            ))
+            .basic_auth(&self.username, Some(&self.password))
+            .send()
+            .await
+            .with_context(|| format!("failed to drop collection {collection_name}"))?;
+        if response.status() != ReqwestStatusCode::NOT_FOUND && !response.status().is_success() {
+            return Err(anyhow!(
+                "failed to drop collection {}: status {}",
+                collection_name,
                 response.status()
             ));
         }
@@ -1522,6 +1546,41 @@ async fn search_documents_endpoint_returns_hybrid_knowledge_payload() -> Result<
         assert_eq!(vector_entity_hits.len(), 1);
         assert_eq!(vector_entity_hits[0]["entityId"], json!(fixture.entity_id));
 
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango services"]
+async fn search_documents_endpoint_falls_back_to_lexical_when_vector_collections_fail() -> Result<()>
+{
+    let fixture = KnowledgeSearchHttpFixture::create().await?;
+
+    let result = async {
+        fixture
+            .temp_arango
+            .drop_collection(KNOWLEDGE_CHUNK_VECTOR_COLLECTION)
+            .await
+            .context("failed to remove chunk vector collection for fallback test")?;
+        fixture
+            .temp_arango
+            .drop_collection(KNOWLEDGE_ENTITY_VECTOR_COLLECTION)
+            .await
+            .context("failed to remove entity vector collection for fallback test")?;
+
+        let body = fixture.search_document_hit("orion").await?;
+        let document_hits =
+            body["documentHits"].as_array().context("documentHits must be an array")?;
+        assert_eq!(document_hits.len(), 1);
+        assert_eq!(document_hits[0]["document"]["documentId"], json!(fixture.document_id));
+        assert_eq!(document_hits[0]["chunkHits"].as_array().map_or(0, Vec::len), 1);
+        assert_eq!(document_hits[0]["vectorChunkHits"].as_array().map_or(0, Vec::len), 0);
+        assert_eq!(body["vectorChunkHits"].as_array().map_or(0, Vec::len), 0);
+        assert_eq!(body["vectorEntityHits"].as_array().map_or(0, Vec::len), 0);
         Ok(())
     }
     .await;

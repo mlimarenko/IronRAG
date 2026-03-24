@@ -7,6 +7,7 @@ use axum::{
 use base64::Engine as _;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
+use tokio::time::{Duration, sleep};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -826,6 +827,95 @@ async fn mcp_route_rejects_oversized_request_bodies_with_structured_limit_error(
         assert_eq!(response["error"]["code"], json!(-32600));
         assert_eq!(response["error"]["data"]["errorKind"], json!("upload_limit_exceeded"));
         assert_eq!(response["error"]["data"]["details"]["uploadLimitMb"], json!(1));
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango"]
+async fn mcp_upload_receipt_status_read_lifecycle_is_stable() -> anyhow::Result<()> {
+    let settings = Settings::from_env().context("failed to load settings for mcp mutation test")?;
+    let fixture = McpMutationFixture::create(settings).await?;
+
+    let result = async {
+        let token =
+            fixture.bearer_token(&["documents:read", "documents:write"], "lifecycle").await?;
+
+        let content = "stable lifecycle content for MCP upload/read";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(content.as_bytes());
+
+        let upload = fixture
+            .mcp_tool_call(
+                &token,
+                "upload_documents",
+                json!({
+                    "libraryId": fixture.library_id,
+                    "documents": [{
+                        "fileName": "lifecycle.txt",
+                        "contentBase64": encoded,
+                        "mimeType": "text/plain"
+                    }]
+                }),
+            )
+            .await?;
+        assert_eq!(upload["result"]["isError"], json!(false));
+
+        let receipt = &upload["result"]["structuredContent"]["receipts"][0];
+        let receipt_id: Uuid =
+            serde_json::from_value(receipt["receiptId"].clone()).context("receipt id missing")?;
+        let document_id: Uuid =
+            serde_json::from_value(receipt["documentId"].clone()).context("document id missing")?;
+
+        let mut ready = false;
+        for _ in 0..60 {
+            let status = fixture
+                .mcp_tool_call(&token, "get_mutation_status", json!({ "receiptId": receipt_id }))
+                .await?;
+            assert_eq!(status["result"]["isError"], json!(false));
+
+            if let Some(status_document_id) = status["result"]["structuredContent"]
+                .get("documentId")
+                .and_then(|value| value.as_str())
+            {
+                assert_eq!(status_document_id, document_id.to_string());
+            }
+
+            let state = status["result"]["structuredContent"]["status"]
+                .as_str()
+                .context("mutation status missing")?;
+
+            match state {
+                "ready" => {
+                    ready = true;
+                    break;
+                }
+                "failed" => {
+                    anyhow::bail!("mutation status reported failed");
+                }
+                _ => sleep(Duration::from_millis(500)).await,
+            }
+        }
+
+        assert!(ready, "timed out waiting for receipt to reach ready status");
+
+        let read = fixture
+            .mcp_tool_call(
+                &token,
+                "read_document",
+                json!({ "documentId": document_id, "mode": "full" }),
+            )
+            .await?;
+        assert_eq!(read["result"]["isError"], json!(false));
+        assert_eq!(read["result"]["structuredContent"]["readabilityState"], json!("readable"));
+        let returned = read["result"]["structuredContent"]["content"]
+            .as_str()
+            .context("read content missing")?;
+        assert!(returned.contains("stable lifecycle content"));
 
         Ok(())
     }

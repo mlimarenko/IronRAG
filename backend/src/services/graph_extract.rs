@@ -8,14 +8,18 @@ use std::time::Instant;
 use crate::{
     app::state::AppState,
     domains::{
-        graph_quality::ExtractionRecoverySummary,
+        ai::AiBindingPurpose,
+        graph_quality::{ExtractionOutcomeStatus, ExtractionRecoverySummary},
         provider_profiles::EffectiveProviderProfile,
         runtime_graph::RuntimeNodeType,
         runtime_ingestion::{RuntimeProviderFailureClass, RuntimeProviderFailureDetail},
     },
     infra::repositories::{self, ChunkRow, DocumentRow, RuntimeGraphExtractionRecordRow},
     integrations::llm::{ChatRequest, LlmGateway},
-    services::extraction_recovery::{ExtractionRecoveryService, ParserRepairClassification},
+    services::{
+        ai_catalog_service::ResolvedRuntimeBinding,
+        extraction_recovery::{ExtractionRecoveryService, ParserRepairClassification},
+    },
 };
 
 const GRAPH_EXTRACTION_VERSION: &str = "graph_extract_v1";
@@ -241,6 +245,30 @@ struct GraphExtractionPromptPlan {
     prompt: String,
     request_shape_key: String,
     request_size_bytes: usize,
+}
+
+fn unconfigured_graph_extraction_failure(
+    request: &GraphExtractionRequest,
+    error_message: impl Into<String>,
+) -> GraphExtractionFailureOutcome {
+    GraphExtractionFailureOutcome {
+        provider_kind: "unconfigured".to_string(),
+        model_name: "unconfigured".to_string(),
+        prompt_hash: sha256_hex(&build_graph_extraction_prompt(request)),
+        request_shape_key: "graph_extract_v3:unconfigured".to_string(),
+        request_size_bytes: 0,
+        provider_attempt_count: 0,
+        raw_output_json: serde_json::json!({}),
+        error_message: error_message.into(),
+        provider_failure: None,
+        recovery_summary: ExtractionRecoverySummary {
+            status: ExtractionOutcomeStatus::Failed,
+            parser_repair_applied: false,
+            second_pass_applied: false,
+            warning: None,
+        },
+        recovery_attempts: Vec::new(),
+    }
 }
 
 impl fmt::Display for GraphExtractionExecutionError {
@@ -696,11 +724,25 @@ async fn resolve_graph_extraction(
     provider_profile: &EffectiveProviderProfile,
     request: &GraphExtractionRequest,
 ) -> std::result::Result<ResolvedGraphExtraction, GraphExtractionFailureOutcome> {
+    let library_id = request.document.project_id;
+    let runtime_binding = state
+        .canonical_services
+        .ai_catalog
+        .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::ExtractGraph)
+        .await
+        .map_err(|error| unconfigured_graph_extraction_failure(request, error.to_string()))?
+        .ok_or_else(|| {
+            unconfigured_graph_extraction_failure(
+                request,
+                "active graph extraction binding is not configured for this library",
+            )
+        })?;
     resolve_graph_extraction_with_gateway(
         state.llm_gateway.as_ref(),
         &state.retrieval_intelligence_services.extraction_recovery,
         &state.resolve_settle_blockers_services.provider_failure_classification,
         provider_profile,
+        &runtime_binding,
         request,
         state.retrieval_intelligence.extraction_recovery_enabled,
         state
@@ -717,13 +759,14 @@ async fn resolve_graph_extraction_with_gateway(
     extraction_recovery: &ExtractionRecoveryService,
     provider_failure_classification: &crate::services::provider_failure_classification::ProviderFailureClassificationService,
     provider_profile: &EffectiveProviderProfile,
+    runtime_binding: &ResolvedRuntimeBinding,
     request: &GraphExtractionRequest,
     recovery_enabled: bool,
     max_provider_attempts: usize,
     provider_timeout_retry_limit: usize,
 ) -> std::result::Result<ResolvedGraphExtraction, GraphExtractionFailureOutcome> {
-    let provider_kind = provider_profile.indexing.provider_kind.as_str().to_string();
-    let model_name = provider_profile.indexing.model_name.clone();
+    let provider_kind = runtime_binding.provider_kind.clone();
+    let model_name = runtime_binding.model_name.clone();
     let lifecycle = GraphExtractionLifecycle {
         revision_id: request.revision_id,
         activated_by_attempt_id: request.activated_by_attempt_id,
@@ -777,6 +820,7 @@ async fn resolve_graph_extraction_with_gateway(
         let raw = match request_graph_extraction_with_prompt_plan(
             gateway,
             provider_profile,
+            runtime_binding,
             &prompt_plan,
             lifecycle.clone(),
         )
@@ -1242,30 +1286,34 @@ async fn resolve_graph_extraction_with_gateway(
 
 async fn request_graph_extraction_with_prompt_plan(
     gateway: &dyn LlmGateway,
-    provider_profile: &EffectiveProviderProfile,
+    _provider_profile: &EffectiveProviderProfile,
+    runtime_binding: &ResolvedRuntimeBinding,
     prompt_plan: &GraphExtractionPromptPlan,
     lifecycle: GraphExtractionLifecycle,
 ) -> Result<RawGraphExtractionResponse> {
     let prompt_hash = sha256_hex(&prompt_plan.prompt);
-    let provider_kind = provider_profile.indexing.provider_kind.as_str().to_string();
-    let model_name = provider_profile.indexing.model_name.clone();
+    let provider_kind = runtime_binding.provider_kind.clone();
+    let model_name = runtime_binding.model_name.clone();
     let started_at = Utc::now();
     let started = Instant::now();
     let response = gateway
         .generate(ChatRequest {
-            provider_kind: provider_kind.clone(),
-            model_name: model_name.clone(),
+            provider_kind: runtime_binding.provider_kind.clone(),
+            model_name: runtime_binding.model_name.clone(),
             prompt: prompt_plan.prompt.clone(),
+            api_key_override: Some(runtime_binding.api_key.clone()),
+            base_url_override: runtime_binding.provider_base_url.clone(),
+            system_prompt: runtime_binding.system_prompt.clone(),
+            temperature: runtime_binding.temperature,
+            top_p: runtime_binding.top_p,
+            max_output_tokens_override: runtime_binding.max_output_tokens_override,
+            extra_parameters_json: runtime_binding.extra_parameters_json.clone(),
         })
         .await
         .context("graph extraction provider call failed")?;
     let finished_at = Utc::now();
     let output_text = response.output_text;
-    let usage_json = build_provider_usage_json(
-        provider_profile.indexing.provider_kind.as_str(),
-        &provider_profile.indexing.model_name,
-        response.usage_json,
-    );
+    let usage_json = build_provider_usage_json(&provider_kind, &model_name, response.usage_json);
 
     Ok(RawGraphExtractionResponse {
         provider_kind,
@@ -1869,6 +1917,28 @@ mod tests {
         }
     }
 
+    fn sample_runtime_binding() -> ResolvedRuntimeBinding {
+        ResolvedRuntimeBinding {
+            binding_id: uuid::Uuid::now_v7(),
+            workspace_id: uuid::Uuid::nil(),
+            library_id: uuid::Uuid::nil(),
+            binding_purpose: AiBindingPurpose::ExtractGraph,
+            provider_catalog_id: uuid::Uuid::now_v7(),
+            provider_kind: "openai".to_string(),
+            provider_base_url: None,
+            provider_api_style: "openai".to_string(),
+            credential_id: uuid::Uuid::now_v7(),
+            api_key: "test-api-key".to_string(),
+            model_catalog_id: uuid::Uuid::now_v7(),
+            model_name: "gpt-5-mini".to_string(),
+            system_prompt: None,
+            temperature: None,
+            top_p: None,
+            max_output_tokens_override: None,
+            extra_parameters_json: serde_json::json!({}),
+        }
+    }
+
     fn sample_request() -> GraphExtractionRequest {
         GraphExtractionRequest {
             project_id: uuid::Uuid::nil(),
@@ -2146,6 +2216,7 @@ mod tests {
             &ExtractionRecoveryService,
             &crate::services::provider_failure_classification::ProviderFailureClassificationService::default(),
             &sample_profile(),
+            &sample_runtime_binding(),
             &sample_request(),
             true,
             2,
@@ -2212,6 +2283,7 @@ mod tests {
             &ExtractionRecoveryService,
             &crate::services::provider_failure_classification::ProviderFailureClassificationService::default(),
             &sample_profile(),
+            &sample_runtime_binding(),
             &sample_request(),
             true,
             2,
@@ -2257,6 +2329,7 @@ mod tests {
             &ExtractionRecoveryService,
             &crate::services::provider_failure_classification::ProviderFailureClassificationService::default(),
             &sample_profile(),
+            &sample_runtime_binding(),
             &sample_request(),
             true,
             2,
@@ -2367,6 +2440,7 @@ mod tests {
             &ExtractionRecoveryService,
             &crate::services::provider_failure_classification::ProviderFailureClassificationService::default(),
             &sample_profile(),
+            &sample_runtime_binding(),
             &sample_request(),
             true,
             2,

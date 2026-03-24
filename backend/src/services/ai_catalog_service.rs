@@ -1,3 +1,4 @@
+use rust_decimal::Decimal;
 use uuid::Uuid;
 
 use crate::{
@@ -15,7 +16,7 @@ pub struct CreateProviderCredentialCommand {
     pub workspace_id: Uuid,
     pub provider_catalog_id: Uuid,
     pub label: String,
-    pub secret_ref: String,
+    pub api_key: String,
     pub created_by_principal_id: Option<Uuid>,
 }
 
@@ -23,7 +24,7 @@ pub struct CreateProviderCredentialCommand {
 pub struct UpdateProviderCredentialCommand {
     pub credential_id: Uuid,
     pub label: String,
-    pub secret_ref: String,
+    pub api_key: Option<String>,
     pub credential_state: String,
 }
 
@@ -71,11 +72,54 @@ pub struct UpdateLibraryBindingCommand {
 }
 
 #[derive(Debug, Clone)]
+pub struct CreateWorkspacePriceOverrideCommand {
+    pub workspace_id: Uuid,
+    pub model_catalog_id: Uuid,
+    pub billing_unit: String,
+    pub unit_price: Decimal,
+    pub currency_code: String,
+    pub effective_from: chrono::DateTime<chrono::Utc>,
+    pub effective_to: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateWorkspacePriceOverrideCommand {
+    pub price_id: Uuid,
+    pub model_catalog_id: Uuid,
+    pub billing_unit: String,
+    pub unit_price: Decimal,
+    pub currency_code: String,
+    pub effective_from: chrono::DateTime<chrono::Utc>,
+    pub effective_to: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone)]
 pub struct CreateBindingValidationCommand {
     pub binding_id: Uuid,
     pub validation_state: String,
     pub failure_code: Option<String>,
     pub message: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedRuntimeBinding {
+    pub binding_id: Uuid,
+    pub workspace_id: Uuid,
+    pub library_id: Uuid,
+    pub binding_purpose: AiBindingPurpose,
+    pub provider_catalog_id: Uuid,
+    pub provider_kind: String,
+    pub provider_base_url: Option<String>,
+    pub provider_api_style: String,
+    pub credential_id: Uuid,
+    pub api_key: String,
+    pub model_catalog_id: Uuid,
+    pub model_name: String,
+    pub system_prompt: Option<String>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub max_output_tokens_override: Option<i32>,
+    pub extra_parameters_json: serde_json::Value,
 }
 
 #[derive(Clone, Default)]
@@ -125,6 +169,63 @@ impl AiCatalogService {
         Ok(rows.into_iter().map(map_price_row).collect())
     }
 
+    pub async fn get_price_catalog_entry(
+        &self,
+        state: &AppState,
+        price_id: Uuid,
+    ) -> Result<PriceCatalogEntry, ApiError> {
+        let row = ai_repository::get_price_catalog_by_id(&state.persistence.postgres, price_id)
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .ok_or_else(|| ApiError::resource_not_found("price_catalog_entry", price_id))?;
+        Ok(map_price_row(row))
+    }
+
+    pub async fn create_workspace_price_override(
+        &self,
+        state: &AppState,
+        command: CreateWorkspacePriceOverrideCommand,
+    ) -> Result<PriceCatalogEntry, ApiError> {
+        let billing_unit = normalize_non_empty(&command.billing_unit, "billingUnit")?;
+        let currency_code = normalize_currency_code(&command.currency_code)?;
+        let row = ai_repository::create_workspace_price_override(
+            &state.persistence.postgres,
+            command.workspace_id,
+            command.model_catalog_id,
+            &billing_unit,
+            command.unit_price,
+            &currency_code,
+            command.effective_from,
+            command.effective_to,
+        )
+        .await
+        .map_err(map_ai_write_error)?;
+        Ok(map_price_row(row))
+    }
+
+    pub async fn update_workspace_price_override(
+        &self,
+        state: &AppState,
+        command: UpdateWorkspacePriceOverrideCommand,
+    ) -> Result<PriceCatalogEntry, ApiError> {
+        let billing_unit = normalize_non_empty(&command.billing_unit, "billingUnit")?;
+        let currency_code = normalize_currency_code(&command.currency_code)?;
+        let row = ai_repository::update_workspace_price_override(
+            &state.persistence.postgres,
+            command.price_id,
+            command.model_catalog_id,
+            &billing_unit,
+            command.unit_price,
+            &currency_code,
+            command.effective_from,
+            command.effective_to,
+        )
+        .await
+        .map_err(map_ai_write_error)?
+        .ok_or_else(|| ApiError::resource_not_found("price_catalog_entry", command.price_id))?;
+        Ok(map_price_row(row))
+    }
+
     pub async fn list_provider_credentials(
         &self,
         state: &AppState,
@@ -158,13 +259,13 @@ impl AiCatalogService {
         command: CreateProviderCredentialCommand,
     ) -> Result<ProviderCredential, ApiError> {
         let label = normalize_non_empty(&command.label, "label")?;
-        let secret_ref = normalize_non_empty(&command.secret_ref, "secretRef")?;
+        let api_key = normalize_non_empty(&command.api_key, "apiKey")?;
         let row = ai_repository::create_provider_credential(
             &state.persistence.postgres,
             command.workspace_id,
             command.provider_catalog_id,
             &label,
-            &secret_ref,
+            &api_key,
             command.created_by_principal_id,
         )
         .await
@@ -178,12 +279,12 @@ impl AiCatalogService {
         command: UpdateProviderCredentialCommand,
     ) -> Result<ProviderCredential, ApiError> {
         let label = normalize_non_empty(&command.label, "label")?;
-        let secret_ref = normalize_non_empty(&command.secret_ref, "secretRef")?;
+        let api_key = normalize_optional(command.api_key.as_deref());
         let row = ai_repository::update_provider_credential(
             &state.persistence.postgres,
             command.credential_id,
             &label,
-            &secret_ref,
+            api_key.as_deref(),
             &command.credential_state,
         )
         .await
@@ -339,6 +440,99 @@ impl AiCatalogService {
         .map_err(map_ai_write_error)?;
         Ok(map_binding_validation_row(row))
     }
+
+    pub async fn resolve_active_runtime_binding(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+        binding_purpose: AiBindingPurpose,
+    ) -> Result<Option<ResolvedRuntimeBinding>, ApiError> {
+        let Some(binding) = ai_repository::get_active_library_binding_by_purpose(
+            &state.persistence.postgres,
+            library_id,
+            binding_purpose_key(binding_purpose),
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?
+        else {
+            return Ok(None);
+        };
+
+        self.resolve_runtime_binding_by_row(state, binding).await.map(Some)
+    }
+
+    pub async fn resolve_runtime_binding_by_id(
+        &self,
+        state: &AppState,
+        binding_id: Uuid,
+    ) -> Result<ResolvedRuntimeBinding, ApiError> {
+        let binding =
+            ai_repository::get_library_binding_by_id(&state.persistence.postgres, binding_id)
+                .await
+                .map_err(|_| ApiError::Internal)?
+                .ok_or_else(|| ApiError::resource_not_found("library_binding", binding_id))?;
+        self.resolve_runtime_binding_by_row(state, binding).await
+    }
+
+    async fn resolve_runtime_binding_by_row(
+        &self,
+        state: &AppState,
+        binding: ai_repository::AiLibraryModelBindingRow,
+    ) -> Result<ResolvedRuntimeBinding, ApiError> {
+        let provider_credential =
+            self.get_provider_credential(state, binding.provider_credential_id).await?;
+        let model_preset = self.get_model_preset(state, binding.model_preset_id).await?;
+        let providers = self.list_provider_catalog(state).await?;
+        let models = self.list_model_catalog(state, None).await?;
+        let provider = providers
+            .into_iter()
+            .find(|entry| entry.id == provider_credential.provider_catalog_id)
+            .ok_or_else(|| {
+                ApiError::resource_not_found(
+                    "provider_catalog",
+                    provider_credential.provider_catalog_id,
+                )
+            })?;
+        let model =
+            models.into_iter().find(|entry| entry.id == model_preset.model_catalog_id).ok_or_else(
+                || ApiError::resource_not_found("model_catalog", model_preset.model_catalog_id),
+            )?;
+        if model.provider_catalog_id != provider.id {
+            return Err(ApiError::BadRequest(
+                "binding links a provider credential to a model from another provider".to_string(),
+            ));
+        }
+        if provider_credential.credential_state != "active" {
+            return Err(ApiError::BadRequest("provider credential is not active".to_string()));
+        }
+
+        let provider_row = ai_repository::list_provider_catalog(&state.persistence.postgres)
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .into_iter()
+            .find(|entry| entry.id == provider.id)
+            .ok_or_else(|| ApiError::resource_not_found("provider_catalog", provider.id))?;
+
+        Ok(ResolvedRuntimeBinding {
+            binding_id: binding.id,
+            workspace_id: binding.workspace_id,
+            library_id: binding.library_id,
+            binding_purpose: parse_binding_purpose(&binding.binding_purpose)?,
+            provider_catalog_id: provider.id,
+            provider_kind: provider.provider_kind,
+            provider_base_url: provider_row.default_base_url,
+            provider_api_style: provider.api_style,
+            credential_id: provider_credential.id,
+            api_key: provider_credential.api_key,
+            model_catalog_id: model.id,
+            model_name: model.model_name,
+            system_prompt: model_preset.system_prompt,
+            temperature: model_preset.temperature,
+            top_p: model_preset.top_p,
+            max_output_tokens_override: model_preset.max_output_tokens_override,
+            extra_parameters_json: model_preset.extra_parameters_json,
+        })
+    }
 }
 
 fn normalize_non_empty(value: &str, field_name: &'static str) -> Result<String, ApiError> {
@@ -351,6 +545,11 @@ fn normalize_non_empty(value: &str, field_name: &'static str) -> Result<String, 
 
 fn normalize_optional(value: Option<&str>) -> Option<String> {
     value.map(str::trim).filter(|value| !value.is_empty()).map(ToString::to_string)
+}
+
+fn normalize_currency_code(value: &str) -> Result<String, ApiError> {
+    let normalized = normalize_non_empty(value, "currencyCode")?;
+    Ok(normalized.to_ascii_uppercase())
 }
 
 fn map_ai_write_error(error: sqlx::Error) -> ApiError {
@@ -398,6 +597,9 @@ fn map_price_row(row: ai_repository::AiPriceCatalogRow) -> PriceCatalogEntry {
         unit_price: row.unit_price,
         currency_code: row.currency_code,
         effective_from: row.effective_from,
+        effective_to: row.effective_to,
+        catalog_scope: row.catalog_scope,
+        workspace_id: row.workspace_id,
     }
 }
 
@@ -407,7 +609,7 @@ fn map_provider_credential_row(row: ai_repository::AiProviderCredentialRow) -> P
         workspace_id: row.workspace_id,
         provider_catalog_id: row.provider_catalog_id,
         label: row.label,
-        secret_ref: row.secret_ref,
+        api_key: row.api_key,
         credential_state: row.credential_state,
         created_at: row.created_at,
         updated_at: row.updated_at,

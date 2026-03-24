@@ -716,7 +716,9 @@ pub fn build_local_file_extraction_plan(
 
 pub async fn build_runtime_file_extraction_plan(
     gateway: &dyn LlmGateway,
-    vision_provider: &ProviderModelSelection,
+    vision_provider: Option<&ProviderModelSelection>,
+    api_key: Option<&str>,
+    base_url: Option<&str>,
     file_name: Option<&str>,
     mime_type: Option<&str>,
     file_bytes: Vec<u8>,
@@ -725,11 +727,19 @@ pub async fn build_runtime_file_extraction_plan(
 
     match file_kind {
         UploadFileKind::Image => {
+            let Some(vision_provider) = vision_provider else {
+                return Err(FileExtractError::ExtractionFailed {
+                    file_kind,
+                    message: "vision binding is not configured for image extraction".to_string(),
+                });
+            };
             let detected_mime = mime_type.unwrap_or("image/png");
             let output = extraction::image::extract_image_with_provider(
                 gateway,
                 vision_provider.provider_kind.as_str(),
                 &vision_provider.model_name,
+                api_key.unwrap_or_default(),
+                base_url,
                 detected_mime,
                 &file_bytes,
             )
@@ -915,8 +925,11 @@ fn with_extraction_quality_markers(
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use anyhow::Result;
     use async_trait::async_trait;
+    use image::{DynamicImage, ImageFormat};
     use lopdf::{
         Document, Object, Stream,
         content::{Content, Operation},
@@ -928,6 +941,13 @@ mod tests {
         ChatRequest, ChatResponse, EmbeddingBatchRequest, EmbeddingBatchResponse, EmbeddingRequest,
         EmbeddingResponse, VisionRequest, VisionResponse,
     };
+
+    fn valid_png_bytes() -> Vec<u8> {
+        let image = DynamicImage::new_rgba8(2, 2);
+        let mut cursor = Cursor::new(Vec::new());
+        image.write_to(&mut cursor, ImageFormat::Png).expect("encode generated png fixture");
+        cursor.into_inner()
+    }
 
     struct FakeGateway;
 
@@ -1177,10 +1197,12 @@ mod tests {
 
         let result = build_runtime_file_extraction_plan(
             &FakeGateway,
-            &provider,
+            Some(&provider),
+            Some("test-key"),
+            None,
             Some("diagram.png"),
             Some("image/png"),
-            vec![0x89, 0x50, 0x4E, 0x47],
+            valid_png_bytes(),
         )
         .await
         .expect("runtime image extraction");

@@ -128,6 +128,30 @@ pub async fn update_workspace(
     .await
 }
 
+pub async fn archive_workspace(
+    postgres: &PgPool,
+    workspace_id: Uuid,
+) -> Result<Option<CatalogWorkspaceRow>, sqlx::Error> {
+    sqlx::query_as::<_, CatalogWorkspaceRow>(
+        "update catalog_workspace
+         set lifecycle_state = 'archived',
+             updated_at = now()
+         where id = $1
+         returning id, slug, display_name, lifecycle_state::text as lifecycle_state, created_at, updated_at",
+    )
+    .bind(workspace_id)
+    .fetch_optional(postgres)
+    .await
+}
+
+pub async fn delete_workspace(postgres: &PgPool, workspace_id: Uuid) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query("delete from catalog_workspace where id = $1")
+        .bind(workspace_id)
+        .execute(postgres)
+        .await?;
+    Ok(result.rows_affected())
+}
+
 pub async fn list_libraries(
     postgres: &PgPool,
     workspace_id: Option<Uuid>,
@@ -228,6 +252,30 @@ pub async fn update_library(
     .bind(lifecycle_state)
     .fetch_optional(postgres)
     .await
+}
+
+pub async fn archive_library(
+    postgres: &PgPool,
+    library_id: Uuid,
+) -> Result<Option<CatalogLibraryRow>, sqlx::Error> {
+    sqlx::query_as::<_, CatalogLibraryRow>(
+        "update catalog_library
+         set lifecycle_state = 'archived',
+             updated_at = now()
+         where id = $1
+         returning id, workspace_id, slug, display_name, description, lifecycle_state::text as lifecycle_state, created_at, updated_at",
+    )
+    .bind(library_id)
+    .fetch_optional(postgres)
+    .await
+}
+
+pub async fn delete_library(postgres: &PgPool, library_id: Uuid) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query("delete from catalog_library where id = $1")
+        .bind(library_id)
+        .execute(postgres)
+        .await?;
+    Ok(result.rows_affected())
 }
 
 pub async fn list_connectors_by_library(

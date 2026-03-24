@@ -3,12 +3,10 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     infra::repositories::{
-        self, ProjectRow,
         ai_repository::{self, AiLibraryModelBindingRow, AiProviderCredentialRow},
         catalog_repository::{
             self, CatalogLibraryConnectorRow, CatalogLibraryRow, CatalogWorkspaceRow,
         },
-        content_repository::{self, ContentDocumentRow},
         ops_repository::{self, OpsAsyncOperationRow},
         query_repository::{self, QueryConversationRow},
     },
@@ -113,6 +111,13 @@ pub struct SanitizedMcpAuditScope {
     pub workspace_id: Option<Uuid>,
     pub library_id: Option<Uuid>,
     pub document_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthorizedContentDocument {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub library_id: Uuid,
 }
 
 pub async fn authorize_workspace_scope(
@@ -431,8 +436,10 @@ pub async fn load_content_document_and_authorize(
     state: &AppState,
     document_id: Uuid,
     accepted_permissions: &[&str],
-) -> Result<ContentDocumentRow, ApiError> {
-    let document = content_repository::get_document_by_id(&state.persistence.postgres, document_id)
+) -> Result<AuthorizedContentDocument, ApiError> {
+    let document = state
+        .arango_document_store
+        .get_document(document_id)
         .await
         .map_err(|_| ApiError::Internal)?
         .ok_or_else(|| ApiError::resource_not_found("document", document_id))?;
@@ -440,60 +447,14 @@ pub async fn load_content_document_and_authorize(
         auth,
         document.workspace_id,
         document.library_id,
-        document.id,
+        document.document_id,
         accepted_permissions,
     )?;
-    Ok(document)
-}
-
-pub async fn load_project_and_authorize(
-    auth: &AuthContext,
-    state: &AppState,
-    project_id: Uuid,
-    accepted_permissions: &[&str],
-) -> Result<ProjectRow, ApiError> {
-    let project = repositories::get_project_by_id(&state.persistence.postgres, project_id)
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::NotFound(format!("project {project_id} not found")))?;
-    authorize_workspace_permission(auth, project.workspace_id, accepted_permissions)?;
-    Ok(project)
-}
-
-pub async fn load_document_and_authorize(
-    auth: &AuthContext,
-    state: &AppState,
-    document_id: Uuid,
-    accepted_permissions: &[&str],
-) -> Result<(repositories::DocumentRow, ProjectRow), ApiError> {
-    let document = repositories::get_document_by_id(&state.persistence.postgres, document_id)
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::NotFound(format!("document {document_id} not found")))?;
-    let project = repositories::get_project_by_id(&state.persistence.postgres, document.project_id)
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::NotFound(format!("project {} not found", document.project_id)))?;
-    authorize_workspace_permission(auth, project.workspace_id, accepted_permissions)?;
-    Ok((document, project))
-}
-
-pub async fn load_ingestion_job_and_authorize(
-    auth: &AuthContext,
-    state: &AppState,
-    ingestion_job_id: Uuid,
-    accepted_permissions: &[&str],
-) -> Result<(repositories::IngestionJobRow, ProjectRow), ApiError> {
-    let row = repositories::get_ingestion_job_by_id(&state.persistence.postgres, ingestion_job_id)
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::NotFound(format!("ingestion_job {ingestion_job_id} not found")))?;
-    let project = repositories::get_project_by_id(&state.persistence.postgres, row.project_id)
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::NotFound(format!("project {} not found", row.project_id)))?;
-    authorize_workspace_permission(auth, project.workspace_id, accepted_permissions)?;
-    Ok((row, project))
+    Ok(AuthorizedContentDocument {
+        id: document.document_id,
+        workspace_id: document.workspace_id,
+        library_id: document.library_id,
+    })
 }
 
 pub fn filter_workspace_rows<T>(

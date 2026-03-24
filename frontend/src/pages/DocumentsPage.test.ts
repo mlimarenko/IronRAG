@@ -4,35 +4,40 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 const documentsPagePath = fileURLToPath(new URL('./DocumentsPage.vue', import.meta.url))
-const documentsTablePath = fileURLToPath(
-  new URL('../components/documents/DocumentsTable.vue', import.meta.url),
+const documentsListPath = fileURLToPath(
+  new URL('../components/documents/DocumentsList.vue', import.meta.url),
 )
 
 describe('DocumentsPage layout contract', () => {
-  it('keeps the primary summary flow ahead of secondary diagnostics, notices, and the table', () => {
+  it('keeps the documents shell minimal: header first, then one workbench with filters and list', () => {
     const source = readFileSync(documentsPagePath, 'utf8')
 
     const headerIndex = source.indexOf('<DocumentsWorkspaceHeader')
-    const summaryIndex = source.indexOf('<DocumentsPrimarySummary')
-    const diagnosticsIndex = source.indexOf('<DocumentsDiagnosticsStrip')
-    const noticesIndex = source.indexOf('<DocumentsNoticeStack')
+    const shellIndex = source.indexOf('rr-documents__workspace-shell')
     const filtersIndex = source.indexOf('<DocumentsFiltersBar')
-    const tableIndex = source.indexOf('<DocumentsTable')
+    const tableIndex = source.indexOf('<DocumentsList')
 
     expect(headerIndex).toBeGreaterThan(-1)
-    expect(summaryIndex).toBeGreaterThan(headerIndex)
-    expect(diagnosticsIndex).toBeGreaterThan(summaryIndex)
-    expect(noticesIndex).toBeGreaterThan(diagnosticsIndex)
-    expect(filtersIndex).toBeGreaterThan(noticesIndex)
+    expect(shellIndex).toBeGreaterThan(headerIndex)
+    expect(filtersIndex).toBeGreaterThan(shellIndex)
     expect(tableIndex).toBeGreaterThan(filtersIndex)
   })
 
-  it('keeps collection summary chrome out of the table wrapper', () => {
-    const tableSource = readFileSync(documentsTablePath, 'utf8')
+  it('keeps one inspector surface and compact inline row actions', () => {
+    const source = readFileSync(documentsPagePath, 'utf8')
+    const listSource = readFileSync(documentsListPath, 'utf8')
 
-    expect(tableSource).not.toContain('DocumentsPrimarySummary')
-    expect(tableSource).not.toContain('DocumentsDiagnosticsStrip')
-    expect(tableSource).not.toContain('workspacePrimarySummary')
-    expect(tableSource).not.toContain('workspaceSecondaryDiagnostics')
+    expect(source).toContain('<DocumentInspectorPane')
+    expect(listSource).toContain('rr-document-row__actions')
+    expect(listSource).not.toContain('DocumentsPrimarySummary')
+  })
+
+  it('keeps collection diagnostics chrome out of the list wrapper', () => {
+    const listSource = readFileSync(documentsListPath, 'utf8')
+
+    expect(listSource).not.toContain('DocumentsPrimarySummary')
+    expect(listSource).not.toContain('DocumentsDiagnosticsStrip')
+    expect(listSource).not.toContain('DocumentsNoticeStack')
+    expect(listSource).not.toContain('DocumentProgressCell')
   })
 })

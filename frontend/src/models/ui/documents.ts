@@ -7,6 +7,8 @@ export type DocumentStatus =
   | 'ready_no_graph'
   | 'failed'
 
+export type DocumentDisplayStatus = 'in_progress' | 'ready' | 'failed'
+
 export type DocumentReadabilityState =
   | 'unreadable'
   | 'readable_active'
@@ -247,8 +249,6 @@ export interface DocumentSummaryCounters {
 export interface DocumentFilterValues {
   statuses: DocumentStatus[]
   fileTypes: string[]
-  accountingStatuses: DocumentAccountingStatus[]
-  mutationStatuses: DocumentMutationStatus[]
 }
 
 export interface DocumentMutationState {
@@ -265,48 +265,21 @@ export interface DocumentMutationImpactScopeSummary {
   fallbackReason: string | null
 }
 
-export interface DocumentRow {
+export interface DocumentRowSummary {
   id: string
-  logicalDocumentId: string | null
-  readabilityState: DocumentReadabilityState
-  activeRevisionId: string | null
-  readableRevisionId: string | null
-  readableRevisionNo: number | null
   fileName: string
   fileType: string
   fileSizeLabel: string
   uploadedAt: string
-  libraryName: string
-  stage: string
   status: DocumentStatus
-  progressPercent: number | null
-  activityStatus: DocumentActivityStatus
-  lastActivityAt: string | null
-  stalledReason: string | null
-  chunkCount: number | null
-  graphNodeCount: number | null
-  graphEdgeCount: number | null
-  activeRevisionNo: number | null
-  activeRevisionKind: string | null
-  latestAttemptNo: number
-  accountingStatus: DocumentAccountingStatus
-  totalEstimatedCost: number | null
-  settledEstimatedCost: number | null
-  inFlightEstimatedCost: number | null
-  currency: string | null
-  inFlightStageCount: number
-  missingStageCount: number
-  partialHistory: boolean
-  partialHistoryReason: string | null
-  graphThroughput: DocumentGraphThroughputSummary | null
-  mutation: DocumentMutationState
-  knowledgeReadiness: DocumentKnowledgeReadiness | null
+  statusLabel: string
+  activityLabel: string
+  mutationLabel: string | null
   canRetry: boolean
   canAppend: boolean
   canReplace: boolean
   canRemove: boolean
   detailAvailable: boolean
-  canonical: DocumentCanonicalState
 }
 
 export interface DocumentHistoryItem {
@@ -542,7 +515,7 @@ export interface DocumentsSurfaceResponse {
   accounting: DocumentCollectionAccountingSummary
   diagnostics: DocumentCollectionDiagnostics
   workspace: DocumentsWorkspaceSummary | null
-  rows: DocumentRow[]
+  rows: DocumentRowSummary[]
 }
 
 export interface DocumentCollectionAccountingSummary {
@@ -693,7 +666,7 @@ export interface DocumentCollectionWarning {
 }
 
 export interface UploadDocumentsResponse {
-  acceptedRows: DocumentRow[]
+  acceptedRows: DocumentRowSummary[]
   rejectedFiles: DocumentUploadFailure[]
 }
 
@@ -719,4 +692,34 @@ export interface DocumentUploadFailure {
   uploadLimitMb: number | null
   rejectionCause: string | null
   operatorAction: string | null
+}
+
+export interface DocumentInspectorState {
+  documentId: string | null
+  loading: boolean
+  error: string | null
+  detail: DocumentDetail | null
+}
+
+export interface DocumentsFilterState {
+  searchQuery: string
+  statusFilter: DocumentDisplayStatus | ''
+  selectedFileTypes: string[]
+  sortField: 'uploadedAt' | 'fileName'
+  sortDirection: 'asc' | 'desc'
+}
+
+export interface DocumentsWorkspaceSurface {
+  acceptedFormats: string[]
+  maxSizeMb: number
+  loading: boolean
+  error: string | null
+  counters: DocumentSummaryCounters
+  rows: DocumentRowSummary[]
+  filters: DocumentsFilterState
+  inspector: DocumentInspectorState
+  uploadInProgress: boolean
+  uploadFailures: DocumentUploadFailure[]
+  uploadQueue: DocumentRowSummary[]
+  selectedDocumentId: string | null
 }

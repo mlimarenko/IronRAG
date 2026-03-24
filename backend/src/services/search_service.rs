@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
+    domains::ai::AiBindingPurpose,
     infra::arangodb::{
         collections::KNOWLEDGE_CHUNK_COLLECTION,
         document_store::KnowledgeChunkRow,
@@ -15,10 +16,7 @@ use crate::{
     },
     infra::repositories::ai_repository,
     integrations::llm::EmbeddingBatchRequest,
-    services::{
-        knowledge_service::RefreshKnowledgeLibraryGenerationCommand,
-        runtime_ingestion::resolve_effective_provider_profile,
-    },
+    services::knowledge_service::RefreshKnowledgeLibraryGenerationCommand,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -239,13 +237,15 @@ impl SearchService {
         state: &AppState,
         library_id: Uuid,
     ) -> Result<usize> {
-        let provider_profile = resolve_effective_provider_profile(state, library_id).await?;
-        let model_catalog_id = resolve_embedding_model_catalog_id(
-            state,
-            provider_profile.embedding.provider_kind.as_str(),
-            &provider_profile.embedding.model_name,
-        )
-        .await?;
+        let embedding_binding = state
+            .canonical_services
+            .ai_catalog
+            .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::EmbedChunk)
+            .await?
+            .ok_or_else(|| {
+                anyhow!("active embedding binding is not configured for library {}", library_id)
+            })?;
+        let model_catalog_id = embedding_binding.model_catalog_id;
         let chunks = list_knowledge_chunks_by_library(state, library_id)
             .await
             .context("failed to load knowledge chunks for chunk embedding rebuild")?;
@@ -260,9 +260,11 @@ impl SearchService {
             let batch_response = state
                 .llm_gateway
                 .embed_many(EmbeddingBatchRequest {
-                    provider_kind: provider_profile.embedding.provider_kind.as_str().to_string(),
-                    model_name: provider_profile.embedding.model_name.clone(),
+                    provider_kind: embedding_binding.provider_kind.clone(),
+                    model_name: embedding_binding.model_name.clone(),
                     inputs: chunk_batch.iter().map(|chunk| chunk.content_text.clone()).collect(),
+                    api_key_override: Some(embedding_binding.api_key.clone()),
+                    base_url_override: embedding_binding.provider_base_url.clone(),
                 })
                 .await
                 .context("failed to rebuild chunk embeddings")?;
@@ -340,13 +342,15 @@ impl SearchService {
         state: &AppState,
         library_id: Uuid,
     ) -> Result<usize> {
-        let provider_profile = resolve_effective_provider_profile(state, library_id).await?;
-        let model_catalog_id = resolve_embedding_model_catalog_id(
-            state,
-            provider_profile.embedding.provider_kind.as_str(),
-            &provider_profile.embedding.model_name,
-        )
-        .await?;
+        let embedding_binding = state
+            .canonical_services
+            .ai_catalog
+            .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::EmbedChunk)
+            .await?
+            .ok_or_else(|| {
+                anyhow!("active embedding binding is not configured for library {}", library_id)
+            })?;
+        let model_catalog_id = embedding_binding.model_catalog_id;
         let entities = state
             .arango_graph_store
             .list_entities_by_library(library_id)
@@ -362,9 +366,11 @@ impl SearchService {
             let batch_response = state
                 .llm_gateway
                 .embed_many(EmbeddingBatchRequest {
-                    provider_kind: provider_profile.embedding.provider_kind.as_str().to_string(),
-                    model_name: provider_profile.embedding.model_name.clone(),
+                    provider_kind: embedding_binding.provider_kind.clone(),
+                    model_name: embedding_binding.model_name.clone(),
                     inputs: entity_batch.iter().map(build_entity_embedding_input).collect(),
+                    api_key_override: Some(embedding_binding.api_key.clone()),
+                    base_url_override: embedding_binding.provider_base_url.clone(),
                 })
                 .await
                 .context("failed to rebuild entity vectors")?;

@@ -642,6 +642,24 @@ impl ArangoDocumentStore {
         decode_many_results(cursor)
     }
 
+    pub async fn get_chunk(&self, chunk_id: Uuid) -> anyhow::Result<Option<KnowledgeChunkRow>> {
+        let cursor = self
+            .client
+            .query_json(
+                "FOR chunk IN @@collection
+                 FILTER chunk.chunk_id == @chunk_id
+                 LIMIT 1
+                 RETURN chunk",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_CHUNK_COLLECTION,
+                    "chunk_id": chunk_id,
+                }),
+            )
+            .await
+            .context("failed to get knowledge chunk by id")?;
+        decode_optional_single_result(cursor)
+    }
+
     pub async fn delete_chunks_by_revision(
         &self,
         revision_id: Uuid,

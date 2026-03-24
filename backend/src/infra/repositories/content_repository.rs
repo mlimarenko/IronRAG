@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::{pool::PoolConnection, FromRow, PgPool, Postgres, QueryBuilder};
+use sqlx::{FromRow, PgPool, Postgres, QueryBuilder, pool::PoolConnection};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, FromRow)]

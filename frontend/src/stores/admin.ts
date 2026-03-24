@@ -4,25 +4,34 @@ import type {
   AdminApiTokenRow,
   AdminAuditEvent,
   AdminGrant,
-  AdminOpsLibrarySnapshot,
   AdminPermissionKind,
   AdminPrincipalSummary,
-  AdminTab,
-  AdminTabAvailability,
-  AdminTabCounts,
+  AdminOpsLibrarySnapshot,
+  CreateAdminPricePayload,
   CreateAdminCredentialPayload,
+  CreateAdminModelPresetPayload,
   CreateApiTokenPayload,
+  SaveAdminLibraryBindingPayload,
+  UpdateAdminPricePayload,
+  UpdateAdminCredentialPayload,
+  UpdateAdminModelPresetPayload,
 } from 'src/models/ui/admin'
 import {
   createAdminApiToken,
+  createAdminPrice,
   createAdminCredential,
   createAdminGrant,
+  createAdminModelPreset,
   fetchAdminAiConsole,
   fetchAdminApiTokens,
   fetchAdminAuditEvents,
   fetchAdminLibraryOpsState,
   fetchAdminPrincipal,
   revokeAdminApiToken,
+  saveAdminLibraryBinding,
+  updateAdminPrice,
+  updateAdminCredential,
+  updateAdminModelPreset,
   validateAdminLibraryBinding,
 } from 'src/services/api/admin'
 
@@ -34,21 +43,35 @@ interface AdminContext {
 }
 
 interface AdminState {
-  activeTab: AdminTab
   loading: boolean
-  tabLoading: boolean
   error: string | null
   context: AdminContext | null
   principal: AdminPrincipalSummary | null
+
+  // Access section
   tokens: AdminApiTokenRow[]
-  aiConsole: AdminAiConsoleState | null
-  aiConsoleContextKey: string | null
-  auditEvents: AdminAuditEvent[]
-  opsSnapshot: AdminOpsLibrarySnapshot | null
-  credentialSaving: boolean
-  bindingValidatingId: string | null
+  accessSaving: boolean
+  accessError: string | null
   showCreateToken: boolean
   latestPlaintextToken: string | null
+
+  // Operations section
+  opsSnapshot: AdminOpsLibrarySnapshot | null
+  auditEvents: AdminAuditEvent[]
+
+  // AI setup section
+  aiConsole: AdminAiConsoleState | null
+  aiConsoleContextKey: string | null
+  aiSetupSaving: boolean
+  aiSetupError: string | null
+  bindingValidatingId: string | null
+
+  // Prices section
+  pricesSaving: boolean
+  pricesError: string | null
+
+  catalogCommitVersion: number
+  loadRequestId: number
 }
 
 const WORKSPACE_DISCOVERY_PERMISSIONS: AdminPermissionKind[] = [
@@ -62,7 +85,6 @@ const WORKSPACE_DISCOVERY_PERMISSIONS: AdminPermissionKind[] = [
   'binding_admin',
   'query_run',
   'ops_read',
-  'audit_read',
   'iam_admin',
 ]
 
@@ -75,174 +97,219 @@ const LIBRARY_DISCOVERY_PERMISSIONS: AdminPermissionKind[] = [
   'query_run',
 ]
 
+const ACCESS_PERMISSIONS: AdminPermissionKind[] = ['iam_admin']
+
+const OPERATIONS_PERMISSIONS: AdminPermissionKind[] = ['ops_read', 'workspace_admin', 'iam_admin']
+
+const AUDIT_PERMISSIONS: AdminPermissionKind[] = ['audit_read', 'workspace_admin', 'iam_admin']
+
 function formatGrantFailureMessage(failedPermissions: AdminPermissionKind[]): string {
   return `Token minted, but grant assignment failed for: ${failedPermissions.join(', ')}`
 }
 
+function hasScopedPermission(
+  principal: AdminPrincipalSummary | null,
+  context: AdminContext | null,
+  accepted: AdminPermissionKind[],
+): boolean {
+  if (!principal || !context) {
+    return false
+  }
+  return principal.effectiveGrants.some((grant) => {
+    if (!accepted.includes(grant.permissionKind)) {
+      return false
+    }
+    if (grant.resourceKind === 'system') {
+      return true
+    }
+    if (grant.resourceKind === 'workspace') {
+      return grant.resourceId === context.workspaceId
+    }
+    if (grant.resourceKind === 'library') {
+      return grant.resourceId === context.libraryId
+    }
+    return false
+  })
+}
+
 export const useAdminStore = defineStore('admin', {
   state: (): AdminState => ({
-    activeTab: 'tokens',
     loading: false,
-    tabLoading: false,
     error: null,
     context: null,
     principal: null,
     tokens: [],
-    aiConsole: null,
-    aiConsoleContextKey: null,
-    auditEvents: [],
-    opsSnapshot: null,
-    credentialSaving: false,
-    bindingValidatingId: null,
+    accessSaving: false,
+    accessError: null,
     showCreateToken: false,
     latestPlaintextToken: null,
+    opsSnapshot: null,
+    auditEvents: [],
+    aiConsole: null,
+    aiConsoleContextKey: null,
+    aiSetupSaving: false,
+    aiSetupError: null,
+    bindingValidatingId: null,
+    pricesSaving: false,
+    pricesError: null,
+    catalogCommitVersion: 0,
+    loadRequestId: 0,
   }),
   getters: {
-    tabCounts(state): AdminTabCounts {
-      return {
-        tokens: state.tokens.length,
-        aiCatalog:
-          (state.aiConsole?.providers.length ?? 0) +
-          (state.aiConsole?.modelPresets.length ?? 0) +
-          (state.aiConsole?.credentials.length ?? 0) +
-          (state.aiConsole?.bindings.length ?? 0),
-        pricing: state.aiConsole?.prices.length ?? 0,
-        audit: state.auditEvents.length,
-      }
+    canManageAccess(state): boolean {
+      return hasScopedPermission(state.principal, state.context, ACCESS_PERMISSIONS)
     },
-    tabAvailability(state): AdminTabAvailability {
-      const hasPermission = (accepted: AdminPermissionKind[]): boolean =>
-        state.principal?.effectiveGrants.some((grant) => {
-          if (!accepted.includes(grant.permissionKind)) {
-            return false
-          }
-          if (grant.resourceKind === 'system') {
-            return true
-          }
-          if (grant.resourceKind === 'workspace') {
-            return grant.resourceId === state.context?.workspaceId
-          }
-          if (grant.resourceKind === 'library') {
-            return grant.resourceId === state.context?.libraryId
-          }
-          return false
-        }) ?? false
-
-      return {
-        tokens: hasPermission(['iam_admin']),
-        aiCatalog:
-          hasPermission(WORKSPACE_DISCOVERY_PERMISSIONS) ||
-          hasPermission(LIBRARY_DISCOVERY_PERMISSIONS),
-        pricing:
-          hasPermission(WORKSPACE_DISCOVERY_PERMISSIONS) ||
-          hasPermission(LIBRARY_DISCOVERY_PERMISSIONS),
-        audit: hasPermission(['audit_read']),
-      }
+    canReadOperations(state): boolean {
+      return hasScopedPermission(state.principal, state.context, OPERATIONS_PERMISSIONS)
+    },
+    canReadAudit(state): boolean {
+      return hasScopedPermission(state.principal, state.context, AUDIT_PERMISSIONS)
+    },
+    canManageAi(state): boolean {
+      return (
+        hasScopedPermission(state.principal, state.context, WORKSPACE_DISCOVERY_PERMISSIONS) ||
+        hasScopedPermission(state.principal, state.context, LIBRARY_DISCOVERY_PERMISSIONS)
+      )
     },
   },
   actions: {
     clearState(): void {
+      this.context = null
       this.error = null
       this.loading = false
-      this.tabLoading = false
       this.principal = null
       this.tokens = []
+      this.accessSaving = false
+      this.accessError = null
+      this.showCreateToken = false
+      this.latestPlaintextToken = null
+      this.opsSnapshot = null
+      this.auditEvents = []
       this.aiConsole = null
       this.aiConsoleContextKey = null
-      this.auditEvents = []
-      this.opsSnapshot = null
-      this.latestPlaintextToken = null
-      this.showCreateToken = false
+      this.aiSetupSaving = false
+      this.aiSetupError = null
+      this.bindingValidatingId = null
+      this.pricesSaving = false
+      this.pricesError = null
+      this.catalogCommitVersion = 0
+      this.loadRequestId = 0
     },
-    async loadForContext(context: AdminContext): Promise<void> {
-      this.loading = true
-      this.error = null
-      this.context = context
-      try {
-        this.principal = await fetchAdminPrincipal()
-        this.opsSnapshot = await fetchAdminLibraryOpsState(context.libraryId).catch(() => null)
-        if (!this.tabAvailability[this.activeTab]) {
-          const firstAvailable = (Object.entries(this.tabAvailability).find(
-            ([, available]) => available,
-          )?.[0] ?? 'tokens') as AdminTab
-          this.activeTab = firstAvailable
-        }
-        await this.loadActiveTab()
-      } catch (error) {
-        this.error = error instanceof Error ? error.message : 'Failed to load admin state'
-        throw error
-      } finally {
-        this.loading = false
-      }
-    },
-    async loadActiveTab(): Promise<void> {
+    async reloadAiConsole(): Promise<void> {
       if (!this.context) {
         return
       }
-
-      this.tabLoading = true
+      const contextKey = `${this.context.workspaceId}:${this.context.libraryId}`
+      const nextConsole = await fetchAdminAiConsole(this.context)
+      if (`${this.context.workspaceId}:${this.context.libraryId}` !== contextKey) {
+        return
+      }
+      this.aiConsole = nextConsole
+      this.aiConsoleContextKey = contextKey
+    },
+    async loadForContext(context: AdminContext): Promise<void> {
+      const requestId = ++this.loadRequestId
+      this.loading = true
       this.error = null
+      this.accessError = null
+      this.aiSetupError = null
+      this.pricesError = null
+      this.context = context
       try {
-        if (this.activeTab === 'tokens') {
-          this.tokens = this.tabAvailability.tokens
-            ? await fetchAdminApiTokens(this.context.workspaceId)
-            : []
-        } else if (this.activeTab === 'aiCatalog' || this.activeTab === 'pricing') {
-          if (this.tabAvailability.aiCatalog || this.tabAvailability.pricing) {
-            const contextKey = `${this.context.workspaceId}:${this.context.libraryId}`
-            if (this.aiConsole !== null && this.aiConsoleContextKey === contextKey) {
-              return
-            }
-            this.aiConsole = await fetchAdminAiConsole(this.context)
-            this.aiConsoleContextKey = contextKey
-          } else {
-            this.aiConsole = null
-            this.aiConsoleContextKey = null
-          }
-        } else {
-          this.auditEvents = this.tabAvailability.audit
-            ? await fetchAdminAuditEvents({
-                workspaceId: this.context.workspaceId,
-                libraryId: this.context.libraryId,
+        const contextKey = `${context.workspaceId}:${context.libraryId}`
+        const principal = await fetchAdminPrincipal()
+        const canManageAi = hasScopedPermission(
+          principal,
+          context,
+          WORKSPACE_DISCOVERY_PERMISSIONS,
+        ) || hasScopedPermission(principal, context, LIBRARY_DISCOVERY_PERMISSIONS)
+        const canManageAccess = hasScopedPermission(principal, context, ACCESS_PERMISSIONS)
+        const canReadOperations = hasScopedPermission(principal, context, OPERATIONS_PERMISSIONS)
+        const canReadAudit = hasScopedPermission(principal, context, AUDIT_PERMISSIONS)
+
+        this.principal = principal
+
+        const [aiConsole, tokens, opsSnapshot, auditEvents] = await Promise.all([
+          canManageAi ? fetchAdminAiConsole(context) : Promise.resolve(null),
+          canManageAccess ? fetchAdminApiTokens(context.workspaceId) : Promise.resolve([]),
+          canReadOperations
+            ? fetchAdminLibraryOpsState(context.libraryId)
+            : Promise.resolve(null),
+          canReadAudit
+            ? fetchAdminAuditEvents({
+                workspaceId: context.workspaceId,
+                libraryId: context.libraryId,
               })
-            : []
+            : Promise.resolve([]),
+        ])
+
+        if (
+          this.loadRequestId !== requestId ||
+          this.context?.workspaceId !== context.workspaceId ||
+          this.context?.libraryId !== context.libraryId
+        ) {
+          return
         }
+
+        this.aiConsole = aiConsole
+        this.aiConsoleContextKey = aiConsole ? contextKey : null
+        this.tokens = tokens
+        this.opsSnapshot = opsSnapshot
+        this.auditEvents = auditEvents
       } catch (error) {
-        this.error = error instanceof Error ? error.message : 'Failed to load admin tab'
+        if (
+          this.loadRequestId !== requestId ||
+          this.context?.workspaceId !== context.workspaceId ||
+          this.context?.libraryId !== context.libraryId
+        ) {
+          return
+        }
+        this.error = error instanceof Error ? error.message : 'Failed to load admin state'
         throw error
       } finally {
-        this.tabLoading = false
-      }
-    },
-    async switchTab(tab: AdminTab): Promise<void> {
-      this.activeTab = tab
-      await this.loadActiveTab()
-    },
-    async createToken(payload: CreateApiTokenPayload): Promise<void> {
-      const result = await createAdminApiToken(payload)
-      this.latestPlaintextToken = result.plaintextToken
-
-      const failedPermissions: AdminPermissionKind[] = []
-      const grantedPermissions: AdminGrant[] = []
-      for (const permissionKind of payload.permissionKinds) {
-        try {
-          const createdGrant = await createAdminGrant({
-            principalId: result.row.principalId,
-            resourceKind: payload.grantResourceKind,
-            resourceId: payload.grantResourceId,
-            permissionKind,
-          })
-          grantedPermissions.push(createdGrant)
-        } catch {
-          failedPermissions.push(permissionKind)
+        if (this.loadRequestId === requestId) {
+          this.loading = false
         }
       }
+    },
+    async createToken(payload: CreateApiTokenPayload): Promise<void> {
+      if (!this.canManageAccess) {
+        this.accessError = 'Access management is not available in the active context'
+        throw new Error(this.accessError)
+      }
+      this.accessSaving = true
+      this.accessError = null
+      try {
+        const result = await createAdminApiToken(payload)
+        this.latestPlaintextToken = result.plaintextToken
 
-      this.tokens = [{ ...result.row, grants: grantedPermissions }, ...this.tokens]
-      this.showCreateToken = true
+        const failedPermissions: AdminPermissionKind[] = []
+        const grantedPermissions: AdminGrant[] = []
+        for (const permissionKind of payload.permissionKinds) {
+          try {
+            const createdGrant = await createAdminGrant({
+              principalId: result.row.principalId,
+              resourceKind: payload.grantResourceKind,
+              resourceId: payload.grantResourceId,
+              permissionKind,
+            })
+            grantedPermissions.push(createdGrant)
+          } catch {
+            failedPermissions.push(permissionKind)
+          }
+        }
 
-      if (failedPermissions.length > 0) {
-        this.error = formatGrantFailureMessage(failedPermissions)
+        this.tokens = [{ ...result.row, grants: grantedPermissions }, ...this.tokens]
+        this.showCreateToken = true
+
+        if (failedPermissions.length > 0) {
+          this.accessError = formatGrantFailureMessage(failedPermissions)
+        }
+      } catch (error) {
+        this.accessError = error instanceof Error ? error.message : 'Failed to create token'
+        throw error
+      } finally {
+        this.accessSaving = false
       }
     },
     async revokeToken(principalId: string): Promise<void> {
@@ -266,19 +333,119 @@ export const useAdminStore = defineStore('admin', {
       if (!this.aiConsole) {
         return
       }
-      this.credentialSaving = true
-      this.error = null
+      this.aiSetupSaving = true
+      this.aiSetupError = null
       try {
-        const created = await createAdminCredential(payload)
-        this.aiConsole = {
-          ...this.aiConsole,
-          credentials: [created, ...this.aiConsole.credentials],
-        }
+        await createAdminCredential(payload)
+        await this.reloadAiConsole()
+        this.catalogCommitVersion += 1
       } catch (error) {
-        this.error = error instanceof Error ? error.message : 'Failed to create credential'
+        this.aiSetupError = error instanceof Error ? error.message : 'Failed to create credential'
         throw error
       } finally {
-        this.credentialSaving = false
+        this.aiSetupSaving = false
+      }
+    },
+    async updateCredential(payload: UpdateAdminCredentialPayload): Promise<void> {
+      if (!this.aiConsole) {
+        return
+      }
+      this.aiSetupSaving = true
+      this.aiSetupError = null
+      try {
+        await updateAdminCredential(payload)
+        await this.reloadAiConsole()
+        this.catalogCommitVersion += 1
+      } catch (error) {
+        this.aiSetupError = error instanceof Error ? error.message : 'Failed to update credential'
+        throw error
+      } finally {
+        this.aiSetupSaving = false
+      }
+    },
+    async createPrice(payload: CreateAdminPricePayload): Promise<void> {
+      if (!this.aiConsole) {
+        return
+      }
+      this.pricesSaving = true
+      this.pricesError = null
+      try {
+        await createAdminPrice(payload)
+        await this.reloadAiConsole()
+        this.catalogCommitVersion += 1
+      } catch (error) {
+        this.pricesError = error instanceof Error ? error.message : 'Failed to save price'
+        throw error
+      } finally {
+        this.pricesSaving = false
+      }
+    },
+    async updatePrice(payload: UpdateAdminPricePayload): Promise<void> {
+      if (!this.aiConsole) {
+        return
+      }
+      this.pricesSaving = true
+      this.pricesError = null
+      try {
+        await updateAdminPrice(payload)
+        await this.reloadAiConsole()
+        this.catalogCommitVersion += 1
+      } catch (error) {
+        this.pricesError = error instanceof Error ? error.message : 'Failed to save price'
+        throw error
+      } finally {
+        this.pricesSaving = false
+      }
+    },
+    async createModelPreset(payload: CreateAdminModelPresetPayload): Promise<void> {
+      if (!this.aiConsole) {
+        return
+      }
+      this.aiSetupSaving = true
+      this.aiSetupError = null
+      try {
+        await createAdminModelPreset(payload)
+        await this.reloadAiConsole()
+        this.catalogCommitVersion += 1
+      } catch (error) {
+        this.aiSetupError = error instanceof Error ? error.message : 'Failed to create model preset'
+        throw error
+      } finally {
+        this.aiSetupSaving = false
+      }
+    },
+    async updateModelPreset(payload: UpdateAdminModelPresetPayload): Promise<void> {
+      if (!this.aiConsole) {
+        return
+      }
+      this.aiSetupSaving = true
+      this.aiSetupError = null
+      try {
+        await updateAdminModelPreset(payload)
+        await this.reloadAiConsole()
+        this.catalogCommitVersion += 1
+      } catch (error) {
+        this.aiSetupError = error instanceof Error ? error.message : 'Failed to update model preset'
+        throw error
+      } finally {
+        this.aiSetupSaving = false
+      }
+    },
+    async saveBinding(payload: SaveAdminLibraryBindingPayload): Promise<void> {
+      if (!this.aiConsole) {
+        return
+      }
+      this.aiSetupSaving = true
+      this.aiSetupError = null
+      try {
+        await saveAdminLibraryBinding(payload)
+        await this.reloadAiConsole()
+        this.catalogCommitVersion += 1
+      } catch (error) {
+        this.aiSetupError = error instanceof Error ? error.message : 'Failed to save library binding'
+        throw error
+      } finally {
+        this.aiSetupSaving = false
       }
     },
     async validateBinding(bindingId: string): Promise<void> {
@@ -286,7 +453,7 @@ export const useAdminStore = defineStore('admin', {
         return
       }
       this.bindingValidatingId = bindingId
-      this.error = null
+      this.aiSetupError = null
       try {
         const validation = await validateAdminLibraryBinding(bindingId)
         this.aiConsole = {
@@ -298,7 +465,7 @@ export const useAdminStore = defineStore('admin', {
           ),
         }
       } catch (error) {
-        this.error = error instanceof Error ? error.message : 'Failed to validate binding'
+        this.aiSetupError = error instanceof Error ? error.message : 'Failed to validate binding'
         throw error
       } finally {
         this.bindingValidatingId = null

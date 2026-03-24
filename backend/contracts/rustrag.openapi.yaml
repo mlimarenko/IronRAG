@@ -838,7 +838,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiErrorBody"
-  /v1/ai/library-bindings/{libraryId}:
+  /v1/ai/libraries/{libraryId}/bindings:
     get:
       tags: [ai]
       summary: List active model bindings for one library
@@ -891,6 +891,49 @@ paths:
                 $ref: "#/components/schemas/ApiErrorBody"
         "401":
           description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ai/library-bindings/{bindingId}:
+    put:
+      tags: [ai]
+      summary: Update one existing library binding
+      operationId: updateAiLibraryBinding
+      parameters:
+        - in: path
+          name: bindingId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateLibraryBindingRequest"
+      responses:
+        "200":
+          description: Library model binding updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LibraryModelBindingResponse"
+        "400":
+          description: Invalid library binding payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Binding not found
           content:
             application/json:
               schema:
@@ -2276,6 +2319,7 @@ paths:
           required: true
           schema:
             type: string
+            enum: [query_execution, ingest_attempt]
         - in: path
           name: executionId
           required: true
@@ -2284,7 +2328,9 @@ paths:
             format: uuid
       responses:
         "200":
-          description: Cost rollup for one execution owner
+          description: |
+            Cost rollup for one execution owner.
+            For executions with no billable provider calls, the API returns a deterministic zero-cost rollup.
           content:
             application/json:
               schema:
@@ -2540,5 +2586,6 @@ components:
     SessionResponse: *genericObject
     TokenResponse: *genericObject
     Unauthorized: *genericObject
+    UpdateLibraryBindingRequest: *genericObject
     UploadContentDocumentRequest: *genericObject
     VersionResponse: *genericObject

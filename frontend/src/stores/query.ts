@@ -33,6 +33,7 @@ interface QueryState {
   loadingExecution: boolean
   executingTurn: boolean
   error: string | null
+  graphSurfacePriority: 'primary' | 'secondary'
 }
 
 function resolveShellScope(): { workspaceId: string; libraryId: string } | null {
@@ -64,6 +65,7 @@ export const useQueryStore = defineStore('query', {
     loadingExecution: false,
     executingTurn: false,
     error: null,
+    graphSurfacePriority: 'secondary',
   }),
   getters: {
     activeTurns(state): QueryTurn[] {
@@ -100,6 +102,10 @@ export const useQueryStore = defineStore('query', {
       this.loadingExecution = false
       this.executingTurn = false
       this.error = null
+      this.graphSurfacePriority = 'secondary'
+    },
+    setGraphSurfacePriority(value: QueryState['graphSurfacePriority']): void {
+      this.graphSurfacePriority = value
     },
     async loadSessions(libraryId?: string): Promise<void> {
       const scope = resolveShellScope()

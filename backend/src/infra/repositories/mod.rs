@@ -4,7 +4,6 @@ pub mod billing_repository;
 pub mod catalog_repository;
 pub mod content_repository;
 pub mod extract_repository;
-pub mod graph_repository;
 pub mod iam_repository;
 pub mod ingest_repository;
 pub mod ops_repository;
@@ -6415,41 +6414,7 @@ pub async fn delete_query_execution_references_by_document(
     .bind(document_id)
     .execute(pool)
     .await?;
-    let node_result = sqlx::query(
-        "delete from query_graph_node_reference as reference
-         using query_execution as execution
-         where reference.execution_id = execution.id
-           and execution.library_id = $1
-           and exists (
-               select 1
-               from graph_node_evidence as evidence
-               join content_chunk on content_chunk.id = evidence.chunk_id
-               where evidence.node_id = reference.node_id
-                 and content_chunk.document_id = $2
-           )",
-    )
-    .bind(project_id)
-    .bind(document_id)
-    .execute(pool)
-    .await?;
-    let edge_result = sqlx::query(
-        "delete from query_graph_edge_reference as reference
-         using query_execution as execution
-         where reference.execution_id = execution.id
-           and execution.library_id = $1
-           and exists (
-               select 1
-               from graph_edge_evidence as evidence
-               join content_chunk on content_chunk.id = evidence.chunk_id
-               where evidence.edge_id = reference.edge_id
-                 and content_chunk.document_id = $2
-           )",
-    )
-    .bind(project_id)
-    .bind(document_id)
-    .execute(pool)
-    .await?;
-    Ok(chunk_result.rows_affected() + node_result.rows_affected() + edge_result.rows_affected())
+    Ok(chunk_result.rows_affected())
 }
 
 /// Deletes persisted query references that point at knowledge contributed by one document revision.
@@ -6480,53 +6445,7 @@ pub async fn delete_query_execution_references_by_document_revision(
     .bind(revision_id)
     .execute(pool)
     .await?;
-    let node_result = sqlx::query(
-        "delete from query_graph_node_reference as reference
-         using query_execution as execution
-         where reference.execution_id = execution.id
-           and execution.library_id = $1
-           and exists (
-               select 1
-               from graph_node_evidence as evidence
-               where evidence.node_id = reference.node_id
-                 and evidence.revision_id = $3
-                 and evidence.chunk_id in (
-                     select id
-                     from content_chunk
-                     where document_id = $2
-                       and revision_id = $3
-                 )
-           )",
-    )
-    .bind(project_id)
-    .bind(document_id)
-    .bind(revision_id)
-    .execute(pool)
-    .await?;
-    let edge_result = sqlx::query(
-        "delete from query_graph_edge_reference as reference
-         using query_execution as execution
-         where reference.execution_id = execution.id
-           and execution.library_id = $1
-           and exists (
-               select 1
-               from graph_edge_evidence as evidence
-               where evidence.edge_id = reference.edge_id
-                 and evidence.revision_id = $3
-                 and evidence.chunk_id in (
-                     select id
-                     from content_chunk
-                     where document_id = $2
-                       and revision_id = $3
-                 )
-           )",
-    )
-    .bind(project_id)
-    .bind(document_id)
-    .bind(revision_id)
-    .execute(pool)
-    .await?;
-    Ok(chunk_result.rows_affected() + node_result.rows_affected() + edge_result.rows_affected())
+    Ok(chunk_result.rows_affected())
 }
 
 /// Persists one chunk-level graph extraction record.

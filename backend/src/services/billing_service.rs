@@ -104,9 +104,33 @@ impl BillingService {
             execution_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::resource_not_found("billing_execution_cost", execution_id))?;
-        map_execution_cost_row(row)
+        .map_err(|_| ApiError::Internal)?;
+        if let Some(row) = row {
+            return map_execution_cost_row(row);
+        }
+
+        // Some executions are legitimately zero-cost (no billable provider call captured).
+        // Expose deterministic zero-cost truth instead of surfacing an ambiguous 404.
+        let provider_call_count = billing_repository::count_provider_calls_by_execution(
+            &state.persistence.postgres,
+            execution_owner_kind_key(execution_kind),
+            execution_id,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?;
+        if provider_call_count == 0 {
+            return Ok(BillingExecutionCost {
+                id: Uuid::now_v7(),
+                owning_execution_kind: execution_kind,
+                owning_execution_id: execution_id,
+                total_cost: Decimal::ZERO,
+                currency_code: "USD".to_string(),
+                provider_call_count: 0,
+                updated_at: Utc::now(),
+            });
+        }
+
+        Err(ApiError::resource_not_found("billing_execution_cost", execution_id))
     }
 
     pub async fn resolve_execution_library_id(

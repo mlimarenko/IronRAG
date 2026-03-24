@@ -28,6 +28,7 @@ const props = defineProps<{
   focusActive: boolean
   layoutMode: GraphLayoutMode
   surfaceVersion: number
+  showFilteredArtifacts?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -52,15 +53,24 @@ const didInitialFit = ref(false)
 const renderMode = ref<'sigma' | 'placeholder'>('sigma')
 const webglContextCleanup = ref<(() => void) | null>(null)
 const webglUnavailable = ref(false)
+const resizeObserver = ref<ResizeObserver | null>(null)
 const effectiveFocusedNodeId = computed(() =>
   props.focusActive ? props.focusedNodeId : null,
 )
 
-const baseNodes = computed(() =>
-  props.filter === '' ? props.nodes : props.nodes.filter((node) => node.nodeType === props.filter),
-)
+const baseNodes = computed(() => {
+  const filteredByType =
+    props.filter === '' ? props.nodes : props.nodes.filter((node) => node.nodeType === props.filter)
+  if (props.showFilteredArtifacts) {
+    return filteredByType
+  }
+  return filteredByType.filter((node) => !node.filteredArtifact)
+})
 
-const baseAggregatedEdges = computed(() => aggregateGraphEdges(baseNodes.value, props.edges))
+const baseEdges = computed(() =>
+  props.showFilteredArtifacts ? props.edges : props.edges.filter((edge) => !edge.filteredArtifact),
+)
+const baseAggregatedEdges = computed(() => aggregateGraphEdges(baseNodes.value, baseEdges.value))
 const baseDegreeMap = computed(() => buildDegreeMap(baseNodes.value, baseAggregatedEdges.value))
 const filteredNodes = computed(() =>
   filterFocusedNodes(
@@ -241,6 +251,10 @@ function destroyGraph(): void {
     webglContextCleanup.value()
     webglContextCleanup.value = null
   }
+  if (resizeObserver.value) {
+    resizeObserver.value.disconnect()
+    resizeObserver.value = null
+  }
   if (sigmaRef.value) {
     sigmaRef.value.kill()
     sigmaRef.value = null
@@ -274,6 +288,22 @@ function registerWebglContextLossHandler(container: HTMLDivElement): void {
   webglContextCleanup.value = () => {
     canvas.removeEventListener('webglcontextlost', handleContextLost, false)
   }
+}
+
+function registerResizeObserver(container: HTMLDivElement): void {
+  if (resizeObserver.value) {
+    resizeObserver.value.disconnect()
+  }
+  if (typeof ResizeObserver === 'undefined') {
+    return
+  }
+  resizeObserver.value = new ResizeObserver(() => {
+    if (sigmaRef.value) {
+      sigmaRef.value.resize()
+      sigmaRef.value.refresh()
+    }
+  })
+  resizeObserver.value.observe(container)
 }
 
 function registerSigmaInteractions(
@@ -454,6 +484,7 @@ function mountSigmaGraph(
   sigmaRef.value = sigma
   webglUnavailable.value = false
   registerWebglContextLossHandler(canvasRef.value)
+  registerResizeObserver(canvasRef.value)
   registerSigmaInteractions(sigma)
 
   emit('ready', {
@@ -597,6 +628,14 @@ watch(
     syncGraphData()
   },
   { immediate: true },
+)
+
+watch(
+  () => props.showFilteredArtifacts,
+  async () => {
+    await nextTick()
+    syncGraphData()
+  },
 )
 
 watch(

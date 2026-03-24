@@ -6,6 +6,7 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::{
+        ai::AiBindingPurpose,
         provider_profiles::{EffectiveProviderProfile, ProviderModelSelection},
         query::{GroupedReferenceKind, RuntimeQueryMode},
     },
@@ -145,7 +146,7 @@ async fn execute_structured_query(
     )
     .await?;
     let plan = build_query_plan(question, Some(mode), Some(top_k), Some(&planning));
-    let question_embedding = embed_question(state, &provider_profile, question).await?;
+    let question_embedding = embed_question(state, library_id, &provider_profile, question).await?;
     let graph_index = load_graph_index(state, library_id).await?;
     let document_index = load_document_index(state, library_id).await?;
     let candidate_limit = expanded_candidate_limit(
@@ -325,24 +326,42 @@ pub(crate) async fn execute_answer_query(
     let answer = if structured.references.is_empty() {
         "No grounded evidence is available in the active library yet.".to_string()
     } else {
+        let answer_binding = state
+            .canonical_services
+            .ai_catalog
+            .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::QueryAnswer)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("active answer binding is not configured for this library")
+            })?;
         let response = state
             .llm_gateway
             .generate(ChatRequest {
-                provider_kind: provider_profile.answer.provider_kind.as_str().to_string(),
-                model_name: provider_profile.answer.model_name.clone(),
+                provider_kind: answer_binding.provider_kind.clone(),
+                model_name: answer_binding.model_name.clone(),
                 prompt: build_answer_prompt(
                     &question,
                     structured.planned_mode,
                     &structured.context_text,
-                    system_prompt.as_deref(),
+                    None,
                 ),
+                api_key_override: Some(answer_binding.api_key),
+                base_url_override: answer_binding.provider_base_url,
+                system_prompt: system_prompt.or(answer_binding.system_prompt),
+                temperature: answer_binding.temperature,
+                top_p: answer_binding.top_p,
+                max_output_tokens_override: answer_binding.max_output_tokens_override,
+                extra_parameters_json: answer_binding.extra_parameters_json,
             })
             .await
             .context("failed to generate grounded answer")?;
         return Ok(RuntimeAnswerQueryResult {
             structured,
             answer: response.output_text.trim().to_string(),
-            provider: provider_profile.answer,
+            provider: ProviderModelSelection {
+                provider_kind: answer_binding.provider_kind.parse().unwrap_or_default(),
+                model_name: answer_binding.model_name,
+            },
             usage_json: response.usage_json,
         });
     };
@@ -357,15 +376,26 @@ pub(crate) async fn execute_answer_query(
 
 async fn embed_question(
     state: &AppState,
-    provider_profile: &EffectiveProviderProfile,
+    library_id: Uuid,
+    _provider_profile: &EffectiveProviderProfile,
     question: &str,
 ) -> anyhow::Result<Vec<f32>> {
+    let embedding_binding = state
+        .canonical_services
+        .ai_catalog
+        .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::EmbedChunk)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!("active embedding binding is not configured for this library")
+        })?;
     state
         .llm_gateway
         .embed(EmbeddingRequest {
-            provider_kind: provider_profile.embedding.provider_kind.as_str().to_string(),
-            model_name: provider_profile.embedding.model_name.clone(),
+            provider_kind: embedding_binding.provider_kind,
+            model_name: embedding_binding.model_name,
             input: question.trim().to_string(),
+            api_key_override: Some(embedding_binding.api_key),
+            base_url_override: embedding_binding.provider_base_url,
         })
         .await
         .map(|response| response.embedding)

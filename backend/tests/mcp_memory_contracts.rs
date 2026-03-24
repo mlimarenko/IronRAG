@@ -45,6 +45,7 @@ fn capability_snapshot_serializes_null_workspace_scope_and_tool_list() {
 fn read_response_preserves_nullability_for_unreadable_payloads() {
     let value = serde_json::to_value(McpReadDocumentResponse {
         document_id: Uuid::nil(),
+        document_title: "Unreadable memory".to_string(),
         library_id: Uuid::nil(),
         workspace_id: Uuid::nil(),
         latest_revision_id: None,

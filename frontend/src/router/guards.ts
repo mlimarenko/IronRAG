@@ -22,11 +22,11 @@ export function installRouteGuards(router: Router) {
     }
 
     if (to.meta.guestOnly && sessionStore.isAuthenticated) {
-      return '/documents'
+      return '/'
     }
 
     if (to.meta.requiresAdmin && !shellStore.adminEnabled) {
-      return '/documents'
+      return '/'
     }
 
     return true

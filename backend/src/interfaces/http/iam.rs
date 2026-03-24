@@ -13,8 +13,7 @@ use crate::{
     app::state::AppState,
     domains::iam::{Grant, GrantResourceKind, WorkspaceMembership},
     infra::repositories::{
-        ai_repository, catalog_repository, content_repository, iam_repository, ops_repository,
-        query_repository,
+        ai_repository, catalog_repository, iam_repository, ops_repository, query_repository,
     },
     interfaces::http::{
         auth::{AuthContext, build_session_cookie_value},
@@ -975,7 +974,9 @@ async fn resolve_grant_workspace_id(
                 .map(|row| row.workspace_id)
         }
         IamGrantResourceKind::Document => {
-            content_repository::get_document_by_id(&state.persistence.postgres, resource_id)
+            state
+                .arango_document_store
+                .get_document(resource_id)
                 .await
                 .map_err(|error| {
                     error!(resource_id = %resource_id, ?error, "failed to load document for grant");

@@ -17,7 +17,7 @@ use crate::{
             NewKnowledgeEvidence, NewKnowledgeRelation, NewKnowledgeRelationCandidate,
             sanitize_graph_view_writes,
         },
-        repositories::{self, graph_repository},
+        repositories,
     },
     services::{
         graph_extract::{
@@ -28,14 +28,6 @@ use crate::{
         graph_summary::{GraphSummaryRefreshRequest, GraphSummaryService},
     },
 };
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct GraphSupportCountRefreshOutcome {
-    pub scanned_nodes: usize,
-    pub scanned_edges: usize,
-    pub updated_nodes: usize,
-    pub updated_edges: usize,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArangoGraphRebuildTarget {
@@ -98,25 +90,6 @@ impl GraphService {
         };
         let (nodes, edges, _) = sanitize_graph_view_writes(&merged.nodes, &merged.edges);
         GraphViewData { nodes, edges }
-    }
-
-    #[must_use]
-    pub fn select_active_projection<'a>(
-        &self,
-        rows: &'a [graph_repository::GraphViewRunRow],
-    ) -> Option<&'a graph_repository::GraphViewRunRow> {
-        rows.iter()
-            .filter(|row| row.view_state == "active")
-            .max_by_key(|row| row.started_at)
-            .or_else(|| rows.iter().max_by_key(|row| row.started_at))
-    }
-
-    #[must_use]
-    pub fn select_active_projection_id(
-        &self,
-        rows: &[graph_repository::GraphViewRunRow],
-    ) -> Option<Uuid> {
-        self.select_active_projection(rows).map(|row| row.id)
     }
 
     pub async fn merge_chunk_graph_candidates(
@@ -1369,99 +1342,6 @@ impl GraphService {
         aliases
     }
 
-    pub async fn refresh_support_counts(
-        &self,
-        state: &AppState,
-        projection_id: Uuid,
-        targeted_node_ids: &[Uuid],
-        targeted_edge_ids: &[Uuid],
-    ) -> Result<GraphSupportCountRefreshOutcome> {
-        let mut updated_nodes = 0usize;
-        let mut updated_edges = 0usize;
-
-        let mut nodes = graph_repository::list_graph_nodes_by_projection(
-            &state.persistence.postgres,
-            projection_id,
-        )
-        .await
-        .context("failed to load graph nodes for support-count refresh")?;
-        if !targeted_node_ids.is_empty() {
-            let targeted = targeted_node_ids.iter().copied().collect::<BTreeSet<_>>();
-            nodes.retain(|node| targeted.contains(&node.id));
-        }
-
-        for node in &nodes {
-            let support_count = i32::try_from(
-                graph_repository::list_graph_node_evidence_by_node(
-                    &state.persistence.postgres,
-                    node.id,
-                )
-                .await
-                .with_context(|| format!("failed to load evidence for graph node {}", node.id))?
-                .len(),
-            )
-            .unwrap_or(i32::MAX);
-            if support_count != node.support_count {
-                graph_repository::update_graph_node(
-                    &state.persistence.postgres,
-                    node.id,
-                    &node.node_kind,
-                    &node.display_label,
-                    node.summary.as_deref(),
-                    support_count,
-                )
-                .await
-                .with_context(|| format!("failed to refresh support count for node {}", node.id))?;
-                updated_nodes += 1;
-            }
-        }
-
-        let mut edges = graph_repository::list_graph_edges_by_projection(
-            &state.persistence.postgres,
-            projection_id,
-        )
-        .await
-        .context("failed to load graph edges for support-count refresh")?;
-        if !targeted_edge_ids.is_empty() {
-            let targeted = targeted_edge_ids.iter().copied().collect::<BTreeSet<_>>();
-            edges.retain(|edge| targeted.contains(&edge.id));
-        }
-
-        for edge in &edges {
-            let support_count = i32::try_from(
-                graph_repository::list_graph_edge_evidence_by_edge(
-                    &state.persistence.postgres,
-                    edge.id,
-                )
-                .await
-                .with_context(|| format!("failed to load evidence for graph edge {}", edge.id))?
-                .len(),
-            )
-            .unwrap_or(i32::MAX);
-            if support_count != edge.support_count {
-                graph_repository::update_graph_edge(
-                    &state.persistence.postgres,
-                    edge.id,
-                    &edge.edge_kind,
-                    edge.from_node_id,
-                    edge.to_node_id,
-                    edge.summary.as_deref(),
-                    support_count,
-                )
-                .await
-                .with_context(|| format!("failed to refresh support count for edge {}", edge.id))?;
-                updated_edges += 1;
-            }
-        }
-
-        Ok(GraphSupportCountRefreshOutcome {
-            scanned_nodes: nodes.len(),
-            scanned_edges: edges.len(),
-            updated_nodes,
-            updated_edges,
-        })
-    }
-
     pub async fn refresh_summaries(
         &self,
         state: &AppState,
@@ -1762,7 +1642,6 @@ fn canonical_chunk_mentions_entity_edge_key(chunk_id: Uuid, entity_id: Uuid) -> 
 mod tests {
     use super::*;
     use crate::infra::arangodb::graph_store::GraphViewData;
-    use chrono::{Duration, Utc};
 
     #[test]
     fn merge_projection_data_prefers_incoming_canonical_rows() {
@@ -1811,36 +1690,5 @@ mod tests {
         assert_eq!(merged.nodes[0].label, "A2");
         assert_eq!(merged.nodes[0].support_count, 4);
         assert!(merged.edges.is_empty(), "dangling edge should be filtered");
-    }
-
-    #[test]
-    fn select_active_projection_prefers_active_latest_projection() {
-        let first = graph_repository::GraphViewRunRow {
-            id: Uuid::now_v7(),
-            workspace_id: Uuid::now_v7(),
-            library_id: Uuid::now_v7(),
-            source_attempt_id: None,
-            view_state: "active".to_string(),
-            started_at: Utc::now() - Duration::minutes(10),
-            completed_at: None,
-            superseded_at: None,
-        };
-        let second = graph_repository::GraphViewRunRow { started_at: Utc::now(), ..first.clone() };
-        let service = GraphService::new();
-
-        assert_eq!(
-            service.select_active_projection_id(&[first.clone(), second.clone()]),
-            Some(second.id)
-        );
-        assert_eq!(
-            service.select_active_projection_id(&[
-                first,
-                graph_repository::GraphViewRunRow {
-                    view_state: "building".to_string(),
-                    ..second.clone()
-                }
-            ]),
-            Some(second.id)
-        );
     }
 }

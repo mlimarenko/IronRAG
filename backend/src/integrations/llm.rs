@@ -13,6 +13,13 @@ pub struct ChatRequest {
     pub provider_kind: String,
     pub model_name: String,
     pub prompt: String,
+    pub api_key_override: Option<String>,
+    pub base_url_override: Option<String>,
+    pub system_prompt: Option<String>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub max_output_tokens_override: Option<i32>,
+    pub extra_parameters_json: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +35,8 @@ pub struct EmbeddingRequest {
     pub provider_kind: String,
     pub model_name: String,
     pub input: String,
+    pub api_key_override: Option<String>,
+    pub base_url_override: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +44,8 @@ pub struct EmbeddingBatchRequest {
     pub provider_kind: String,
     pub model_name: String,
     pub inputs: Vec<String>,
+    pub api_key_override: Option<String>,
+    pub base_url_override: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +73,13 @@ pub struct VisionRequest {
     pub prompt: String,
     pub image_bytes: Vec<u8>,
     pub mime_type: String,
+    pub api_key_override: Option<String>,
+    pub base_url_override: Option<String>,
+    pub system_prompt: Option<String>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub max_output_tokens_override: Option<i32>,
+    pub extra_parameters_json: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,10 +101,6 @@ pub trait LlmGateway: Send + Sync {
 #[derive(Clone)]
 pub struct UnifiedGateway {
     client: Client,
-    openai_api_key: Option<String>,
-    deepseek_api_key: Option<String>,
-    qwen_api_key: Option<String>,
-    qwen_api_base_url: String,
     transport_retry_attempts: usize,
     transport_retry_base_delay_ms: u64,
 }
@@ -120,6 +134,14 @@ enum OpenAiCompatibleContentPart {
 struct OpenAiCompatibleChatCompletionRequest {
     model: String,
     messages: Vec<OpenAiCompatibleMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<i32>,
+    #[serde(flatten)]
+    extra_parameters_json: serde_json::Value,
 }
 
 impl UnifiedGateway {
@@ -133,10 +155,6 @@ impl UnifiedGateway {
             .unwrap_or_else(|_| Client::new());
         Self {
             client,
-            openai_api_key: settings.openai_api_key.clone(),
-            deepseek_api_key: settings.deepseek_api_key.clone(),
-            qwen_api_key: settings.qwen_api_key.clone(),
-            qwen_api_base_url: settings.qwen_api_base_url.clone(),
             transport_retry_attempts: settings.llm_transport_retry_attempts.max(1),
             transport_retry_base_delay_ms: settings.llm_transport_retry_base_delay_ms.max(25),
         }
@@ -149,8 +167,21 @@ impl UnifiedGateway {
         base_url: &str,
         model_name: &str,
         messages: Vec<OpenAiCompatibleMessage>,
+        system_prompt: Option<&str>,
+        temperature: Option<f64>,
+        top_p: Option<f64>,
+        max_output_tokens: Option<i32>,
+        extra_parameters_json: &serde_json::Value,
     ) -> Result<(String, serde_json::Value)> {
-        let request_body = serialize_openai_compatible_chat_request(model_name, messages)?;
+        let request_body = serialize_openai_compatible_chat_request(
+            model_name,
+            messages,
+            system_prompt,
+            temperature,
+            top_p,
+            max_output_tokens,
+            extra_parameters_json,
+        )?;
         let request_body_is_valid_json = true;
         let max_attempts = self.transport_retry_attempts.max(1);
 
@@ -274,6 +305,8 @@ impl UnifiedGateway {
                     provider_kind: request.provider_kind.clone(),
                     model_name: request.model_name.clone(),
                     input,
+                    api_key_override: request.api_key_override.clone(),
+                    base_url_override: request.base_url_override.clone(),
                 })
                 .await?;
             if let Some(value) =
@@ -311,21 +344,29 @@ impl UnifiedGateway {
         })
     }
 
-    fn resolve_provider<'a>(&'a self, provider_kind: &str) -> Result<(&'a str, &'a str)> {
+    fn resolve_provider(
+        &self,
+        provider_kind: &str,
+        api_key_override: Option<&str>,
+        base_url_override: Option<&str>,
+    ) -> Result<(String, String)> {
+        let api_key = api_key_override
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("missing provider API key"))?
+            .to_string();
         match provider_kind {
-            "openai" => Ok((
-                self.openai_api_key.as_deref().ok_or_else(|| anyhow!("missing OpenAI API key"))?,
-                "https://api.openai.com/v1",
-            )),
-            "deepseek" => Ok((
-                self.deepseek_api_key
-                    .as_deref()
-                    .ok_or_else(|| anyhow!("missing DeepSeek API key"))?,
-                "https://api.deepseek.com",
-            )),
+            "openai" => {
+                Ok((api_key, base_url_override.unwrap_or("https://api.openai.com/v1").to_string()))
+            }
+            "deepseek" => {
+                Ok((api_key, base_url_override.unwrap_or("https://api.deepseek.com").to_string()))
+            }
             "qwen" => Ok((
-                self.qwen_api_key.as_deref().ok_or_else(|| anyhow!("missing Qwen API key"))?,
-                self.qwen_api_base_url.as_str(),
+                api_key,
+                base_url_override
+                    .unwrap_or("https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
+                    .to_string(),
             )),
             other => Err(anyhow!("unsupported provider kind: {other}")),
         }
@@ -335,17 +376,26 @@ impl UnifiedGateway {
 #[async_trait]
 impl LlmGateway for UnifiedGateway {
     async fn generate(&self, request: ChatRequest) -> Result<ChatResponse> {
-        let (api_key, base_url) = self.resolve_provider(&request.provider_kind)?;
+        let (api_key, base_url) = self.resolve_provider(
+            &request.provider_kind,
+            request.api_key_override.as_deref(),
+            request.base_url_override.as_deref(),
+        )?;
         let (output_text, usage_json) = self
             .call_openai_compatible(
                 &request.provider_kind,
-                api_key,
-                base_url,
+                api_key.as_str(),
+                base_url.as_str(),
                 &request.model_name,
                 vec![OpenAiCompatibleMessage {
                     role: "user".to_string(),
                     content: OpenAiCompatibleMessageContent::Text(request.prompt.clone()),
                 }],
+                request.system_prompt.as_deref(),
+                request.temperature,
+                request.top_p,
+                request.max_output_tokens_override,
+                &request.extra_parameters_json,
             )
             .await?;
         Ok(ChatResponse {
@@ -357,11 +407,15 @@ impl LlmGateway for UnifiedGateway {
     }
 
     async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
-        let (api_key, base_url) = self.resolve_provider(&request.provider_kind)?;
+        let (api_key, base_url) = self.resolve_provider(
+            &request.provider_kind,
+            request.api_key_override.as_deref(),
+            request.base_url_override.as_deref(),
+        )?;
 
         let response = self
             .client
-            .post(format!("{base_url}/embeddings"))
+            .post(format!("{}/embeddings", base_url))
             .bearer_auth(api_key)
             .json(&serde_json::json!({
                 "model": request.model_name,
@@ -416,6 +470,8 @@ impl LlmGateway for UnifiedGateway {
                     provider_kind: request.provider_kind.clone(),
                     model_name: request.model_name.clone(),
                     input: request.inputs[0].clone(),
+                    api_key_override: request.api_key_override.clone(),
+                    base_url_override: request.base_url_override.clone(),
                 })
                 .await?;
             return Ok(EmbeddingBatchResponse {
@@ -427,10 +483,14 @@ impl LlmGateway for UnifiedGateway {
             });
         }
 
-        let (api_key, base_url) = self.resolve_provider(&request.provider_kind)?;
+        let (api_key, base_url) = self.resolve_provider(
+            &request.provider_kind,
+            request.api_key_override.as_deref(),
+            request.base_url_override.as_deref(),
+        )?;
         let response = self
             .client
-            .post(format!("{base_url}/embeddings"))
+            .post(format!("{}/embeddings", base_url))
             .bearer_auth(api_key)
             .json(&serde_json::json!({
                 "model": request.model_name,
@@ -477,7 +537,11 @@ impl LlmGateway for UnifiedGateway {
     }
 
     async fn vision_extract(&self, request: VisionRequest) -> Result<VisionResponse> {
-        let (api_key, base_url) = self.resolve_provider(&request.provider_kind)?;
+        let (api_key, base_url) = self.resolve_provider(
+            &request.provider_kind,
+            request.api_key_override.as_deref(),
+            request.base_url_override.as_deref(),
+        )?;
         let image_data_url = format!(
             "data:{};base64,{}",
             request.mime_type,
@@ -486,8 +550,8 @@ impl LlmGateway for UnifiedGateway {
         let (output_text, usage_json) = self
             .call_openai_compatible(
                 &request.provider_kind,
-                api_key,
-                base_url,
+                api_key.as_str(),
+                base_url.as_str(),
                 &request.model_name,
                 vec![OpenAiCompatibleMessage {
                     role: "user".to_string(),
@@ -498,6 +562,11 @@ impl LlmGateway for UnifiedGateway {
                         },
                     ]),
                 }],
+                request.system_prompt.as_deref(),
+                request.temperature,
+                request.top_p,
+                request.max_output_tokens_override,
+                &request.extra_parameters_json,
             )
             .await?;
 
@@ -547,8 +616,29 @@ fn extract_message_content_text(content: &serde_json::Value) -> String {
 fn serialize_openai_compatible_chat_request(
     model_name: &str,
     messages: Vec<OpenAiCompatibleMessage>,
+    system_prompt: Option<&str>,
+    temperature: Option<f64>,
+    top_p: Option<f64>,
+    max_output_tokens: Option<i32>,
+    extra_parameters_json: &serde_json::Value,
 ) -> Result<Vec<u8>> {
-    let payload = OpenAiCompatibleChatCompletionRequest { model: model_name.to_string(), messages };
+    let mut request_messages =
+        Vec::with_capacity(messages.len() + usize::from(system_prompt.is_some()));
+    if let Some(system_prompt) = system_prompt.map(str::trim).filter(|value| !value.is_empty()) {
+        request_messages.push(OpenAiCompatibleMessage {
+            role: "system".to_string(),
+            content: OpenAiCompatibleMessageContent::Text(system_prompt.to_string()),
+        });
+    }
+    request_messages.extend(messages);
+    let payload = OpenAiCompatibleChatCompletionRequest {
+        model: model_name.to_string(),
+        messages: request_messages,
+        temperature,
+        top_p,
+        max_output_tokens,
+        extra_parameters_json: extra_parameters_json.clone(),
+    };
     let body = serde_json::to_vec(&payload).context("failed to serialize provider request body")?;
     serde_json::from_slice::<serde_json::Value>(&body)
         .context("serialized provider request body was not valid json")?;
@@ -635,6 +725,11 @@ mod tests {
                 role: "user".to_string(),
                 content: OpenAiCompatibleMessageContent::Text("hello".to_string()),
             }],
+            None,
+            None,
+            None,
+            None,
+            &serde_json::json!({}),
         )
         .expect("request body should serialize");
         let value: serde_json::Value =

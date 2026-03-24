@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import FeedbackState from 'src/components/design-system/FeedbackState.vue'
+
 defineProps<{
   title: string
   description: string
@@ -6,8 +8,9 @@ defineProps<{
 </script>
 
 <template>
-  <div class="rr-page-card rr-error-card">
-    <h3>{{ title }}</h3>
-    <p>{{ description }}</p>
-  </div>
+  <FeedbackState
+    :title="title"
+    :message="description"
+    kind="error"
+  />
 </template>

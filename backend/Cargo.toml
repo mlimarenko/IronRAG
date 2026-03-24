@@ -53,6 +53,7 @@ zip = { version = "8.2.0", default-features = false, features = ["deflate"] }
 base64 = "0.22.1"
 tempfile = "3.23.0"
 json5 = "0.4"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { useDisplayFormatters } from 'src/composables/useDisplayFormatters'
 import type {
   AdminPermissionKind,
   CreateApiTokenPayload,
@@ -20,10 +22,14 @@ const emit = defineEmits<{
   copy: []
 }>()
 
+const { t } = useI18n()
+const { permissionLabel } = useDisplayFormatters()
+
 const label = ref('')
 const expiresInDays = ref<string>('90')
 const grantResourceKind = ref<'workspace' | 'library'>('library')
 const permissionKinds = ref<AdminPermissionKind[]>([])
+const showValidation = ref(false)
 
 const workspacePermissionOptions: AdminPermissionKind[] = [
   'workspace_admin',
@@ -76,6 +82,9 @@ watch(
   },
 )
 
+const labelMissing = computed(() => showValidation.value && label.value.trim().length === 0)
+const permissionsMissing = computed(() => showValidation.value && permissionKinds.value.length === 0)
+
 watch(
   () => props.open,
   (open) => {
@@ -84,11 +93,13 @@ watch(
       expiresInDays.value = '90'
       grantResourceKind.value = 'library'
       permissionKinds.value = []
+      showValidation.value = false
     }
   },
 )
 
 function submit() {
+  showValidation.value = true
   if (!canSubmit.value) {
     return
   }
@@ -145,7 +156,12 @@ function submit() {
             id="token-label"
             v-model="label"
             type="text"
+            :class="{ 'rr-field--invalid': labelMissing }"
           >
+          <span
+            v-if="labelMissing"
+            class="rr-field__error"
+          >{{ t('admin.dialog.label') }}</span>
         </div>
 
         <div class="rr-field">
@@ -200,9 +216,13 @@ function submit() {
                 type="checkbox"
                 :value="permission"
               >
-              <span>{{ $t(`admin.tokens.permissions.${permission}`) }}</span>
+              <span>{{ permissionLabel(permission) }}</span>
             </label>
           </div>
+          <span
+            v-if="permissionsMissing"
+            class="rr-field__error"
+          >{{ t('admin.dialog.permissions') }}</span>
         </div>
 
         <div class="rr-dialog__actions">

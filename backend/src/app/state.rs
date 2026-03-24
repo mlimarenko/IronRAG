@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use crate::{
     app::config::{Settings, UiBootstrapAdmin},
-    domains::provider_profiles::{EffectiveProviderProfile, RuntimeProviderProfileDefaults},
     infra::{
         arangodb::{
             bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
@@ -49,7 +48,6 @@ pub struct UiSessionCookieConfig {
 #[derive(Clone)]
 pub struct GraphRuntimeSettings {
     pub backend_name: String,
-    pub live_validation_enabled: bool,
 }
 
 #[derive(Clone)]
@@ -196,7 +194,6 @@ pub struct AppState {
     pub pipeline_hardening: PipelineHardeningSettings,
     pub resolve_settle_blockers: ResolveSettleBlockersSettings,
     pub resolve_settle_blockers_services: ResolveSettleBlockersServices,
-    pub runtime_provider_defaults: RuntimeProviderProfileDefaults,
 }
 
 impl AppState {
@@ -218,10 +215,7 @@ impl AppState {
             name: UI_SESSION_COOKIE_NAME,
             ttl_hours: settings.ui_session_ttl_hours,
         };
-        let graph_runtime = GraphRuntimeSettings {
-            backend_name: "arangodb".to_string(),
-            live_validation_enabled: settings.runtime_live_validation_enabled,
-        };
+        let graph_runtime = GraphRuntimeSettings { backend_name: "arangodb".to_string() };
         let arango_runtime = ArangoRuntimeSettings {
             url: settings.arangodb_url.clone(),
             database: settings.arangodb_database.clone(),
@@ -321,8 +315,6 @@ impl AppState {
                 resolve_settle_blockers.provider_request_size_soft_limit_bytes,
             ),
         };
-        let runtime_provider_defaults = RuntimeProviderProfileDefaults::from_settings(&settings);
-
         Self {
             llm_gateway: Arc::new(UnifiedGateway::from_settings(&settings)),
             arango_client,
@@ -346,7 +338,6 @@ impl AppState {
             pipeline_hardening,
             resolve_settle_blockers,
             resolve_settle_blockers_services,
-            runtime_provider_defaults,
         }
     }
 
@@ -357,7 +348,7 @@ impl AppState {
     pub async fn new(settings: Settings) -> anyhow::Result<Self> {
         let persistence = Persistence::connect(&settings).await?;
         if settings.destructive_fresh_bootstrap_settings().allow_legacy_startup_side_effects
-            && crate::infra::persistence::legacy_runtime_repair_tables_present(
+            && crate::infra::persistence::legacy_runtime_attempt_repair_tables_present(
                 &persistence.postgres,
             )
             .await?
@@ -385,12 +376,9 @@ impl AppState {
         if bootstrap_options.any_enabled() {
             bootstrap_knowledge_plane(&arango_client, &bootstrap_options).await?;
         }
+        crate::infra::persistence::validate_arango_bootstrap_state(&arango_client, &settings)
+            .await?;
         ArangoGraphStore::new(Arc::clone(&arango_client)).ping().await?;
         Ok(Self::from_dependencies(settings, persistence, arango_client))
-    }
-
-    #[must_use]
-    pub fn effective_provider_profile(&self) -> EffectiveProviderProfile {
-        self.runtime_provider_defaults.effective_profile()
     }
 }

@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::{
+        ai::AiBindingPurpose,
         provider_profiles::{EffectiveProviderProfile, ProviderModelSelection},
         runtime_ingestion::RuntimeDocumentActivityStatus,
     },
@@ -306,138 +307,74 @@ pub fn provider_profile_from_snapshot_json(
     serde_json::from_value(snapshot_json.clone()).ok()
 }
 
+fn binding_purpose_label(binding_purpose: AiBindingPurpose) -> &'static str {
+    match binding_purpose {
+        AiBindingPurpose::ExtractText => "extract_text",
+        AiBindingPurpose::ExtractGraph => "extract_graph",
+        AiBindingPurpose::EmbedChunk => "embed_chunk",
+        AiBindingPurpose::QueryRetrieve => "query_retrieve",
+        AiBindingPurpose::QueryAnswer => "query_answer",
+        AiBindingPurpose::Vision => "vision",
+    }
+}
+
 async fn resolve_library_binding_selection(
     state: &AppState,
     library_id: Uuid,
-    binding_purpose: &str,
-    default_selection: &ProviderModelSelection,
+    binding_purpose: AiBindingPurpose,
 ) -> anyhow::Result<ProviderModelSelection> {
-    let Some(binding) = repositories::ai_repository::get_active_library_binding_by_purpose(
-        &state.persistence.postgres,
-        library_id,
-        binding_purpose,
-    )
-    .await
-    .with_context(|| format!("failed to query active {binding_purpose} library binding"))?
-    else {
-        return Ok(default_selection.clone());
-    };
-
-    let provider_credential = repositories::ai_repository::get_provider_credential_by_id(
-        &state.persistence.postgres,
-        binding.provider_credential_id,
-    )
-    .await
-    .with_context(|| {
-        format!(
-            "failed to query provider credential {} for {binding_purpose} binding {}",
-            binding.provider_credential_id, binding.id
-        )
-    })?
-    .with_context(|| {
-        format!(
-            "missing provider credential {} for {binding_purpose} binding {}",
-            binding.provider_credential_id, binding.id
-        )
-    })?;
-    let model_preset = repositories::ai_repository::get_model_preset_by_id(
-        &state.persistence.postgres,
-        binding.model_preset_id,
-    )
-    .await
-    .with_context(|| {
-        format!(
-            "failed to query model preset {} for {binding_purpose} binding {}",
-            binding.model_preset_id, binding.id
-        )
-    })?
-    .with_context(|| {
-        format!(
-            "missing model preset {} for {binding_purpose} binding {}",
-            binding.model_preset_id, binding.id
-        )
-    })?;
-    let providers = repositories::ai_repository::list_provider_catalog(&state.persistence.postgres)
+    let binding_label = binding_purpose_label(binding_purpose);
+    let binding = state
+        .canonical_services
+        .ai_catalog
+        .resolve_active_runtime_binding(state, library_id, binding_purpose)
         .await
-        .context("failed to query provider catalog")?;
-    let models = repositories::ai_repository::list_model_catalog(&state.persistence.postgres, None)
-        .await
-        .context("failed to query model catalog")?;
-    let provider_kind = providers
-        .into_iter()
-        .find(|provider| provider.id == provider_credential.provider_catalog_id)
-        .map(|provider| provider.provider_kind)
+        .with_context(|| format!("failed to resolve active {binding_label} binding"))?
         .with_context(|| {
-            format!(
-                "missing provider catalog {} for {binding_purpose} binding {}",
-                provider_credential.provider_catalog_id, binding.id
-            )
+            format!("active {binding_label} binding is not configured for library {library_id}")
         })?;
-    let model = models
-        .into_iter()
-        .find(|model| model.id == model_preset.model_catalog_id)
-        .with_context(|| {
-            format!(
-                "missing model catalog {} for {binding_purpose} binding {}",
-                model_preset.model_catalog_id, binding.id
-            )
-        })?;
-    if model.provider_catalog_id != provider_credential.provider_catalog_id {
-        bail!(
-            "binding {} purpose {} links provider {} to model {} from provider {}",
-            binding.id,
-            binding_purpose,
-            provider_credential.provider_catalog_id,
-            model.id,
-            model.provider_catalog_id
-        );
-    }
+    let provider_kind = binding.provider_kind.parse().map_err(|error: String| {
+        anyhow::anyhow!("invalid provider kind for {binding_label}: {error}")
+    })?;
 
-    Ok(ProviderModelSelection {
-        provider_kind: provider_kind.parse().unwrap_or(default_selection.provider_kind),
-        model_name: model.model_name,
-    })
+    Ok(ProviderModelSelection { provider_kind, model_name: binding.model_name })
 }
 
 pub async fn resolve_effective_provider_profile(
     state: &AppState,
     library_id: Uuid,
 ) -> anyhow::Result<EffectiveProviderProfile> {
-    let defaults = &state.runtime_provider_defaults;
     Ok(EffectiveProviderProfile {
         indexing: resolve_library_binding_selection(
             state,
             library_id,
-            "extract_graph",
-            &defaults.indexing,
+            AiBindingPurpose::ExtractGraph,
         )
         .await?,
         embedding: resolve_library_binding_selection(
             state,
             library_id,
-            "embed_chunk",
-            &defaults.embedding,
+            AiBindingPurpose::EmbedChunk,
         )
         .await?,
-        answer: resolve_library_binding_selection(
-            state,
-            library_id,
-            "query_answer",
-            &defaults.answer,
-        )
-        .await?,
-        vision: resolve_library_binding_selection(state, library_id, "vision", &defaults.vision)
+        answer: resolve_library_binding_selection(state, library_id, AiBindingPurpose::QueryAnswer)
+            .await?,
+        vision: resolve_library_binding_selection(state, library_id, AiBindingPurpose::Vision)
             .await?,
     })
 }
 
-#[must_use]
 pub fn resolve_runtime_run_provider_profile(
-    state: &AppState,
     runtime_run: &RuntimeIngestionRunRow,
-) -> EffectiveProviderProfile {
-    provider_profile_from_snapshot_json(&runtime_run.provider_profile_snapshot_json)
-        .unwrap_or_else(|| state.effective_provider_profile())
+) -> anyhow::Result<EffectiveProviderProfile> {
+    provider_profile_from_snapshot_json(&runtime_run.provider_profile_snapshot_json).with_context(
+        || {
+            format!(
+                "runtime ingestion run {} is missing canonical provider profile snapshot",
+                runtime_run.id
+            )
+        },
+    )
 }
 
 pub async fn persist_extracted_content_from_payload(
@@ -705,19 +642,27 @@ pub async fn embed_runtime_chunks(
     chunks: &[repositories::ChunkRow],
     mut lease_heartbeat: Option<&mut JobLeaseHeartbeat>,
 ) -> anyhow::Result<RuntimeStageUsageSummary> {
-    let model_catalog_id = state
-        .canonical_services
-        .search
-        .resolve_embedding_model_catalog_id(
-            state,
+    let Some(first_chunk) = chunks.first() else {
+        return Ok(RuntimeStageUsageSummary::with_model(
             provider_profile.embedding.provider_kind.as_str(),
             &provider_profile.embedding.model_name,
-        )
-        .await
-        .context("failed to resolve embedding model catalog id for chunk embeddings")?;
+        ));
+    };
+    let embedding_binding = state
+        .canonical_services
+        .ai_catalog
+        .resolve_active_runtime_binding(state, first_chunk.project_id, AiBindingPurpose::EmbedChunk)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "active embedding binding is not configured for library {}",
+                first_chunk.project_id
+            )
+        })?;
+    let model_catalog_id = embedding_binding.model_catalog_id;
     let mut usage = RuntimeStageUsageSummary::with_model(
-        provider_profile.embedding.provider_kind.as_str(),
-        &provider_profile.embedding.model_name,
+        &embedding_binding.provider_kind,
+        &embedding_binding.model_name,
     );
     for chunk_batch in chunks.chunks(EMBEDDING_BATCH_SIZE) {
         if let Some(lease_heartbeat) = lease_heartbeat.as_deref_mut() {
@@ -726,9 +671,11 @@ pub async fn embed_runtime_chunks(
         let batch_response = state
             .llm_gateway
             .embed_many(EmbeddingBatchRequest {
-                provider_kind: provider_profile.embedding.provider_kind.as_str().to_string(),
-                model_name: provider_profile.embedding.model_name.clone(),
+                provider_kind: embedding_binding.provider_kind.clone(),
+                model_name: embedding_binding.model_name.clone(),
                 inputs: chunk_batch.iter().map(|chunk| chunk.content.clone()).collect::<Vec<_>>(),
+                api_key_override: Some(embedding_binding.api_key.clone()),
+                base_url_override: embedding_binding.provider_base_url.clone(),
             })
             .await
             .with_context(|| {
@@ -778,9 +725,26 @@ pub async fn embed_runtime_graph_nodes(
 ) -> anyhow::Result<RuntimeStageUsageSummary> {
     let nodes_to_embed =
         nodes.iter().filter(|node| node.node_type != "document").collect::<Vec<_>>();
+    let Some(first_node) = nodes_to_embed.first() else {
+        return Ok(RuntimeStageUsageSummary::with_model(
+            provider_profile.embedding.provider_kind.as_str(),
+            &provider_profile.embedding.model_name,
+        ));
+    };
+    let embedding_binding = state
+        .canonical_services
+        .ai_catalog
+        .resolve_active_runtime_binding(state, first_node.project_id, AiBindingPurpose::EmbedChunk)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "active embedding binding is not configured for library {}",
+                first_node.project_id
+            )
+        })?;
     let mut usage = RuntimeStageUsageSummary::with_model(
-        provider_profile.embedding.provider_kind.as_str(),
-        &provider_profile.embedding.model_name,
+        &embedding_binding.provider_kind,
+        &embedding_binding.model_name,
     );
     for node_batch in nodes_to_embed.chunks(EMBEDDING_BATCH_SIZE) {
         if let Some(lease_heartbeat) = lease_heartbeat.as_deref_mut() {
@@ -789,12 +753,14 @@ pub async fn embed_runtime_graph_nodes(
         let batch_response = state
             .llm_gateway
             .embed_many(EmbeddingBatchRequest {
-                provider_kind: provider_profile.embedding.provider_kind.as_str().to_string(),
-                model_name: provider_profile.embedding.model_name.clone(),
+                provider_kind: embedding_binding.provider_kind.clone(),
+                model_name: embedding_binding.model_name.clone(),
                 inputs: node_batch
                     .iter()
                     .map(|node| build_graph_node_embedding_input(node))
                     .collect::<Vec<_>>(),
+                api_key_override: Some(embedding_binding.api_key.clone()),
+                base_url_override: embedding_binding.provider_base_url.clone(),
             })
             .await
             .with_context(|| {
@@ -837,9 +803,26 @@ pub async fn embed_runtime_graph_edges(
     mut lease_heartbeat: Option<&mut JobLeaseHeartbeat>,
 ) -> anyhow::Result<RuntimeStageUsageSummary> {
     let node_index = nodes.iter().map(|node| (node.id, node)).collect::<HashMap<_, _>>();
+    let Some(first_edge) = edges.first() else {
+        return Ok(RuntimeStageUsageSummary::with_model(
+            provider_profile.embedding.provider_kind.as_str(),
+            &provider_profile.embedding.model_name,
+        ));
+    };
+    let embedding_binding = state
+        .canonical_services
+        .ai_catalog
+        .resolve_active_runtime_binding(state, first_edge.project_id, AiBindingPurpose::EmbedChunk)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "active embedding binding is not configured for library {}",
+                first_edge.project_id
+            )
+        })?;
     let mut usage = RuntimeStageUsageSummary::with_model(
-        provider_profile.embedding.provider_kind.as_str(),
-        &provider_profile.embedding.model_name,
+        &embedding_binding.provider_kind,
+        &embedding_binding.model_name,
     );
     for edge_batch in edges.chunks(EMBEDDING_BATCH_SIZE) {
         if let Some(lease_heartbeat) = lease_heartbeat.as_deref_mut() {
@@ -848,12 +831,14 @@ pub async fn embed_runtime_graph_edges(
         let batch_response = state
             .llm_gateway
             .embed_many(EmbeddingBatchRequest {
-                provider_kind: provider_profile.embedding.provider_kind.as_str().to_string(),
-                model_name: provider_profile.embedding.model_name.clone(),
+                provider_kind: embedding_binding.provider_kind.clone(),
+                model_name: embedding_binding.model_name.clone(),
                 inputs: edge_batch
                     .iter()
                     .map(|edge| build_graph_edge_embedding_input(edge, &node_index))
                     .collect::<Vec<_>>(),
+                api_key_override: Some(embedding_binding.api_key.clone()),
+                base_url_override: embedding_binding.provider_base_url.clone(),
             })
             .await
             .with_context(|| {

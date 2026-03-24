@@ -7,7 +7,9 @@ use rustrag_backend::{
     app::{config::Settings, state::AppState},
     infra::{
         arangodb::collections::{
-            DOCUMENT_COLLECTIONS, EDGE_COLLECTIONS, KNOWLEDGE_GRAPH_NAME, KNOWLEDGE_SEARCH_VIEW,
+            DOCUMENT_COLLECTIONS, EDGE_COLLECTIONS, KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
+            KNOWLEDGE_CHUNK_VECTOR_INDEX, KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
+            KNOWLEDGE_ENTITY_VECTOR_INDEX, KNOWLEDGE_GRAPH_NAME, KNOWLEDGE_SEARCH_VIEW,
         },
         persistence::{canonical_ai_catalog_seeded, canonical_baseline_present},
     },
@@ -159,6 +161,28 @@ impl TempArangoDatabase {
         Ok(response.status().is_success())
     }
 
+    async fn has_index(&self, collection: &str, index_name: &str) -> Result<bool> {
+        let payload = self
+            .http
+            .get(self.db_api_url(&format!("_api/index?collection={collection}")))
+            .basic_auth(&self.username, Some(&self.password))
+            .send()
+            .await
+            .context("failed to list Arango indexes")?
+            .error_for_status()
+            .context("Arango index listing failed")?
+            .json::<serde_json::Value>()
+            .await
+            .context("failed to decode Arango index list")?;
+        let indexes = payload
+            .get("indexes")
+            .and_then(serde_json::Value::as_array)
+            .context("Arango index list missing `indexes`")?;
+        Ok(indexes
+            .iter()
+            .any(|row| row.get("name").and_then(serde_json::Value::as_str) == Some(index_name)))
+    }
+
     async fn drop(self) -> Result<()> {
         let response = self
             .http
@@ -288,6 +312,18 @@ async fn fresh_startup_bootstraps_postgres_catalog_and_arango_knowledge_plane() 
 
         assert!(fixture.temp_arango.has_view(KNOWLEDGE_SEARCH_VIEW).await?);
         assert!(fixture.temp_arango.has_graph(KNOWLEDGE_GRAPH_NAME).await?);
+        assert!(
+            fixture
+                .temp_arango
+                .has_index(KNOWLEDGE_CHUNK_VECTOR_COLLECTION, KNOWLEDGE_CHUNK_VECTOR_INDEX)
+                .await?
+        );
+        assert!(
+            fixture
+                .temp_arango
+                .has_index(KNOWLEDGE_ENTITY_VECTOR_COLLECTION, KNOWLEDGE_ENTITY_VECTOR_INDEX)
+                .await?
+        );
 
         Ok(())
     }

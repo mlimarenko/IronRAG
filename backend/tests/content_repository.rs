@@ -374,6 +374,7 @@ async fn content_repository_tracks_mutation_idempotency_and_items() -> anyhow::R
                 requested_by_principal_id: Some(fixture.principal_id),
                 request_surface: "mcp",
                 idempotency_key: Some("mutation-idempotency-key"),
+                source_identity: Some("sha256:mutation-result"),
                 mutation_state: "accepted",
                 failure_code: None,
                 conflict_code: None,

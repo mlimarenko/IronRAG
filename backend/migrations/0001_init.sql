@@ -1,4 +1,7 @@
-create extension pgcrypto;
+-- Canonical RustRAG baseline schema (fresh stack):
+-- Postgres (control-plane + operations), Redis (queue/session cache), ArangoDB (knowledge plane).
+-- This migration intentionally avoids legacy graph-store bootstrap/repair routines.
+create extension if not exists pgcrypto;
 
 create type catalog_workspace_lifecycle_state as enum ('active', 'archived');
 create type catalog_library_lifecycle_state as enum ('active', 'archived');
@@ -83,8 +86,7 @@ create type ingest_stage_state as enum ('started', 'completed', 'failed', 'skipp
 
 create type extract_state as enum ('missing', 'processing', 'ready', 'failed');
 
-create type graph_projection_state as enum ('building', 'active', 'failed', 'superseded');
-create type graph_summary_state as enum ('pending', 'ready', 'failed');
+-- Legacy graph projection types removed: canonical graph truth is in ArangoDB.
 
 create type query_conversation_state as enum ('active', 'archived');
 create type query_turn_kind as enum ('user', 'assistant', 'system', 'tool');
@@ -268,7 +270,7 @@ create table ai_provider_credential (
     workspace_id uuid not null references catalog_workspace(id) on delete cascade,
     provider_catalog_id uuid not null references ai_provider_catalog(id) on delete restrict,
     label text not null,
-    secret_ref text not null,
+    api_key text not null,
     credential_state ai_credential_state not null default 'active',
     created_by_principal_id uuid references iam_principal(id) on delete set null,
     created_at timestamptz not null default now(),
@@ -575,84 +577,8 @@ create table extract_resume_cursor (
     updated_at timestamptz not null default now()
 );
 
-create table graph_projection (
-    id uuid primary key default uuidv7(),
-    workspace_id uuid not null,
-    library_id uuid not null,
-    source_attempt_id uuid references ingest_attempt(id) on delete set null,
-    projection_state graph_projection_state not null default 'building',
-    started_at timestamptz not null default now(),
-    completed_at timestamptz,
-    superseded_at timestamptz,
-    unique (id, workspace_id, library_id),
-    foreign key (library_id, workspace_id)
-        references catalog_library(id, workspace_id)
-        on delete cascade
-);
-
-create table graph_node (
-    id uuid primary key default uuidv7(),
-    projection_id uuid not null references graph_projection(id) on delete cascade,
-    workspace_id uuid not null,
-    library_id uuid not null,
-    canonical_key text not null,
-    node_kind text not null,
-    display_label text not null,
-    summary text,
-    support_count integer not null default 0,
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now(),
-    unique (projection_id, canonical_key),
-    foreign key (projection_id, workspace_id, library_id)
-        references graph_projection(id, workspace_id, library_id)
-        on delete cascade
-);
-
-create table graph_edge (
-    id uuid primary key default uuidv7(),
-    projection_id uuid not null references graph_projection(id) on delete cascade,
-    workspace_id uuid not null,
-    library_id uuid not null,
-    canonical_key text not null,
-    edge_kind text not null,
-    from_node_id uuid not null references graph_node(id) on delete cascade,
-    to_node_id uuid not null references graph_node(id) on delete cascade,
-    summary text,
-    support_count integer not null default 0,
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now(),
-    unique (projection_id, canonical_key),
-    foreign key (projection_id, workspace_id, library_id)
-        references graph_projection(id, workspace_id, library_id)
-        on delete cascade
-);
-
-create table graph_node_evidence (
-    node_id uuid not null references graph_node(id) on delete cascade,
-    chunk_id uuid not null references content_chunk(id) on delete cascade,
-    revision_id uuid not null references content_revision(id) on delete cascade,
-    attempt_id uuid not null references ingest_attempt(id) on delete cascade,
-    candidate_node_id uuid references extract_node_candidate(id) on delete set null,
-    evidence_weight numeric(10,4) not null default 1,
-    primary key (node_id, chunk_id, attempt_id)
-);
-
-create table graph_edge_evidence (
-    edge_id uuid not null references graph_edge(id) on delete cascade,
-    chunk_id uuid not null references content_chunk(id) on delete cascade,
-    revision_id uuid not null references content_revision(id) on delete cascade,
-    attempt_id uuid not null references ingest_attempt(id) on delete cascade,
-    candidate_edge_id uuid references extract_edge_candidate(id) on delete set null,
-    evidence_weight numeric(10,4) not null default 1,
-    primary key (edge_id, chunk_id, attempt_id)
-);
-
-create table graph_summary (
-    projection_id uuid primary key references graph_projection(id) on delete cascade,
-    summary_text text,
-    summary_state graph_summary_state not null default 'pending',
-    generated_at timestamptz
-);
+-- Legacy graph projection tables removed: canonical graph truth is in ArangoDB
+-- (knowledge_entity, knowledge_relation, knowledge_evidence, etc.).
 
 create table query_conversation (
     id uuid primary key default uuidv7(),
@@ -714,21 +640,8 @@ create table query_chunk_reference (
     primary key (execution_id, chunk_id)
 );
 
-create table query_graph_node_reference (
-    execution_id uuid not null references query_execution(id) on delete cascade,
-    node_id uuid not null references graph_node(id) on delete cascade,
-    rank integer not null,
-    score double precision not null,
-    primary key (execution_id, node_id)
-);
-
-create table query_graph_edge_reference (
-    execution_id uuid not null references query_execution(id) on delete cascade,
-    edge_id uuid not null references graph_edge(id) on delete cascade,
-    rank integer not null,
-    score double precision not null,
-    primary key (execution_id, edge_id)
-);
+-- Legacy query_graph_node_reference and query_graph_edge_reference removed:
+-- graph-grounded query references use ArangoDB knowledge_retrieval_trace.
 
 create table ops_library_state (
     library_id uuid primary key references catalog_library(id) on delete cascade,
@@ -736,7 +649,6 @@ create table ops_library_state (
     running_attempts integer not null default 0,
     readable_document_count integer not null default 0,
     failed_document_count integer not null default 0,
-    active_projection_id uuid references graph_projection(id) on delete set null,
     degraded_state ops_degraded_state not null default 'healthy',
     last_recomputed_at timestamptz not null default now()
 );
@@ -837,14 +749,7 @@ create index idx_ingest_stage_event_attempt_ordinal
 create index idx_extract_chunk_result_attempt_state
     on extract_chunk_result (attempt_id, extract_state);
 
-create index idx_graph_projection_library_state
-    on graph_projection (library_id, projection_state, started_at desc);
-
-create index idx_graph_node_projection_kind
-    on graph_node (projection_id, node_kind);
-
-create index idx_graph_edge_projection_kind
-    on graph_edge (projection_id, edge_kind);
+-- Legacy graph projection indexes removed (ArangoDB canonical).
 
 create index idx_query_conversation_library_updated_at
     on query_conversation (library_id, updated_at desc);

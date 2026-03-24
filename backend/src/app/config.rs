@@ -45,21 +45,6 @@ pub struct ArangoSettings {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AiCatalogValidationSettings {
-    pub live_validation_enabled: bool,
-    pub seed_from_env: bool,
-    pub default_currency: String,
-    pub default_indexing_provider: String,
-    pub default_indexing_model: String,
-    pub default_embedding_provider: String,
-    pub default_embedding_model: String,
-    pub default_answer_provider: String,
-    pub default_answer_model: String,
-    pub default_vision_provider: String,
-    pub default_vision_model: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DestructiveFreshBootstrapSettings {
     pub required: bool,
     pub allow_legacy_startup_side_effects: bool,
@@ -88,10 +73,6 @@ pub struct Settings {
     pub service_name: String,
     pub environment: String,
     pub log_filter: String,
-    pub openai_api_key: Option<String>,
-    pub deepseek_api_key: Option<String>,
-    pub qwen_api_key: Option<String>,
-    pub qwen_api_base_url: String,
     pub bootstrap_token: Option<String>,
     pub bootstrap_claim_enabled: bool,
     pub legacy_ui_bootstrap_enabled: bool,
@@ -114,15 +95,6 @@ pub struct Settings {
     pub llm_http_timeout_seconds: u64,
     pub llm_transport_retry_attempts: usize,
     pub llm_transport_retry_base_delay_ms: u64,
-    pub runtime_default_indexing_provider: String,
-    pub runtime_default_indexing_model: String,
-    pub runtime_default_embedding_provider: String,
-    pub runtime_default_embedding_model: String,
-    pub runtime_default_answer_provider: String,
-    pub runtime_default_answer_model: String,
-    pub runtime_default_vision_provider: String,
-    pub runtime_default_vision_model: String,
-    pub runtime_live_validation_enabled: bool,
     pub query_intent_cache_ttl_hours: u64,
     pub query_intent_cache_max_entries_per_library: usize,
     pub query_rerank_enabled: bool,
@@ -146,17 +118,6 @@ pub struct Settings {
     pub mcp_memory_max_search_limit: usize,
     pub mcp_memory_idempotency_retention_hours: u64,
     pub mcp_memory_audit_enabled: bool,
-    pub runtime_pricing_seed_from_env: bool,
-    pub runtime_pricing_default_currency: String,
-    pub openai_input_price_per_1m: f64,
-    pub openai_output_price_per_1m: f64,
-    pub deepseek_input_price_per_1m: f64,
-    pub deepseek_output_price_per_1m: f64,
-    pub qwen_input_price_per_1m: f64,
-    pub qwen_chat_input_price_per_1m: f64,
-    pub qwen_chat_output_price_per_1m: f64,
-    pub qwen_vision_input_price_per_1m: f64,
-    pub qwen_vision_output_price_per_1m: f64,
 }
 
 impl Settings {
@@ -188,10 +149,6 @@ impl Settings {
             .set_default("arangodb_vector_index_default_n_probe", 8)?
             .set_default("arangodb_vector_index_training_iterations", 25)?
             .set_default("log_filter", "info")?
-            .set_default(
-                "qwen_api_base_url",
-                "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-            )?
             .set_default("bootstrap_claim_enabled", true)?
             .set_default("legacy_ui_bootstrap_enabled", true)?
             .set_default("legacy_bootstrap_token_endpoint_enabled", true)?
@@ -211,15 +168,6 @@ impl Settings {
             .set_default("llm_http_timeout_seconds", 120)?
             .set_default("llm_transport_retry_attempts", 3)?
             .set_default("llm_transport_retry_base_delay_ms", 250)?
-            .set_default("runtime_default_indexing_provider", "openai")?
-            .set_default("runtime_default_indexing_model", "gpt-5-mini")?
-            .set_default("runtime_default_embedding_provider", "openai")?
-            .set_default("runtime_default_embedding_model", "text-embedding-3-large")?
-            .set_default("runtime_default_answer_provider", "openai")?
-            .set_default("runtime_default_answer_model", "gpt-5.4")?
-            .set_default("runtime_default_vision_provider", "openai")?
-            .set_default("runtime_default_vision_model", "gpt-5-mini")?
-            .set_default("runtime_live_validation_enabled", false)?
             .set_default("query_intent_cache_ttl_hours", 24)?
             .set_default("query_intent_cache_max_entries_per_library", 500)?
             .set_default("query_rerank_enabled", true)?
@@ -243,17 +191,6 @@ impl Settings {
             .set_default("mcp_memory_max_search_limit", 25)?
             .set_default("mcp_memory_idempotency_retention_hours", 72)?
             .set_default("mcp_memory_audit_enabled", true)?
-            .set_default("runtime_pricing_seed_from_env", true)?
-            .set_default("runtime_pricing_default_currency", "USD")?
-            .set_default("openai_input_price_per_1m", 0.25)?
-            .set_default("openai_output_price_per_1m", 2.0)?
-            .set_default("deepseek_input_price_per_1m", 0.27)?
-            .set_default("deepseek_output_price_per_1m", 1.10)?
-            .set_default("qwen_input_price_per_1m", 0.07)?
-            .set_default("qwen_chat_input_price_per_1m", 0.0)?
-            .set_default("qwen_chat_output_price_per_1m", 0.0)?
-            .set_default("qwen_vision_input_price_per_1m", 0.0)?
-            .set_default("qwen_vision_output_price_per_1m", 0.0)?
             .add_source(config::Environment::default().separator("__"))
             .add_source(config::Environment::with_prefix("RUSTRAG").separator("__"))
             .build()?;
@@ -265,27 +202,6 @@ impl Settings {
         validate_service_name(&settings).map_err(config::ConfigError::Message)?;
         validate_arangodb_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_mcp_memory_settings(&settings).map_err(config::ConfigError::Message)?;
-
-        if settings.openai_api_key.as_deref().is_none_or(|value| value.trim().is_empty()) {
-            settings.openai_api_key = std::env::var("RUSTRAG_OPENAI_API_KEY")
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty());
-        }
-
-        if settings.deepseek_api_key.as_deref().is_none_or(|value| value.trim().is_empty()) {
-            settings.deepseek_api_key = std::env::var("RUSTRAG_DEEPSEEK_API_KEY")
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty());
-        }
-
-        if settings.qwen_api_key.as_deref().is_none_or(|value| value.trim().is_empty()) {
-            settings.qwen_api_key = std::env::var("RUSTRAG_QWEN_API_KEY")
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty());
-        }
 
         Ok(settings)
     }
@@ -346,23 +262,6 @@ impl Settings {
             vector_index_n_lists: self.arangodb_vector_index_n_lists,
             vector_index_default_n_probe: self.arangodb_vector_index_default_n_probe,
             vector_index_training_iterations: self.arangodb_vector_index_training_iterations,
-        }
-    }
-
-    #[must_use]
-    pub fn ai_catalog_validation_settings(&self) -> AiCatalogValidationSettings {
-        AiCatalogValidationSettings {
-            live_validation_enabled: self.runtime_live_validation_enabled,
-            seed_from_env: self.runtime_pricing_seed_from_env,
-            default_currency: self.runtime_pricing_default_currency.clone(),
-            default_indexing_provider: self.runtime_default_indexing_provider.clone(),
-            default_indexing_model: self.runtime_default_indexing_model.clone(),
-            default_embedding_provider: self.runtime_default_embedding_provider.clone(),
-            default_embedding_model: self.runtime_default_embedding_model.clone(),
-            default_answer_provider: self.runtime_default_answer_provider.clone(),
-            default_answer_model: self.runtime_default_answer_model.clone(),
-            default_vision_provider: self.runtime_default_vision_provider.clone(),
-            default_vision_model: self.runtime_default_vision_model.clone(),
         }
     }
 
@@ -535,10 +434,6 @@ mod tests {
             service_name: "rustrag-backend".into(),
             environment: "local".into(),
             log_filter: "info".into(),
-            openai_api_key: None,
-            deepseek_api_key: None,
-            qwen_api_key: None,
-            qwen_api_base_url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1".into(),
             bootstrap_token: None,
             bootstrap_claim_enabled: true,
             legacy_ui_bootstrap_enabled: true,
@@ -561,15 +456,6 @@ mod tests {
             llm_http_timeout_seconds: 120,
             llm_transport_retry_attempts: 3,
             llm_transport_retry_base_delay_ms: 250,
-            runtime_default_indexing_provider: "openai".into(),
-            runtime_default_indexing_model: "gpt-5-mini".into(),
-            runtime_default_embedding_provider: "openai".into(),
-            runtime_default_embedding_model: "text-embedding-3-large".into(),
-            runtime_default_answer_provider: "openai".into(),
-            runtime_default_answer_model: "gpt-5.4".into(),
-            runtime_default_vision_provider: "openai".into(),
-            runtime_default_vision_model: "gpt-5-mini".into(),
-            runtime_live_validation_enabled: false,
             query_intent_cache_ttl_hours: 24,
             query_intent_cache_max_entries_per_library: 500,
             query_rerank_enabled: true,
@@ -593,17 +479,6 @@ mod tests {
             mcp_memory_max_search_limit: 25,
             mcp_memory_idempotency_retention_hours: 72,
             mcp_memory_audit_enabled: true,
-            runtime_pricing_seed_from_env: true,
-            runtime_pricing_default_currency: "USD".into(),
-            openai_input_price_per_1m: 0.25,
-            openai_output_price_per_1m: 2.0,
-            deepseek_input_price_per_1m: 0.27,
-            deepseek_output_price_per_1m: 1.10,
-            qwen_input_price_per_1m: 0.07,
-            qwen_chat_input_price_per_1m: 0.0,
-            qwen_chat_output_price_per_1m: 0.0,
-            qwen_vision_input_price_per_1m: 0.0,
-            qwen_vision_output_price_per_1m: 0.0,
         }
     }
 
@@ -748,18 +623,6 @@ mod tests {
             origins.allowed_origins,
             vec!["https://app.example.com".to_string(), "http://localhost:19000".to_string()]
         );
-    }
-
-    #[test]
-    fn ai_catalog_validation_settings_capture_runtime_defaults() {
-        let settings = sample_settings();
-        let ai_catalog = settings.ai_catalog_validation_settings();
-
-        assert!(!ai_catalog.live_validation_enabled);
-        assert!(ai_catalog.seed_from_env);
-        assert_eq!(ai_catalog.default_currency, "USD");
-        assert_eq!(ai_catalog.default_embedding_model, "text-embedding-3-large");
-        assert_eq!(ai_catalog.default_answer_model, "gpt-5.4");
     }
 
     #[test]

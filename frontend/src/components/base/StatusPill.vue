@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import StatusBadge from 'src/components/design-system/StatusBadge.vue'
+
 const props = defineProps<{
   tone:
     | 'queued'
@@ -15,8 +17,8 @@ const props = defineProps<{
 </script>
 
 <template>
-  <span
-    class="rr-status-pill"
-    :class="`rr-status-pill--${props.tone}`"
-  >{{ props.label }}</span>
+  <StatusBadge
+    :kind="props.tone"
+    :label="props.label"
+  />
 </template>

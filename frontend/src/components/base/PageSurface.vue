@@ -1,16 +1,15 @@
 <script setup lang="ts">
+import PageFrame from 'src/components/design-system/PageFrame.vue'
+
 withDefaults(defineProps<{
-  wide?: boolean
+  mode?: 'default' | 'wide' | 'full'
 }>(), {
-  wide: false,
+  mode: 'default',
 })
 </script>
 
 <template>
-  <div
-    class="rr-page-surface"
-    :class="{ 'rr-page-surface--wide': wide }"
-  >
+  <PageFrame :width-mode="mode">
     <slot />
-  </div>
+  </PageFrame>
 </template>

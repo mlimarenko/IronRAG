@@ -13,7 +13,6 @@ use crate::{
         ContentDocument, ContentDocumentHead, ContentDocumentSummary, ContentMutation,
         ContentMutationItem, ContentRevision,
     },
-    infra::repositories,
     interfaces::http::{
         auth::AuthContext,
         authorization::{
@@ -181,22 +180,29 @@ async fn list_chunks(
     auth.require_any_scope(POLICY_DOCUMENTS_READ)?;
 
     let document_id =
-        query.document_id.ok_or_else(|| ApiError::BadRequest("document_id is required".into()))?;
-    load_content_document_and_authorize(&auth, &state, document_id, POLICY_DOCUMENTS_READ).await?;
-    let items = repositories::list_chunks_by_document(&state.persistence.postgres, document_id)
-        .await
-        .map_err(|_| ApiError::Internal)?;
+        query.document_id.ok_or_else(|| ApiError::BadRequest("documentId is required".into()))?;
+    let document =
+        load_content_document_and_authorize(&auth, &state, document_id, POLICY_DOCUMENTS_READ)
+            .await?;
+    let head = state.canonical_services.content.get_document_head(&state, document_id).await?;
+    let revision_id = head.and_then(|row| row.readable_revision_id.or(row.active_revision_id));
+    let items = match revision_id {
+        Some(revision_id) => {
+            state.canonical_services.content.list_chunks(&state, revision_id).await?
+        }
+        None => Vec::new(),
+    };
 
     Ok(Json(
         items
             .into_iter()
-            .map(|row| ChunkSummary {
-                id: row.id,
-                document_id: row.document_id,
-                project_id: row.project_id,
-                ordinal: row.ordinal,
-                content: row.content,
-                token_count: row.token_count,
+            .map(|chunk| ChunkSummary {
+                id: chunk.id,
+                document_id,
+                project_id: document.library_id,
+                ordinal: chunk.chunk_index,
+                content: chunk.normalized_text,
+                token_count: chunk.token_count,
             })
             .collect(),
     ))
