@@ -166,7 +166,14 @@ compose deploy:
       grep -Fxq "RUSTRAG_BACKEND_IMAGE=$RUSTRAG_BACKEND_DEPLOY_IMAGE" .images.env
       grep -Fxq "RUSTRAG_FRONTEND_IMAGE=$RUSTRAG_FRONTEND_DEPLOY_IMAGE" .images.env
       source ./.env
-      curl -fsS "http://127.0.0.1:\${FRONTEND_PORT}/health" >/dev/null
-      curl -fsS "http://127.0.0.1:\${BACKEND_PORT}/v1/ready" >/dev/null
-      docker compose -p "$APP_COMPOSE_PROJECT" --env-file .env --env-file .images.env -f docker-compose.ci.yml ps
+      for _ in {1..30}; do
+        if curl -fsS "http://127.0.0.1:\${FRONTEND_PORT}/health" >/dev/null \
+          && curl -fsS "http://127.0.0.1:\${BACKEND_PORT}/v1/ready" >/dev/null; then
+          docker compose -p "$APP_COMPOSE_PROJECT" --env-file .env --env-file .images.env -f docker-compose.ci.yml ps
+          exit 0
+        fi
+        sleep 2
+      done
+      docker compose -p "$APP_COMPOSE_PROJECT" --env-file .env --env-file .images.env -f docker-compose.ci.yml ps -a
+      exit 1
       EOF
