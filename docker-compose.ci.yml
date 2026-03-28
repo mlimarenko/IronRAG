@@ -87,9 +87,18 @@ services:
       ui_bootstrap_admin_login: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN:-}
       ui_bootstrap_admin_password: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD:-}
       ui_bootstrap_admin_api_token: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN:-}
+      content_storage_root: /var/lib/rustrag/content-storage
       RUST_BACKTRACE: full
     expose:
       - "8080"
+    volumes:
+      - ./data/content-storage:/var/lib/rustrag/content-storage
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/v1/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   worker:
     image: ${RUSTRAG_BACKEND_IMAGE}
@@ -127,7 +136,13 @@ services:
       ui_bootstrap_admin_login: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN:-}
       ui_bootstrap_admin_password: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD:-}
       ui_bootstrap_admin_api_token: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN:-}
+      content_storage_root: /var/lib/rustrag/content-storage
       RUST_BACKTRACE: full
+    volumes:
+      - ./data/content-storage:/var/lib/rustrag/content-storage
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 30s
 
   frontend:
     image: ${RUSTRAG_FRONTEND_IMAGE}

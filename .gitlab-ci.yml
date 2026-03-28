@@ -102,6 +102,7 @@ compose deploy:
   stage: deploy
   image: gitlab.piping.space:4567/general/devopsimage:latest
   tags: [docker]
+  resource_group: rustrag-deploy
   rules:
     - if: '$CI_COMMIT_REF_NAME == "develop"'
   needs:
