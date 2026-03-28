@@ -91,6 +91,8 @@ services:
       RUST_BACKTRACE: full
     expose:
       - "8080"
+    ports:
+      - "${BACKEND_PORT:-18080}:8080"
     volumes:
       - ./data/content-storage:/var/lib/rustrag/content-storage
     healthcheck:

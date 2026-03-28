@@ -119,6 +119,7 @@ compose deploy:
     - echo "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" -u "$CI_REGISTRY_USER" --password-stdin
     - |
       docker run --rm --network host \
+        --entrypoint /bin/sh \
         -v "$CI_PROJECT_DIR:/workspace" \
         -w /workspace \
         -e ANSIBLE_HOST_KEY_CHECKING \
@@ -138,8 +139,7 @@ compose deploy:
         -e RUSTRAG_FRONTEND_DEPLOY_IMAGE \
         -e SSH_PRIVATE_KEY_B64 \
         gitlab.piping.space:4567/general/devopsimage:latest \
-        sh -lc '
-          set -euo pipefail
+        -xec '
           mkdir -p /root/.ssh
           chmod 700 /root/.ssh
           echo "$SSH_PRIVATE_KEY_B64" | tr -d "\r" | base64 -d >/root/.ssh/id_ed25519
@@ -159,3 +159,14 @@ compose deploy:
             --private-key /root/.ssh/id_ed25519 \
             -e "ansible_port=${DEPLOY_PORT}"
         '
+    - |
+      ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" /bin/bash <<EOF
+      set -euo pipefail
+      cd "$DEPLOY_PATH"
+      grep -Fxq "RUSTRAG_BACKEND_IMAGE=$RUSTRAG_BACKEND_DEPLOY_IMAGE" .images.env
+      grep -Fxq "RUSTRAG_FRONTEND_IMAGE=$RUSTRAG_FRONTEND_DEPLOY_IMAGE" .images.env
+      source ./.env
+      curl -fsS "http://127.0.0.1:\${FRONTEND_PORT}/health" >/dev/null
+      curl -fsS "http://127.0.0.1:\${BACKEND_PORT}/v1/ready" >/dev/null
+      docker compose -p "$APP_COMPOSE_PROJECT" --env-file .env --env-file .images.env -f docker-compose.ci.yml ps
+      EOF
