@@ -120,7 +120,6 @@ compose deploy:
     - |
       docker run --rm --network host \
         -v "$CI_PROJECT_DIR:/workspace" \
-        -v "$HOME/.ssh:/root/.ssh:ro" \
         -w /workspace \
         -e ANSIBLE_HOST_KEY_CHECKING \
         -e APP_COMPOSE_PROJECT \
@@ -137,10 +136,26 @@ compose deploy:
         -e RUSTRAG_BACKEND_DEPLOY_IMAGE \
         -e RUSTRAG_DEPLOY_CLEAN_VOLUMES \
         -e RUSTRAG_FRONTEND_DEPLOY_IMAGE \
+        -e SSH_PRIVATE_KEY_B64 \
         gitlab.piping.space:4567/general/devopsimage:latest \
-        ansible-playbook \
-          -i "${DEPLOY_HOST}," \
-          ansible/deploy.yml \
-          -u "$DEPLOY_USER" \
-          --private-key /root/.ssh/id_ed25519 \
-          -e "ansible_port=${DEPLOY_PORT}"
+        sh -lc '
+          set -euo pipefail
+          mkdir -p /root/.ssh
+          chmod 700 /root/.ssh
+          echo "$SSH_PRIVATE_KEY_B64" | tr -d "\r" | base64 -d >/root/.ssh/id_ed25519
+          chmod 600 /root/.ssh/id_ed25519
+          cat > /root/.ssh/config <<'"'"'CFG'"'"'
+          Host *
+            IdentityFile /root/.ssh/id_ed25519
+            IdentitiesOnly yes
+            IdentityAgent none
+            StrictHostKeyChecking no
+          CFG
+          chmod 600 /root/.ssh/config
+          ansible-playbook \
+            -i "${DEPLOY_HOST}," \
+            ansible/deploy.yml \
+            -u "$DEPLOY_USER" \
+            --private-key /root/.ssh/id_ed25519 \
+            -e "ansible_port=${DEPLOY_PORT}"
+        '
