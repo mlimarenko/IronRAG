@@ -101,7 +101,7 @@ frontend build:
 compose deploy:
   stage: deploy
   image: gitlab.piping.space:4567/general/devopsimage:latest
-  tags: [docker]
+  tags: [pxm-docker01_shell]
   resource_group: rustrag-deploy
   rules:
     - if: '$CI_COMMIT_REF_NAME == "develop"'
@@ -110,6 +110,8 @@ compose deploy:
     - job: frontend build
     - job: get version
   before_script:
+    - export PATH="$HOME/.local/bin:$PATH"
+    - command -v ansible-playbook >/dev/null || (echo "ansible-playbook is required on pxm-docker01_shell" && exit 1)
     - test -n "$SSH_PRIVATE_KEY_B64" || (echo "SSH_PRIVATE_KEY_B64 is required" && exit 1)
     - mkdir -p ~/.ssh
     - chmod 700 ~/.ssh
