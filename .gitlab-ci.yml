@@ -144,13 +144,13 @@ compose deploy:
           chmod 700 /root/.ssh
           echo "$SSH_PRIVATE_KEY_B64" | tr -d "\r" | base64 -d >/root/.ssh/id_ed25519
           chmod 600 /root/.ssh/id_ed25519
-          cat > /root/.ssh/config <<'"'"'CFG'"'"'
-          Host *
-            IdentityFile /root/.ssh/id_ed25519
-            IdentitiesOnly yes
-            IdentityAgent none
-            StrictHostKeyChecking no
-          CFG
+          printf "%s\n" \
+            "Host *" \
+            "  IdentityFile /root/.ssh/id_ed25519" \
+            "  IdentitiesOnly yes" \
+            "  IdentityAgent none" \
+            "  StrictHostKeyChecking no" \
+            >/root/.ssh/config
           chmod 600 /root/.ssh/config
           ansible-playbook \
             -i "${DEPLOY_HOST}," \
