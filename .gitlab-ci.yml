@@ -111,7 +111,9 @@ compose deploy:
     - job: get version
   before_script:
     - export PATH="$HOME/.local/bin:$PATH"
-    - command -v ansible-playbook >/dev/null || (echo "ansible-playbook is required on pxm-docker01_shell" && exit 1)
+    - command -v python3 >/dev/null || (echo "python3 is required on pxm-docker01_shell" && exit 1)
+    - command -v pip3 >/dev/null || python3 -m ensurepip --upgrade
+    - command -v ansible-playbook >/dev/null || python3 -m pip install --user --break-system-packages 'ansible-core>=2.20,<2.21'
     - test -n "$SSH_PRIVATE_KEY_B64" || (echo "SSH_PRIVATE_KEY_B64 is required" && exit 1)
     - mkdir -p ~/.ssh
     - chmod 700 ~/.ssh
