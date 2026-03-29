@@ -1,0 +1,4 @@
+dist
+.quasar
+node_modules
+coverage

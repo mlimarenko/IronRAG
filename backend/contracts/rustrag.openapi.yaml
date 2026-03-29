@@ -1,0 +1,2591 @@
+openapi: 3.1.0
+info:
+  title: RustRAG API
+  version: 0.1.0
+  description: |
+    Canonical API contract for the current ArangoDB-centered RustRAG backend surface.
+
+    This contract tracks the active public Axum routes mounted from `backend/src/interfaces/http`
+    and is rewritten at request time with proxy-safe server origins for the current entrypoint.
+servers:
+  - url: /v1
+    description: Relative API root
+security:
+  - bearerAuth: []
+tags:
+  - name: system
+  - name: catalog
+  - name: iam
+  - name: ai
+  - name: knowledge
+  - name: ingest
+  - name: search
+  - name: query
+  - name: billing
+  - name: ops
+  - name: audit
+  - name: automation
+  - name: content
+x-greenfield-scaffold:
+  canonicalPathPrefixes:
+    - /v1/catalog
+    - /v1/iam
+    - /v1/ai
+    - /v1/knowledge
+    - /v1/content
+    - /v1/ingest
+    - /v1/search
+    - /v1/query
+    - /v1/billing
+    - /v1/ops
+    - /v1/audit
+    - /v1/mcp
+  forbiddenLegacyVocabulary:
+    - runtime prefix
+    - ui prefix
+    - mcp memory module
+  seededAiCatalog:
+    providers: 3
+    models: 7
+    prices: 12
+  freshBootstrapDiscovery:
+    - /v1/openapi/rustrag.openapi.yaml
+    - /v1/iam/bootstrap/status
+    - /v1/iam/bootstrap/setup
+    - /v1/iam/bootstrap/claim
+  scaffoldStatus: canonical-cutover
+paths:
+  /v1/health:
+    get:
+      tags: [system]
+      summary: Health check
+      operationId: getHealth
+      security: []
+      responses:
+        "200":
+          description: Service health
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /v1/ready:
+    get:
+      tags: [system]
+      summary: Readiness check
+      operationId: getReadiness
+      security: []
+      responses:
+        "200":
+          description: Readiness probe result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessResponse"
+  /v1/version:
+    get:
+      tags: [system]
+      summary: Service version
+      operationId: getVersion
+      security: []
+      responses:
+        "200":
+          description: Service version metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionResponse"
+  /v1/openapi/rustrag.openapi.yaml:
+    get:
+      tags: [system]
+      summary: OpenAPI contract discovery
+      operationId: getOpenApiContract
+      security: []
+      responses:
+        "200":
+          description: Rendered OpenAPI contract for the current public entrypoint
+          content:
+            application/yaml:
+              schema:
+                type: string
+  /v1/iam/bootstrap/claim:
+    post:
+      tags: [iam]
+      summary: Claim the first administrator for a fresh deployment
+      operationId: postBootstrapClaim
+      security: []
+      description: |
+        One-time bootstrap route for destructive fresh deployments. This route is expected to
+        succeed exactly once, create the first `iam_principal` plus `iam_user`, and emit one
+        canonical `audit_event`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BootstrapClaimRequest"
+      responses:
+        "200":
+          description: Bootstrap claim succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BootstrapClaimResponse"
+        "400":
+          description: Invalid bootstrap payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Invalid bootstrap secret
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "403":
+          description: Bootstrap claim disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "409":
+          description: Bootstrap was already claimed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/iam/bootstrap/status:
+    get:
+      tags: [iam]
+      summary: Resolve whether first-run admin setup is still required
+      operationId: getBootstrapStatus
+      security: []
+      responses:
+        "200":
+          description: Bootstrap setup status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BootstrapStatusResponse"
+  /v1/iam/bootstrap/setup:
+    post:
+      tags: [iam]
+      summary: Configure the first administrator interactively
+      operationId: postBootstrapSetup
+      security: []
+      description: |
+        One-time interactive setup route for a fresh deployment with no administrator and no
+        explicit bootstrap admin credentials configured through environment variables.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BootstrapSetupRequest"
+      responses:
+        "200":
+          description: Bootstrap setup succeeded and created a browser session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "400":
+          description: Invalid bootstrap payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "403":
+          description: Interactive bootstrap setup is disabled by configured environment credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "409":
+          description: Bootstrap was already completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/mcp:
+    post:
+      tags: [automation]
+      summary: MCP JSON-RPC endpoint for canonical agent memory flows
+      operationId: postMcpRequest
+      description: |
+        Bearer-token authenticated JSON-RPC transport for discovery, search, read, and document
+        mutation tools. Tool visibility and callable actions are derived from the authenticated
+        principal's typed grants.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/McpJsonRpcRequest"
+      responses:
+        "200":
+          description: JSON-RPC response envelope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/McpJsonRpcResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/mcp/capabilities:
+    get:
+      tags: [automation]
+      summary: Return the derived MCP capability snapshot for the current principal
+      operationId: getMcpCapabilities
+      responses:
+        "200":
+          description: Derived capability snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/McpCapabilitySnapshot"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/catalog/workspaces:
+    get:
+      tags: [catalog]
+      summary: List visible workspaces
+      operationId: listCatalogWorkspaces
+      responses:
+        "200":
+          description: Visible workspaces for the authenticated principal
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CatalogWorkspaceResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+    post:
+      tags: [catalog]
+      summary: Create a workspace
+      operationId: createCatalogWorkspace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCatalogWorkspaceRequest"
+      responses:
+        "200":
+          description: Created workspace
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogWorkspaceResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "409":
+          description: Workspace slug conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/catalog/workspaces/{workspaceId}:
+    get:
+      tags: [catalog]
+      summary: Get one visible workspace
+      operationId: getCatalogWorkspace
+      parameters:
+        - in: path
+          name: workspaceId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Workspace details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogWorkspaceResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Workspace not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/catalog/workspaces/{workspaceId}/libraries:
+    get:
+      tags: [catalog]
+      summary: List visible libraries in one workspace
+      operationId: listCatalogLibraries
+      parameters:
+        - in: path
+          name: workspaceId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Libraries visible in the workspace
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CatalogLibraryResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+    post:
+      tags: [catalog]
+      summary: Create a library in one workspace
+      operationId: createCatalogLibrary
+      parameters:
+        - in: path
+          name: workspaceId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCatalogLibraryRequest"
+      responses:
+        "200":
+          description: Created library
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogLibraryResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Workspace not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "409":
+          description: Library slug conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/catalog/libraries/{libraryId}:
+    get:
+      tags: [catalog]
+      summary: Get one visible library
+      operationId: getCatalogLibrary
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Library details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogLibraryResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Library not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/iam/session/login:
+    post:
+      tags: [iam]
+      summary: Authenticate a browser session with login and password
+      operationId: loginIamSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginSessionRequest"
+      responses:
+        "200":
+          description: Authenticated session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "400":
+          description: Invalid payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/iam/session:
+    get:
+      tags: [iam]
+      summary: Resolve the current browser session
+      operationId: getIamSession
+      responses:
+        "200":
+          description: Current browser session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "401":
+          description: Missing or invalid browser session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/iam/session/logout:
+    post:
+      tags: [iam]
+      summary: Revoke the current browser session
+      operationId: logoutIamSession
+      responses:
+        "204":
+          description: Session revoked
+        "401":
+          description: Missing or invalid browser session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/iam/me:
+    get:
+      tags: [iam]
+      summary: Resolve the current principal, memberships, and effective grants
+      operationId: getIamMe
+      responses:
+        "200":
+          description: Canonical principal view
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeResponse"
+        "401":
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/iam/tokens:
+    get:
+      tags: [iam]
+      summary: List visible API tokens
+      operationId: listIamTokens
+      parameters:
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: API tokens
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TokenResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+    post:
+      tags: [iam]
+      summary: Mint a canonical API token
+      operationId: mintIamToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MintTokenRequest"
+      responses:
+        "200":
+          description: Minted token and persisted API token record
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MintTokenResponse"
+        "400":
+          description: Invalid token payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/iam/tokens/{tokenPrincipalId}/revoke:
+    post:
+      tags: [iam]
+      summary: Revoke one API token principal
+      operationId: revokeIamToken
+      parameters:
+        - in: path
+          name: tokenPrincipalId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Token revoked
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Token not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/iam/grants:
+    get:
+      tags: [iam]
+      summary: List effective grants for one principal
+      operationId: listIamGrants
+      parameters:
+        - in: query
+          name: principalId
+          required: false
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Effective grants for the requested principal
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/GrantResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+    post:
+      tags: [iam]
+      summary: Create a typed grant
+      operationId: createIamGrant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateGrantRequest"
+      responses:
+        "200":
+          description: Grant created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GrantResponse"
+        "400":
+          description: Invalid grant payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/iam/grants/{grantId}:
+    delete:
+      tags: [iam]
+      summary: Revoke one typed grant
+      operationId: revokeIamGrant
+      parameters:
+        - in: path
+          name: grantId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Grant revoked
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Grant not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ai/providers:
+    get:
+      tags: [ai]
+      summary: List seeded AI providers
+      operationId: listAiProviders
+      responses:
+        "200":
+          description: AI provider catalog entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProviderCatalogEntryResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ai/models:
+    get:
+      tags: [ai]
+      summary: List seeded AI models
+      operationId: listAiModels
+      parameters:
+        - in: query
+          name: providerCatalogId
+          required: false
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: AI model catalog entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ModelCatalogEntryResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ai/model-presets:
+    get:
+      tags: [ai]
+      summary: List workspace model presets
+      operationId: listAiModelPresets
+      parameters:
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Workspace model presets
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ModelPresetResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ai/prices:
+    get:
+      tags: [ai]
+      summary: List seeded AI prices
+      operationId: listAiPrices
+      parameters:
+        - in: query
+          name: modelCatalogId
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: AI price catalog entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PriceCatalogEntryResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ai/credentials:
+    get:
+      tags: [ai]
+      summary: List visible provider credentials for one workspace
+      operationId: listAiCredentials
+      parameters:
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Provider credentials
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProviderCredentialResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+    post:
+      tags: [ai]
+      summary: Create a provider credential
+      operationId: createAiCredential
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProviderCredentialRequest"
+      responses:
+        "200":
+          description: Provider credential created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderCredentialResponse"
+        "400":
+          description: Invalid provider credential payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ai/libraries/{libraryId}/bindings:
+    get:
+      tags: [ai]
+      summary: List active model bindings for one library
+      operationId: listAiLibraryBindings
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Active library model bindings
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LibraryModelBindingResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ai/library-bindings:
+    post:
+      tags: [ai]
+      summary: Create or replace the active binding for one library purpose
+      operationId: createAiLibraryBinding
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateLibraryBindingRequest"
+      responses:
+        "200":
+          description: Library model binding created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LibraryModelBindingResponse"
+        "400":
+          description: Invalid library binding payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ai/library-bindings/{bindingId}:
+    put:
+      tags: [ai]
+      summary: Update one existing library binding
+      operationId: updateAiLibraryBinding
+      parameters:
+        - in: path
+          name: bindingId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateLibraryBindingRequest"
+      responses:
+        "200":
+          description: Library model binding updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LibraryModelBindingResponse"
+        "400":
+          description: Invalid library binding payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Binding not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ai/library-bindings/{bindingId}/validate:
+    post:
+      tags: [ai]
+      summary: Trigger one library-binding validation row
+      operationId: validateAiLibraryBinding
+      parameters:
+        - in: path
+          name: bindingId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Binding validation request accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BindingValidationResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Binding not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/documents:
+    get:
+      tags: [content]
+      summary: List canonical logical documents for one library
+      operationId: listContentDocuments
+      parameters:
+        - in: query
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: includeDeleted
+          required: false
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: Logical documents in the requested library
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ContentDocumentDetailResponse"
+        "400":
+          description: Invalid document listing request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+    post:
+      tags: [content]
+      summary: Create a logical document and accepted upload mutation
+      operationId: createContentDocument
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateContentDocumentRequest"
+      responses:
+        "200":
+          description: Created logical document and accepted mutation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateContentDocumentResponse"
+        "400":
+          description: Invalid document creation request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/documents/upload:
+    post:
+      tags: [content]
+      summary: Upload one document revision directly into the canonical content pipeline
+      operationId: uploadContentDocument
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/UploadContentDocumentRequest"
+      responses:
+        "200":
+          description: Created logical document and accepted upload mutation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateContentDocumentResponse"
+        "400":
+          description: Invalid upload request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Library not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/documents/{documentId}:
+    get:
+      tags: [content]
+      summary: Get one canonical logical document
+      operationId: getContentDocument
+      parameters:
+        - in: path
+          name: documentId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Canonical logical document detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentDocumentDetailResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+    delete:
+      tags: [content]
+      summary: Delete one logical document through a canonical mutation
+      operationId: deleteContentDocument
+      parameters:
+        - in: path
+          name: documentId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Accepted and applied document deletion mutation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentMutationDetailResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/documents/{documentId}/append:
+    post:
+      tags: [content]
+      summary: Append plain text to one logical document
+      operationId: appendContentDocument
+      parameters:
+        - in: path
+          name: documentId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppendContentDocumentRequest"
+      responses:
+        "200":
+          description: Accepted append mutation with per-item state and linked job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentMutationDetailResponse"
+        "400":
+          description: Invalid append request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/documents/{documentId}/replace:
+    post:
+      tags: [content]
+      summary: Replace the active document revision with a new uploaded file
+      operationId: replaceContentDocument
+      parameters:
+        - in: path
+          name: documentId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/ReplaceContentDocumentRequest"
+      responses:
+        "200":
+          description: Accepted replacement mutation with per-item state and linked job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentMutationDetailResponse"
+        "400":
+          description: Invalid replacement request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/documents/{documentId}/revisions:
+    get:
+      tags: [content]
+      summary: List immutable revisions for one logical document
+      operationId: listContentRevisions
+      parameters:
+        - in: path
+          name: documentId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Immutable content revisions for one document
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ContentRevision"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/mutations:
+    get:
+      tags: [content]
+      summary: List canonical content mutations for one library
+      operationId: listContentMutations
+      parameters:
+        - in: query
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Canonical content mutations in the requested library
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ContentMutationDetailResponse"
+        "400":
+          description: Invalid mutation listing request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+    post:
+      tags: [content]
+      summary: Create a canonical content mutation
+      operationId: createContentMutation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateContentMutationRequest"
+      responses:
+        "200":
+          description: Accepted mutation with per-item state and linked job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentMutationDetailResponse"
+        "400":
+          description: Invalid mutation request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/mutations/{mutationId}:
+    get:
+      tags: [content]
+      summary: Get one canonical content mutation and items
+      operationId: getContentMutation
+      parameters:
+        - in: path
+          name: mutationId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Canonical content mutation detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentMutationDetailResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Mutation not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ingest/jobs:
+    get:
+      tags: [ingest]
+      summary: List canonical ingest jobs for one library
+      operationId: listIngestJobs
+      parameters:
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Canonical ingest jobs in one library
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/IngestJob"
+        "400":
+          description: Invalid ingest job query
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ingest/jobs/{jobId}:
+    get:
+      tags: [ingest]
+      summary: Get one canonical ingest job
+      operationId: getIngestJob
+      parameters:
+        - in: path
+          name: jobId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Canonical ingest job detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestJob"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Ingest job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ingest/attempts/{attemptId}:
+    get:
+      tags: [ingest]
+      summary: Get one canonical ingest attempt
+      operationId: getIngestAttempt
+      parameters:
+        - in: path
+          name: attemptId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Canonical ingest attempt detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestAttempt"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Ingest attempt not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ingest/attempts/{attemptId}/stages:
+    get:
+      tags: [ingest]
+      summary: List ordered stage events for one ingest attempt
+      operationId: listIngestStageEvents
+      parameters:
+        - in: path
+          name: attemptId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Ordered stage events for the requested attempt
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/IngestStageEvent"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Ingest attempt not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/search/documents:
+    get:
+      tags: [knowledge]
+      summary: Search documents, chunks, entities, and relations in one knowledge library
+      operationId: searchDocuments
+      parameters:
+        - in: query
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: query
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 50
+        - in: query
+          name: chunkHitLimitPerDocument
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 50
+        - in: query
+          name: evidenceSampleLimit
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 50
+      responses:
+        "200":
+          description: Hybrid knowledge search response with lexical and vector candidates, document hits, and provenance summaries
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  [
+                    libraryId,
+                    queryText,
+                    limit,
+                    embeddingProviderKind,
+                    embeddingModelName,
+                    embeddingModelCatalogId,
+                    freshnessGeneration,
+                    documentHits,
+                    entityHits,
+                    relationHits,
+                    vectorChunkHits,
+                    vectorEntityHits,
+                  ]
+                properties:
+                  libraryId:
+                    type: string
+                    format: uuid
+                  queryText:
+                    type: string
+                  limit:
+                    type: integer
+                    format: int32
+                  embeddingProviderKind:
+                    type: string
+                  embeddingModelName:
+                    type: string
+                  embeddingModelCatalogId:
+                    type: string
+                    format: uuid
+                  freshnessGeneration:
+                    type: integer
+                    format: int64
+                  documentHits:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                        [
+                          document,
+                          revision,
+                          score,
+                          provenanceSummary,
+                          chunkHits,
+                          vectorChunkHits,
+                          evidenceSamples,
+                        ]
+                      properties:
+                        document:
+                          $ref: "#/components/schemas/KnowledgeDocumentRow"
+                        revision:
+                          $ref: "#/components/schemas/KnowledgeRevisionRow"
+                        score:
+                          type: number
+                          format: double
+                        lexicalRank:
+                          type:
+                            - integer
+                            - "null"
+                          format: int32
+                        vectorRank:
+                          type:
+                            - integer
+                            - "null"
+                          format: int32
+                        lexicalScore:
+                          type:
+                            - number
+                            - "null"
+                          format: double
+                        vectorScore:
+                          type:
+                            - number
+                            - "null"
+                          format: double
+                        chunkHits:
+                          type: array
+                          items:
+                            $ref: "#/components/schemas/KnowledgeChunkSearchRow"
+                        vectorChunkHits:
+                          type: array
+                          items:
+                            $ref: "#/components/schemas/KnowledgeChunkVectorSearchRow"
+                        evidenceSamples:
+                          type: array
+                          items:
+                            $ref: "#/components/schemas/KnowledgeEvidenceRow"
+                        provenanceSummary:
+                          type: object
+                          required: [supportingEvidenceCount, lexicalChunkCount, vectorChunkCount]
+                          properties:
+                            supportingEvidenceCount:
+                              type: integer
+                              format: int32
+                            lexicalChunkCount:
+                              type: integer
+                              format: int32
+                            vectorChunkCount:
+                              type: integer
+                              format: int32
+                  entityHits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeEntitySearchRow"
+                  relationHits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeRelationSearchRow"
+                  vectorChunkHits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeChunkVectorSearchRow"
+                  vectorEntityHits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeEntityVectorSearchRow"
+        "400":
+          description: Invalid search request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/knowledge/libraries/{libraryId}/documents:
+    get:
+      tags: [knowledge]
+      summary: List documents in one knowledge library
+      operationId: listKnowledgeDocuments
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Documents visible to the authenticated principal
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/KnowledgeDocumentRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/libraries/{libraryId}/documents/{documentId}:
+    get:
+      tags: [knowledge]
+      summary: Get document detail with revisions and latest chunks
+      operationId: getKnowledgeDocument
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: path
+          name: documentId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Document detail payload
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [document, revisions, latestRevisionChunks]
+                properties:
+                  document:
+                    $ref: "#/components/schemas/KnowledgeDocumentRow"
+                  revisions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeRevisionRow"
+                  latestRevision:
+                    oneOf:
+                      - $ref: "#/components/schemas/KnowledgeRevisionRow"
+                      - type: "null"
+                  latestRevisionChunks:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeChunkRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/libraries/{libraryId}/context-bundles:
+    get:
+      tags: [knowledge]
+      summary: List context bundles in one knowledge library
+      operationId: listKnowledgeContextBundles
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Context bundles visible to the authenticated principal
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/KnowledgeContextBundleRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/context-bundles/{bundleId}:
+    get:
+      tags: [knowledge]
+      summary: Get one context bundle with traces and resolved knowledge rows
+      operationId: getKnowledgeContextBundle
+      parameters:
+        - in: path
+          name: bundleId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Context bundle detail payload
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [bundle, traces, chunkEdges, entityEdges, relationEdges, evidenceEdges, chunks, entities, relations, evidence]
+                properties:
+                  bundle:
+                    $ref: "#/components/schemas/KnowledgeContextBundleRow"
+                  traces:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeRetrievalTraceRow"
+                  chunkEdges:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeBundleChunkEdgeRow"
+                  entityEdges:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeBundleEntityEdgeRow"
+                  relationEdges:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeBundleRelationEdgeRow"
+                  evidenceEdges:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeBundleEvidenceEdgeRow"
+                  chunks:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeChunkRow"
+                  entities:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeEntityRow"
+                  relations:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeRelationRow"
+                  evidence:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeEvidenceRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/libraries/{libraryId}/entities:
+    get:
+      tags: [knowledge]
+      summary: List graph entities in one knowledge library
+      operationId: listKnowledgeEntities
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Knowledge entities
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/KnowledgeEntityRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/libraries/{libraryId}/entities/{entityId}:
+    get:
+      tags: [knowledge]
+      summary: Get entity detail with mention and provenance data
+      operationId: getKnowledgeEntity
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: path
+          name: entityId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Entity detail payload
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entity, mentionEdges, mentionedChunks, supportingEvidenceEdges, supportingEvidence]
+                properties:
+                  entity:
+                    $ref: "#/components/schemas/KnowledgeEntityRow"
+                  mentionEdges:
+                    type: array
+                    items:
+                      type: object
+                  mentionedChunks:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeChunkRow"
+                  supportingEvidenceEdges:
+                    type: array
+                    items:
+                      type: object
+                  supportingEvidence:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeEvidenceRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/libraries/{libraryId}/relations:
+    get:
+      tags: [knowledge]
+      summary: List graph relations in one knowledge library
+      operationId: listKnowledgeRelations
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Knowledge relations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/KnowledgeRelationRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/libraries/{libraryId}/relations/{relationId}:
+    get:
+      tags: [knowledge]
+      summary: Get relation detail with provenance data
+      operationId: getKnowledgeRelation
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: path
+          name: relationId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Relation detail payload
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [relation, supportingEvidenceEdges, supportingEvidence]
+                properties:
+                  relation:
+                    $ref: "#/components/schemas/KnowledgeRelationRow"
+                  supportingEvidenceEdges:
+                    type: array
+                    items:
+                      type: object
+                  supportingEvidence:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeEvidenceRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/libraries/{libraryId}/search/documents:
+    get:
+      tags: [knowledge]
+      summary: Search documents, chunks, entities, and relations in one knowledge library
+      operationId: searchKnowledgeDocuments
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: query
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 50
+        - in: query
+          name: chunkHitLimitPerDocument
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 50
+        - in: query
+          name: evidenceSampleLimit
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 50
+      responses:
+        "200":
+          description: Hybrid knowledge search response with lexical and vector candidates, document hits, and provenance summaries
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  [
+                    libraryId,
+                    queryText,
+                    limit,
+                    embeddingProviderKind,
+                    embeddingModelName,
+                    embeddingModelCatalogId,
+                    freshnessGeneration,
+                    documentHits,
+                    entityHits,
+                    relationHits,
+                    vectorChunkHits,
+                    vectorEntityHits,
+                  ]
+                properties:
+                  libraryId:
+                    type: string
+                    format: uuid
+                  queryText:
+                    type: string
+                  limit:
+                    type: integer
+                    format: int32
+                  embeddingProviderKind:
+                    type: string
+                  embeddingModelName:
+                    type: string
+                  embeddingModelCatalogId:
+                    type: string
+                    format: uuid
+                  freshnessGeneration:
+                    type: integer
+                    format: int64
+                  documentHits:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                        [
+                          document,
+                          revision,
+                          score,
+                          provenanceSummary,
+                          chunkHits,
+                          vectorChunkHits,
+                          evidenceSamples,
+                        ]
+                      properties:
+                        document:
+                          $ref: "#/components/schemas/KnowledgeDocumentRow"
+                        revision:
+                          $ref: "#/components/schemas/KnowledgeRevisionRow"
+                        score:
+                          type: number
+                          format: double
+                        lexicalRank:
+                          type:
+                            - integer
+                            - "null"
+                          format: int32
+                        vectorRank:
+                          type:
+                            - integer
+                            - "null"
+                          format: int32
+                        lexicalScore:
+                          type:
+                            - number
+                            - "null"
+                          format: double
+                        vectorScore:
+                          type:
+                            - number
+                            - "null"
+                          format: double
+                        chunkHits:
+                          type: array
+                          items:
+                            $ref: "#/components/schemas/KnowledgeChunkSearchRow"
+                        vectorChunkHits:
+                          type: array
+                          items:
+                            $ref: "#/components/schemas/KnowledgeChunkVectorSearchRow"
+                        evidenceSamples:
+                          type: array
+                          items:
+                            $ref: "#/components/schemas/KnowledgeEvidenceRow"
+                        provenanceSummary:
+                          type: object
+                          required: [supportingEvidenceCount, lexicalChunkCount, vectorChunkCount]
+                          properties:
+                            supportingEvidenceCount:
+                              type: integer
+                              format: int32
+                            lexicalChunkCount:
+                              type: integer
+                              format: int32
+                            vectorChunkCount:
+                              type: integer
+                              format: int32
+                  entityHits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeEntitySearchRow"
+                  relationHits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeRelationSearchRow"
+                  vectorChunkHits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeChunkVectorSearchRow"
+                  vectorEntityHits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeEntityVectorSearchRow"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/query/sessions:
+    get:
+      tags: [query]
+      summary: List canonical query sessions for one library
+      operationId: listQuerySessions
+      parameters:
+        - in: query
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Visible query sessions ordered by most recent activity
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/QueryConversation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [query]
+      summary: Create one canonical query session
+      operationId: createQuerySession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateQueryConversationRequest"
+      responses:
+        "200":
+          description: Query session created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryConversation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/query/sessions/{sessionId}:
+    get:
+      tags: [query]
+      summary: Get canonical query session detail
+      operationId: getQuerySession
+      parameters:
+        - in: path
+          name: sessionId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Query session detail with turns and executions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryConversationDetailResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/query/sessions/{sessionId}/turns:
+    post:
+      tags: [query]
+      summary: Submit a user turn and execute one grounded answer in a query session
+      operationId: createQuerySessionTurn
+      parameters:
+        - in: path
+          name: sessionId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateQueryTurnRequest"
+      responses:
+        "200":
+          description: User turn accepted and grounded answer completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryTurnExecutionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /v1/query/executions/{executionId}:
+    get:
+      tags: [query]
+      summary: Get canonical grounded execution detail
+      operationId: getQueryExecution
+      parameters:
+        - in: path
+          name: executionId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Execution detail with typed references
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryExecutionDetailResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/billing/provider-calls:
+    get:
+      tags: [billing]
+      summary: List canonical provider calls for one library
+      operationId: listBillingProviderCalls
+      parameters:
+        - in: query
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Provider calls attributed to canonical executions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BillingProviderCall"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/billing/charges:
+    get:
+      tags: [billing]
+      summary: List canonical priced charges for one library
+      operationId: listBillingCharges
+      parameters:
+        - in: query
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Charges derived from canonical provider calls
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BillingCharge"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/billing/executions/{executionKind}/{executionId}:
+    get:
+      tags: [billing]
+      summary: Get canonical execution cost rollup
+      operationId: getBillingExecutionCost
+      parameters:
+        - in: path
+          name: executionKind
+          required: true
+          schema:
+            type: string
+            enum: [query_execution, ingest_attempt]
+        - in: path
+          name: executionId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: |
+            Cost rollup for one execution owner.
+            For executions with no billable provider calls, the API returns a deterministic zero-cost rollup.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BillingExecutionCost"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/ops/operations/{operationId}:
+    get:
+      tags: [ops]
+      summary: Get one canonical async operation
+      operationId: getAsyncOperation
+      parameters:
+        - in: path
+          name: operationId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Canonical async operation detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpsAsyncOperation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/ops/libraries/{libraryId}:
+    get:
+      tags: [ops]
+      summary: Get derived operational state for one library
+      operationId: getLibraryState
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Derived operational state and knowledge generation snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpsLibraryStateResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/audit/events:
+    get:
+      tags: [audit]
+      summary: List canonical audit events
+      operationId: listAuditEvents
+      parameters:
+        - in: query
+          name: actorPrincipalId
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: libraryId
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: internal
+          required: false
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: Canonical audit events with visible subjects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AuditEventResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "403":
+          description: Internal view requires system administrator access
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/chunks:
+    get:
+      tags: [content]
+      summary: List chunks by document
+      operationId: listChunks
+      description: Requires `documents:read`, `workspace:admin`, or an `instance_admin` token.
+      parameters:
+        - $ref: "#/components/parameters/documentId"
+      responses:
+        "200":
+          description: Chunk list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ChunkSummary"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    workspaceId:
+      name: workspaceId
+      in: query
+      required: true
+      schema: &uuidString
+        type: string
+        format: uuid
+    documentId:
+      name: documentId
+      in: query
+      required: true
+      schema: *uuidString
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema: &genericObject
+            type: object
+            additionalProperties: true
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema: *genericObject
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema: *genericObject
+    Conflict:
+      description: Conflict
+      content:
+        application/json:
+          schema: *genericObject
+    InternalError:
+      description: Internal error
+      content:
+        application/json:
+          schema: *genericObject
+  schemas:
+    ApiErrorBody: *genericObject
+    AppendContentDocumentRequest: *genericObject
+    AuditEventResponse: *genericObject
+    BillingCharge: *genericObject
+    BillingExecutionCost: *genericObject
+    BillingProviderCall: *genericObject
+    BindingValidationResponse: *genericObject
+    BootstrapClaimRequest: *genericObject
+    BootstrapClaimResponse: *genericObject
+    BootstrapSetupRequest: *genericObject
+    BootstrapStatusResponse: *genericObject
+    CatalogLibraryResponse: *genericObject
+    CatalogWorkspaceResponse: *genericObject
+    ChunkSummary: *genericObject
+    ContentDocumentDetailResponse: *genericObject
+    ContentMutationDetailResponse: *genericObject
+    ContentRevision: *genericObject
+    CreateCatalogLibraryRequest: *genericObject
+    CreateCatalogWorkspaceRequest: *genericObject
+    CreateContentDocumentRequest: *genericObject
+    CreateContentDocumentResponse: *genericObject
+    CreateContentMutationRequest: *genericObject
+    CreateGrantRequest: *genericObject
+    CreateLibraryBindingRequest: *genericObject
+    CreateProviderCredentialRequest: *genericObject
+    CreateQueryConversationRequest: *genericObject
+    CreateQueryTurnRequest: *genericObject
+    GrantResponse: *genericObject
+    HealthResponse: *genericObject
+    IngestAttempt: *genericObject
+    IngestJob: *genericObject
+    IngestStageEvent: *genericObject
+    InternalError: *genericObject
+    KnowledgeBundleChunkEdgeRow: *genericObject
+    KnowledgeBundleEntityEdgeRow: *genericObject
+    KnowledgeBundleEvidenceEdgeRow: *genericObject
+    KnowledgeBundleRelationEdgeRow: *genericObject
+    KnowledgeChunkRow: *genericObject
+    KnowledgeChunkSearchRow: *genericObject
+    KnowledgeChunkVectorSearchRow: *genericObject
+    KnowledgeContextBundleRow: *genericObject
+    KnowledgeDocumentRow: *genericObject
+    KnowledgeEntityRow: *genericObject
+    KnowledgeEntitySearchRow: *genericObject
+    KnowledgeEntityVectorSearchRow: *genericObject
+    KnowledgeEvidenceRow: *genericObject
+    KnowledgeLibraryGeneration: *genericObject
+    KnowledgeRelationRow: *genericObject
+    KnowledgeRelationSearchRow: *genericObject
+    KnowledgeRetrievalTraceRow: *genericObject
+    KnowledgeRevisionRow: *genericObject
+    LibraryModelBindingResponse: *genericObject
+    LoginSessionRequest: *genericObject
+    McpCapabilitySnapshot: *genericObject
+    McpJsonRpcRequest: *genericObject
+    McpJsonRpcResponse: *genericObject
+    MeResponse: *genericObject
+    MintTokenRequest: *genericObject
+    MintTokenResponse: *genericObject
+    ModelCatalogEntryResponse: *genericObject
+    ModelPresetResponse: *genericObject
+    NotFound: *genericObject
+    OpsAsyncOperation: *genericObject
+    OpsLibraryState: *genericObject
+    OpsLibraryStateResponse: *genericObject
+    OpsLibraryWarning: *genericObject
+    PriceCatalogEntryResponse: *genericObject
+    ProviderCatalogEntryResponse: *genericObject
+    ProviderCredentialResponse: *genericObject
+    QueryConversation: *genericObject
+    QueryConversationDetailResponse: *genericObject
+    QueryExecutionDetailResponse: *genericObject
+    QueryTurnExecutionResponse: *genericObject
+    ReadinessResponse: *genericObject
+    ReplaceContentDocumentRequest: *genericObject
+    SessionResponse: *genericObject
+    TokenResponse: *genericObject
+    Unauthorized: *genericObject
+    UpdateLibraryBindingRequest: *genericObject
+    UploadContentDocumentRequest: *genericObject
+    VersionResponse: *genericObject
