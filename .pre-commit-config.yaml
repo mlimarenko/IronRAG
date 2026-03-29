@@ -1,0 +1,52 @@
+repos:
+  # General file checks (latest version: v6.0.0)
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-merge-conflict
+      - id: debug-statements
+      - id: check-case-conflict
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+      - id: check-toml
+      - id: check-xml
+      - id: detect-private-key
+      - id: forbid-new-submodules
+  - repo: local
+    hooks:
+      - id: backend-fmt
+        name: backend-fmt
+        entry: bash -lc 'cd backend && cargo fmt --all'
+        language: system
+        pass_filenames: false
+      - id: backend-lint
+        name: backend-lint
+        entry: bash -lc 'cd backend && cargo clippy --all-targets --all-features -- -D warnings'
+        language: system
+        pass_filenames: false
+      - id: backend-test
+        name: backend-test
+        entry: bash -lc 'cd backend && cargo test'
+        language: system
+        pass_filenames: false
+      - id: frontend-lint
+        name: frontend-lint
+        entry: bash -lc 'cd frontend && npm run lint'
+        language: system
+        pass_filenames: false
+      - id: frontend-format-check
+        name: frontend-format-check
+        entry: bash -lc 'cd frontend && npm run format:check'
+        language: system
+        pass_filenames: false
+      - id: frontend-typecheck
+        name: frontend-typecheck
+        entry: bash -lc 'cd frontend && npm run typecheck'
+        language: system
+        pass_filenames: false

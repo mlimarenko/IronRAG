@@ -1,0 +1,34 @@
+{
+  "provider": "deepseek",
+  "fixtures": [
+    {
+      "fileName": "runtime-notes.txt",
+      "format": "text",
+      "purpose": "plain text baseline for chunking and entity extraction"
+    },
+    {
+      "fileName": "runtime-brief.md",
+      "format": "markdown",
+      "purpose": "markdown ingestion with heading structure"
+    },
+    {
+      "fileName": "runtime-report.pdf",
+      "format": "pdf",
+      "purpose": "pdf text extraction and page-map smoke"
+    },
+    {
+      "fileName": "runtime-plan.docx",
+      "format": "docx",
+      "purpose": "docx paragraph ordering and named-entity smoke"
+    },
+    {
+      "fileName": "runtime-graph.png",
+      "format": "image",
+      "purpose": "vision-backed OCR and graph evidence extraction"
+    }
+  ],
+  "queries": [
+    "Summarize the main entities and budget relationships in this library.",
+    "Which documents support the research budget node?"
+  ]
+}

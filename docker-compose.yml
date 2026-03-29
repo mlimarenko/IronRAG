@@ -1,0 +1,188 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: rustrag
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d rustrag"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      # postgres:18-alpine stores PGDATA under /var/lib/postgresql by default.
+      # Mount the parent path to avoid anonymous volume allocation.
+      - postgres_data:/var/lib/postgresql
+
+  redis:
+    image: redis:8.4
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  arangodb:
+    image: arangodb:3.12.4
+    environment:
+      ARANGO_ROOT_PASSWORD: rustrag-dev
+    command:
+      - arangod
+      - --server.authentication=true
+      - --experimental-vector-index=true
+      - --database.directory=/var/lib/arangodb3
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "arangosh --server.endpoint tcp://127.0.0.1:8529 --server.username root --server.password \"$$ARANGO_ROOT_PASSWORD\" --javascript.execute-string \"db._version()\" >/dev/null 2>&1 || exit 1",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    expose:
+      - "8529"
+    volumes:
+      - arangodb_data:/var/lib/arangodb3
+
+  backend:
+    image: ${RUSTRAG_BACKEND_IMAGE:-rustrag-backend:local}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 10m
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      arangodb:
+        condition: service_healthy
+    environment:
+      bind_addr: 0.0.0.0:8080
+      service_role: api
+      service_name: rustrag-backend
+      environment: local-compose
+      database_url: postgres://postgres:postgres@postgres:5432/rustrag
+      database_max_connections: 20
+      redis_url: redis://redis:6379
+      arangodb_url: http://arangodb:8529
+      arangodb_database: rustrag
+      arangodb_username: root
+      arangodb_password: rustrag-dev
+      arangodb_request_timeout_seconds: 15
+      arangodb_bootstrap_collections: true
+      arangodb_bootstrap_views: true
+      arangodb_bootstrap_graph: true
+      log_filter: info
+      frontend_origin: http://127.0.0.1:19000,http://localhost:19000,http://127.0.0.1:9000,http://localhost:9000,http://127.0.0.1:3000,http://localhost:3000
+      bootstrap_token: ${RUSTRAG_BOOTSTRAP_TOKEN:-bootstrap-local}
+      ui_bootstrap_admin_login: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN:-}
+      ui_bootstrap_admin_password: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD:-}
+      ui_bootstrap_admin_api_token: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN:-}
+      content_storage_root: /var/lib/rustrag/content-storage
+      RUST_BACKTRACE: full
+    expose:
+      - "8080"
+    volumes:
+      - content_storage_data:/var/lib/rustrag/content-storage
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/v1/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+
+  worker:
+    image: ${RUSTRAG_BACKEND_IMAGE:-rustrag-backend:local}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 10m
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      arangodb:
+        condition: service_healthy
+    environment:
+      service_role: worker
+      bind_addr: 0.0.0.0:8080
+      service_name: rustrag-worker
+      environment: local-compose
+      database_url: postgres://postgres:postgres@postgres:5432/rustrag
+      database_max_connections: 20
+      redis_url: redis://redis:6379
+      arangodb_url: http://arangodb:8529
+      arangodb_database: rustrag
+      arangodb_username: root
+      arangodb_password: rustrag-dev
+      arangodb_request_timeout_seconds: 15
+      arangodb_bootstrap_collections: true
+      arangodb_bootstrap_views: true
+      arangodb_bootstrap_graph: true
+      log_filter: info
+      frontend_origin: http://127.0.0.1:19000,http://localhost:19000,http://127.0.0.1:9000,http://localhost:9000,http://127.0.0.1:3000,http://localhost:3000
+      bootstrap_token: ${RUSTRAG_BOOTSTRAP_TOKEN:-bootstrap-local}
+      ui_bootstrap_admin_login: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN:-}
+      ui_bootstrap_admin_password: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD:-}
+      ui_bootstrap_admin_api_token: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN:-}
+      content_storage_root: /var/lib/rustrag/content-storage
+      RUST_BACKTRACE: full
+    volumes:
+      - content_storage_data:/var/lib/rustrag/content-storage
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    depends_on:
+      - backend
+    expose:
+      - "3000"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  nginx:
+    image: nginx:1.28-alpine
+    restart: unless-stopped
+    depends_on:
+      - backend
+      - frontend
+      - arangodb
+    volumes:
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "${RUSTRAG_PORT:-19000}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/health >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
+  arangodb_data:
+  content_storage_data:

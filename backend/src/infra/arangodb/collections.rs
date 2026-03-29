@@ -1,0 +1,63 @@
+pub const KNOWLEDGE_DOCUMENT_COLLECTION: &str = "knowledge_document";
+pub const KNOWLEDGE_REVISION_COLLECTION: &str = "knowledge_revision";
+pub const KNOWLEDGE_CHUNK_COLLECTION: &str = "knowledge_chunk";
+pub const KNOWLEDGE_LIBRARY_GENERATION_COLLECTION: &str = "knowledge_library_generation";
+pub const KNOWLEDGE_CHUNK_VECTOR_COLLECTION: &str = "knowledge_chunk_vector";
+pub const KNOWLEDGE_ENTITY_VECTOR_COLLECTION: &str = "knowledge_entity_vector";
+pub const KNOWLEDGE_ENTITY_COLLECTION: &str = "knowledge_entity";
+pub const KNOWLEDGE_ENTITY_CANDIDATE_COLLECTION: &str = "knowledge_entity_candidate";
+pub const KNOWLEDGE_RELATION_COLLECTION: &str = "knowledge_relation";
+pub const KNOWLEDGE_RELATION_CANDIDATE_COLLECTION: &str = "knowledge_relation_candidate";
+pub const KNOWLEDGE_EVIDENCE_COLLECTION: &str = "knowledge_evidence";
+pub const KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION: &str = "knowledge_context_bundle";
+pub const KNOWLEDGE_RETRIEVAL_TRACE_COLLECTION: &str = "knowledge_retrieval_trace";
+
+pub const KNOWLEDGE_DOCUMENT_REVISION_EDGE: &str = "knowledge_document_revision_edge";
+pub const KNOWLEDGE_REVISION_CHUNK_EDGE: &str = "knowledge_revision_chunk_edge";
+pub const KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE: &str = "knowledge_chunk_mentions_entity_edge";
+pub const KNOWLEDGE_RELATION_SUBJECT_EDGE: &str = "knowledge_relation_subject_edge";
+pub const KNOWLEDGE_RELATION_OBJECT_EDGE: &str = "knowledge_relation_object_edge";
+pub const KNOWLEDGE_EVIDENCE_SOURCE_EDGE: &str = "knowledge_evidence_source_edge";
+pub const KNOWLEDGE_EVIDENCE_SUPPORTS_ENTITY_EDGE: &str = "knowledge_evidence_supports_entity_edge";
+pub const KNOWLEDGE_EVIDENCE_SUPPORTS_RELATION_EDGE: &str =
+    "knowledge_evidence_supports_relation_edge";
+pub const KNOWLEDGE_BUNDLE_CHUNK_EDGE: &str = "knowledge_bundle_chunk_edge";
+pub const KNOWLEDGE_BUNDLE_ENTITY_EDGE: &str = "knowledge_bundle_entity_edge";
+pub const KNOWLEDGE_BUNDLE_RELATION_EDGE: &str = "knowledge_bundle_relation_edge";
+pub const KNOWLEDGE_BUNDLE_EVIDENCE_EDGE: &str = "knowledge_bundle_evidence_edge";
+
+pub const KNOWLEDGE_SEARCH_VIEW: &str = "knowledge_search_view";
+pub const KNOWLEDGE_GRAPH_NAME: &str = "knowledge_graph";
+pub const KNOWLEDGE_CHUNK_VECTOR_INDEX: &str = "knowledge_chunk_vector_index";
+pub const KNOWLEDGE_ENTITY_VECTOR_INDEX: &str = "knowledge_entity_vector_index";
+
+pub const DOCUMENT_COLLECTIONS: &[&str] = &[
+    KNOWLEDGE_DOCUMENT_COLLECTION,
+    KNOWLEDGE_REVISION_COLLECTION,
+    KNOWLEDGE_CHUNK_COLLECTION,
+    KNOWLEDGE_LIBRARY_GENERATION_COLLECTION,
+    KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
+    KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
+    KNOWLEDGE_ENTITY_COLLECTION,
+    KNOWLEDGE_ENTITY_CANDIDATE_COLLECTION,
+    KNOWLEDGE_RELATION_COLLECTION,
+    KNOWLEDGE_RELATION_CANDIDATE_COLLECTION,
+    KNOWLEDGE_EVIDENCE_COLLECTION,
+    KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION,
+    KNOWLEDGE_RETRIEVAL_TRACE_COLLECTION,
+];
+
+pub const EDGE_COLLECTIONS: &[&str] = &[
+    KNOWLEDGE_DOCUMENT_REVISION_EDGE,
+    KNOWLEDGE_REVISION_CHUNK_EDGE,
+    KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE,
+    KNOWLEDGE_RELATION_SUBJECT_EDGE,
+    KNOWLEDGE_RELATION_OBJECT_EDGE,
+    KNOWLEDGE_EVIDENCE_SOURCE_EDGE,
+    KNOWLEDGE_EVIDENCE_SUPPORTS_ENTITY_EDGE,
+    KNOWLEDGE_EVIDENCE_SUPPORTS_RELATION_EDGE,
+    KNOWLEDGE_BUNDLE_CHUNK_EDGE,
+    KNOWLEDGE_BUNDLE_ENTITY_EDGE,
+    KNOWLEDGE_BUNDLE_RELATION_EDGE,
+    KNOWLEDGE_BUNDLE_EVIDENCE_EDGE,
+];

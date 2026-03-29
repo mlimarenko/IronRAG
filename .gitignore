@@ -1,0 +1,33 @@
+# Rust
+/target
+**/target
+Cargo.lock
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules
+.pnpm-store
+
+# Build artifacts
+dist
+coverage
+playwright-report
+test-results
+frontend/.quasar/
+frontend/.tmp-*.mjs
+frontend/public/figma-mockups/
+tmp-*
+
+# IDE
+.vscode
+.idea
+.DS_Store
+.audit/
+**/.audit/
+
+# SQLx
+.sqlx
