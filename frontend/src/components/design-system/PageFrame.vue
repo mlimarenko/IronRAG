@@ -10,7 +10,7 @@ withDefaults(defineProps<{
   <div
     class="rr-page-frame"
     :class="{
-      'rr-page-surface--wide': widthMode === 'wide',
+      'rr-page-frame--wide': widthMode === 'wide',
       'rr-page-frame--full': widthMode === 'full',
     }"
   >

@@ -414,6 +414,66 @@ pub async fn list_execution_cost_rollups(
     .await
 }
 
+#[derive(Debug, Clone, FromRow)]
+pub struct DocumentCostRow {
+    pub document_id: Uuid,
+    pub total_cost: Decimal,
+    pub currency_code: String,
+    pub provider_call_count: i64,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct LibraryCostSummaryRow {
+    pub total_cost: Decimal,
+    pub currency_code: String,
+    pub document_count: i64,
+    pub provider_call_count: i64,
+}
+
+pub async fn list_document_costs_by_library(
+    postgres: &PgPool,
+    library_id: Uuid,
+) -> Result<Vec<DocumentCostRow>, sqlx::Error> {
+    sqlx::query_as::<_, DocumentCostRow>(
+        "select
+            ij.knowledge_document_id as document_id,
+            sum(bec.total_cost) as total_cost,
+            bec.currency_code,
+            sum(bec.provider_call_count)::bigint as provider_call_count
+         from billing_execution_cost bec
+         join ingest_attempt ia on ia.id = bec.owning_execution_id
+         join ingest_job ij on ij.id = ia.job_id
+         where bec.owning_execution_kind = 'ingest_attempt'
+           and ij.library_id = $1
+         group by ij.knowledge_document_id, bec.currency_code
+         order by total_cost desc",
+    )
+    .bind(library_id)
+    .fetch_all(postgres)
+    .await
+}
+
+pub async fn get_library_cost_summary(
+    postgres: &PgPool,
+    library_id: Uuid,
+) -> Result<Option<LibraryCostSummaryRow>, sqlx::Error> {
+    sqlx::query_as::<_, LibraryCostSummaryRow>(
+        "select
+            coalesce(sum(bec.total_cost), 0) as total_cost,
+            coalesce(max(bec.currency_code), 'USD') as currency_code,
+            count(distinct ij.knowledge_document_id)::bigint as document_count,
+            coalesce(sum(bec.provider_call_count), 0)::bigint as provider_call_count
+         from billing_execution_cost bec
+         join ingest_attempt ia on ia.id = bec.owning_execution_id
+         join ingest_job ij on ij.id = ia.job_id
+         where bec.owning_execution_kind = 'ingest_attempt'
+           and ij.library_id = $1",
+    )
+    .bind(library_id)
+    .fetch_optional(postgres)
+    .await
+}
+
 pub async fn count_provider_calls_by_execution(
     postgres: &PgPool,
     owning_execution_kind: &str,

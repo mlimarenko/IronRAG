@@ -24,6 +24,10 @@ interface RawCatalogLibrary {
   displayName: string
   description?: string | null
   lifecycleState: string
+  ingestionReadiness: {
+    ready: boolean
+    missingBindingPurposes: LibraryOption['ingestionReadiness']['missingBindingPurposes']
+  }
 }
 
 interface RawIamPrincipal {
@@ -92,6 +96,10 @@ function mapLibrary(item: RawCatalogLibrary): LibraryOption {
     name: item.displayName,
     description: item.description ?? null,
     lifecycleState: item.lifecycleState,
+    ingestionReadiness: {
+      ready: item.ingestionReadiness.ready,
+      missingBindingPurposes: item.ingestionReadiness.missingBindingPurposes,
+    },
   }
 }
 
@@ -329,6 +337,22 @@ export async function createLibrary(payload: {
         }),
       ),
     )
+  } catch (error) {
+    normalizeMissingCatalogCreateEndpoint(error)
+  }
+}
+
+export async function deleteWorkspace(workspaceId: string): Promise<void> {
+  try {
+    await unwrap(apiHttp.delete(`/catalog/workspaces/${workspaceId}`))
+  } catch (error) {
+    normalizeMissingCatalogCreateEndpoint(error)
+  }
+}
+
+export async function deleteLibrary(workspaceId: string, libraryId: string): Promise<void> {
+  try {
+    await unwrap(apiHttp.delete(`/catalog/workspaces/${workspaceId}/libraries/${libraryId}`))
   } catch (error) {
     normalizeMissingCatalogCreateEndpoint(error)
   }

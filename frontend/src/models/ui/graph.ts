@@ -61,6 +61,7 @@ export interface GraphSurfaceResponse {
   nodeCount: number
   relationCount: number
   edgeCount: number
+  hiddenNodeCount: number
   filteredArtifactCount: number | null
   lastBuiltAt: string | null
   overlay: GraphOverlayState
@@ -201,3 +202,16 @@ export interface GraphInspectorState {
 }
 
 export type GraphWorkspaceSurface = GraphSurfaceResponse
+
+export function resolveDefaultGraphLayoutMode(
+  nodeCount: number,
+  edgeCount: number,
+): GraphLayoutMode {
+  if (nodeCount >= 220 || edgeCount >= 260) {
+    return 'clusters'
+  }
+  if (nodeCount >= 120 || edgeCount >= 140) {
+    return 'rings'
+  }
+  return 'cloud'
+}

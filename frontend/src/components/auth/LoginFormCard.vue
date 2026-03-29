@@ -67,7 +67,7 @@ function submit() {
       </label>
 
       <button
-        class="rr-button"
+        class="rr-button rr-button--primary"
         type="submit"
         :disabled="props.loading"
       >

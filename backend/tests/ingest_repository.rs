@@ -209,10 +209,15 @@ async fn ingest_job_crud_and_ordering_round_trip() -> Result<()> {
         .await
         .context("failed to create low priority ingest job")?;
 
-        let ordered =
-            ingest_repository::list_ingest_jobs(&fixture.pool, Some(fixture.workspace_id), None)
-                .await
-                .context("failed to list ordered ingest jobs")?;
+        let ordered = ingest_repository::list_ingest_jobs(
+            &fixture.pool,
+            Some(fixture.workspace_id),
+            None,
+            None,
+            None,
+        )
+        .await
+        .context("failed to list ordered ingest jobs")?;
         let ordered_ids: Vec<Uuid> = ordered.into_iter().map(|row| row.id).collect();
         assert_eq!(ordered_ids, vec![high_priority.id, delayed.id, low_priority.id]);
 

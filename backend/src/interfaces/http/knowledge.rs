@@ -26,7 +26,10 @@ use crate::{
             KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeLibraryGenerationRow,
             KnowledgeRevisionRow,
         },
-        graph_store::{KnowledgeEntityRow, KnowledgeEvidenceRow, KnowledgeRelationTopologyRow},
+        graph_store::{
+            KnowledgeDocumentGraphLinkRow, KnowledgeEntityRow, KnowledgeEvidenceRow,
+            KnowledgeRelationTopologyRow,
+        },
         search_store::{
             KnowledgeChunkSearchRow, KnowledgeChunkVectorSearchRow, KnowledgeEntitySearchRow,
             KnowledgeEntityVectorSearchRow, KnowledgeRelationSearchRow,
@@ -49,6 +52,7 @@ pub fn router() -> Router<AppState> {
         .route("/knowledge/libraries/{library_id}/context-bundles", get(list_context_bundles))
         .route("/knowledge/libraries/{library_id}/documents", get(list_documents))
         .route("/knowledge/libraries/{library_id}/documents/{document_id}", get(get_document))
+        .route("/knowledge/libraries/{library_id}/graph-topology", get(get_graph_topology))
         .route("/knowledge/libraries/{library_id}/entities", get(list_entities))
         .route("/knowledge/libraries/{library_id}/entities/{entity_id}", get(get_entity))
         .route("/knowledge/libraries/{library_id}/relations", get(list_relations))
@@ -138,6 +142,15 @@ struct KnowledgeRelationDetailResponse {
     relation: KnowledgeRelationTopologyRow,
     supporting_evidence_edges: Vec<KnowledgeEvidenceSupportRelationEdgeRow>,
     supporting_evidence: Vec<KnowledgeEvidenceRow>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct KnowledgeGraphTopologyResponse {
+    documents: Vec<KnowledgeDocumentRow>,
+    entities: Vec<KnowledgeEntityRow>,
+    relations: Vec<KnowledgeRelationTopologyRow>,
+    document_links: Vec<KnowledgeDocumentGraphLinkRow>,
 }
 
 #[derive(Debug, Serialize)]
@@ -336,6 +349,42 @@ async fn get_document(
         latest_revision,
         latest_revision_chunks,
     }))
+}
+
+async fn get_graph_topology(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(library_id): Path<Uuid>,
+) -> Result<Json<KnowledgeGraphTopologyResponse>, ApiError> {
+    let library =
+        load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
+    let documents = state
+        .arango_document_store
+        .list_documents_by_library(library.workspace_id, library.id)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    let entities = state
+        .arango_graph_store
+        .list_entities_by_library(library_id)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    let relations =
+        state.arango_graph_store.list_relation_topology_by_library(library_id).await.map_err(
+            |error| {
+                tracing::error!(%library_id, ?error, "failed to list knowledge relation topology");
+                ApiError::Internal
+            },
+        )?;
+    let document_links = state
+        .arango_graph_store
+        .list_document_graph_links_by_library(library_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(%library_id, ?error, "failed to list knowledge document graph links");
+            ApiError::Internal
+        })?;
+
+    Ok(Json(KnowledgeGraphTopologyResponse { documents, entities, relations, document_links }))
 }
 
 async fn get_context_bundle(
@@ -897,17 +946,36 @@ async fn get_relation(
         .arango_graph_store
         .get_relation_topology_by_id(relation_id)
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|error| {
+            tracing::error!(%library_id, %relation_id, ?error, "failed to load knowledge relation topology");
+            ApiError::Internal
+        })?
         .ok_or_else(|| ApiError::resource_not_found("knowledge_relation", relation_id))?;
     if relation.relation.library_id != library_id {
         return Err(ApiError::resource_not_found("knowledge_relation", relation_id));
     }
 
     let supporting_evidence_edges =
-        list_relation_evidence_support_edges(&state, relation_id).await?;
+        list_relation_evidence_support_edges(&state, relation_id)
+            .await
+            .map_err(|error| {
+                tracing::error!(%library_id, %relation_id, ?error, "failed to load relation evidence support edges");
+                error
+            })?;
     let supporting_evidence_ids: Vec<Uuid> =
         supporting_evidence_edges.iter().map(|edge| edge.evidence_id).collect();
-    let supporting_evidence = load_evidence_by_ids(&state, &supporting_evidence_ids).await?;
+    let supporting_evidence = load_evidence_by_ids(&state, &supporting_evidence_ids)
+        .await
+        .map_err(|error| {
+            tracing::error!(
+                %library_id,
+                %relation_id,
+                evidence_count = supporting_evidence_ids.len(),
+                ?error,
+                "failed to load relation supporting evidence",
+            );
+            error
+        })?;
 
     Ok(Json(KnowledgeRelationDetailResponse {
         relation,
@@ -971,16 +1039,23 @@ async fn list_entity_mention_edges(
         .client()
         .query_json(
             "FOR edge IN @@collection
-             FILTER edge.entity_id == @entity_id
-             SORT edge.rank ASC, edge.created_at ASC, edge._key ASC
+             LET entity = DOCUMENT(edge._to)
+             LET chunk = DOCUMENT(edge._from)
+             LET resolved_rank = edge.rank != null ? edge.rank : edge.payload.rank
+             LET resolved_score = edge.score != null ? edge.score : edge.payload.score
+             LET resolved_inclusion_reason = edge.inclusionReason != null ? edge.inclusionReason : edge.payload.inclusionReason
+             FILTER entity != null
+               AND chunk != null
+               AND entity.entity_id == @entity_id
+             SORT resolved_rank ASC, edge.created_at ASC, edge._key ASC
              RETURN {
                 key: edge._key,
-                entity_id: edge.entity_id,
-                chunk_id: edge.chunk_id,
-                rank: edge.rank,
-                score: edge.score,
-                inclusion_reason: edge.inclusionReason,
-                created_at: edge.created_at
+                entityId: entity.entity_id,
+                chunkId: chunk.chunk_id,
+                rank: resolved_rank,
+                score: resolved_score,
+                inclusionReason: resolved_inclusion_reason,
+                createdAt: edge.created_at
              }",
             serde_json::json!({
                 "@collection": KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE,
@@ -1001,16 +1076,23 @@ async fn list_entity_evidence_support_edges(
         .client()
         .query_json(
             "FOR edge IN @@collection
-             FILTER edge.entity_id == @entity_id
-             SORT edge.rank ASC, edge.created_at ASC, edge._key ASC
+             LET evidence = DOCUMENT(edge._from)
+             LET entity = DOCUMENT(edge._to)
+             LET resolved_rank = edge.rank != null ? edge.rank : edge.payload.rank
+             LET resolved_score = edge.score != null ? edge.score : edge.payload.score
+             LET resolved_inclusion_reason = edge.inclusionReason != null ? edge.inclusionReason : edge.payload.inclusionReason
+             FILTER evidence != null
+               AND entity != null
+               AND entity.entity_id == @entity_id
+             SORT resolved_rank ASC, edge.created_at ASC, edge._key ASC
              RETURN {
                 key: edge._key,
-                evidence_id: edge.evidence_id,
-                entity_id: edge.entity_id,
-                rank: edge.rank,
-                score: edge.score,
-                inclusion_reason: edge.inclusionReason,
-                created_at: edge.created_at
+                evidenceId: evidence.evidence_id,
+                entityId: entity.entity_id,
+                rank: resolved_rank,
+                score: resolved_score,
+                inclusionReason: resolved_inclusion_reason,
+                createdAt: edge.created_at
              }",
             serde_json::json!({
                 "@collection": KNOWLEDGE_EVIDENCE_SUPPORTS_ENTITY_EDGE,
@@ -1031,16 +1113,23 @@ async fn list_relation_evidence_support_edges(
         .client()
         .query_json(
             "FOR edge IN @@collection
-             FILTER edge.relation_id == @relation_id
-             SORT edge.rank ASC, edge.created_at ASC, edge._key ASC
+             LET evidence = DOCUMENT(edge._from)
+             LET relation = DOCUMENT(edge._to)
+             LET resolved_rank = edge.rank != null ? edge.rank : edge.payload.rank
+             LET resolved_score = edge.score != null ? edge.score : edge.payload.score
+             LET resolved_inclusion_reason = edge.inclusionReason != null ? edge.inclusionReason : edge.payload.inclusionReason
+             FILTER evidence != null
+               AND relation != null
+               AND relation.relation_id == @relation_id
+             SORT resolved_rank ASC, edge.created_at ASC, edge._key ASC
              RETURN {
                 key: edge._key,
-                evidence_id: edge.evidence_id,
-                relation_id: edge.relation_id,
-                rank: edge.rank,
-                score: edge.score,
-                inclusion_reason: edge.inclusionReason,
-                created_at: edge.created_at
+                evidenceId: evidence.evidence_id,
+                relationId: relation.relation_id,
+                rank: resolved_rank,
+                score: resolved_score,
+                inclusionReason: resolved_inclusion_reason,
+                createdAt: edge.created_at
              }",
             serde_json::json!({
                 "@collection": KNOWLEDGE_EVIDENCE_SUPPORTS_RELATION_EDGE,

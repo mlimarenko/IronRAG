@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+import SearchField from 'src/components/design-system/SearchField.vue'
 import { useDisplayFormatters } from 'src/composables/useDisplayFormatters'
 import type {
   AdminAiConsoleState,
@@ -23,8 +25,9 @@ const props = defineProps<{
   settings: AdminAiConsoleState
   saving: boolean
   commitVersion: number
+  workspaceName: string
+  libraryName: string
   errorMessage?: string | null
-  embedded?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -32,11 +35,12 @@ const emit = defineEmits<{
   updatePrice: [payload: UpdateAdminPricePayload]
 }>()
 
+const { t } = useI18n()
 const { billingUnitLabel, enumLabel, formatDateTime, priceOriginLabel } = useDisplayFormatters()
 
 const selectedPriceKey = ref<string | null>(null)
-const editorOpen = ref(false)
 const pendingSubmit = ref(false)
+const searchQuery = ref('')
 
 const form = reactive<EditablePriceForm>({
   priceId: null,
@@ -100,12 +104,33 @@ const priceRows = computed(() =>
     }),
 )
 
+const filteredPriceRows = computed(() => {
+  const query = searchQuery.value.trim().toLowerCase()
+  if (!query) {
+    return priceRows.value
+  }
+  return priceRows.value.filter((row) => {
+    const haystack = [
+      row.provider?.displayName ?? '',
+      row.model?.modelName ?? '',
+      row.currencyCode,
+      row.billingUnit,
+      billingUnitLabel(row.billingUnit),
+      sourceLabel(row),
+      formatPrice(row),
+    ]
+      .join(' ')
+      .toLowerCase()
+    return haystack.includes(query)
+  })
+})
+
 const priceGroups = computed(() => {
   const groups = new Map<
     string,
-    { providerName: string; rows: typeof priceRows.value }
+    { providerName: string; rows: typeof filteredPriceRows.value }
   >()
-  for (const row of priceRows.value) {
+  for (const row of filteredPriceRows.value) {
     const key = row.provider?.id ?? 'unknown'
     const current = groups.get(key)
     if (current) {
@@ -119,6 +144,16 @@ const priceGroups = computed(() => {
   }
   return Array.from(groups.values())
 })
+
+const selectedPrice = computed(
+  () => priceRows.value.find((row) => `price:${row.id}` === selectedPriceKey.value) ?? null,
+)
+
+const summary = computed(() => ({
+  total: priceRows.value.length,
+  current: priceRows.value.filter((row) => row.setInWorkspace).length,
+  providers: new Set(priceRows.value.map((row) => row.provider?.id ?? 'unknown')).size,
+}))
 
 const canSave = computed(
   () =>
@@ -191,8 +226,6 @@ function sourceLabel(row: AdminPriceCatalogEntry): string {
 
 function resetForm(): void {
   pendingSubmit.value = false
-  editorOpen.value = true
-  selectedPriceKey.value = 'price:new'
   form.priceId = null
   form.workspaceId = props.settings.workspaceId
   form.modelCatalogId = props.settings.models[0]?.id ?? ''
@@ -204,13 +237,11 @@ function resetForm(): void {
 }
 
 function openCreateForm(): void {
-  resetForm()
-  editorOpen.value = true
   selectedPriceKey.value = 'price:new'
+  resetForm()
 }
 
 function stagePriceForm(row: AdminPriceCatalogEntry): void {
-  editorOpen.value = true
   selectedPriceKey.value = `price:${row.id}`
   form.priceId = row.setInWorkspace ? row.id : null
   form.workspaceId = props.settings.workspaceId
@@ -256,6 +287,27 @@ function submit(): void {
 resetForm()
 
 watch(
+  filteredPriceRows,
+  (rows) => {
+    if (rows.length === 0) {
+      if (searchQuery.value.trim().length > 0) {
+        selectedPriceKey.value = null
+        return
+      }
+      openCreateForm()
+      return
+    }
+    if (selectedPriceKey.value === 'price:new') {
+      return
+    }
+    if (!rows.some((row) => `price:${row.id}` === selectedPriceKey.value)) {
+      stagePriceForm(rows[0])
+    }
+  },
+  { immediate: true },
+)
+
+watch(
   () => props.commitVersion,
   (next, previous) => {
     if (next <= previous || !pendingSubmit.value) {
@@ -268,14 +320,11 @@ watch(
 </script>
 
 <template>
-  <section class="rr-admin-pricing">
-    <div
-      class="rr-admin-pricing__layout"
-      :class="{ 'rr-admin-pricing__layout--editing': editorOpen }"
-    >
-      <aside class="rr-admin-pricing__rail">
-        <header class="rr-admin-pricing__rail-head">
-          <div>
+  <section class="rr-admin-workbench rr-admin-workbench--pricing">
+    <div class="rr-admin-workbench__layout">
+      <aside class="rr-admin-workbench__rail">
+        <header class="rr-admin-workbench__pane-head">
+          <div class="rr-admin-workbench__pane-copy">
             <h3>{{ $t('admin.pricing.catalogPricesTitle') }}</h3>
             <p>{{ $t('admin.pricing.catalogPricesSubtitle') }}</p>
           </div>
@@ -288,47 +337,88 @@ watch(
           </button>
         </header>
 
+        <div class="rr-admin-workbench__context">
+          <div class="rr-admin-workbench__context-chip">
+            <span>{{ $t('shell.workspace') }}</span>
+            <strong>{{ workspaceName }}</strong>
+          </div>
+          <div class="rr-admin-workbench__context-chip">
+            <span>{{ $t('shell.library') }}</span>
+            <strong>{{ libraryName }}</strong>
+          </div>
+        </div>
+
+        <SearchField
+          v-model="searchQuery"
+          :placeholder="$t('admin.pricing.searchPlaceholder')"
+          @clear="searchQuery = ''"
+        />
+
+        <div class="rr-admin-workbench__summary">
+          <article class="rr-admin-workbench__metric">
+            <strong>{{ summary.total }}</strong>
+            <span>{{ $t('admin.pricing.summary.total') }}</span>
+          </article>
+          <article class="rr-admin-workbench__metric">
+            <strong>{{ summary.current }}</strong>
+            <span>{{ $t('admin.pricing.summary.current') }}</span>
+          </article>
+          <article class="rr-admin-workbench__metric">
+            <strong>{{ summary.providers }}</strong>
+            <span>{{ $t('admin.pricing.summary.providers') }}</span>
+          </article>
+        </div>
+
         <p
-          v-if="!editorOpen"
-          class="rr-admin-pricing__intro"
+          v-if="errorMessage"
+          class="rr-admin-workbench__feedback rr-admin-workbench__feedback--error"
         >
-          {{ $t('admin.pricing.editorSubtitle') }}
+          {{ errorMessage }}
         </p>
 
         <div
           v-if="priceGroups.length"
-          class="rr-admin-pricing__group-stack"
+          class="rr-admin-workbench__group-stack"
         >
           <section
             v-for="group in priceGroups"
             :key="group.providerName"
-            class="rr-admin-pricing__group"
+            class="rr-admin-workbench__group"
           >
-            <header class="rr-admin-pricing__group-head">
+            <header class="rr-admin-workbench__group-head">
               <strong>{{ group.providerName }}</strong>
+              <span>{{ group.rows.length }}</span>
             </header>
 
-            <div class="rr-admin-pricing__group-list">
-                <button
+            <div class="rr-admin-workbench__group-list">
+              <button
                 v-for="row in group.rows"
                 :key="row.id"
-                class="rr-admin-pricing__row"
+                class="rr-admin-workbench__row"
                 :class="{
-                  'rr-admin-pricing__row--active': selectedPriceKey === `price:${row.id}`,
-                  'rr-admin-pricing__row--current': row.setInWorkspace,
+                  'rr-admin-workbench__row--active': selectedPriceKey === `price:${row.id}`,
+                  'rr-admin-workbench__row--accent': row.setInWorkspace,
                 }"
                 type="button"
                 @click="stagePriceForm(row)"
               >
-                <span class="rr-admin-pricing__row-title">
-                  {{ row.model?.modelName ?? '—' }}
-                </span>
-                <span class="rr-admin-pricing__row-meta">
+                <div class="rr-admin-workbench__row-head">
+                  <strong>{{ row.model?.modelName ?? '—' }}</strong>
+                  <span
+                    class="rr-status-pill"
+                    :class="row.setInWorkspace ? 'is-success' : 'is-muted'"
+                  >
+                    {{ sourceLabel(row) }}
+                  </span>
+                </div>
+                <span class="rr-admin-workbench__row-subtitle">
                   {{ billingUnitLabel(row.billingUnit) }}
                 </span>
-                <div class="rr-admin-pricing__row-trailing">
+                <div class="rr-admin-workbench__row-meta">
+                  <span>{{ effectivePeriodLabel(row) }}</span>
+                </div>
+                <div class="rr-admin-workbench__row-trailing">
                   <strong>{{ formatPrice(row) }}</strong>
-                  <span>{{ sourceLabel(row) }}</span>
                 </div>
               </button>
             </div>
@@ -336,30 +426,60 @@ watch(
         </div>
 
         <p
-          v-else
-          class="rr-admin-pricing__empty-copy"
+          v-else-if="priceRows.length === 0"
+          class="rr-admin-workbench__state"
         >
           {{ $t('admin.pricing.empty') }}
         </p>
+        <p
+          v-else
+          class="rr-admin-workbench__state"
+        >
+          {{ $t('shared.feedbackState.noResults') }}
+        </p>
       </aside>
 
-      <section
-        v-if="editorOpen"
-        class="rr-admin-pricing__detail"
-      >
-        <div class="rr-admin-pricing__detail-card">
-          <header class="rr-admin-pricing__detail-head">
-            <div>
+      <section class="rr-admin-workbench__detail">
+        <div class="rr-admin-workbench__detail-card">
+          <header class="rr-admin-workbench__detail-head">
+            <div class="rr-admin-workbench__pane-copy">
               <h3>{{ form.priceId ? $t('admin.pricing.editPrice') : $t('admin.pricing.setPrice') }}</h3>
-              <p>{{ $t('admin.pricing.subtitle') }}</p>
+              <p>
+                {{
+                  selectedPrice
+                    ? modelDescriptor(selectedPrice.modelCatalogId)
+                    : $t('admin.pricing.editorSubtitle')
+                }}
+              </p>
             </div>
           </header>
 
-          <p
-            v-if="errorMessage"
-            class="rr-admin-pricing__detail-error"
+          <dl
+            v-if="selectedPrice"
+            class="rr-admin-workbench__detail-grid"
           >
-            {{ errorMessage }}
+            <div>
+              <dt>{{ $t('admin.headers.provider') }}</dt>
+              <dd>{{ selectedPrice.provider?.displayName ?? '—' }}</dd>
+            </div>
+            <div>
+              <dt>{{ $t('admin.headers.billingUnit') }}</dt>
+              <dd>{{ billingUnitLabel(selectedPrice.billingUnit) }}</dd>
+            </div>
+            <div>
+              <dt>{{ $t('admin.headers.price') }}</dt>
+              <dd>{{ formatPrice(selectedPrice) }}</dd>
+            </div>
+            <div>
+              <dt>{{ $t('admin.pricing.scheduleTitle') }}</dt>
+              <dd>{{ effectivePeriodLabel(selectedPrice) }}</dd>
+            </div>
+          </dl>
+          <p
+            v-else
+            class="rr-admin-workbench__feedback rr-admin-workbench__feedback--info"
+          >
+            {{ $t('admin.pricing.newDraftHint') }}
           </p>
 
           <div class="rr-admin-pricing__form-grid">
@@ -424,20 +544,13 @@ watch(
             </label>
           </div>
 
-          <div
-            v-if="selectedPriceKey && selectedPriceKey !== 'price:new'"
-            class="rr-admin-pricing__detail-meta"
-          >
-            <span>{{ effectivePeriodLabel(priceRows.find((row) => `price:${row.id}` === selectedPriceKey)!) }}</span>
-          </div>
-
-          <div class="rr-admin-pricing__actions">
+          <div class="rr-admin-workbench__detail-actions">
             <button
               class="rr-button rr-button--ghost"
               type="button"
               @click="resetForm"
             >
-              {{ $t('dialogs.close') }}
+              {{ $t('admin.pricing.newDraft') }}
             </button>
             <button
               class="rr-button"
@@ -459,173 +572,6 @@ watch(
 </template>
 
 <style scoped>
-.rr-admin-pricing {
-  display: grid;
-}
-
-.rr-admin-pricing__layout {
-  display: grid;
-  gap: 1rem;
-  grid-template-columns: 1fr;
-  min-height: 0;
-}
-
-.rr-admin-pricing__layout--editing {
-  grid-template-columns: minmax(360px, 0.95fr) minmax(0, 1.2fr);
-  min-height: 34rem;
-}
-
-.rr-admin-pricing__rail,
-.rr-admin-pricing__detail {
-  border: 1px solid var(--rr-border-soft);
-  border-radius: 22px;
-  background: rgba(255, 255, 255, 0.72);
-}
-
-.rr-admin-pricing__rail {
-  display: grid;
-  gap: 0.9rem;
-  align-content: start;
-  padding: 1.05rem;
-}
-
-.rr-admin-pricing__rail-head,
-.rr-admin-pricing__detail-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 1rem;
-  align-items: flex-start;
-}
-
-.rr-admin-pricing__rail-head h3,
-.rr-admin-pricing__detail-head h3 {
-  margin: 0;
-  font-size: 1.14rem;
-  color: var(--rr-text-primary);
-}
-
-.rr-admin-pricing__rail-head p,
-.rr-admin-pricing__detail-head p {
-  margin: 0.2rem 0 0;
-  font-size: 0.95rem;
-  line-height: 1.5;
-  color: var(--rr-text-secondary);
-}
-
-.rr-admin-pricing__group-stack {
-  display: grid;
-  gap: 0.85rem;
-}
-
-.rr-admin-pricing__intro {
-  margin: 0;
-  padding: 0.95rem 1rem;
-  border: 1px solid var(--rr-border-muted);
-  border-radius: 16px;
-  background: rgba(248, 250, 252, 0.78);
-  color: var(--rr-text-secondary);
-  font-size: 0.9rem;
-  line-height: 1.5;
-}
-
-.rr-admin-pricing__group {
-  display: grid;
-  gap: 0.45rem;
-}
-
-.rr-admin-pricing__group-head {
-  color: var(--rr-text-secondary);
-  font-size: 0.92rem;
-}
-
-.rr-admin-pricing__group-list {
-  display: grid;
-  gap: 0.45rem;
-}
-
-.rr-admin-pricing__row {
-  width: 100%;
-  border: 1px solid var(--rr-border-muted);
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.78);
-  padding: 0.9rem 1rem;
-  text-align: left;
-  display: grid;
-  gap: 0.28rem;
-  transition:
-    border-color 120ms ease,
-    background-color 120ms ease;
-}
-
-.rr-admin-pricing__row:hover,
-.rr-admin-pricing__row--active {
-  border-color: rgba(56, 87, 255, 0.18);
-  background: rgba(244, 247, 255, 0.96);
-}
-
-.rr-admin-pricing__row--current {
-  border-left: 3px solid rgba(56, 87, 255, 0.35);
-}
-
-.rr-admin-pricing__row-title,
-.rr-admin-pricing__row-trailing strong {
-  color: var(--rr-text-primary);
-  font-weight: 600;
-  font-size: 0.98rem;
-}
-
-.rr-admin-pricing__row-meta,
-.rr-admin-pricing__row-trailing span,
-.rr-admin-pricing__empty-copy,
-.rr-admin-pricing__detail-meta {
-  font-size: 0.92rem;
-  line-height: 1.5;
-  color: var(--rr-text-secondary);
-}
-
-.rr-admin-pricing__row-trailing {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.45rem 0.75rem;
-  align-items: center;
-}
-
-.rr-admin-pricing__detail {
-  padding: 1.05rem;
-}
-
-.rr-admin-pricing__detail-empty,
-.rr-admin-pricing__detail-card {
-  height: 100%;
-  border: 1px solid var(--rr-border-muted);
-  border-radius: 18px;
-  background: rgba(248, 250, 252, 0.72);
-  padding: 1.1rem;
-}
-
-.rr-admin-pricing__detail-empty {
-  display: grid;
-  align-content: center;
-  gap: 0.45rem;
-  text-align: center;
-}
-
-.rr-admin-pricing__detail-empty strong {
-  color: var(--rr-text-primary);
-  font-size: 1rem;
-}
-
-.rr-admin-pricing__detail-empty p {
-  margin: 0;
-  color: var(--rr-text-secondary);
-}
-
-.rr-admin-pricing__detail-card {
-  display: grid;
-  gap: 1.1rem;
-  align-content: start;
-}
-
 .rr-admin-pricing__form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -653,36 +599,21 @@ watch(
   border: 1px solid var(--rr-border-soft);
   border-radius: 14px;
   background: #fff;
-  min-height: 2.65rem;
-  padding: 0.8rem 0.95rem;
-  font-size: 0.95rem;
+  min-height: 2.625rem;
+  padding: 0.65rem 0.95rem;
+  font-size: 0.92rem;
   color: var(--rr-text-primary);
+  transition: border-color 150ms ease, box-shadow 150ms ease;
 }
 
-.rr-admin-pricing__actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 0.75rem;
-}
-
-.rr-admin-pricing__detail-error {
-  margin: 0;
-  padding: 0.75rem 0.85rem;
-  border-radius: 14px;
-  background: rgba(254, 242, 242, 0.92);
-  border: 1px solid rgba(248, 113, 113, 0.22);
-  color: #b91c1c;
-  font-size: 0.9rem;
-  line-height: 1.45;
+.rr-admin-pricing__field input:focus,
+.rr-admin-pricing__field select:focus {
+  border-color: var(--rr-accent);
+  box-shadow: 0 0 0 3px var(--rr-accent-muted);
+  outline: none;
 }
 
 @media (max-width: 1024px) {
-  .rr-admin-pricing__layout {
-    grid-template-columns: 1fr;
-    min-height: 0;
-  }
-
   .rr-admin-pricing__form-grid {
     grid-template-columns: 1fr;
   }

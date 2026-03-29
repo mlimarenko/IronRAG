@@ -171,7 +171,8 @@ pub async fn list_documents_by_library(
             deleted_at
          from content_document
          where library_id = $1
-         order by created_at desc",
+         order by created_at desc
+         limit 1000",
     )
     .bind(library_id)
     .fetch_all(postgres)
@@ -402,6 +403,39 @@ pub async fn get_revision_by_id(
          where id = $1",
     )
     .bind(revision_id)
+    .fetch_optional(postgres)
+    .await
+}
+
+pub async fn update_revision_storage_key(
+    postgres: &PgPool,
+    revision_id: Uuid,
+    storage_key: Option<&str>,
+) -> Result<Option<ContentRevisionRow>, sqlx::Error> {
+    sqlx::query_as::<_, ContentRevisionRow>(
+        "update content_revision
+         set storage_key = $2
+         where id = $1
+         returning
+            id,
+            document_id,
+            workspace_id,
+            library_id,
+            revision_number,
+            parent_revision_id,
+            content_source_kind::text as content_source_kind,
+            checksum,
+            mime_type,
+            byte_size,
+            title,
+            language_code,
+            source_uri,
+            storage_key,
+            created_by_principal_id,
+            created_at",
+    )
+    .bind(revision_id)
+    .bind(storage_key)
     .fetch_optional(postgres)
     .await
 }
@@ -743,6 +777,37 @@ pub async fn get_mutation_by_id(
     )
     .bind(mutation_id)
     .fetch_optional(postgres)
+    .await
+}
+
+pub async fn list_mutations_by_ids(
+    postgres: &PgPool,
+    mutation_ids: &[Uuid],
+) -> Result<Vec<ContentMutationRow>, sqlx::Error> {
+    if mutation_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, ContentMutationRow>(
+        "select
+            id,
+            workspace_id,
+            library_id,
+            operation_kind::text as operation_kind,
+            requested_by_principal_id,
+            request_surface::text as request_surface,
+            idempotency_key,
+            source_identity,
+            mutation_state::text as mutation_state,
+            requested_at,
+            completed_at,
+            failure_code,
+            conflict_code
+         from content_mutation
+         where id = any($1)",
+    )
+    .bind(mutation_ids)
+    .fetch_all(postgres)
     .await
 }
 

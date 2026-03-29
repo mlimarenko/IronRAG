@@ -11,6 +11,7 @@ import type {
   GraphSearchHit,
   GraphStatus,
 } from 'src/models/ui/graph'
+import { resolveDefaultGraphLayoutMode } from 'src/models/ui/graph'
 
 export interface GraphCanvasNodeAttributes {
   label: string
@@ -24,22 +25,33 @@ export interface GraphCanvasNodeAttributes {
   nodeType: GraphNodeType
   supportCount: number
   filteredArtifact: boolean
+  focusRole?: 'focus' | 'neighbor'
 }
 
 export interface GraphCanvasEdgeAttributes {
+  edgeId: string
   label: string
   size: number
   color: string
   supportCount: number
   filteredArtifact: boolean
+  focusEdge?: boolean
 }
 
 export const NODE_BORDER_COLOR = '#ffffff'
 export const EDGE_COLOR = 'rgba(69, 91, 136, 0.7)'
+export const DENSE_EDGE_COLOR = 'rgba(69, 91, 136, 0.58)'
 export const FILTERED_EDGE_COLOR = 'rgba(244, 63, 94, 0.48)'
+export const FOCUS_EDGE_COLOR = 'rgba(29, 78, 216, 0.96)'
+export const FOCUS_NODE_BORDER_COLOR = 'rgba(15, 23, 42, 0.96)'
+export const NEIGHBOR_NODE_BORDER_COLOR = 'rgba(255, 255, 255, 0.96)'
 
-const MAX_FOCUS_NEIGHBORS = 120
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5))
+const LARGE_OVERVIEW_NODE_THRESHOLD = 240
+const MIN_NORMALIZED_LAYOUT_EXTENT = 0.88
+const NORMALIZED_LAYOUT_PADDING = 0.16
+const FOCUS_NEIGHBOR_LABEL_LIMIT = 8
+const DENSE_FOCUS_NEIGHBOR_LABEL_LIMIT = 4
 const OVERVIEW_LABEL_LIMITS: Record<GraphNodeType, number> = {
   document: 4,
   entity: 6,
@@ -70,29 +82,6 @@ export function buildNodeMap(nodes: GraphNode[]): Map<string, GraphNode> {
   return map
 }
 
-export function aggregateGraphEdges(nodes: GraphNode[], edges: GraphEdge[]): GraphEdge[] {
-  const nodeMap = buildNodeMap(nodes)
-  const edgeMap = new Map<string, GraphEdge>()
-
-  for (const edge of edges) {
-    if (edge.source === edge.target) {
-      continue
-    }
-    if (!nodeMap.has(edge.source) || !nodeMap.has(edge.target)) {
-      continue
-    }
-
-    const key =
-      edge.source < edge.target ? `${edge.source}::${edge.target}` : `${edge.target}::${edge.source}`
-    const current = edgeMap.get(key)
-    if (!current || edge.supportCount > current.supportCount) {
-      edgeMap.set(key, edge)
-    }
-  }
-
-  return [...edgeMap.values()]
-}
-
 export function buildDegreeMap(nodes: GraphNode[], edges: GraphEdge[]): Map<string, number> {
   const degreeMap = new Map<string, number>()
   for (const node of nodes) {
@@ -103,42 +92,6 @@ export function buildDegreeMap(nodes: GraphNode[], edges: GraphEdge[]): Map<stri
     degreeMap.set(edge.target, (degreeMap.get(edge.target) ?? 0) + 1)
   }
   return degreeMap
-}
-
-export function filterFocusedNodes(
-  nodes: GraphNode[],
-  edges: GraphEdge[],
-  focusedNodeId: string | null,
-  degreeMap: Map<string, number>,
-): GraphNode[] {
-  if (!focusedNodeId) {
-    return nodes
-  }
-
-  const nodeMap = buildNodeMap(nodes)
-  if (!nodeMap.has(focusedNodeId)) {
-    return nodes
-  }
-
-  const selected = new Set<string>([focusedNodeId])
-  const neighborWeights = new Map<string, number>()
-
-  for (const edge of edges) {
-    if (edge.source === focusedNodeId) {
-      neighborWeights.set(edge.target, Math.max(neighborWeights.get(edge.target) ?? 0, edge.supportCount))
-    } else if (edge.target === focusedNodeId) {
-      neighborWeights.set(edge.source, Math.max(neighborWeights.get(edge.source) ?? 0, edge.supportCount))
-    }
-  }
-
-  const orderedNeighbors = [...neighborWeights.keys()].sort((left, right) => {
-    const leftWeight = (neighborWeights.get(left) ?? 0) * 3 + (degreeMap.get(left) ?? 0)
-    const rightWeight = (neighborWeights.get(right) ?? 0) * 3 + (degreeMap.get(right) ?? 0)
-    return rightWeight - leftWeight
-  })
-
-  orderedNeighbors.slice(0, MAX_FOCUS_NEIGHBORS).forEach((nodeId) => selected.add(nodeId))
-  return nodes.filter((node) => selected.has(node.id))
 }
 
 function nodeColor(nodeType: GraphNodeType): string {
@@ -185,19 +138,10 @@ function sortNodesByWeight(nodes: GraphNode[], degreeMap: Map<string, number>): 
   })
 }
 
-function selectLabelNodeIds(
+function selectOverviewLabelNodeIds(
   nodes: GraphNode[],
   degreeMap: Map<string, number>,
-  focusedNodeId: string | null,
 ): Set<string> {
-  if (focusedNodeId) {
-    const selected = new Set<string>([focusedNodeId])
-    sortNodesByWeight(nodes, degreeMap)
-      .slice(0, 18)
-      .forEach((node) => selected.add(node.id))
-    return selected
-  }
-
   if (nodes.length <= 36) {
     return new Set(nodes.map((node) => node.id))
   }
@@ -226,6 +170,141 @@ function selectLabelNodeIds(
   return selected
 }
 
+interface GraphVisualContext {
+  degreeMap: Map<string, number>
+  compactLabels: boolean
+  denseGraph: boolean
+  labelNodeIds: Set<string>
+  focusedNodeId: string | null
+  focusedNeighborIds: Set<string>
+  focusedEdgeIds: Set<string>
+}
+
+function createGraphVisualContext(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  degreeMap?: Map<string, number>,
+  focusedNodeId: string | null = null,
+): GraphVisualContext {
+  const resolvedDegreeMap = degreeMap ?? buildDegreeMap(nodes, edges)
+  const compactLabels = nodes.length > 72
+  const denseGraph = nodes.length > LARGE_OVERVIEW_NODE_THRESHOLD
+  const focusedNeighborIds = new Set<string>()
+  const focusedEdgeIds = new Set<string>()
+
+  if (focusedNodeId) {
+    for (const edge of edges) {
+      if (edge.source === focusedNodeId) {
+        focusedNeighborIds.add(edge.target)
+        focusedEdgeIds.add(edge.id)
+      } else if (edge.target === focusedNodeId) {
+        focusedNeighborIds.add(edge.source)
+        focusedEdgeIds.add(edge.id)
+      }
+    }
+  }
+
+  const labelNodeIds = focusedNodeId
+    ? new Set<string>([focusedNodeId])
+    : selectOverviewLabelNodeIds(nodes, resolvedDegreeMap)
+
+  if (focusedNodeId && focusedNeighborIds.size > 0) {
+    const neighborLabelLimit = denseGraph
+      ? DENSE_FOCUS_NEIGHBOR_LABEL_LIMIT
+      : FOCUS_NEIGHBOR_LABEL_LIMIT
+    const prioritizedNeighbors = sortNodesByWeight(
+      nodes.filter((node) => focusedNeighborIds.has(node.id)),
+      resolvedDegreeMap,
+    )
+      .slice(0, neighborLabelLimit)
+
+    prioritizedNeighbors.forEach((node) => labelNodeIds.add(node.id))
+  }
+
+  return {
+    degreeMap: resolvedDegreeMap,
+    compactLabels,
+    denseGraph,
+    labelNodeIds,
+    focusedNodeId,
+    focusedNeighborIds,
+    focusedEdgeIds,
+  }
+}
+
+type GraphNodeVisualAttributes = Omit<GraphCanvasNodeAttributes, 'x' | 'y'>
+
+function resolveNodeVisualAttributes(
+  node: GraphNode,
+  context: GraphVisualContext,
+): GraphNodeVisualAttributes {
+  const baseSize = nodeSize(node, context.degreeMap.get(node.id) ?? 0, context.compactLabels)
+  const overviewSize = context.denseGraph ? Math.max(2.4, baseSize * 0.66) : baseSize
+  const color = node.filteredArtifact ? filteredNodeColor(node.nodeType) : nodeColor(node.nodeType)
+  let borderColor = node.filteredArtifact ? 'rgba(244, 63, 94, 0.9)' : NODE_BORDER_COLOR
+  let borderSize = node.filteredArtifact ? 0.32 : context.denseGraph ? 0.1 : 0.18
+  let size = overviewSize
+  let focusRole: GraphCanvasNodeAttributes['focusRole']
+  let forceLabel = context.labelNodeIds.has(node.id)
+
+  if (context.focusedNodeId === node.id) {
+    size = Math.max(size + 8.6, size * 2.04)
+    borderColor = FOCUS_NODE_BORDER_COLOR
+    borderSize = 1.28
+    focusRole = 'focus'
+    forceLabel = true
+  } else if (context.focusedNeighborIds.has(node.id)) {
+    size = Math.max(size + 3.1, size * 1.24)
+    borderColor = NEIGHBOR_NODE_BORDER_COLOR
+    borderSize = 0.52
+    focusRole = 'neighbor'
+  }
+
+  return {
+    label: node.label,
+    size,
+    color,
+    borderColor,
+    borderSize,
+    nodeType: node.nodeType,
+    supportCount: node.supportCount,
+    forceLabel,
+    filteredArtifact: node.filteredArtifact,
+    focusRole,
+  }
+}
+
+function resolveEdgeVisualAttributes(
+  edge: GraphEdge,
+  context: GraphVisualContext,
+): GraphCanvasEdgeAttributes {
+  const baseSize =
+    edge.filteredArtifact
+      ? Math.max(1.1, edgeSize(edge) * 0.72)
+      : context.denseGraph
+        ? Math.max(0.72, edgeSize(edge) * 0.74)
+        : edgeSize(edge)
+  const baseColor =
+    edge.filteredArtifact
+      ? FILTERED_EDGE_COLOR
+      : context.denseGraph
+        ? DENSE_EDGE_COLOR
+        : EDGE_COLOR
+  const focusEdge = context.focusedEdgeIds.has(edge.id)
+  const size = focusEdge ? Math.max(2.4, baseSize * 1.9) : baseSize
+  const color = focusEdge ? FOCUS_EDGE_COLOR : baseColor
+
+  return {
+    edgeId: edge.id,
+    label: labelForRelation(edge),
+    size,
+    color,
+    supportCount: edge.supportCount,
+    filteredArtifact: edge.filteredArtifact,
+    focusEdge,
+  }
+}
+
 function buildAdjacencyMap(nodes: GraphNode[], edges: GraphEdge[]): Map<string, string[]> {
   const adjacency = new Map<string, Set<string>>()
   for (const node of nodes) {
@@ -242,28 +321,83 @@ function buildAdjacencyMap(nodes: GraphNode[], edges: GraphEdge[]): Map<string, 
   )
 }
 
-function assignRadialSet(
+function assignPackedSet(
   graph: MultiUndirectedGraph<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes>,
   nodeIds: string[],
   centerX: number,
   centerY: number,
-  startRadius: number,
+  radiusBase: number,
   radiusStep: number,
-  perRing: number,
   jitterKey: string,
   stretchX = 1,
   stretchY = 1,
+  angleOffset = 0,
 ): void {
   nodeIds.forEach((nodeId, index) => {
-    const ringIndex = Math.floor(index / perRing)
-    const positionInRing = index % perRing
-    const ringCount = Math.min(perRing, nodeIds.length - ringIndex * perRing)
-    const angle = (positionInRing / Math.max(1, ringCount)) * Math.PI * 2
-    const jitter = (hashToUnit(`${nodeId}:${jitterKey}`) - 0.5) * 0.06
-    const radius = startRadius + ringIndex * radiusStep + jitter
+    const localIndex = index + 1
+    const angleJitter = (hashToUnit(`${nodeId}:${jitterKey}:angle`) - 0.5) * 0.72
+    const radiusJitter =
+      (hashToUnit(`${nodeId}:${jitterKey}:radius`) - 0.5) * radiusStep * 0.92
+    const driftX = (hashToUnit(`${nodeId}:${jitterKey}:drift:x`) - 0.5) * radiusStep * 0.96
+    const driftY = (hashToUnit(`${nodeId}:${jitterKey}:drift:y`) - 0.5) * radiusStep * 0.78
+    const radius = radiusBase + Math.sqrt(localIndex) * radiusStep + radiusJitter
+    const angle = localIndex * GOLDEN_ANGLE + angleOffset + angleJitter
     graph.mergeNodeAttributes(nodeId, {
-      x: centerX + Math.cos(angle) * radius * stretchX,
-      y: centerY + Math.sin(angle) * radius * stretchY,
+      x: centerX + Math.cos(angle) * radius * stretchX + driftX,
+      y: centerY + Math.sin(angle) * radius * stretchY + driftY,
+    })
+  })
+}
+
+function resolveDirectionalAngle(
+  origin: { x: number; y: number },
+  reference: { x: number; y: number },
+  fallbackAngle: number,
+): number {
+  const dx = origin.x - reference.x
+  const dy = origin.y - reference.y
+  if (Math.abs(dx) < 0.0001 && Math.abs(dy) < 0.0001) {
+    return fallbackAngle
+  }
+  return Math.atan2(dy, dx)
+}
+
+function assignLeafFanSet(
+  graph: MultiUndirectedGraph<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes>,
+  leafNodeIds: string[],
+  origin: { x: number; y: number },
+  reference: { x: number; y: number },
+  radiusBase: number,
+  radiusStep: number,
+  jitterKey: string,
+  fallbackAngle: number,
+): void {
+  if (leafNodeIds.length === 0) {
+    return
+  }
+
+  const baseAngle = resolveDirectionalAngle(origin, reference, fallbackAngle)
+  const ringCapacity = Math.min(8, Math.max(4, Math.ceil(Math.sqrt(leafNodeIds.length) * 2)))
+  const arcSpread = Math.min(Math.PI * 0.8, 0.42 + ringCapacity * 0.12)
+
+  leafNodeIds.forEach((nodeId, index) => {
+    const ringIndex = Math.floor(index / ringCapacity)
+    const positionInRing = index % ringCapacity
+    const itemsInRing = Math.min(ringCapacity, leafNodeIds.length - ringIndex * ringCapacity)
+    const angleOffset =
+      itemsInRing <= 1
+        ? 0
+        : ((positionInRing / Math.max(1, itemsInRing - 1)) - 0.5) * arcSpread
+    const angleJitter = (hashToUnit(`${nodeId}:${jitterKey}:angle`) - 0.5) * 0.16
+    const radiusJitter = (hashToUnit(`${nodeId}:${jitterKey}:radius`) - 0.5) * radiusStep * 0.28
+    const driftX = (hashToUnit(`${nodeId}:${jitterKey}:drift:x`) - 0.5) * radiusStep * 0.3
+    const driftY = (hashToUnit(`${nodeId}:${jitterKey}:drift:y`) - 0.5) * radiusStep * 0.24
+    const radius = radiusBase + ringIndex * radiusStep + radiusJitter
+    const angle = baseAngle + angleOffset + angleJitter
+
+    graph.mergeNodeAttributes(nodeId, {
+      x: origin.x + Math.cos(angle) * radius * 1.04 + driftX,
+      y: origin.y + Math.sin(angle) * radius * 0.92 + driftY,
     })
   })
 }
@@ -292,7 +426,7 @@ function buildSeededClusterEntries(
 ): [string, GraphNode[]][] {
   const adjacency = buildAdjacencyMap(nodes, edges)
   const ordered = sortNodesByWeight(nodes, degreeMap)
-  const desiredSeedCount = Math.min(8, Math.max(3, Math.round(Math.sqrt(nodes.length) / 3)))
+  const desiredSeedCount = Math.min(28, Math.max(6, Math.round(Math.sqrt(nodes.length) / 1.6)))
   const seeds: string[] = []
 
   for (const node of ordered) {
@@ -373,6 +507,220 @@ function buildSeededClusterEntries(
   )
 }
 
+function resolveClusterAnchorCount(clusterSize: number): number {
+  if (clusterSize <= 18) {
+    return 1
+  }
+  if (clusterSize <= 42) {
+    return 2
+  }
+  if (clusterSize <= 120) {
+    return Math.min(6, Math.max(3, Math.round(Math.sqrt(clusterSize) / 2.5)))
+  }
+  return Math.min(8, Math.max(4, Math.round(Math.sqrt(clusterSize) / 2.18)))
+}
+
+function selectClusterAnchorNodes(
+  orderedCluster: GraphNode[],
+  clusterId: string,
+): GraphNode[] {
+  if (!orderedCluster.length) {
+    return []
+  }
+
+  const desiredAnchorCount = Math.min(
+    resolveClusterAnchorCount(orderedCluster.length),
+    orderedCluster.length,
+  )
+  const seedNode =
+    orderedCluster.find((node) => node.id === clusterId) ?? orderedCluster[0]
+
+  if (desiredAnchorCount === 1) {
+    return [seedNode]
+  }
+
+  const anchorPool = [seedNode, ...orderedCluster.filter((node) => node.id !== seedNode.id)]
+  const selectionWindow = Math.min(anchorPool.length, Math.max(desiredAnchorCount * 6, desiredAnchorCount))
+  const anchors: GraphNode[] = []
+  const selectedIds = new Set<string>()
+
+  for (let index = 0; index < desiredAnchorCount; index += 1) {
+    const poolIndex =
+      index === 0
+        ? 0
+        : Math.min(
+            selectionWindow - 1,
+            Math.round((index * (selectionWindow - 1)) / Math.max(1, desiredAnchorCount - 1)),
+          )
+    const candidate = anchorPool[poolIndex]
+    if (!candidate || selectedIds.has(candidate.id)) {
+      continue
+    }
+    anchors.push(candidate)
+    selectedIds.add(candidate.id)
+  }
+
+  if (anchors.length < desiredAnchorCount) {
+    for (const candidate of anchorPool) {
+      if (selectedIds.has(candidate.id)) {
+        continue
+      }
+      anchors.push(candidate)
+      selectedIds.add(candidate.id)
+      if (anchors.length >= desiredAnchorCount) {
+        break
+      }
+    }
+  }
+
+  return anchors
+}
+
+function resolveClusterAnchorCenters(
+  center: { x: number; y: number },
+  clusterSize: number,
+  anchorCount: number,
+  clusterIndex: number,
+): Array<{ x: number; y: number }> {
+  if (anchorCount <= 1) {
+    return [center]
+  }
+
+  const radius = Math.min(0.92, 0.24 + Math.sqrt(clusterSize) * 0.05)
+  return Array.from({ length: anchorCount }, (_, index) => {
+    const angle = (index / anchorCount) * Math.PI * 2 + clusterIndex * 0.27
+    return {
+      x: center.x + Math.cos(angle) * radius * 1.16,
+      y: center.y + Math.sin(angle) * radius * 0.94,
+    }
+  })
+}
+
+function assignClusterConstellation(
+  graph: MultiUndirectedGraph<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes>,
+  clusterId: string,
+  clusterNodes: GraphNode[],
+  clusterCenter: { x: number; y: number },
+  clusterIndex: number,
+  degreeMap: Map<string, number>,
+  adjacency: Map<string, string[]>,
+): void {
+  const orderedCluster = sortNodesByWeight(clusterNodes, degreeMap)
+  const anchorNodes = selectClusterAnchorNodes(orderedCluster, clusterId)
+  const anchorIds = anchorNodes.map((node) => node.id)
+  const anchorCenters = resolveClusterAnchorCenters(
+    clusterCenter,
+    clusterNodes.length,
+    anchorNodes.length,
+    clusterIndex,
+  )
+
+  anchorNodes.forEach((anchorNode, index) => {
+    const anchorCenter = anchorCenters[index] ?? clusterCenter
+    graph.mergeNodeAttributes(anchorNode.id, {
+      x: anchorCenter.x,
+      y: anchorCenter.y,
+    })
+  })
+
+  const groupedNodeIds = new Map<string, string[]>()
+  anchorIds.forEach((anchorId) => groupedNodeIds.set(anchorId, []))
+  const anchorLoads = new Map<string, number>()
+  anchorIds.forEach((anchorId) => anchorLoads.set(anchorId, 0))
+  const targetAnchorLoad = Math.max(
+    8,
+    Math.ceil(Math.max(0, orderedCluster.length - anchorIds.length) / Math.max(1, anchorIds.length)),
+  )
+
+  orderedCluster
+    .filter((node) => !anchorIds.includes(node.id))
+    .forEach((node) => {
+      const connections = new Set(adjacency.get(node.id) ?? [])
+      const bestAnchorId =
+        anchorIds.reduce<{ anchorId: string; score: number } | null>((best, anchorId, index) => {
+          const directConnectionScore = connections.has(anchorId) ? 2.4 : 0
+          const currentLoad = anchorLoads.get(anchorId) ?? 0
+          const overloadPenalty = currentLoad / targetAnchorLoad
+          const deterministicBias = hashToUnit(`${node.id}:${anchorId}:cluster-anchor`) * 0.08
+          const positionBias = (anchorIds.length - index) * 0.01
+          const score = directConnectionScore - overloadPenalty + deterministicBias + positionBias
+
+          if (!best || score > best.score) {
+            return { anchorId, score }
+          }
+          return best
+        }, null)?.anchorId ?? anchorIds[0]
+
+      groupedNodeIds.get(bestAnchorId)?.push(node.id)
+      anchorLoads.set(bestAnchorId, (anchorLoads.get(bestAnchorId) ?? 0) + 1)
+    })
+
+  const clusterSpreadScale = Math.min(2.3, 1.08 + Math.sqrt(clusterNodes.length) / 13)
+  anchorIds.forEach((anchorId, index) => {
+    const anchorCenter = anchorCenters[index] ?? clusterCenter
+    const groupedIds = groupedNodeIds.get(anchorId) ?? []
+    const leafNodeIds = groupedIds.filter((nodeId) => (degreeMap.get(nodeId) ?? 0) <= 1)
+    const coreNodeIds = groupedIds.filter((nodeId) => (degreeMap.get(nodeId) ?? 0) > 1)
+
+    assignPackedSet(
+      graph,
+      coreNodeIds,
+      anchorCenter.x,
+      anchorCenter.y,
+      anchorIds.length === 1 ? 0.16 * clusterSpreadScale : 0.12 * clusterSpreadScale,
+      anchorIds.length === 1 ? 0.18 * clusterSpreadScale : 0.14 * clusterSpreadScale,
+      `cluster:${anchorId}`,
+      1.28,
+      1.04,
+      clusterIndex * 0.24 + index * 0.37,
+    )
+
+    const parentLeafGroups = new Map<string, string[]>()
+    leafNodeIds.forEach((leafNodeId) => {
+      const neighbors = adjacency.get(leafNodeId) ?? []
+      const preferredParentId =
+        neighbors.find((neighborId) => {
+          if (neighborId === anchorId) {
+            return true
+          }
+          return (degreeMap.get(neighborId) ?? 0) > 1
+        }) ?? anchorId
+      const groupedLeafIds = parentLeafGroups.get(preferredParentId)
+      if (groupedLeafIds) {
+        groupedLeafIds.push(leafNodeId)
+      } else {
+        parentLeafGroups.set(preferredParentId, [leafNodeId])
+      }
+    })
+
+    parentLeafGroups.forEach((leafIds, parentId) => {
+      const fallbackAngle =
+        clusterIndex * 0.24 +
+        index * 0.37 +
+        (hashToUnit(`${parentId}:leaf-fallback`) - 0.5) * 0.62
+      const parentAttributes =
+        graph.hasNode(parentId)
+          ? graph.getNodeAttributes(parentId)
+          : { x: anchorCenter.x, y: anchorCenter.y }
+      const reference =
+        parentId === anchorId
+          ? clusterCenter
+          : { x: anchorCenter.x, y: anchorCenter.y }
+
+      assignLeafFanSet(
+        graph,
+        leafIds,
+        { x: parentAttributes.x, y: parentAttributes.y },
+        reference,
+        0.11 * clusterSpreadScale,
+        0.06 * clusterSpreadScale,
+        `leaf:${parentId}`,
+        fallbackAngle,
+      )
+    })
+  })
+}
+
 function archipelagoCenters(count: number): { x: number; y: number }[] {
   const centers: { x: number; y: number }[] = []
   let placed = 0
@@ -402,33 +750,21 @@ function assignClusterLayout(
   degreeMap: Map<string, number>,
 ): void {
   const clusterEntries = buildSeededClusterEntries(nodes, edges, degreeMap)
-  const centers = clusterCenters(clusterEntries.length, 0.22, 0.5, 1.18, 0.9)
+  const adjacency = buildAdjacencyMap(nodes, edges)
+  const centerRadiusBase = clusterEntries.length > 12 ? 1.24 : 1.12
+  const centerRadiusStep = clusterEntries.length > 12 ? 1.36 : 1.24
+  const centers = clusterCenters(clusterEntries.length, centerRadiusBase, centerRadiusStep, 1.84, 1.32)
 
   clusterEntries.forEach(([clusterId, clusterNodes], index) => {
     const center = centers[index] ?? { x: 0, y: 0 }
-    const orderedCluster = sortNodesByWeight(clusterNodes, degreeMap)
-    const seedIndex = Math.max(
-      0,
-      orderedCluster.findIndex((node) => node.id === clusterId),
-    )
-    const seedNode = orderedCluster[seedIndex] ?? orderedCluster[0]
-    const rest = orderedCluster.filter((node) => node.id !== seedNode.id)
-
-    graph.mergeNodeAttributes(seedNode.id, {
-      x: center.x,
-      y: center.y,
-    })
-    assignRadialSet(
+    assignClusterConstellation(
       graph,
-      rest.map((node) => node.id),
-      center.x,
-      center.y,
-      0.18,
-      0.13,
-      10,
-      'cluster',
-      1.04,
-      0.88,
+      clusterId,
+      clusterNodes,
+      center,
+      index,
+      degreeMap,
+      adjacency,
     )
   })
 }
@@ -456,17 +792,17 @@ function assignIslandLayout(
       x: center.x,
       y: center.y,
     })
-    assignRadialSet(
+    assignPackedSet(
       graph,
       rest.map((node) => node.id),
       center.x,
       center.y,
-      0.12,
-      0.085,
-      12,
+      0.08,
+      0.072,
       'island',
-      0.98,
-      0.84,
+      1,
+      0.88,
+      index * 0.31,
     )
   })
 }
@@ -696,6 +1032,10 @@ export function ensureFinitePositions(
 
 export function normalizeGraphBounds(
   graph: MultiUndirectedGraph<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes>,
+  options?: {
+    minExtent?: number
+    padding?: number
+  },
 ): void {
   let minX = Number.POSITIVE_INFINITY
   let maxX = Number.NEGATIVE_INFINITY
@@ -719,9 +1059,11 @@ export function normalizeGraphBounds(
     return
   }
 
-  const width = Math.max(0.001, maxX - minX)
-  const height = Math.max(0.001, maxY - minY)
-  const scale = 2 / Math.max(width, height)
+  const minExtent = options?.minExtent ?? MIN_NORMALIZED_LAYOUT_EXTENT
+  const padding = options?.padding ?? NORMALIZED_LAYOUT_PADDING
+  const width = Math.max(minExtent, maxX - minX)
+  const height = Math.max(minExtent, maxY - minY)
+  const scale = 2 / Math.max(width + padding, height + padding)
   const centerX = (minX + maxX) / 2
   const centerY = (minY + maxY) / 2
 
@@ -739,27 +1081,32 @@ function applyLayout(
   nodes: GraphNode[],
   edges: GraphEdge[],
   layoutMode: GraphLayoutMode,
+  degreeMap?: Map<string, number>,
 ): void {
-  const degreeMap = buildDegreeMap(nodes, edges)
+  const degrees = degreeMap ?? buildDegreeMap(nodes, edges)
 
   if (layoutMode === 'lanes') {
-    assignLaneLayout(graph, nodes, degreeMap)
+    assignLaneLayout(graph, nodes, degrees)
   } else if (layoutMode === 'circle') {
-    assignCircleLayout(graph, nodes, degreeMap)
+    assignCircleLayout(graph, nodes, degrees)
   } else if (layoutMode === 'clusters') {
-    assignClusterLayout(graph, nodes, edges, degreeMap)
+    assignClusterLayout(graph, nodes, edges, degrees)
   } else if (layoutMode === 'islands') {
-    assignIslandLayout(graph, nodes, edges, degreeMap)
+    assignIslandLayout(graph, nodes, edges, degrees)
   } else if (layoutMode === 'spiral') {
-    assignSpiralLayout(graph, nodes, degreeMap)
+    assignSpiralLayout(graph, nodes, degrees)
   } else if (layoutMode === 'rings') {
-    assignRingLayout(graph, nodes, degreeMap)
+    assignRingLayout(graph, nodes, degrees)
   } else {
-    assignCloudLayout(graph, nodes, degreeMap)
+    assignCloudLayout(graph, nodes, degrees)
   }
 
   ensureFinitePositions(graph)
-  normalizeGraphBounds(graph)
+  const compactSubgraph = nodes.length <= 8
+  normalizeGraphBounds(graph, {
+    minExtent: compactSubgraph ? 0.96 : MIN_NORMALIZED_LAYOUT_EXTENT,
+    padding: compactSubgraph ? 0.18 : NORMALIZED_LAYOUT_PADDING,
+  })
 }
 
 export function createGraphModel(
@@ -767,25 +1114,19 @@ export function createGraphModel(
   edges: GraphEdge[],
   focusedNodeId: string | null,
   layoutMode: GraphLayoutMode,
+  options?: {
+    applyLayout?: boolean
+  },
 ): MultiUndirectedGraph<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes> {
   const graph = new MultiUndirectedGraph<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes>()
-  const degreeMap = buildDegreeMap(nodes, edges)
-  const compactLabels = !focusedNodeId && nodes.length > 72
-  const labelNodeIds = selectLabelNodeIds(nodes, degreeMap, focusedNodeId)
+  const visualContext = createGraphVisualContext(nodes, edges, undefined, focusedNodeId)
 
   for (const node of nodes) {
+    const visualAttributes = resolveNodeVisualAttributes(node, visualContext)
     graph.addNode(node.id, {
-      label: node.label,
       x: 0,
       y: 0,
-      size: nodeSize(node, degreeMap.get(node.id) ?? 0, compactLabels),
-      color: node.filteredArtifact ? filteredNodeColor(node.nodeType) : nodeColor(node.nodeType),
-      borderColor: node.filteredArtifact ? 'rgba(244, 63, 94, 0.9)' : NODE_BORDER_COLOR,
-      borderSize: node.filteredArtifact ? 0.32 : 0.18,
-      nodeType: node.nodeType,
-      supportCount: node.supportCount,
-      forceLabel: labelNodeIds.has(node.id),
-      filteredArtifact: node.filteredArtifact,
+      ...visualAttributes,
     })
   }
 
@@ -793,17 +1134,91 @@ export function createGraphModel(
     if (!graph.hasNode(edge.source) || !graph.hasNode(edge.target)) {
       continue
     }
-    graph.addEdge(edge.source, edge.target, {
-      label: labelForRelation(edge),
-      size: edge.filteredArtifact ? Math.max(1.1, edgeSize(edge) * 0.72) : edgeSize(edge),
-      color: edge.filteredArtifact ? FILTERED_EDGE_COLOR : EDGE_COLOR,
-      supportCount: edge.supportCount,
-      filteredArtifact: edge.filteredArtifact,
-    })
+    graph.addEdge(
+      edge.source,
+      edge.target,
+      resolveEdgeVisualAttributes(edge, visualContext),
+    )
   }
 
-  applyLayout(graph, nodes, edges, layoutMode)
+  if (options?.applyLayout !== false) {
+    applyLayout(graph, nodes, edges, layoutMode, visualContext.degreeMap)
+  }
   return graph
+}
+
+export function applyGraphVisualState(
+  graph: MultiUndirectedGraph<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes>,
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  focusedNodeId: string | null,
+): {
+  nodeIds: string[]
+  edgeKeys: string[]
+} {
+  const degreeMap = buildDegreeMap(nodes, edges)
+  const visualContext = createGraphVisualContext(nodes, edges, degreeMap, focusedNodeId)
+  const nodeMap = buildNodeMap(nodes)
+  const edgeMap = new Map(edges.map((edge) => [edge.id, edge]))
+  const touchedNodeIds = new Set<string>()
+  const touchedEdgeKeys = new Set<string>()
+
+  graph.forEachNode((nodeId, attributes) => {
+    const node = nodeMap.get(nodeId)
+    if (!node) {
+      return
+    }
+
+    const nextVisualAttributes = resolveNodeVisualAttributes(node, visualContext)
+    const focusRoleChanged = attributes.focusRole !== nextVisualAttributes.focusRole
+    const visualChanged =
+      focusRoleChanged ||
+      attributes.size !== nextVisualAttributes.size ||
+      attributes.borderColor !== nextVisualAttributes.borderColor ||
+      attributes.borderSize !== nextVisualAttributes.borderSize ||
+      attributes.forceLabel !== nextVisualAttributes.forceLabel
+
+    if (!visualChanged) {
+      return
+    }
+
+    graph.replaceNodeAttributes(nodeId, {
+      ...attributes,
+      ...nextVisualAttributes,
+      x: attributes.x,
+      y: attributes.y,
+    })
+    touchedNodeIds.add(nodeId)
+  })
+
+  graph.forEachEdge((edgeKey, attributes) => {
+    const edge = edgeMap.get(attributes.edgeId)
+    if (!edge) {
+      return
+    }
+
+    const nextVisualAttributes = resolveEdgeVisualAttributes(edge, visualContext)
+    const focusEdgeChanged = attributes.focusEdge !== nextVisualAttributes.focusEdge
+    const visualChanged =
+      focusEdgeChanged ||
+      attributes.size !== nextVisualAttributes.size ||
+      attributes.color !== nextVisualAttributes.color
+
+    if (!visualChanged) {
+      return
+    }
+
+    graph.replaceEdgeAttributes(edgeKey, {
+      ...attributes,
+      ...nextVisualAttributes,
+    })
+    touchedEdgeKeys.add(edgeKey)
+  })
+
+  return {
+    nodeIds: [...touchedNodeIds],
+    edgeKeys: [...touchedEdgeKeys],
+  }
 }
 
 export function resolveGraphCanvasMode(options: {
@@ -852,7 +1267,8 @@ export function createGraphOverlayState(options: {
     searchQuery: options.searchQuery ?? '',
     searchHits: options.searchHits ?? [],
     nodeTypeFilter: options.nodeTypeFilter ?? '',
-    activeLayout: options.activeLayout ?? 'cloud',
+    activeLayout:
+      options.activeLayout ?? resolveDefaultGraphLayoutMode(options.nodeCount, options.edgeCount),
     showFilteredArtifacts: options.showFilteredArtifacts ?? false,
     filteredArtifactCount: options.filteredArtifactCount,
     nodeCount: options.nodeCount,

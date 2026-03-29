@@ -156,6 +156,7 @@ pub struct ModelCatalogEntryResponse {
     pub model_name: String,
     pub capability_kind: String,
     pub modality_kind: String,
+    pub allowed_binding_purposes: Vec<AiBindingPurpose>,
     pub context_window: Option<i32>,
     pub max_output_tokens: Option<i32>,
 }
@@ -874,6 +875,7 @@ fn map_model(entry: ModelCatalogEntry) -> ModelCatalogEntryResponse {
         model_name: entry.model_name,
         capability_kind: entry.capability_kind,
         modality_kind: entry.modality_kind,
+        allowed_binding_purposes: entry.allowed_binding_purposes,
         context_window: entry.context_window,
         max_output_tokens: entry.max_output_tokens,
     }

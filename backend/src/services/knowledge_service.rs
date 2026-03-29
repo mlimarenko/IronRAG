@@ -15,6 +15,7 @@ pub struct CreateKnowledgeDocumentCommand {
     pub workspace_id: Uuid,
     pub library_id: Uuid,
     pub external_key: String,
+    pub title: Option<String>,
     pub document_state: String,
 }
 
@@ -110,6 +111,7 @@ impl KnowledgeService {
                 workspace_id: command.workspace_id,
                 library_id: command.library_id,
                 external_key: command.external_key,
+                title: command.title,
                 document_state: command.document_state,
                 active_revision_id: None,
                 readable_revision_id: None,
@@ -173,6 +175,16 @@ impl KnowledgeService {
         state: &AppState,
         command: PromoteKnowledgeDocumentCommand,
     ) -> Result<KnowledgeDocument, ApiError> {
+        let title_source_revision_id = command.readable_revision_id.or(command.active_revision_id);
+        let resolved_title = match title_source_revision_id {
+            Some(revision_id) => state
+                .arango_document_store
+                .get_revision(revision_id)
+                .await
+                .map_err(|_| ApiError::Internal)?
+                .and_then(|row| row.title),
+            None => None,
+        };
         let row = state
             .arango_document_store
             .update_document_pointers(
@@ -181,6 +193,7 @@ impl KnowledgeService {
                 command.active_revision_id,
                 command.readable_revision_id,
                 command.latest_revision_no,
+                resolved_title.as_deref(),
                 command.deleted_at,
             )
             .await
@@ -215,6 +228,21 @@ impl KnowledgeService {
                 text_state,
                 text_readable_at.or(current.text_readable_at),
             )
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .ok_or_else(|| ApiError::resource_not_found("knowledge_revision", revision_id))?;
+        Ok(map_revision_row(row))
+    }
+
+    pub async fn set_revision_storage_ref(
+        &self,
+        state: &AppState,
+        revision_id: Uuid,
+        storage_ref: Option<&str>,
+    ) -> Result<KnowledgeRevision, ApiError> {
+        let row = state
+            .arango_document_store
+            .update_revision_storage_ref(revision_id, storage_ref)
             .await
             .map_err(|_| ApiError::Internal)?
             .ok_or_else(|| ApiError::resource_not_found("knowledge_revision", revision_id))?;
@@ -402,6 +430,7 @@ fn map_document_row(
         workspace_id: row.workspace_id,
         library_id: row.library_id,
         external_key: row.external_key,
+        title: row.title,
         document_state: row.document_state,
         active_revision_id: row.active_revision_id,
         readable_revision_id: row.readable_revision_id,

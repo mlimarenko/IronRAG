@@ -97,6 +97,7 @@ export interface AdminModelCatalogEntry {
   modelName: string
   capabilityKind: string
   modalityKind: string
+  allowedBindingPurposes: string[]
   contextWindow: number | null
   maxOutputTokens: number | null
 }
@@ -354,6 +355,17 @@ export interface AdminPriceEditorSurface {
   selectedPriceId: string | null
   priceDraft: AdminDraftState<CreateAdminPricePayload>
 }
+
+export const ADMIN_MCP_CLIENT_IDS = [
+  'codex',
+  'cursor',
+  'claude_code',
+  'claude_desktop',
+  'vscode',
+  'generic',
+] as const
+
+export type AdminMcpClientId = (typeof ADMIN_MCP_CLIENT_IDS)[number]
 
 export type AdminSection = 'access' | 'operations' | 'ai' | 'prices'
 

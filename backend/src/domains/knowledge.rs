@@ -8,6 +8,7 @@ pub struct KnowledgeDocument {
     pub workspace_id: Uuid,
     pub library_id: Uuid,
     pub external_key: String,
+    pub title: Option<String>,
     pub document_state: String,
     pub active_revision_id: Option<Uuid>,
     pub readable_revision_id: Option<Uuid>,

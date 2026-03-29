@@ -61,13 +61,13 @@ function buildStatusChartSummary(
         key: 'processing',
         label: i18n.global.t('dashboard.chart.processing'),
         value: counters.processing + counters.queued,
-        color: 'var(--rr-warning-text)',
+        color: '#eab308',
       },
       {
         key: 'failed',
         label: i18n.global.t('dashboard.chart.failed'),
         value: counters.failed,
-        color: 'var(--rr-danger-text)',
+        color: '#ef4444',
       },
     ],
   }

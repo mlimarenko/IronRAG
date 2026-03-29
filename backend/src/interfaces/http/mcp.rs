@@ -480,7 +480,7 @@ async fn handle_tools_list(
         .filter_map(|name| match name.as_str() {
             "create_workspace" => Some(McpToolDescriptor {
                 name: "create_workspace",
-                description: "Create a workspace when the current token has workspace-admin rights.",
+                description: "Create a workspace when the current token has system-admin rights. Use this for workspace provisioning, not routine document ingestion.",
                 input_schema: json!({
                     "type": "object",
                     "required": ["name"],
@@ -495,85 +495,110 @@ async fn handle_tools_list(
             }),
             "create_library" => Some(McpToolDescriptor {
                 name: "create_library",
-                description: "Create a library inside one authorized workspace when the token can write projects.",
+                description: "Create an empty library inside one authorized workspace. The returned library descriptor includes ingestionReadiness so agents can see immediately whether uploads are blocked by missing AI bindings.",
                 input_schema: json!({
                     "type": "object",
                     "required": ["workspaceId", "name"],
                     "properties": {
-                        "workspaceId": { "type": "string", "format": "uuid" },
+                        "workspaceId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Target workspace UUID from list_workspaces."
+                        },
                         "slug": {
                             "type": "string",
                             "description": "Optional custom slug. If omitted, RustRAG derives a stable slug from the library name."
                         },
-                        "name": { "type": "string" },
-                        "description": { "type": "string" }
+                        "name": {
+                            "type": "string",
+                            "description": "Human-readable library name."
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Optional operator-facing description for the library."
+                        }
                     }
                 }),
             }),
             "list_workspaces" => Some(McpToolDescriptor {
                 name: "list_workspaces",
-                description: "List workspaces visible to the current bearer token.",
+                description: "List workspaces visible to the current bearer token. Call this first when the agent does not yet know which RustRAG workspace should be searched or modified.",
                 input_schema: json!({ "type": "object", "properties": {} }),
             }),
             "list_libraries" => Some(McpToolDescriptor {
                 name: "list_libraries",
-                description: "List visible libraries, optionally filtered to one visible workspace.",
+                description: "List visible libraries, optionally filtered to one visible workspace. Each library descriptor includes ingestionReadiness so agents can detect missing upload prerequisites before calling upload_documents.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "workspaceId": {
                             "type": "string",
                             "format": "uuid",
-                            "description": "Workspace UUID. Also accepts snake_case alias workspace_id."
+                            "description": "Optional workspace UUID from list_workspaces. Also accepts snake_case alias workspace_id."
                         }
                     }
                 }),
             }),
             "search_documents" => Some(McpToolDescriptor {
                 name: "search_documents",
-                description: "Search authorized library memory and return document-level hits.",
+                description: "Search authorized library memory and return document-level candidates. Agents should usually follow relevant hits with read_document in full mode before answering.",
                 input_schema: json!({
                     "type": "object",
                     "required": ["query"],
                     "properties": {
-                        "query": { "type": "string" },
+                        "query": {
+                            "type": "string",
+                            "description": "Natural-language question or keyword query to match against RustRAG memory."
+                        },
                         "libraryIds": {
                             "type": "array",
                             "items": { "type": "string", "format": "uuid" },
-                            "description": "Optional library UUID filter. Also accepts snake_case alias library_ids, or singular library_id for one library."
+                            "description": "Optional library UUID filter. Narrowing to the most likely library reduces noise. Also accepts snake_case alias library_ids, or singular library_id for one library."
                         },
-                        "limit": { "type": "integer", "minimum": 1 }
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Optional hit limit. Small values such as 3-10 keep the candidate set focused."
+                        }
                     }
                 }),
             }),
             "read_document" => Some(McpToolDescriptor {
                 name: "read_document",
-                description: "Read a full document or a wide excerpt using continuation tokens for large text.",
+                description: "Read one document in full or as an excerpt. Use this after search_documents or when you already know the documentId; full mode is the safe default for fact extraction.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "documentId": {
                             "type": "string",
                             "format": "uuid",
-                            "description": "Document UUID. Also accepts snake_case alias document_id."
+                            "description": "Document UUID from search_documents, upload_documents, or another trusted source. Also accepts snake_case alias document_id."
                         },
-                        "mode": { "type": "string", "enum": ["full", "excerpt"] },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["full", "excerpt"],
+                            "description": "Prefer full for grounded answers; excerpt is useful for incremental reads."
+                        },
                         "startOffset": {
                             "type": "integer",
                             "minimum": 0,
                             "description": "Start character offset. Also accepts snake_case alias start_offset."
                         },
-                        "length": { "type": "integer", "minimum": 1 },
+                        "length": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Optional character count for excerpt reads."
+                        },
                         "continuationToken": {
                             "type": "string",
-                            "description": "Opaque token returned by a previous read. Also accepts snake_case alias continuation_token."
+                            "description": "Opaque token returned by a previous read when hasMore is true. Also accepts snake_case alias continuation_token."
                         }
                     }
                 }),
             }),
             "upload_documents" => Some(McpToolDescriptor {
                 name: "upload_documents",
-                description: "Upload one or more new documents into an authorized library and return mutation receipts.",
+                description: "Create one or more new logical documents in an authorized library. Use body for short agent-authored text and contentBase64 for files; always poll get_mutation_status before treating ingestion as complete.",
                 input_schema: json!({
                     "type": "object",
                     "required": ["libraryId", "documents"],
@@ -581,7 +606,7 @@ async fn handle_tools_list(
                         "libraryId": {
                             "type": "string",
                             "format": "uuid",
-                            "description": "Target library UUID. Also accepts snake_case alias library_id."
+                            "description": "Target library UUID from list_libraries or create_library. Also accepts snake_case alias library_id."
                         },
                         "idempotencyKey": {
                             "type": "string",
@@ -607,7 +632,7 @@ async fn handle_tools_list(
                                     },
                                     "body": {
                                         "type": "string",
-                                        "description": "Inline text body for agent-authored notes and snippets."
+                                        "description": "Inline UTF-8 text body for agent-authored notes and snippets. Target libraries still need the required active AI bindings for extraction and search."
                                     },
                                     "sourceType": {
                                         "type": "string",
@@ -621,7 +646,10 @@ async fn handle_tools_list(
                                         "type": "string",
                                         "description": "Optional MIME type. Also accepts snake_case alias mime_type."
                                     },
-                                    "title": { "type": "string" }
+                                    "title": {
+                                        "type": "string",
+                                        "description": "Optional display title shown in search and read responses."
+                                    }
                                 }
                             }
                         }
@@ -630,7 +658,7 @@ async fn handle_tools_list(
             }),
             "update_document" => Some(McpToolDescriptor {
                 name: "update_document",
-                description: "Append to or replace one logical document while preserving mutation receipts and idempotency.",
+                description: "Append to or replace one logical document while preserving document identity. The call returns mutation receipts; poll get_mutation_status until a terminal state before depending on the new revision.",
                 input_schema: json!({
                     "type": "object",
                     "required": ["libraryId", "documentId", "operationKind"],
@@ -648,12 +676,12 @@ async fn handle_tools_list(
                         "libraryId": {
                             "type": "string",
                             "format": "uuid",
-                            "description": "Target library UUID. Also accepts snake_case alias library_id."
+                            "description": "Library UUID that owns the target document. Also accepts snake_case alias library_id."
                         },
                         "documentId": {
                             "type": "string",
                             "format": "uuid",
-                            "description": "Target document UUID. Also accepts snake_case alias document_id."
+                            "description": "Target document UUID from search_documents, read_document, or a prior mutation receipt. Also accepts snake_case alias document_id."
                         },
                         "operationKind": {
                             "type": "string",
@@ -666,15 +694,15 @@ async fn handle_tools_list(
                         },
                         "appendedText": {
                             "type": "string",
-                            "description": "Required for append. Also accepts snake_case alias appended_text."
+                            "description": "Required for append operations. Good for small incremental notes. Also accepts snake_case alias appended_text."
                         },
                         "replacementFileName": {
                             "type": "string",
-                            "description": "Required for replace. Also accepts snake_case alias replacement_file_name."
+                            "description": "Required for replace operations. Also accepts snake_case alias replacement_file_name."
                         },
                         "replacementContentBase64": {
                             "type": "string",
-                            "description": "Required for replace. Also accepts snake_case alias replacement_content_base64."
+                            "description": "Required for replace operations. Also accepts snake_case alias replacement_content_base64."
                         },
                         "replacementMimeType": {
                             "type": "string",
@@ -685,7 +713,7 @@ async fn handle_tools_list(
             }),
             "get_mutation_status" => Some(McpToolDescriptor {
                 name: "get_mutation_status",
-                description: "Read the current backend-visible lifecycle state for a previously accepted MCP mutation receipt.",
+                description: "Check the lifecycle of a previously accepted upload_documents or update_document receipt. Use this to confirm backend completion; read/search visibility can arrive slightly before or after the terminal receipt state.",
                 input_schema: json!({
                     "type": "object",
                     "required": ["receiptId"],

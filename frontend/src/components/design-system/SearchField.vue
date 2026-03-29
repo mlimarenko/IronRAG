@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
+
 defineProps<{
   modelValue: string
   placeholder?: string
@@ -9,6 +11,8 @@ const emit = defineEmits<{
   (event: 'update:modelValue', value: string): void
   (event: 'clear'): void
 }>()
+
+const { t } = useI18n()
 </script>
 
 <template>
@@ -26,6 +30,7 @@ const emit = defineEmits<{
       v-if="modelValue"
       type="button"
       class="rr-button rr-button--subtle rr-search-field__clear"
+      :aria-label="t('search.clear', 'Clear search')"
       @click="emit('clear')"
     >
       ×

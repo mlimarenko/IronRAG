@@ -13,13 +13,13 @@ const routes = [
         path: '',
         name: 'home',
         component: () => import('src/pages/DashboardPage.vue'),
-        meta: { title: 'Home', widthMode: 'default' },
+        meta: { title: 'Home', widthMode: 'wide' },
       },
       {
         path: 'documents',
         name: 'documents',
         component: () => import('src/pages/DocumentsPage.vue'),
-        meta: { title: 'Documents', widthMode: 'wide' },
+        meta: { title: 'Documents', widthMode: 'full' },
       },
       {
         path: 'graph',
@@ -31,7 +31,7 @@ const routes = [
         path: 'admin',
         name: 'admin',
         component: () => import('src/pages/AdminPage.vue'),
-        meta: { title: 'Admin', widthMode: 'default', requiresAdmin: true },
+        meta: { title: 'Admin', widthMode: 'full', requiresAdmin: true },
       },
       {
         path: 'swagger',
@@ -43,7 +43,8 @@ const routes = [
   },
   {
     path: '/:pathMatch(.*)*',
-    redirect: '/',
+    name: 'not-found',
+    component: () => import('src/pages/NotFoundPage.vue'),
   },
 ]
 

@@ -1,5 +1,12 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+import {
+  buildDocumentUploadAcceptString,
+  formatAcceptedDocumentFormats,
+  isAcceptedDocumentUpload,
+} from 'src/models/ui/documentFormats'
+import DocumentActionDialog from './DocumentActionDialog.vue'
 
 const props = defineProps<{
   open: boolean
@@ -14,11 +21,12 @@ const emit = defineEmits<{
   submit: [file: File]
 }>()
 
+const { t } = useI18n()
 const selectedFile = ref<File | null>(null)
 const touched = ref(false)
-
-const acceptedFileTypes = computed(() =>
-  props.acceptedFormats.map((format) => format.toLowerCase()),
+const acceptString = computed(() => buildDocumentUploadAcceptString(props.acceptedFormats))
+const acceptedFormatsLabel = computed(() =>
+  formatAcceptedDocumentFormats(props.acceptedFormats, (format) => t(`documents.fileFormats.${format}`)),
 )
 
 const validationError = computed(() => {
@@ -29,12 +37,7 @@ const validationError = computed(() => {
     return 'required'
   }
 
-  const fileExtension = selectedFile.value.name.split('.').pop()?.toLowerCase()
-  if (
-    acceptedFileTypes.value.length > 0 &&
-    fileExtension &&
-    !acceptedFileTypes.value.includes(fileExtension)
-  ) {
+  if (!isAcceptedDocumentUpload(selectedFile.value, props.acceptedFormats)) {
     return 'type'
   }
 
@@ -68,27 +71,29 @@ function submit(): void {
 </script>
 
 <template>
-  <div
-    v-if="props.open"
-    class="rr-dialog-backdrop"
-    @click.self="emit('close')"
+  <DocumentActionDialog
+    :open="props.open"
+    :title="$t('documents.dialogs.replace.title')"
+    :subtitle="$t('documents.dialogs.replace.subtitle', { name: props.documentName ?? '—' })"
+    :submit-label="$t('documents.actions.replace')"
+    :submit-disabled="Boolean(validationError)"
+    :loading="props.loading"
+    @close="emit('close')"
+    @submit="submit"
   >
-    <div class="rr-dialog rr-document-dialog">
-      <h3>{{ $t('documents.dialogs.replace.title') }}</h3>
-      <p>{{ $t('documents.dialogs.replace.subtitle', { name: props.documentName ?? '—' }) }}</p>
+    <div class="rr-field">
+      <label for="replace-document-file">{{ $t('documents.dialogs.replace.fileLabel') }}</label>
+      <input
+        id="replace-document-file"
+        type="file"
+        :accept="acceptString"
+        @change="onFileChange"
+      >
+    </div>
 
-      <div class="rr-field">
-        <label for="replace-document-file">{{ $t('documents.dialogs.replace.fileLabel') }}</label>
-        <input
-          id="replace-document-file"
-          type="file"
-          :accept="props.acceptedFormats.map((format) => `.${format}`).join(',')"
-          @change="onFileChange"
-        >
-      </div>
-
+    <template #feedback>
       <p class="rr-document-dialog__hint">
-        {{ $t('documents.dialogs.replace.acceptedFormats', { formats: props.acceptedFormats.join(', ') || '—' }) }}
+        {{ $t('documents.dialogs.replace.acceptedFormats', { formats: acceptedFormatsLabel }) }}
       </p>
       <p
         v-if="selectedFile"
@@ -114,24 +119,6 @@ function submit(): void {
       >
         {{ props.error }}
       </p>
-
-      <div class="rr-dialog__actions">
-        <button
-          class="rr-button rr-button--ghost"
-          type="button"
-          @click="emit('close')"
-        >
-          {{ $t('dialogs.cancel') }}
-        </button>
-        <button
-          class="rr-button"
-          type="button"
-          :disabled="props.loading"
-          @click="submit"
-        >
-          {{ props.loading ? $t('documents.dialogs.submitting') : $t('documents.actions.replace') }}
-        </button>
-      </div>
-    </div>
-  </div>
+    </template>
+  </DocumentActionDialog>
 </template>

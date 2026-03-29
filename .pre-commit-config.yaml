@@ -1,4 +1,23 @@
 repos:
+  # General file checks (latest version: v6.0.0)
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-merge-conflict
+      - id: debug-statements
+      - id: check-case-conflict
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+      - id: check-toml
+      - id: check-xml
+      - id: detect-private-key
+      - id: forbid-new-submodules
   - repo: local
     hooks:
       - id: backend-fmt

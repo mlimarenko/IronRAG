@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { storeToRefs } from 'pinia'
+import type { LibraryOption, WorkspaceOption } from 'src/models/ui/shell'
 import router from 'src/router'
 import { useSessionStore } from 'src/stores/session'
 import { useShellStore } from 'src/stores/shell'
@@ -20,6 +21,14 @@ const {
   libraries,
   workspaces,
 } = storeToRefs(shellStore)
+
+function onDeleteWorkspace(option: WorkspaceOption | LibraryOption) {
+  shellStore.requestDeleteWorkspace(option as WorkspaceOption)
+}
+
+function onDeleteLibrary(option: WorkspaceOption | LibraryOption) {
+  shellStore.requestDeleteLibrary(option as LibraryOption)
+}
 
 async function logout() {
   await sessionStore.logout()
@@ -42,6 +51,7 @@ async function logout() {
       >
         <div class="rr-shellbar__context">
           <ContextSelector
+            class="rr-shellbar__selector rr-shellbar__selector--workspace"
             :label="$t('shell.workspace')"
             :selected-id="activeWorkspace?.id ?? ''"
             :options="workspaces"
@@ -50,11 +60,14 @@ async function logout() {
             :placeholder="$t('shell.noWorkspaces')"
             :can-create="canCreateWorkspace"
             :create-label="$t('shell.createWorkspace')"
+            :can-delete="canCreateWorkspace"
             @change="shellStore.switchWorkspace"
             @create="shellStore.showCreateWorkspace = true"
+            @delete="onDeleteWorkspace"
           />
           <ContextSelector
             v-if="activeWorkspace || libraries.length || canCreateLibrary"
+            class="rr-shellbar__selector rr-shellbar__selector--library"
             :label="$t('shell.library')"
             :selected-id="activeLibrary?.id ?? ''"
             :options="libraries"
@@ -63,8 +76,10 @@ async function logout() {
             :placeholder="activeWorkspace ? $t('shell.noLibraries') : $t('shell.selectWorkspaceFirst')"
             :can-create="canCreateLibrary"
             :create-label="$t('shell.createLibrary')"
+            :can-delete="canCreateLibrary"
             @change="shellStore.switchLibrary"
             @create="shellStore.showCreateLibrary = true"
+            @delete="onDeleteLibrary"
           />
         </div>
 
@@ -85,34 +100,4 @@ async function logout() {
   </header>
 </template>
 
-<style scoped lang="scss">
-.rr-shellbar {
-  border-bottom: 1px solid rgba(226, 232, 240, 0.9);
-}
-
-.rr-shellbar__frame {
-  width: min(1760px, calc(100% - 8px));
-}
-
-.rr-shellbar__nav {
-  gap: 14px;
-}
-
-.rr-shellbar :deep(.rr-nav-tabs) {
-  padding: 4px;
-  border: 1px solid rgba(203, 213, 225, 0.88);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.88);
-}
-
-.rr-shellbar :deep(.rr-nav-tabs__link) {
-  min-height: 34px;
-  padding: 0 12px;
-  border-radius: 999px;
-  font-size: 12px;
-}
-
-.rr-shellbar :deep(.rr-nav-tabs__link.is-active) {
-  box-shadow: 0 6px 14px rgba(15, 23, 42, 0.08);
-}
-</style>
+<!-- styles consolidated in app.scss -->

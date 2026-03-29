@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::ai::AiBindingPurpose,
+    domains::{ai::AiBindingPurpose, catalog::CatalogLibraryIngestionReadiness},
     infra::repositories::catalog_repository::{self, CatalogLibraryRow, CatalogWorkspaceRow},
     integrations::llm::EmbeddingRequest,
     interfaces::http::{
@@ -18,9 +18,10 @@ use crate::{
     },
     mcp_types::{
         McpChunkReference, McpCreateLibraryRequest, McpCreateWorkspaceRequest, McpDocumentHit,
-        McpEntityReference, McpEvidenceReference, McpLibraryDescriptor, McpReadDocumentRequest,
-        McpReadDocumentResponse, McpReadabilityState, McpRelationReference,
-        McpSearchDocumentsRequest, McpSearchDocumentsResponse, McpWorkspaceDescriptor,
+        McpEntityReference, McpEvidenceReference, McpLibraryDescriptor,
+        McpLibraryIngestionReadiness, McpReadDocumentRequest, McpReadDocumentResponse,
+        McpReadabilityState, McpRelationReference, McpSearchDocumentsRequest,
+        McpSearchDocumentsResponse, McpWorkspaceDescriptor,
     },
     services::mcp_support::{
         char_slice, encode_continuation_token, normalize_read_request, preview_hit, saturating_rank,
@@ -483,7 +484,9 @@ pub async fn create_library(
         .await
         .map_err(|_| ApiError::Internal)?
         .ok_or_else(|| ApiError::resource_not_found("library", library.id))?;
-    let context = describe_library(auth, state, row).await?;
+    let readiness =
+        state.canonical_services.catalog.get_library_ingestion_readiness(state, row.id).await?;
+    let context = describe_library(auth, state, row, readiness).await?;
     Ok(context.descriptor)
 }
 
@@ -705,7 +708,7 @@ pub(crate) async fn resolve_search_libraries(
                 "libraryIds must not be empty when provided",
             ));
         }
-        let mut items = Vec::with_capacity(library_ids.len());
+        let mut rows = Vec::with_capacity(library_ids.len());
         for library_id in library_ids {
             let library = crate::interfaces::http::authorization::load_library_and_authorize(
                 auth,
@@ -714,9 +717,9 @@ pub(crate) async fn resolve_search_libraries(
                 POLICY_MCP_MEMORY_READ,
             )
             .await?;
-            items.push(describe_library(auth, state, library).await?);
+            rows.push(library);
         }
-        return Ok(items);
+        return describe_libraries(auth, state, rows).await;
     }
 
     let libraries = load_visible_library_contexts(auth, state, None).await?;
@@ -767,17 +770,45 @@ pub(crate) async fn load_visible_library_contexts(
                 .map_err(|_| ApiError::Internal)?;
         for library in rows {
             if authorize_library_discovery(auth, workspace_id, library.id).is_ok() {
-                libraries.push(describe_library(auth, state, library).await?);
+                libraries.push(library);
             }
         }
     }
-    Ok(libraries)
+    describe_libraries(auth, state, libraries).await
+}
+
+async fn describe_libraries(
+    auth: &AuthContext,
+    state: &AppState,
+    libraries: Vec<CatalogLibraryRow>,
+) -> Result<Vec<VisibleLibraryContext>, ApiError> {
+    let readiness_by_library = state
+        .canonical_services
+        .catalog
+        .list_library_ingestion_readiness(
+            state,
+            &libraries.iter().map(|library| library.id).collect::<Vec<_>>(),
+        )
+        .await?;
+
+    let mut items = Vec::with_capacity(libraries.len());
+    for library in libraries {
+        let readiness = readiness_by_library.get(&library.id).cloned().unwrap_or(
+            CatalogLibraryIngestionReadiness {
+                ready: false,
+                missing_binding_purposes: vec![AiBindingPurpose::ExtractGraph],
+            },
+        );
+        items.push(describe_library(auth, state, library, readiness).await?);
+    }
+    Ok(items)
 }
 
 pub(crate) async fn describe_library(
     auth: &AuthContext,
     state: &AppState,
     library: CatalogLibraryRow,
+    ingestion_readiness: CatalogLibraryIngestionReadiness,
 ) -> Result<VisibleLibraryContext, ApiError> {
     let supports_search =
         auth.has_library_permission(library.workspace_id, library.id, POLICY_MCP_MEMORY_READ);
@@ -818,6 +849,7 @@ pub(crate) async fn describe_library(
         slug: library.slug.clone(),
         name: library.display_name.trim().to_string(),
         description: library.description.clone(),
+        ingestion_readiness: map_ingestion_readiness(ingestion_readiness),
         document_count,
         readable_document_count,
         processing_document_count,
@@ -833,6 +865,15 @@ pub(crate) async fn describe_library(
         supports_write,
     };
     Ok(VisibleLibraryContext { library, descriptor })
+}
+
+fn map_ingestion_readiness(
+    readiness: CatalogLibraryIngestionReadiness,
+) -> McpLibraryIngestionReadiness {
+    McpLibraryIngestionReadiness {
+        ready: readiness.ready,
+        missing_binding_purposes: readiness.missing_binding_purposes,
+    }
 }
 
 pub(crate) async fn resolve_search_embedding_context(

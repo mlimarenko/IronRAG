@@ -85,6 +85,12 @@ pub struct AiLibraryModelBindingRow {
 }
 
 #[derive(Debug, Clone, FromRow)]
+pub struct ActiveLibraryBindingPurposeRow {
+    pub library_id: Uuid,
+    pub binding_purpose: String,
+}
+
+#[derive(Debug, Clone, FromRow)]
 pub struct AiBindingValidationRow {
     pub id: Uuid,
     pub binding_id: Uuid,
@@ -812,6 +818,27 @@ pub async fn list_library_bindings(
          order by created_at desc",
     )
     .bind(library_id)
+    .fetch_all(postgres)
+    .await
+}
+
+pub async fn list_active_binding_purposes_for_libraries(
+    postgres: &PgPool,
+    library_ids: &[Uuid],
+) -> Result<Vec<ActiveLibraryBindingPurposeRow>, sqlx::Error> {
+    if library_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, ActiveLibraryBindingPurposeRow>(
+        "select
+            library_id,
+            binding_purpose::text as binding_purpose
+         from ai_library_model_binding
+         where library_id = any($1)
+           and binding_state = 'active'",
+    )
+    .bind(library_ids)
     .fetch_all(postgres)
     .await
 }

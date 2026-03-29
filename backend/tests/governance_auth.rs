@@ -744,6 +744,11 @@ async fn workspace_scoped_discovery_only_returns_visible_workspace_and_libraries
         assert_eq!(libraries.len(), 1);
         assert_eq!(libraries[0]["id"], json!(fixture.library_id));
         assert_eq!(libraries[0]["workspaceId"], json!(fixture.workspace_id));
+        assert_eq!(libraries[0]["ingestionReadiness"]["ready"], json!(false));
+        assert_eq!(
+            libraries[0]["ingestionReadiness"]["missingBindingPurposes"],
+            json!(["extract_graph"])
+        );
 
         Ok(())
     }

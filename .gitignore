@@ -18,6 +18,9 @@ coverage
 playwright-report
 test-results
 frontend/.quasar/
+frontend/.tmp-*.mjs
+frontend/public/figma-mockups/
+tmp-*
 
 # IDE
 .vscode

@@ -136,7 +136,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="rr-page-surface rr-page-surface--wide rr-swagger-page">
+  <section class="rr-swagger-page">
     <header class="rr-page-card rr-swagger-page__hero">
       <div class="rr-swagger-page__hero-copy">
         <p class="rr-swagger-page__eyebrow">Swagger</p>

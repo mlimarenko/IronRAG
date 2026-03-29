@@ -1,16 +1,23 @@
+use std::collections::{HashMap, HashSet};
+
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
+    domains::ai::AiBindingPurpose,
     domains::catalog::{
-        CatalogLibrary, CatalogLibraryConnector, CatalogLifecycleState, CatalogWorkspace,
+        CatalogLibrary, CatalogLibraryConnector, CatalogLibraryIngestionReadiness,
+        CatalogLifecycleState, CatalogWorkspace,
     },
-    infra::repositories::catalog_repository,
+    infra::repositories::{ai_repository, catalog_repository},
     interfaces::http::router_support::{
         ApiError, map_library_create_error, map_workspace_create_error,
     },
     shared::slugs::slugify,
 };
+
+const INGEST_REQUIRED_BINDINGS: &[(AiBindingPurpose, &str)] =
+    &[(AiBindingPurpose::ExtractGraph, "extract_graph")];
 
 #[derive(Debug, Clone)]
 pub struct CreateWorkspaceCommand {
@@ -150,7 +157,25 @@ impl CatalogService {
             catalog_repository::list_libraries(&state.persistence.postgres, Some(workspace_id))
                 .await
                 .map_err(|_| ApiError::Internal)?;
-        Ok(rows.into_iter().map(map_library_row).collect::<Result<Vec<_>, _>>()?)
+        let readiness_by_library = self
+            .list_library_ingestion_readiness(
+                state,
+                &rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let library_id = row.id;
+                map_library_row(
+                    row,
+                    readiness_by_library
+                        .get(&library_id)
+                        .cloned()
+                        .unwrap_or_else(default_ingestion_readiness),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?)
     }
 
     pub async fn get_library(
@@ -162,7 +187,8 @@ impl CatalogService {
             .await
             .map_err(|_| ApiError::Internal)?
             .ok_or_else(|| ApiError::resource_not_found("library", library_id))?;
-        Ok(map_library_row(row)?)
+        let readiness = self.get_library_ingestion_readiness(state, row.id).await?;
+        Ok(map_library_row(row, readiness)?)
     }
 
     pub async fn create_library(
@@ -183,7 +209,18 @@ impl CatalogService {
         )
         .await
         .map_err(|error| map_library_create_error(error, command.workspace_id, &slug))?;
-        Ok(map_library_row(row)?)
+        state
+            .canonical_services
+            .ai_catalog
+            .ensure_library_runtime_profile(
+                state,
+                command.workspace_id,
+                row.id,
+                command.created_by_principal_id,
+            )
+            .await?;
+        let readiness = self.get_library_ingestion_readiness(state, row.id).await?;
+        Ok(map_library_row(row, readiness)?)
     }
 
     pub async fn update_library(
@@ -205,7 +242,63 @@ impl CatalogService {
         .await
         .map_err(|_| ApiError::Internal)?
         .ok_or_else(|| ApiError::resource_not_found("library", command.library_id))?;
-        Ok(map_library_row(row)?)
+        let readiness = self.get_library_ingestion_readiness(state, row.id).await?;
+        Ok(map_library_row(row, readiness)?)
+    }
+
+    pub async fn get_library_ingestion_readiness(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+    ) -> Result<CatalogLibraryIngestionReadiness, ApiError> {
+        Ok(self
+            .list_library_ingestion_readiness(state, &[library_id])
+            .await?
+            .remove(&library_id)
+            .unwrap_or_else(default_ingestion_readiness))
+    }
+
+    pub async fn list_library_ingestion_readiness(
+        &self,
+        state: &AppState,
+        library_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, CatalogLibraryIngestionReadiness>, ApiError> {
+        if library_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let rows = ai_repository::list_active_binding_purposes_for_libraries(
+            &state.persistence.postgres,
+            library_ids,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?;
+
+        let mut purposes_by_library = HashMap::<Uuid, HashSet<String>>::new();
+        for row in rows {
+            purposes_by_library.entry(row.library_id).or_default().insert(row.binding_purpose);
+        }
+
+        let mut readiness = HashMap::with_capacity(library_ids.len());
+        for library_id in library_ids {
+            let present = purposes_by_library.get(library_id);
+            let missing_binding_purposes = INGEST_REQUIRED_BINDINGS
+                .iter()
+                .filter_map(|(purpose, key)| {
+                    let has_binding = present.is_some_and(|bindings| bindings.contains(*key));
+                    (!has_binding).then_some(*purpose)
+                })
+                .collect::<Vec<_>>();
+            readiness.insert(
+                *library_id,
+                CatalogLibraryIngestionReadiness {
+                    ready: missing_binding_purposes.is_empty(),
+                    missing_binding_purposes,
+                },
+            );
+        }
+
+        Ok(readiness)
     }
 
     pub async fn list_connectors(
@@ -327,7 +420,20 @@ fn map_workspace_row(
     })
 }
 
-fn map_library_row(row: catalog_repository::CatalogLibraryRow) -> Result<CatalogLibrary, ApiError> {
+fn default_ingestion_readiness() -> CatalogLibraryIngestionReadiness {
+    CatalogLibraryIngestionReadiness {
+        ready: false,
+        missing_binding_purposes: INGEST_REQUIRED_BINDINGS
+            .iter()
+            .map(|(purpose, _)| *purpose)
+            .collect(),
+    }
+}
+
+fn map_library_row(
+    row: catalog_repository::CatalogLibraryRow,
+    ingestion_readiness: CatalogLibraryIngestionReadiness,
+) -> Result<CatalogLibrary, ApiError> {
     Ok(CatalogLibrary {
         id: row.id,
         workspace_id: row.workspace_id,
@@ -335,6 +441,7 @@ fn map_library_row(row: catalog_repository::CatalogLibraryRow) -> Result<Catalog
         display_name: row.display_name,
         description: row.description,
         lifecycle_state: parse_lifecycle_state(&row.lifecycle_state)?,
+        ingestion_readiness,
         created_at: row.created_at,
         updated_at: row.updated_at,
     })

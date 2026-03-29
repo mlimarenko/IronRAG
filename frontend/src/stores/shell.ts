@@ -12,6 +12,8 @@ import {
   buildShellContext,
   createLibrary,
   createWorkspace,
+  deleteLibrary,
+  deleteWorkspace,
   fetchLibrariesForWorkspace,
   fetchShellBootstrap,
 } from 'src/services/api/shell'
@@ -34,6 +36,10 @@ interface ShellState {
   error: string | null
   showCreateWorkspace: boolean
   showCreateLibrary: boolean
+  showDeleteWorkspace: boolean
+  deleteWorkspaceTarget: WorkspaceOption | null
+  showDeleteLibrary: boolean
+  deleteLibraryTarget: LibraryOption | null
 }
 
 function readStoredSelection(key: string): string | null {
@@ -82,6 +88,10 @@ export const useShellStore = defineStore('shell', {
     error: null,
     showCreateWorkspace: false,
     showCreateLibrary: false,
+    showDeleteWorkspace: false,
+    deleteWorkspaceTarget: null,
+    showDeleteLibrary: false,
+    deleteLibraryTarget: null,
   }),
   getters: {
     currentUser: (state) => state.viewer,
@@ -110,6 +120,10 @@ export const useShellStore = defineStore('shell', {
       this.loading = false
       this.showCreateWorkspace = false
       this.showCreateLibrary = false
+      this.showDeleteWorkspace = false
+      this.deleteWorkspaceTarget = null
+      this.showDeleteLibrary = false
+      this.deleteLibraryTarget = null
       writeStoredSelection(ACTIVE_WORKSPACE_STORAGE_KEY, null)
       writeStoredSelection(ACTIVE_LIBRARY_STORAGE_KEY, null)
     },
@@ -258,6 +272,48 @@ export const useShellStore = defineStore('shell', {
       } catch (error) {
         this.error = error instanceof Error ? error.message : 'Failed to create library'
       }
+    },
+    requestDeleteWorkspace(workspace: WorkspaceOption): void {
+      this.deleteWorkspaceTarget = workspace
+      this.showDeleteWorkspace = true
+    },
+    async confirmDeleteWorkspace(): Promise<void> {
+      const target = this.deleteWorkspaceTarget
+      if (!target) return
+      try {
+        await deleteWorkspace(target.id)
+        this.showDeleteWorkspace = false
+        this.deleteWorkspaceTarget = null
+        await this.loadContext()
+        this.error = null
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Failed to delete workspace'
+      }
+    },
+    cancelDeleteWorkspace(): void {
+      this.showDeleteWorkspace = false
+      this.deleteWorkspaceTarget = null
+    },
+    requestDeleteLibrary(library: LibraryOption): void {
+      this.deleteLibraryTarget = library
+      this.showDeleteLibrary = true
+    },
+    async confirmDeleteLibrary(): Promise<void> {
+      const target = this.deleteLibraryTarget
+      if (!target) return
+      try {
+        await deleteLibrary(target.workspaceId, target.id)
+        this.showDeleteLibrary = false
+        this.deleteLibraryTarget = null
+        await this.loadContext({ preferredWorkspaceId: this.activeWorkspace?.id ?? undefined })
+        this.error = null
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Failed to delete library'
+      }
+    },
+    cancelDeleteLibrary(): void {
+      this.showDeleteLibrary = false
+      this.deleteLibraryTarget = null
     },
   },
 })

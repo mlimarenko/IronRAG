@@ -353,8 +353,9 @@ impl ExtractService {
             .map_err(|_| ApiError::Internal)?
             .ok_or_else(|| ApiError::resource_not_found("knowledge_revision", chunk.revision_id))?;
 
-        for candidate in node_candidates {
-            let row = NewKnowledgeEntityCandidate {
+        let entity_rows = node_candidates
+            .iter()
+            .map(|candidate| NewKnowledgeEntityCandidate {
                 candidate_id: stable_candidate_id(
                     "entity",
                     chunk_result_id,
@@ -373,16 +374,19 @@ impl ExtractService {
                 candidate_state: "active".to_string(),
                 created_at: Some(Utc::now()),
                 updated_at: Some(Utc::now()),
-            };
+            })
+            .collect::<Vec<_>>();
+        if !entity_rows.is_empty() {
             let _ = state
                 .arango_graph_store
-                .upsert_entity_candidate(&row)
+                .upsert_entity_candidates(&entity_rows)
                 .await
                 .map_err(|_| ApiError::Internal)?;
         }
 
-        for candidate in edge_candidates {
-            let row = NewKnowledgeRelationCandidate {
+        let relation_rows = edge_candidates
+            .iter()
+            .map(|candidate| NewKnowledgeRelationCandidate {
                 candidate_id: stable_candidate_id(
                     "relation",
                     chunk_result_id,
@@ -402,10 +406,12 @@ impl ExtractService {
                 candidate_state: "active".to_string(),
                 created_at: Some(Utc::now()),
                 updated_at: Some(Utc::now()),
-            };
+            })
+            .collect::<Vec<_>>();
+        if !relation_rows.is_empty() {
             let _ = state
                 .arango_graph_store
-                .upsert_relation_candidate(&row)
+                .upsert_relation_candidates(&relation_rows)
                 .await
                 .map_err(|_| ApiError::Internal)?;
         }

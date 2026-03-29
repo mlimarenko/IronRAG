@@ -537,7 +537,7 @@ async fn canonical_content_lifecycle_promotes_head_and_separates_readable_from_a
 
 #[tokio::test]
 #[ignore = "requires local postgres with canonical extensions"]
-async fn canonical_content_lifecycle_inline_upload_persists_chunks_in_arango() -> Result<()> {
+async fn canonical_content_lifecycle_inline_upload_admits_background_ingest_job() -> Result<()> {
     let fixture = ContentLifecycleFixture::create().await?;
 
     let result = async {
@@ -570,6 +570,13 @@ async fn canonical_content_lifecycle_inline_upload_persists_chunks_in_arango() -
             .first()
             .and_then(|item| item.result_revision_id)
             .context("inline upload did not create a result revision")?;
+        let revision = fixture
+            .state
+            .arango_document_store
+            .get_revision(revision_id)
+            .await
+            .context("failed to load admitted inline upload revision")?
+            .context("missing admitted inline upload revision")?;
 
         let postgres_chunks =
             rustrag_backend::infra::repositories::content_repository::list_chunks_by_revision(
@@ -584,25 +591,56 @@ async fn canonical_content_lifecycle_inline_upload_persists_chunks_in_arango() -
             .list_chunks_by_revision(revision_id)
             .await
             .context("failed to list Arango knowledge chunks for inline upload")?;
+        let ingest_jobs = rustrag_backend::infra::repositories::ingest_repository::list_ingest_jobs_by_mutation_ids(
+            &fixture.state.persistence.postgres,
+            fixture.workspace_id,
+            fixture.library_id,
+            &[admission.mutation.mutation.id],
+        )
+        .await
+        .context("failed to list ingest jobs for inline upload")?;
 
-        assert!(!postgres_chunks.is_empty());
-        assert_eq!(knowledge_chunks.len(), postgres_chunks.len());
+        assert_eq!(admission.mutation.mutation.mutation_state, "accepted");
+        assert!(revision.storage_ref.is_some());
+        assert!(postgres_chunks.is_empty());
+        assert!(knowledge_chunks.is_empty());
+        assert_eq!(ingest_jobs.len(), 1);
+        assert_eq!(ingest_jobs[0].mutation_id, Some(admission.mutation.mutation.id));
+        assert_eq!(ingest_jobs[0].queue_state, "queued");
+        assert_eq!(ingest_jobs[0].job_kind, "content_mutation");
+
+        let summaries = fixture
+            .state
+            .canonical_services
+            .content
+            .list_documents(&fixture.state, fixture.library_id)
+            .await
+            .context("failed to list canonical document summaries after inline upload")?;
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].document.id, admission.document.document.id);
         assert_eq!(
-            knowledge_chunks
-                .iter()
-                .map(|chunk| (chunk.chunk_id, chunk.chunk_index))
-                .collect::<Vec<_>>(),
-            postgres_chunks.iter().map(|chunk| (chunk.id, chunk.chunk_index)).collect::<Vec<_>>()
+            summaries[0]
+                .pipeline
+                .latest_mutation
+                .as_ref()
+                .map(|mutation| mutation.id),
+            Some(admission.mutation.mutation.id)
         );
-        assert!(
-            knowledge_chunks
-                .iter()
-                .all(|chunk| chunk.document_id == admission.document.document.id)
+        assert_eq!(
+            summaries[0]
+                .pipeline
+                .latest_job
+                .as_ref()
+                .map(|job| job.id),
+            Some(ingest_jobs[0].id)
         );
-        assert!(
-            knowledge_chunks
-                .iter()
-                .all(|chunk| chunk.chunk_state == "ready" && chunk.text_generation == Some(1))
+        assert_eq!(
+            summaries[0]
+                .pipeline
+                .latest_job
+                .as_ref()
+                .map(|job| job.queue_state.as_str()),
+            Some("queued")
         );
 
         Ok(())

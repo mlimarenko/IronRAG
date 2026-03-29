@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import type { LibraryOption, WorkspaceOption } from 'src/models/ui/shell'
+import type { LibraryBindingPurpose, LibraryOption, WorkspaceOption } from 'src/models/ui/shell'
+import { useI18n } from 'vue-i18n'
+
+const { t } = useI18n()
 
 const props = withDefaults(defineProps<{
   label: string
@@ -10,14 +13,17 @@ const props = withDefaults(defineProps<{
   placeholder?: string
   canCreate?: boolean
   createLabel?: string
+  canDelete?: boolean
   compact?: boolean
 }>(), {
   compact: false,
+  canDelete: false,
 })
 
 const emit = defineEmits<{
   change: [value: string]
   create: []
+  delete: [option: WorkspaceOption | LibraryOption]
 }>()
 
 const rootRef = ref<HTMLElement | null>(null)
@@ -32,6 +38,38 @@ const selectedOption = computed(
 
 const displayValue = computed(
   () => selectedOption.value?.name ?? props.placeholder ?? props.label,
+)
+
+function isLibraryOption(option: WorkspaceOption | LibraryOption): option is LibraryOption {
+  return 'ingestionReadiness' in option
+}
+
+function bindingPurposeLabel(purpose: LibraryBindingPurpose): string {
+  const shortKey = `shell.bindingPurposeShort.${purpose}`
+  const shortLabel = t(shortKey)
+  if (shortLabel !== shortKey) {
+    return shortLabel
+  }
+  return t(`admin.ai.bindingPurposes.${purpose}`)
+}
+
+function missingBindingsLabel(purposes: LibraryBindingPurpose[]): string {
+  if (purposes.length === 1) {
+    return t('shell.ingestionNeedsBinding', { purpose: bindingPurposeLabel(purposes[0]) })
+  }
+  return t('shell.ingestionNeedsBindingsCount', { count: purposes.length })
+}
+
+function ingestionStatusLabel(option: WorkspaceOption | LibraryOption): string | null {
+  if (!isLibraryOption(option) || option.ingestionReadiness.ready) {
+    return null
+  }
+
+  return missingBindingsLabel(option.ingestionReadiness.missingBindingPurposes)
+}
+
+const selectedStatusLabel = computed(() =>
+  selectedOption.value ? ingestionStatusLabel(selectedOption.value) : null,
 )
 
 function closeMenu(options?: { restoreFocus?: boolean }) {
@@ -85,7 +123,7 @@ function handlePointerDown(event: Event) {
 
 function handleKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') {
-    closeMenu()
+    closeMenu({ restoreFocus: true })
   }
 }
 
@@ -209,7 +247,15 @@ onBeforeUnmount(() => {
     >
       <span class="rr-selector__copy">
         <span class="rr-selector__label">{{ label }}</span>
-        <span class="rr-selector__value">{{ displayValue }}</span>
+        <span class="rr-selector__value-row">
+          <span class="rr-selector__value">{{ displayValue }}</span>
+          <span
+            v-if="selectedStatusLabel"
+            class="rr-selector__status-badge rr-selector__status-badge--attention"
+          >
+            {{ selectedStatusLabel }}
+          </span>
+        </span>
       </span>
       <span class="rr-selector__chevron">▾</span>
     </button>
@@ -221,26 +267,47 @@ onBeforeUnmount(() => {
       :aria-label="label"
       @keydown="handleMenuKeydown"
     >
-      <button
+      <div
         v-for="(option, index) in options"
         :key="option.id"
-        :ref="(element) => setOptionRef(element as HTMLButtonElement | null, index)"
-        class="rr-selector__option"
-        :class="{ 'is-active': option.id === selectedId }"
-        type="button"
-        role="option"
-        :aria-selected="option.id === selectedId"
-        :tabindex="index === activeIndex ? 0 : -1"
-        @click="selectOption(option.id)"
+        class="rr-selector__option-row"
       >
-        <span>{{ option.name }}</span>
-        <span
-          v-if="option.id === selectedId"
-          class="rr-selector__tick"
+        <button
+          :ref="(element) => setOptionRef(element as HTMLButtonElement | null, index)"
+          class="rr-selector__option"
+          :class="{ 'is-active': option.id === selectedId }"
+          type="button"
+          role="option"
+          :aria-selected="option.id === selectedId"
+          :tabindex="index === activeIndex ? 0 : -1"
+          @click="selectOption(option.id)"
         >
-          ✓
-        </span>
-      </button>
+          <span class="rr-selector__option-copy">
+            <span>{{ option.name }}</span>
+            <span
+              v-if="ingestionStatusLabel(option)"
+              class="rr-selector__status-badge rr-selector__status-badge--attention"
+            >
+              {{ ingestionStatusLabel(option) }}
+            </span>
+          </span>
+          <span
+            v-if="option.id === selectedId"
+            class="rr-selector__tick"
+          >
+            ✓
+          </span>
+        </button>
+        <button
+          v-if="canDelete"
+          class="rr-selector__delete-btn"
+          type="button"
+          :title="'Delete ' + option.name"
+          @click.stop="emit('delete', option); closeMenu()"
+        >
+          ✕
+        </button>
+      </div>
 
       <p
         v-if="!options.length"

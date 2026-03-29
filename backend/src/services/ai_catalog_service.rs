@@ -1,4 +1,5 @@
 use rust_decimal::Decimal;
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
@@ -7,7 +8,7 @@ use crate::{
         AiBindingPurpose, BindingValidation, LibraryModelBinding, ModelCatalogEntry, ModelPreset,
         PriceCatalogEntry, ProviderCatalogEntry, ProviderCredential,
     },
-    infra::repositories::ai_repository,
+    infra::repositories::{ai_repository, catalog_repository},
     interfaces::http::router_support::ApiError,
 };
 
@@ -125,6 +126,13 @@ pub struct ResolvedRuntimeBinding {
 #[derive(Clone, Default)]
 pub struct AiCatalogService;
 
+const CANONICAL_RUNTIME_BINDING_PURPOSES: [AiBindingPurpose; 4] = [
+    AiBindingPurpose::ExtractGraph,
+    AiBindingPurpose::EmbedChunk,
+    AiBindingPurpose::QueryAnswer,
+    AiBindingPurpose::Vision,
+];
+
 impl AiCatalogService {
     #[must_use]
     pub const fn new() -> Self {
@@ -150,7 +158,7 @@ impl AiCatalogService {
             ai_repository::list_model_catalog(&state.persistence.postgres, provider_catalog_id)
                 .await
                 .map_err(|_| ApiError::Internal)?;
-        Ok(rows.into_iter().map(map_model_row).collect())
+        rows.into_iter().map(map_model_row).collect()
     }
 
     pub async fn list_price_catalog(
@@ -270,7 +278,14 @@ impl AiCatalogService {
         )
         .await
         .map_err(map_ai_write_error)?;
-        Ok(map_provider_credential_row(row))
+        let credential = map_provider_credential_row(row);
+        self.ensure_workspace_runtime_profiles(
+            state,
+            credential.workspace_id,
+            command.created_by_principal_id,
+        )
+        .await?;
+        Ok(credential)
     }
 
     pub async fn update_provider_credential(
@@ -292,7 +307,9 @@ impl AiCatalogService {
         .ok_or_else(|| {
             ApiError::resource_not_found("provider_credential", command.credential_id)
         })?;
-        Ok(map_provider_credential_row(row))
+        let credential = map_provider_credential_row(row);
+        self.ensure_workspace_runtime_profiles(state, credential.workspace_id, None).await?;
+        Ok(credential)
     }
 
     pub async fn list_model_presets(
@@ -391,6 +408,13 @@ impl AiCatalogService {
         state: &AppState,
         command: CreateLibraryBindingCommand,
     ) -> Result<LibraryModelBinding, ApiError> {
+        self.validate_binding_target(
+            state,
+            command.binding_purpose,
+            command.provider_credential_id,
+            command.model_preset_id,
+        )
+        .await?;
         let row = ai_repository::create_library_binding(
             &state.persistence.postgres,
             command.workspace_id,
@@ -410,6 +434,20 @@ impl AiCatalogService {
         state: &AppState,
         command: UpdateLibraryBindingCommand,
     ) -> Result<LibraryModelBinding, ApiError> {
+        let existing = ai_repository::get_library_binding_by_id(
+            &state.persistence.postgres,
+            command.binding_id,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .ok_or_else(|| ApiError::resource_not_found("library_binding", command.binding_id))?;
+        self.validate_binding_target(
+            state,
+            parse_binding_purpose(&existing.binding_purpose)?,
+            command.provider_credential_id,
+            command.model_preset_id,
+        )
+        .await?;
         let row = ai_repository::update_library_binding(
             &state.persistence.postgres,
             command.binding_id,
@@ -447,6 +485,32 @@ impl AiCatalogService {
         library_id: Uuid,
         binding_purpose: AiBindingPurpose,
     ) -> Result<Option<ResolvedRuntimeBinding>, ApiError> {
+        let binding = ai_repository::get_active_library_binding_by_purpose(
+            &state.persistence.postgres,
+            library_id,
+            binding_purpose_key(binding_purpose),
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?;
+
+        if let Some(binding) = binding {
+            if let Ok(resolved) = self.resolve_runtime_binding_by_row(state, binding.clone()).await
+            {
+                return Ok(Some(resolved));
+            }
+            self.ensure_library_runtime_profile(state, binding.workspace_id, library_id, None)
+                .await?;
+        } else if let Some(library) =
+            catalog_repository::get_library_by_id(&state.persistence.postgres, library_id)
+                .await
+                .map_err(|_| ApiError::Internal)?
+        {
+            self.ensure_library_runtime_profile(state, library.workspace_id, library_id, None)
+                .await?;
+        } else {
+            return Ok(None);
+        }
+
         let Some(binding) = ai_repository::get_active_library_binding_by_purpose(
             &state.persistence.postgres,
             library_id,
@@ -459,6 +523,168 @@ impl AiCatalogService {
         };
 
         self.resolve_runtime_binding_by_row(state, binding).await.map(Some)
+    }
+
+    pub async fn ensure_workspace_runtime_profiles(
+        &self,
+        state: &AppState,
+        workspace_id: Uuid,
+        updated_by_principal_id: Option<Uuid>,
+    ) -> Result<(), ApiError> {
+        let libraries = crate::infra::repositories::catalog_repository::list_libraries(
+            &state.persistence.postgres,
+            Some(workspace_id),
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?;
+        for library in libraries {
+            self.ensure_library_runtime_profile(
+                state,
+                workspace_id,
+                library.id,
+                updated_by_principal_id,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn ensure_library_runtime_profile(
+        &self,
+        state: &AppState,
+        workspace_id: Uuid,
+        library_id: Uuid,
+        updated_by_principal_id: Option<Uuid>,
+    ) -> Result<(), ApiError> {
+        let providers = self.list_provider_catalog(state).await?;
+        let provider_by_id = providers
+            .into_iter()
+            .map(|provider| (provider.id, provider))
+            .collect::<std::collections::HashMap<_, _>>();
+        let models = self.list_model_catalog(state, None).await?;
+        let model_by_id = models
+            .iter()
+            .map(|model| (model.id, model))
+            .collect::<std::collections::HashMap<_, _>>();
+        let presets = self.list_model_presets(state, workspace_id).await?;
+        let mut presets_by_model = presets.into_iter().fold(
+            std::collections::HashMap::<Uuid, Vec<ModelPreset>>::new(),
+            |mut acc, preset| {
+                acc.entry(preset.model_catalog_id).or_default().push(preset);
+                acc
+            },
+        );
+        let credentials = self.list_provider_credentials(state, workspace_id).await?;
+        let mut active_credentials = credentials
+            .iter()
+            .filter(|credential| credential.credential_state == "active")
+            .cloned()
+            .collect::<Vec<_>>();
+        active_credentials.sort_by(|left, right| {
+            let left_provider = provider_by_id
+                .get(&left.provider_catalog_id)
+                .map(|provider| provider.display_name.as_str())
+                .unwrap_or("");
+            let right_provider = provider_by_id
+                .get(&right.provider_catalog_id)
+                .map(|provider| provider.display_name.as_str())
+                .unwrap_or("");
+            left_provider
+                .cmp(right_provider)
+                .then_with(|| left.label.cmp(&right.label))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        if active_credentials.is_empty() {
+            return Ok(());
+        }
+
+        let mut bindings = self.list_library_bindings(state, library_id).await?;
+
+        for purpose in CANONICAL_RUNTIME_BINDING_PURPOSES {
+            let Some((credential, model)) =
+                select_canonical_runtime_target(purpose, &active_credentials, &models)
+            else {
+                continue;
+            };
+            let Some(provider) = provider_by_id.get(&credential.provider_catalog_id) else {
+                continue;
+            };
+            let preset_name = canonical_runtime_preset_name(&provider.display_name, purpose);
+            let preset_id = match select_runtime_preset(
+                presets_by_model.get(&model.id).map(Vec::as_slice).unwrap_or(&[]),
+                &preset_name,
+            ) {
+                Some(existing) => existing.id,
+                None => {
+                    let created = self
+                        .create_model_preset(
+                            state,
+                            CreateModelPresetCommand {
+                                workspace_id,
+                                model_catalog_id: model.id,
+                                preset_name: preset_name.clone(),
+                                system_prompt: None,
+                                temperature: None,
+                                top_p: None,
+                                max_output_tokens_override: None,
+                                extra_parameters_json: serde_json::json!({}),
+                                created_by_principal_id: updated_by_principal_id,
+                            },
+                        )
+                        .await?;
+                    presets_by_model.entry(model.id).or_default().push(created.clone());
+                    created.id
+                }
+            };
+
+            let existing_index =
+                bindings.iter().position(|binding| binding.binding_purpose == purpose);
+            match existing_index {
+                Some(index)
+                    if library_binding_is_runtime_ready(
+                        &bindings[index],
+                        &credentials,
+                        &model_by_id,
+                        &presets_by_model,
+                    ) =>
+                {
+                    continue;
+                }
+                Some(index) => {
+                    let updated = self
+                        .update_library_binding(
+                            state,
+                            UpdateLibraryBindingCommand {
+                                binding_id: bindings[index].id,
+                                provider_credential_id: credential.id,
+                                model_preset_id: preset_id,
+                                binding_state: "active".to_string(),
+                                updated_by_principal_id,
+                            },
+                        )
+                        .await?;
+                    bindings[index] = updated;
+                }
+                None => {
+                    let created = self
+                        .create_library_binding(
+                            state,
+                            CreateLibraryBindingCommand {
+                                workspace_id,
+                                library_id,
+                                binding_purpose: purpose,
+                                provider_credential_id: credential.id,
+                                model_preset_id: preset_id,
+                                updated_by_principal_id,
+                            },
+                        )
+                        .await?;
+                    bindings.push(created);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn resolve_runtime_binding_by_id(
@@ -482,6 +708,7 @@ impl AiCatalogService {
         let provider_credential =
             self.get_provider_credential(state, binding.provider_credential_id).await?;
         let model_preset = self.get_model_preset(state, binding.model_preset_id).await?;
+        let binding_purpose = parse_binding_purpose(&binding.binding_purpose)?;
         let providers = self.list_provider_catalog(state).await?;
         let models = self.list_model_catalog(state, None).await?;
         let provider = providers
@@ -505,6 +732,7 @@ impl AiCatalogService {
         if provider_credential.credential_state != "active" {
             return Err(ApiError::BadRequest("provider credential is not active".to_string()));
         }
+        validate_model_binding_purpose(binding_purpose, &model)?;
 
         let provider_row = ai_repository::list_provider_catalog(&state.persistence.postgres)
             .await
@@ -517,7 +745,7 @@ impl AiCatalogService {
             binding_id: binding.id,
             workspace_id: binding.workspace_id,
             library_id: binding.library_id,
-            binding_purpose: parse_binding_purpose(&binding.binding_purpose)?,
+            binding_purpose,
             provider_catalog_id: provider.id,
             provider_kind: provider.provider_kind,
             provider_base_url: provider_row.default_base_url,
@@ -533,6 +761,105 @@ impl AiCatalogService {
             extra_parameters_json: model_preset.extra_parameters_json,
         })
     }
+
+    async fn validate_binding_target(
+        &self,
+        state: &AppState,
+        binding_purpose: AiBindingPurpose,
+        provider_credential_id: Uuid,
+        model_preset_id: Uuid,
+    ) -> Result<(), ApiError> {
+        let provider_credential =
+            self.get_provider_credential(state, provider_credential_id).await?;
+        let model_preset = self.get_model_preset(state, model_preset_id).await?;
+        let providers = self.list_provider_catalog(state).await?;
+        let models = self.list_model_catalog(state, None).await?;
+        let provider = providers
+            .into_iter()
+            .find(|entry| entry.id == provider_credential.provider_catalog_id)
+            .ok_or_else(|| {
+                ApiError::resource_not_found(
+                    "provider_catalog",
+                    provider_credential.provider_catalog_id,
+                )
+            })?;
+        let model =
+            models.into_iter().find(|entry| entry.id == model_preset.model_catalog_id).ok_or_else(
+                || ApiError::resource_not_found("model_catalog", model_preset.model_catalog_id),
+            )?;
+
+        if model.provider_catalog_id != provider.id {
+            return Err(ApiError::BadRequest(
+                "binding links a provider credential to a model from another provider".to_string(),
+            ));
+        }
+        if provider_credential.credential_state != "active" {
+            return Err(ApiError::BadRequest("provider credential is not active".to_string()));
+        }
+        validate_model_binding_purpose(binding_purpose, &model)
+    }
+}
+
+fn select_runtime_preset<'a>(
+    presets: &'a [ModelPreset],
+    canonical_name: &str,
+) -> Option<&'a ModelPreset> {
+    if let Some(existing) = presets.iter().find(|preset| preset.preset_name == canonical_name) {
+        return Some(existing);
+    }
+    match presets {
+        [only] => Some(only),
+        _ => None,
+    }
+}
+
+fn select_canonical_runtime_target<'a>(
+    purpose: AiBindingPurpose,
+    credentials: &'a [ProviderCredential],
+    models: &'a [ModelCatalogEntry],
+) -> Option<(&'a ProviderCredential, &'a ModelCatalogEntry)> {
+    credentials.iter().find_map(|credential| {
+        models
+            .iter()
+            .find(|model| {
+                model.provider_catalog_id == credential.provider_catalog_id
+                    && model.allowed_binding_purposes.contains(&purpose)
+            })
+            .map(|model| (credential, model))
+    })
+}
+
+fn library_binding_is_runtime_ready(
+    binding: &LibraryModelBinding,
+    credentials: &[ProviderCredential],
+    model_by_id: &std::collections::HashMap<Uuid, &ModelCatalogEntry>,
+    presets_by_model: &std::collections::HashMap<Uuid, Vec<ModelPreset>>,
+) -> bool {
+    if binding.binding_state != "active" {
+        return false;
+    }
+
+    let Some(credential) =
+        credentials.iter().find(|credential| credential.id == binding.provider_credential_id)
+    else {
+        return false;
+    };
+    if credential.credential_state != "active" {
+        return false;
+    }
+
+    let preset = presets_by_model
+        .values()
+        .flat_map(|presets| presets.iter())
+        .find(|preset| preset.id == binding.model_preset_id);
+    let Some(preset) = preset else {
+        return false;
+    };
+    let Some(model) = model_by_id.get(&preset.model_catalog_id) else {
+        return false;
+    };
+    credential.provider_catalog_id == model.provider_catalog_id
+        && model.allowed_binding_purposes.contains(&binding.binding_purpose)
 }
 
 fn normalize_non_empty(value: &str, field_name: &'static str) -> Result<String, ApiError> {
@@ -577,16 +904,17 @@ fn map_provider_row(row: ai_repository::AiProviderCatalogRow) -> ProviderCatalog
     }
 }
 
-fn map_model_row(row: ai_repository::AiModelCatalogRow) -> ModelCatalogEntry {
-    ModelCatalogEntry {
+fn map_model_row(row: ai_repository::AiModelCatalogRow) -> Result<ModelCatalogEntry, ApiError> {
+    Ok(ModelCatalogEntry {
         id: row.id,
         provider_catalog_id: row.provider_catalog_id,
         model_name: row.model_name,
         capability_kind: row.capability_kind,
         modality_kind: row.modality_kind,
+        allowed_binding_purposes: parse_allowed_binding_purposes(&row.metadata_json)?,
         context_window: row.context_window,
         max_output_tokens: row.max_output_tokens,
-    }
+    })
 }
 
 fn map_price_row(row: ai_repository::AiPriceCatalogRow) -> PriceCatalogEntry {
@@ -677,5 +1005,101 @@ fn binding_purpose_key(value: AiBindingPurpose) -> &'static str {
         AiBindingPurpose::QueryRetrieve => "query_retrieve",
         AiBindingPurpose::QueryAnswer => "query_answer",
         AiBindingPurpose::Vision => "vision",
+    }
+}
+
+fn canonical_runtime_preset_name(provider_display_name: &str, purpose: AiBindingPurpose) -> String {
+    let purpose_label = match purpose {
+        AiBindingPurpose::ExtractText => "Extract Text",
+        AiBindingPurpose::ExtractGraph => "Extract Graph",
+        AiBindingPurpose::EmbedChunk => "Embed Chunk",
+        AiBindingPurpose::QueryRetrieve => "Query Retrieve",
+        AiBindingPurpose::QueryAnswer => "Query Answer",
+        AiBindingPurpose::Vision => "Vision",
+    };
+    format!("{provider_display_name} {purpose_label}")
+}
+
+fn parse_allowed_binding_purposes(
+    metadata_json: &Value,
+) -> Result<Vec<AiBindingPurpose>, ApiError> {
+    let roles = metadata_json
+        .get("defaultRoles")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ApiError::Internal)?;
+    if roles.is_empty() {
+        return Err(ApiError::Internal);
+    }
+
+    let mut allowed = Vec::with_capacity(roles.len());
+    for role in roles {
+        let role = role.as_str().ok_or_else(|| ApiError::Internal)?;
+        let purpose = parse_binding_purpose(role)?;
+        if !allowed.contains(&purpose) {
+            allowed.push(purpose);
+        }
+    }
+    Ok(allowed)
+}
+
+fn validate_model_binding_purpose(
+    binding_purpose: AiBindingPurpose,
+    model: &ModelCatalogEntry,
+) -> Result<(), ApiError> {
+    if model.allowed_binding_purposes.contains(&binding_purpose) {
+        return Ok(());
+    }
+
+    let allowed = model
+        .allowed_binding_purposes
+        .iter()
+        .map(|purpose| binding_purpose_key(*purpose))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(ApiError::BadRequest(format!(
+        "binding purpose {} is incompatible with model {}; allowed purposes: {}",
+        binding_purpose_key(binding_purpose),
+        model.model_name,
+        allowed,
+    )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_allowed_binding_purposes, validate_model_binding_purpose};
+    use crate::domains::ai::{AiBindingPurpose, ModelCatalogEntry};
+    use crate::interfaces::http::router_support::ApiError;
+    use uuid::Uuid;
+
+    fn sample_model(allowed_binding_purposes: Vec<AiBindingPurpose>) -> ModelCatalogEntry {
+        ModelCatalogEntry {
+            id: Uuid::nil(),
+            provider_catalog_id: Uuid::nil(),
+            model_name: "sample-model".to_string(),
+            capability_kind: "chat".to_string(),
+            modality_kind: "text".to_string(),
+            allowed_binding_purposes,
+            context_window: None,
+            max_output_tokens: None,
+        }
+    }
+
+    #[test]
+    fn parses_allowed_binding_purposes_from_default_roles() {
+        let metadata = serde_json::json!({
+            "defaultRoles": ["extract_graph", "query_answer"]
+        });
+        let purposes =
+            parse_allowed_binding_purposes(&metadata).expect("defaultRoles should parse");
+        assert_eq!(purposes, vec![AiBindingPurpose::ExtractGraph, AiBindingPurpose::QueryAnswer]);
+    }
+
+    #[test]
+    fn rejects_incompatible_binding_purpose() {
+        let model = sample_model(vec![AiBindingPurpose::EmbedChunk]);
+        let error = validate_model_binding_purpose(AiBindingPurpose::ExtractGraph, &model)
+            .expect_err("incompatible purpose should fail");
+        assert!(matches!(error, ApiError::BadRequest(_)));
+        assert!(format!("{error:?}").contains("incompatible"));
     }
 }

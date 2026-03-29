@@ -97,6 +97,8 @@ impl IngestService {
             &state.persistence.postgres,
             workspace_id,
             library_id,
+            None,
+            None,
         )
         .await
         .map_err(|_| ApiError::Internal)?;

@@ -1,8 +1,6 @@
 services:
   postgres:
     image: postgres:18-alpine
-    security_opt:
-      - apparmor=unconfined
     environment:
       POSTGRES_PASSWORD: postgres
       POSTGRES_USER: postgres
@@ -19,8 +17,6 @@ services:
 
   redis:
     image: redis:8.4
-    security_opt:
-      - apparmor=unconfined
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -28,8 +24,6 @@ services:
       retries: 20
   arangodb:
     image: arangodb:3.12.4
-    security_opt:
-      - apparmor=unconfined
     environment:
       ARANGO_ROOT_PASSWORD: rustrag-dev
     command:
@@ -56,8 +50,6 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    security_opt:
-      - apparmor=unconfined
     restart: unless-stopped
     stop_signal: SIGTERM
     stop_grace_period: 10m
@@ -90,17 +82,30 @@ services:
       ui_bootstrap_admin_login: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN:-}
       ui_bootstrap_admin_password: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD:-}
       ui_bootstrap_admin_api_token: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN:-}
+      content_storage_root: /var/lib/rustrag/content-storage
       RUST_BACKTRACE: full
     expose:
       - "8080"
+    volumes:
+      - content_storage_data:/var/lib/rustrag/content-storage
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/v1/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
 
   worker:
     image: ${RUSTRAG_BACKEND_IMAGE:-rustrag-backend:local}
     build:
       context: ./backend
       dockerfile: Dockerfile
-    security_opt:
-      - apparmor=unconfined
     restart: unless-stopped
     stop_signal: SIGTERM
     stop_grace_period: 10m
@@ -133,7 +138,19 @@ services:
       ui_bootstrap_admin_login: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN:-}
       ui_bootstrap_admin_password: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD:-}
       ui_bootstrap_admin_api_token: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN:-}
+      content_storage_root: /var/lib/rustrag/content-storage
       RUST_BACKTRACE: full
+    volumes:
+      - content_storage_data:/var/lib/rustrag/content-storage
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
 
   frontend:
     build:
@@ -143,11 +160,13 @@ services:
       - backend
     expose:
       - "3000"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
 
   nginx:
     image: nginx:1.28-alpine
-    security_opt:
-      - apparmor=unconfined
     restart: unless-stopped
     depends_on:
       - backend
@@ -166,3 +185,4 @@ services:
 volumes:
   postgres_data:
   arangodb_data:
+  content_storage_data:

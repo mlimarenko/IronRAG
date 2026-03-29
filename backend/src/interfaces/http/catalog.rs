@@ -8,7 +8,10 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::catalog::{CatalogLibrary, CatalogLifecycleState, CatalogWorkspace},
+    domains::{
+        ai::AiBindingPurpose,
+        catalog::{CatalogLibrary, CatalogLifecycleState, CatalogWorkspace},
+    },
     interfaces::http::{
         auth::AuthContext,
         authorization::{
@@ -34,6 +37,13 @@ pub struct CatalogWorkspaceResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CatalogLibraryIngestionReadinessResponse {
+    pub ready: bool,
+    pub missing_binding_purposes: Vec<AiBindingPurpose>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CatalogLibraryResponse {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -41,6 +51,7 @@ pub struct CatalogLibraryResponse {
     pub display_name: String,
     pub description: Option<String>,
     pub lifecycle_state: String,
+    pub ingestion_readiness: CatalogLibraryIngestionReadinessResponse,
 }
 
 #[derive(Debug, Deserialize)]
@@ -242,6 +253,10 @@ fn map_library(library: CatalogLibrary) -> CatalogLibraryResponse {
         display_name: library.display_name,
         description: library.description,
         lifecycle_state: lifecycle_state_label(&library.lifecycle_state).to_string(),
+        ingestion_readiness: CatalogLibraryIngestionReadinessResponse {
+            ready: library.ingestion_readiness.ready,
+            missing_binding_purposes: library.ingestion_readiness.missing_binding_purposes,
+        },
     }
 }
 

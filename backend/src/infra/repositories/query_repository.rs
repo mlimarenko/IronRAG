@@ -101,7 +101,8 @@ pub async fn list_conversations_by_library(
             updated_at
          from query_conversation
          where library_id = $1
-         order by updated_at desc, created_at desc",
+         order by created_at desc, updated_at desc
+         limit 100",
     )
     .bind(library_id)
     .fetch_all(postgres)
@@ -182,7 +183,8 @@ pub async fn list_turns_by_conversation(
             created_at
          from query_turn
          where conversation_id = $1
-         order by turn_index asc",
+         order by created_at asc, turn_index asc
+         limit 200",
     )
     .bind(conversation_id)
     .fetch_all(postgres)

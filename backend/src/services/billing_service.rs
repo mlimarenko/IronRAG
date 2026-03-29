@@ -12,6 +12,24 @@ use crate::{
     interfaces::http::router_support::ApiError,
 };
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentCostSummary {
+    pub document_id: Uuid,
+    pub total_cost: Decimal,
+    pub currency_code: String,
+    pub provider_call_count: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryCostSummary {
+    pub total_cost: Decimal,
+    pub currency_code: String,
+    pub document_count: i64,
+    pub provider_call_count: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct CaptureQueryExecutionBillingCommand {
     pub workspace_id: Uuid,
@@ -131,6 +149,53 @@ impl BillingService {
         }
 
         Err(ApiError::resource_not_found("billing_execution_cost", execution_id))
+    }
+
+    pub async fn list_document_costs_for_library(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+    ) -> Result<Vec<DocumentCostSummary>, ApiError> {
+        let rows = billing_repository::list_document_costs_by_library(
+            &state.persistence.postgres,
+            library_id,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| DocumentCostSummary {
+                document_id: r.document_id,
+                total_cost: r.total_cost,
+                currency_code: r.currency_code,
+                provider_call_count: r.provider_call_count,
+            })
+            .collect())
+    }
+
+    pub async fn get_library_cost_summary(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+    ) -> Result<LibraryCostSummary, ApiError> {
+        let row =
+            billing_repository::get_library_cost_summary(&state.persistence.postgres, library_id)
+                .await
+                .map_err(|_| ApiError::Internal)?;
+        match row {
+            Some(r) => Ok(LibraryCostSummary {
+                total_cost: r.total_cost,
+                currency_code: r.currency_code,
+                document_count: r.document_count,
+                provider_call_count: r.provider_call_count,
+            }),
+            None => Ok(LibraryCostSummary {
+                total_cost: Decimal::ZERO,
+                currency_code: "USD".to_string(),
+                document_count: 0,
+                provider_call_count: 0,
+            }),
+        }
     }
 
     pub async fn resolve_execution_library_id(

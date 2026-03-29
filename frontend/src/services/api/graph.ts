@@ -12,6 +12,7 @@ import type {
   GraphStatus,
   GraphSurfaceResponse,
 } from 'src/models/ui/graph'
+import { resolveDefaultGraphLayoutMode } from 'src/models/ui/graph'
 import type { DashboardAttentionItem } from 'src/models/ui/dashboard'
 import { i18n } from 'src/lib/i18n'
 import { useShellStore } from 'src/stores/shell'
@@ -25,6 +26,7 @@ interface RawKnowledgeDocumentRow {
   workspaceId: string
   libraryId: string
   externalKey: string
+  title: string | null
   documentState: string
   activeRevisionId: string | null
   readableRevisionId: string | null
@@ -204,103 +206,28 @@ interface RawKnowledgeRelationDetailResponse {
   supportingEvidence: RawKnowledgeEvidenceRow[]
 }
 
-interface RawKnowledgeSearchResponse {
-  libraryId: string
-  queryText: string
-  limit: number
-  embeddingProviderKind: string
-  embeddingModelName: string
-  embeddingModelCatalogId: string
-  freshnessGeneration: number
-  documentHits: Array<{
-    document: RawKnowledgeDocumentRow
-    revision: {
-      revisionId: string
-      documentId: string
-      revisionNumber: number
-      revisionState: string
-      revisionKind: string
-      mimeType: string
-      title: string | null
-      byteSize: number
-      textState: string
-      vectorState: string
-      graphState: string
-      createdAt: string
-    }
-    score: number
-    lexicalRank: number | null
-    vectorRank: number | null
-    lexicalScore: number | null
-    vectorScore: number | null
-    chunkHits: Array<{
-      chunkId: string
-      workspaceId: string
-      libraryId: string
-      revisionId: string
-      contentText: string
-      normalizedText: string
-      sectionPath: string[]
-      headingTrail: string[]
-      score: number
-    }>
-    vectorChunkHits: Array<{
-      vectorId: string
-      workspaceId: string
-      libraryId: string
-      chunkId: string
-      revisionId: string
-      embeddingModelKey: string
-      vectorKind: string
-      freshnessGeneration: number
-      score: number
-    }>
-    evidenceSamples: RawKnowledgeEvidenceRow[]
-    provenanceSummary: {
-      supportingEvidenceCount: number
-      lexicalChunkCount: number
-      vectorChunkCount: number
-    }
-  }>
-  entityHits: Array<{
-    entityId: string
-    workspaceId: string
-    libraryId: string
-    canonicalName: string
-    entityType: string
-    summary: string | null
-    score: number
-  }>
-  relationHits: Array<{
-    relationId: string
-    workspaceId: string
-    libraryId: string
-    predicate: string
-    canonicalLabel: string
-    summary: string | null
-    score: number
-  }>
-  vectorChunkHits: Array<{
-    vectorId: string
-    workspaceId: string
-    libraryId: string
-    chunkId: string
-    revisionId: string
-    embeddingModelKey: string
-    vectorKind: string
-    freshnessGeneration: number
-    score: number
-  }>
-  vectorEntityHits: Array<{
-    vectorId: string
-    workspaceId: string
-    libraryId: string
-    entityId: string
-    embeddingModelKey: string
-    vectorKind: string
-    freshnessGeneration: number
-    score: number
-  }>
+interface RawKnowledgeDocumentGraphLinkRow {
+  documentId: string
+  targetNodeId: string
+  targetNodeType: GraphNodeType
+  relationType: string
+  supportCount: number
+}
+
+interface RawKnowledgeGraphTopologyResponse {
+  documents: RawKnowledgeDocumentRow[]
+  entities: RawKnowledgeEntityRow[]
+  relations: RawKnowledgeRelationRow[]
+  documentLinks: RawKnowledgeDocumentGraphLinkRow[]
+}
+
+export interface GraphSurfaceHeartbeat {
+  graphStatus: GraphStatus
+  convergenceStatus: GraphConvergenceStatus | null
+  graphGeneration: number
+  graphGenerationState: string | null
+  lastBuiltAt: string | null
+  warning: string | null
 }
 
 type RawRow = Record<string, unknown>
@@ -314,6 +241,7 @@ function normalizeKnowledgeDocumentRow(row: RawRow): RawKnowledgeDocumentRow {
     workspaceId: String(row.workspaceId ?? row.workspace_id ?? ''),
     libraryId: String(row.libraryId ?? row.library_id ?? ''),
     externalKey: String(row.externalKey ?? row.external_key ?? ''),
+    title: (row.title ?? null) as string | null,
     documentState: String(row.documentState ?? row.document_state ?? ''),
     activeRevisionId: (row.activeRevisionId ?? row.active_revision_id ?? null) as string | null,
     readableRevisionId: (row.readableRevisionId ?? row.readable_revision_id ?? null) as string | null,
@@ -461,6 +389,16 @@ function normalizeKnowledgeEvidenceRow(row: RawRow): RawKnowledgeEvidenceRow {
   }
 }
 
+function normalizeKnowledgeDocumentGraphLinkRow(row: RawRow): RawKnowledgeDocumentGraphLinkRow {
+  return {
+    documentId: String(row.documentId ?? row.document_id ?? ''),
+    targetNodeId: String(row.targetNodeId ?? row.target_node_id ?? ''),
+    targetNodeType: String(row.targetNodeType ?? row.target_node_type ?? 'entity') as GraphNodeType,
+    relationType: String(row.relationType ?? row.relation_type ?? 'supports'),
+    supportCount: Number(row.supportCount ?? row.support_count ?? 0),
+  }
+}
+
 function resolveActiveLibraryId(): string | null {
   return useShellStore().context?.activeLibrary.id ?? null
 }
@@ -511,13 +449,14 @@ function buildEmptySurface(): GraphSurfaceResponse {
     nodeCount: 0,
     relationCount: 0,
     edgeCount: 0,
+    hiddenNodeCount: 0,
     filteredArtifactCount: 0,
     lastBuiltAt: null,
     overlay: {
       searchQuery: '',
       searchHits: [],
       nodeTypeFilter: '',
-      activeLayout: 'cloud',
+      activeLayout: resolveDefaultGraphLayoutMode(0, 0),
       showFilteredArtifacts: false,
       filteredArtifactCount: 0,
       nodeCount: 0,
@@ -565,7 +504,7 @@ function mapGraphStatus(
     case 'text_only':
       return nodeCount > 0 || relationCount > 0 ? 'partial' : 'building'
     case 'accepted':
-      return 'building'
+      return nodeCount > 0 || relationCount > 0 ? 'partial' : 'building'
     case 'rebuilding':
       return 'rebuilding'
     case 'stale':
@@ -619,6 +558,7 @@ function buildSurface(
   generation: RawKnowledgeLibraryGenerationRow | null,
   rawNodes: GraphNode[],
   rawEdges: GraphEdge[] = [],
+  hiddenNodeCount = 0,
 ): GraphSurfaceResponse {
   const relationNodeCount = rawNodes.filter((node) => node.nodeType === 'topic').length
   const graphStatus = mapGraphStatus(generation, rawNodes.length, relationNodeCount)
@@ -654,13 +594,14 @@ function buildSurface(
     nodeCount: rawNodes.length,
     relationCount: relationNodeCount,
     edgeCount,
+    hiddenNodeCount,
     filteredArtifactCount,
     lastBuiltAt: generation?.updatedAt ?? null,
     overlay: {
       searchQuery: '',
       searchHits: [],
       nodeTypeFilter: '',
-      activeLayout: 'cloud',
+      activeLayout: resolveDefaultGraphLayoutMode(rawNodes.length, edgeCount),
       showFilteredArtifacts: false,
       filteredArtifactCount,
       nodeCount: rawNodes.length,
@@ -733,6 +674,10 @@ function compactOpaqueIdentifier(value: string): string {
 }
 
 function documentDisplayLabel(row: RawKnowledgeDocumentRow): string {
+  const title = row.title?.trim() ?? ''
+  if (title) {
+    return title
+  }
   const externalKey = row.externalKey.trim()
   if (!externalKey) {
     return compactOpaqueIdentifier(row.documentId)
@@ -741,6 +686,108 @@ function documentDisplayLabel(row: RawKnowledgeDocumentRow): string {
     return compactOpaqueIdentifier(row.documentId)
   }
   return externalKey
+}
+
+function humanizeGraphLabelToken(value: string): string {
+  const normalized = value
+    .trim()
+    .replace(/^entity:/i, '')
+    .replace(/^relation:/i, '')
+    .replace(/:+/g, ' ')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  if (!normalized) {
+    return ''
+  }
+
+  return normalized
+    .split(' ')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(' ')
+}
+
+function looksMachineEntityLabel(value: string): boolean {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return false
+  }
+
+  return (
+    /^entity:/i.test(trimmed) ||
+    /^https?:/i.test(trimmed) ||
+    /^https?_/i.test(trimmed) ||
+    /^www[._-]/i.test(trimmed) ||
+    trimmed.includes('/') ||
+    trimmed.includes('_')
+  )
+}
+
+function humanizeEntityLabel(value: string): string {
+  const tokens = value
+    .trim()
+    .replace(/^entity:/i, '')
+    .split(/[\s:/._-]+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .filter((part) => !['entity', 'http', 'https', 'www'].includes(part.toLowerCase()))
+
+  if (!tokens.length) {
+    return ''
+  }
+
+  const displayTokens =
+    tokens.length > 6 ? [...tokens.slice(0, 3), '...', ...tokens.slice(-2)] : tokens
+
+  return displayTokens
+    .map((part) =>
+      part === '...' ? part : part.charAt(0).toUpperCase() + part.slice(1).toLowerCase(),
+    )
+    .join(' ')
+}
+
+function entityDisplayLabel(row: RawKnowledgeEntityRow): string {
+  const canonicalLabel = row.canonicalLabel.trim()
+  if (canonicalLabel && canonicalLabel !== 'entity:' && canonicalLabel !== 'entity') {
+    if (!looksMachineEntityLabel(canonicalLabel)) {
+      return canonicalLabel
+    }
+
+    const humanizedCanonicalLabel = humanizeEntityLabel(canonicalLabel)
+    if (humanizedCanonicalLabel) {
+      return humanizedCanonicalLabel
+    }
+  }
+
+  return (
+    humanizeGraphLabelToken(row.entityType) ||
+    compactOpaqueIdentifier(row.entityId)
+  )
+}
+
+function looksMachineRelationLabel(value: string): boolean {
+  const trimmed = value.trim()
+  return (
+    !trimmed ||
+    trimmed.includes('--') ||
+    /^entity:/i.test(trimmed) ||
+    /^relation:/i.test(trimmed)
+  )
+}
+
+function relationDisplayLabel(row: RawKnowledgeRelationRow): string {
+  const assertion = row.normalizedAssertion.trim()
+  if (assertion && !looksMachineRelationLabel(assertion)) {
+    return assertion
+  }
+
+  return (
+    humanizeGraphLabelToken(row.predicate) ||
+    humanizeGraphLabelToken(assertion) ||
+    compactOpaqueIdentifier(row.relationId)
+  )
 }
 
 function mapDocumentRow(row: RawKnowledgeDocumentRow): GraphNode {
@@ -759,7 +806,7 @@ function mapEntityRow(row: RawKnowledgeEntityRow): GraphNode {
   return {
     id: row.entityId,
     canonicalKey: `entity:${row.entityId}`,
-    label: row.canonicalLabel,
+    label: entityDisplayLabel(row),
     nodeType: 'entity',
     secondaryLabel: row.entityType,
     supportCount: row.supportCount,
@@ -771,7 +818,7 @@ function mapRelationRow(row: RawKnowledgeRelationRow): GraphNode {
   return {
     id: row.relationId,
     canonicalKey: `relation:${row.relationId}`,
-    label: row.normalizedAssertion,
+    label: relationDisplayLabel(row),
     nodeType: 'topic',
     secondaryLabel: row.predicate,
     supportCount: row.supportCount,
@@ -790,9 +837,13 @@ function dedupeSearchHits(items: GraphSearchHit[]): GraphSearchHit[] {
   })
 }
 
-function buildRelationEdges(relations: RawKnowledgeRelationRow[], nodes: GraphNode[]): GraphEdge[] {
+function buildGraphEdges(
+  relations: RawKnowledgeRelationRow[],
+  documentLinks: RawKnowledgeDocumentGraphLinkRow[],
+  nodes: GraphNode[],
+): GraphEdge[] {
   const nodeIds = new Set(nodes.map((node) => node.id))
-  return relations.flatMap((relation) => {
+  const relationEdges = relations.flatMap((relation) => {
     const subjectEntityId = relation.subjectEntityId ?? null
     const objectEntityId = relation.objectEntityId ?? null
     if (
@@ -826,20 +877,162 @@ function buildRelationEdges(relations: RawKnowledgeRelationRow[], nodes: GraphNo
       },
     ]
   })
+
+  const documentLinkEdges = documentLinks.flatMap((link) => {
+    if (
+      !link.documentId ||
+      !link.targetNodeId ||
+      !nodeIds.has(link.documentId) ||
+      !nodeIds.has(link.targetNodeId)
+    ) {
+      return []
+    }
+
+    return [
+      {
+        id: `${link.documentId}:${link.relationType}:${link.targetNodeId}`,
+        canonicalKey: `document-edge:${link.documentId}:${link.relationType}:${link.targetNodeId}`,
+        source: link.documentId,
+        target: link.targetNodeId,
+        relationType: link.relationType,
+        supportCount: Math.max(1, link.supportCount),
+        filteredArtifact: false,
+      },
+    ]
+  })
+
+  return [...documentLinkEdges, ...relationEdges]
 }
 
 function mapSearchNodeType(node: GraphNode): GraphNodeType {
   return node.nodeType
 }
 
+function resolveSearchPreview(node: GraphNode, preview: string | null): string | null {
+  const trimmedPreview = preview?.trim() ?? ''
+  if (trimmedPreview) {
+    return trimmedPreview
+  }
+
+  const trimmedSecondary = node.secondaryLabel?.trim() ?? ''
+  if (!trimmedSecondary || node.nodeType === 'document') {
+    return null
+  }
+
+  const normalizedSecondary =
+    node.nodeType === 'topic' ? humanizeGraphLabelToken(trimmedSecondary) || trimmedSecondary : trimmedSecondary
+
+  return normalizedSecondary === node.label ? null : normalizedSecondary
+}
+
 function mapSearchHit(node: GraphNode, preview: string | null): GraphSearchHit {
+  const resolvedPreview = resolveSearchPreview(node, preview)
   return {
     id: node.id,
     label: node.label,
     nodeType: mapSearchNodeType(node),
-    secondaryLabel: preview ?? node.secondaryLabel,
-    preview,
+    secondaryLabel: resolvedPreview,
+    preview: resolvedPreview,
   }
+}
+
+function normalizeSearchTerm(value: string | null | undefined): string {
+  return value?.trim().toLowerCase() ?? ''
+}
+
+function scoreSearchField(
+  value: string,
+  query: string,
+  terms: string[],
+  weights: {
+    exact: number
+    prefix: number
+    tokenPrefix: number
+    includes: number
+    term: number
+  },
+): number {
+  if (!value) {
+    return 0
+  }
+
+  let score = 0
+
+  if (value === query) {
+    score += weights.exact
+  } else if (value.startsWith(query)) {
+    score += weights.prefix
+  } else if (value.includes(query)) {
+    score += weights.includes
+  }
+
+  const tokens = value.split(/[\s:/._-]+/).filter(Boolean)
+  if (tokens.some((token) => token.startsWith(query))) {
+    score += weights.tokenPrefix
+  }
+
+  for (const term of terms) {
+    if (term.length > 1 && value.includes(term)) {
+      score += weights.term
+    }
+  }
+
+  return score
+}
+
+function scoreSearchNode(node: GraphNode, query: string, terms: string[]): number {
+  const label = normalizeSearchTerm(node.label)
+  const secondary = normalizeSearchTerm(resolveSearchPreview(node, null))
+  const canonical = normalizeSearchTerm(node.canonicalKey?.replace(/^[^:]+:/, ''))
+  const combined = [label, secondary, canonical].filter(Boolean).join(' ')
+
+  let score = 0
+  score += scoreSearchField(label, query, terms, {
+    exact: 1200,
+    prefix: 780,
+    tokenPrefix: 520,
+    includes: 360,
+    term: 84,
+  })
+  score += scoreSearchField(secondary, query, terms, {
+    exact: 280,
+    prefix: 180,
+    tokenPrefix: 120,
+    includes: 90,
+    term: 24,
+  })
+  score += scoreSearchField(canonical, query, terms, {
+    exact: 220,
+    prefix: 150,
+    tokenPrefix: 100,
+    includes: 70,
+    term: 18,
+  })
+
+  if (terms.length > 1 && terms.every((term) => combined.includes(term))) {
+    score += 90
+  }
+
+  score += Math.min(72, Math.log2(Math.max(1, node.supportCount) + 1) * 18)
+  return score
+}
+
+function buildSearchResultPreview(node: GraphNode, duplicateLabel: boolean): string | null {
+  const basePreview = resolveSearchPreview(node, null)
+  if (!duplicateLabel) {
+    return basePreview
+  }
+
+  const supportLabel =
+    node.nodeType === 'document'
+      ? i18n.global.t('graph.searchRevisionCount', { count: node.supportCount })
+      : i18n.global.t('graph.searchSupportCount', { count: node.supportCount })
+
+  if (basePreview) {
+    return `${basePreview} · ${supportLabel}`
+  }
+
+  return `${supportLabel} · ${compactOpaqueIdentifier(node.id)}`
 }
 
 function buildDocumentSummary(
@@ -895,6 +1088,7 @@ function mapEntityDetail(
   supportingEvidence: RawKnowledgeEvidenceRow[],
   nodes: GraphNode[],
 ): GraphNodeDetail {
+  const label = entityDisplayLabel(entity)
   const relatedDocumentIds = new Set(mentionedChunks.map((chunk) => chunk.documentId))
   const relatedDocuments = [...relatedDocumentIds]
     .map((documentId) => findDocumentNode(nodes, documentId))
@@ -923,9 +1117,9 @@ function mapEntityDetail(
 
   return {
     id: entity.entityId,
-    label: entity.canonicalLabel,
+    label,
     nodeType: 'entity',
-    summary: entity.summary ?? entity.canonicalLabel,
+    summary: entity.summary ?? label,
     properties: [
       ['Type', entity.entityType],
       ['Support', String(entity.supportCount)],
@@ -973,6 +1167,7 @@ function mapRelationDetail(
   supportingEvidence: RawKnowledgeEvidenceRow[],
   nodes: GraphNode[],
 ): GraphNodeDetail {
+  const label = relationDisplayLabel(relation)
   const relatedDocuments = dedupeSearchHits(
     supportingEvidence
     .map((evidence) => findDocumentNode(nodes, evidence.documentId))
@@ -1009,12 +1204,12 @@ function mapRelationDetail(
 
   return {
     id: relation.relationId,
-    label: relation.normalizedAssertion,
+    label,
     nodeType: 'topic',
-    summary: relation.normalizedAssertion,
+    summary: label,
     properties: [
       ['Type', relation.predicate],
-      ['Assertion', relation.normalizedAssertion],
+      ['Assertion', label],
       ['Support', String(relation.supportCount)],
       ['Subject entity', subjectNode?.label ?? relation.subjectEntityId ?? '—'],
       ['Object entity', objectNode?.label ?? relation.objectEntityId ?? '—'],
@@ -1047,7 +1242,7 @@ function mapRelationDetail(
     })),
     relationCount: relation.supportCount,
     canonicalSummary: {
-      text: relation.normalizedAssertion,
+      text: label,
       confidenceStatus:
         relation.confidence !== null && relation.confidence >= 0.8 ? 'strong' : 'partial',
       supportCount: relation.supportCount,
@@ -1109,37 +1304,33 @@ function mapDocumentDetail(
   }
 }
 
-async function fetchKnowledgeDocuments(libraryId: string): Promise<RawKnowledgeDocumentRow[]> {
+async function fetchKnowledgeGraphTopology(
+  libraryId: string,
+): Promise<RawKnowledgeGraphTopologyResponse> {
   try {
-    const rows = await unwrap(apiHttp.get<RawRow[]>(`/knowledge/libraries/${libraryId}/documents`))
-    return rows.map(normalizeKnowledgeDocumentRow)
-  } catch (error) {
-    if (error instanceof ApiClientError && error.statusCode === 404) {
-      return []
-    }
-    throw error
-  }
-}
+    const topology = await unwrap(
+      apiHttp.get<{
+        documents: RawRow[]
+        entities: RawRow[]
+        relations: RawRow[]
+        documentLinks: RawRow[]
+      }>(`/knowledge/libraries/${libraryId}/graph-topology`),
+    )
 
-async function fetchKnowledgeEntities(libraryId: string): Promise<RawKnowledgeEntityRow[]> {
-  try {
-    const rows = await unwrap(apiHttp.get<RawRow[]>(`/knowledge/libraries/${libraryId}/entities`))
-    return rows.map(normalizeKnowledgeEntityRow)
-  } catch (error) {
-    if (error instanceof ApiClientError && error.statusCode === 404) {
-      return []
+    return {
+      documents: topology.documents.map(normalizeKnowledgeDocumentRow),
+      entities: topology.entities.map(normalizeKnowledgeEntityRow),
+      relations: topology.relations.map(normalizeKnowledgeRelationRow),
+      documentLinks: topology.documentLinks.map(normalizeKnowledgeDocumentGraphLinkRow),
     }
-    throw error
-  }
-}
-
-async function fetchKnowledgeRelations(libraryId: string): Promise<RawKnowledgeRelationRow[]> {
-  try {
-    const rows = await unwrap(apiHttp.get<RawRow[]>(`/knowledge/libraries/${libraryId}/relations`))
-    return rows.map(normalizeKnowledgeRelationRow)
   } catch (error) {
     if (error instanceof ApiClientError && error.statusCode === 404) {
-      return []
+      return {
+        documents: [],
+        entities: [],
+        relations: [],
+        documentLinks: [],
+      }
     }
     throw error
   }
@@ -1222,77 +1413,61 @@ async function fetchKnowledgeRelationDetail(
   }
 }
 
-async function fetchKnowledgeSearch(
-  libraryId: string,
-  query: string,
-  limit: number,
-): Promise<RawKnowledgeSearchResponse> {
-  const response = await unwrap(
-    apiHttp.get<RawKnowledgeSearchResponse>(`/knowledge/libraries/${libraryId}/search/documents`, {
-      params: { query, limit },
-    }),
-  )
-  return {
-    ...response,
-    documentHits: response.documentHits.map((hit) => ({
-      ...hit,
-      document: normalizeKnowledgeDocumentRow(hit.document as unknown as RawRow),
-      revision: normalizeKnowledgeRevisionRow(hit.revision as unknown as RawRow),
-      chunkHits: hit.chunkHits.map((row) => {
-        const normalized = normalizeKnowledgeChunkRow(row as unknown as RawRow)
-        return {
-          chunkId: normalized.chunkId,
-          workspaceId: normalized.workspaceId,
-          libraryId: normalized.libraryId,
-          revisionId: normalized.revisionId,
-          contentText: normalized.contentText,
-          normalizedText: normalized.normalizedText,
-          sectionPath: normalized.sectionPath,
-          headingTrail: normalized.headingTrail,
-          score: row.score,
-        }
-      }),
-      evidenceSamples: hit.evidenceSamples.map((row) =>
-        normalizeKnowledgeEvidenceRow(row as unknown as RawRow),
-      ),
-    })),
-    relationHits: response.relationHits.map((row) => ({
-      ...row,
-      relationId: row.relationId ?? (row as unknown as { relation_id?: string }).relation_id ?? '',
-      workspaceId: row.workspaceId ?? (row as unknown as { workspace_id?: string }).workspace_id ?? '',
-      libraryId: row.libraryId ?? (row as unknown as { library_id?: string }).library_id ?? '',
-      predicate: row.predicate,
-      canonicalLabel:
-        row.canonicalLabel ??
-        (row as unknown as { canonical_label?: string; normalized_assertion?: string }).canonical_label ??
-        (row as unknown as { normalized_assertion?: string }).normalized_assertion ??
-        '',
-      summary: row.summary ?? null,
-      score: row.score,
-    })),
-  }
-}
-
 export async function fetchGraphSurface(libraryId: string): Promise<GraphSurfaceResponse> {
   if (!libraryId) {
     return buildEmptySurface()
   }
 
-  const [documents, entities, relations, generations] = await Promise.all([
-    fetchKnowledgeDocuments(libraryId),
-    fetchKnowledgeEntities(libraryId),
-    fetchKnowledgeRelations(libraryId),
+  const [topology, generations] = await Promise.all([
+    fetchKnowledgeGraphTopology(libraryId),
     fetchKnowledgeGenerations(libraryId),
   ])
 
+  const { documents, entities, relations, documentLinks } = topology
   const nodes = [
     ...documents.map(mapDocumentRow),
     ...entities.map(mapEntityRow),
     ...relations.map(mapRelationRow),
   ]
   const latestGeneration = generations[0] ?? null
-  const edges = buildRelationEdges(relations, nodes)
-  return buildSurface(latestGeneration, nodes, edges)
+  const edges = buildGraphEdges(relations, documentLinks, nodes)
+  return buildSurface(
+    latestGeneration,
+    nodes,
+    edges,
+    0,
+  )
+}
+
+export async function fetchGraphSurfaceHeartbeat(
+  libraryId: string,
+  nodeCount: number,
+  relationCount: number,
+): Promise<GraphSurfaceHeartbeat> {
+  if (!libraryId) {
+    const surface = buildEmptySurface()
+    return {
+      graphStatus: surface.graphStatus,
+      convergenceStatus: surface.convergenceStatus,
+      graphGeneration: surface.graphGeneration,
+      graphGenerationState: surface.graphGenerationState ?? null,
+      lastBuiltAt: surface.lastBuiltAt,
+      warning: surface.warning,
+    }
+  }
+
+  const latestGeneration = (await fetchKnowledgeGenerations(libraryId))[0] ?? null
+  const graphStatus = mapGraphStatus(latestGeneration, nodeCount, relationCount)
+  const graphGenerationState = latestGeneration?.degradedState ?? null
+
+  return {
+    graphStatus,
+    convergenceStatus: mapConvergenceStatus(graphStatus, graphGenerationState),
+    graphGeneration: graphGenerationOf(latestGeneration),
+    graphGenerationState,
+    lastBuiltAt: latestGeneration?.updatedAt ?? null,
+    warning: projectionWarning(graphStatus, graphGenerationState),
+  }
 }
 
 export async function fetchGraphDiagnostics(libraryId?: string): Promise<GraphDiagnostics> {
@@ -1385,52 +1560,39 @@ export async function fetchGraphNodeDetail(
   return mapRelationDetail(detail.relation, detail.supportingEvidence, nodes)
 }
 
-export async function searchGraphNodes(
-  libraryId: string,
+export function searchGraphNodes(
   query: string,
   nodes: GraphNode[],
+  filter: GraphNodeType | '' = '',
   limit = 8,
-): Promise<GraphSearchHit[]> {
-  const trimmed = query.trim()
-  if (!trimmed) {
+): GraphSearchHit[] {
+  const normalizedQuery = normalizeSearchTerm(query)
+  if (!normalizedQuery) {
     return []
   }
 
-  const response = await fetchKnowledgeSearch(libraryId, trimmed, limit)
-  const scores = new Map<string, number>()
-  const hits: GraphSearchHit[] = []
+  const terms = normalizedQuery.split(/\s+/).filter(Boolean)
+  const rankedNodes = nodes
+    .filter((node) => !filter || node.nodeType === filter)
+    .map((node) => ({
+      node,
+      score: scoreSearchNode(node, normalizedQuery, terms),
+    }))
+    .filter((candidate) => candidate.score > 0)
+    .sort((left, right) => right.score - left.score || left.node.label.localeCompare(right.node.label))
 
-  for (const hit of response.documentHits) {
-    const node = findDocumentNode(nodes, hit.document.documentId)
-    if (!node) {
-      continue
-    }
-    scores.set(node.id, hit.score)
-    hits.push(
-      mapSearchHit(node, hit.evidenceSamples[0]?.excerpt ?? hit.revision.title ?? hit.document.externalKey),
+  const labelCounts = rankedNodes.reduce<Map<string, number>>((counts, candidate) => {
+    counts.set(candidate.node.label, (counts.get(candidate.node.label) ?? 0) + 1)
+    return counts
+  }, new Map())
+
+  return rankedNodes
+    .map((candidate) =>
+      mapSearchHit(
+        candidate.node,
+        buildSearchResultPreview(candidate.node, (labelCounts.get(candidate.node.label) ?? 0) > 1),
+      ),
     )
-  }
-
-  for (const hit of response.entityHits) {
-    const node = findEntityNode(nodes, hit.entityId)
-    if (!node) {
-      continue
-    }
-    scores.set(node.id, hit.score)
-    hits.push(mapSearchHit(node, hit.summary ?? hit.canonicalName))
-  }
-
-  for (const hit of response.relationHits) {
-    const node = findRelationNode(nodes, hit.relationId)
-    if (!node) {
-      continue
-    }
-    scores.set(node.id, hit.score)
-    hits.push(mapSearchHit(node, hit.summary ?? hit.canonicalLabel))
-  }
-
-  return hits
-    .sort((left, right) => (scores.get(right.id) ?? 0) - (scores.get(left.id) ?? 0))
     .slice(0, limit)
 }
 
@@ -1448,12 +1610,8 @@ export function mapGraphDiagnosticsForDashboard(
   let severity: DashboardAttentionItem['severity'] | null = null
   if (diagnostics.graphStatus === 'failed' || diagnostics.graphStatus === 'stale') {
     severity = 'error'
-  } else if (
-    diagnostics.graphStatus === 'building' ||
-    diagnostics.graphStatus === 'partial' ||
-    diagnostics.graphStatus === 'rebuilding'
-  ) {
-    severity = 'warning'
+  } else if (diagnostics.graphStatus === 'building' || diagnostics.graphStatus === 'rebuilding') {
+    severity = 'info'
   }
 
   return {

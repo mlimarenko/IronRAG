@@ -21,29 +21,38 @@ onMounted(async () => {
 async function completeAuthTransition() {
   try {
     await shellStore.loadContext()
-  } finally {
-    await router.push('/')
+  } catch {
+    // shell bootstrap failed — user will see shell-level error after navigation
   }
+  await router.push('/')
 }
 
 async function submit(payload: { login: string; password: string; rememberMe: boolean }) {
-  await sessionStore.loginWithPassword({
-    login: payload.login,
-    password: payload.password,
-    rememberMe: payload.rememberMe,
-    locale: sessionStore.locale,
-  })
-  await completeAuthTransition()
+  try {
+    await sessionStore.loginWithPassword({
+      login: payload.login,
+      password: payload.password,
+      rememberMe: payload.rememberMe,
+      locale: sessionStore.locale,
+    })
+    await completeAuthTransition()
+  } catch {
+    // store sets its own error state for UI feedback
+  }
 }
 
 async function setup(payload: { login: string; displayName: string; password: string }) {
-  await sessionStore.completeBootstrapSetup({
-    login: payload.login,
-    displayName: payload.displayName,
-    password: payload.password,
-    locale: sessionStore.locale,
-  })
-  await completeAuthTransition()
+  try {
+    await sessionStore.completeBootstrapSetup({
+      login: payload.login,
+      displayName: payload.displayName,
+      password: payload.password,
+      locale: sessionStore.locale,
+    })
+    await completeAuthTransition()
+  } catch {
+    // store sets its own error state for UI feedback
+  }
 }
 </script>
 

@@ -1,8 +1,9 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, anyhow};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use tokio::time::sleep;
 use uuid::Uuid;
 
 use crate::infra::arangodb::{
@@ -253,6 +254,15 @@ pub struct KnowledgeRelationTopologyRow {
     pub object_entity_id: Uuid,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeDocumentGraphLinkRow {
+    pub document_id: Uuid,
+    pub target_node_id: Uuid,
+    pub target_node_type: String,
+    pub relation_type: String,
+    pub support_count: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct NewKnowledgeEntityCandidate {
     pub candidate_id: Uuid,
@@ -387,6 +397,7 @@ impl ArangoGraphStore {
              )
              FILTER subject != null AND object != null
              SORT relation.support_count DESC, relation.updated_at DESC, relation.relation_id DESC
+             LIMIT 10000
              RETURN MERGE(
                 relation,
                 {{
@@ -408,6 +419,91 @@ impl ArangoGraphStore {
             )
             .await
             .context("failed to list knowledge relation topology by library")?;
+        decode_many_results(cursor)
+    }
+
+    pub async fn list_document_graph_links_by_library(
+        &self,
+        library_id: Uuid,
+    ) -> anyhow::Result<Vec<KnowledgeDocumentGraphLinkRow>> {
+        let query = format!(
+            "LET rows = UNION(
+               FOR edge IN {mention_edge_collection}
+                 LET chunk = DOCUMENT(edge._from)
+                 LET entity = DOCUMENT(edge._to)
+                 FILTER chunk != null
+                   AND entity != null
+                   AND chunk.library_id == @library_id
+                   AND entity.library_id == @library_id
+                 RETURN {{
+                    document_id: chunk.document_id,
+                    target_node_id: entity.entity_id,
+                    target_node_type: \"entity\",
+                    mention_count: 1,
+                    support_count: 0
+                 }},
+               FOR edge IN {evidence_support_entity_edge_collection}
+                 LET evidence = DOCUMENT(edge._from)
+                 LET entity = DOCUMENT(edge._to)
+                 FILTER evidence != null
+                   AND entity != null
+                   AND evidence.library_id == @library_id
+                   AND entity.library_id == @library_id
+                 RETURN {{
+                    document_id: evidence.document_id,
+                    target_node_id: entity.entity_id,
+                    target_node_type: \"entity\",
+                    mention_count: 0,
+                    support_count: 1
+                 }},
+               FOR edge IN {evidence_support_relation_edge_collection}
+                 LET evidence = DOCUMENT(edge._from)
+                 LET relation = DOCUMENT(edge._to)
+                 FILTER evidence != null
+                   AND relation != null
+                   AND evidence.library_id == @library_id
+                   AND relation.library_id == @library_id
+                 RETURN {{
+                    document_id: evidence.document_id,
+                    target_node_id: relation.relation_id,
+                    target_node_type: \"topic\",
+                    mention_count: 0,
+                    support_count: 1
+                 }}
+             )
+             FOR row IN rows
+               COLLECT
+                 document_id = row.document_id,
+                 target_node_id = row.target_node_id,
+                 target_node_type = row.target_node_type
+               AGGREGATE
+                 mention_count = SUM(row.mention_count),
+                 support_count = SUM(row.support_count)
+               LET total_support_count = mention_count + support_count
+               LET relation_type =
+                 target_node_type == \"entity\" && mention_count > 0 ? \"mentions\" : \"supports\"
+               SORT total_support_count DESC, document_id ASC, target_node_type ASC, target_node_id ASC
+               RETURN {{
+                  document_id,
+                  target_node_id,
+                  target_node_type,
+                  relation_type,
+                  support_count: total_support_count
+               }}",
+            mention_edge_collection = KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE,
+            evidence_support_entity_edge_collection = KNOWLEDGE_EVIDENCE_SUPPORTS_ENTITY_EDGE,
+            evidence_support_relation_edge_collection = KNOWLEDGE_EVIDENCE_SUPPORTS_RELATION_EDGE,
+        );
+        let cursor = self
+            .client
+            .query_json(
+                &query,
+                serde_json::json!({
+                    "library_id": library_id,
+                }),
+            )
+            .await
+            .context("failed to list knowledge document graph links")?;
         decode_many_results(cursor)
     }
 
@@ -458,43 +554,21 @@ impl ArangoGraphStore {
         &self,
         input: &NewKnowledgeEntityCandidate,
     ) -> anyhow::Result<KnowledgeEntityCandidateRow> {
-        let cursor = self
-            .client
-            .query_json(
-                "UPSERT { _key: @key }
-                 INSERT {
-                    _key: @key,
-                    candidate_id: @candidate_id,
-                    workspace_id: @workspace_id,
-                    library_id: @library_id,
-                    revision_id: @revision_id,
-                    chunk_id: @chunk_id,
-                    candidate_label: @candidate_label,
-                    candidate_type: @candidate_type,
-                    normalization_key: @normalization_key,
-                    confidence: @confidence,
-                    extraction_method: @extraction_method,
-                    candidate_state: @candidate_state,
-                    created_at: @created_at,
-                    updated_at: @updated_at
-                 }
-                 UPDATE {
-                    workspace_id: @workspace_id,
-                    library_id: @library_id,
-                    revision_id: @revision_id,
-                    chunk_id: @chunk_id,
-                    candidate_label: @candidate_label,
-                    candidate_type: @candidate_type,
-                    normalization_key: @normalization_key,
-                    confidence: @confidence,
-                    extraction_method: @extraction_method,
-                    candidate_state: @candidate_state,
-                    updated_at: @updated_at
-                 }
-                 IN @@collection
-                 RETURN NEW",
+        let mut rows = self.upsert_entity_candidates(std::slice::from_ref(input)).await?;
+        rows.pop().ok_or_else(|| anyhow!("ArangoDB query returned no entity candidate rows"))
+    }
+
+    pub async fn upsert_entity_candidates(
+        &self,
+        inputs: &[NewKnowledgeEntityCandidate],
+    ) -> anyhow::Result<Vec<KnowledgeEntityCandidateRow>> {
+        if inputs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = inputs
+            .iter()
+            .map(|input| {
                 serde_json::json!({
-                    "@collection": KNOWLEDGE_ENTITY_CANDIDATE_COLLECTION,
                     "key": input.candidate_id,
                     "candidate_id": input.candidate_id,
                     "workspace_id": input.workspace_id,
@@ -509,11 +583,52 @@ impl ArangoGraphStore {
                     "candidate_state": input.candidate_state,
                     "created_at": input.created_at.unwrap_or_else(Utc::now),
                     "updated_at": input.updated_at.unwrap_or_else(Utc::now),
+                })
+            })
+            .collect::<Vec<_>>();
+        let cursor = self
+            .run_retryable_upsert_query(
+                "FOR row IN @rows
+                 UPSERT { _key: row.key }
+                 INSERT {
+                    _key: row.key,
+                    candidate_id: row.candidate_id,
+                    workspace_id: row.workspace_id,
+                    library_id: row.library_id,
+                    revision_id: row.revision_id,
+                    chunk_id: row.chunk_id,
+                    candidate_label: row.candidate_label,
+                    candidate_type: row.candidate_type,
+                    normalization_key: row.normalization_key,
+                    confidence: row.confidence,
+                    extraction_method: row.extraction_method,
+                    candidate_state: row.candidate_state,
+                    created_at: row.created_at,
+                    updated_at: row.updated_at
+                 }
+                 UPDATE {
+                    workspace_id: row.workspace_id,
+                    library_id: row.library_id,
+                    revision_id: row.revision_id,
+                    chunk_id: row.chunk_id,
+                    candidate_label: row.candidate_label,
+                    candidate_type: row.candidate_type,
+                    normalization_key: row.normalization_key,
+                    confidence: row.confidence,
+                    extraction_method: row.extraction_method,
+                    candidate_state: row.candidate_state,
+                    updated_at: row.updated_at
+                 }
+                 IN @@collection
+                 RETURN NEW",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_ENTITY_CANDIDATE_COLLECTION,
+                    "rows": rows,
                 }),
+                "failed to upsert knowledge entity candidates",
             )
-            .await
-            .context("failed to upsert knowledge entity candidate")?;
-        decode_single_result(cursor)
+            .await?;
+        decode_many_results(cursor)
     }
 
     pub async fn upsert_relation_with_endpoints(
@@ -620,45 +735,21 @@ impl ArangoGraphStore {
         &self,
         input: &NewKnowledgeRelationCandidate,
     ) -> anyhow::Result<KnowledgeRelationCandidateRow> {
-        let cursor = self
-            .client
-            .query_json(
-                "UPSERT { _key: @key }
-                 INSERT {
-                    _key: @key,
-                    candidate_id: @candidate_id,
-                    workspace_id: @workspace_id,
-                    library_id: @library_id,
-                    revision_id: @revision_id,
-                    chunk_id: @chunk_id,
-                    subject_candidate_key: @subject_candidate_key,
-                    predicate: @predicate,
-                    object_candidate_key: @object_candidate_key,
-                    normalized_assertion: @normalized_assertion,
-                    confidence: @confidence,
-                    extraction_method: @extraction_method,
-                    candidate_state: @candidate_state,
-                    created_at: @created_at,
-                    updated_at: @updated_at
-                 }
-                 UPDATE {
-                    workspace_id: @workspace_id,
-                    library_id: @library_id,
-                    revision_id: @revision_id,
-                    chunk_id: @chunk_id,
-                    subject_candidate_key: @subject_candidate_key,
-                    predicate: @predicate,
-                    object_candidate_key: @object_candidate_key,
-                    normalized_assertion: @normalized_assertion,
-                    confidence: @confidence,
-                    extraction_method: @extraction_method,
-                    candidate_state: @candidate_state,
-                    updated_at: @updated_at
-                 }
-                 IN @@collection
-                 RETURN NEW",
+        let mut rows = self.upsert_relation_candidates(std::slice::from_ref(input)).await?;
+        rows.pop().ok_or_else(|| anyhow!("ArangoDB query returned no relation candidate rows"))
+    }
+
+    pub async fn upsert_relation_candidates(
+        &self,
+        inputs: &[NewKnowledgeRelationCandidate],
+    ) -> anyhow::Result<Vec<KnowledgeRelationCandidateRow>> {
+        if inputs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = inputs
+            .iter()
+            .map(|input| {
                 serde_json::json!({
-                    "@collection": KNOWLEDGE_RELATION_CANDIDATE_COLLECTION,
                     "key": input.candidate_id,
                     "candidate_id": input.candidate_id,
                     "workspace_id": input.workspace_id,
@@ -674,11 +765,54 @@ impl ArangoGraphStore {
                     "candidate_state": input.candidate_state,
                     "created_at": input.created_at.unwrap_or_else(Utc::now),
                     "updated_at": input.updated_at.unwrap_or_else(Utc::now),
+                })
+            })
+            .collect::<Vec<_>>();
+        let cursor = self
+            .run_retryable_upsert_query(
+                "FOR row IN @rows
+                 UPSERT { _key: row.key }
+                 INSERT {
+                    _key: row.key,
+                    candidate_id: row.candidate_id,
+                    workspace_id: row.workspace_id,
+                    library_id: row.library_id,
+                    revision_id: row.revision_id,
+                    chunk_id: row.chunk_id,
+                    subject_candidate_key: row.subject_candidate_key,
+                    predicate: row.predicate,
+                    object_candidate_key: row.object_candidate_key,
+                    normalized_assertion: row.normalized_assertion,
+                    confidence: row.confidence,
+                    extraction_method: row.extraction_method,
+                    candidate_state: row.candidate_state,
+                    created_at: row.created_at,
+                    updated_at: row.updated_at
+                 }
+                 UPDATE {
+                    workspace_id: row.workspace_id,
+                    library_id: row.library_id,
+                    revision_id: row.revision_id,
+                    chunk_id: row.chunk_id,
+                    subject_candidate_key: row.subject_candidate_key,
+                    predicate: row.predicate,
+                    object_candidate_key: row.object_candidate_key,
+                    normalized_assertion: row.normalized_assertion,
+                    confidence: row.confidence,
+                    extraction_method: row.extraction_method,
+                    candidate_state: row.candidate_state,
+                    updated_at: row.updated_at
+                 }
+                 IN @@collection
+                 RETURN NEW",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_RELATION_CANDIDATE_COLLECTION,
+                    "rows": rows,
                 }),
+                "failed to upsert knowledge relation candidates",
             )
-            .await
-            .context("failed to upsert knowledge relation candidate")?;
-        decode_single_result(cursor)
+            .await?;
+        decode_many_results(cursor)
     }
 
     pub async fn upsert_evidence_with_edges(
@@ -803,43 +937,21 @@ impl ArangoGraphStore {
         &self,
         input: &NewKnowledgeEntity,
     ) -> anyhow::Result<KnowledgeEntityRow> {
-        let cursor = self
-            .client
-            .query_json(
-                "UPSERT { _key: @key }
-                 INSERT {
-                    _key: @key,
-                    entity_id: @entity_id,
-                    workspace_id: @workspace_id,
-                    library_id: @library_id,
-                    canonical_label: @canonical_label,
-                    aliases: @aliases,
-                    entity_type: @entity_type,
-                    summary: @summary,
-                    confidence: @confidence,
-                    support_count: @support_count,
-                    freshness_generation: @freshness_generation,
-                    entity_state: @entity_state,
-                    created_at: @created_at,
-                    updated_at: @updated_at
-                 }
-                 UPDATE {
-                    workspace_id: @workspace_id,
-                    library_id: @library_id,
-                    canonical_label: @canonical_label,
-                   aliases: UNION_DISTINCT((OLD.aliases == null ? [] : OLD.aliases), @aliases),
-                    entity_type: @entity_type,
-                    summary: @summary,
-                    confidence: @confidence,
-                    support_count: @support_count,
-                    freshness_generation: @freshness_generation,
-                    entity_state: @entity_state,
-                    updated_at: @updated_at
-                 }
-                 IN @@collection
-                 RETURN NEW",
+        let mut rows = self.upsert_entities(std::slice::from_ref(input)).await?;
+        rows.pop().ok_or_else(|| anyhow!("ArangoDB query returned no entity rows"))
+    }
+
+    pub async fn upsert_entities(
+        &self,
+        inputs: &[NewKnowledgeEntity],
+    ) -> anyhow::Result<Vec<KnowledgeEntityRow>> {
+        if inputs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = inputs
+            .iter()
+            .map(|input| {
                 serde_json::json!({
-                    "@collection": KNOWLEDGE_ENTITY_COLLECTION,
                     "key": input.entity_id,
                     "entity_id": input.entity_id,
                     "workspace_id": input.workspace_id,
@@ -854,11 +966,52 @@ impl ArangoGraphStore {
                     "entity_state": input.entity_state,
                     "created_at": input.created_at.unwrap_or_else(Utc::now),
                     "updated_at": input.updated_at.unwrap_or_else(Utc::now),
+                })
+            })
+            .collect::<Vec<_>>();
+        let cursor = self
+            .run_retryable_upsert_query(
+                "FOR row IN @rows
+                 UPSERT { _key: row.key }
+                 INSERT {
+                    _key: row.key,
+                    entity_id: row.entity_id,
+                    workspace_id: row.workspace_id,
+                    library_id: row.library_id,
+                    canonical_label: row.canonical_label,
+                    aliases: row.aliases,
+                    entity_type: row.entity_type,
+                    summary: row.summary,
+                    confidence: row.confidence,
+                    support_count: row.support_count,
+                    freshness_generation: row.freshness_generation,
+                    entity_state: row.entity_state,
+                    created_at: row.created_at,
+                    updated_at: row.updated_at
+                 }
+                 UPDATE {
+                    workspace_id: row.workspace_id,
+                    library_id: row.library_id,
+                    canonical_label: row.canonical_label,
+                    aliases: UNION_DISTINCT((OLD.aliases == null ? [] : OLD.aliases), row.aliases),
+                    entity_type: row.entity_type,
+                    summary: row.summary,
+                    confidence: row.confidence,
+                    support_count: row.support_count,
+                    freshness_generation: row.freshness_generation,
+                    entity_state: row.entity_state,
+                    updated_at: row.updated_at
+                 }
+                 IN @@collection
+                 RETURN NEW",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_ENTITY_COLLECTION,
+                    "rows": rows,
                 }),
+                "failed to upsert knowledge entities",
             )
-            .await
-            .context("failed to upsert knowledge entity")?;
-        decode_single_result(cursor)
+            .await?;
+        decode_many_results(cursor)
     }
 
     pub async fn get_entity_by_id(
@@ -916,6 +1069,7 @@ impl ArangoGraphStore {
                 "FOR entity IN @@collection
                  FILTER entity.library_id == @library_id
                  SORT entity.support_count DESC, entity.updated_at DESC, entity.entity_id DESC
+                 LIMIT 5000
                  RETURN entity",
                 serde_json::json!({
                     "@collection": KNOWLEDGE_ENTITY_COLLECTION,
@@ -931,41 +1085,21 @@ impl ArangoGraphStore {
         &self,
         input: &NewKnowledgeRelation,
     ) -> anyhow::Result<KnowledgeRelationRow> {
-        let cursor = self
-            .client
-            .query_json(
-                "UPSERT { _key: @key }
-                 INSERT {
-                    _key: @key,
-                    relation_id: @relation_id,
-                    workspace_id: @workspace_id,
-                    library_id: @library_id,
-                    predicate: @predicate,
-                    normalized_assertion: @normalized_assertion,
-                    confidence: @confidence,
-                    support_count: @support_count,
-                    contradiction_state: @contradiction_state,
-                    freshness_generation: @freshness_generation,
-                    relation_state: @relation_state,
-                    created_at: @created_at,
-                    updated_at: @updated_at
-                 }
-                 UPDATE {
-                    workspace_id: @workspace_id,
-                    library_id: @library_id,
-                    predicate: @predicate,
-                    normalized_assertion: @normalized_assertion,
-                    confidence: @confidence,
-                    support_count: @support_count,
-                    contradiction_state: @contradiction_state,
-                    freshness_generation: @freshness_generation,
-                    relation_state: @relation_state,
-                    updated_at: @updated_at
-                 }
-                 IN @@collection
-                 RETURN NEW",
+        let mut rows = self.upsert_relations(std::slice::from_ref(input)).await?;
+        rows.pop().ok_or_else(|| anyhow!("ArangoDB query returned no relation rows"))
+    }
+
+    pub async fn upsert_relations(
+        &self,
+        inputs: &[NewKnowledgeRelation],
+    ) -> anyhow::Result<Vec<KnowledgeRelationRow>> {
+        if inputs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = inputs
+            .iter()
+            .map(|input| {
                 serde_json::json!({
-                    "@collection": KNOWLEDGE_RELATION_COLLECTION,
                     "key": input.relation_id,
                     "relation_id": input.relation_id,
                     "workspace_id": input.workspace_id,
@@ -979,11 +1113,50 @@ impl ArangoGraphStore {
                     "relation_state": input.relation_state,
                     "created_at": input.created_at.unwrap_or_else(Utc::now),
                     "updated_at": input.updated_at.unwrap_or_else(Utc::now),
+                })
+            })
+            .collect::<Vec<_>>();
+        let cursor = self
+            .run_retryable_upsert_query(
+                "FOR row IN @rows
+                 UPSERT { _key: row.key }
+                 INSERT {
+                    _key: row.key,
+                    relation_id: row.relation_id,
+                    workspace_id: row.workspace_id,
+                    library_id: row.library_id,
+                    predicate: row.predicate,
+                    normalized_assertion: row.normalized_assertion,
+                    confidence: row.confidence,
+                    support_count: row.support_count,
+                    contradiction_state: row.contradiction_state,
+                    freshness_generation: row.freshness_generation,
+                    relation_state: row.relation_state,
+                    created_at: row.created_at,
+                    updated_at: row.updated_at
+                 }
+                 UPDATE {
+                    workspace_id: row.workspace_id,
+                    library_id: row.library_id,
+                    predicate: row.predicate,
+                    normalized_assertion: row.normalized_assertion,
+                    confidence: row.confidence,
+                    support_count: row.support_count,
+                    contradiction_state: row.contradiction_state,
+                    freshness_generation: row.freshness_generation,
+                    relation_state: row.relation_state,
+                    updated_at: row.updated_at
+                 }
+                 IN @@collection
+                 RETURN NEW",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_RELATION_COLLECTION,
+                    "rows": rows,
                 }),
+                "failed to upsert knowledge relations",
             )
-            .await
-            .context("failed to upsert knowledge relation")?;
-        decode_single_result(cursor)
+            .await?;
+        decode_many_results(cursor)
     }
 
     pub async fn get_relation_by_id(
@@ -1587,6 +1760,31 @@ impl ArangoGraphStore {
         Ok(())
     }
 
+    async fn run_retryable_upsert_query(
+        &self,
+        query: &str,
+        bind_vars: serde_json::Value,
+        context_message: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        let mut last_error = None;
+        for attempt in 0..3 {
+            match self.client.query_json(query, bind_vars.clone()).await {
+                Ok(cursor) => return Ok(cursor),
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    if attempt < 2 && is_retryable_upsert_error(&message) {
+                        sleep(Duration::from_millis(100 * (1 << attempt))).await;
+                        last_error = Some(error);
+                        continue;
+                    }
+                    return Err(error).context(context_message.to_string());
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| anyhow!("retryable ArangoDB upsert failed")))
+            .context(context_message.to_string())
+    }
+
     pub async fn replace_library_projection(
         &self,
         _library_id: Uuid,
@@ -1686,4 +1884,14 @@ where
         .cloned()
         .ok_or_else(|| anyhow!("ArangoDB cursor response is missing result"))?;
     serde_json::from_value(result).context("failed to decode ArangoDB result rows")
+}
+
+fn is_retryable_upsert_error(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    normalized.contains("write-write conflict")
+        || normalized.contains("operation timed out")
+        || normalized.contains("timed out")
+        || normalized.contains("timeout")
+        || normalized.contains("status 500")
+        || normalized.contains("status 503")
 }

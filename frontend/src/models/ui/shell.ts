@@ -29,6 +29,19 @@ export interface WorkspaceOption {
   lifecycleState: string
 }
 
+export type LibraryBindingPurpose =
+  | 'extract_text'
+  | 'extract_graph'
+  | 'embed_chunk'
+  | 'query_retrieve'
+  | 'query_answer'
+  | 'vision'
+
+export interface LibraryIngestionReadiness {
+  ready: boolean
+  missingBindingPurposes: LibraryBindingPurpose[]
+}
+
 export interface LibraryOption {
   id: string
   workspaceId: string
@@ -36,6 +49,7 @@ export interface LibraryOption {
   name: string
   description: string | null
   lifecycleState: string
+  ingestionReadiness: LibraryIngestionReadiness
 }
 
 export interface ShellCurrentUser {

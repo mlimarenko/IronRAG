@@ -102,6 +102,12 @@ pub(crate) async fn ensure_default_catalog_workspace_and_library(
     .await
     .map_err(|_| ApiError::Internal)?;
 
+    state
+        .canonical_services
+        .ai_catalog
+        .ensure_workspace_runtime_profiles(state, workspace.id, Some(principal_id))
+        .await?;
+
     Ok(())
 }
 

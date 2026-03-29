@@ -89,6 +89,7 @@ pub struct Settings {
     pub ui_bootstrap_admin_api_token: Option<String>,
     pub ui_session_ttl_hours: u64,
     pub upload_max_size_mb: u64,
+    pub content_storage_root: String,
     pub ingestion_worker_concurrency: usize,
     pub ingestion_worker_lease_seconds: u64,
     pub ingestion_worker_heartbeat_interval_seconds: u64,
@@ -162,6 +163,7 @@ impl Settings {
             .set_default("ui_default_locale", "ru")?
             .set_default("ui_session_ttl_hours", 720)?
             .set_default("upload_max_size_mb", 50)?
+            .set_default("content_storage_root", "/var/lib/rustrag/content-storage")?
             .set_default("ingestion_worker_concurrency", 4)?
             .set_default("ingestion_worker_lease_seconds", 300)?
             .set_default("ingestion_worker_heartbeat_interval_seconds", 15)?
@@ -450,6 +452,7 @@ mod tests {
             ui_bootstrap_admin_api_token: None,
             ui_session_ttl_hours: 720,
             upload_max_size_mb: 50,
+            content_storage_root: "/var/lib/rustrag/content-storage".into(),
             ingestion_worker_concurrency: 4,
             ingestion_worker_lease_seconds: 300,
             ingestion_worker_heartbeat_interval_seconds: 15,
@@ -499,6 +502,7 @@ mod tests {
         assert_eq!(settings.query_intent_cache_ttl_hours, 24);
         assert!(settings.query_rerank_enabled);
         assert!(settings.runtime_graph_extract_recovery_enabled);
+        assert_eq!(settings.content_storage_root, "/var/lib/rustrag/content-storage");
         assert_eq!(settings.runtime_document_activity_freshness_seconds, 45);
         assert_eq!(settings.runtime_document_stalled_after_seconds, 180);
         assert!(settings.runtime_graph_filter_empty_relations);

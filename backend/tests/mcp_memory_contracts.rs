@@ -547,6 +547,14 @@ async fn create_tools_allow_omitting_slug_and_advertise_optional_slug_inputs() -
             library_response["result"]["structuredContent"]["library"]["slug"],
             json!("agent-library")
         );
+        assert_eq!(
+            library_response["result"]["structuredContent"]["library"]["ingestionReadiness"]["ready"],
+            json!(false)
+        );
+        assert_eq!(
+            library_response["result"]["structuredContent"]["library"]["ingestionReadiness"]["missingBindingPurposes"],
+            json!(["extract_graph"])
+        );
 
         sqlx::query("delete from workspace where id = $1")
             .bind(created_workspace_id)

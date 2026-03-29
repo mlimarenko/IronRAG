@@ -396,7 +396,7 @@ where
     Fut: std::future::Future<Output = Result<(), GraphViewWriteError>>,
 {
     let guard = &state.resolve_settle_blockers_services.graph_projection_guard;
-    let projection_lock = repositories::acquire_runtime_library_projection_lock(
+    let projection_lock = repositories::acquire_runtime_library_graph_lock(
         &state.persistence.postgres,
         scope.library_id,
     )
@@ -421,7 +421,7 @@ where
     }
     .await;
     let release_result =
-        repositories::release_runtime_library_projection_lock(projection_lock, scope.library_id)
+        repositories::release_runtime_library_graph_lock(projection_lock, scope.library_id)
             .await
             .context("failed to release graph projection advisory lock");
     match (result, release_result) {

@@ -25,6 +25,7 @@ pub struct KnowledgeDocumentRow {
     pub workspace_id: Uuid,
     pub library_id: Uuid,
     pub external_key: String,
+    pub title: Option<String>,
     pub document_state: String,
     pub active_revision_id: Option<Uuid>,
     pub readable_revision_id: Option<Uuid>,
@@ -141,6 +142,7 @@ impl ArangoDocumentStore {
                     workspace_id: @workspace_id,
                     library_id: @library_id,
                     external_key: @external_key,
+                    title: @title,
                     document_state: @document_state,
                     active_revision_id: @active_revision_id,
                     readable_revision_id: @readable_revision_id,
@@ -153,6 +155,7 @@ impl ArangoDocumentStore {
                     workspace_id: @workspace_id,
                     library_id: @library_id,
                     external_key: @external_key,
+                    title: @title,
                     document_state: @document_state,
                     active_revision_id: @active_revision_id,
                     readable_revision_id: @readable_revision_id,
@@ -169,6 +172,7 @@ impl ArangoDocumentStore {
                     "workspace_id": row.workspace_id,
                     "library_id": row.library_id,
                     "external_key": row.external_key,
+                    "title": row.title,
                     "document_state": row.document_state,
                     "active_revision_id": row.active_revision_id,
                     "readable_revision_id": row.readable_revision_id,
@@ -262,6 +266,7 @@ impl ArangoDocumentStore {
         active_revision_id: Option<Uuid>,
         readable_revision_id: Option<Uuid>,
         latest_revision_no: Option<i64>,
+        title: Option<&str>,
         deleted_at: Option<DateTime<Utc>>,
     ) -> anyhow::Result<Option<KnowledgeDocumentRow>> {
         let cursor = self
@@ -275,6 +280,7 @@ impl ArangoDocumentStore {
                     active_revision_id: @active_revision_id,
                     readable_revision_id: @readable_revision_id,
                     latest_revision_no: @latest_revision_no,
+                    title: @title,
                     updated_at: @updated_at,
                     deleted_at: @deleted_at
                  } IN @@collection
@@ -286,6 +292,7 @@ impl ArangoDocumentStore {
                     "active_revision_id": active_revision_id,
                     "readable_revision_id": readable_revision_id,
                     "latest_revision_no": latest_revision_no,
+                    "title": title,
                     "updated_at": Utc::now(),
                     "deleted_at": deleted_at,
                 }),
@@ -418,6 +425,7 @@ impl ArangoDocumentStore {
                 "FOR revision IN @@collection
                  FILTER revision.document_id == @document_id
                  SORT revision.revision_number DESC, revision.revision_id DESC
+                 LIMIT 100
                  RETURN revision",
                 serde_json::json!({
                     "@collection": KNOWLEDGE_REVISION_COLLECTION,
@@ -505,6 +513,32 @@ impl ArangoDocumentStore {
             )
             .await
             .context("failed to update knowledge revision text content")?;
+        decode_optional_single_result(cursor)
+    }
+
+    pub async fn update_revision_storage_ref(
+        &self,
+        revision_id: Uuid,
+        storage_ref: Option<&str>,
+    ) -> anyhow::Result<Option<KnowledgeRevisionRow>> {
+        let cursor = self
+            .client
+            .query_json(
+                "FOR revision IN @@collection
+                 FILTER revision.revision_id == @revision_id
+                 LIMIT 1
+                 UPDATE revision WITH {
+                    storage_ref: @storage_ref
+                 } IN @@collection
+                 RETURN NEW",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_REVISION_COLLECTION,
+                    "revision_id": revision_id,
+                    "storage_ref": storage_ref,
+                }),
+            )
+            .await
+            .context("failed to update knowledge revision storage ref")?;
         decode_optional_single_result(cursor)
     }
 
@@ -631,6 +665,7 @@ impl ArangoDocumentStore {
                 "FOR chunk IN @@collection
                  FILTER chunk.revision_id == @revision_id
                  SORT chunk.chunk_index ASC, chunk.chunk_id ASC
+                 LIMIT 2000
                  RETURN chunk",
                 serde_json::json!({
                     "@collection": KNOWLEDGE_CHUNK_COLLECTION,

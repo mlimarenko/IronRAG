@@ -1,6 +1,10 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import {
+  buildDocumentUploadAcceptString,
+  formatAcceptedDocumentFormats,
+} from 'src/models/ui/documentFormats'
 
 const props = defineProps<{
   acceptedFormats: string[]
@@ -15,9 +19,42 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const inputRef = ref<HTMLInputElement | null>(null)
+const isDragging = ref(false)
+const acceptString = computed(() => buildDocumentUploadAcceptString(props.acceptedFormats))
+const acceptedFormatsLabel = computed(() =>
+  formatAcceptedDocumentFormats(props.acceptedFormats, (format) => t(`documents.fileFormats.${format}`)),
+)
+const compactFormatsLabel = computed(() => {
+  const formats = acceptedFormatsLabel.value.split(', ').filter(Boolean)
+  const visibleFormats = formats.slice(0, 6)
+  const hiddenCount = props.acceptedFormats.length - visibleFormats.length
+  const prefix = visibleFormats.join(', ')
+  return hiddenCount > 0 ? `${prefix} +${hiddenCount}` : prefix
+})
+const metaLabel = computed(() =>
+  props.hasDocuments
+    ? compactFormatsLabel.value
+    : `${acceptedFormatsLabel.value} · ${t('documents.maxSize', {
+        size: props.maxSizeMb,
+      })}`,
+)
 
 function openPicker() {
   inputRef.value?.click()
+}
+
+function onDragEnter(e: DragEvent) {
+  e.preventDefault()
+  isDragging.value = true
+}
+
+function onDragLeave(_e: DragEvent) {
+  isDragging.value = false
+}
+
+function onDrop(e: DragEvent) {
+  isDragging.value = false
+  emitFiles(e.dataTransfer?.files ?? null)
 }
 
 function emitFiles(fileList: FileList | null) {
@@ -35,9 +72,11 @@ defineExpose({
 <template>
   <div
     class="rr-upload-dropzone"
-    :class="{ 'is-loading': props.loading, 'is-compact': props.hasDocuments }"
+    :class="{ 'is-loading': props.loading, 'is-compact': props.hasDocuments, 'is-dragging': isDragging }"
     @dragover.prevent
-    @drop.prevent="emitFiles($event.dataTransfer?.files ?? null)"
+    @dragenter="onDragEnter"
+    @dragleave="onDragLeave"
+    @drop.prevent="onDrop"
   >
     <input
       ref="inputRef"
@@ -47,6 +86,7 @@ defineExpose({
       hidden
       tabindex="-1"
       aria-hidden="true"
+      :accept="acceptString"
       @change="emitFiles(($event.target as HTMLInputElement).files)"
     >
     <button
@@ -67,7 +107,7 @@ defineExpose({
         {{ t('documents.uploadOnboardingDescription') }}
       </p>
       <p class="rr-upload-dropzone__meta">
-        {{ props.acceptedFormats.join(', ') }} · {{ t('documents.maxSize', { size: props.maxSizeMb }) }}
+        {{ metaLabel }}
       </p>
       <p class="rr-upload-dropzone__hint">
         {{ props.hasDocuments ? t('documents.uploadCompactHint') : t('documents.uploadQueuedHint') }}
@@ -96,6 +136,11 @@ defineExpose({
 .rr-upload-dropzone:hover {
   border-color: color-mix(in srgb, var(--rr-accent) 40%, var(--rr-border-soft));
   box-shadow: 0 0 0 0.22rem color-mix(in srgb, var(--rr-accent) 10%, transparent);
+}
+
+.rr-upload-dropzone.is-dragging {
+  border-color: var(--rr-accent);
+  background: rgba(99, 102, 241, 0.04);
 }
 
 .rr-upload-dropzone.is-loading {
@@ -145,22 +190,51 @@ defineExpose({
 }
 
 .rr-upload-dropzone.is-compact {
-  min-width: min(100%, 19rem);
-  padding: 0.65rem 0.8rem;
+  min-width: min(100%, 11rem);
+  gap: 0.28rem;
+  padding: 0.28rem 0.34rem;
   background: rgba(248, 250, 252, 0.92);
 }
 
 .rr-upload-dropzone.is-compact .rr-upload-dropzone__copy {
-  gap: 0.15rem;
+  gap: 0.08rem;
 }
 
 .rr-upload-dropzone.is-compact .rr-upload-dropzone__title {
-  font-size: 0.72rem;
+  display: none;
 }
 
-.rr-upload-dropzone.is-compact .rr-upload-dropzone__meta,
+.rr-upload-dropzone.is-compact .rr-upload-dropzone__meta {
+  font-size: 0.56rem;
+  line-height: 1.25;
+}
+
 .rr-upload-dropzone.is-compact .rr-upload-dropzone__hint {
-  font-size: 0.78rem;
+  display: none;
+}
+
+@media (max-width: 920px) {
+  .rr-upload-dropzone.is-compact {
+    min-width: min(100%, 10.8rem);
+    gap: 0.28rem;
+    padding: 0.28rem 0.34rem;
+    border-radius: 14px;
+  }
+
+  .rr-upload-dropzone.is-compact .rr-upload-dropzone__copy {
+    gap: 0.08rem;
+  }
+
+  .rr-upload-dropzone.is-compact .rr-upload-dropzone__meta {
+    font-size: 0.54rem;
+  }
+
+}
+
+@media (min-width: 1800px) {
+  .rr-upload-dropzone.is-compact {
+    min-width: min(100%, 12.4rem);
+  }
 }
 
 @media (max-width: 720px) {
@@ -174,6 +248,31 @@ defineExpose({
   .rr-upload-dropzone__button {
     width: 100%;
     justify-content: center;
+  }
+}
+
+@media (max-width: 600px) {
+  .rr-upload-dropzone.is-compact {
+    min-width: 100%;
+    gap: 0;
+    padding: 0;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .rr-upload-dropzone.is-compact:hover {
+    border-color: transparent;
+    box-shadow: none;
+  }
+
+  .rr-upload-dropzone.is-compact .rr-upload-dropzone__button {
+    min-height: 2.5rem;
+  }
+
+  .rr-upload-dropzone.is-compact .rr-upload-dropzone__meta {
+    display: none;
   }
 }
 </style>

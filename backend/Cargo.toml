@@ -54,6 +54,7 @@ base64 = "0.22.1"
 tempfile = "3.23.0"
 json5 = "0.4"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff"] }
+png = "0.18.1"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

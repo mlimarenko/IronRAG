@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::domains::ai::AiBindingPurpose;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpCapabilitySnapshot {
@@ -27,12 +29,20 @@ pub struct McpWorkspaceDescriptor {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct McpLibraryIngestionReadiness {
+    pub ready: bool,
+    pub missing_binding_purposes: Vec<AiBindingPurpose>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct McpLibraryDescriptor {
     pub library_id: Uuid,
     pub workspace_id: Uuid,
     pub slug: String,
     pub name: String,
     pub description: Option<String>,
+    pub ingestion_readiness: McpLibraryIngestionReadiness,
     pub document_count: usize,
     pub readable_document_count: usize,
     pub processing_document_count: usize,

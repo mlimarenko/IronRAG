@@ -7,7 +7,6 @@ use crate::{
 };
 use serde::Serialize;
 
-pub const UI_ACCEPTED_UPLOAD_FORMATS: &[&str] = &["PDF", "DOCX", "TXT", "MD", "Images"];
 pub const MULTIPART_UPLOAD_MODE: &str = "multipart_upload_v2";
 pub const EXTRACTED_CONTENT_PREVIEW_LIMIT: usize = 1_600;
 const EXTRACTION_QUALITY_KEY: &str = "content_quality";
@@ -19,17 +18,22 @@ const TEXT_LIKE_EXTENSIONS: &[&str] = &[
 ];
 const IMAGE_EXTENSIONS: &[&str] =
     &["png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "tif", "tiff", "heic", "heif"];
-const OFFICE_EXTENSIONS: &[&str] = &["docx"];
+const DOCX_EXTENSIONS: &[&str] = &["docx"];
+const PPTX_EXTENSIONS: &[&str] = &["pptx"];
 const TEXT_LIKE_MIME_TYPES: &[&str] = &["application/json", "application/xml", "text/xml"];
-const OFFICE_MIME_TYPES: &[&str] =
+const DOCX_MIME_TYPES: &[&str] =
     &["application/vnd.openxmlformats-officedocument.wordprocessingml.document"];
+const PPTX_MIME_TYPES: &[&str] =
+    &["application/vnd.openxmlformats-officedocument.presentationml.presentation"];
+const GENERIC_BINARY_MIME_TYPES: &[&str] = &["application/octet-stream", "binary/octet-stream"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UploadFileKind {
     TextLike,
     Pdf,
     Image,
-    OfficeDocument,
+    Docx,
+    Pptx,
     Binary,
 }
 
@@ -40,7 +44,8 @@ impl UploadFileKind {
             Self::TextLike => "text_like",
             Self::Pdf => "pdf",
             Self::Image => "image",
-            Self::OfficeDocument => "office_document",
+            Self::Docx => "docx",
+            Self::Pptx => "pptx",
             Self::Binary => "binary",
         }
     }
@@ -51,7 +56,8 @@ impl UploadFileKind {
             Self::TextLike => "Text",
             Self::Pdf => "PDF",
             Self::Image => "Image",
-            Self::OfficeDocument => "DOCX",
+            Self::Docx => "DOCX",
+            Self::Pptx => "PPTX",
             Self::Binary => "Binary",
         }
     }
@@ -62,7 +68,8 @@ impl UploadFileKind {
             "text_like" => Some(Self::TextLike),
             "pdf" => Some(Self::Pdf),
             "image" => Some(Self::Image),
-            "office_document" => Some(Self::OfficeDocument),
+            "docx" => Some(Self::Docx),
+            "pptx" => Some(Self::Pptx),
             "binary" => Some(Self::Binary),
             _ => None,
         }
@@ -351,7 +358,7 @@ impl UploadAdmissionError {
                 file_size_bytes: None,
                 upload_limit_mb: None,
                 rejection_cause: message,
-                operator_action: "Attach a file field named `file` or `files` and retry."
+                operator_action: "Attach a file field named `file` and retry."
                     .to_string(),
             },
         }
@@ -418,7 +425,7 @@ impl fmt::Display for FileExtractError {
         match self {
             Self::UnsupportedBinary => write!(
                 f,
-                "unsupported file type; only text, pdf, docx, and image uploads are accepted"
+                "unsupported file type; only text, pdf, docx, pptx, and image uploads are accepted"
             ),
             Self::InvalidUtf8 => {
                 write!(f, "selected file is treated as text-like but could not be decoded as utf-8")
@@ -466,7 +473,7 @@ impl FileExtractError {
     pub const fn operator_action(&self) -> &'static str {
         match self {
             Self::UnsupportedBinary => {
-                "Upload a TXT, MD, PDF, DOCX, or supported image file instead."
+                "Upload a TXT, MD, PDF, DOCX, PPTX, or supported image file instead."
             }
             Self::InvalidUtf8 => {
                 "Re-save the file as UTF-8 text or upload a format with a dedicated parser."
@@ -564,11 +571,8 @@ fn detect_declared_upload_file_kind(
     file_name: Option<&str>,
     mime_type: Option<&str>,
 ) -> Option<UploadFileKind> {
-    let normalized_mime =
-        mime_type.map(str::trim).filter(|value| !value.is_empty()).map(str::to_ascii_lowercase);
-    let extension = file_name
-        .and_then(|value| Path::new(value).extension().and_then(|ext| ext.to_str()))
-        .map(str::to_ascii_lowercase);
+    let normalized_mime = normalized_upload_mime_type(mime_type);
+    let extension = normalized_upload_extension(file_name);
 
     if normalized_mime.as_deref() == Some("application/pdf") || extension.as_deref() == Some("pdf")
     {
@@ -579,10 +583,15 @@ fn detect_declared_upload_file_kind(
     {
         return Some(UploadFileKind::Image);
     }
-    if normalized_mime.as_deref().is_some_and(|value| OFFICE_MIME_TYPES.contains(&value))
-        || extension.as_deref().is_some_and(|value| OFFICE_EXTENSIONS.contains(&value))
+    if normalized_mime.as_deref().is_some_and(|value| DOCX_MIME_TYPES.contains(&value))
+        || extension.as_deref().is_some_and(|value| DOCX_EXTENSIONS.contains(&value))
     {
-        return Some(UploadFileKind::OfficeDocument);
+        return Some(UploadFileKind::Docx);
+    }
+    if normalized_mime.as_deref().is_some_and(|value| PPTX_MIME_TYPES.contains(&value))
+        || extension.as_deref().is_some_and(|value| PPTX_EXTENSIONS.contains(&value))
+    {
+        return Some(UploadFileKind::Pptx);
     }
     if normalized_mime
         .as_deref()
@@ -595,6 +604,55 @@ fn detect_declared_upload_file_kind(
     None
 }
 
+fn normalized_upload_extension(file_name: Option<&str>) -> Option<String> {
+    file_name
+        .and_then(|value| Path::new(value).extension().and_then(|ext| ext.to_str()))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
+fn normalized_upload_mime_type(mime_type: Option<&str>) -> Option<String> {
+    mime_type.map(str::trim).filter(|value| !value.is_empty()).map(str::to_ascii_lowercase)
+}
+
+fn is_supported_upload_extension(extension: &str) -> bool {
+    extension == "pdf"
+        || TEXT_LIKE_EXTENSIONS.contains(&extension)
+        || IMAGE_EXTENSIONS.contains(&extension)
+        || DOCX_EXTENSIONS.contains(&extension)
+        || PPTX_EXTENSIONS.contains(&extension)
+}
+
+fn is_supported_upload_mime_type(mime_type: &str) -> bool {
+    mime_type == "application/pdf"
+        || mime_type.starts_with("image/")
+        || TEXT_LIKE_MIME_TYPES.contains(&mime_type)
+        || mime_type.starts_with("text/")
+        || DOCX_MIME_TYPES.contains(&mime_type)
+        || PPTX_MIME_TYPES.contains(&mime_type)
+}
+
+fn mime_type_is_generic_binary(mime_type: &str) -> bool {
+    GENERIC_BINARY_MIME_TYPES.contains(&mime_type)
+}
+
+fn declares_unsupported_upload_format(file_name: Option<&str>, mime_type: Option<&str>) -> bool {
+    if let Some(extension) = normalized_upload_extension(file_name) {
+        if !is_supported_upload_extension(&extension) {
+            return true;
+        }
+    }
+
+    if let Some(mime_type) = normalized_upload_mime_type(mime_type) {
+        if !mime_type_is_generic_binary(&mime_type) && !is_supported_upload_mime_type(&mime_type) {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[must_use]
 pub fn detect_upload_file_kind(
     file_name: Option<&str>,
@@ -604,6 +662,9 @@ pub fn detect_upload_file_kind(
     if let Some(file_kind) = detect_declared_upload_file_kind(file_name, mime_type) {
         return file_kind;
     }
+    if declares_unsupported_upload_format(file_name, mime_type) {
+        return UploadFileKind::Binary;
+    }
     if let Ok(decoded_text) = std::str::from_utf8(file_bytes) {
         if !utf8_payload_looks_binary(decoded_text) {
             return UploadFileKind::TextLike;
@@ -611,6 +672,24 @@ pub fn detect_upload_file_kind(
     }
 
     UploadFileKind::Binary
+}
+
+pub fn validate_upload_file_admission(
+    file_name: Option<&str>,
+    mime_type: Option<&str>,
+    file_bytes: &[u8],
+) -> Result<UploadFileKind, FileExtractError> {
+    let file_kind = detect_upload_file_kind(file_name, mime_type, file_bytes);
+    match file_kind {
+        UploadFileKind::Binary => Err(FileExtractError::UnsupportedBinary),
+        UploadFileKind::TextLike => {
+            std::str::from_utf8(file_bytes).map_err(|_| FileExtractError::InvalidUtf8)?;
+            Ok(file_kind)
+        }
+        UploadFileKind::Pdf | UploadFileKind::Image | UploadFileKind::Docx | UploadFileKind::Pptx => {
+            Ok(file_kind)
+        }
+    }
 }
 
 fn utf8_payload_looks_binary(decoded_text: &str) -> bool {
@@ -700,9 +779,15 @@ pub fn build_local_file_extraction_plan(
                 FileExtractError::ExtractionFailed { file_kind, message: error.to_string() }
             })?,
         )),
-        UploadFileKind::OfficeDocument => Ok(build_plan_from_extraction(
+        UploadFileKind::Docx => Ok(build_plan_from_extraction(
             file_kind,
             extraction::docx::extract_docx(&file_bytes).map_err(|error| {
+                FileExtractError::ExtractionFailed { file_kind, message: error.to_string() }
+            })?,
+        )),
+        UploadFileKind::Pptx => Ok(build_plan_from_extraction(
+            file_kind,
+            extraction::pptx::extract_pptx(&file_bytes).map_err(|error| {
                 FileExtractError::ExtractionFailed { file_kind, message: error.to_string() }
             })?,
         )),
@@ -1045,7 +1130,15 @@ mod tests {
     fn detects_docx_by_extension() {
         assert_eq!(
             detect_upload_file_kind(Some("notes.docx"), None, b"binary"),
-            UploadFileKind::OfficeDocument
+            UploadFileKind::Docx
+        );
+    }
+
+    #[test]
+    fn detects_pptx_by_extension() {
+        assert_eq!(
+            detect_upload_file_kind(Some("deck.pptx"), None, b"binary"),
+            UploadFileKind::Pptx
         );
     }
 
@@ -1062,6 +1155,26 @@ mod tests {
         assert_eq!(
             detect_upload_file_kind(Some("Dockerfile"), None, b"FROM rust:1.86"),
             UploadFileKind::TextLike
+        );
+    }
+
+    #[test]
+    fn rejects_utf8_payloads_with_unsupported_declared_extension() {
+        assert_eq!(
+            detect_upload_file_kind(Some("sheet.xlsx"), None, br#"name,value\nacme,42"#),
+            UploadFileKind::Binary
+        );
+    }
+
+    #[test]
+    fn rejects_utf8_payloads_with_unsupported_declared_mime_type() {
+        assert_eq!(
+            detect_upload_file_kind(
+                Some("spreadsheet"),
+                Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+                br#"name,value\nacme,42"#,
+            ),
+            UploadFileKind::Binary
         );
     }
 
@@ -1186,6 +1299,17 @@ mod tests {
         assert_eq!(rejection.error_kind(), "unsupported_upload_type");
         assert_eq!(rejection.details().file_name.as_deref(), Some("unsupported.bin"));
         assert_eq!(rejection.details().detected_format.as_deref(), Some("Binary"));
+    }
+
+    #[test]
+    fn upload_admission_rejects_unsupported_declared_extension_before_persistence() {
+        let result = validate_upload_file_admission(
+            Some("sheet.xlsx"),
+            Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            br#"name,value\nacme,42"#,
+        );
+
+        assert!(matches!(result, Err(FileExtractError::UnsupportedBinary)));
     }
 
     #[tokio::test]

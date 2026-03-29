@@ -312,12 +312,16 @@ impl GraphService {
         state: &AppState,
         library_id: Uuid,
     ) -> Result<ArangoGraphRebuildOutcome> {
-        let mut outcome = self.reconcile_arango_library_candidates(state, library_id, None).await?;
-        outcome.target = Some(ArangoGraphRebuildTarget::Graph);
-        self.recalculate_arango_library_generations(state, library_id)
-            .await
-            .context("failed to refresh arango generation state after graph rebuild")?;
-        Ok(outcome)
+        self.with_runtime_graph_lock(state, library_id, async {
+            let mut outcome =
+                self.reconcile_arango_library_candidates(state, library_id, None).await?;
+            outcome.target = Some(ArangoGraphRebuildTarget::Graph);
+            self.recalculate_arango_library_generations(state, library_id)
+                .await
+                .context("failed to refresh arango generation state after graph rebuild")?;
+            Ok(outcome)
+        })
+        .await
     }
 
     pub async fn rebuild_arango_library_evidence(
@@ -325,12 +329,16 @@ impl GraphService {
         state: &AppState,
         library_id: Uuid,
     ) -> Result<ArangoGraphRebuildOutcome> {
-        let mut outcome = self.reconcile_arango_library_candidates(state, library_id, None).await?;
-        outcome.target = Some(ArangoGraphRebuildTarget::Evidence);
-        self.recalculate_arango_library_generations(state, library_id)
-            .await
-            .context("failed to refresh arango generation state after evidence rebuild")?;
-        Ok(outcome)
+        self.with_runtime_graph_lock(state, library_id, async {
+            let mut outcome =
+                self.reconcile_arango_library_candidates(state, library_id, None).await?;
+            outcome.target = Some(ArangoGraphRebuildTarget::Evidence);
+            self.recalculate_arango_library_generations(state, library_id)
+                .await
+                .context("failed to refresh arango generation state after evidence rebuild")?;
+            Ok(outcome)
+        })
+        .await
     }
 
     pub async fn rebuild_arango_library(
@@ -338,36 +346,67 @@ impl GraphService {
         state: &AppState,
         library_id: Uuid,
     ) -> Result<ArangoGraphRebuildOutcome> {
-        let text = self.rebuild_arango_library_text(state, library_id).await?;
-        let vector = self.rebuild_arango_library_vector(state, library_id).await?;
-        let graph = self.reconcile_arango_library_candidates(state, library_id, None).await?;
-        let mut outcome = ArangoGraphRebuildOutcome {
-            target: Some(ArangoGraphRebuildTarget::Library),
-            ..Default::default()
-        };
-        outcome.text_reconciled_revisions = text.text_reconciled_revisions;
-        outcome.chunk_embeddings_rebuilt = vector.chunk_embeddings_rebuilt;
-        outcome.graph_node_embeddings_rebuilt = vector.graph_node_embeddings_rebuilt;
-        outcome.scanned_entity_candidates = graph.scanned_entity_candidates;
-        outcome.scanned_relation_candidates = graph.scanned_relation_candidates;
-        outcome.upserted_entities = graph.upserted_entities;
-        outcome.upserted_relations = graph.upserted_relations;
-        outcome.upserted_evidence = graph.upserted_evidence;
-        outcome.upserted_document_revision_edges = graph.upserted_document_revision_edges;
-        outcome.upserted_revision_chunk_edges = graph.upserted_revision_chunk_edges;
-        outcome.upserted_chunk_entity_edges = graph.upserted_chunk_entity_edges;
-        outcome.upserted_relation_subject_edges = graph.upserted_relation_subject_edges;
-        outcome.upserted_relation_object_edges = graph.upserted_relation_object_edges;
-        outcome.upserted_evidence_source_edges = graph.upserted_evidence_source_edges;
-        outcome.upserted_evidence_support_entity_edges =
-            graph.upserted_evidence_support_entity_edges;
-        outcome.upserted_evidence_support_relation_edges =
-            graph.upserted_evidence_support_relation_edges;
-        outcome.stale_evidence_marked = graph.stale_evidence_marked;
-        self.recalculate_arango_library_generations(state, library_id)
-            .await
-            .context("failed to refresh arango generation state after library rebuild")?;
-        Ok(outcome)
+        self.with_runtime_graph_lock(state, library_id, async {
+            let text = self.rebuild_arango_library_text(state, library_id).await?;
+            let vector = self.rebuild_arango_library_vector(state, library_id).await?;
+            let graph = self.reconcile_arango_library_candidates(state, library_id, None).await?;
+            let mut outcome = ArangoGraphRebuildOutcome {
+                target: Some(ArangoGraphRebuildTarget::Library),
+                ..Default::default()
+            };
+            outcome.text_reconciled_revisions = text.text_reconciled_revisions;
+            outcome.chunk_embeddings_rebuilt = vector.chunk_embeddings_rebuilt;
+            outcome.graph_node_embeddings_rebuilt = vector.graph_node_embeddings_rebuilt;
+            outcome.scanned_entity_candidates = graph.scanned_entity_candidates;
+            outcome.scanned_relation_candidates = graph.scanned_relation_candidates;
+            outcome.upserted_entities = graph.upserted_entities;
+            outcome.upserted_relations = graph.upserted_relations;
+            outcome.upserted_evidence = graph.upserted_evidence;
+            outcome.upserted_document_revision_edges = graph.upserted_document_revision_edges;
+            outcome.upserted_revision_chunk_edges = graph.upserted_revision_chunk_edges;
+            outcome.upserted_chunk_entity_edges = graph.upserted_chunk_entity_edges;
+            outcome.upserted_relation_subject_edges = graph.upserted_relation_subject_edges;
+            outcome.upserted_relation_object_edges = graph.upserted_relation_object_edges;
+            outcome.upserted_evidence_source_edges = graph.upserted_evidence_source_edges;
+            outcome.upserted_evidence_support_entity_edges =
+                graph.upserted_evidence_support_entity_edges;
+            outcome.upserted_evidence_support_relation_edges =
+                graph.upserted_evidence_support_relation_edges;
+            outcome.stale_evidence_marked = graph.stale_evidence_marked;
+            self.recalculate_arango_library_generations(state, library_id)
+                .await
+                .context("failed to refresh arango generation state after library rebuild")?;
+            Ok(outcome)
+        })
+        .await
+    }
+
+    async fn with_runtime_graph_lock<F>(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+        operation: F,
+    ) -> Result<ArangoGraphRebuildOutcome>
+    where
+        F: std::future::Future<Output = Result<ArangoGraphRebuildOutcome>>,
+    {
+        let graph_lock = repositories::acquire_runtime_library_graph_lock(
+            &state.persistence.postgres,
+            library_id,
+        )
+        .await
+        .context("failed to acquire canonical graph advisory lock")?;
+        let result = operation.await;
+        let release_result =
+            repositories::release_runtime_library_graph_lock(graph_lock, library_id)
+                .await
+                .context("failed to release canonical graph advisory lock");
+        match (result, release_result) {
+            (Ok(outcome), Ok(())) => Ok(outcome),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(release_error)) => Err(release_error),
+            (Err(error), Err(release_error)) => Err(release_error).context(error.to_string()),
+        }
     }
 
     async fn reconcile_arango_library_candidates(
@@ -404,6 +443,21 @@ impl GraphService {
         relation_candidates: Vec<KnowledgeRelationCandidateRow>,
         alias_overrides: Option<&BTreeMap<String, BTreeSet<String>>>,
     ) -> Result<ArangoGraphRebuildOutcome> {
+        #[derive(Debug)]
+        struct EntityReconcileGroup {
+            normalization_key: String,
+            revision_context: ArangoRevisionContext,
+            candidates: Vec<KnowledgeEntityCandidateRow>,
+            entity_id: Uuid,
+        }
+
+        #[derive(Debug)]
+        struct RelationReconcileGroup {
+            revision_context: ArangoRevisionContext,
+            candidates: Vec<KnowledgeRelationCandidateRow>,
+            relation_id: Uuid,
+        }
+
         let mut revision_contexts = BTreeMap::<Uuid, ArangoRevisionContext>::new();
         for revision_id in entity_candidates
             .iter()
@@ -432,6 +486,9 @@ impl GraphService {
             entity_groups.entry(row.normalization_key.clone()).or_default().push(row);
         }
 
+        let mut entity_reconcile_groups = Vec::<EntityReconcileGroup>::new();
+        let mut entity_requests = Vec::<NewKnowledgeEntity>::new();
+        let mut entity_request_ids = BTreeSet::<Uuid>::new();
         for (normalization_key, rows) in entity_groups {
             let row = rows.last().expect("entity candidate group is non-empty");
             let revision_context = revision_contexts.get(&row.revision_id).ok_or_else(|| {
@@ -461,38 +518,29 @@ impl GraphService {
                 .iter()
                 .filter_map(|candidate| candidate.confidence)
                 .max_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
-            let entity = self
-                .upsert_canonical_entity(
-                    state,
-                    library_id,
-                    revision_context.workspace_id,
-                    &normalization_key,
-                    &canonical_label,
-                    &entity_type,
-                    aliases,
-                    confidence,
-                    rows.len() as i64,
-                    revision_context.revision_number,
-                )
-                .await?;
-            outcome.upserted_entities += 1;
-            for candidate in rows {
-                self.upsert_current_entity_evidence(
-                    state,
-                    revision_context,
-                    &candidate,
-                    &entity,
-                    &normalization_key,
-                )
-                .await?;
-                outcome.upserted_evidence += 1;
-                outcome.upserted_evidence_source_edges += 1;
-                outcome.upserted_evidence_support_entity_edges += 1;
-                if candidate.chunk_id.is_some() {
-                    outcome.upserted_revision_chunk_edges += 0;
-                    outcome.upserted_chunk_entity_edges += 1;
-                }
-            }
+            let entity_id = canonical_entity_id(library_id, &normalization_key, &entity_type);
+            entity_request_ids.insert(entity_id);
+            entity_requests.push(NewKnowledgeEntity {
+                entity_id,
+                workspace_id: revision_context.workspace_id,
+                library_id,
+                canonical_label,
+                aliases: aliases.into_iter().collect(),
+                entity_type,
+                summary: None,
+                confidence,
+                support_count: rows.len() as i64,
+                freshness_generation: revision_context.revision_number,
+                entity_state: "active".to_string(),
+                created_at: None,
+                updated_at: Some(Utc::now()),
+            });
+            entity_reconcile_groups.push(EntityReconcileGroup {
+                normalization_key,
+                revision_context: revision_context.clone(),
+                candidates: rows,
+                entity_id,
+            });
         }
 
         let mut relation_groups = BTreeMap::<String, Vec<KnowledgeRelationCandidateRow>>::new();
@@ -500,6 +548,9 @@ impl GraphService {
             relation_groups.entry(row.normalized_assertion.clone()).or_default().push(row);
         }
 
+        let mut relation_reconcile_groups = Vec::<RelationReconcileGroup>::new();
+        let mut relation_requests = Vec::<NewKnowledgeRelation>::new();
+        let mut placeholder_entity_requests = BTreeMap::<Uuid, NewKnowledgeEntity>::new();
         for (normalized_assertion, rows) in relation_groups {
             let row = rows.last().expect("relation candidate group is non-empty");
             let revision_context = revision_contexts.get(&row.revision_id).ok_or_else(|| {
@@ -516,42 +567,117 @@ impl GraphService {
                 .iter()
                 .filter_map(|candidate| candidate.confidence)
                 .max_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
-            let relation = self
-                .upsert_canonical_relation(
+            let relation_id = canonical_relation_id(library_id, &normalized_assertion);
+            relation_requests.push(NewKnowledgeRelation {
+                relation_id,
+                workspace_id: revision_context.workspace_id,
+                library_id,
+                predicate,
+                normalized_assertion,
+                confidence,
+                support_count: rows.len() as i64,
+                contradiction_state: "unknown".to_string(),
+                freshness_generation: revision_context.revision_number,
+                relation_state: "active".to_string(),
+                created_at: None,
+                updated_at: Some(Utc::now()),
+            });
+            for candidate in &rows {
+                for normalization_key in
+                    [&candidate.subject_candidate_key, &candidate.object_candidate_key]
+                {
+                    let entity_id = canonical_entity_id(library_id, normalization_key, "entity");
+                    if entity_request_ids.contains(&entity_id) {
+                        continue;
+                    }
+                    let entry = placeholder_entity_requests.entry(entity_id).or_insert_with(|| {
+                        NewKnowledgeEntity {
+                            entity_id,
+                            workspace_id: revision_context.workspace_id,
+                            library_id,
+                            canonical_label: normalization_key.trim().to_string(),
+                            aliases: vec![normalization_key.trim().to_string()],
+                            entity_type: "entity".to_string(),
+                            summary: None,
+                            confidence: None,
+                            support_count: 0,
+                            freshness_generation: revision_context.revision_number,
+                            entity_state: "active".to_string(),
+                            created_at: None,
+                            updated_at: Some(Utc::now()),
+                        }
+                    });
+                    entry.support_count += 1;
+                    entry.freshness_generation =
+                        entry.freshness_generation.max(revision_context.revision_number);
+                    entry.updated_at = Some(Utc::now());
+                }
+            }
+            relation_reconcile_groups.push(RelationReconcileGroup {
+                revision_context: revision_context.clone(),
+                candidates: rows,
+                relation_id,
+            });
+        }
+
+        entity_requests.extend(placeholder_entity_requests.into_values());
+        let entity_rows = state.arango_graph_store.upsert_entities(&entity_requests).await?;
+        let entity_by_id =
+            entity_rows.into_iter().map(|row| (row.entity_id, row)).collect::<BTreeMap<_, _>>();
+
+        for group in entity_reconcile_groups {
+            let entity = entity_by_id.get(&group.entity_id).ok_or_else(|| {
+                anyhow::anyhow!("missing canonical entity {} after bulk upsert", group.entity_id)
+            })?;
+            outcome.upserted_entities += 1;
+            for candidate in group.candidates {
+                self.upsert_current_entity_evidence(
                     state,
-                    library_id,
-                    revision_context.workspace_id,
-                    &normalized_assertion,
-                    &predicate,
-                    confidence,
-                    rows.len() as i64,
-                    revision_context.revision_number,
+                    &group.revision_context,
+                    &candidate,
+                    entity,
+                    &group.normalization_key,
                 )
                 .await?;
+                outcome.upserted_evidence += 1;
+                outcome.upserted_evidence_source_edges += 1;
+                outcome.upserted_evidence_support_entity_edges += 1;
+                if candidate.chunk_id.is_some() {
+                    outcome.upserted_revision_chunk_edges += 0;
+                    outcome.upserted_chunk_entity_edges += 1;
+                }
+            }
+        }
+
+        let relation_rows = state.arango_graph_store.upsert_relations(&relation_requests).await?;
+        let relation_by_id =
+            relation_rows.into_iter().map(|row| (row.relation_id, row)).collect::<BTreeMap<_, _>>();
+
+        for group in relation_reconcile_groups {
+            let relation = relation_by_id.get(&group.relation_id).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "missing canonical relation {} after bulk upsert",
+                    group.relation_id
+                )
+            })?;
             outcome.upserted_relations += 1;
-            for candidate in rows {
-                let subject = self
-                    .upsert_placeholder_entity_for_label(
-                        state,
-                        library_id,
-                        revision_context.workspace_id,
-                        &candidate.subject_candidate_key,
-                    )
-                    .await?;
-                let object = self
-                    .upsert_placeholder_entity_for_label(
-                        state,
-                        library_id,
-                        revision_context.workspace_id,
-                        &candidate.object_candidate_key,
-                    )
-                    .await?;
-                self.upsert_relation_edges(state, &relation, &subject, &object).await?;
+            for candidate in group.candidates {
+                let subject_id =
+                    canonical_entity_id(library_id, &candidate.subject_candidate_key, "entity");
+                let object_id =
+                    canonical_entity_id(library_id, &candidate.object_candidate_key, "entity");
+                let subject = entity_by_id.get(&subject_id).ok_or_else(|| {
+                    anyhow::anyhow!("missing subject placeholder entity {}", subject_id)
+                })?;
+                let object = entity_by_id.get(&object_id).ok_or_else(|| {
+                    anyhow::anyhow!("missing object placeholder entity {}", object_id)
+                })?;
+                self.upsert_relation_edges(state, relation, subject, object).await?;
                 self.upsert_current_relation_evidence(
                     state,
-                    revision_context,
+                    &group.revision_context,
                     &candidate,
-                    &relation,
+                    relation,
                 )
                 .await?;
                 outcome.upserted_evidence += 1;
@@ -805,26 +931,38 @@ impl GraphService {
             (None, Some(candidate_confidence)) => Some(candidate_confidence),
             (None, None) => None,
         };
-        let row = state
-            .arango_graph_store
-            .upsert_entity(&NewKnowledgeEntity {
-                entity_id,
-                workspace_id,
-                library_id,
-                canonical_label: canonical_label.to_string(),
-                aliases: merged_aliases,
-                entity_type: entity_type.to_string(),
-                summary,
-                confidence,
-                support_count,
-                freshness_generation,
-                entity_state: "active".to_string(),
-                created_at: existing.as_ref().map(|row| row.created_at),
-                updated_at: Some(Utc::now()),
-            })
-            .await
-            .context("failed to upsert canonical arango entity")?;
-        Ok(row)
+        let entity = NewKnowledgeEntity {
+            entity_id,
+            workspace_id,
+            library_id,
+            canonical_label: canonical_label.to_string(),
+            aliases: merged_aliases,
+            entity_type: entity_type.to_string(),
+            summary,
+            confidence,
+            support_count,
+            freshness_generation,
+            entity_state: "active".to_string(),
+            created_at: existing.as_ref().map(|row| row.created_at),
+            updated_at: Some(Utc::now()),
+        };
+        let mut last_err = None;
+        for attempt in 0..3 {
+            match state.arango_graph_store.upsert_entity(&entity).await {
+                Ok(row) => return Ok(row),
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    if msg.contains("409") && msg.contains("write-write conflict") && attempt < 2 {
+                        let backoff = std::time::Duration::from_millis(50 * (1 << attempt));
+                        tokio::time::sleep(backoff).await;
+                        last_err = Some(e);
+                        continue;
+                    }
+                    return Err(e).context("failed to upsert canonical arango entity");
+                }
+            }
+        }
+        Err(last_err.unwrap()).context("failed to upsert canonical arango entity after retries")
     }
 
     async fn upsert_placeholder_entity_for_label(
@@ -882,28 +1020,40 @@ impl GraphService {
             (None, Some(candidate_confidence)) => Some(candidate_confidence),
             (None, None) => None,
         };
-        let row = state
-            .arango_graph_store
-            .upsert_relation(&NewKnowledgeRelation {
-                relation_id,
-                workspace_id,
-                library_id,
-                predicate: predicate.to_string(),
-                normalized_assertion: normalized_assertion.to_string(),
-                confidence,
-                support_count,
-                contradiction_state: existing
-                    .as_ref()
-                    .map(|row| row.contradiction_state.clone())
-                    .unwrap_or_else(|| "unknown".to_string()),
-                freshness_generation,
-                relation_state: "active".to_string(),
-                created_at: existing.as_ref().map(|row| row.created_at),
-                updated_at: Some(Utc::now()),
-            })
-            .await
-            .context("failed to upsert canonical arango relation")?;
-        Ok(row)
+        let relation = NewKnowledgeRelation {
+            relation_id,
+            workspace_id,
+            library_id,
+            predicate: predicate.to_string(),
+            normalized_assertion: normalized_assertion.to_string(),
+            confidence,
+            support_count,
+            contradiction_state: existing
+                .as_ref()
+                .map(|row| row.contradiction_state.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+            freshness_generation,
+            relation_state: "active".to_string(),
+            created_at: existing.as_ref().map(|row| row.created_at),
+            updated_at: Some(Utc::now()),
+        };
+        let mut last_err = None;
+        for attempt in 0..3 {
+            match state.arango_graph_store.upsert_relation(&relation).await {
+                Ok(row) => return Ok(row),
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    if msg.contains("409") && msg.contains("write-write conflict") && attempt < 2 {
+                        let backoff = std::time::Duration::from_millis(50 * (1 << attempt));
+                        tokio::time::sleep(backoff).await;
+                        last_err = Some(e);
+                        continue;
+                    }
+                    return Err(e).context("failed to upsert canonical arango relation");
+                }
+            }
+        }
+        Err(last_err.unwrap()).context("failed to upsert canonical arango relation after retries")
     }
 
     async fn upsert_current_entity_evidence<C>(
@@ -1213,22 +1363,34 @@ impl GraphService {
                      }
                      IN @@collection
                      RETURN NEW";
-        let _ = client
-            .query_json(
-                query,
-                json!({
-                    "@collection": collection,
-                    "key": key,
-                    "from": format!("{from_collection}/{from_id}"),
-                    "to": format!("{to_collection}/{to_id}"),
-                    "created_at": Utc::now(),
-                    "updated_at": Utc::now(),
-                    "payload": extra_fields,
-                }),
-            )
-            .await
-            .with_context(|| format!("failed to upsert arango edge in {collection}"))?;
-        Ok(())
+        let bind_vars = json!({
+            "@collection": collection,
+            "key": key,
+            "from": format!("{from_collection}/{from_id}"),
+            "to": format!("{to_collection}/{to_id}"),
+            "created_at": Utc::now(),
+            "updated_at": Utc::now(),
+            "payload": extra_fields,
+        });
+        let mut last_err = None;
+        for attempt in 0..3u32 {
+            match client.query_json(query, bind_vars.clone()).await {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    if msg.contains("409") && msg.contains("write-write conflict") && attempt < 2 {
+                        let backoff = std::time::Duration::from_millis(50 * (1 << attempt));
+                        tokio::time::sleep(backoff).await;
+                        last_err = Some(e);
+                        continue;
+                    }
+                    return Err(e)
+                        .with_context(|| format!("failed to upsert arango edge in {collection}"));
+                }
+            }
+        }
+        Err(last_err.unwrap())
+            .with_context(|| format!("failed to upsert arango edge in {collection} after retries"))
     }
 
     async fn build_and_refresh_arango_graph_from_candidates(

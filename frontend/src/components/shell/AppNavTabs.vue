@@ -8,6 +8,7 @@ const tabs = [
   { to: '/documents', labelKey: 'shell.documents' },
   { to: '/graph', labelKey: 'shell.graph' },
   { to: '/admin', labelKey: 'shell.admin' },
+  { to: '/swagger', labelKey: 'shell.swagger' },
 ] as const
 </script>
 

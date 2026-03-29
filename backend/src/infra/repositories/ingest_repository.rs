@@ -438,7 +438,12 @@ pub async fn list_ingest_jobs(
     postgres: &PgPool,
     workspace_id: Option<Uuid>,
     library_id: Option<Uuid>,
+    limit: Option<i64>,
+    offset: Option<i64>,
 ) -> Result<Vec<IngestJobRow>, sqlx::Error> {
+    let effective_limit = limit.unwrap_or(500);
+    let effective_offset = offset.unwrap_or(0);
+
     match (workspace_id, library_id) {
         (Some(workspace_id), Some(library_id)) => {
             sqlx::query_as::<_, IngestJobRow>(
@@ -461,10 +466,13 @@ pub async fn list_ingest_jobs(
                  from ingest_job
                  where workspace_id = $1
                    and library_id = $2
-                 order by priority asc, available_at asc, queued_at asc, id asc",
+                 order by priority asc, available_at asc, queued_at asc, id asc
+                 limit $3 offset $4",
             )
             .bind(workspace_id)
             .bind(library_id)
+            .bind(effective_limit)
+            .bind(effective_offset)
             .fetch_all(postgres)
             .await
         }
@@ -488,9 +496,12 @@ pub async fn list_ingest_jobs(
                     completed_at
                  from ingest_job
                  where workspace_id = $1
-                 order by priority asc, available_at asc, queued_at asc, id asc",
+                 order by priority asc, available_at asc, queued_at asc, id asc
+                 limit $2 offset $3",
             )
             .bind(workspace_id)
+            .bind(effective_limit)
+            .bind(effective_offset)
             .fetch_all(postgres)
             .await
         }
@@ -514,9 +525,12 @@ pub async fn list_ingest_jobs(
                     completed_at
                  from ingest_job
                  where library_id = $1
-                 order by priority asc, available_at asc, queued_at asc, id asc",
+                 order by priority asc, available_at asc, queued_at asc, id asc
+                 limit $2 offset $3",
             )
             .bind(library_id)
+            .bind(effective_limit)
+            .bind(effective_offset)
             .fetch_all(postgres)
             .await
         }
@@ -539,8 +553,11 @@ pub async fn list_ingest_jobs(
                     available_at,
                     completed_at
                  from ingest_job
-                 order by priority asc, available_at asc, queued_at asc, id asc",
+                 order by priority asc, available_at asc, queued_at asc, id asc
+                 limit $1 offset $2",
             )
+            .bind(effective_limit)
+            .bind(effective_offset)
             .fetch_all(postgres)
             .await
         }
@@ -806,6 +823,26 @@ pub async fn update_ingest_attempt(
     .await
 }
 
+/// Lightweight heartbeat touch — only updates `heartbeat_at` and optionally
+/// `current_stage` on an `ingest_attempt` row.
+pub async fn touch_attempt_heartbeat(
+    postgres: &PgPool,
+    attempt_id: Uuid,
+    current_stage: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "update ingest_attempt
+         set heartbeat_at = now(),
+             current_stage = coalesce($2, current_stage)
+         where id = $1 and attempt_state = 'leased'",
+    )
+    .bind(attempt_id)
+    .bind(current_stage)
+    .execute(postgres)
+    .await?;
+    Ok(())
+}
+
 pub async fn create_ingest_stage_event(
     postgres: &PgPool,
     input: &NewIngestStageEvent,
@@ -920,4 +957,80 @@ pub async fn list_ingest_stage_events_by_job(
     .bind(job_id)
     .fetch_all(postgres)
     .await
+}
+
+/// Atomically claim the next available canonical `ingest_job` by transitioning
+/// its `queue_state` from `queued` → `leased`.  Uses `FOR UPDATE SKIP LOCKED`
+/// so concurrent workers never claim the same row.
+pub async fn claim_next_queued_ingest_job(
+    postgres: &PgPool,
+) -> Result<Option<IngestJobRow>, sqlx::Error> {
+    sqlx::query_as::<_, IngestJobRow>(
+        "update ingest_job
+         set queue_state = 'leased'::ingest_queue_state
+         where id = (
+             select id from ingest_job
+             where queue_state = 'queued'
+               and available_at <= now()
+             order by priority asc, available_at asc, queued_at asc, id asc
+             limit 1
+             for update skip locked
+         )
+         returning
+            id,
+            workspace_id,
+            library_id,
+            mutation_id,
+            connector_id,
+            async_operation_id,
+            knowledge_document_id,
+            knowledge_revision_id,
+            job_kind::text as job_kind,
+            queue_state::text as queue_state,
+            priority,
+            dedupe_key,
+            queued_at,
+            available_at,
+            completed_at",
+    )
+    .fetch_optional(postgres)
+    .await
+}
+
+/// Recover canonical `ingest_job` rows stuck in `leased` whose corresponding
+/// `ingest_attempt` heartbeat is stale (older than `stale_threshold`).
+/// Returns the number of jobs reset back to `queued`.
+pub async fn recover_stale_canonical_leases(
+    postgres: &PgPool,
+    stale_threshold: chrono::Duration,
+) -> Result<u64, sqlx::Error> {
+    let cutoff = Utc::now() - stale_threshold;
+    let result = sqlx::query(
+        "with stale_attempts as (
+             select distinct a.job_id
+             from ingest_attempt a
+             join ingest_job j on j.id = a.job_id
+             where j.queue_state = 'leased'
+               and a.attempt_state = 'leased'
+               and a.heartbeat_at < $1
+         ),
+         failed_attempts as (
+             update ingest_attempt
+             set attempt_state = 'failed',
+                 failure_class = 'lease_expired',
+                 failure_code = 'stale_heartbeat',
+                 finished_at = now(),
+                 retryable = true
+             where job_id in (select job_id from stale_attempts)
+               and attempt_state = 'leased'
+         )
+         update ingest_job
+         set queue_state = 'queued',
+             available_at = now()
+         where id in (select job_id from stale_attempts)",
+    )
+    .bind(cutoff)
+    .execute(postgres)
+    .await?;
+    Ok(result.rows_affected())
 }

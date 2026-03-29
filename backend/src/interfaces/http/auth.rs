@@ -332,19 +332,19 @@ async fn build_auth_context_for_principal(
     token_kind: String,
     workspace_id: Option<Uuid>,
     parent_principal_id: Option<Uuid>,
-) -> Result<AuthContext, (StatusCode, &'static str)> {
+) -> Result<AuthContext, ApiError> {
     let mut grants = iam_repository::list_resolved_grants_by_principal(
         &state.persistence.postgres,
         principal_id,
     )
     .await
-    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "grant lookup failed"))?;
+    .map_err(|_| ApiError::Internal)?;
     let mut memberships = iam_repository::list_workspace_memberships_by_principal(
         &state.persistence.postgres,
         principal_id,
     )
     .await
-    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "membership lookup failed"))?;
+    .map_err(|_| ApiError::Internal)?;
 
     if let Some(token_workspace_id) = workspace_id {
         grants.retain(|grant| {
@@ -1061,7 +1061,7 @@ mod tests {
 }
 
 impl FromRequestParts<AppState> for AuthContext {
-    type Rejection = (StatusCode, &'static str);
+    type Rejection = ApiError;
 
     fn from_request_parts(
         parts: &mut Parts,
@@ -1072,14 +1072,10 @@ impl FromRequestParts<AppState> for AuthContext {
 
         async move {
             if let Some(auth_header) = auth_header {
-                let header_value = auth_header
-                    .to_str()
-                    .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid authorization header"))?
-                    .to_owned();
+                let header_value =
+                    auth_header.to_str().map_err(|_| ApiError::Unauthorized)?.to_owned();
 
-                let token = header_value
-                    .strip_prefix("Bearer ")
-                    .ok_or((StatusCode::UNAUTHORIZED, "expected bearer token"))?;
+                let token = header_value.strip_prefix("Bearer ").ok_or(ApiError::Unauthorized)?;
 
                 let token_hash = hash_token(token);
                 let token_row = iam_repository::find_active_api_token_by_secret_hash(
@@ -1087,15 +1083,15 @@ impl FromRequestParts<AppState> for AuthContext {
                     &token_hash,
                 )
                 .await
-                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "token lookup failed"))?
-                .ok_or((StatusCode::UNAUTHORIZED, "invalid token"))?;
+                .map_err(|_| ApiError::Internal)?
+                .ok_or(ApiError::Unauthorized)?;
 
                 iam_repository::touch_api_token(
                     &state.persistence.postgres,
                     token_row.principal_id,
                 )
                 .await
-                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "token touch failed"))?;
+                .map_err(|_| ApiError::Internal)?;
 
                 return build_auth_context_for_principal(
                     &state,
@@ -1109,23 +1105,23 @@ impl FromRequestParts<AppState> for AuthContext {
             }
 
             let cookie_value = read_cookie(&parts.headers, state.ui_session_cookie.name)
-                .ok_or((StatusCode::UNAUTHORIZED, "missing authorization header"))?;
-            let (session_id, session_secret) = parse_session_cookie_value(&cookie_value)
-                .ok_or((StatusCode::UNAUTHORIZED, "invalid session cookie"))?;
+                .ok_or(ApiError::Unauthorized)?;
+            let (session_id, session_secret) =
+                parse_session_cookie_value(&cookie_value).ok_or(ApiError::Unauthorized)?;
             let session_row =
                 iam_repository::get_session_by_id(&state.persistence.postgres, session_id)
                     .await
-                    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "session lookup failed"))?
-                    .ok_or((StatusCode::UNAUTHORIZED, "invalid session"))?;
+                    .map_err(|_| ApiError::Internal)?
+                    .ok_or(ApiError::Unauthorized)?;
             if session_row.revoked_at.is_some() || session_row.expires_at < Utc::now() {
-                return Err((StatusCode::UNAUTHORIZED, "session expired"));
+                return Err(ApiError::Unauthorized);
             }
             if session_row.session_secret_hash != hash_session_secret(&session_secret) {
-                return Err((StatusCode::UNAUTHORIZED, "invalid session"));
+                return Err(ApiError::Unauthorized);
             }
             iam_repository::touch_session(&state.persistence.postgres, session_id)
                 .await
-                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "session touch failed"))?;
+                .map_err(|_| ApiError::Internal)?;
 
             build_auth_context_for_principal(
                 &state,

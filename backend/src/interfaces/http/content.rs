@@ -1,6 +1,9 @@
 use axum::{
     Json, Router,
-    extract::{Multipart, Path, Query, State},
+    extract::{
+        Path, Query, State,
+        multipart::{Field, Multipart},
+    },
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -10,8 +13,9 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::content::{
-        ContentDocument, ContentDocumentHead, ContentDocumentSummary, ContentMutation,
-        ContentMutationItem, ContentRevision,
+        ContentDocument, ContentDocumentHead, ContentDocumentPipelineState,
+        ContentDocumentSummary, ContentMutation, ContentMutationItem, ContentRevision,
+        ContentRevisionReadiness,
     },
     interfaces::http::{
         auth::AuthContext,
@@ -100,8 +104,11 @@ pub struct ReprocessDocumentRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ContentDocumentDetailResponse {
     pub document: ContentDocument,
+    pub file_name: String,
     pub head: Option<ContentDocumentHead>,
     pub active_revision: Option<ContentRevision>,
+    pub readiness: Option<ContentRevisionReadiness>,
+    pub pipeline: ContentDocumentPipelineState,
 }
 
 #[derive(Debug, Serialize)]
@@ -491,10 +498,18 @@ async fn get_mutation(
 }
 
 fn map_document_summary(summary: ContentDocumentSummary) -> ContentDocumentDetailResponse {
+    let file_name = summary
+        .active_revision
+        .as_ref()
+        .and_then(|revision| revision.title.clone())
+        .unwrap_or_else(|| summary.document.external_key.clone());
     ContentDocumentDetailResponse {
         document: summary.document,
+        file_name,
         head: summary.head,
         active_revision: summary.active_revision,
+        readiness: summary.readiness,
+        pipeline: summary.pipeline,
     }
 }
 
@@ -585,22 +600,10 @@ async fn parse_upload_multipart(
                 );
             }
             "file" => {
-                file_name = field.file_name().map(ToString::to_string);
-                mime_type = field.content_type().map(ToString::to_string);
-                file_bytes = Some(
-                    field
-                        .bytes()
-                        .await
-                        .map_err(|error| {
-                            map_content_multipart_file_body_error(
-                                state,
-                                file_name.as_deref(),
-                                mime_type.as_deref(),
-                                &error,
-                            )
-                        })?
-                        .to_vec(),
-                );
+                let parsed_file = read_multipart_file_field(state, field).await?;
+                file_name = Some(parsed_file.file_name);
+                mime_type = parsed_file.mime_type;
+                file_bytes = Some(parsed_file.file_bytes);
             }
             _ => {}
         }
@@ -634,6 +637,16 @@ async fn reprocess_document(
     let active_revision = summary.active_revision.ok_or_else(|| {
         ApiError::BadRequest("document has no active revision to reprocess".to_string())
     })?;
+    let resolved_storage_key = state
+        .canonical_services
+        .content
+        .resolve_revision_storage_key(&state, active_revision.id)
+        .await?;
+    if active_revision.storage_key.is_none() && resolved_storage_key.is_none() {
+        return Err(ApiError::BadRequest(
+            "document has no stored source to reprocess".to_string(),
+        ));
+    }
     let admission = state
         .canonical_services
         .content
@@ -648,20 +661,30 @@ async fn reprocess_document(
                 requested_by_principal_id: Some(auth.principal_id),
                 request_surface: "rest".to_string(),
                 source_identity: None,
-                revision: Some(RevisionAdmissionMetadata {
-                    content_source_kind: "reprocess".to_string(),
-                    checksum: active_revision.checksum,
-                    mime_type: active_revision.mime_type,
-                    byte_size: active_revision.byte_size,
-                    title: active_revision.title,
-                    language_code: active_revision.language_code,
-                    source_uri: active_revision.source_uri,
-                    storage_key: active_revision.storage_key,
-                }),
+                revision: Some(build_reprocess_revision_metadata(
+                    &active_revision,
+                    resolved_storage_key,
+                )),
             },
         )
         .await?;
     Ok(Json(map_mutation_admission(admission)))
+}
+
+fn build_reprocess_revision_metadata(
+    active_revision: &ContentRevision,
+    storage_key: Option<String>,
+) -> RevisionAdmissionMetadata {
+    RevisionAdmissionMetadata {
+        content_source_kind: active_revision.content_source_kind.clone(),
+        checksum: active_revision.checksum.clone(),
+        mime_type: active_revision.mime_type.clone(),
+        byte_size: active_revision.byte_size,
+        title: active_revision.title.clone(),
+        language_code: active_revision.language_code.clone(),
+        source_uri: active_revision.source_uri.clone(),
+        storage_key: storage_key.or_else(|| active_revision.storage_key.clone()),
+    }
 }
 
 async fn parse_replace_multipart(
@@ -687,22 +710,10 @@ async fn parse_replace_multipart(
                 );
             }
             "file" => {
-                file_name = field.file_name().map(ToString::to_string);
-                mime_type = field.content_type().map(ToString::to_string);
-                file_bytes = Some(
-                    field
-                        .bytes()
-                        .await
-                        .map_err(|error| {
-                            map_content_multipart_file_body_error(
-                                state,
-                                file_name.as_deref(),
-                                mime_type.as_deref(),
-                                &error,
-                            )
-                        })?
-                        .to_vec(),
-                );
+                let parsed_file = read_multipart_file_field(state, field).await?;
+                file_name = Some(parsed_file.file_name);
+                mime_type = parsed_file.mime_type;
+                file_bytes = Some(parsed_file.file_bytes);
             }
             _ => {}
         }
@@ -718,6 +729,32 @@ async fn parse_replace_multipart(
             ))
         })?,
     })
+}
+
+struct ParsedMultipartFile {
+    file_name: String,
+    mime_type: Option<String>,
+    file_bytes: Vec<u8>,
+}
+
+async fn read_multipart_file_field(
+    state: &AppState,
+    mut field: Field<'_>,
+) -> Result<ParsedMultipartFile, ApiError> {
+    let file_name = field
+        .file_name()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("upload-{}", Uuid::now_v7()));
+    let mime_type = field.content_type().map(ToString::to_string);
+    let mut file_bytes = Vec::new();
+
+    while let Some(chunk) = field.chunk().await.map_err(|error| {
+        map_content_multipart_file_body_error(state, Some(&file_name), mime_type.as_deref(), &error)
+    })? {
+        file_bytes.extend_from_slice(&chunk);
+    }
+
+    Ok(ParsedMultipartFile { file_name, mime_type, file_bytes })
 }
 
 fn map_content_multipart_payload_error(
@@ -763,5 +800,46 @@ fn map_mutation_admission(admission: ContentMutationAdmission) -> ContentMutatio
         items: admission.items,
         job_id: admission.job_id,
         async_operation_id: admission.async_operation_id,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_reprocess_revision_metadata;
+    use crate::domains::content::ContentRevision;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    #[test]
+    fn reprocess_metadata_preserves_active_revision_source_kind() {
+        let revision = ContentRevision {
+            id: Uuid::now_v7(),
+            document_id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            revision_number: 1,
+            parent_revision_id: None,
+            content_source_kind: "upload".to_string(),
+            checksum: "sha256:test".to_string(),
+            mime_type: "application/pdf".to_string(),
+            byte_size: 636,
+            title: Some("runtime-upload-check.pdf".to_string()),
+            language_code: Some("ru".to_string()),
+            source_uri: Some("upload://runtime-upload-check.pdf".to_string()),
+            storage_key: Some("storage/runtime-upload-check.pdf".to_string()),
+            created_by_principal_id: None,
+            created_at: Utc::now(),
+        };
+
+        let metadata = build_reprocess_revision_metadata(&revision, None);
+
+        assert_eq!(metadata.content_source_kind, "upload");
+        assert_eq!(metadata.checksum, revision.checksum);
+        assert_eq!(metadata.mime_type, revision.mime_type);
+        assert_eq!(metadata.byte_size, revision.byte_size);
+        assert_eq!(metadata.title, revision.title);
+        assert_eq!(metadata.language_code, revision.language_code);
+        assert_eq!(metadata.source_uri, revision.source_uri);
+        assert_eq!(metadata.storage_key, revision.storage_key);
     }
 }

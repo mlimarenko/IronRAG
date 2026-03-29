@@ -269,17 +269,38 @@ export interface DocumentRowSummary {
   id: string
   fileName: string
   fileType: string
+  fileSizeBytes: number | null
   fileSizeLabel: string
   uploadedAt: string
   status: DocumentStatus
   statusLabel: string
-  activityLabel: string
-  mutationLabel: string | null
+  stageLabel: string | null
+  costAmount: number | null
+  costLabel: string | null
   canRetry: boolean
-  canAppend: boolean
-  canReplace: boolean
-  canRemove: boolean
   detailAvailable: boolean
+}
+
+export type DocumentsSortField =
+  | 'uploadedAt'
+  | 'fileName'
+  | 'fileType'
+  | 'fileSizeBytes'
+  | 'costAmount'
+  | 'status'
+
+export interface LibraryCostSummary {
+  totalCost: number
+  currencyCode: string
+  documentCount: number
+  providerCallCount: number
+}
+
+export interface DocumentCostEntry {
+  documentId: string
+  totalCost: number
+  currencyCode: string
+  providerCallCount: number
 }
 
 export interface DocumentHistoryItem {
@@ -473,6 +494,7 @@ export interface DocumentDetail {
   settledEstimatedCost: number | null
   inFlightEstimatedCost: number | null
   currency: string | null
+  providerCallCount: number
   inFlightStageCount: number
   missingStageCount: number
   partialHistory: boolean
@@ -705,7 +727,7 @@ export interface DocumentsFilterState {
   searchQuery: string
   statusFilter: DocumentDisplayStatus | ''
   selectedFileTypes: string[]
-  sortField: 'uploadedAt' | 'fileName'
+  sortField: DocumentsSortField
   sortDirection: 'asc' | 'desc'
 }
 
@@ -715,6 +737,7 @@ export interface DocumentsWorkspaceSurface {
   loading: boolean
   error: string | null
   counters: DocumentSummaryCounters
+  costSummary: LibraryCostSummary | null
   rows: DocumentRowSummary[]
   filters: DocumentsFilterState
   inspector: DocumentInspectorState

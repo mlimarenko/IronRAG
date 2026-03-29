@@ -6,11 +6,17 @@ import type {
   GraphNodeType,
   GraphWorkspaceSurface,
 } from 'src/models/ui/graph'
+import { resolveDefaultGraphLayoutMode } from 'src/models/ui/graph'
 import {
   createGraphInspectorState,
   createGraphOverlayState,
 } from 'src/components/graph/graphCanvasModel'
-import { fetchGraphNodeDetail, fetchGraphSurface, searchGraphNodes } from 'src/services/api/graph'
+import {
+  fetchGraphNodeDetail,
+  fetchGraphSurface,
+  fetchGraphSurfaceHeartbeat,
+  searchGraphNodes,
+} from 'src/services/api/graph'
 
 interface GraphCanvasControls {
   fitViewport: (() => void) | null
@@ -82,6 +88,23 @@ export const useGraphStore = defineStore('graph', {
     },
   },
   actions: {
+    syncSearchHits(): void {
+      if (!this.surface) {
+        return
+      }
+
+      const { searchQuery, nodeTypeFilter } = this.surface.overlay
+      if (!searchQuery.trim()) {
+        this.surface.overlay.searchHits = []
+        return
+      }
+
+      this.surface.overlay.searchHits = searchGraphNodes(
+        searchQuery,
+        this.surface.nodes,
+        nodeTypeFilter,
+      )
+    },
     createEmptySurface(): GraphWorkspaceSurface {
       return {
         loading: false,
@@ -131,7 +154,10 @@ export const useGraphStore = defineStore('graph', {
         this.surface.overlay.searchQuery = ''
         this.surface.overlay.searchHits = []
         this.surface.overlay.nodeTypeFilter = ''
-        this.surface.overlay.activeLayout = 'cloud'
+        this.surface.overlay.activeLayout = resolveDefaultGraphLayoutMode(
+          this.surface.nodeCount,
+          this.surface.edgeCount,
+        )
         this.surface.overlay.showFilteredArtifacts = false
       }
 
@@ -153,9 +179,11 @@ export const useGraphStore = defineStore('graph', {
             edgeCount: surface.edgeCount,
             filteredArtifactCount: surface.filteredArtifactCount ?? 0,
             searchQuery: preservedOverlay?.searchQuery,
-            searchHits: preservedOverlay?.searchHits,
+            searchHits: [],
             nodeTypeFilter: preservedOverlay?.nodeTypeFilter,
-            activeLayout: preservedOverlay?.activeLayout,
+            activeLayout: options?.preserveUi
+              ? preservedOverlay?.activeLayout
+              : surface.overlay.activeLayout,
             showFilteredArtifacts: preservedOverlay?.showFilteredArtifacts,
             showLegend: preservedOverlay?.showLegend,
             showFilters: preservedOverlay?.showFilters,
@@ -168,6 +196,7 @@ export const useGraphStore = defineStore('graph', {
             error: preservedInspector?.error ?? null,
           }),
         }
+        this.syncSearchHits()
         this.routeWarning = surface.warning ?? null
         await this.loadFocusedNodeDetail(libraryId, nextFocusedNodeId)
       } catch (error) {
@@ -188,23 +217,63 @@ export const useGraphStore = defineStore('graph', {
         }
       }
     },
-    async searchNodes(query: string): Promise<void> {
+    async pollSurface(libraryId: string): Promise<void> {
+      if (!this.surface || this.surface.loading) {
+        await this.loadSurface(libraryId, { preserveUi: true })
+        return
+      }
+
+      const heartbeat = await fetchGraphSurfaceHeartbeat(
+        libraryId,
+        this.surface.nodeCount,
+        this.surface.relationCount,
+      )
+
+      if (this.activeLibraryId !== libraryId || !this.surface) {
+        return
+      }
+
+      const previousStatus = this.surface.graphStatus
+      const previousGeneration = this.surface.graphGeneration
+      const previousGenerationState = this.surface.graphGenerationState ?? null
+
+      this.surface.graphStatus = heartbeat.graphStatus
+      this.surface.convergenceStatus = heartbeat.convergenceStatus
+      this.surface.graphGeneration = heartbeat.graphGeneration
+      this.surface.graphGenerationState = heartbeat.graphGenerationState
+      this.surface.lastBuiltAt = heartbeat.lastBuiltAt
+      this.surface.warning = heartbeat.warning
+      this.routeWarning = heartbeat.warning
+
+      const generationChanged = heartbeat.graphGeneration !== previousGeneration
+      const generationStateChanged = heartbeat.graphGenerationState !== previousGenerationState
+      const statusSettled =
+        heartbeat.graphStatus === 'ready' ||
+        heartbeat.graphStatus === 'failed' ||
+        heartbeat.graphStatus === 'stale'
+      const statusChanged = heartbeat.graphStatus !== previousStatus
+
+      if (
+        generationChanged ||
+        (statusSettled && (statusChanged || generationStateChanged))
+      ) {
+        await this.loadSurface(libraryId, { preserveUi: true })
+      }
+    },
+    searchNodes(query: string): void {
       if (!this.surface) {
         return
       }
 
       this.surface.overlay.searchQuery = query
-
-      if (!this.activeLibraryId || !query.trim()) {
-        this.surface.overlay.searchHits = []
+      this.syncSearchHits()
+    },
+    clearSearch(): void {
+      if (!this.surface) {
         return
       }
-
-      this.surface.overlay.searchHits = await searchGraphNodes(
-        this.activeLibraryId,
-        query,
-        this.surface.nodes,
-      )
+      this.surface.overlay.searchQuery = ''
+      this.surface.overlay.searchHits = []
     },
     async focusNode(identifier: string): Promise<void> {
       if (!this.surface) {
@@ -225,6 +294,7 @@ export const useGraphStore = defineStore('graph', {
         return
       }
       this.surface.overlay.nodeTypeFilter = value
+      this.syncSearchHits()
     },
     async setShowFilteredArtifacts(value: boolean): Promise<void> {
       if (!this.surface) {

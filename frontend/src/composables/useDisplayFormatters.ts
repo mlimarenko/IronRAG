@@ -1,4 +1,5 @@
 import { useI18n } from 'vue-i18n'
+import { inferDocumentFormatTokenFromMime } from 'src/models/ui/documentFormats'
 
 export function useDisplayFormatters() {
   const { t, te, locale } = useI18n()
@@ -14,6 +15,27 @@ export function useDisplayFormatters() {
     return new Intl.DateTimeFormat(locale.value || undefined, {
       dateStyle: 'medium',
       timeStyle: 'short',
+    }).format(parsed)
+  }
+
+  function formatCompactDateTime(value: string | null): string {
+    if (!value) {
+      return '—'
+    }
+    const parsed = new Date(value)
+    if (Number.isNaN(parsed.getTime())) {
+      return value
+    }
+
+    const now = new Date()
+    const includeYear = parsed.getFullYear() !== now.getFullYear()
+
+    return new Intl.DateTimeFormat(locale.value || undefined, {
+      day: 'numeric',
+      month: 'short',
+      ...(includeYear ? { year: 'numeric' } : {}),
+      hour: '2-digit',
+      minute: '2-digit',
     }).format(parsed)
   }
 
@@ -49,6 +71,11 @@ export function useDisplayFormatters() {
       return null
     }
 
+    const normalized = value.trim().toLowerCase()
+    if (!normalized || normalized === 'unknown' || normalized === 'none' || normalized === 'n/a') {
+      return null
+    }
+
     switch (value) {
       case 'The canonical Arango knowledge graph generation failed.':
         return t('graph.statusDescriptions.failed')
@@ -64,8 +91,18 @@ export function useDisplayFormatters() {
         return t('graph.detailWarnings.documentDeleted')
       default:
         if (value.startsWith('Relation contradiction state: ')) {
+          const contradictionState = value.replace('Relation contradiction state: ', '').trim()
+          const normalizedContradictionState = contradictionState.toLowerCase()
+          if (
+            !normalizedContradictionState ||
+            normalizedContradictionState === 'unknown' ||
+            normalizedContradictionState === 'none' ||
+            normalizedContradictionState === 'n/a'
+          ) {
+            return null
+          }
           return t('graph.detailWarnings.relationContradictionState', {
-            value: humanizeToken(value.replace('Relation contradiction state: ', '')),
+            value: humanizeToken(contradictionState),
           })
         }
         if (value.startsWith('The canonical Arango knowledge generation is ')) {
@@ -131,8 +168,9 @@ export function useDisplayFormatters() {
 
   function fileFormatLabel(mime: string | null): string {
     if (!mime) return '—'
+    const normalized = inferDocumentFormatTokenFromMime(mime)
     const raw = mime.split('/').pop() ?? mime
-    const normalized = raw.replace('.', '').toLowerCase()
+    if (!normalized) return raw.toUpperCase()
     const key = `documents.fileFormats.${normalized}`
     return te(key) ? t(key) : raw.toUpperCase()
   }
@@ -140,6 +178,21 @@ export function useDisplayFormatters() {
   function documentMetadataLabel(key: string): string {
     const labelKey = `documents.details.labels.${key}`
     return te(labelKey) ? t(labelKey) : humanizeToken(key)
+  }
+
+  function uploadFailureLabel(value: string | null): string | null {
+    if (!value) {
+      return null
+    }
+    const normalized = value.trim()
+    if (!normalized) {
+      return null
+    }
+    const key = `documents.uploadReport.rejectionKinds.${normalized}`
+    if (te(key)) {
+      return t(key)
+    }
+    return /\s/.test(normalized) ? normalized : humanizeToken(normalized)
   }
 
   function inspectorMetadataLabel(key: string): string {
@@ -206,6 +259,7 @@ export function useDisplayFormatters() {
     documentMetadataLabel,
     enumLabel,
     fileFormatLabel,
+    formatCompactDateTime,
     formatDateTime,
     inspectorMetadataLabel,
     graphEvidenceLabel,
@@ -219,6 +273,7 @@ export function useDisplayFormatters() {
     permissionLabel,
     priceOriginLabel,
     providerStateLabel,
+    uploadFailureLabel,
     shortIdentifier,
     statusBadgeLabel,
   }

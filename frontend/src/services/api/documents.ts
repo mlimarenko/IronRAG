@@ -40,10 +40,16 @@ import type {
   DocumentsWorkspaceSummary,
   DocumentsSurfaceResponse,
   DocumentUploadFailure,
+  DocumentCostEntry,
+  LibraryCostSummary,
   UploadDocumentsResponse,
   UploadRejectionDetails,
 } from 'src/models/ui/documents'
 import type { DashboardRecentDocument } from 'src/models/ui/dashboard'
+import {
+  DOCUMENT_UPLOAD_FORMAT_TOKENS,
+  inferDocumentFileType,
+} from 'src/models/ui/documentFormats'
 import type { GraphCanonicalSummary } from 'src/models/ui/graph'
 import { i18n } from 'src/lib/i18n'
 import { useShellStore } from 'src/stores/shell'
@@ -86,6 +92,16 @@ interface RawContentRevision {
   created_at: string
 }
 
+interface RawContentRevisionReadiness {
+  revision_id: string
+  text_state: string
+  vector_state: string
+  graph_state: string
+  text_readable_at: string | null
+  vector_ready_at: string | null
+  graph_ready_at: string | null
+}
+
 interface RawContentMutation {
   id: string
   workspace_id: string
@@ -113,8 +129,32 @@ interface RawContentMutationItem {
 
 interface RawContentDocumentDetailResponse {
   document: RawContentDocument
+  file_name: string
   head: RawContentDocumentHead | null
   active_revision: RawContentRevision | null
+  readiness: RawContentRevisionReadiness | null
+  pipeline: RawContentDocumentPipelineState
+}
+
+interface RawContentDocumentPipelineJob {
+  id: string
+  workspace_id: string
+  library_id: string
+  mutation_id: string | null
+  async_operation_id: string | null
+  job_kind: string
+  queue_state: 'queued' | 'leased' | 'completed' | 'failed' | 'canceled' | string
+  queued_at: string
+  available_at: string
+  completed_at: string | null
+  current_stage: string | null
+  failure_code: string | null
+  retryable: boolean
+}
+
+interface RawContentDocumentPipelineState {
+  latest_mutation: RawContentMutation | null
+  latest_job: RawContentDocumentPipelineJob | null
 }
 
 interface RawKnowledgeRevisionRow {
@@ -187,10 +227,28 @@ interface RawIngestJob {
   queued_at: string
   available_at: string
   completed_at: string | null
+  current_stage?: string | null
+  failure_code?: string | null
+  retryable?: boolean
+}
+
+interface RawIngestAttempt {
+  id: string
+  job_id: string
+  attempt_number: number
+  attempt_state: string
+  current_stage: string | null
+  started_at: string
+  heartbeat_at: string | null
+  finished_at: string | null
+  failure_class: string | null
+  failure_code: string | null
+  retryable: boolean
 }
 
 interface RawIngestJobResponse {
   job: RawIngestJob
+  latest_attempt?: RawIngestAttempt | null
 }
 
 interface RawChunkSummary {
@@ -213,7 +271,7 @@ interface CanonicalDocumentRelation {
   jobs: RawIngestJob[]
 }
 
-const DEFAULT_ACCEPTED_FORMATS = ['PDF', 'DOCX', 'TXT', 'MD', 'Images']
+const DEFAULT_ACCEPTED_FORMATS = [...DOCUMENT_UPLOAD_FORMAT_TOKENS]
 const DEFAULT_UPLOAD_LIMIT_MB = 50
 const STALLED_ACTIVITY_AFTER_MS = 180_000
 
@@ -233,12 +291,21 @@ function normalizeContentDocumentDetailResponse(
   payload: RawContentDocumentDetailResponse | RawWireRecord,
 ): RawContentDocumentDetailResponse {
   const detail = payload as RawContentDocumentDetailResponse & {
+    fileName?: string | null
     activeRevision?: RawContentRevision | null
+    readiness?: RawContentRevisionReadiness | null
+    pipeline?: RawContentDocumentPipelineState | null
   }
   return {
     document: detail.document,
+    file_name: detail.file_name ?? detail.fileName ?? detail.document.external_key,
     head: detail.head ?? null,
     active_revision: detail.active_revision ?? detail.activeRevision ?? null,
+    readiness: detail.readiness ?? null,
+    pipeline: detail.pipeline ?? {
+      latest_mutation: null,
+      latest_job: null,
+    },
   }
 }
 
@@ -270,26 +337,6 @@ function formatFileSizeLabel(sizeBytes: number): string {
   return `${String(sizeBytes)} B`
 }
 
-function inferFileType(fileName: string, mimeType: string | null): string {
-  const extension = fileName.split('.').pop()?.toLowerCase() ?? ''
-  if (mimeType?.startsWith('image/') || ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg'].includes(extension)) {
-    return 'Image'
-  }
-  if (mimeType === 'application/pdf' || extension === 'pdf') {
-    return 'PDF'
-  }
-  if (extension === 'docx' || mimeType?.includes('wordprocessingml')) {
-    return 'DOCX'
-  }
-  if (
-    ['md', 'markdown', 'txt', 'text', 'log', 'csv', 'json', 'yaml', 'yml', 'xml'].includes(extension) ||
-    mimeType?.startsWith('text/')
-  ) {
-    return 'Text'
-  }
-  return extension ? extension.toUpperCase() : 'File'
-}
-
 function formatDateTime(value: string | null): string {
   if (!value) {
     return '—'
@@ -309,34 +356,75 @@ function statusLabelFor(status: DocumentStatus): string {
   return i18n.global.te(key) ? i18n.global.t(key) : status
 }
 
-function mutationLabelFor(mutation: RawContentMutation | null): string | null {
-  if (!mutation) {
-    return null
-  }
-  const kindKey = `documents.mutationKinds.${mutation.operation_kind}`
-  const kindLabel = i18n.global.te(kindKey)
-    ? i18n.global.t(kindKey)
-    : mutation.operation_kind
-  const statusValue = mutationStatusFromState(mutation.mutation_state)
-  const statusKey = `documents.mutation.status.${statusValue}`
-  const statusLabel = i18n.global.te(statusKey) ? i18n.global.t(statusKey) : statusValue
-  return `${kindLabel} · ${statusLabel}`
+const STAGE_LABELS: Record<string, string> = {
+  extract_content: 'extracting_content',
+  chunk_content: 'chunking',
+  embed_chunk: 'embedding_chunks',
+  extract_graph: 'building_graph',
+  finalizing: 'finalizing',
 }
 
-function mutationLabelFromState(mutation: DocumentMutationState | null): string | null {
-  if (!mutation || (!mutation.kind && !mutation.status)) {
-    return null
+function documentStageLabel(stage: string): string {
+  const key = `documents.stage.${stage}`
+  return i18n.global.te(key) ? i18n.global.t(key) : stage
+}
+
+function stageKeyFor(
+  job: RawIngestJob | null,
+  mutationState: string | null = null,
+): string | null {
+  if (job) {
+    const state = job.queue_state
+    if (state === 'queued') return 'accepted'
+    if (state === 'leased' && job.current_stage) {
+      const canonicalStage = STAGE_LABELS[job.current_stage] ?? job.current_stage
+      return canonicalStage === 'content_mutation' ? 'claimed' : canonicalStage
+    }
+    if (state === 'leased') return 'claimed'
+    if (state === 'failed' || state === 'canceled') return 'failed'
+    if (state === 'completed') return 'completed'
   }
-  const kindKey = mutation.kind ? `documents.mutationKinds.${mutation.kind}` : null
-  const kindLabel =
-    kindKey && i18n.global.te(kindKey) ? i18n.global.t(kindKey) : mutation.kind ?? null
-  const statusKey = mutation.status ? `documents.mutation.status.${mutation.status}` : null
-  const statusLabel =
-    statusKey && i18n.global.te(statusKey) ? i18n.global.t(statusKey) : mutation.status ?? null
-  if (kindLabel && statusLabel) {
-    return `${kindLabel} · ${statusLabel}`
+
+  switch (mutationState) {
+    case 'accepted':
+      return 'accepted'
+    case 'running':
+      return 'claimed'
+    case 'failed':
+    case 'conflicted':
+    case 'canceled':
+      return 'failed'
+    case 'applied':
+      return 'completed'
+    default:
+      return null
   }
-  return kindLabel ?? statusLabel ?? null
+}
+
+function stageLabelFor(job: RawIngestJob | null, mutationState: string | null = null): string | null {
+  const stageKey = stageKeyFor(job, mutationState)
+  if (!stageKey) return null
+  if (stageKey === 'completed') return null
+  return documentStageLabel(stageKey)
+}
+
+function terminalStageForStatus(status: DocumentStatus): string {
+  return status === 'failed' ? 'failed' : 'completed'
+}
+
+function currentMutationState(
+  mutation: RawContentMutationDetailResponse | null,
+  fallbackMutation: RawContentMutationDetailResponse | null = null,
+): string | null {
+  return mutation?.mutation.mutation_state ?? fallbackMutation?.mutation.mutation_state ?? null
+}
+
+function stageKeyForDetail(
+  status: DocumentStatus,
+  job: RawIngestJob | null,
+  mutationState: string | null,
+): string {
+  return stageKeyFor(job, mutationState) ?? terminalStageForStatus(status)
 }
 
 function mutationStatusFromState(value: string): 'accepted' | 'reconciling' | 'completed' | 'failed' {
@@ -374,6 +462,71 @@ function documentStatusFromQueueState(
   }
 }
 
+function isReadableTextState(textState: string | null | undefined): boolean {
+  return textState === 'readable' || textState === 'ready' || textState === 'text_readable'
+}
+
+function readinessTextState(readiness: RawContentRevisionReadiness | RawKnowledgeRevisionRow): string {
+  return 'text_state' in readiness ? readiness.text_state : readiness.textState
+}
+
+function readinessVectorState(readiness: RawContentRevisionReadiness | RawKnowledgeRevisionRow): string {
+  return 'vector_state' in readiness ? readiness.vector_state : readiness.vectorState
+}
+
+function readinessGraphState(readiness: RawContentRevisionReadiness | RawKnowledgeRevisionRow): string {
+  return 'graph_state' in readiness ? readiness.graph_state : readiness.graphState
+}
+
+function isFailedReadiness(readiness: RawContentRevisionReadiness | RawKnowledgeRevisionRow | null): boolean {
+  if (!readiness) {
+    return false
+  }
+  return (
+    readinessTextState(readiness) === 'failed' ||
+    readinessTextState(readiness) === 'unavailable' ||
+    readinessVectorState(readiness) === 'failed' ||
+    readinessGraphState(readiness) === 'failed'
+  )
+}
+
+function isGraphReadyState(graphState: string | null | undefined): boolean {
+  return graphState === 'ready' || graphState === 'graph_ready'
+}
+
+function isOpenMutationState(mutationState: string | null | undefined): boolean {
+  return mutationState === 'accepted' || mutationState === 'running'
+}
+
+function isFailedMutationState(mutationState: string | null | undefined): boolean {
+  return mutationState === 'failed' || mutationState === 'conflicted' || mutationState === 'canceled'
+}
+
+function documentStatusFromCurrentState(
+  readiness: RawContentRevisionReadiness | RawKnowledgeRevisionRow | null,
+  mutationState: string | null,
+  queueState: RawIngestJob['queue_state'] | null,
+): DocumentStatus {
+  if (isOpenMutationState(mutationState)) {
+    return queueState === 'queued' ? 'queued' : 'processing'
+  }
+
+  if (isFailedMutationState(mutationState)) {
+    return 'failed'
+  }
+
+  if (readiness) {
+    if (isFailedReadiness(readiness)) {
+      return 'failed'
+    }
+    if (isReadableTextState(readinessTextState(readiness))) {
+      return isGraphReadyState(readinessGraphState(readiness)) ? 'ready' : 'ready_no_graph'
+    }
+  }
+
+  return documentStatusFromQueueState(queueState, false)
+}
+
 function activityStatusFromQueueState(
   queueState: RawIngestJob['queue_state'] | null,
   lastActivityAt: string | null,
@@ -409,6 +562,30 @@ function activityStatusFromQueueState(
   }
 
   return activityStatus
+}
+
+function activityStatusFromCurrentState(
+  status: DocumentStatus,
+  currentJob: RawIngestJob | null,
+  mutationState: string | null,
+): DocumentActivityStatus {
+  if (currentJob) {
+    return activityStatusFromQueueState(currentJob.queue_state, latestActivityAt(currentJob))
+  }
+
+  if (isOpenMutationState(mutationState)) {
+    return 'active'
+  }
+
+  if (status === 'failed') {
+    return 'failed'
+  }
+
+  if (status === 'ready' || status === 'ready_no_graph') {
+    return 'ready'
+  }
+
+  return 'queued'
 }
 
 function stalledReason(activityStatus: DocumentActivityStatus, lastActivityAt: string | null): string | null {
@@ -458,13 +635,13 @@ function buildCanonicalAttempt(job: RawIngestJob): CanonicalIngestAttempt {
           : job.queue_state === 'leased'
             ? 'running'
             : 'leased',
-    currentStage: job.job_kind,
+    currentStage: stageKeyFor(job),
     startedAt: job.queued_at,
     heartbeatAt: lastActivity,
     finishedAt: job.completed_at,
     failureClass: job.queue_state === 'failed' || job.queue_state === 'canceled' ? 'ingest_failed' : null,
     failureCode: null,
-    retryable: job.queue_state === 'failed',
+    retryable: Boolean(job.retryable),
   }
 }
 
@@ -547,27 +724,26 @@ function buildCanonicalIdentity(document: RawContentDocument): CanonicalDocument
 }
 
 function buildDocumentFileName(
-  document: RawContentDocument,
+  detail: RawContentDocumentDetailResponse,
   activeRevision: RawContentRevision | null,
   revisions: RawContentRevision[],
 ): string {
-  return activeRevision?.title ?? revisions[0]?.title ?? document.external_key
+  return detail.file_name ?? activeRevision?.title ?? revisions[0]?.title ?? detail.document.external_key
 }
 
 function buildDocumentFileType(
-  document: RawContentDocument,
+  detail: RawContentDocumentDetailResponse,
   activeRevision: RawContentRevision | null,
   revisions: RawContentRevision[],
 ): string {
   const reference = activeRevision ?? revisions[0] ?? null
   if (!reference) {
-    return inferFileType(document.external_key, null)
+    return inferDocumentFileType(detail.file_name, null)
   }
   const fileNameReference =
     reference.source_uri?.replace(/^upload:\/\//, '') ??
-    reference.title ??
-    document.external_key
-  return inferFileType(fileNameReference, reference.mime_type)
+    detail.file_name
+  return inferDocumentFileType(fileNameReference, reference.mime_type)
 }
 
 function buildMutationState(mutation: RawContentMutation | null): DocumentMutationState {
@@ -628,7 +804,7 @@ function buildProcessingHistory(job: RawIngestJob): DocumentDetail['processingHi
   return {
     attemptNo: 1,
     status: job.queue_state,
-    stage: job.job_kind,
+    stage: stageKeyFor(job) ?? 'accepted',
     errorMessage: job.queue_state === 'failed' || job.queue_state === 'canceled' ? 'Canonical ingest job failed' : null,
     startedAt: job.queued_at,
     finishedAt: job.completed_at,
@@ -943,41 +1119,63 @@ function buildWorkspaceSummary(
   }
 }
 
-function collectMutationsForDocument(
-  documentId: string,
-  mutations: RawContentMutationDetailResponse[],
-): RawContentMutationDetailResponse[] {
-  return mutations
-    .filter((mutation) => mutation.items.some((item) => item.document_id === documentId))
-    .sort((left, right) => compareIsoDates(left.mutation.requested_at, right.mutation.requested_at))
-}
-
-function selectLatestMutation(
+function selectMutationJob(
   document: RawContentDocumentDetailResponse,
-  relatedMutations: RawContentMutationDetailResponse[],
-): RawContentMutationDetailResponse | null {
-  if (document.head?.latest_mutation_id) {
-    const headMutation = relatedMutations.find(
-      (mutation) => mutation.mutation.id === document.head?.latest_mutation_id,
-    )
-    if (headMutation) {
-      return headMutation
-    }
-  }
-  return relatedMutations[0] ?? null
-}
-
-function selectLatestJob(
-  latestMutation: RawContentMutationDetailResponse | null,
+  mutation: RawContentMutationDetailResponse | null,
   relatedJobs: RawIngestJob[],
 ): RawIngestJob | null {
-  if (latestMutation?.job_id) {
-    const job = relatedJobs.find((item) => item.id === latestMutation.job_id)
+  if (document.pipeline.latest_job) {
+    return mapPipelineJobToRawIngestJob(document.pipeline.latest_job)
+  }
+  if (mutation?.job_id) {
+    const job = relatedJobs.find((item) => item.id === mutation.job_id)
     if (job) {
       return job
     }
   }
-  return relatedJobs[0] ?? null
+  return null
+}
+
+function selectCurrentMutation(
+  document: RawContentDocumentDetailResponse,
+  relatedMutations: RawContentMutationDetailResponse[],
+): RawContentMutationDetailResponse | null {
+  if (document.pipeline.latest_mutation) {
+    return {
+      mutation: document.pipeline.latest_mutation,
+      items: [],
+      job_id: document.pipeline.latest_job?.id ?? null,
+      async_operation_id: document.pipeline.latest_job?.async_operation_id ?? null,
+    }
+  }
+  if (!document.head?.latest_mutation_id) {
+    return null
+  }
+  return (
+    relatedMutations.find((mutation) => mutation.mutation.id === document.head?.latest_mutation_id) ??
+    null
+  )
+}
+
+function mapPipelineJobToRawIngestJob(job: RawContentDocumentPipelineJob): RawIngestJob {
+  return {
+    id: job.id,
+    workspace_id: job.workspace_id,
+    library_id: job.library_id,
+    mutation_id: job.mutation_id,
+    connector_id: null,
+    async_operation_id: job.async_operation_id,
+    job_kind: job.job_kind,
+    queue_state: job.queue_state,
+    priority: 0,
+    dedupe_key: null,
+    queued_at: job.queued_at,
+    available_at: job.available_at,
+    completed_at: job.completed_at,
+    current_stage: job.current_stage,
+    failure_code: job.failure_code,
+    retryable: job.retryable,
+  }
 }
 
 function mapSurfaceRow(
@@ -986,33 +1184,35 @@ function mapSurfaceRow(
   relatedJobs: RawIngestJob[],
 ): DocumentRowSummary {
   const revisions = document.active_revision ? [document.active_revision] : []
-  const latestMutation = selectLatestMutation(document, relatedMutations)
-  const latestJob = selectLatestJob(latestMutation, relatedJobs)
-  const readableRevisionPresent = document.head?.readable_revision_id !== null
-  const documentStatus = documentStatusFromQueueState(latestJob?.queue_state ?? null, readableRevisionPresent)
+  const currentMutation = selectCurrentMutation(document, relatedMutations)
+  const currentJob = selectMutationJob(document, currentMutation, relatedJobs)
+  const documentStatus = documentStatusFromCurrentState(
+    document.readiness,
+    currentMutation?.mutation.mutation_state ?? null,
+    currentJob?.queue_state ?? null,
+  )
   const activeRevision = document.active_revision
-  const fileName = buildDocumentFileName(document.document, activeRevision, revisions)
-  const fileType = buildDocumentFileType(document.document, activeRevision, revisions)
-  const mutationState = buildMutationState(latestMutation?.mutation ?? null)
-  const lastActivity = latestActivityAt(latestJob) ?? document.document.created_at
+  const fileName = buildDocumentFileName(document, activeRevision, revisions)
+  const fileType = buildDocumentFileType(document, activeRevision, revisions)
+  const mutationState = buildMutationState(currentMutation?.mutation ?? null)
 
   return {
     id: document.document.id,
     fileName,
     fileType,
+    fileSizeBytes: activeRevision?.byte_size ?? null,
     fileSizeLabel: activeRevision ? formatFileSizeLabel(activeRevision.byte_size) : '—',
     uploadedAt: document.document.created_at,
     status: documentStatus,
     statusLabel: statusLabelFor(documentStatus),
-    activityLabel: formatDateTime(lastActivity),
-    mutationLabel: mutationLabelFor(latestMutation?.mutation ?? null),
+    stageLabel: stageLabelFor(currentJob, currentMutationState(currentMutation)),
+    costAmount: null,
+    costLabel: null,
     canRetry:
-      latestJob?.queue_state === 'failed' ||
-      latestJob?.queue_state === 'canceled' ||
-      mutationState.status === 'failed',
-    canAppend: document.document.document_state === 'active',
-    canReplace: document.document.document_state === 'active',
-    canRemove: document.document.document_state === 'active',
+      documentStatus === 'failed' &&
+      document.document.document_state === 'active' &&
+      activeRevision !== null &&
+      currentJob?.retryable === true,
     detailAvailable: document.document.document_state === 'active',
   }
 }
@@ -1097,9 +1297,19 @@ function mapDocumentDetail(
     document.head?.readable_revision_id
       ? revisions.find((revision) => revision.id === document.head?.readable_revision_id) ?? null
       : activeRevision
-  const latestJob = selectLatestJob(latestMutation, relatedJobs)
-  const status = documentStatusFromQueueState(latestJob?.queue_state ?? null, Boolean(readableRevision))
-  const activityStatus = activityStatusFromQueueState(latestJob?.queue_state ?? null, latestActivityAt(latestJob))
+  const currentMutation = selectCurrentMutation(document, relatedMutations)
+  const currentJob = selectMutationJob(document, currentMutation, relatedJobs)
+  const readiness = knowledgeRevision ?? document.readiness
+  const status = documentStatusFromCurrentState(
+    readiness,
+    currentMutation?.mutation.mutation_state ?? null,
+    currentJob?.queue_state ?? null,
+  )
+  const activityStatus = activityStatusFromCurrentState(
+    status,
+    currentJob,
+    currentMutation?.mutation.mutation_state ?? null,
+  )
   const canonicalSummary = mapChunksToPreview(chunks)
   const canonicalSummaryPreview: GraphCanonicalSummary | null = canonicalSummary.previewText
     ? {
@@ -1116,12 +1326,12 @@ function mapDocumentDetail(
     edgeCount: 0,
     evidenceCount: previewChunkCount,
   }
-  const knowledgeReadiness = buildKnowledgeReadiness(knowledgeRevision)
-  const mutationState = buildMutationState(latestMutation?.mutation ?? null)
-  const lastActivity = latestActivityAt(latestJob)
+  const knowledgeReadiness = buildKnowledgeReadiness(readiness)
+  const mutationState = buildMutationState((currentMutation ?? latestMutation)?.mutation ?? null)
+  const lastActivity = latestActivityAt(currentJob)
   const attemptGroups = mapDetailAttempts(relatedJobs, activeRevision)
   const processingHistory = mapDetailProcessingHistory(relatedJobs)
-  const latestJobForCanonical = latestJob ?? null
+  const latestJobForCanonical = currentJob ?? null
   const stageEvents: CanonicalIngestStageEvent[] = []
 
   return {
@@ -1137,12 +1347,16 @@ function mapDocumentDetail(
     readableRevisionId: readableRevision?.id ?? null,
     readableRevisionNo: readableRevision?.revision_number ?? null,
     readableRevisionKind: readableRevision?.content_source_kind ?? null,
-    fileName: buildDocumentFileName(document.document, activeRevision, revisions),
-    fileType: buildDocumentFileType(document.document, activeRevision, revisions),
+    fileName: buildDocumentFileName(document, activeRevision, revisions),
+    fileType: buildDocumentFileType(document, activeRevision, revisions),
     fileSizeLabel: activeRevision ? formatFileSizeLabel(activeRevision.byte_size) : '—',
     uploadedAt: document.document.created_at,
     libraryName,
-    stage: latestJob?.job_kind ?? activeRevision?.content_source_kind ?? document.document.document_state,
+    stage: stageKeyForDetail(
+      status,
+      currentJob,
+      currentMutationState(currentMutation, latestMutation),
+    ),
     status,
     progressPercent:
       status === 'ready'
@@ -1173,35 +1387,41 @@ function mapDocumentDetail(
     settledEstimatedCost: null,
     inFlightEstimatedCost: null,
     currency: null,
+    providerCallCount: 0,
     inFlightStageCount: activityStatus === 'queued' || activityStatus === 'active' ? 1 : 0,
     missingStageCount: 0,
     partialHistory: relatedJobs.length > 1 || status !== 'ready',
-    partialHistoryReason: latestMutation?.mutation.failure_code ?? latestMutation?.mutation.conflict_code ?? null,
+    partialHistoryReason:
+      (currentMutation ?? latestMutation)?.mutation.failure_code ??
+      (currentMutation ?? latestMutation)?.mutation.conflict_code ??
+      null,
     mutation: mutationState,
-    requestedBy: latestMutation?.mutation.requested_by_principal_id ?? null,
+    requestedBy: (currentMutation ?? latestMutation)?.mutation.requested_by_principal_id ?? null,
     errorMessage:
-      latestMutation?.mutation.failure_code ??
-      latestMutation?.mutation.conflict_code ??
+      currentMutation?.mutation.failure_code ??
+      currentMutation?.mutation.conflict_code ??
       (status === 'failed' ? 'Canonical ingestion failed' : null),
     failureClass:
-      latestJob?.queue_state === 'failed' || latestJob?.queue_state === 'canceled'
+      currentJob?.queue_state === 'failed' || currentJob?.queue_state === 'canceled'
         ? 'ingest_failed'
         : null,
-    operatorAction: latestMutation?.mutation.operation_kind ?? null,
+    operatorAction: (currentMutation ?? latestMutation)?.mutation.operation_kind ?? null,
     summary:
       canonicalSummaryPreview?.text ??
       activeRevision?.title ??
       document.document.external_key,
-    graphNodeId: activeRevision ? document.document.id : null,
+    graphNodeId:
+      activeRevision && knowledgeReadiness?.graphState === 'ready' ? document.document.id : null,
     canonicalSummaryPreview,
     canDownloadText: previewChunkCount > 0,
     canAppend: document.document.document_state === 'active',
     canReplace: document.document.document_state === 'active',
     canRemove: document.document.document_state === 'active',
     canRetry:
-      latestJob?.queue_state === 'failed' ||
-      latestJob?.queue_state === 'canceled' ||
-      mutationState.status === 'failed',
+      status === 'failed' &&
+      document.document.document_state === 'active' &&
+      activeRevision !== null &&
+      currentJob?.retryable === true,
     detailAvailable: document.document.document_state === 'active',
     reconciliationScope: null,
     providerFailure: null,
@@ -1236,7 +1456,7 @@ function mapDocumentDetail(
       document.head,
       activeRevision,
       readableRevision,
-      latestMutation,
+      currentMutation ?? latestMutation,
       latestJobForCanonical,
       relatedMutations,
       relatedJobs,
@@ -1262,50 +1482,38 @@ function normalizeUploadRejectionDetails(details: unknown): UploadRejectionDetai
   }
 }
 
-async function fetchCanonicalBundle(): Promise<CanonicalLibraryBundle> {
+async function fetchSurfaceDocuments(): Promise<RawContentDocumentDetailResponse[]> {
   const shellStore = useShellStore()
   const libraryId = shellStore.context?.activeLibrary.id
   if (!libraryId) {
-    return {
-      documents: [],
-      mutations: [],
-      jobs: [],
-    }
+    return []
   }
 
-  const [documents, mutations, jobs] = await Promise.all([
-    unwrap(
-      apiHttp.get<RawContentDocumentDetailResponse[]>('/content/documents', {
-        params: { libraryId, includeDeleted: false },
-      }),
-    ),
-    unwrap(
-      apiHttp.get<RawContentMutationDetailResponseWire[]>('/content/mutations', {
-        params: { libraryId },
-      }),
-    ),
-    unwrap(
-      apiHttp.get<RawIngestJobResponse[]>('/ingest/jobs', {
-        params: {
-          libraryId,
-          workspaceId: shellStore.context?.activeWorkspace.id,
-        },
-      }),
-    ),
-  ])
-
-  return {
-    documents: documents.map(normalizeContentDocumentDetailResponse),
-    mutations: mutations.map(normalizeContentMutationDetailResponse),
-    jobs: jobs.map(normalizeIngestJobResponse),
-  }
+  const documents = await unwrap(
+    apiHttp.get<RawContentDocumentDetailResponse[]>('/content/documents', {
+      params: { libraryId, includeDeleted: false },
+    }),
+  )
+  return documents.map(normalizeContentDocumentDetailResponse)
 }
 
 function normalizeIngestJobResponse(response: RawIngestJobResponse | RawIngestJob): RawIngestJob {
   if ('job' in response) {
-    return response.job
+    const job = { ...response.job }
+    const attempt = response.latest_attempt
+    if (attempt) {
+      job.current_stage = attempt.current_stage
+      job.failure_code = attempt.failure_code
+      job.retryable = attempt.retryable
+    } else if (job.retryable === undefined) {
+      job.retryable = false
+    }
+    return job
   }
-  return response
+  return {
+    ...response,
+    retryable: response.retryable ?? false,
+  }
 }
 
 function normalizeContentMutationDetailResponse(
@@ -1332,65 +1540,11 @@ async function fetchKnowledgeDocumentDetail(
   )
 }
 
-function buildRelationMaps(
-  bundle: CanonicalLibraryBundle,
-): {
-  mutationsByDocument: Map<string, RawContentMutationDetailResponse[]>
-  jobsById: Map<string, RawIngestJob>
-} {
-  const mutationsByDocument = new Map<string, RawContentMutationDetailResponse[]>()
-  for (const mutation of bundle.mutations) {
-    for (const item of mutation.items) {
-      if (!item.document_id) {
-        continue
-      }
-      const current = mutationsByDocument.get(item.document_id) ?? []
-      current.push(mutation)
-      mutationsByDocument.set(item.document_id, current)
-    }
-  }
-  for (const [documentId, mutations] of mutationsByDocument.entries()) {
-    mutations.sort((left, right) => compareIsoDates(left.mutation.requested_at, right.mutation.requested_at))
-    mutationsByDocument.set(documentId, mutations)
-  }
-  const jobsById = new Map(bundle.jobs.map((job) => [job.id, job] as const))
-  return { mutationsByDocument, jobsById }
-}
-
-function buildDocumentRelations(
-  documentId: string,
-  bundle: CanonicalLibraryBundle,
-  maps: ReturnType<typeof buildRelationMaps>,
-): CanonicalDocumentRelation {
-  const mutations = maps.mutationsByDocument.get(documentId) ?? []
-  const jobIds = new Set<string>()
-  const jobs: RawIngestJob[] = []
-
-  for (const mutation of mutations) {
-    if (!mutation.job_id || jobIds.has(mutation.job_id)) {
-      continue
-    }
-    const job = maps.jobsById.get(mutation.job_id)
-    if (!job) {
-      continue
-    }
-    jobs.push(job)
-    jobIds.add(job.id)
-  }
-
-  jobs.sort((left, right) => compareIsoDates(left.queued_at, right.queued_at))
-  return { mutations, jobs }
-}
-
 function buildSurfaceResponse(
-  bundle: CanonicalLibraryBundle,
+  documents: RawContentDocumentDetailResponse[],
 ): DocumentsSurfaceResponse {
-  const relationMaps = buildRelationMaps(bundle)
-  const rows = bundle.documents
-    .map((document) => {
-      const relations = buildDocumentRelations(document.document.id, bundle, relationMaps)
-      return mapSurfaceRow(document, relations.mutations, relations.jobs)
-    })
+  const rows = documents
+    .map((document) => mapSurfaceRow(document, [], []))
     .sort((left, right) => compareIsoDates(left.uploadedAt, right.uploadedAt))
 
   const diagnostics = buildCollectionDiagnostics(rows)
@@ -1455,7 +1609,7 @@ function dashboardRowPriority(row: DocumentRowSummary): number {
 
 export function mapDashboardRecentDocuments(
   rows: DocumentRowSummary[],
-  limit = 6,
+  limit = 8,
 ): DashboardRecentDocument[] {
   return rows
     .slice()
@@ -1471,6 +1625,7 @@ export function mapDashboardRecentDocuments(
       id: row.id,
       fileName: row.fileName,
       fileType: row.fileType,
+      fileSizeLabel: row.fileSizeLabel,
       status: row.status,
       statusLabel: row.statusLabel,
       uploadedAt: row.uploadedAt,
@@ -1483,7 +1638,8 @@ export function normalizeDocumentUploadFailure(
 ): DocumentUploadFailure {
   const details =
     error instanceof ApiClientError ? normalizeUploadRejectionDetails(error.details) : null
-  const message = error instanceof Error ? error.message : 'Failed to upload document'
+  const rawMessage = error instanceof Error ? error.message : 'Failed to upload document'
+  const message = summarizeUploadFailureMessage(rawMessage, details)
 
   return {
     fileName: details?.fileName ?? file.name,
@@ -1499,15 +1655,109 @@ export function normalizeDocumentUploadFailure(
   }
 }
 
-export async function fetchDocumentsSurface(): Promise<DocumentsSurfaceResponse> {
-  const shellStore = useShellStore()
-  const bundle = await fetchCanonicalBundle()
-
-  if (bundle.documents.length === 0) {
-    return buildSurfaceResponse(bundle)
+function summarizeUploadFailureMessage(
+  rawMessage: string,
+  details: UploadRejectionDetails | null,
+): string {
+  const rejectionCause = details?.rejectionCause?.trim()
+  if (rejectionCause) {
+    return rejectionCause
   }
 
-  return buildSurfaceResponse(bundle)
+  const sanitized = rawMessage.split(' body=')[0]?.trim() ?? rawMessage.trim()
+  const providerStatusMatch = sanitized.match(/provider=([a-z0-9_-]+)\s+status=([0-9]{3})\s+(.+)$/i)
+  if (providerStatusMatch) {
+    const [, provider, statusCode, statusText] = providerStatusMatch
+    const providerLabel = provider.charAt(0).toUpperCase() + provider.slice(1)
+    return `${providerLabel} request failed (${statusCode} ${statusText.trim()})`
+  }
+
+  return sanitized
+    .replace(/^graph provider call failed(?: for chunk [^:]+)?:\s*/i, 'Graph extraction failed: ')
+    .replace(/^provider request failed:\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+interface RawDocumentCostEntry {
+  documentId: string
+  totalCost: string
+  currencyCode: string
+  providerCallCount: number
+}
+
+interface RawLibraryCostSummary {
+  totalCost: string
+  currencyCode: string
+  documentCount: number
+  providerCallCount: number
+}
+
+function formatCostLabel(costUsd: number): string {
+  if (costUsd <= 0) return ''
+  if (costUsd < 0.001) return '<$0.001'
+  if (costUsd < 0.01) return `$${costUsd.toFixed(4).replace(/\.?0+$/, '')}`
+  return `$${costUsd.toFixed(3).replace(/\.?0+$/, '')}`
+}
+
+export async function fetchLibraryDocumentCosts(libraryId: string): Promise<DocumentCostEntry[]> {
+  try {
+    const raw = await unwrap(
+      apiHttp.get<RawDocumentCostEntry[]>('/billing/library-document-costs', {
+        params: { libraryId },
+      }),
+    )
+    return raw.map((entry) => ({
+      documentId: entry.documentId,
+      totalCost: Number(entry.totalCost),
+      currencyCode: entry.currencyCode,
+      providerCallCount: entry.providerCallCount,
+    }))
+  } catch {
+    return []
+  }
+}
+
+export async function fetchLibraryCostSummary(libraryId: string): Promise<LibraryCostSummary | null> {
+  try {
+    const raw = await unwrap(
+      apiHttp.get<RawLibraryCostSummary>('/billing/library-cost-summary', {
+        params: { libraryId },
+      }),
+    )
+    return {
+      totalCost: Number(raw.totalCost),
+      currencyCode: raw.currencyCode,
+      documentCount: raw.documentCount,
+      providerCallCount: raw.providerCallCount,
+    }
+  } catch {
+    return null
+  }
+}
+
+export async function fetchDocumentsSurface(): Promise<DocumentsSurfaceResponse> {
+  const shellStore = useShellStore()
+  const libraryId = shellStore.context?.activeLibrary.id ?? null
+  const [documents, documentCosts] = await Promise.all([
+    fetchSurfaceDocuments(),
+    libraryId ? fetchLibraryDocumentCosts(libraryId) : Promise.resolve([]),
+  ])
+
+  const surface = buildSurfaceResponse(documents)
+
+  if (documentCosts.length > 0) {
+    const costMap = new Map(documentCosts.map((c) => [c.documentId, c]))
+    for (const row of surface.rows) {
+      const cost = costMap.get(row.id)
+      if (cost && cost.totalCost > 0) {
+        row.costAmount = cost.totalCost
+        row.costLabel = formatCostLabel(cost.totalCost)
+      }
+    }
+  }
+
+  return surface
 }
 
 export async function fetchDocumentDetail(id: string): Promise<DocumentDetail> {
@@ -1515,43 +1765,22 @@ export async function fetchDocumentDetail(id: string): Promise<DocumentDetail> {
   const document = normalizeContentDocumentDetailResponse(
     await unwrap(apiHttp.get<RawContentDocumentDetailResponse>(`/content/documents/${id}`)),
   )
-  const [revisions, mutations, jobs, chunks, knowledgeDetail] = await Promise.all([
+  const [revisions, chunks, knowledgeDetail, documentCosts] = await Promise.all([
     unwrap(apiHttp.get<RawContentRevision[]>(`/content/documents/${id}/revisions`)),
-    unwrap(
-      apiHttp.get<RawContentMutationDetailResponseWire[]>('/content/mutations', {
-        params: { libraryId: document.document.library_id },
-      }),
-    ),
-    unwrap(
-      apiHttp.get<RawIngestJobResponse[]>('/ingest/jobs', {
-        params: {
-          libraryId: document.document.library_id,
-          workspaceId: document.document.workspace_id,
-        },
-      }),
-    ),
     unwrap(
       apiHttp.get<RawChunkSummary[]>('/chunks', {
         params: { documentId: id },
       }),
     ),
     fetchKnowledgeDocumentDetail(document.document.library_id, id),
+    fetchLibraryDocumentCosts(document.document.library_id),
   ])
-  const normalizedMutations = mutations.map(normalizeContentMutationDetailResponse)
-  const normalizedJobs = jobs.map(normalizeIngestJobResponse)
-  const relationMaps = buildRelationMaps({
-    documents: [document],
-    mutations: normalizedMutations,
-    jobs: normalizedJobs,
-  })
-  const relations = buildDocumentRelations(
-    id,
-    { documents: [document], mutations: normalizedMutations, jobs: normalizedJobs },
-    relationMaps,
-  )
-  const relatedMutations = relations.mutations
-  const relatedJobs = relations.jobs
-  const latestMutation = selectLatestMutation(document, relatedMutations)
+  const relatedMutations: RawContentMutationDetailResponse[] = []
+  const relatedJobs: RawIngestJob[] = []
+  const effectiveKnowledgeRevision = document.readiness?.revision_id
+    ? knowledgeDetail.revisions.find((revision) => revision.revisionId === document.readiness?.revision_id) ??
+      knowledgeDetail.latestRevision
+    : knowledgeDetail.latestRevision
   const revisionsById = new Map(revisions.map((revision) => [revision.id, revision] as const))
   const readableRevision = document.head?.readable_revision_id
     ? revisionsById.get(document.head.readable_revision_id) ?? null
@@ -1562,13 +1791,21 @@ export async function fetchDocumentDetail(id: string): Promise<DocumentDetail> {
     chunks,
     relatedMutations,
     relatedJobs,
-    latestMutation,
+    null,
     shellStore.context?.activeLibrary.name ?? document.document.library_id,
-    knowledgeDetail.latestRevision,
+    effectiveKnowledgeRevision,
   )
 
   if (readableRevision) {
     detail.canonical.readableRevision = buildCanonicalRevision(readableRevision)
+  }
+
+  const documentCost = documentCosts.find((entry) => entry.documentId === id) ?? null
+  if (documentCost && documentCost.totalCost > 0) {
+    detail.totalEstimatedCost = documentCost.totalCost
+    detail.settledEstimatedCost = documentCost.totalCost
+    detail.currency = documentCost.currencyCode
+    detail.providerCallCount = documentCost.providerCallCount
   }
 
   return detail
@@ -1605,7 +1842,9 @@ export async function uploadDocument(file: File): Promise<DocumentRowSummary> {
   const response = await unwrap(
     apiHttp.post<RawCreateDocumentResponse>('/content/documents/upload', formData),
   )
-  return fetchDocumentRowFromDetail(response.document.document.id)
+  const document = normalizeContentDocumentDetailResponse(response.document)
+  const mutation = normalizeContentMutationDetailResponse(response.mutation)
+  return mapSurfaceRow(document, [mutation], [])
 }
 
 export async function uploadDocuments(files: File[]): Promise<UploadDocumentsResponse> {
@@ -1621,22 +1860,13 @@ export async function deleteDocumentItem(id: string): Promise<void> {
 }
 
 export async function retryDocumentItem(id: string): Promise<DocumentRowSummary> {
-  const detail = await fetchDocumentDetail(id)
-  const latestJob = detail.canonical.latestJob
-  if (!latestJob) {
-    throw new Error('No canonical ingest job is available for this document')
-  }
-  await unwrap(apiHttp.post<RawIngestJob>(`/ingest/jobs/${latestJob.id}/retry`))
+  await unwrap(
+    apiHttp.post<RawContentMutationDetailResponse>(
+      `/content/documents/${id}/reprocess`,
+      {},
+    ),
+  )
   return await fetchDocumentRowFromDetail(id)
-}
-
-export async function reprocessDocumentItem(id: string): Promise<void> {
-  const detail = await fetchDocumentDetail(id)
-  const latestJob = detail.canonical.latestJob
-  if (!latestJob) {
-    throw new Error('No canonical ingest job is available for this document')
-  }
-  await unwrap(apiHttp.post<RawIngestJob>(`/ingest/jobs/${latestJob.id}/retry`))
 }
 
 async function fetchDocumentRowFromDetail(id: string): Promise<DocumentRowSummary> {
@@ -1645,16 +1875,22 @@ async function fetchDocumentRowFromDetail(id: string): Promise<DocumentRowSummar
     id: detail.id,
     fileName: detail.fileName,
     fileType: detail.fileType,
+    fileSizeBytes: detail.canonical.activeRevision?.byteSize ?? null,
     fileSizeLabel: detail.fileSizeLabel,
     uploadedAt: detail.uploadedAt,
     status: detail.status,
     statusLabel: statusLabelFor(detail.status),
-    activityLabel: formatDateTime(detail.lastActivityAt ?? detail.uploadedAt),
-    mutationLabel: mutationLabelFromState(detail.mutation),
+    stageLabel:
+      detail.status === 'processing' || detail.status === 'queued'
+        ? documentStageLabel(detail.stage)
+        : null,
+    costAmount: detail.totalEstimatedCost && detail.totalEstimatedCost > 0
+      ? detail.totalEstimatedCost
+      : null,
+    costLabel: detail.totalEstimatedCost && detail.totalEstimatedCost > 0
+      ? formatCostLabel(detail.totalEstimatedCost)
+      : null,
     canRetry: detail.canRetry,
-    canAppend: detail.canAppend,
-    canReplace: detail.canReplace,
-    canRemove: detail.canRemove,
     detailAvailable: detail.detailAvailable,
   }
 }

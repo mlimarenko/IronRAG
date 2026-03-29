@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 pub mod docx;
 pub mod image;
 pub mod pdf;
+pub mod pptx;
 pub mod text_like;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

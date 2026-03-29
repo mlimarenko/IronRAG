@@ -511,6 +511,8 @@ impl OpsStateFixture {
             &self.state.persistence.postgres,
             Some(self.workspace_id),
             Some(self.library_id),
+            None,
+            None,
         )
         .await
         .context("failed to list ops_state ingest jobs for resolution")?;

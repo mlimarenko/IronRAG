@@ -43,6 +43,17 @@ pub struct ContentRevision {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContentRevisionReadiness {
+    pub revision_id: Uuid,
+    pub text_state: String,
+    pub vector_state: String,
+    pub graph_state: String,
+    pub text_readable_at: Option<DateTime<Utc>>,
+    pub vector_ready_at: Option<DateTime<Utc>>,
+    pub graph_ready_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContentMutation {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -83,8 +94,33 @@ pub struct ContentMutationItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContentDocumentPipelineJob {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub library_id: Uuid,
+    pub mutation_id: Option<Uuid>,
+    pub async_operation_id: Option<Uuid>,
+    pub job_kind: String,
+    pub queue_state: String,
+    pub queued_at: DateTime<Utc>,
+    pub available_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub current_stage: Option<String>,
+    pub failure_code: Option<String>,
+    pub retryable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContentDocumentPipelineState {
+    pub latest_mutation: Option<ContentMutation>,
+    pub latest_job: Option<ContentDocumentPipelineJob>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContentDocumentSummary {
     pub document: ContentDocument,
     pub head: Option<ContentDocumentHead>,
     pub active_revision: Option<ContentRevision>,
+    pub readiness: Option<ContentRevisionReadiness>,
+    pub pipeline: ContentDocumentPipelineState,
 }

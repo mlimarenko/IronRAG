@@ -1,7 +1,10 @@
 use std::io::Cursor;
 
-use anyhow::{Context, Result};
-use image::{DynamicImage, ImageFormat, imageops::FilterType};
+use anyhow::{Context, Result, anyhow};
+use image::{
+    DynamicImage, ImageBuffer, ImageFormat, Luma, LumaA, Rgb, Rgba, imageops::FilterType,
+};
+use png::{ColorType as PngColorType, Decoder as PngDecoder, Transformations as PngTransformations};
 
 use crate::{
     integrations::llm::{LlmGateway, VisionRequest},
@@ -61,11 +64,13 @@ struct PreparedVisionPayload {
     warnings: Vec<String>,
 }
 
+const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+
 fn prepare_vision_image_payload(
     file_bytes: &[u8],
     mime_type: &str,
 ) -> Result<PreparedVisionPayload> {
-    let mut image = image::load_from_memory(file_bytes).context("failed to decode image bytes")?;
+    let mut image = load_normalizable_image(file_bytes, mime_type).context("failed to decode image bytes")?;
     let mut warnings = Vec::new();
 
     let width = image.width();
@@ -101,12 +106,55 @@ fn prepare_vision_image_payload(
     })
 }
 
+fn load_normalizable_image(file_bytes: &[u8], mime_type: &str) -> Result<DynamicImage> {
+    if mime_type.eq_ignore_ascii_case("image/png") || file_bytes.starts_with(PNG_SIGNATURE) {
+        return decode_png_ignoring_checksums(file_bytes);
+    }
+
+    image::load_from_memory(file_bytes).context("failed to decode image bytes with generic decoder")
+}
+
+fn decode_png_ignoring_checksums(file_bytes: &[u8]) -> Result<DynamicImage> {
+    let mut decoder = PngDecoder::new(Cursor::new(file_bytes));
+    decoder.ignore_checksums(true);
+    decoder.set_transformations(PngTransformations::normalize_to_color8());
+
+    let mut reader = decoder.read_info().context("failed to read png metadata")?;
+    let buffer_size = reader
+        .output_buffer_size()
+        .context("png decoder could not determine output buffer size")?;
+    let mut buffer = vec![0; buffer_size];
+    let output = reader.next_frame(&mut buffer).context("failed to decode png frame")?;
+    let pixels = buffer[..output.buffer_size()].to_vec();
+
+    match output.color_type {
+        PngColorType::Grayscale => ImageBuffer::<Luma<u8>, _>::from_raw(output.width, output.height, pixels)
+            .map(DynamicImage::ImageLuma8)
+            .ok_or_else(|| anyhow!("failed to construct luma image from decoded png buffer")),
+        PngColorType::GrayscaleAlpha => {
+            ImageBuffer::<LumaA<u8>, _>::from_raw(output.width, output.height, pixels)
+                .map(DynamicImage::ImageLumaA8)
+                .ok_or_else(|| anyhow!("failed to construct luma-alpha image from decoded png buffer"))
+        }
+        PngColorType::Rgb => ImageBuffer::<Rgb<u8>, _>::from_raw(output.width, output.height, pixels)
+            .map(DynamicImage::ImageRgb8)
+            .ok_or_else(|| anyhow!("failed to construct rgb image from decoded png buffer")),
+        PngColorType::Rgba => ImageBuffer::<Rgba<u8>, _>::from_raw(output.width, output.height, pixels)
+            .map(DynamicImage::ImageRgba8)
+            .ok_or_else(|| anyhow!("failed to construct rgba image from decoded png buffer")),
+        PngColorType::Indexed => {
+            Err(anyhow!("png decoder returned indexed output after normalization"))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
 
     use anyhow::Result;
     use async_trait::async_trait;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use image::{DynamicImage, ImageFormat};
 
     use super::*;
@@ -122,6 +170,12 @@ mod tests {
         let mut cursor = Cursor::new(Vec::new());
         image.write_to(&mut cursor, ImageFormat::Png).expect("encode generated png fixture");
         cursor.into_inner()
+    }
+
+    fn tiny_grayscale_alpha_png_bytes() -> Vec<u8> {
+        STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aF9sAAAAASUVORK5CYII=")
+            .expect("decode tiny png fixture")
     }
 
     #[async_trait]
@@ -189,5 +243,23 @@ mod tests {
         assert_eq!(output.source_map["mime_type"], serde_json::json!("image/png"));
         assert!(output.warnings.len() >= 1);
         assert!(output.content_text.contains("[image/png]"));
+    }
+
+    #[test]
+    fn normalizes_tiny_grayscale_alpha_png_payloads() {
+        let payload = prepare_vision_image_payload(&tiny_grayscale_alpha_png_bytes(), "image/png")
+            .expect("normalize tiny grayscale alpha png");
+
+        let decoded =
+            image::load_from_memory(&payload.image_bytes).expect("decode normalized payload");
+
+        assert_eq!(payload.mime_type, "image/png");
+        assert_eq!(decoded.width(), 64);
+        assert_eq!(decoded.height(), 64);
+        assert_eq!(decoded.color(), image::ColorType::Rgb8);
+        assert!(payload
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("upscaled image from 1x1 to 64x64")));
     }
 }

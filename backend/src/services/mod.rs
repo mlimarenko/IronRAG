@@ -3,6 +3,7 @@ pub mod audit_service;
 pub mod billing_service;
 pub mod catalog_service;
 pub mod content_service;
+pub mod content_storage;
 mod document_accounting;
 pub mod extract_service;
 pub(crate) mod extraction_recovery;

@@ -5965,14 +5965,14 @@ pub async fn refresh_runtime_library_queue_slice_activity(
     Ok(())
 }
 
-/// Acquires a library-scoped PostgreSQL advisory lock for graph projection serialization.
+/// Acquires a library-scoped PostgreSQL advisory lock for canonical graph serialization.
 ///
 /// The returned pooled connection keeps the session lock alive until
-/// `release_runtime_library_projection_lock` is called.
+/// `release_runtime_library_graph_lock` is called.
 ///
 /// # Errors
 /// Returns any `SQLx` error raised while acquiring the connection or advisory lock.
-pub async fn acquire_runtime_library_projection_lock(
+pub async fn acquire_runtime_library_graph_lock(
     pool: &PgPool,
     project_id: Uuid,
 ) -> Result<sqlx::pool::PoolConnection<Postgres>, sqlx::Error> {
@@ -5984,11 +5984,11 @@ pub async fn acquire_runtime_library_projection_lock(
     Ok(connection)
 }
 
-/// Releases a library-scoped PostgreSQL advisory lock for graph projection serialization.
+/// Releases a library-scoped PostgreSQL advisory lock for canonical graph serialization.
 ///
 /// # Errors
 /// Returns any `SQLx` error raised while unlocking the advisory key.
-pub async fn release_runtime_library_projection_lock(
+pub async fn release_runtime_library_graph_lock(
     mut connection: sqlx::pool::PoolConnection<Postgres>,
     project_id: Uuid,
 ) -> Result<(), sqlx::Error> {

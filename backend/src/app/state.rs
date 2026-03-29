@@ -17,8 +17,8 @@ use crate::{
     services::{
         ai_catalog_service::AiCatalogService, audit_service::AuditService,
         billing_service::BillingService, catalog_service::CatalogService,
-        content_service::ContentService, extract_service::ExtractService,
-        extraction_recovery::ExtractionRecoveryService,
+        content_service::ContentService, content_storage::ContentStorageService,
+        extract_service::ExtractService, extraction_recovery::ExtractionRecoveryService,
         graph_projection_guard::GraphWriteGuardService,
         graph_quality_guard::GraphQualityGuardService,
         graph_reconciliation_scope::GraphReconciliationScopeService, graph_service::GraphService,
@@ -175,6 +175,7 @@ pub struct AppState {
     pub settings: Settings,
     pub persistence: Persistence,
     pub llm_gateway: Arc<dyn LlmGateway>,
+    pub content_storage: ContentStorageService,
     pub arango_client: Arc<ArangoClient>,
     pub ui_runtime: UiRuntimeSettings,
     pub ui_bootstrap_admin: Option<UiBootstrapAdmin>,
@@ -205,6 +206,7 @@ impl AppState {
     ) -> Self {
         let bootstrap_settings = settings.bootstrap_settings();
         let public_origin_settings = settings.public_origin_settings();
+        let content_storage = ContentStorageService::new(settings.content_storage_root.clone());
         let ui_bootstrap_admin = bootstrap_settings.legacy_ui_bootstrap_admin;
         let ui_runtime = UiRuntimeSettings {
             frontend_origin: public_origin_settings.raw_frontend_origin,
@@ -317,6 +319,7 @@ impl AppState {
         };
         Self {
             llm_gateway: Arc::new(UnifiedGateway::from_settings(&settings)),
+            content_storage,
             arango_client,
             settings,
             persistence,

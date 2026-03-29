@@ -20,7 +20,6 @@ LOCAL_DOCKER_ALL_SERVICES ?= postgres redis arangodb backend frontend
 	check-strict \
 	enterprise-validate \
 	audit \
-	release-validation \
 	docker-local-build \
 	docker-local-rebuild \
 	docker-local-redeploy \
@@ -73,9 +72,6 @@ enterprise-validate:
 	cd frontend && npm run enterprise:check
 
 audit: backend-audit
-
-release-validation:
-	node scripts/release-validation/run.mjs --library-id $(LIBRARY_ID)
 
 docker-local-build:
 	$(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) build $(LOCAL_DOCKER_APP_SERVICES)

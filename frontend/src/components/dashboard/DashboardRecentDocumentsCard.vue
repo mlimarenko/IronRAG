@@ -1,18 +1,24 @@
 <script setup lang="ts">
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import SurfacePanel from 'src/components/design-system/SurfacePanel.vue'
 import StatusBadge from 'src/components/design-system/StatusBadge.vue'
 import { useDisplayFormatters } from 'src/composables/useDisplayFormatters'
+import { computed } from 'vue'
 import type { DashboardRecentDocument } from 'src/models/ui/dashboard'
 
 const props = defineProps<{
   documents: DashboardRecentDocument[]
+  compact?: boolean
 }>()
 
 const { t } = useI18n()
 const router = useRouter()
-const { formatDateTime } = useDisplayFormatters()
+const { formatCompactDateTime } = useDisplayFormatters()
+const showFileType = computed(() => new Set(props.documents.map((row) => row.fileType)).size > 1)
+const showStatusBadge = computed(() => props.documents.some((row) => !['ready', 'ready_no_graph'].includes(row.status)))
+function rowMeta(row: DashboardRecentDocument): string {
+  return `${row.fileSizeLabel} · ${formatCompactDateTime(row.uploadedAt)}`
+}
 
 async function openDocuments() {
   await router.push('/documents')
@@ -20,16 +26,20 @@ async function openDocuments() {
 </script>
 
 <template>
-  <SurfacePanel class="rr-dashboard-card rr-dashboard-recent">
-    <header class="rr-dashboard-card__header">
-      <div class="rr-dashboard-card__copy">
-        <p class="rr-dashboard-card__eyebrow">{{ t('dashboard.recent.eyebrow') }}</p>
-        <h2 class="rr-dashboard-card__title">{{ t('dashboard.recent.title') }}</h2>
-        <p class="rr-dashboard-card__subtitle">{{ t('dashboard.recent.subtitle') }}</p>
+  <section
+    class="rr-dash-docs"
+    :class="{ 'is-compact': props.compact, 'is-solo': props.documents.length <= 1 }"
+  >
+    <header class="rr-dash-docs__header">
+      <div class="rr-dash-docs__copy">
+        <div class="rr-dash-docs__title-row">
+          <h2 class="rr-dash-docs__title">{{ t('dashboard.recent.title') }}</h2>
+        </div>
+        <p class="rr-dash-docs__subtitle">{{ t('dashboard.recent.subtitle') }}</p>
       </div>
       <button
         type="button"
-        class="rr-button rr-button--ghost rr-button--tiny"
+        class="rr-button rr-button--ghost rr-button--tiny rr-dash-docs__view-all"
         @click="openDocuments"
       >
         {{ t('shared.actions.viewAll') }}
@@ -38,37 +48,36 @@ async function openDocuments() {
 
     <div
       v-if="props.documents.length"
-      class="rr-dashboard-recent__list"
+      class="rr-dash-docs__table"
     >
-      <article
+      <div
         v-for="row in props.documents"
         :key="row.id"
-        class="rr-dashboard-recent__row"
+        class="rr-dash-docs__row"
       >
-        <div class="rr-dashboard-recent__copy">
+        <div class="rr-dash-docs__name">
           <strong>{{ row.fileName }}</strong>
-          <span>{{ row.fileType }} · {{ formatDateTime(row.uploadedAt) }}</span>
+          <span class="rr-dash-docs__meta rr-dash-docs__meta--inline">{{ rowMeta(row) }}</span>
         </div>
-        <div class="rr-dashboard-recent__actions">
-          <StatusBadge
-            :kind="row.status"
-            :label="row.statusLabel"
-          />
-          <button
-            type="button"
-            class="rr-button rr-button--ghost rr-button--tiny"
-            @click="openDocuments"
-          >
-            {{ t('dashboard.recent.openAction') }}
-          </button>
-        </div>
-      </article>
+        <span
+          v-if="showFileType"
+          class="rr-dash-docs__meta rr-dash-docs__meta--type"
+        >
+          {{ row.fileType }}
+        </span>
+        <StatusBadge
+          v-if="showStatusBadge"
+          class="rr-dash-docs__status"
+          :kind="row.status"
+          :label="row.statusLabel"
+        />
+      </div>
     </div>
     <p
       v-else
-      class="rr-dashboard-card__empty"
+      class="rr-dash-docs__empty"
     >
       {{ t('dashboard.recent.empty') }}
     </p>
-  </SurfacePanel>
+  </section>
 </template>

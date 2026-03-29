@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
@@ -7,6 +7,7 @@ import FeedbackState from 'src/components/design-system/FeedbackState.vue'
 import GraphCanvas from 'src/components/graph/GraphCanvas.vue'
 import GraphControls from 'src/components/graph/GraphControls.vue'
 import GraphNodeDetailsCard from 'src/components/graph/GraphNodeDetailsCard.vue'
+import { resolveDefaultGraphLayoutMode } from 'src/models/ui/graph'
 import { useGraphStore } from 'src/stores/graph'
 import { useQueryStore } from 'src/stores/query'
 import { useShellStore } from 'src/stores/shell'
@@ -28,7 +29,8 @@ const {
 } = storeToRefs(graphStore)
 
 let refreshTimer: number | null = null
-const focusActive = ref(false)
+const isPageVisible = ref(typeof document === 'undefined' ? true : document.visibilityState === 'visible')
+const canvasRendererAvailable = ref(true)
 
 function stopPolling() {
   if (refreshTimer !== null) {
@@ -37,27 +39,47 @@ function stopPolling() {
   }
 }
 
+function pollGraph(): void {
+  if (!activeLibraryId.value) {
+    return
+  }
+  void graphStore.pollSurface(activeLibraryId.value).catch(() => undefined)
+}
+
+function handleVisibilityChange(): void {
+  isPageVisible.value = document.visibilityState === 'visible'
+}
+
 const activeLibraryId = computed(() => shellStore.context?.activeLibrary.id ?? null)
 
 const canvasMode = computed(() => surface.value?.canvasMode ?? 'building')
 const overlay = computed(() => surface.value?.overlay ?? null)
 const inspector = computed(() => surface.value?.inspector ?? null)
+const defaultLayoutMode = computed(() =>
+  resolveDefaultGraphLayoutMode(surface.value?.nodeCount ?? 0, surface.value?.edgeCount ?? 0),
+)
 const focusedNodeId = computed(() => inspector.value?.focusedNodeId ?? null)
 const focusedNodeDetail = computed(() => inspector.value?.detail ?? null)
 const focusedNodeDetailLoading = computed(() => inspector.value?.loading ?? false)
+const showGraphCanvas = computed(
+  () => Boolean(surface.value) && (surface.value?.nodeCount ?? 0) > 0 && canvasMode.value === 'ready',
+)
 
 const showControlDock = computed(() => {
-  if (!surface.value || surface.value.nodeCount === 0) {
+  if (!showGraphCanvas.value) {
     return false
   }
-  return canvasMode.value === 'ready'
+  return canvasRendererAvailable.value
 })
+
+const inspectorError = computed(() => inspector.value?.error ?? null)
 
 const showNodeInspector = computed(
   () =>
+    canvasRendererAvailable.value &&
     Boolean(surface.value) &&
     Boolean(focusedNodeId.value) &&
-    (focusedNodeDetailLoading.value || Boolean(focusedNodeDetail.value)),
+    (focusedNodeDetailLoading.value || Boolean(focusedNodeDetail.value) || Boolean(inspectorError.value)),
 )
 
 const overlayState = computed(() => {
@@ -137,9 +159,36 @@ const overlayPrimaryAction = computed(() => {
   return null
 })
 
+const overlayDetails = computed(() => {
+  if (!overlayState.value || !surface.value) {
+    return []
+  }
+
+  if (overlayState.value.tone === 'sparse') {
+    const details = [
+      t('graph.sparseDocumentsDetail', {
+        count: surface.value.nodeCount,
+      }),
+    ]
+
+    if (surface.value.graphGenerationState && surface.value.graphGenerationState !== 'current') {
+      details.push(
+        t('graph.sparseGenerationDetail', {
+          state: surface.value.graphGenerationState.replace(/_/g, ' '),
+        }),
+      )
+    }
+
+    return details
+  }
+
+  return []
+})
+
 watch(
   activeLibraryId,
   async (libraryId) => {
+    canvasRendererAvailable.value = true
     if (!libraryId) {
       return
     }
@@ -153,21 +202,23 @@ watch(
 )
 
 watch(
-  () => refreshIntervalMs.value,
-  (intervalMs) => {
+  [() => refreshIntervalMs.value, isPageVisible],
+  ([intervalMs, pageVisible]) => {
     stopPolling()
-    if (intervalMs <= 0) {
+    if (intervalMs <= 0 || !pageVisible) {
       return
     }
-    refreshTimer = window.setInterval(() => {
-      if (!activeLibraryId.value) {
-        return
-      }
-      void graphStore.loadSurface(activeLibraryId.value, { preserveUi: true }).catch(() => undefined)
-    }, intervalMs)
+    refreshTimer = window.setInterval(pollGraph, intervalMs)
   },
   { immediate: true },
 )
+
+watch(isPageVisible, (pageVisible) => {
+  if (!pageVisible || refreshIntervalMs.value <= 0) {
+    return
+  }
+  pollGraph()
+})
 
 watch(
   () => [route.query.node, surface.value?.graphGeneration] as const,
@@ -176,54 +227,53 @@ watch(
       return
     }
     if (typeof nodeId !== 'string' || !nodeId.trim()) {
-      focusActive.value = false
       graphStore.clearFocus()
       return
     }
 
     if (focusedNodeId.value === nodeId) {
-      focusActive.value = true
       return
     }
 
     await graphStore.focusNode(nodeId)
-    focusActive.value = Boolean(graphStore.surface?.inspector.focusedNodeId)
   },
   { immediate: true },
 )
 
+onMounted(() => {
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+})
+
 onBeforeUnmount(() => {
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
   stopPolling()
 })
 
 async function focusNode(id: string) {
-  await graphStore.focusNode(id)
+  const focusTask = graphStore.focusNode(id)
   const nextFocusedId = graphStore.surface?.inspector.focusedNodeId ?? null
 
   if (!nextFocusedId) {
-    focusActive.value = false
+    await focusTask
     return
   }
-
-  focusActive.value = true
 
   if (route.query.node !== nextFocusedId) {
     await router.replace({ query: { ...route.query, node: nextFocusedId } })
   }
+
+  await focusTask
 }
 
 async function selectHit(id: string) {
   await focusNode(id)
-  if (surface.value?.overlay) {
-    surface.value.overlay.searchHits = []
-  }
+  graphStore.clearSearch()
 }
 
 async function clearFocus() {
   const nextQuery = { ...route.query }
   delete nextQuery.node
   await router.replace({ query: nextQuery })
-  focusActive.value = false
   graphStore.clearFocus()
   graphStore.fitViewport()
 }
@@ -241,19 +291,19 @@ async function reloadSurface() {
   <div class="rr-graph-page rr-graph-page--immersive rr-graph-page--reset">
     <h1 class="rr-screen-reader-only">{{ $t('shell.graph') }}</h1>
     <section class="rr-graph-workbench rr-graph-workbench--immersive">
-        <template v-if="surface && surface.nodeCount > 0">
+        <template v-if="showGraphCanvas">
           <GraphCanvas
             :nodes="surface.nodes"
             :edges="surface.edges"
             :filter="overlay?.nodeTypeFilter ?? ''"
             :focused-node-id="focusedNodeId"
-            :focus-active="focusActive"
-            :layout-mode="overlay?.activeLayout ?? 'cloud'"
+            :layout-mode="overlay?.activeLayout ?? defaultLayoutMode"
             :show-filtered-artifacts="overlay?.showFilteredArtifacts ?? false"
             :surface-version="surface.graphGeneration"
             @select-node="focusNode"
             @clear-focus="clearFocus"
             @ready="graphStore.registerCanvasControls"
+            @renderer-state="canvasRendererAvailable = $event"
           />
         </template>
 
@@ -268,7 +318,8 @@ async function reloadSurface() {
           :query="overlay?.searchQuery ?? ''"
           :filter="overlay?.nodeTypeFilter ?? ''"
           :hits="overlay?.searchHits ?? []"
-          :layout-mode="overlay?.activeLayout ?? 'cloud'"
+          :layout-mode="overlay?.activeLayout ?? defaultLayoutMode"
+          :compact="showNodeInspector"
           :can-clear-focus="Boolean(focusedNodeId)"
           :graph-status="overlayState ? null : (surface?.graphStatus ?? null)"
           :convergence-status="overlayState ? null : convergenceStatus"
@@ -276,6 +327,7 @@ async function reloadSurface() {
           :show-filtered-artifacts="overlay?.showFilteredArtifacts ?? false"
           :node-count="surface?.nodeCount ?? 0"
           :edge-count="surface?.edgeCount ?? 0"
+          :hidden-node-count="surface?.hiddenNodeCount ?? 0"
           @zoom-in="graphStore.zoomIn"
           @zoom-out="graphStore.zoomOut"
           @fit="graphStore.fitViewport"
@@ -315,6 +367,7 @@ async function reloadSurface() {
           <GraphNodeDetailsCard
             :detail="focusedNodeDetail"
             :loading="focusedNodeDetailLoading"
+            :error="inspectorError"
             @select-node="focusNode"
           />
         </aside>
@@ -327,6 +380,7 @@ async function reloadSurface() {
           <FeedbackState
             :title="overlayState.title"
             :message="overlayState.description ?? ''"
+            :details="overlayDetails"
             :kind="overlayState.tone === 'failed' ? 'error' : (overlayState.tone as 'loading' | 'empty' | 'sparse')"
             :action-label="overlayPrimaryAction?.label"
             @action="overlayPrimaryAction?.action()"

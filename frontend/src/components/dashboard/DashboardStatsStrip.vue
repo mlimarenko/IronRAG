@@ -1,40 +1,43 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import StatTile from 'src/components/design-system/StatTile.vue'
-import type { DashboardMetric } from 'src/models/ui/dashboard'
+import { resolveDashboardVisibleMetrics, type DashboardMetric } from 'src/models/ui/dashboard'
 
 const props = defineProps<{
   metrics: DashboardMetric[]
 }>()
 
-const tiles = computed(() => props.metrics.slice(0, 4))
+const tiles = computed(() => resolveDashboardVisibleMetrics(props.metrics))
 
-function metricCount(metric: DashboardMetric): number {
-  const value = Number(metric.value)
-  return Number.isNaN(value) ? 0 : value
-}
+const columnCount = computed(() => Math.max(1, Math.min(tiles.value.length, 4)))
 
-function metricTone(metric: DashboardMetric): 'info' | 'warning' | 'ready' | 'failed' {
-  const count = metricCount(metric)
-  if (metric.key === 'attention') {
-    return count > 0 ? 'warning' : 'ready'
-  }
-  if (metric.key === 'inFlight') {
-    return count > 0 ? 'warning' : 'info'
-  }
-  return 'info'
+function toneClass(metric: DashboardMetric): string {
+  const val = Number(metric.value)
+  if (metric.key === 'attention') return val > 0 ? 'is-warning' : 'is-quiet'
+  if (metric.key === 'inFlight') return val > 0 ? 'is-active' : 'is-quiet'
+  if (metric.key === 'ready') return val > 0 ? 'is-ready' : 'is-quiet'
+  return ''
 }
 </script>
 
 <template>
-  <div class="rr-dashboard-metrics">
-    <StatTile
+  <div
+    class="rr-dash-stats"
+    :style="{ '--rr-dash-stats-columns': `${columnCount}` }"
+  >
+    <div
       v-for="metric in tiles"
       :key="metric.key"
-      :label="metric.label"
-      :value="metric.value"
-      :supporting-text="metric.supportingText ?? undefined"
-      :status-kind="metricTone(metric)"
-    />
+      class="rr-dash-stat"
+      :class="toneClass(metric)"
+    >
+      <span class="rr-dash-stat__value">{{ metric.value }}</span>
+      <span class="rr-dash-stat__label">{{ metric.label }}</span>
+      <span
+        v-if="metric.supportingText"
+        class="rr-dash-stat__hint"
+      >
+        {{ metric.supportingText }}
+      </span>
+    </div>
   </div>
 </template>

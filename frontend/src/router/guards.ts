@@ -26,7 +26,7 @@ export function installRouteGuards(router: Router) {
     }
 
     if (to.meta.requiresAdmin && !shellStore.adminEnabled) {
-      return '/'
+      return { path: '/', query: { notice: 'admin-required' } }
     }
 
     return true

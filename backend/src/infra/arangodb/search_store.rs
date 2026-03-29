@@ -324,6 +324,7 @@ impl ArangoSearchStore {
                 "FOR vector IN @@collection
                  FILTER vector.entity_id == @entity_id
                  SORT vector.freshness_generation DESC, vector.created_at DESC
+                 LIMIT 1000
                  RETURN vector",
                 serde_json::json!({
                     "@collection": KNOWLEDGE_ENTITY_VECTOR_COLLECTION,

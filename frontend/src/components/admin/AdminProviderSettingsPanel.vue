@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import SearchField from 'src/components/design-system/SearchField.vue'
 import { useDisplayFormatters } from 'src/composables/useDisplayFormatters'
 import type {
   AdminAiConsoleState,
   AdminLibraryBinding,
   AdminModelPreset,
+  AdminProviderCatalogEntry,
   AdminProviderCredential,
   CreateAdminCredentialPayload,
   CreateAdminModelPresetPayload,
@@ -44,7 +46,7 @@ type EditableAssignmentForm = {
   bindingState: string
 }
 
-type SettingsSection = 'credentials' | 'modelPresets' | 'assignments'
+type SettingsSection = 'providers' | 'credentials' | 'modelPresets' | 'assignments'
 type LibraryTaskPurpose = 'extract_graph' | 'embed_chunk' | 'query_answer' | 'vision'
 
 const LIBRARY_TASKS: LibraryTaskPurpose[] = ['extract_graph', 'embed_chunk', 'query_answer', 'vision']
@@ -55,7 +57,6 @@ const props = defineProps<{
   validatingBindingId: string | null
   commitVersion: number
   errorMessage?: string | null
-  embedded?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -69,6 +70,13 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const { bindingPurposeLabel, enumLabel, formatDateTime, providerStateLabel } = useDisplayFormatters()
+
+const searchQuery = ref('')
+const railSection = ref<SettingsSection>('assignments')
+const editingSection = ref<SettingsSection | null>(null)
+const selectionKey = ref<string | null>(null)
+const pendingSubmitSection = ref<SettingsSection | null>(null)
+const pendingSelectionKey = ref<string | null>(null)
 
 const credentialForm = reactive<EditableCredentialForm>({
   credentialId: null,
@@ -100,10 +108,6 @@ const assignmentForm = reactive<EditableAssignmentForm>({
   bindingState: 'active',
 })
 
-const editingSection = ref<SettingsSection | null>(null)
-const selectionKey = ref<string | null>(null)
-const pendingSubmitSection = ref<SettingsSection | null>(null)
-
 watch(
   () => props.settings,
   (settings) => {
@@ -134,7 +138,13 @@ watch(
     if (!previousKey || nextKey === previousKey) {
       return
     }
-    selectCredential()
+    selectionKey.value = null
+    editingSection.value = null
+    pendingSubmitSection.value = null
+    pendingSelectionKey.value = null
+    resetCredentialForm()
+    resetPresetForm()
+    resetAssignmentForm()
   },
 )
 
@@ -158,20 +168,42 @@ const providerModelCounts = computed(() => {
   return counts
 })
 
+const providerCredentialCounts = computed(() => {
+  const counts = new Map<string, number>()
+  for (const credential of props.settings.credentials) {
+    counts.set(credential.providerCatalogId, (counts.get(credential.providerCatalogId) ?? 0) + 1)
+  }
+  return counts
+})
+
+const providerRows = computed(() =>
+  props.settings.providers
+    .map((provider) => ({
+      ...provider,
+      modelCount: providerModelCounts.value.get(provider.id) ?? 0,
+      credentialCount: providerCredentialCounts.value.get(provider.id) ?? 0,
+    }))
+    .sort((left, right) => left.displayName.localeCompare(right.displayName)),
+)
+
 const credentialRows = computed(() =>
-  props.settings.credentials.map((credential) => ({
-    ...credential,
-    provider: providerMap.value.get(credential.providerCatalogId) ?? null,
-    providerModelCount: providerModelCounts.value.get(credential.providerCatalogId) ?? 0,
-  })),
+  props.settings.credentials
+    .map((credential) => ({
+      ...credential,
+      provider: providerMap.value.get(credential.providerCatalogId) ?? null,
+      providerModelCount: providerModelCounts.value.get(credential.providerCatalogId) ?? 0,
+    }))
+    .sort((left, right) => left.label.localeCompare(right.label)),
 )
 
 const presetRows = computed(() =>
-  props.settings.modelPresets.map((preset) => {
-    const model = modelMap.value.get(preset.modelCatalogId) ?? null
-    const provider = model ? providerMap.value.get(model.providerCatalogId) ?? null : null
-    return { ...preset, model, provider }
-  }),
+  props.settings.modelPresets
+    .map((preset) => {
+      const model = modelMap.value.get(preset.modelCatalogId) ?? null
+      const provider = model ? providerMap.value.get(model.providerCatalogId) ?? null : null
+      return { ...preset, model, provider }
+    })
+    .sort((left, right) => left.presetName.localeCompare(right.presetName)),
 )
 
 const assignmentRows = computed(() =>
@@ -202,18 +234,48 @@ const libraryTaskRows = computed(() =>
   })),
 )
 
+function modelSupportsBindingPurpose(modelCatalogId: string, purpose: LibraryTaskPurpose): boolean {
+  const model = modelMap.value.get(modelCatalogId)
+  return !!model && model.allowedBindingPurposes.includes(purpose)
+}
+
+const purposeCompatiblePresetOptions = computed(() =>
+  props.settings.modelPresets.filter((preset) =>
+    modelSupportsBindingPurpose(preset.modelCatalogId, assignmentForm.bindingPurpose as LibraryTaskPurpose),
+  ),
+)
+
+const assignmentCredentialOptions = computed(() => {
+  const compatibleProviderIds = new Set(
+    purposeCompatiblePresetOptions.value
+      .map((preset) => modelMap.value.get(preset.modelCatalogId)?.providerCatalogId ?? null)
+      .filter((providerCatalogId): providerCatalogId is string => providerCatalogId !== null),
+  )
+  return props.settings.credentials.filter((credential) =>
+    compatibleProviderIds.has(credential.providerCatalogId),
+  )
+})
+
 const assignmentPresetOptions = computed(() => {
-  const selectedCredential = props.settings.credentials.find(
+  const selectedCredential = assignmentCredentialOptions.value.find(
     (credential) => credential.id === assignmentForm.providerCredentialId,
   )
   if (!selectedCredential) {
-    return props.settings.modelPresets
+    return purposeCompatiblePresetOptions.value
   }
-  return props.settings.modelPresets.filter((preset) => {
+  return purposeCompatiblePresetOptions.value.filter((preset) => {
     const model = modelMap.value.get(preset.modelCatalogId)
     return model?.providerCatalogId === selectedCredential.providerCatalogId
   })
 })
+
+const summary = computed(() => ({
+  providers: providerRows.value.length,
+  credentials: credentialRows.value.length,
+  tasks: libraryTaskRows.value.filter((task) => task.binding !== null).length,
+}))
+
+const detailErrorMessage = computed(() => props.errorMessage ?? null)
 
 const activeValidation = computed(() => {
   if (!assignmentForm.bindingId) {
@@ -225,12 +287,151 @@ const activeValidation = computed(() => {
   )
 })
 
-const detailErrorMessage = computed(() => {
-  if (!editingSection.value) {
+const visibleProviderRows = computed(() =>
+  providerRows.value.filter((provider) =>
+    matchesQuery([
+      provider.displayName,
+      provider.providerKind,
+      provider.apiStyle,
+      provider.lifecycleState,
+      provider.modelCount,
+      provider.credentialCount,
+    ]),
+  ),
+)
+
+const visibleCredentialRows = computed(() =>
+  credentialRows.value.filter((credential) =>
+    matchesQuery([
+      credential.label,
+      credential.provider?.displayName,
+      credential.credentialState,
+      credential.apiKeySummary,
+      credential.providerModelCount,
+    ]),
+  ),
+)
+
+const visiblePresetRows = computed(() =>
+  presetRows.value.filter((preset) =>
+    matchesQuery([
+      preset.presetName,
+      preset.provider?.displayName,
+      preset.model?.modelName,
+      preset.systemPrompt,
+    ]),
+  ),
+)
+
+const visibleTaskRows = computed(() =>
+  libraryTaskRows.value.filter((task) =>
+    matchesQuery([
+      bindingPurposeLabel(task.purpose),
+      task.binding?.credential?.label,
+      task.binding?.preset?.presetName,
+      task.binding?.provider?.displayName,
+      task.binding?.latestValidation?.validationState,
+      task.binding?.latestValidation?.failureCode,
+      task.binding?.latestValidation?.message,
+    ]),
+  ),
+)
+
+const railSections = computed(() => [
+  {
+    id: 'assignments' as const,
+    label: t('admin.aiCatalog.bindingsTitle'),
+    subtitle: t('admin.aiCatalog.bindingsSubtitle'),
+    count: visibleTaskRows.value.length,
+  },
+  {
+    id: 'credentials' as const,
+    label: t('admin.aiCatalog.credentialsTitle'),
+    subtitle: t('admin.aiCatalog.credentialsSubtitle'),
+    count: visibleCredentialRows.value.length,
+  },
+  {
+    id: 'modelPresets' as const,
+    label: t('admin.aiCatalog.modelPresetsTitle'),
+    subtitle: t('admin.aiCatalog.modelPresetsSubtitle'),
+    count: visiblePresetRows.value.length,
+  },
+  {
+    id: 'providers' as const,
+    label: t('admin.aiCatalog.providersTitle'),
+    subtitle: t('admin.aiCatalog.providersSubtitle'),
+    count: visibleProviderRows.value.length,
+  },
+])
+
+const activeRailSectionMeta = computed(
+  () => railSections.value.find((section) => section.id === railSection.value) ?? railSections.value[0],
+)
+
+const activeRailSelectionKeys = computed(() => selectionKeysForSection(railSection.value))
+
+const selectedProvider = computed(() => {
+  if (editingSection.value !== 'providers') {
     return null
   }
-  return props.errorMessage ?? null
+  const providerId = selectionKey.value?.startsWith('provider:') ? selectionKey.value.slice(9) : null
+  return providerId ? providerRows.value.find((provider) => provider.id === providerId) ?? null : null
 })
+
+const selectedProviderModels = computed(() => {
+  if (!selectedProvider.value) {
+    return []
+  }
+  return props.settings.models
+    .filter((model) => model.providerCatalogId === selectedProvider.value?.id)
+    .sort((left, right) => left.modelName.localeCompare(right.modelName))
+})
+
+const selectedCredential = computed(() => {
+  if (editingSection.value !== 'credentials' || selectionKey.value === 'credential:new') {
+    return null
+  }
+  const credentialId = selectionKey.value?.startsWith('credential:')
+    ? selectionKey.value.slice(11)
+    : null
+  return credentialId
+    ? credentialRows.value.find((credential) => credential.id === credentialId) ?? null
+    : null
+})
+
+const selectedPreset = computed(() => {
+  if (editingSection.value !== 'modelPresets' || selectionKey.value === 'preset:new') {
+    return null
+  }
+  const presetId = selectionKey.value?.startsWith('preset:') ? selectionKey.value.slice(7) : null
+  return presetId ? presetRows.value.find((preset) => preset.id === presetId) ?? null : null
+})
+
+const selectedTask = computed(() => {
+  if (editingSection.value !== 'assignments' || !selectionKey.value) {
+    return null
+  }
+  if (selectionKey.value.startsWith('binding:')) {
+    const bindingId = selectionKey.value.slice(8)
+    return libraryTaskRows.value.find((task) => task.binding?.id === bindingId) ?? null
+  }
+  if (selectionKey.value.startsWith('binding-purpose:')) {
+    const purpose = selectionKey.value.slice(16) as LibraryTaskPurpose
+    return libraryTaskRows.value.find((task) => task.purpose === purpose) ?? null
+  }
+  return null
+})
+
+watch(
+  assignmentCredentialOptions,
+  (options) => {
+    if (options.some((credential) => credential.id === assignmentForm.providerCredentialId)) {
+      return
+    }
+    assignmentForm.providerCredentialId = options[0]?.id ?? ''
+  },
+  { immediate: true },
+)
 
 watch(
   assignmentPresetOptions,
@@ -239,6 +440,29 @@ watch(
       return
     }
     assignmentForm.modelPresetId = options[0]?.id ?? ''
+  },
+  { immediate: true },
+)
+
+watch(
+  activeRailSelectionKeys,
+  (keys) => {
+    if (
+      (railSection.value === 'credentials' && selectionKey.value === 'credential:new') ||
+      (railSection.value === 'modelPresets' && selectionKey.value === 'preset:new')
+    ) {
+      return
+    }
+    if (keys.length === 0) {
+      if (editingSection.value === railSection.value) {
+        selectionKey.value = null
+        editingSection.value = null
+      }
+      return
+    }
+    if (editingSection.value !== railSection.value || !selectionKey.value || !keys.includes(selectionKey.value)) {
+      activateSelection(keys[0])
+    }
   },
   { immediate: true },
 )
@@ -268,6 +492,51 @@ const canSaveAssignment = computed(
     assignmentForm.modelPresetId.trim().length > 0 &&
     assignmentPresetOptions.value.some((preset) => preset.id === assignmentForm.modelPresetId),
 )
+
+function matchesQuery(parts: Array<string | number | null | undefined>): boolean {
+  const query = searchQuery.value.trim().toLowerCase()
+  if (!query) {
+    return true
+  }
+  return parts
+    .filter((part) => part !== null && part !== undefined)
+    .join(' ')
+    .toLowerCase()
+    .includes(query)
+}
+
+function providerSelectionKey(providerId: string): string {
+  return `provider:${providerId}`
+}
+
+function credentialSelectionKey(credentialId: string): string {
+  return `credential:${credentialId}`
+}
+
+function presetSelectionKey(presetId: string): string {
+  return `preset:${presetId}`
+}
+
+function taskSelectionKey(task: { purpose: LibraryTaskPurpose; binding: AdminLibraryBinding | null }): string {
+  return task.binding ? `binding:${task.binding.id}` : `binding-purpose:${task.purpose}`
+}
+
+function selectionKeysForSection(section: SettingsSection): string[] {
+  if (section === 'providers') {
+    return visibleProviderRows.value.map((provider) => providerSelectionKey(provider.id))
+  }
+  if (section === 'credentials') {
+    return visibleCredentialRows.value.map((credential) => credentialSelectionKey(credential.id))
+  }
+  if (section === 'modelPresets') {
+    return visiblePresetRows.value.map((preset) => presetSelectionKey(preset.id))
+  }
+  return visibleTaskRows.value.map((task) => taskSelectionKey(task))
+}
+
+function showRailSection(section: SettingsSection): void {
+  railSection.value = section
+}
 
 function parseOptionalNumber(value: string): number | null {
   const normalized = value.trim()
@@ -310,9 +579,64 @@ function resetAssignmentForm(): void {
   assignmentForm.bindingState = 'active'
 }
 
-function selectCredential(credential?: AdminProviderCredential): void {
+function activateSelection(key: string): void {
+  if (key.startsWith('provider:')) {
+    const provider = providerRows.value.find((item) => providerSelectionKey(item.id) === key)
+    if (provider) {
+      selectProvider(provider)
+    }
+    return
+  }
+  if (key.startsWith('credential:')) {
+    if (key === 'credential:new') {
+      openNewCredential()
+      return
+    }
+    const credential = props.settings.credentials.find((item) => credentialSelectionKey(item.id) === key)
+    if (credential) {
+      selectCredential(credential)
+    }
+    return
+  }
+  if (key.startsWith('preset:')) {
+    if (key === 'preset:new') {
+      openNewPreset()
+      return
+    }
+    const preset = props.settings.modelPresets.find((item) => presetSelectionKey(item.id) === key)
+    if (preset) {
+      selectPreset(preset)
+    }
+    return
+  }
+  if (key.startsWith('binding:') || key.startsWith('binding-purpose:')) {
+    const task = libraryTaskRows.value.find((item) => taskSelectionKey(item) === key)
+    if (task) {
+      selectAssignment(task.purpose)
+    }
+  }
+}
+
+function selectProvider(provider: AdminProviderCatalogEntry): void {
+  railSection.value = 'providers'
+  editingSection.value = 'providers'
+  selectionKey.value = providerSelectionKey(provider.id)
+}
+
+function openNewCredential(providerCatalogId?: string): void {
+  railSection.value = 'credentials'
   editingSection.value = 'credentials'
-  selectionKey.value = credential ? `credential:${credential.id}` : 'credential:new'
+  selectionKey.value = 'credential:new'
+  resetCredentialForm()
+  if (providerCatalogId) {
+    credentialForm.providerCatalogId = providerCatalogId
+  }
+}
+
+function selectCredential(credential?: AdminProviderCredential): void {
+  railSection.value = 'credentials'
+  editingSection.value = 'credentials'
+  selectionKey.value = credential ? credentialSelectionKey(credential.id) : 'credential:new'
 
   if (!credential) {
     resetCredentialForm()
@@ -327,9 +651,23 @@ function selectCredential(credential?: AdminProviderCredential): void {
   credentialForm.credentialState = credential.credentialState
 }
 
-function selectPreset(preset?: AdminModelPreset): void {
+function openNewPreset(providerCatalogId?: string): void {
+  railSection.value = 'modelPresets'
   editingSection.value = 'modelPresets'
-  selectionKey.value = preset ? `preset:${preset.id}` : 'preset:new'
+  selectionKey.value = 'preset:new'
+  resetPresetForm()
+  if (providerCatalogId) {
+    const model = props.settings.models.find((item) => item.providerCatalogId === providerCatalogId)
+    if (model) {
+      presetForm.modelCatalogId = model.id
+    }
+  }
+}
+
+function selectPreset(preset?: AdminModelPreset): void {
+  railSection.value = 'modelPresets'
+  editingSection.value = 'modelPresets'
+  selectionKey.value = preset ? presetSelectionKey(preset.id) : 'preset:new'
 
   if (!preset) {
     resetPresetForm()
@@ -349,8 +687,9 @@ function selectPreset(preset?: AdminModelPreset): void {
 
 function selectAssignment(taskPurpose: LibraryTaskPurpose): void {
   const binding = assignmentRows.value.find((item) => item.bindingPurpose === taskPurpose) ?? null
+  railSection.value = 'assignments'
   editingSection.value = 'assignments'
-  selectionKey.value = binding ? `binding:${binding.id}` : `binding:${taskPurpose}`
+  selectionKey.value = binding ? `binding:${binding.id}` : `binding-purpose:${taskPurpose}`
 
   if (!binding) {
     resetAssignmentForm()
@@ -367,22 +706,13 @@ function selectAssignment(taskPurpose: LibraryTaskPurpose): void {
   assignmentForm.bindingState = binding.bindingState
 }
 
-function closeDetail(): void {
-  editingSection.value = null
-  selectionKey.value = null
-  pendingSubmitSection.value = null
-  resetCredentialForm()
-  resetPresetForm()
-  resetAssignmentForm()
-  selectCredential()
-}
-
 function submitCredential(): void {
   if (!canSaveCredential.value) {
     return
   }
 
   pendingSubmitSection.value = 'credentials'
+  pendingSelectionKey.value = selectionKey.value
 
   if (credentialForm.credentialId) {
     emit('updateCredential', {
@@ -407,6 +737,7 @@ function submitPreset(): void {
   }
 
   pendingSubmitSection.value = 'modelPresets'
+  pendingSelectionKey.value = selectionKey.value
 
   const payload = {
     presetName: presetForm.presetName.trim(),
@@ -437,6 +768,7 @@ function submitAssignment(): void {
   }
 
   pendingSubmitSection.value = 'assignments'
+  pendingSelectionKey.value = selectionKey.value
 
   emit('saveBinding', {
     bindingId: assignmentForm.bindingId ?? undefined,
@@ -465,165 +797,362 @@ function assignmentValidationLabel(binding: (typeof assignmentRows.value)[number
   return enumLabel('admin.aiCatalog.bindingStates', binding.bindingState)
 }
 
+function providerStatusClass(status: string): string {
+  if (status === 'active') {
+    return 'is-success'
+  }
+  if (status === 'invalid') {
+    return 'is-danger'
+  }
+  return 'is-muted'
+}
+
 watch(
   () => props.commitVersion,
   (next, previous) => {
     if (next <= previous || !pendingSubmitSection.value) {
       return
     }
-    closeDetail()
+    const nextSection = pendingSubmitSection.value
+    const nextSelection = pendingSelectionKey.value
+    pendingSubmitSection.value = null
+    pendingSelectionKey.value = null
+
+    if (nextSection === 'credentials' && nextSelection && nextSelection !== 'credential:new') {
+      railSection.value = 'credentials'
+      activateSelection(nextSelection)
+      return
+    }
+    if (nextSection === 'modelPresets' && nextSelection && nextSelection !== 'preset:new') {
+      railSection.value = 'modelPresets'
+      activateSelection(nextSelection)
+      return
+    }
+    if (nextSection === 'assignments' && nextSelection) {
+      railSection.value = 'assignments'
+      activateSelection(nextSelection)
+      return
+    }
+
+    if (nextSection === 'credentials' && credentialRows.value.length > 0) {
+      selectCredential(props.settings.credentials[0])
+      return
+    }
+    if (nextSection === 'modelPresets' && presetRows.value.length > 0) {
+      selectPreset(props.settings.modelPresets[0])
+      return
+    }
+    if (nextSection === 'assignments' && libraryTaskRows.value.length > 0) {
+      selectAssignment(libraryTaskRows.value[0].purpose)
+    }
   },
 )
 </script>
 
 <template>
-  <section class="rr-admin-ai">
-    <div
-      class="rr-admin-ai__layout"
-      :class="{ 'rr-admin-ai__layout--editing': Boolean(editingSection) }"
-    >
-      <aside class="rr-admin-ai__rail">
-        <div
-          v-if="!editingSection"
-          class="rr-admin-ai__intro"
-        >
-          <strong>{{ $t('admin.aiCatalog.editorPromptTitle') }}</strong>
-          <p>{{ $t('admin.aiCatalog.editorPromptDescription') }}</p>
+  <section class="rr-admin-workbench rr-admin-workbench--ai">
+    <div class="rr-admin-workbench__layout">
+      <aside class="rr-admin-workbench__rail">
+        <header class="rr-admin-workbench__pane-head">
+          <div class="rr-admin-workbench__pane-copy">
+            <h3>{{ $t('admin.aiCatalog.title') }}</h3>
+            <p>{{ $t('admin.aiCatalog.workspaceSubtitle', { workspace: settings.workspaceName, library: settings.libraryName }) }}</p>
+          </div>
+        </header>
+
+        <div class="rr-admin-workbench__context">
+          <div class="rr-admin-workbench__context-chip">
+            <span>{{ $t('shell.workspace') }}</span>
+            <strong>{{ settings.workspaceName }}</strong>
+          </div>
+          <div class="rr-admin-workbench__context-chip">
+            <span>{{ $t('shell.library') }}</span>
+            <strong>{{ settings.libraryName }}</strong>
+          </div>
         </div>
 
-        <section class="rr-admin-ai__rail-group">
-          <header class="rr-admin-ai__rail-head">
-            <div>
-              <h3>{{ $t('admin.aiCatalog.credentialsTitle') }}</h3>
-              <p>{{ $t('admin.aiCatalog.credentialsSubtitle', { workspace: settings.workspaceName }) }}</p>
+        <SearchField
+          v-model="searchQuery"
+          :placeholder="$t('admin.aiCatalog.searchPlaceholder')"
+          @clear="searchQuery = ''"
+        />
+
+        <div class="rr-admin-workbench__summary">
+          <article class="rr-admin-workbench__metric">
+            <strong>{{ summary.providers }}</strong>
+            <span>{{ $t('admin.aiCatalog.summary.providers') }}</span>
+          </article>
+          <article class="rr-admin-workbench__metric">
+            <strong>{{ summary.credentials }}</strong>
+            <span>{{ $t('admin.aiCatalog.summary.credentials') }}</span>
+          </article>
+          <article class="rr-admin-workbench__metric">
+            <strong>{{ summary.tasks }}</strong>
+            <span>{{ $t('admin.aiCatalog.summary.tasks') }}</span>
+          </article>
+        </div>
+
+        <p
+          v-if="detailErrorMessage"
+          class="rr-admin-workbench__feedback rr-admin-workbench__feedback--error"
+        >
+          {{ detailErrorMessage }}
+        </p>
+
+        <div class="rr-admin-ai-workbench__switcher">
+          <button
+            v-for="section in railSections"
+            :key="section.id"
+            type="button"
+            class="rr-admin-ai-workbench__switch"
+            :class="{ 'rr-admin-ai-workbench__switch--active': railSection === section.id }"
+            @click="showRailSection(section.id)"
+          >
+            <span>{{ section.label }}</span>
+            <strong>{{ section.count }}</strong>
+          </button>
+        </div>
+
+        <section class="rr-admin-ai-workbench__section">
+          <header class="rr-admin-ai-workbench__section-head">
+            <div class="rr-admin-workbench__pane-copy">
+              <h4>{{ activeRailSectionMeta?.label }}</h4>
+              <p>{{ activeRailSectionMeta?.subtitle }}</p>
             </div>
             <button
+              v-if="railSection === 'credentials'"
               class="rr-button rr-button--ghost rr-button--tiny"
               type="button"
-              @click="selectCredential()"
+              @click="openNewCredential()"
             >
               {{ $t('admin.aiCatalog.createCredential') }}
             </button>
-          </header>
-
-          <div
-            v-if="credentialRows.length"
-            class="rr-admin-ai__rail-list"
-          >
             <button
-              v-for="row in credentialRows"
-              :key="row.id"
-              class="rr-admin-ai__rail-row"
-              :class="{ 'rr-admin-ai__rail-row--active': selectionKey === `credential:${row.id}` }"
-              type="button"
-              @click="selectCredential(row)"
-            >
-              <span class="rr-admin-ai__rail-row-title">{{ row.label }}</span>
-              <span class="rr-admin-ai__rail-row-meta">
-                {{ row.provider?.displayName ?? '—' }} ·
-                {{ providerStateLabel(row.credentialState) }} ·
-                {{ t('admin.aiCatalog.providerSummary', { models: row.providerModelCount, credentials: 1 }) }}
-              </span>
-            </button>
-          </div>
-          <p
-            v-else
-            class="rr-admin-ai__empty-copy"
-          >
-            {{ $t('admin.aiCatalog.emptyCredentials') }}
-          </p>
-        </section>
-
-        <section class="rr-admin-ai__rail-group">
-          <header class="rr-admin-ai__rail-head">
-            <div>
-              <h3>{{ $t('admin.aiCatalog.modelPresetsTitle') }}</h3>
-              <p>{{ $t('admin.aiCatalog.modelPresetsSubtitle') }}</p>
-            </div>
-            <button
+              v-else-if="railSection === 'modelPresets'"
               class="rr-button rr-button--ghost rr-button--tiny"
               type="button"
-              @click="selectPreset()"
+              @click="openNewPreset()"
             >
               {{ $t('admin.aiCatalog.createPreset') }}
             </button>
           </header>
 
           <div
-            v-if="presetRows.length"
-            class="rr-admin-ai__rail-list"
+            v-if="railSection === 'providers' && visibleProviderRows.length"
+            class="rr-admin-workbench__group-list"
           >
             <button
-              v-for="row in presetRows"
-              :key="row.id"
-              class="rr-admin-ai__rail-row"
-              :class="{ 'rr-admin-ai__rail-row--active': selectionKey === `preset:${row.id}` }"
+              v-for="provider in visibleProviderRows"
+              :key="provider.id"
               type="button"
-              @click="selectPreset(row)"
+              class="rr-admin-workbench__row"
+              :class="{ 'rr-admin-workbench__row--active': selectionKey === providerSelectionKey(provider.id) }"
+              @click="selectProvider(provider)"
             >
-              <span class="rr-admin-ai__rail-row-title">{{ row.presetName }}</span>
-              <span class="rr-admin-ai__rail-row-meta">{{ modelDescriptor(row.modelCatalogId) }}</span>
+              <div class="rr-admin-workbench__row-head">
+                <strong>{{ provider.displayName }}</strong>
+                <span
+                  class="rr-status-pill"
+                  :class="providerStatusClass(provider.lifecycleState)"
+                >
+                  {{ providerStateLabel(provider.lifecycleState) }}
+                </span>
+              </div>
+              <span class="rr-admin-workbench__row-subtitle">
+                {{ enumLabel('admin.aiCatalog.apiStyles', provider.apiStyle) }}
+              </span>
+              <div class="rr-admin-workbench__row-meta">
+                <span>{{ t('admin.aiCatalog.providerSummary', { models: provider.modelCount, credentials: provider.credentialCount }) }}</span>
+              </div>
             </button>
           </div>
-          <p
-            v-else
-            class="rr-admin-ai__empty-copy"
+
+          <div
+            v-else-if="railSection === 'credentials' && visibleCredentialRows.length"
+            class="rr-admin-workbench__group-list"
           >
-            {{ $t('admin.aiCatalog.emptyPresets') }}
-          </p>
-        </section>
-
-        <section class="rr-admin-ai__rail-group">
-          <header class="rr-admin-ai__rail-head">
-            <div>
-              <h3>{{ $t('admin.aiCatalog.assignmentsTitle') }}</h3>
-              <p>{{ $t('admin.aiCatalog.assignmentsSubtitle', { library: settings.libraryName }) }}</p>
-            </div>
-          </header>
-
-          <div class="rr-admin-ai__rail-list">
             <button
-              v-for="task in libraryTaskRows"
-              :key="task.purpose"
-              class="rr-admin-ai__rail-row"
-              :class="{
-                'rr-admin-ai__rail-row--active':
-                  selectionKey === (task.binding ? `binding:${task.binding.id}` : `binding:${task.purpose}`),
-              }"
+              v-for="credential in visibleCredentialRows"
+              :key="credential.id"
               type="button"
+              class="rr-admin-workbench__row"
+              :class="{ 'rr-admin-workbench__row--active': selectionKey === credentialSelectionKey(credential.id) }"
+              @click="selectCredential(credential)"
+            >
+              <div class="rr-admin-workbench__row-head">
+                <strong>{{ credential.label }}</strong>
+                <span
+                  class="rr-status-pill"
+                  :class="providerStatusClass(credential.credentialState)"
+                >
+                  {{ enumLabel('admin.aiCatalog.credentialStates', credential.credentialState) }}
+                </span>
+              </div>
+              <span class="rr-admin-workbench__row-subtitle">
+                {{ credential.provider?.displayName ?? '—' }}
+              </span>
+              <div class="rr-admin-workbench__row-meta">
+                <span>{{ credential.apiKeySummary }}</span>
+                <span>{{ formatDateTime(credential.updatedAt) }}</span>
+              </div>
+            </button>
+          </div>
+
+          <div
+            v-else-if="railSection === 'modelPresets' && visiblePresetRows.length"
+            class="rr-admin-workbench__group-list"
+          >
+            <button
+              v-for="preset in visiblePresetRows"
+              :key="preset.id"
+              type="button"
+              class="rr-admin-workbench__row"
+              :class="{ 'rr-admin-workbench__row--active': selectionKey === presetSelectionKey(preset.id) }"
+              @click="selectPreset(preset)"
+            >
+              <div class="rr-admin-workbench__row-head">
+                <strong>{{ preset.presetName }}</strong>
+                <span class="rr-status-pill is-muted">
+                  {{ preset.provider?.displayName ?? '—' }}
+                </span>
+              </div>
+              <span class="rr-admin-workbench__row-subtitle">
+                {{ modelDescriptor(preset.modelCatalogId) }}
+              </span>
+              <div class="rr-admin-workbench__row-meta">
+                <span>{{ formatDateTime(preset.updatedAt) }}</span>
+              </div>
+            </button>
+          </div>
+
+          <div
+            v-else-if="railSection === 'assignments' && visibleTaskRows.length"
+            class="rr-admin-workbench__group-list"
+          >
+            <button
+              v-for="task in visibleTaskRows"
+              :key="task.purpose"
+              type="button"
+              class="rr-admin-workbench__row"
+              :class="{ 'rr-admin-workbench__row--active': selectionKey === taskSelectionKey(task) }"
               @click="selectAssignment(task.purpose)"
             >
-              <span class="rr-admin-ai__rail-row-title">
-                {{ bindingPurposeLabel(task.purpose) }}
-              </span>
-              <span
-                v-if="task.binding"
-                class="rr-admin-ai__rail-row-meta"
-              >
-                {{ task.binding.credential?.label ?? '—' }} ·
-                {{ task.binding.preset?.presetName ?? '—' }}
-              </span>
-              <span
-                v-else
-                class="rr-admin-ai__rail-row-meta"
-              >
-                {{ $t('admin.aiCatalog.unconfiguredTask') }}
+              <div class="rr-admin-workbench__row-head">
+                <strong>{{ bindingPurposeLabel(task.purpose) }}</strong>
+                <span
+                  class="rr-status-pill"
+                  :class="task.binding ? providerStatusClass(task.binding.bindingState) : 'is-muted'"
+                >
+                  {{
+                    task.binding
+                      ? assignmentValidationLabel(task.binding)
+                      : $t('admin.aiCatalog.unsetState')
+                  }}
+                </span>
+              </div>
+              <span class="rr-admin-workbench__row-subtitle">
+                {{
+                  task.binding
+                    ? `${task.binding.credential?.label ?? '—'} · ${task.binding.preset?.presetName ?? '—'}`
+                    : $t('admin.aiCatalog.unconfiguredTask')
+                }}
               </span>
             </button>
           </div>
+
+          <p
+            v-else
+            class="rr-admin-workbench__state"
+          >
+            {{
+              searchQuery
+                ? $t('shared.feedbackState.noResults')
+                : railSection === 'providers'
+                  ? $t('admin.aiCatalog.emptyProviders')
+                  : railSection === 'credentials'
+                    ? $t('admin.aiCatalog.emptyCredentials')
+                    : railSection === 'modelPresets'
+                      ? $t('admin.aiCatalog.emptyPresets')
+                      : $t('admin.aiCatalog.emptyBindings')
+            }}
+          </p>
         </section>
       </aside>
 
-      <section
-        v-if="editingSection"
-        class="rr-admin-ai__detail"
-      >
+      <section class="rr-admin-workbench__detail">
         <div
-          v-if="editingSection === 'credentials'"
-          class="rr-admin-ai__detail-card"
+          v-if="editingSection === 'providers' && selectedProvider"
+          class="rr-admin-workbench__detail-card"
         >
-          <header class="rr-admin-ai__detail-head">
+          <header class="rr-admin-workbench__detail-head">
+            <div class="rr-admin-workbench__pane-copy">
+              <h3>{{ selectedProvider.displayName }}</h3>
+              <p>{{ enumLabel('admin.aiCatalog.apiStyles', selectedProvider.apiStyle) }}</p>
+            </div>
+            <span
+              class="rr-status-pill"
+              :class="providerStatusClass(selectedProvider.lifecycleState)"
+            >
+              {{ providerStateLabel(selectedProvider.lifecycleState) }}
+            </span>
+          </header>
+
+          <dl class="rr-admin-workbench__detail-grid">
             <div>
+              <dt>{{ $t('admin.headers.provider') }}</dt>
+              <dd>{{ selectedProvider.displayName }}</dd>
+            </div>
+            <div>
+              <dt>{{ $t('admin.headers.apiStyle') }}</dt>
+              <dd>{{ enumLabel('admin.aiCatalog.apiStyles', selectedProvider.apiStyle) }}</dd>
+            </div>
+            <div>
+              <dt>{{ $t('admin.headers.models') }}</dt>
+              <dd>{{ selectedProviderModels.length }}</dd>
+            </div>
+            <div>
+              <dt>{{ $t('admin.aiCatalog.credentialsTitle') }}</dt>
+              <dd>{{ providerCredentialCounts.get(selectedProvider.id) ?? 0 }}</dd>
+            </div>
+          </dl>
+
+          <section class="rr-admin-workbench__detail-section">
+            <h4>{{ $t('admin.headers.models') }}</h4>
+            <ul class="rr-admin-ai-workbench__model-list">
+              <li
+                v-for="model in selectedProviderModels"
+                :key="model.id"
+              >
+                <strong>{{ model.modelName }}</strong>
+                <span>{{ model.capabilityKind }}</span>
+              </li>
+            </ul>
+          </section>
+
+          <div class="rr-admin-workbench__detail-actions">
+            <button
+              class="rr-button rr-button--ghost"
+              type="button"
+              @click="openNewCredential(selectedProvider.id)"
+            >
+              {{ $t('admin.aiCatalog.createCredential') }}
+            </button>
+            <button
+              class="rr-button"
+              type="button"
+              @click="openNewPreset(selectedProvider.id)"
+            >
+              {{ $t('admin.aiCatalog.createPreset') }}
+            </button>
+          </div>
+        </div>
+
+        <div
+          v-else-if="editingSection === 'credentials'"
+          class="rr-admin-workbench__detail-card"
+        >
+          <header class="rr-admin-workbench__detail-head">
+            <div class="rr-admin-workbench__pane-copy">
               <h3>
                 {{
                   credentialForm.credentialId
@@ -631,19 +1160,46 @@ watch(
                     : $t('admin.aiCatalog.createCredential')
                 }}
               </h3>
-              <p>{{ $t('admin.aiCatalog.credentialsSubtitle', { workspace: settings.workspaceName }) }}</p>
+              <p>
+                {{
+                  selectedCredential?.provider?.displayName ??
+                    $t('admin.aiCatalog.credentialsSubtitle')
+                }}
+              </p>
             </div>
           </header>
 
-          <p
-            v-if="detailErrorMessage"
-            class="rr-admin-ai__detail-error"
+          <dl
+            v-if="selectedCredential"
+            class="rr-admin-workbench__detail-grid"
           >
-            {{ detailErrorMessage }}
+            <div>
+              <dt>{{ $t('admin.headers.provider') }}</dt>
+              <dd>{{ selectedCredential.provider?.displayName ?? '—' }}</dd>
+            </div>
+            <div>
+              <dt>{{ $t('admin.headers.state') }}</dt>
+              <dd>{{ enumLabel('admin.aiCatalog.credentialStates', selectedCredential.credentialState) }}</dd>
+            </div>
+            <div>
+              <dt>{{ $t('admin.headers.updated') }}</dt>
+              <dd>{{ formatDateTime(selectedCredential.updatedAt) }}</dd>
+            </div>
+            <div>
+              <dt>{{ $t('admin.aiCatalog.secretRef') }}</dt>
+              <dd>{{ selectedCredential.apiKeySummary }}</dd>
+            </div>
+          </dl>
+
+          <p
+            v-if="credentialForm.credentialId"
+            class="rr-admin-workbench__feedback rr-admin-workbench__feedback--info"
+          >
+            {{ $t('admin.aiCatalog.apiKeyKeepExistingHint') }}
           </p>
 
-          <div class="rr-admin-ai__form-grid">
-            <label class="rr-admin-ai__field rr-admin-ai__field--wide">
+          <div class="rr-admin-ai-workbench__form-grid">
+            <label class="rr-admin-ai-workbench__field rr-admin-ai-workbench__field--wide">
               <span>{{ $t('admin.headers.provider') }}</span>
               <select v-model="credentialForm.providerCatalogId">
                 <option
@@ -656,7 +1212,7 @@ watch(
               </select>
             </label>
 
-            <label class="rr-admin-ai__field rr-admin-ai__field--wide">
+            <label class="rr-admin-ai-workbench__field rr-admin-ai-workbench__field--wide">
               <span>{{ $t('admin.headers.label') }}</span>
               <input
                 v-model="credentialForm.label"
@@ -664,7 +1220,7 @@ watch(
               >
             </label>
 
-            <label class="rr-admin-ai__field rr-admin-ai__field--wide">
+            <label class="rr-admin-ai-workbench__field rr-admin-ai-workbench__field--wide">
               <span>{{ $t('admin.aiCatalog.apiKeyLabel') }}</span>
               <input
                 v-model="credentialForm.apiKey"
@@ -679,31 +1235,24 @@ watch(
 
             <label
               v-if="credentialForm.credentialId"
-              class="rr-admin-ai__field"
+              class="rr-admin-ai-workbench__field"
             >
               <span>{{ $t('admin.headers.state') }}</span>
               <select v-model="credentialForm.credentialState">
                 <option value="active">{{ enumLabel('admin.aiCatalog.credentialStates', 'active') }}</option>
                 <option value="invalid">{{ enumLabel('admin.aiCatalog.credentialStates', 'invalid') }}</option>
-                <option value="archived">{{ enumLabel('admin.aiCatalog.credentialStates', 'archived') }}</option>
+                <option value="revoked">{{ enumLabel('admin.aiCatalog.credentialStates', 'revoked') }}</option>
               </select>
             </label>
           </div>
 
-          <p
-            v-if="credentialForm.credentialId"
-            class="rr-admin-ai__detail-note"
-          >
-            {{ $t('admin.aiCatalog.apiKeyKeepExistingHint') }}
-          </p>
-
-          <div class="rr-admin-ai__actions">
+          <div class="rr-admin-workbench__detail-actions">
             <button
               class="rr-button rr-button--ghost"
               type="button"
-              @click="closeDetail"
+              @click="openNewCredential()"
             >
-              {{ $t('dialogs.close') }}
+              {{ $t('admin.aiCatalog.createCredential') }}
             </button>
             <button
               class="rr-button"
@@ -722,10 +1271,10 @@ watch(
 
         <div
           v-else-if="editingSection === 'modelPresets'"
-          class="rr-admin-ai__detail-card"
+          class="rr-admin-workbench__detail-card"
         >
-          <header class="rr-admin-ai__detail-head">
-            <div>
+          <header class="rr-admin-workbench__detail-head">
+            <div class="rr-admin-workbench__pane-copy">
               <h3>
                 {{
                   presetForm.presetId
@@ -733,19 +1282,40 @@ watch(
                     : $t('admin.aiCatalog.createPreset')
                 }}
               </h3>
-              <p>{{ $t('admin.aiCatalog.modelPresetsSubtitle') }}</p>
+              <p>
+                {{
+                  selectedPreset
+                    ? modelDescriptor(selectedPreset.modelCatalogId)
+                    : $t('admin.aiCatalog.modelPresetsSubtitle')
+                }}
+              </p>
             </div>
           </header>
 
-          <p
-            v-if="detailErrorMessage"
-            class="rr-admin-ai__detail-error"
+          <dl
+            v-if="selectedPreset"
+            class="rr-admin-workbench__detail-grid"
           >
-            {{ detailErrorMessage }}
-          </p>
+            <div>
+              <dt>{{ $t('admin.headers.provider') }}</dt>
+              <dd>{{ selectedPreset.provider?.displayName ?? '—' }}</dd>
+            </div>
+            <div>
+              <dt>{{ $t('admin.headers.model') }}</dt>
+              <dd>{{ selectedPreset.model?.modelName ?? '—' }}</dd>
+            </div>
+            <div>
+              <dt>{{ $t('admin.headers.updated') }}</dt>
+              <dd>{{ formatDateTime(selectedPreset.updatedAt) }}</dd>
+            </div>
+            <div>
+              <dt>{{ $t('admin.aiCatalog.temperature') }}</dt>
+              <dd>{{ selectedPreset.temperature ?? '—' }}</dd>
+            </div>
+          </dl>
 
-          <div class="rr-admin-ai__form-grid">
-            <label class="rr-admin-ai__field rr-admin-ai__field--wide">
+          <div class="rr-admin-ai-workbench__form-grid">
+            <label class="rr-admin-ai-workbench__field rr-admin-ai-workbench__field--wide">
               <span>{{ $t('admin.headers.model') }}</span>
               <select v-model="presetForm.modelCatalogId">
                 <option
@@ -758,7 +1328,7 @@ watch(
               </select>
             </label>
 
-            <label class="rr-admin-ai__field rr-admin-ai__field--wide">
+            <label class="rr-admin-ai-workbench__field rr-admin-ai-workbench__field--wide">
               <span>{{ $t('admin.headers.preset') }}</span>
               <input
                 v-model="presetForm.presetName"
@@ -766,12 +1336,12 @@ watch(
               >
             </label>
 
-            <label class="rr-admin-ai__field rr-admin-ai__field--wide">
+            <label class="rr-admin-ai-workbench__field rr-admin-ai-workbench__field--wide">
               <span>{{ $t('admin.aiCatalog.systemPrompt') }}</span>
               <textarea v-model="presetForm.systemPrompt" />
             </label>
 
-            <label class="rr-admin-ai__field">
+            <label class="rr-admin-ai-workbench__field">
               <span>{{ $t('admin.aiCatalog.temperature') }}</span>
               <input
                 v-model="presetForm.temperature"
@@ -780,7 +1350,7 @@ watch(
               >
             </label>
 
-            <label class="rr-admin-ai__field">
+            <label class="rr-admin-ai-workbench__field">
               <span>{{ $t('admin.aiCatalog.topP') }}</span>
               <input
                 v-model="presetForm.topP"
@@ -789,7 +1359,7 @@ watch(
               >
             </label>
 
-            <label class="rr-admin-ai__field">
+            <label class="rr-admin-ai-workbench__field">
               <span>{{ $t('admin.aiCatalog.maxOutputTokens') }}</span>
               <input
                 v-model="presetForm.maxOutputTokensOverride"
@@ -799,13 +1369,13 @@ watch(
             </label>
           </div>
 
-          <div class="rr-admin-ai__actions">
+          <div class="rr-admin-workbench__detail-actions">
             <button
               class="rr-button rr-button--ghost"
               type="button"
-              @click="closeDetail"
+              @click="openNewPreset()"
             >
-              {{ $t('dialogs.close') }}
+              {{ $t('admin.aiCatalog.createPreset') }}
             </button>
             <button
               class="rr-button"
@@ -823,34 +1393,57 @@ watch(
         </div>
 
         <div
-          v-else
-          class="rr-admin-ai__detail-card"
+          v-else-if="editingSection === 'assignments' && selectedTask"
+          class="rr-admin-workbench__detail-card"
         >
-          <header class="rr-admin-ai__detail-head">
-            <div>
-              <h3>{{ bindingPurposeLabel(assignmentForm.bindingPurpose) }}</h3>
-              <p>{{ $t('admin.aiCatalog.assignmentsSubtitle', { library: settings.libraryName }) }}</p>
+          <header class="rr-admin-workbench__detail-head">
+            <div class="rr-admin-workbench__pane-copy">
+              <h3>{{ bindingPurposeLabel(selectedTask.purpose) }}</h3>
+              <p>{{ $t('admin.aiCatalog.bindingsSubtitle') }}</p>
             </div>
+            <span
+              class="rr-status-pill"
+              :class="selectedTask.binding ? providerStatusClass(selectedTask.binding.bindingState) : 'is-muted'"
+            >
+              {{
+                selectedTask.binding
+                  ? assignmentValidationLabel(selectedTask.binding)
+                  : $t('admin.aiCatalog.unsetState')
+              }}
+            </span>
           </header>
 
-          <p
-            v-if="detailErrorMessage"
-            class="rr-admin-ai__detail-error"
-          >
-            {{ detailErrorMessage }}
-          </p>
+          <dl class="rr-admin-workbench__detail-grid">
+            <div>
+              <dt>{{ $t('admin.headers.purpose') }}</dt>
+              <dd>{{ bindingPurposeLabel(selectedTask.purpose) }}</dd>
+            </div>
+            <div>
+              <dt>{{ $t('admin.headers.credential') }}</dt>
+              <dd>{{ selectedTask.binding?.credential?.label ?? '—' }}</dd>
+            </div>
+            <div>
+              <dt>{{ $t('admin.headers.preset') }}</dt>
+              <dd>{{ selectedTask.binding?.preset?.presetName ?? '—' }}</dd>
+            </div>
+            <div>
+              <dt>{{ $t('admin.headers.validation') }}</dt>
+              <dd>
+                {{
+                  selectedTask.binding
+                    ? assignmentValidationLabel(selectedTask.binding)
+                    : $t('admin.aiCatalog.unconfiguredTask')
+                }}
+              </dd>
+            </div>
+          </dl>
 
-          <div class="rr-admin-ai__assignment-purpose">
-            <span>{{ $t('admin.headers.purpose') }}</span>
-            <strong>{{ bindingPurposeLabel(assignmentForm.bindingPurpose) }}</strong>
-          </div>
-
-          <div class="rr-admin-ai__form-grid">
-            <label class="rr-admin-ai__field rr-admin-ai__field--wide">
+          <div class="rr-admin-ai-workbench__form-grid">
+            <label class="rr-admin-ai-workbench__field rr-admin-ai-workbench__field--wide">
               <span>{{ $t('admin.headers.credential') }}</span>
               <select v-model="assignmentForm.providerCredentialId">
                 <option
-                  v-for="credential in props.settings.credentials"
+                  v-for="credential in assignmentCredentialOptions"
                   :key="credential.id"
                   :value="credential.id"
                 >
@@ -863,7 +1456,7 @@ watch(
               </select>
             </label>
 
-            <label class="rr-admin-ai__field rr-admin-ai__field--wide">
+            <label class="rr-admin-ai-workbench__field rr-admin-ai-workbench__field--wide">
               <span>{{ $t('admin.headers.preset') }}</span>
               <select v-model="assignmentForm.modelPresetId">
                 <option
@@ -878,39 +1471,28 @@ watch(
 
             <label
               v-if="assignmentForm.bindingId"
-              class="rr-admin-ai__field"
+              class="rr-admin-ai-workbench__field"
             >
               <span>{{ $t('admin.headers.state') }}</span>
               <select v-model="assignmentForm.bindingState">
                 <option value="active">{{ enumLabel('admin.aiCatalog.bindingStates', 'active') }}</option>
                 <option value="invalid">{{ enumLabel('admin.aiCatalog.bindingStates', 'invalid') }}</option>
-                <option value="archived">{{ enumLabel('admin.aiCatalog.bindingStates', 'archived') }}</option>
+                <option value="disabled">{{ enumLabel('admin.aiCatalog.bindingStates', 'disabled') }}</option>
               </select>
             </label>
           </div>
 
           <div
             v-if="activeValidation"
-            class="rr-admin-ai__validation"
+            class="rr-admin-ai-workbench__validation"
           >
-            <strong>
-              {{ enumLabel('admin.aiCatalog.validationStates', activeValidation.validationState) }}
-            </strong>
+            <strong>{{ enumLabel('admin.aiCatalog.validationStates', activeValidation.validationState) }}</strong>
             <span>{{ formatDateTime(activeValidation.checkedAt) }}</span>
-            <span v-if="activeValidation.failureCode">
-              {{ activeValidation.failureCode }}
-            </span>
+            <span v-if="activeValidation.failureCode">{{ activeValidation.failureCode }}</span>
             <p v-if="activeValidation.message">{{ activeValidation.message }}</p>
           </div>
 
-          <div class="rr-admin-ai__actions">
-            <button
-              class="rr-button rr-button--ghost"
-              type="button"
-              @click="closeDetail"
-            >
-              {{ $t('dialogs.close') }}
-            </button>
+          <div class="rr-admin-workbench__detail-actions">
             <button
               v-if="assignmentForm.bindingId"
               class="rr-button rr-button--ghost"
@@ -938,259 +1520,188 @@ watch(
             </button>
           </div>
         </div>
+
+        <div
+          v-else
+          class="rr-admin-workbench__state rr-admin-workbench__state--detail"
+        >
+          {{ $t('admin.aiCatalog.editorPromptDescription') }}
+        </div>
       </section>
     </div>
   </section>
 </template>
 
-<style scoped>
-.rr-admin-ai {
+<style scoped lang="scss">
+.rr-admin-ai-workbench__switcher {
   display: grid;
-  gap: 0.85rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
-.rr-admin-ai__layout {
-  display: grid;
-  gap: 0.9rem;
-  grid-template-columns: 1fr;
-  min-height: 0;
-}
-
-.rr-admin-ai__layout--editing {
-  grid-template-columns: minmax(320px, 0.86fr) minmax(0, 1.14fr);
-  min-height: 32rem;
-}
-
-.rr-admin-ai__rail,
-.rr-admin-ai__detail {
-  border: 1px solid var(--rr-border-soft);
-  border-radius: 20px;
-  background: rgba(255, 255, 255, 0.72);
-}
-
-.rr-admin-ai__rail {
-  display: grid;
-  gap: 0.85rem;
-  padding: 0.95rem;
-  align-content: start;
-}
-
-.rr-admin-ai__intro {
-  display: grid;
-  gap: 0.35rem;
-  padding: 0.9rem 0.95rem;
-  border: 1px solid var(--rr-border-muted);
-  border-radius: 16px;
-  background: rgba(248, 250, 252, 0.78);
-}
-
-.rr-admin-ai__intro strong {
-  color: var(--rr-text-primary);
-  font-size: 0.96rem;
-}
-
-.rr-admin-ai__intro p {
-  margin: 0;
-  color: var(--rr-text-secondary);
-  font-size: 0.82rem;
-  line-height: 1.5;
-}
-
-.rr-admin-ai__rail-group {
-  display: grid;
-  gap: 0.7rem;
-}
-
-.rr-admin-ai__rail-head {
+.rr-admin-ai-workbench__switch {
   display: flex;
+  align-items: center;
   justify-content: space-between;
-  gap: 0.75rem;
-  align-items: flex-start;
-}
-
-.rr-admin-ai__rail-head h3,
-.rr-admin-ai__detail-head h3 {
-  margin: 0;
-  font-size: 0.98rem;
-  color: var(--rr-text-primary);
-}
-
-.rr-admin-ai__rail-head p,
-.rr-admin-ai__detail-head p {
-  margin: 0.2rem 0 0;
-  font-size: 0.84rem;
-  line-height: 1.5;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: 14px;
+  background: rgba(248, 250, 252, 0.76);
   color: var(--rr-text-secondary);
-}
-
-.rr-admin-ai__rail-list {
-  display: grid;
-  gap: 0.45rem;
-}
-
-.rr-admin-ai__rail-row {
-  width: 100%;
-  border: 1px solid var(--rr-border-muted);
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.78);
-  padding: 0.8rem 0.9rem;
+  cursor: pointer;
   text-align: left;
-  display: grid;
-  gap: 0.24rem;
   transition:
     border-color 120ms ease,
     background-color 120ms ease,
-    transform 120ms ease;
+    box-shadow 120ms ease;
 }
 
-.rr-admin-ai__rail-row:hover,
-.rr-admin-ai__rail-row--active {
-  border-color: rgba(56, 87, 255, 0.18);
-  background: rgba(244, 247, 255, 0.96);
+.rr-admin-ai-workbench__switch:hover {
+  border-color: rgba(56, 87, 255, 0.16);
+  background: rgba(244, 247, 255, 0.9);
 }
 
-.rr-admin-ai__rail-row-title {
+.rr-admin-ai-workbench__switch--active {
+  border-color: rgba(56, 87, 255, 0.24);
+  background: rgba(244, 247, 255, 0.98);
+  box-shadow: 0 4px 16px rgba(56, 87, 255, 0.08);
+  color: var(--rr-text-primary);
+}
+
+.rr-admin-ai-workbench__switch span {
+  font-size: 0.78rem;
   font-weight: 600;
-  font-size: 0.92rem;
+  line-height: 1.35;
+}
+
+.rr-admin-ai-workbench__switch strong {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.75rem;
+  min-height: 1.75rem;
+  padding: 0 0.45rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.88);
   color: var(--rr-text-primary);
+  font-size: 0.76rem;
+  line-height: 1;
 }
 
-.rr-admin-ai__rail-row-meta,
-.rr-admin-ai__empty-copy,
-.rr-admin-ai__detail-note {
-  font-size: 0.82rem;
-  line-height: 1.5;
-  color: var(--rr-text-secondary);
-}
-
-.rr-admin-ai__detail {
-  padding: 0.95rem;
-}
-
-.rr-admin-ai__detail-empty,
-.rr-admin-ai__detail-card {
-  height: 100%;
-  border: 1px solid var(--rr-border-muted);
-  border-radius: 18px;
-  background: rgba(248, 250, 252, 0.72);
-  padding: 0.95rem;
-}
-
-.rr-admin-ai__detail-empty {
+.rr-admin-ai-workbench__section {
   display: grid;
-  align-content: center;
-  gap: 0.45rem;
-  text-align: center;
+  gap: 10px;
 }
 
-.rr-admin-ai__detail-empty strong {
-  color: var(--rr-text-primary);
-  font-size: 1rem;
+.rr-admin-ai-workbench__section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
 }
 
-.rr-admin-ai__detail-empty p {
+.rr-admin-ai-workbench__section-head h4 {
   margin: 0;
-  color: var(--rr-text-secondary);
+  color: var(--rr-text-primary);
+  font-size: 0.92rem;
+  line-height: 1.35;
 }
 
-.rr-admin-ai__detail-card {
+.rr-admin-ai-workbench__model-list {
   display: grid;
-  gap: 1rem;
-  align-content: start;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
-.rr-admin-ai__form-grid {
+.rr-admin-ai-workbench__model-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 11px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(226, 232, 240, 0.82);
+  background: rgba(248, 250, 252, 0.82);
+}
+
+.rr-admin-ai-workbench__model-list strong {
+  color: var(--rr-text-primary);
+  font-size: 0.9rem;
+}
+
+.rr-admin-ai-workbench__model-list span {
+  color: var(--rr-text-secondary);
+  font-size: 0.8rem;
+}
+
+.rr-admin-ai-workbench__form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.9rem;
+  gap: 12px;
 }
 
-.rr-admin-ai__field {
+.rr-admin-ai-workbench__field {
   display: grid;
-  gap: 0.35rem;
+  gap: 6px;
 }
 
-.rr-admin-ai__field--wide {
+.rr-admin-ai-workbench__field--wide {
   grid-column: 1 / -1;
 }
 
-.rr-admin-ai__field span,
-.rr-admin-ai__assignment-purpose span {
-  font-size: 0.76rem;
-  font-weight: 600;
+.rr-admin-ai-workbench__field span {
   color: var(--rr-text-secondary);
+  font-size: 0.82rem;
+  font-weight: 600;
 }
 
-.rr-admin-ai__field input,
-.rr-admin-ai__field select,
-.rr-admin-ai__field textarea {
+.rr-admin-ai-workbench__field input,
+.rr-admin-ai-workbench__field select,
+.rr-admin-ai-workbench__field textarea {
   width: 100%;
+  min-height: 42px;
+  padding: 10px 12px;
   border: 1px solid var(--rr-border-soft);
   border-radius: 14px;
   background: #fff;
-  padding: 0.75rem 0.85rem;
   color: var(--rr-text-primary);
+  font-size: 0.9rem;
 }
 
-.rr-admin-ai__field textarea {
-  min-height: 9rem;
+.rr-admin-ai-workbench__field textarea {
+  min-height: 132px;
   resize: vertical;
 }
 
-.rr-admin-ai__assignment-purpose {
+.rr-admin-ai-workbench__field input:focus,
+.rr-admin-ai-workbench__field select:focus,
+.rr-admin-ai-workbench__field textarea:focus {
+  outline: none;
+  border-color: var(--rr-accent);
+  box-shadow: 0 0 0 3px var(--rr-accent-muted);
+}
+
+.rr-admin-ai-workbench__validation {
   display: grid;
-  gap: 0.2rem;
-  padding: 0.8rem 0.9rem;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.82);
-  border: 1px solid var(--rr-border-muted);
-}
-
-.rr-admin-ai__assignment-purpose strong,
-.rr-admin-ai__validation strong {
-  color: var(--rr-text-primary);
-}
-
-.rr-admin-ai__validation {
-  display: grid;
-  gap: 0.25rem;
-  padding: 0.8rem 0.9rem;
-  border-radius: 16px;
-  background: rgba(241, 245, 249, 0.9);
-  border: 1px solid var(--rr-border-muted);
-  font-size: 0.84rem;
-  color: var(--rr-text-secondary);
-}
-
-.rr-admin-ai__validation p {
-  margin: 0;
-}
-
-.rr-admin-ai__detail-error {
-  margin: 0;
-  padding: 0.75rem 0.85rem;
+  gap: 4px;
+  padding: 12px 14px;
   border-radius: 14px;
-  background: rgba(254, 242, 242, 0.92);
-  border: 1px solid rgba(248, 113, 113, 0.22);
-  color: #b91c1c;
+  border: 1px solid rgba(59, 130, 246, 0.18);
+  background: rgba(239, 246, 255, 0.92);
+  color: #1d4ed8;
   font-size: 0.84rem;
-  line-height: 1.45;
+  line-height: 1.5;
 }
 
-.rr-admin-ai__actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 0.75rem;
+.rr-admin-ai-workbench__validation p {
+  margin: 0;
 }
 
-@media (max-width: 1024px) {
-  .rr-admin-ai__layout {
-    grid-template-columns: 1fr;
-    min-height: 0;
-  }
-
-  .rr-admin-ai__form-grid {
+@media (max-width: 900px) {
+  .rr-admin-ai-workbench__switcher,
+  .rr-admin-ai-workbench__form-grid {
     grid-template-columns: 1fr;
   }
 }

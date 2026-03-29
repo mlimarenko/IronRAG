@@ -116,6 +116,7 @@ interface RawModelCatalogEntry {
   modelName: string
   capabilityKind: string
   modalityKind: string
+  allowedBindingPurposes: string[]
   contextWindow: number | null
   maxOutputTokens: number | null
 }
@@ -375,6 +376,7 @@ export function mapModel(row: RawModelCatalogEntry): AdminModelCatalogEntry {
     modelName: row.modelName,
     capabilityKind: row.capabilityKind,
     modalityKind: row.modalityKind,
+    allowedBindingPurposes: row.allowedBindingPurposes,
     contextWindow: row.contextWindow,
     maxOutputTokens: row.maxOutputTokens,
   }

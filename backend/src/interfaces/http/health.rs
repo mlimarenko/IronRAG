@@ -1,4 +1,4 @@
-use axum::{Json, extract::State};
+use axum::{Json, extract::State, http::StatusCode};
 use serde::Serialize;
 use sqlx::Row;
 
@@ -34,7 +34,7 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     })
 }
 
-pub async fn readiness(State(state): State<AppState>) -> Json<ReadinessResponse> {
+pub async fn readiness(State(state): State<AppState>) -> (StatusCode, Json<ReadinessResponse>) {
     let postgres_ok = sqlx::query("select 1")
         .fetch_one(&state.persistence.postgres)
         .await
@@ -51,12 +51,19 @@ pub async fn readiness(State(state): State<AppState>) -> Json<ReadinessResponse>
     };
     let arangodb_ok = state.arango_client.ping().await.is_ok();
 
-    Json(ReadinessResponse {
-        status: if postgres_ok && redis_ok && arangodb_ok { "ready" } else { "degraded" },
+    let all_ok = postgres_ok && redis_ok && arangodb_ok;
+    let body = ReadinessResponse {
+        status: if all_ok { "ready" } else { "degraded" },
         postgres: if postgres_ok { "ok" } else { "down" },
         redis: if redis_ok { "ok" } else { "down" },
         arangodb: if arangodb_ok { "ok" } else { "down" },
-    })
+    };
+
+    if all_ok {
+        (StatusCode::OK, Json(body))
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, Json(body))
+    }
 }
 
 pub async fn version(State(state): State<AppState>) -> Json<VersionResponse> {

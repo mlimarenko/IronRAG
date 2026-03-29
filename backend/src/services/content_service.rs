@@ -5,11 +5,12 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::content::{
-        ContentChunk, ContentDocument, ContentDocumentHead, ContentDocumentSummary,
-        ContentMutation, ContentMutationItem, ContentRevision,
+        ContentChunk, ContentDocument, ContentDocumentHead, ContentDocumentPipelineJob,
+        ContentDocumentPipelineState, ContentDocumentSummary, ContentMutation,
+        ContentMutationItem, ContentRevision, ContentRevisionReadiness,
     },
     domains::{
-        ai::AiBindingPurpose, provider_profiles::ProviderModelSelection,
+        ai::AiBindingPurpose, ingest::IngestStageEvent, provider_profiles::ProviderModelSelection,
         runtime_graph::RuntimeNodeType,
     },
     infra::arangodb::document_store::{
@@ -26,13 +27,17 @@ use crate::{
     interfaces::http::router_support::ApiError,
     services::{
         billing_service::CaptureIngestAttemptBillingCommand,
+        content_storage::ContentStorageService,
         extract_service::{
             MaterializeChunkResultCommand, NewEdgeCandidate, NewNodeCandidate,
             PersistExtractContentCommand,
         },
         graph_extract::parse_graph_extraction_output,
         ingest_service::AdmitIngestJobCommand,
-        ingest_service::{FinalizeAttemptCommand, LeaseAttemptCommand, RecordStageEventCommand},
+        ingest_service::{
+            FinalizeAttemptCommand, IngestJobHandle, LeaseAttemptCommand,
+            RecordStageEventCommand,
+        },
         knowledge_service::{
             CreateKnowledgeChunkCommand, CreateKnowledgeDocumentCommand,
             CreateKnowledgeRevisionCommand, PromoteKnowledgeDocumentCommand,
@@ -43,7 +48,7 @@ use crate::{
         chunking::{ChunkingProfile, split_text_into_chunks_with_profile},
         file_extract::{
             FileExtractError, FileExtractionPlan, UploadAdmissionError, UploadFileKind,
-            build_runtime_file_extraction_plan,
+            build_runtime_file_extraction_plan, validate_upload_file_admission,
         },
     },
 };
@@ -117,6 +122,23 @@ pub struct UpdateMutationItemCommand {
     pub result_revision_id: Option<Uuid>,
     pub item_state: String,
     pub message: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReconcileFailedIngestMutationCommand {
+    pub mutation_id: Uuid,
+    pub failure_code: String,
+    pub failure_message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FailedRevisionReadiness {
+    pub text_state: String,
+    pub vector_state: String,
+    pub graph_state: String,
+    pub text_readable_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub vector_ready_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub graph_ready_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -231,12 +253,6 @@ struct AppendableDocumentContext {
 }
 
 #[derive(Debug, Clone)]
-struct InlineMutationFailure {
-    failure_kind: String,
-    message: String,
-}
-
-#[derive(Debug, Clone)]
 struct PendingChunkInsert {
     chunk_index: i32,
     start_offset: i32,
@@ -246,12 +262,6 @@ struct PendingChunkInsert {
     text_checksum: String,
 }
 
-#[derive(Debug, Clone)]
-enum InlineExtractOutcome {
-    Ready(FileExtractionPlan),
-    Failed(InlineMutationFailure),
-}
-
 #[derive(Clone, Default)]
 pub struct ContentService;
 
@@ -259,6 +269,134 @@ impl ContentService {
     #[must_use]
     pub const fn new() -> Self {
         Self
+    }
+
+    pub async fn build_runtime_extraction_plan(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+        file_name: &str,
+        mime_type: Option<&str>,
+        file_bytes: &[u8],
+    ) -> Result<FileExtractionPlan, UploadAdmissionError> {
+        let file_size_bytes = u64::try_from(file_bytes.len()).unwrap_or(u64::MAX);
+        let vision_binding = state
+            .canonical_services
+            .ai_catalog
+            .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::Vision)
+            .await
+            .map_err(|_| {
+                UploadAdmissionError::from_file_extract_error(
+                    file_name,
+                    mime_type,
+                    file_size_bytes,
+                    FileExtractError::ExtractionFailed {
+                        file_kind: UploadFileKind::Image,
+                        message: "failed to resolve active vision binding".to_string(),
+                    },
+                )
+            })?;
+        let vision_provider = vision_binding.as_ref().and_then(|binding| {
+            binding.provider_kind.parse().ok().map(|provider_kind| ProviderModelSelection {
+                provider_kind,
+                model_name: binding.model_name.clone(),
+            })
+        });
+        let plan = build_runtime_file_extraction_plan(
+            state.llm_gateway.as_ref(),
+            vision_provider.as_ref(),
+            vision_binding.as_ref().map(|binding| binding.api_key.as_str()),
+            vision_binding.as_ref().and_then(|binding| binding.provider_base_url.as_deref()),
+            Some(file_name),
+            mime_type,
+            file_bytes.to_vec(),
+        )
+        .await
+        .map_err(|error| {
+            UploadAdmissionError::from_file_extract_error(
+                file_name,
+                mime_type,
+                file_size_bytes,
+                error,
+            )
+        })?;
+        validate_extraction_plan(file_name, mime_type, file_size_bytes, &plan)?;
+        Ok(plan)
+    }
+
+    fn validate_inline_file_admission(
+        &self,
+        file_name: &str,
+        mime_type: Option<&str>,
+        file_bytes: &[u8],
+    ) -> Result<UploadFileKind, ApiError> {
+        let file_size_bytes = u64::try_from(file_bytes.len()).unwrap_or(u64::MAX);
+        validate_upload_file_admission(Some(file_name), mime_type, file_bytes).map_err(|error| {
+            ApiError::from_upload_admission(UploadAdmissionError::from_file_extract_error(
+                file_name,
+                mime_type,
+                file_size_bytes,
+                error,
+            ))
+        })
+    }
+
+    pub async fn resolve_revision_storage_key(
+        &self,
+        state: &AppState,
+        revision_id: Uuid,
+    ) -> Result<Option<String>, ApiError> {
+        let revision = content_repository::get_revision_by_id(&state.persistence.postgres, revision_id)
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .ok_or_else(|| ApiError::resource_not_found("revision", revision_id))?;
+        if let Some(storage_key) = revision
+            .storage_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+        {
+            return Ok(Some(storage_key));
+        }
+
+        let Some(file_name) = storage_backed_revision_file_name(
+            &revision.content_source_kind,
+            revision.source_uri.as_deref(),
+            revision.title.as_deref(),
+        ) else {
+            return Ok(None);
+        };
+
+        let storage_key = ContentStorageService::build_revision_storage_key(
+            revision.workspace_id,
+            revision.library_id,
+            &file_name,
+            &revision.checksum,
+        );
+        let exists = state
+            .content_storage
+            .has_revision_source(&storage_key)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+        if !exists {
+            return Ok(None);
+        }
+
+        content_repository::update_revision_storage_key(
+            &state.persistence.postgres,
+            revision_id,
+            Some(&storage_key),
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .ok_or_else(|| ApiError::resource_not_found("revision", revision_id))?;
+        let _ = state
+            .canonical_services
+            .knowledge
+            .set_revision_storage_ref(state, revision_id, Some(&storage_key))
+            .await?;
+        Ok(Some(storage_key))
     }
 
     pub async fn list_documents(
@@ -276,9 +414,64 @@ impl ContentService {
             .list_documents_by_library(library.workspace_id, library_id)
             .await
             .map_err(|_| ApiError::Internal)?;
+        let document_ids = documents.iter().map(|row| row.document_id).collect::<Vec<_>>();
+        let content_heads = content_repository::list_document_heads_by_document_ids(
+            &state.persistence.postgres,
+            &document_ids,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?;
+        let latest_mutation_ids = content_heads
+            .iter()
+            .filter_map(|row| row.latest_mutation_id)
+            .collect::<Vec<_>>();
+        let mutations_by_id = content_repository::list_mutations_by_ids(
+            &state.persistence.postgres,
+            &latest_mutation_ids,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .into_iter()
+        .map(|row| (row.id, row))
+        .collect::<std::collections::HashMap<_, _>>();
+        let job_handles_by_mutation_id = state
+            .canonical_services
+            .ingest
+            .list_job_handles_by_mutation_ids(
+                state,
+                library.workspace_id,
+                library_id,
+                &latest_mutation_ids,
+            )
+            .await?
+            .into_iter()
+            .filter_map(|handle| handle.job.mutation_id.map(|mutation_id| (mutation_id, handle)))
+            .collect::<std::collections::HashMap<_, _>>();
+        let heads_by_document_id = content_heads
+            .into_iter()
+            .map(|row| (row.document_id, row))
+            .collect::<std::collections::HashMap<_, _>>();
         let mut summaries = Vec::with_capacity(documents.len());
         for row in documents {
-            summaries.push(self.build_document_summary_from_knowledge(state, row).await?);
+            let content_head = heads_by_document_id.get(&row.document_id);
+            let latest_mutation = content_head
+                .and_then(|head| head.latest_mutation_id)
+                .and_then(|mutation_id| mutations_by_id.get(&mutation_id).cloned())
+                .map(map_mutation_row);
+            let latest_job = content_head
+                .and_then(|head| head.latest_mutation_id)
+                .and_then(|mutation_id| job_handles_by_mutation_id.get(&mutation_id).cloned())
+                .map(map_document_pipeline_job);
+            summaries.push(
+                self.build_document_summary_from_knowledge(
+                    state,
+                    row,
+                    content_head,
+                    latest_mutation,
+                    latest_job,
+                )
+                .await?,
+            );
         }
         Ok(summaries)
     }
@@ -294,7 +487,38 @@ impl ContentService {
             .await
             .map_err(|_| ApiError::Internal)?
             .ok_or_else(|| ApiError::resource_not_found("document", document_id))?;
-        self.build_document_summary_from_knowledge(state, row).await
+        let content_head =
+            content_repository::get_document_head(&state.persistence.postgres, document_id)
+                .await
+                .map_err(|_| ApiError::Internal)?;
+        let latest_mutation = match content_head.as_ref().and_then(|head| head.latest_mutation_id) {
+            Some(mutation_id) => content_repository::get_mutation_by_id(
+                &state.persistence.postgres,
+                mutation_id,
+            )
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .map(map_mutation_row),
+            None => None,
+        };
+        let latest_job = match content_head.as_ref().and_then(|head| head.latest_mutation_id) {
+            Some(mutation_id) => state
+                .canonical_services
+                .ingest
+                .get_job_handle_by_mutation_id(state, mutation_id)
+                .await?
+                .map(map_document_pipeline_job),
+            None => None,
+        };
+        self
+            .build_document_summary_from_knowledge(
+                state,
+                row,
+                content_head.as_ref(),
+                latest_mutation,
+                latest_job,
+            )
+            .await
     }
 
     pub async fn get_document_head(
@@ -405,6 +629,7 @@ impl ContentService {
                     workspace_id: document.workspace_id,
                     library_id: document.library_id,
                     external_key: document.external_key.clone(),
+                    title: None,
                     document_state: document.document_state.clone(),
                 },
             )
@@ -603,6 +828,12 @@ impl ContentService {
         state: &AppState,
         command: UploadInlineDocumentCommand,
     ) -> Result<CreateDocumentAdmission, ApiError> {
+        self.validate_inline_file_admission(
+            &command.file_name,
+            command.mime_type.as_deref(),
+            &command.file_bytes,
+        )?;
+        let file_checksum = sha256_hex_bytes(&command.file_bytes);
         let file_name = command.file_name.trim().to_string();
         let title = command
             .title
@@ -611,7 +842,17 @@ impl ContentService {
             .filter(|value| !value.is_empty())
             .map(ToString::to_string)
             .unwrap_or_else(|| file_name.clone());
-        let admission = self
+        let storage_key = self
+            .persist_inline_file_source(
+                state,
+                command.workspace_id,
+                command.library_id,
+                &file_name,
+                &format!("sha256:{file_checksum}"),
+                &command.file_bytes,
+            )
+            .await?;
+        self
             .admit_document(
                 state,
                 AdmitDocumentCommand {
@@ -624,7 +865,7 @@ impl ContentService {
                     source_identity: command.source_identity.clone(),
                     revision: Some(RevisionAdmissionMetadata {
                         content_source_kind: "upload".to_string(),
-                        checksum: format!("sha256:{}", sha256_hex_bytes(&command.file_bytes)),
+                        checksum: format!("sha256:{file_checksum}"),
                         mime_type: infer_inline_mime_type(
                             command.mime_type.as_deref(),
                             Some(&file_name),
@@ -638,22 +879,11 @@ impl ContentService {
                             command.source_identity.as_deref(),
                             Some(&file_name),
                         )),
-                        storage_key: None,
+                        storage_key: Some(storage_key),
                     }),
                 },
             )
-            .await?;
-        let mutation = self
-            .materialize_inline_file_mutation(
-                state,
-                &admission.mutation,
-                &file_name,
-                command.mime_type.as_deref(),
-                &command.file_bytes,
-            )
-            .await?;
-        let document = self.get_document(state, admission.document.document.id).await?;
-        Ok(CreateDocumentAdmission { document, mutation })
+            .await
     }
 
     pub async fn create_revision(
@@ -959,6 +1189,12 @@ impl ContentService {
         state: &AppState,
         command: ReplaceInlineMutationCommand,
     ) -> Result<ContentMutationAdmission, ApiError> {
+        self.validate_inline_file_admission(
+            &command.file_name,
+            command.mime_type.as_deref(),
+            &command.file_bytes,
+        )?;
+        let file_checksum = sha256_hex_bytes(&command.file_bytes);
         let head = self.get_document_head(state, command.document_id).await?;
         let base_revision =
             match head.as_ref().and_then(|row| row.active_revision_id.or(row.readable_revision_id))
@@ -970,7 +1206,17 @@ impl ContentService {
                     .map_err(|_| ApiError::Internal)?,
                 None => None,
             };
-        let admission = self
+        let storage_key = self
+            .persist_inline_file_source(
+                state,
+                command.workspace_id,
+                command.library_id,
+                &command.file_name,
+                &format!("sha256:{file_checksum}"),
+                &command.file_bytes,
+            )
+            .await?;
+        self
             .admit_mutation(
                 state,
                 AdmitMutationCommand {
@@ -984,7 +1230,7 @@ impl ContentService {
                     source_identity: command.source_identity.clone(),
                     revision: Some(RevisionAdmissionMetadata {
                         content_source_kind: "replace".to_string(),
-                        checksum: format!("sha256:{}", sha256_hex_bytes(&command.file_bytes)),
+                        checksum: format!("sha256:{file_checksum}"),
                         mime_type: infer_inline_mime_type(
                             command.mime_type.as_deref(),
                             Some(&command.file_name),
@@ -1004,19 +1250,11 @@ impl ContentService {
                             command.source_identity.as_deref(),
                             Some(&command.file_name),
                         )),
-                        storage_key: None,
+                        storage_key: Some(storage_key),
                     }),
                 },
             )
-            .await?;
-        self.materialize_inline_file_mutation(
-            state,
-            &admission,
-            &command.file_name,
-            command.mime_type.as_deref(),
-            &command.file_bytes,
-        )
-        .await
+            .await
     }
 
     pub async fn delete_document(
@@ -1400,6 +1638,144 @@ impl ContentService {
         Ok(map_mutation_item_row(row))
     }
 
+    pub async fn reconcile_failed_ingest_mutation(
+        &self,
+        state: &AppState,
+        command: ReconcileFailedIngestMutationCommand,
+    ) -> Result<ContentMutationAdmission, ApiError> {
+        let admission = self.get_mutation_admission(state, command.mutation_id).await?;
+        let job_handle = state
+            .canonical_services
+            .ingest
+            .get_job_handle_by_mutation_id(state, command.mutation_id)
+            .await?;
+        let async_operation_id = admission.async_operation_id.or_else(|| {
+            job_handle
+                .as_ref()
+                .and_then(|handle| handle.async_operation.as_ref().map(|operation| operation.id))
+                .or_else(|| job_handle.as_ref().and_then(|handle| handle.job.async_operation_id))
+        });
+        let stage_events = if let Some(attempt) =
+            job_handle.as_ref().and_then(|handle| handle.latest_attempt.as_ref())
+        {
+            state.canonical_services.ingest.list_stage_events(state, attempt.id).await?
+        } else {
+            Vec::new()
+        };
+
+        if let Some(operation_id) = async_operation_id {
+            let _ = state
+                .canonical_services
+                .ops
+                .update_async_operation(
+                    state,
+                    UpdateAsyncOperationCommand {
+                        operation_id,
+                        status: "failed".to_string(),
+                        completed_at: Some(Utc::now()),
+                        failure_code: Some(command.failure_code.clone()),
+                    },
+                )
+                .await?;
+        }
+
+        for item in &admission.items {
+            if matches!(item.item_state.as_str(), "applied" | "failed") {
+                continue;
+            }
+            let _ = self
+                .update_mutation_item(
+                    state,
+                    UpdateMutationItemCommand {
+                        item_id: item.id,
+                        document_id: item.document_id,
+                        base_revision_id: item.base_revision_id,
+                        result_revision_id: item.result_revision_id,
+                        item_state: "failed".to_string(),
+                        message: Some(command.failure_message.clone()),
+                    },
+                )
+                .await?;
+        }
+
+        if matches!(admission.mutation.mutation_state.as_str(), "accepted" | "running") {
+            let _ = self
+                .update_mutation(
+                    state,
+                    UpdateMutationCommand {
+                        mutation_id: command.mutation_id,
+                        mutation_state: "failed".to_string(),
+                        completed_at: Some(Utc::now()),
+                        failure_code: Some(command.failure_code.clone()),
+                        conflict_code: None,
+                    },
+                )
+                .await?;
+        }
+
+        let document_id =
+            admission.items.iter().find_map(|item| item.document_id).or_else(|| {
+                job_handle.as_ref().and_then(|handle| handle.job.knowledge_document_id)
+            });
+        let revision_id =
+            admission.items.iter().find_map(|item| item.result_revision_id).or_else(|| {
+                job_handle.as_ref().and_then(|handle| handle.job.knowledge_revision_id)
+            });
+
+        if let Some(document_id) = document_id
+            && let Some(document) = state
+                .arango_document_store
+                .get_document(document_id)
+                .await
+                .map_err(|_| ApiError::Internal)?
+        {
+            let head =
+                content_repository::get_document_head(&state.persistence.postgres, document_id)
+                    .await
+                    .map_err(|_| ApiError::Internal)?;
+            let _ = self
+                .promote_document_head(
+                    state,
+                    PromoteHeadCommand {
+                        document_id,
+                        active_revision_id: document.active_revision_id,
+                        readable_revision_id: document.readable_revision_id,
+                        latest_mutation_id: Some(command.mutation_id),
+                        latest_successful_attempt_id: head
+                            .as_ref()
+                            .and_then(|current_head| current_head.latest_successful_attempt_id),
+                    },
+                )
+                .await?;
+        }
+
+        if let Some(revision_id) = revision_id
+            && let Some(revision) = state
+                .arango_document_store
+                .get_revision(revision_id)
+                .await
+                .map_err(|_| ApiError::Internal)?
+        {
+            let readiness = derive_failed_revision_readiness(&revision, &stage_events);
+            let _ = state
+                .arango_document_store
+                .update_revision_readiness(
+                    revision_id,
+                    &readiness.text_state,
+                    &readiness.vector_state,
+                    &readiness.graph_state,
+                    readiness.text_readable_at,
+                    readiness.vector_ready_at,
+                    readiness.graph_ready_at,
+                    revision.superseded_by_revision_id,
+                )
+                .await
+                .map_err(|_| ApiError::Internal)?;
+        }
+
+        self.get_mutation_admission(state, command.mutation_id).await
+    }
+
     async fn materialize_inline_text_mutation(
         &self,
         state: &AppState,
@@ -1481,138 +1857,6 @@ impl ContentService {
             )
             .await?;
         self.complete_successful_inline_mutation(state, &context, attempt.id).await
-    }
-
-    async fn materialize_inline_file_mutation(
-        &self,
-        state: &AppState,
-        admission: &ContentMutationAdmission,
-        file_name: &str,
-        mime_type: Option<&str>,
-        file_bytes: &[u8],
-    ) -> Result<ContentMutationAdmission, ApiError> {
-        let context = self.inline_mutation_context_from_admission(admission)?;
-        let attempt = self.lease_inline_attempt(state, &context).await?;
-        self.update_mutation(
-            state,
-            UpdateMutationCommand {
-                mutation_id: context.mutation_id,
-                mutation_state: "running".to_string(),
-                completed_at: None,
-                failure_code: None,
-                conflict_code: None,
-            },
-        )
-        .await?;
-        state
-            .canonical_services
-            .ingest
-            .record_stage_event(
-                state,
-                RecordStageEventCommand {
-                    attempt_id: attempt.id,
-                    stage_name: "extract_content".to_string(),
-                    stage_state: "started".to_string(),
-                    message: Some("extracting readable content".to_string()),
-                    details_json: serde_json::json!({
-                        "fileName": file_name,
-                        "documentId": context.document_id,
-                    }),
-                },
-            )
-            .await?;
-
-        match self
-            .build_extract_outcome(state, context.library_id, file_name, mime_type, file_bytes)
-            .await
-        {
-            InlineExtractOutcome::Ready(plan) => {
-                let normalized_text = plan.extracted_text.clone().unwrap_or_default();
-                state
-                    .canonical_services
-                    .extract
-                    .persist_extract_content(
-                        state,
-                        PersistExtractContentCommand {
-                            revision_id: context.revision_id,
-                            attempt_id: Some(attempt.id),
-                            extract_state: "ready".to_string(),
-                            normalized_text: Some(normalized_text.clone()),
-                            text_checksum: Some(sha256_hex_text(&normalized_text)),
-                            warning_count: i32::try_from(plan.extraction_warnings.len())
-                                .unwrap_or(i32::MAX),
-                        },
-                    )
-                    .await?;
-                state
-                    .canonical_services
-                    .ingest
-                    .record_stage_event(
-                        state,
-                        RecordStageEventCommand {
-                            attempt_id: attempt.id,
-                            stage_name: "extract_content".to_string(),
-                            stage_state: "completed".to_string(),
-                            message: Some("readable content extracted".to_string()),
-                            details_json: serde_json::json!({
-                                "fileKind": plan.file_kind.as_str(),
-                                "warningCount": plan.extraction_warnings.len(),
-                            }),
-                        },
-                    )
-                    .await?;
-                self.persist_revision_chunks(state, context.revision_id, &normalized_text).await?;
-                state
-                    .canonical_services
-                    .ingest
-                    .record_stage_event(
-                        state,
-                        RecordStageEventCommand {
-                            attempt_id: attempt.id,
-                            stage_name: "chunk_content".to_string(),
-                            stage_state: "completed".to_string(),
-                            message: Some("content chunks persisted".to_string()),
-                            details_json: serde_json::json!({ "revisionId": context.revision_id }),
-                        },
-                    )
-                    .await?;
-                self.complete_successful_inline_mutation(state, &context, attempt.id).await
-            }
-            InlineExtractOutcome::Failed(failure) => {
-                state
-                    .canonical_services
-                    .extract
-                    .persist_extract_content(
-                        state,
-                        PersistExtractContentCommand {
-                            revision_id: context.revision_id,
-                            attempt_id: Some(attempt.id),
-                            extract_state: "failed".to_string(),
-                            normalized_text: None,
-                            text_checksum: None,
-                            warning_count: 0,
-                        },
-                    )
-                    .await?;
-                state
-                    .canonical_services
-                    .ingest
-                    .record_stage_event(
-                        state,
-                        RecordStageEventCommand {
-                            attempt_id: attempt.id,
-                            stage_name: "extract_content".to_string(),
-                            stage_state: "failed".to_string(),
-                            message: Some(failure.message.clone()),
-                            details_json: serde_json::json!({
-                                "failureKind": failure.failure_kind,
-                            }),
-                        },
-                    )
-                    .await?;
-                self.complete_failed_inline_mutation(state, &context, attempt.id, failure).await
-            }
-        }
     }
 
     async fn complete_successful_inline_mutation(
@@ -1943,72 +2187,6 @@ Chunk:\n{}",
         Ok((chunks.len(), extracted_entities, extracted_relations))
     }
 
-    async fn complete_failed_inline_mutation(
-        &self,
-        state: &AppState,
-        context: &InlineMutationContext,
-        attempt_id: Uuid,
-        failure: InlineMutationFailure,
-    ) -> Result<ContentMutationAdmission, ApiError> {
-        let current_head = self.get_document_head(state, context.document_id).await?;
-        let latest_successful_attempt_id =
-            current_head.as_ref().and_then(|row| row.latest_successful_attempt_id);
-        let _ = self
-            .promote_document_head(
-                state,
-                PromoteHeadCommand {
-                    document_id: context.document_id,
-                    active_revision_id: Some(context.revision_id),
-                    readable_revision_id: current_head.and_then(|row| row.readable_revision_id),
-                    latest_mutation_id: Some(context.mutation_id),
-                    latest_successful_attempt_id,
-                },
-            )
-            .await?;
-        let _ = self
-            .update_mutation_item(
-                state,
-                UpdateMutationItemCommand {
-                    item_id: context.item_id,
-                    document_id: Some(context.document_id),
-                    base_revision_id: None,
-                    result_revision_id: Some(context.revision_id),
-                    item_state: "failed".to_string(),
-                    message: Some(failure.message.clone()),
-                },
-            )
-            .await?;
-        let _ = self
-            .update_mutation(
-                state,
-                UpdateMutationCommand {
-                    mutation_id: context.mutation_id,
-                    mutation_state: "failed".to_string(),
-                    completed_at: Some(Utc::now()),
-                    failure_code: Some(failure.failure_kind.clone()),
-                    conflict_code: None,
-                },
-            )
-            .await?;
-        let _ = state
-            .canonical_services
-            .ingest
-            .finalize_attempt(
-                state,
-                FinalizeAttemptCommand {
-                    attempt_id,
-                    knowledge_generation_id: None,
-                    attempt_state: "failed".to_string(),
-                    current_stage: Some("extract_content".to_string()),
-                    failure_class: Some("content_extract".to_string()),
-                    failure_code: Some(failure.failure_kind),
-                    retryable: false,
-                },
-            )
-            .await?;
-        self.get_mutation_admission(state, context.mutation_id).await
-    }
-
     async fn lease_inline_attempt(
         &self,
         state: &AppState,
@@ -2030,78 +2208,20 @@ Chunk:\n{}",
             .await
     }
 
-    async fn build_extract_outcome(
+    async fn persist_inline_file_source(
         &self,
         state: &AppState,
+        workspace_id: Uuid,
         library_id: Uuid,
         file_name: &str,
-        mime_type: Option<&str>,
+        checksum: &str,
         file_bytes: &[u8],
-    ) -> InlineExtractOutcome {
-        let file_size_bytes = u64::try_from(file_bytes.len()).unwrap_or(u64::MAX);
-        let vision_binding = state
-            .canonical_services
-            .ai_catalog
-            .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::Vision)
+    ) -> Result<String, ApiError> {
+        state
+            .content_storage
+            .persist_revision_source(workspace_id, library_id, file_name, checksum, file_bytes)
             .await
-            .ok()
-            .flatten();
-
-        // If explicit vision binding is not configured, reuse extract_graph runtime binding.
-        // This keeps image/PDF OCR paths available in minimal setups.
-        let fallback_graph_binding = if vision_binding.is_none() {
-            state
-                .canonical_services
-                .ai_catalog
-                .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::ExtractGraph)
-                .await
-                .ok()
-                .flatten()
-        } else {
-            None
-        };
-
-        let active_vision_like_binding =
-            vision_binding.as_ref().or(fallback_graph_binding.as_ref());
-        let vision_provider = active_vision_like_binding.and_then(|binding| {
-            binding.provider_kind.parse().ok().map(|provider_kind| ProviderModelSelection {
-                provider_kind,
-                model_name: binding.model_name.clone(),
-            })
-        });
-        match build_runtime_file_extraction_plan(
-            state.llm_gateway.as_ref(),
-            vision_provider.as_ref(),
-            active_vision_like_binding.map(|binding| binding.api_key.as_str()),
-            active_vision_like_binding.and_then(|binding| binding.provider_base_url.as_deref()),
-            Some(file_name),
-            mime_type,
-            file_bytes.to_vec(),
-        )
-        .await
-        {
-            Ok(plan) => {
-                match validate_extraction_plan(file_name, mime_type, file_size_bytes, &plan) {
-                    Ok(()) => InlineExtractOutcome::Ready(plan),
-                    Err(error) => InlineExtractOutcome::Failed(InlineMutationFailure {
-                        failure_kind: error.error_kind().to_string(),
-                        message: error.message().to_string(),
-                    }),
-                }
-            }
-            Err(error) => {
-                let rejection = UploadAdmissionError::from_file_extract_error(
-                    file_name,
-                    mime_type,
-                    file_size_bytes,
-                    error,
-                );
-                InlineExtractOutcome::Failed(InlineMutationFailure {
-                    failure_kind: rejection.error_kind().to_string(),
-                    message: rejection.message().to_string(),
-                })
-            }
-        }
+            .map_err(|_| ApiError::Internal)
     }
 
     async fn persist_revision_chunks(
@@ -2255,7 +2375,15 @@ Chunk:\n{}",
         else {
             return Ok(());
         };
-        if matches!(latest_mutation.mutation_state.as_str(), "accepted" | "running") {
+        let latest_mutation_state =
+            if matches!(latest_mutation.mutation_state.as_str(), "accepted" | "running") {
+                self.reconcile_stale_inflight_mutation_if_terminal(state, &latest_mutation)
+                    .await?
+                    .unwrap_or(latest_mutation.mutation_state)
+            } else {
+                latest_mutation.mutation_state
+            };
+        if matches!(latest_mutation_state.as_str(), "accepted" | "running") {
             return Err(ApiError::ConflictingMutation(
                 "document is still processing a previous mutation".to_string(),
             ));
@@ -2267,30 +2395,60 @@ Chunk:\n{}",
         &self,
         state: &AppState,
         document_row: KnowledgeDocumentRow,
+        content_head: Option<&content_repository::ContentDocumentHeadRow>,
+        latest_mutation: Option<ContentMutation>,
+        latest_job: Option<ContentDocumentPipelineJob>,
     ) -> Result<ContentDocumentSummary, ApiError> {
-        let active_revision = if let Some(revision_id) = document_row.active_revision_id {
+        let active_revision_row = if let Some(revision_id) = document_row.active_revision_id {
             state
                 .arango_document_store
                 .get_revision(revision_id)
                 .await
                 .map_err(|_| ApiError::Internal)?
-                .map(map_knowledge_revision_row)
         } else {
             None
+        };
+        let active_revision = active_revision_row.clone().map(map_knowledge_revision_row);
+        let effective_readiness_row = match (
+            document_row.readable_revision_id,
+            document_row.active_revision_id,
+            active_revision_row.as_ref(),
+        ) {
+            (Some(readable_revision_id), Some(active_revision_id), Some(active_row))
+                if readable_revision_id == active_revision_id =>
+            {
+                Some(active_row.clone())
+            }
+            (Some(readable_revision_id), _, _) => state
+                .arango_document_store
+                .get_revision(readable_revision_id)
+                .await
+                .map_err(|_| ApiError::Internal)?,
+            (None, Some(_), Some(active_row)) => Some(active_row.clone()),
+            (None, Some(active_revision_id), None) => state
+                .arango_document_store
+                .get_revision(active_revision_id)
+                .await
+                .map_err(|_| ApiError::Internal)?,
+            (None, None, _) => None,
         };
         let head = Some(ContentDocumentHead {
             document_id: document_row.document_id,
             active_revision_id: document_row.active_revision_id,
             readable_revision_id: document_row.readable_revision_id,
-            latest_mutation_id: None,
-            latest_successful_attempt_id: None,
-            head_updated_at: document_row.updated_at,
+            latest_mutation_id: content_head.and_then(|row| row.latest_mutation_id),
+            latest_successful_attempt_id: content_head
+                .and_then(|row| row.latest_successful_attempt_id),
+            head_updated_at: content_head
+                .map_or(document_row.updated_at, |row| row.head_updated_at),
         });
 
         Ok(ContentDocumentSummary {
             document: map_knowledge_document_row(document_row),
             head,
             active_revision,
+            readiness: effective_readiness_row.map(map_knowledge_revision_readiness),
+            pipeline: ContentDocumentPipelineState { latest_mutation, latest_job },
         })
     }
 
@@ -2318,6 +2476,125 @@ Chunk:\n{}",
         )
         .await
     }
+}
+
+impl ContentService {
+    async fn reconcile_stale_inflight_mutation_if_terminal(
+        &self,
+        state: &AppState,
+        latest_mutation: &content_repository::ContentMutationRow,
+    ) -> Result<Option<String>, ApiError> {
+        let admission = self.get_mutation_admission(state, latest_mutation.id).await?;
+        let job_handle = state
+            .canonical_services
+            .ingest
+            .get_job_handle_by_mutation_id(state, latest_mutation.id)
+            .await?;
+        let job_failed =
+            job_handle.as_ref().is_some_and(|handle| handle.job.queue_state == "failed");
+        let attempt_failed = job_handle
+            .as_ref()
+            .and_then(|handle| handle.latest_attempt.as_ref())
+            .is_some_and(|attempt| {
+                matches!(attempt.attempt_state.as_str(), "failed" | "abandoned" | "canceled")
+            });
+        let async_operation_failed = admission.async_operation_id.and_then(|operation_id| {
+            job_handle
+                .as_ref()
+                .and_then(|handle| handle.async_operation.as_ref())
+                .filter(|operation| operation.id == operation_id)
+                .map(|operation| operation.status == "failed")
+        }) == Some(true);
+
+        if !(job_failed || attempt_failed || async_operation_failed) {
+            return Ok(None);
+        }
+
+        let failure_code = job_handle
+            .as_ref()
+            .and_then(|handle| handle.latest_attempt.as_ref())
+            .and_then(|attempt| attempt.failure_code.clone())
+            .or_else(|| {
+                job_handle
+                    .as_ref()
+                    .and_then(|handle| handle.async_operation.as_ref())
+                    .and_then(|operation| operation.failure_code.clone())
+            })
+            .unwrap_or_else(|| "canonical_pipeline_failed".to_string());
+        let failure_message = format!(
+            "terminal ingest failure left mutation {} in {}",
+            latest_mutation.id, latest_mutation.mutation_state
+        );
+        let reconciled = self
+            .reconcile_failed_ingest_mutation(
+                state,
+                ReconcileFailedIngestMutationCommand {
+                    mutation_id: latest_mutation.id,
+                    failure_code,
+                    failure_message,
+                },
+            )
+            .await?;
+        Ok(Some(reconciled.mutation.mutation_state))
+    }
+}
+
+pub(crate) fn derive_failed_revision_readiness(
+    revision: &KnowledgeRevisionRow,
+    stage_events: &[IngestStageEvent],
+) -> FailedRevisionReadiness {
+    let now = Utc::now();
+    let extract_completed = has_completed_stage(stage_events, "extract_content");
+    let embed_completed = has_completed_stage(stage_events, "embed_chunk");
+    let graph_completed = has_completed_stage(stage_events, "extract_graph");
+
+    let text_state = if revision.text_state == "text_readable" || extract_completed {
+        "text_readable"
+    } else {
+        "failed"
+    };
+    let vector_state =
+        if revision.vector_state == "ready" || embed_completed { "ready" } else { "failed" };
+    let graph_state =
+        if revision.graph_state == "ready" || graph_completed { "ready" } else { "failed" };
+
+    FailedRevisionReadiness {
+        text_state: text_state.to_string(),
+        vector_state: vector_state.to_string(),
+        graph_state: graph_state.to_string(),
+        text_readable_at: (text_state == "text_readable")
+            .then(|| revision.text_readable_at.unwrap_or(now)),
+        vector_ready_at: (vector_state == "ready").then(|| revision.vector_ready_at.unwrap_or(now)),
+        graph_ready_at: (graph_state == "ready").then(|| revision.graph_ready_at.unwrap_or(now)),
+    }
+}
+
+fn has_completed_stage(stage_events: &[IngestStageEvent], stage_name: &str) -> bool {
+    stage_events
+        .iter()
+        .any(|event| event.stage_name == stage_name && event.stage_state == "completed")
+}
+
+fn storage_backed_revision_file_name(
+    content_source_kind: &str,
+    source_uri: Option<&str>,
+    title: Option<&str>,
+) -> Option<String> {
+    if !matches!(content_source_kind, "upload" | "replace") {
+        return None;
+    }
+    source_uri
+        .and_then(|value| value.split_once("://").map(|(_, rest)| rest).or(Some(value)))
+        .and_then(|value| value.rsplit('/').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "inline")
+        .map(ToString::to_string)
+        .or_else(|| {
+            title
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+        })
 }
 
 fn map_knowledge_document_row(row: KnowledgeDocumentRow) -> ContentDocument {
@@ -2373,6 +2650,18 @@ fn map_knowledge_revision_row(row: KnowledgeRevisionRow) -> ContentRevision {
     }
 }
 
+fn map_knowledge_revision_readiness(row: KnowledgeRevisionRow) -> ContentRevisionReadiness {
+    ContentRevisionReadiness {
+        revision_id: row.revision_id,
+        text_state: row.text_state,
+        vector_state: row.vector_state,
+        graph_state: row.graph_state,
+        text_readable_at: row.text_readable_at,
+        vector_ready_at: row.vector_ready_at,
+        graph_ready_at: row.graph_ready_at,
+    }
+}
+
 fn map_knowledge_chunk_row(row: KnowledgeChunkRow) -> ContentChunk {
     let start_offset = row.span_start.unwrap_or(0);
     let end_offset = row.span_end.unwrap_or_else(|| {
@@ -2406,6 +2695,25 @@ fn map_mutation_row(row: content_repository::ContentMutationRow) -> ContentMutat
         source_identity: row.source_identity,
         failure_code: row.failure_code,
         conflict_code: row.conflict_code,
+    }
+}
+
+fn map_document_pipeline_job(handle: IngestJobHandle) -> ContentDocumentPipelineJob {
+    let latest_attempt = handle.latest_attempt;
+    ContentDocumentPipelineJob {
+        id: handle.job.id,
+        workspace_id: handle.job.workspace_id,
+        library_id: handle.job.library_id,
+        mutation_id: handle.job.mutation_id,
+        async_operation_id: handle.job.async_operation_id,
+        job_kind: handle.job.job_kind,
+        queue_state: handle.job.queue_state,
+        queued_at: handle.job.queued_at,
+        available_at: handle.job.available_at,
+        completed_at: handle.job.completed_at,
+        current_stage: latest_attempt.as_ref().and_then(|attempt| attempt.current_stage.clone()),
+        failure_code: latest_attempt.as_ref().and_then(|attempt| attempt.failure_code.clone()),
+        retryable: latest_attempt.as_ref().is_some_and(|attempt| attempt.retryable),
     }
 }
 
@@ -2474,7 +2782,11 @@ fn infer_inline_mime_type(
     file_name: Option<&str>,
     fallback_kind: &str,
 ) -> String {
-    if let Some(mime_type) = requested_mime_type.map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(mime_type) = requested_mime_type
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter(|value| !value.eq_ignore_ascii_case("application/octet-stream"))
+    {
         return mime_type.to_string();
     }
 
@@ -2483,9 +2795,19 @@ fn infer_inline_mime_type(
         Some(extension) if extension == "docx" => {
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_string()
         }
+        Some(extension) if extension == "pptx" => {
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation".to_string()
+        }
         Some(extension) if extension == "md" => "text/markdown".to_string(),
         Some(extension) if extension == "txt" => "text/plain".to_string(),
         Some(extension) if extension == "json" => "application/json".to_string(),
+        Some(extension) if extension == "png" => "image/png".to_string(),
+        Some(extension) if extension == "jpg" || extension == "jpeg" => "image/jpeg".to_string(),
+        Some(extension) if extension == "gif" => "image/gif".to_string(),
+        Some(extension) if extension == "bmp" => "image/bmp".to_string(),
+        Some(extension) if extension == "webp" => "image/webp".to_string(),
+        Some(extension) if extension == "svg" => "image/svg+xml".to_string(),
+        Some(extension) if extension == "tif" || extension == "tiff" => "image/tiff".to_string(),
         _ if fallback_kind == "append" => "text/plain".to_string(),
         _ => "application/octet-stream".to_string(),
     }
