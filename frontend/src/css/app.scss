@@ -7856,6 +7856,11 @@ select.rr-field--select:focus {
   grid-template-columns: 1fr;
 }
 
+.rr-dashboard__overview.is-solo.is-solo-doc {
+  grid-template-columns: minmax(0, 62rem);
+  justify-content: start;
+}
+
 /* Hero header */
 
 .rr-dash-hero {
@@ -7890,6 +7895,10 @@ select.rr-field--select:focus {
 .rr-dashboard__workbench.is-settled {
   grid-template-columns: minmax(0, 52rem);
   justify-content: start;
+}
+
+.rr-dashboard__workbench.is-settled.is-solo-doc {
+  grid-template-columns: minmax(0, 42rem);
 }
 
 .rr-dash-hero__top {
@@ -8285,6 +8294,7 @@ select.rr-field--select:focus {
   grid-template-rows: auto auto;
   align-content: start;
   align-self: start;
+  max-width: 42rem;
   gap: 0.45rem;
   padding: 12px 14px 13px;
 }
@@ -8386,6 +8396,10 @@ select.rr-field--select:focus {
   .rr-dashboard__overview {
     grid-template-columns: minmax(0, 1.18fr) minmax(520px, 0.92fr);
     gap: var(--rr-sp-5);
+  }
+
+  .rr-dashboard__overview.is-solo.is-solo-doc {
+    grid-template-columns: minmax(0, 68rem);
   }
 
   .rr-dashboard__workbench {
@@ -8578,6 +8592,18 @@ select.rr-field--select:focus {
 
   .rr-dash-hero__top {
     flex-direction: column;
+  }
+
+  .rr-dash-hero__actions {
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .rr-dash-hero__actions .rr-button {
+    min-height: 2.25rem;
+    padding-inline: 0.78rem;
+    font-size: 0.78rem;
   }
 
   .rr-dash-hero__facts {

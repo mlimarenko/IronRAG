@@ -189,13 +189,15 @@ const heroMetaBadges = computed(() => {
     return []
   }
 
-  const badges = [
-    t('graph.summary.confidenceLine', {
-      value: summaryConfidenceLabel(canonicalSummary.value.confidenceStatus),
-    }),
-  ]
+  const badges: string[] = []
 
-  if (canonicalSummary.value.supportCount > 0) {
+  if (canonicalSummary.value.confidenceStatus !== 'strong') {
+    badges.push(t('graph.summary.confidenceLine', {
+      value: summaryConfidenceLabel(canonicalSummary.value.confidenceStatus),
+    }))
+  }
+
+  if (canonicalSummary.value.supportCount > 1) {
     badges.push(t('graph.summary.supportCount', { count: canonicalSummary.value.supportCount }))
   }
 
@@ -363,17 +365,28 @@ const navigationSections = computed(() => {
 
 const showNavigation = computed(() => navigationSections.value.length > 0)
 const showNavigationTitles = computed(() => navigationSections.value.length > 1)
+const showNavigationSectionTitle = computed(() => navigationSections.value.length > 1)
 const showStateSectionTitle = computed(
   () => stateSummaryLines.value.length > 1 || visibleEvidence.value.length > 0 || showNavigation.value || meaningfulProperties.value.length > 0,
+)
+const showEvidenceCaption = computed(() => evidenceCount.value > visibleEvidence.value.length)
+const showHeaderCounters = computed(
+  () => headerCounters.value.length > 0 && !visibleEvidence.value.length && !showNavigation.value,
 )
 
 const headerCounters = computed(() => {
   const counters: string[] = []
-  if (relatedDocumentCount.value > 0) {
+  if (relatedDocumentCount.value > 1 && visibleRelatedDocuments.value.length === 0) {
     counters.push(t('graph.relatedDocumentsCount', { count: relatedDocumentCount.value }))
   }
   const summarySupportCount = canonicalSummary.value?.supportCount ?? 0
-  if (evidenceCount.value > 0 && evidenceCount.value !== summarySupportCount) {
+  if (summarySupportCount > 1 && visibleEvidence.value.length === 0) {
+    counters.push(graphEvidenceLabel(summarySupportCount))
+  } else if (
+    evidenceCount.value > 1 &&
+    evidenceCount.value !== summarySupportCount &&
+    visibleEvidence.value.length === 0
+  ) {
     counters.push(graphEvidenceLabel(evidenceCount.value))
   }
   return counters
@@ -411,7 +424,7 @@ const headerCounters = computed(() => {
             {{ $t('graph.relationCount', { count: props.detail.relationCount }) }}
           </span>
           <span
-            v-if="props.detail.convergenceStatus"
+            v-if="props.detail.convergenceStatus && props.detail.convergenceStatus !== 'current'"
             class="nc__badge nc__badge--status"
           >
             {{ $t(`graph.convergence.${props.detail.convergenceStatus}`) }}
@@ -455,7 +468,7 @@ const headerCounters = computed(() => {
         </div>
 
         <div
-          v-if="headerCounters.length"
+          v-if="showHeaderCounters"
           class="nc__counters"
         >
           <template
@@ -501,7 +514,12 @@ const headerCounters = computed(() => {
       >
         <div class="nc__section-head">
           <h4 class="nc__section-title">{{ $t('graph.inspector.evidencePreview') }}</h4>
-          <span class="nc__section-caption">{{ graphEvidenceLabel(evidenceCount) }}</span>
+          <span
+            v-if="showEvidenceCaption"
+            class="nc__section-caption"
+          >
+            {{ graphEvidenceLabel(evidenceCount) }}
+          </span>
         </div>
 
         <ul class="nc__evidence-list">
@@ -526,7 +544,12 @@ const headerCounters = computed(() => {
         class="nc__section"
       >
         <div class="nc__section-head">
-          <h4 class="nc__section-title">{{ $t('graph.inspector.jumpTo') }}</h4>
+          <h4
+            v-if="showNavigationSectionTitle"
+            class="nc__section-title"
+          >
+            {{ $t('graph.inspector.jumpTo') }}
+          </h4>
         </div>
 
         <div class="nc__nav-groups">

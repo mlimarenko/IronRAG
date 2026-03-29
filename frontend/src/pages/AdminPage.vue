@@ -247,6 +247,7 @@ async function validateBinding(bindingId: string) {
         <div
           v-if="sectionTabs.length"
           class="rr-admin-control__layout"
+          :class="{ 'is-sparse-access': activeSection === 'access' && tokens.length === 0 }"
         >
           <aside class="rr-admin-control__nav">
             <nav class="rr-admin-control__nav-list">
@@ -436,6 +437,15 @@ async function validateBinding(bindingId: string) {
   align-items: stretch;
 }
 
+.rr-admin-control__layout.is-sparse-access {
+  grid-template-columns: minmax(176px, 208px) minmax(0, 54rem);
+  justify-content: start;
+}
+
+.rr-admin-control__layout.is-sparse-access .rr-admin-control__content {
+  max-width: 54rem;
+}
+
 .rr-admin-control__nav {
   position: sticky;
   top: 5.6rem;
@@ -594,7 +604,7 @@ async function validateBinding(bindingId: string) {
   }
 
   .rr-admin-control__nav-list {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 0.5rem;
   }
 
@@ -611,6 +621,12 @@ async function validateBinding(bindingId: string) {
     display: -webkit-box;
     -webkit-box-orient: vertical;
     overflow: hidden;
+  }
+}
+
+@media (max-width: 820px) {
+  .rr-admin-control__nav-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

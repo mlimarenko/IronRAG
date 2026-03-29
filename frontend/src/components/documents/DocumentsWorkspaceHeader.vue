@@ -34,6 +34,7 @@ const uploadFailureSummary = computed(() => {
 const hasActiveDocuments = computed(() => (props.activeCount ?? 0) > 0)
 const hasFailedDocuments = computed(() => (props.failedCount ?? 0) > 0)
 const hasCostSummary = computed(() => Boolean(props.costSummary && props.costSummary.totalCost > 0))
+const showTotalStat = computed(() => (props.totalCount ?? 0) > 0 || Boolean(props.hasDocuments))
 const showAvgCostStat = computed(
   () => hasCostSummary.value && (hasActiveDocuments.value || hasFailedDocuments.value),
 )
@@ -49,7 +50,7 @@ const showReadyStat = computed(() => {
   return readyCount < totalCount
 })
 const visibleStatCount = computed(() => {
-  let count = 1
+  let count = showTotalStat.value ? 1 : 0
   if (showReadyStat.value) count += 1
   if (hasActiveDocuments.value) count += 1
   if (hasFailedDocuments.value) count += 1
@@ -57,6 +58,7 @@ const visibleStatCount = computed(() => {
   if (showAvgCostStat.value) count += 1
   return count
 })
+const showSoloStatLayout = computed(() => Boolean(props.hasDocuments) && visibleStatCount.value <= 1)
 const compactOverview = computed(() => Boolean(props.hasDocuments) && visibleStatCount.value <= 2)
 
 function uploadFailureKindLabel(failure: DocumentUploadFailure): string | null {
@@ -96,7 +98,11 @@ defineExpose({ openUploader })
 <template>
   <header
     class="rr-docs-header"
-    :class="{ 'has-documents': Boolean(hasDocuments), 'is-compact': compactOverview }"
+    :class="{
+      'has-documents': Boolean(hasDocuments),
+      'is-compact': compactOverview,
+      'has-solo-stat': showSoloStatLayout,
+    }"
   >
     <section class="rr-docs-header__overview">
       <div class="rr-docs-header__top">
@@ -118,9 +124,12 @@ defineExpose({ openUploader })
 
       <div
         class="rr-docs-header__stats"
-        :class="{ 'is-sparse': visibleStatCount <= 3 }"
+        :class="{ 'is-sparse': visibleStatCount <= 3, 'is-solo': showSoloStatLayout }"
       >
-        <div class="rr-docs-header__stat">
+        <div
+          v-if="showTotalStat"
+          class="rr-docs-header__stat"
+        >
           <span class="rr-docs-header__stat-value">{{ totalCount ?? 0 }}</span>
           <span class="rr-docs-header__stat-label">{{ $t('documents.workspace.stats.total') }}</span>
         </div>
@@ -220,6 +229,10 @@ defineExpose({ openUploader })
   border-radius: 16px;
 }
 
+.rr-docs-header.has-solo-stat .rr-docs-header__overview {
+  gap: 4px;
+}
+
 .rr-docs-header.is-compact .rr-docs-header__top {
   gap: 7px;
 }
@@ -290,6 +303,11 @@ defineExpose({ openUploader })
   justify-content: start;
 }
 
+.rr-docs-header__stats.is-solo {
+  grid-template-columns: minmax(132px, 160px);
+  max-width: 160px;
+}
+
 .rr-docs-header.has-documents .rr-docs-header__stats {
   gap: 6px;
 }
@@ -320,6 +338,11 @@ defineExpose({ openUploader })
   gap: 1px;
   padding: 7px 9px;
   border-radius: 12px;
+}
+
+.rr-docs-header.has-solo-stat .rr-docs-header__stat {
+  padding: 7px 9px;
+  border-radius: 13px;
 }
 
 .rr-docs-header__stat-value {
@@ -391,6 +414,10 @@ defineExpose({ openUploader })
 }
 
 @media (min-width: 900px) {
+  .rr-docs-header.has-solo-stat .rr-docs-header__overview {
+    width: min(100%, 58rem);
+  }
+
   .rr-docs-header__top {
     grid-template-columns: minmax(0, 1fr) auto;
   }
@@ -463,6 +490,11 @@ defineExpose({ openUploader })
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .rr-docs-header__stats.is-solo {
+    grid-template-columns: minmax(124px, 156px);
+    max-width: 156px;
+  }
+
   .rr-docs-header.is-compact .rr-docs-header__stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 6px;
@@ -495,7 +527,37 @@ defineExpose({ openUploader })
   }
 }
 
+@media (max-width: 600px) {
+  .rr-docs-header.is-compact {
+    gap: 6px;
+  }
+
+  .rr-docs-header.is-compact .rr-docs-header__overview {
+    gap: 5px;
+    padding: 6px 8px;
+    border-radius: 14px;
+  }
+
+  .rr-docs-header.is-compact .rr-docs-header__top {
+    gap: 6px;
+  }
+
+  .rr-docs-header.is-compact .rr-docs-header__stats {
+    grid-template-columns: minmax(108px, 132px);
+    justify-content: start;
+  }
+
+  .rr-docs-header.is-compact .rr-docs-header__stat {
+    padding: 6px 8px;
+    border-radius: 11px;
+  }
+}
+
 @media (min-width: 1240px) {
+  .rr-docs-header.has-solo-stat .rr-docs-header__overview {
+    width: min(100%, 60rem);
+  }
+
   .rr-docs-header__top {
     gap: 14px;
   }
@@ -506,6 +568,11 @@ defineExpose({ openUploader })
 
   .rr-docs-header__stats.is-sparse {
     grid-template-columns: repeat(auto-fit, minmax(164px, 188px));
+  }
+
+  .rr-docs-header__stats.is-solo {
+    grid-template-columns: minmax(148px, 176px);
+    max-width: 176px;
   }
 }
 
@@ -541,6 +608,11 @@ defineExpose({ openUploader })
     grid-template-columns: repeat(auto-fit, minmax(176px, 210px));
   }
 
+  .rr-docs-header__stats.is-solo {
+    grid-template-columns: minmax(156px, 184px);
+    max-width: 184px;
+  }
+
   .rr-docs-header__stat {
     gap: 3px;
     padding: 10px 12px;
@@ -568,6 +640,11 @@ defineExpose({ openUploader })
 
   .rr-docs-header__stats.is-sparse {
     grid-template-columns: repeat(auto-fit, minmax(190px, 224px));
+  }
+
+  .rr-docs-header__stats.is-solo {
+    grid-template-columns: minmax(164px, 192px);
+    max-width: 192px;
   }
 }
 
@@ -626,6 +703,11 @@ defineExpose({ openUploader })
 
   .rr-docs-header__stats.is-sparse {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .rr-docs-header__stats.is-solo {
+    grid-template-columns: repeat(1, minmax(0, 1fr));
+    max-width: none;
   }
 
   .rr-docs-header.has-documents .rr-docs-header__stat {

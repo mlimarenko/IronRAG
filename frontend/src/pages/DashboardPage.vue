@@ -93,6 +93,14 @@ const heroNarrative = computed(() => {
     return narrative.value
   }
 
+  if (attentionItems.value.length > 0) {
+    return ''
+  }
+
+  if (isSettledOverview.value && totalDocuments <= 1 && attentionItems.value.length === 0) {
+    return ''
+  }
+
   return attentionItems.value.length > 0 || inFlightCount > 0 || visibleMetrics.value.length <= 1
     ? narrative.value
     : ''
@@ -108,6 +116,9 @@ const showStatusChart = computed(() => Boolean(chartSummary.value) && !isSettled
 const showStatsStrip = computed(() => visibleMetrics.value.length > 1)
 const compactRecentDocuments = computed(
   () => !showStatusChart.value && recentDocuments.value.length > 0 && recentDocuments.value.length <= 3,
+)
+const showSingleSettledCard = computed(
+  () => !showStatusChart.value && recentDocuments.value.length <= 1,
 )
 const heroFacts = computed<DashboardHeroFact[]>(() => {
   const shellContext = shellStore.context
@@ -184,7 +195,7 @@ const heroFacts = computed<DashboardHeroFact[]>(() => {
 
       <div
         class="rr-dashboard__overview"
-        :class="{ 'is-solo': !showStatsStrip }"
+        :class="{ 'is-solo': !showStatsStrip, 'is-solo-doc': showSingleSettledCard }"
       >
         <DashboardHero
           :narrative="heroNarrative"
@@ -204,7 +215,7 @@ const heroFacts = computed<DashboardHeroFact[]>(() => {
 
       <div
         class="rr-dashboard__workbench"
-        :class="{ 'is-settled': !showStatusChart }"
+        :class="{ 'is-settled': !showStatusChart, 'is-solo-doc': showSingleSettledCard }"
       >
         <DashboardStatusChartCard
           v-if="showStatusChart"
