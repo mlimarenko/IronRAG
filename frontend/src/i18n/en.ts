@@ -30,6 +30,7 @@ const en = {
     home: 'Home',
     documents: 'Documents',
     graph: 'Graph',
+    assistant: 'AI',
     swagger: 'Swagger',
     admin: 'Admin',
     access: {
@@ -56,9 +57,145 @@ const en = {
       query_answer: 'answers',
       vision: 'vision',
     },
-    deleteWorkspaceWarning: 'This will permanently delete the workspace and all its libraries and documents. This action cannot be undone.',
-    deleteLibraryWarning: 'This will permanently delete the library and all its documents. This action cannot be undone.',
+    deleteWorkspaceWarning:
+      'This will permanently delete the workspace and all its libraries and documents. This action cannot be undone.',
+    deleteLibraryWarning:
+      'This will permanently delete the library and all its documents. This action cannot be undone.',
     logout: 'Log out',
+  },
+  assistant: {
+    eyebrow: 'AI Workspace',
+    title: 'Knowledge base chat',
+    subtitle:
+      'Ask questions about the active library {library} and attach new files directly inside the conversation when needed.',
+    you: 'You',
+    sessionFallback: 'Session · {createdAt}',
+    roomMessage:
+      'Active library: {library}. Attachments are uploaded into the same knowledge base before they can ground answers.',
+    actions: {
+      newSession: 'New session',
+      sessions: 'Sessions',
+      context: 'Context',
+      openDocuments: 'Open documents',
+      openGraph: 'Open graph',
+      openAiAdmin: 'Open AI setup',
+      attach: 'Attach',
+      send: 'Send',
+      showSessions: 'Show sessions',
+      hideSessions: 'Hide sessions',
+      showContext: 'Show context',
+      hideContext: 'Hide context',
+      retry: 'Retry',
+    },
+    states: {
+      noLibraryTitle: 'Select a library first',
+      noLibraryBody:
+        'The assistant runs on top of the active library. Select a library in the shell to open grounded chat.',
+      bindingTitle: 'AI answer binding is required',
+      bindingBody:
+        'The active library does not yet have the canonical binding needed for grounded answer generation.',
+      bindingDetail: 'Open AI setup and assign a model binding for the query_answer purpose.',
+      errorTitle: 'Chat is unavailable',
+    },
+    toolbar: {
+      sessionsTitle: 'Sessions',
+      sessions: 'Sessions: {count} / {max}',
+      attachments: 'PDF, DOCX, PPTX, and images are uploaded into the same library.',
+      rollover: 'A new session will replace the oldest one in this library.',
+    },
+    notices: {
+      newSession: 'A new library-scoped chat session is open.',
+      sessionRolledOver:
+        'A new library-scoped chat session is open. The oldest session in this library was replaced.',
+      filesUploadedWithQuestion:
+        '{count} file(s) uploaded. If processing is still running, the current answer may not include them yet.',
+      filesUploadedOnly:
+        'Files were uploaded into the library. As soon as they are ready, you can ask about them here.',
+    },
+    status: {
+      executingTitle: 'Preparing the answer',
+      executing: 'The assistant is assembling grounded context and drafting an answer…',
+    },
+    progress: {
+      retrieving: 'Retrieving relevant documents',
+      grounding: 'Grounding graph and evidence',
+      answering: 'Drafting the answer',
+    },
+    starters: {
+      summary: 'Give me a short summary of the library and its current state.',
+      risks: 'Show the main risks and what currently needs attention in this library.',
+      documents: 'List the freshest documents and explain briefly what they are about.',
+    },
+    chat: {
+      roomsEmpty: 'No sessions yet',
+      roomEmpty: 'Select or create a session from the left rail',
+      newMessages: 'New messages',
+      messageDeleted: 'Message deleted',
+      messagesEmpty: 'Start the first grounded conversation',
+      conversationStarted: 'Conversation started',
+      typeMessage: 'Ask something about the library',
+      search: 'Search sessions',
+      searchEmptyTitle: 'No sessions found',
+      searchEmptyBody: 'Try clearing the search or start a new session.',
+      emptyConversationTitle: 'Start a new grounded conversation',
+      emptyConversationBody:
+        'Ask about documents, entities, or attach fresh files to test the knowledge base directly in chat.',
+      now: 'now',
+      isOnline: 'is online',
+      lastSeen: 'last active',
+      isTyping: 'is typing…',
+      cancelSelect: 'Cancel selection',
+    },
+    evidence: {
+      eyebrow: 'Answer context',
+      title: 'Answer trace',
+      subtitle: 'What the assistant is using on top of library {library}.',
+      modeLabel: 'Mode',
+      sessionsLabel: 'Sessions',
+      errorTitle: 'The last query finished with an error',
+      emptyTitle: 'No query yet',
+      emptyBody:
+        'After the first question this panel will show the bundle, execution state, and top grounded references.',
+      emptyPromptDocuments: 'Ask what the library knows about a specific document.',
+      emptyPromptGraph: 'Ask about an entity, relationship, or topic from the graph.',
+      emptyPromptCompare: 'Compare multiple documents or newly uploaded attachments.',
+      executingTitle: 'Answer in progress',
+      executionTitle: 'Latest grounded run',
+      executionState: 'State: {state}',
+      startedAt: 'Started: {value}',
+      completedAt: 'Completed: {value}',
+      failureCode: 'Failure code: {value}',
+      bundleLabel: 'Context',
+      bundleState: 'Context {state} · mode {strategy}',
+      executionStates: {
+        retrieving: 'retrieving',
+        completed: 'completed',
+        failed: 'failed',
+      },
+      bundleStates: {
+        ready: 'ready',
+        failed: 'failed',
+        assembling: 'assembling',
+      },
+      metrics: {
+        chunks: 'Chunk refs',
+        entities: 'Entity refs',
+        relations: 'Relation refs',
+        evidence: 'Evidence refs',
+      },
+      sections: {
+        chunks: 'Top chunk refs',
+        entities: 'Top entity refs',
+        relations: 'Top relation refs',
+        evidence: 'Top evidence refs',
+      },
+      labels: {
+        chunk: 'Chunk {id}',
+        entity: 'Entity {id}',
+        relation: 'Relation {id}',
+        evidence: 'Evidence {id}',
+      },
+    },
   },
   dashboard: {
     eyebrow: 'Library overview',
@@ -79,6 +216,8 @@ const en = {
       noUploadsHint: 'Upload the first files to start the overview.',
       documents: 'Documents',
       documentsHint: 'All files are ready for search and graph.',
+      documentsGraphCatchUpHint:
+        '{searchReady} ready for search, {graphReady} already visible in graph, {catchUp} still catching up.',
       nextCheck: 'Next check',
       reviewValue: '{count} item(s) need review',
       reviewHint: 'Start with the active warnings.',
@@ -88,23 +227,23 @@ const en = {
     metrics: {
       documents: 'Documents',
       inFlight: 'In flight',
-      ready: 'Ready',
+      graphReady: 'In graph',
       attention: 'Attention',
     },
     metricsHints: {
       documents: 'Files in this library',
       inFlightActive: 'Processing and queue are active',
       inFlightIdle: 'No items in the queue',
-      readyActive: '{count} ready to explore',
-      readyIdle: 'No ready files yet',
+      graphReadyActive: '{count} already visible in graph',
+      graphReadyIdle: 'Nothing in graph yet',
       attentionActive: '{count} item(s) need review',
       attentionQuiet: 'No open issues',
     },
     narrative: {
       empty: 'Upload files to start the library overview.',
-      attention: '{failed} failed, {inFlight} in flight, graph {graph}.',
-      active: '{total} documents, {inFlight} still processing, graph {graph}.',
-      settled: '{total} documents, {ready} ready, graph {graph}.',
+      attention: '{failed} failed, {inFlight} in flight, {graphReady} in graph, graph {graph}.',
+      active: '{total} documents, {inFlight} still processing, {graphReady} in graph, graph {graph}.',
+      settled: '{total} documents, {searchReady} search-ready, {graphReady} in graph, graph {graph}.',
     },
     graphStatus: {
       ready: 'ready',
@@ -133,6 +272,10 @@ const en = {
       warningsTitle: 'Warnings',
       warningsMessage: '{count} warning(s) — some documents processed with limitations.',
       warningsAction: 'Details',
+      graphCatchUpTitle: 'Graph is still catching up',
+      graphCatchUpMessage:
+        '{count} document(s) are already searchable but are not yet confirmed in the graph surface.',
+      graphCatchUpAction: 'Open documents',
       graphTitle: 'Knowledge graph',
       graphMessage: 'Graph is {status} — data will update shortly.',
       graphAction: 'Open graph',
@@ -149,15 +292,17 @@ const en = {
     chart: {
       eyebrow: 'Library status',
       title: 'Status mix',
-      subtitle: 'Ready vs processing vs failed.',
+      subtitle: 'In graph vs search-only vs in flight vs failed.',
       total: 'Total documents',
       empty: 'No status data yet.',
-      ready: 'Ready',
+      graphReady: 'In graph',
+      graphCatchUp: 'Search only',
       processing: 'In flight',
       failed: 'Failed',
       summaryAllReady: 'All {count} documents are ready.',
       summarySingleStatus: '{count} document(s) are {status}.',
-      summaryMixed: '{ready} ready, {processing} in flight, {failed} failed.',
+      summaryMixed:
+        '{graphReady} in graph, {graphCatchUp} search-only, {processing} in flight, {failed} failed.',
     },
   },
   dialogs: {
@@ -180,7 +325,8 @@ const en = {
     uploadCompactHint: 'Queued immediately.',
     uploadOnboardingCta: 'Add your first files',
     uploadOnboardingTitle: 'Upload documents',
-    uploadOnboardingDescription: 'Drop files here or click to browse. They enter the processing queue right away.',
+    uploadOnboardingDescription:
+      'Drop files here or click to browse. They enter the processing queue right away.',
     uploadInlineTitle: 'Add files',
     select: 'Select files',
     maxSize: 'up to {size} MB',
@@ -190,8 +336,7 @@ const en = {
       backends: {
         canonical_arango: 'Arango knowledge plane',
       },
-      subtitle:
-        'Upload, find, and inspect files in the active library.',
+      subtitle: 'Upload, find, and inspect files in the active library.',
       contextActive: '{total} documents, {active} still processing.',
       contextTotal: '{count} documents in this library.',
       contextEmpty: 'No documents yet.',
@@ -203,6 +348,7 @@ const en = {
       stats: {
         total: 'Total',
         ready: 'Ready',
+        graphReady: 'In graph',
         processing: 'Processing',
         failed: 'Failed',
         totalCost: 'Total cost',
@@ -219,14 +365,30 @@ const en = {
         cost: 'Cost',
         status: 'Status',
       },
+      processingStrip: {
+        title: 'In progress: {count}',
+        queued: 'Queued: {count}',
+        processing: 'Processing: {count}',
+        graphCatchUpTitle: 'Graph catch-up: {count}',
+        graphCatchUp: 'Search-ready without graph: {count}',
+      },
+      rowState: {
+        queuedEyebrow: 'Queued',
+        processingEyebrow: 'Processing now',
+        graphCatchUpEyebrow: 'Search already ready',
+        queuedDetail: 'Waiting for capacity and will continue automatically.',
+        processingDetail: 'Canonical ingestion is running and updates automatically.',
+        readyNoGraphDetail: 'Text is ready; graph coverage is still catching up.',
+        failedDetail: 'Processing stopped. Open the document to review details.',
+        progressLabel: '{percent}% complete',
+        lastActivity: 'Updated {time}',
+      },
       emptyTitle: 'This library is empty',
-      emptyDescription:
-        'Add one file or a batch to start working here.',
+      emptyDescription: 'Add one file or a batch to start working here.',
       selectDocumentDescription:
         'Select a document on the left to read the extracted text, review status, and act in place.',
       noMatchTitle: 'No documents match',
-      noMatchDescription:
-        'Clear search or status filters to see more files.',
+      noMatchDescription: 'Clear search or status filters to see more files.',
       activeBacklog: '{count} document(s) are still active.',
       liveSpend: 'Visible in-flight spend: {cost}.',
       primary: {
@@ -318,8 +480,7 @@ const en = {
     attemptShort: 'Attempt #{number}',
     averageCostHint: 'Average cost: {value}',
     loadingDetail: 'Loading document detail…',
-    uploadQueuedHint:
-      'Files enter the queue immediately and continue in the background.',
+    uploadQueuedHint: 'Files enter the queue immediately and continue in the background.',
     fileFormats: {
       pdf: 'PDF',
       docx: 'DOCX',
@@ -384,14 +545,14 @@ const en = {
       queued: 'Queued',
       processing: 'Processing',
       ready: 'Ready',
-      ready_no_graph: 'Ready',
+      ready_no_graph: 'Search ready',
       failed: 'Failed',
     },
     statuses: {
       queued: 'Queued',
       processing: 'Processing',
       ready: 'Ready',
-      ready_no_graph: 'Ready',
+      ready_no_graph: 'Search ready',
       failed: 'Failed',
     },
     accounting: {
@@ -625,8 +786,7 @@ const en = {
         failed: 'Failed',
       },
       truthNotes: {
-        readableWhileCatchingUp:
-          'Text is already usable while {backend} is still catching up.',
+        readableWhileCatchingUp: 'Text is already usable while {backend} is still catching up.',
         readableReady: 'Current extracted text is ready for read and search flows.',
         downstreamFailure: 'Downstream work settled in failure.',
         noInflightWork: 'No in-flight work remains for this document context.',
@@ -650,7 +810,8 @@ const en = {
       pageCount: 'Page count',
       extractionKind: 'Extraction kind',
       preview: 'Extracted text preview',
-      previewTruncated: 'Preview is truncated. Use Download text to inspect the full normalized body.',
+      previewTruncated:
+        'Preview is truncated. Use Download text to inspect the full normalized body.',
       normalizationStatus: 'Normalization',
       extractionRecovery: {
         label: 'Extraction recovery',
@@ -746,14 +907,16 @@ const en = {
           ordinary_backlog: 'The library is simply waiting behind older queued work.',
           isolated_capacity_wait:
             'The library is waiting for its reserved execution slice while general capacity stays busy elsewhere.',
-          blocked: 'The library has queued work, but a blocked runtime run still needs operator attention.',
+          blocked:
+            'The library has queued work, but a blocked runtime run still needs operator attention.',
           degraded:
             'The queue is moving, but visible liveness signals are degraded and should be watched.',
         },
       },
       graphProgress: {
         title: 'Graph extraction progress',
-        summary: 'Graph extraction is still running: {progress}% with {processed} of {total} chunks checkpointed.',
+        summary:
+          'Graph extraction is still running: {progress}% with {processed} of {total} chunks checkpointed.',
         stage: 'Stage',
         percent: 'Visible progress',
         providerCalls: 'Provider calls',
@@ -964,9 +1127,22 @@ const en = {
     loadingNode: 'Loading node details…',
     emptyTitle: 'Graph not ready yet',
     emptyDescription: 'Upload documents to generate the first nodes and links.',
+    emptyBuildingDescription:
+      'Documents are already uploaded, but the pipeline is still processing them before the first graph nodes and links appear.',
+    emptyCatchUpDescription:
+      'Documents are already searchable, but the graph is still catching up and has not exposed nodes yet.',
+    emptyTrackedDocumentsDetail: 'Documents currently in the library: {count}.',
     sparseTitle: 'Connections are still forming',
     sparseDescription: 'Add more documents or wait for extraction to finish.',
+    sparseBuildingDescription:
+      'Document nodes are already admitted, but entity and relation extraction is still running.',
+    sparseCatchUpDescription:
+      'Some documents are already searchable, but the graph is still catching up before all links appear.',
+    sparseSettledDescription:
+      'Documents are already in the graph, but no stable entities or relations have been extracted yet.',
     sparseDocumentsDetail: 'Documents currently on the graph: {count}.',
+    sparseQueueDetail: '{queued} queued, {processing} processing.',
+    sparseCatchUpDetail: 'Graph is still catching up for {count} search-ready document(s).',
     sparseGenerationDetail: 'Current graph extraction state: {state}.',
     failedTitle: 'Graph update failed',
     failedDescription: 'The latest graph update did not complete successfully.',
@@ -1031,7 +1207,7 @@ const en = {
     connectedNodes: 'Connected nodes',
     relatedEdges: 'Related edges',
     evidence: 'Evidence',
-    evidenceCount: '{count} evidence link(s)',
+    evidenceCount: '{count} supporting evidence fragment(s)',
     rebuildBacklog: '{count} document(s) are still queued or rebuilding graph coverage.',
     readyNoGraph: '{count} processed document(s) still have no graph evidence.',
     toolbarBacklog: '{count} in backlog',
@@ -1100,8 +1276,8 @@ const en = {
         pending: 'Mutation impact is still being detected.',
         targeted: 'Targeted refresh covers {count} affected graph target(s).',
         fallback_broad: 'Targeted refresh fell back to a broader graph rebuild.',
-          completed: 'Graph refresh completed.',
-          failed: 'Graph refresh failed.',
+        completed: 'Graph refresh completed.',
+        failed: 'Graph refresh failed.',
       },
       confidence: {
         high: 'High',
@@ -1248,7 +1424,8 @@ const en = {
     },
     extractionRecovery: {
       recovered: 'Some visible support was admitted only after extraction recovery.',
-      partial: 'Some visible support is still partial because extraction could not be fully recovered.',
+      partial:
+        'Some visible support is still partial because extraction could not be fully recovered.',
       failed: 'Some expected support is still missing after extraction recovery failed.',
     },
   },
@@ -1298,22 +1475,26 @@ const en = {
       access: {
         eyebrow: 'Access',
         title: 'Access and tokens',
-        subtitle: 'Control who can work in the active workspace and which tokens can act on its behalf.',
+        subtitle:
+          'Control who can work in the active workspace and which tokens can act on its behalf.',
       },
       mcp: {
         eyebrow: 'MCP',
         title: 'MCP setup',
-        subtitle: 'Copy the canonical MCP connection snippets for Codex, Cursor, Claude, VS Code, or any HTTP MCP client.',
+        subtitle:
+          'Copy the canonical MCP connection snippets for Codex, Cursor, Claude, VS Code, or any HTTP MCP client.',
       },
       operations: {
         eyebrow: 'Operations',
         title: 'Operations and audit',
-        subtitle: 'Watch queue health, active warnings, and recent control-plane activity for the active library.',
+        subtitle:
+          'Watch queue health, active warnings, and recent control-plane activity for the active library.',
       },
       ai: {
         eyebrow: 'AI setup',
         title: 'AI setup',
-        subtitle: 'Set workspace credentials, save model profiles, and wire each library task to one working path.',
+        subtitle:
+          'Set workspace credentials, save model profiles, and wire each library task to one working path.',
       },
       pricing: {
         eyebrow: 'Model prices',
@@ -1383,11 +1564,18 @@ const en = {
           'Use the rustragMemory MCP server as the primary source for project memory, runbooks, policies, decisions, and factual team knowledge stored in RustRAG libraries.',
           'Start with tools/list, then call list_workspaces and list_libraries so you understand which workspaces and libraries are actually visible to the current token.',
           'If the user question depends on dates, owners, prices, procedures, incidents, notes, agreements, or other team facts, search with search_documents before answering from memory.',
-          'After every relevant hit, call read_document in full mode and ground your answer in the document content, not only in the title, score, or short hit metadata.',
+          'Search iteratively and deeply: refine the query, repeat search_documents, and widen the candidate set until you gather enough grounded evidence to answer or you have clearly exhausted the library.',
+          'After every relevant hit, call read_document in full mode and ground your answer in the document content, not only in the title, score, or short hit metadata. Read many documents when needed instead of stopping after the first one or two matches.',
+          'Do not narrate the retrieval process, document reads, or chunk references unless the user explicitly asks for sources or evidence.',
+          'In the final answer, do not say “I found in the documents”, “I read documents”, or “the library contains a document” unless the user explicitly asks for sources; just present the conclusion and the facts.',
+          'Start with the answer itself instead of preambles like “in the library”, “in the documents”, or “in the available materials”.',
+          'Prefer wording like “The loyalty program works as ...” instead of “The materials describe ...” or “The library contains ...”.',
+          'Do not ask the user to resend or upload a document until you have exhausted search_documents and read_document against the currently available library.',
+          'If the library is still insufficient, give the best partial answer you can and describe the missing facts or subject matter rather than saying which document is missing.',
           'When you need to create memory or update existing memory, use upload_documents or update_document and then poll get_mutation_status until the mutation reaches a terminal state.',
           'If a new library rejects uploads, explain that the library may still need active AI bindings in Admin -> AI, at minimum extract_graph and usually embed_chunk.',
           'If search_documents or read_document sees a document slightly before or after the mutation reaches its terminal state, use get_mutation_status as lifecycle confirmation and read/search as the practical availability check.',
-          'In the final answer, briefly name the documents you used and the facts you extracted from them.',
+          'In the final answer, focus on the conclusion and the facts rather than listing every document you read, unless the user explicitly asks for sources.',
         ],
       },
       recommendedFlowTitle: 'Recommended flow',
@@ -1421,8 +1609,7 @@ const en = {
           vendor: 'OpenAI',
           subtitle: 'Shared CLI and IDE MCP config.',
           configLabel: '~/.codex/config.toml',
-          note:
-            'Codex supports both CLI registration and a persistent TOML config, so this is the quickest path for operators using Codex day to day.',
+          note: 'Codex supports both CLI registration and a persistent TOML config, so this is the quickest path for operators using Codex day to day.',
           steps: {
             token: 'Export the plaintext RustRAG token to RUSTRAG_MCP_TOKEN.',
             register: 'Register the HTTP MCP server once with the canonical RustRAG endpoint.',
@@ -1434,8 +1621,7 @@ const en = {
           vendor: 'Cursor',
           subtitle: 'User-level MCP config with bearer headers.',
           configLabel: '~/.cursor/mcp.json',
-          note:
-            'Cursor reads mcp.json directly, so the only moving pieces are the RustRAG URL and the Authorization header.',
+          note: 'Cursor reads mcp.json directly, so the only moving pieces are the RustRAG URL and the Authorization header.',
           steps: {
             token: 'Export RUSTRAG_MCP_TOKEN in the shell or environment that launches Cursor.',
             config: 'Add one HTTP MCP server entry to ~/.cursor/mcp.json.',
@@ -1447,8 +1633,7 @@ const en = {
           vendor: 'Claude Code',
           subtitle: 'Project-scoped HTTP MCP config.',
           configLabel: '.mcp.json',
-          note:
-            'Claude Code supports HTTP MCP servers through project or user config. A project .mcp.json keeps the setup explicit and easy to share.',
+          note: 'Claude Code supports HTTP MCP servers through project or user config. A project .mcp.json keeps the setup explicit and easy to share.',
           steps: {
             token: 'Export RUSTRAG_MCP_TOKEN before starting Claude Code.',
             config: 'Add one HTTP MCP server with a static Authorization header in .mcp.json.',
@@ -1461,8 +1646,7 @@ const en = {
           subtitle: 'Remote connector flow in Settings > Connectors.',
           configLabel: 'Settings > Connectors',
           authLabel: 'OAuth / authless',
-          note:
-            'Claude Desktop adds remote MCP connectors through Settings, not through a local JSON file. RustRAG currently exposes bearer-token HTTP, so direct desktop setup needs an authless or OAuth-capable gateway in front if you do not use Claude Code.',
+          note: 'Claude Desktop adds remote MCP connectors through Settings, not through a local JSON file. RustRAG currently exposes bearer-token HTTP, so direct desktop setup needs an authless or OAuth-capable gateway in front if you do not use Claude Code.',
           compatibilityBody:
             'Claude Desktop remote connectors are configured in the app UI and expect a directly reachable remote MCP server. RustRAG currently authenticates with a bearer token via {envVar}, so the clean path today is Claude Code or an intermediate gateway that presents OAuth or authless remote connector auth to Claude Desktop.',
           steps: {
@@ -1477,12 +1661,12 @@ const en = {
           vendor: 'GitHub Copilot',
           subtitle: 'Workspace MCP config for Agent mode.',
           configLabel: '.vscode/mcp.json',
-          note:
-            'VS Code uses mcp.json in the workspace or user profile. The workspace file is the clearest copy-paste path for a project-bound RustRAG connection.',
+          note: 'VS Code uses mcp.json in the workspace or user profile. The workspace file is the clearest copy-paste path for a project-bound RustRAG connection.',
           steps: {
             token: 'Set RUSTRAG_MCP_TOKEN in your environment before opening VS Code.',
             config: 'Create .vscode/mcp.json with one HTTP server entry for RustRAG.',
-            enable: 'Open Copilot Chat in Agent mode and enable the MCP server in the tools picker.',
+            enable:
+              'Open Copilot Chat in Agent mode and enable the MCP server in the tools picker.',
           },
         },
         generic: {
@@ -1490,12 +1674,13 @@ const en = {
           vendor: 'Generic HTTP',
           subtitle: 'Canonical MCP HTTP shape and health probe.',
           configLabel: 'Any MCP client',
-          note:
-            'If a client accepts raw MCP HTTP configuration, only the endpoint URL and Authorization header are required.',
+          note: 'If a client accepts raw MCP HTTP configuration, only the endpoint URL and Authorization header are required.',
           steps: {
-            token: 'Mint a RustRAG token and keep it in a bearer-token capable secret store or env var.',
+            token:
+              'Mint a RustRAG token and keep it in a bearer-token capable secret store or env var.',
             endpoint: 'Point the client at the canonical /v1/mcp HTTP endpoint.',
-            capabilities: 'Probe /v1/mcp/capabilities first if you want a quick auth and reachability check.',
+            capabilities:
+              'Probe /v1/mcp/capabilities first if you want a quick auth and reachability check.',
           },
         },
       },
@@ -1525,7 +1710,8 @@ const en = {
         'Tokens let external tools and operators act against the active library without using an interactive login.',
       emptyDetailActionHint: 'Open the token dialog for this active context.',
       nextStepsTitle: 'What happens next',
-      nextStepsScope: 'The token will be scoped against the active library context shown on this page.',
+      nextStepsScope:
+        'The token will be scoped against the active library context shown on this page.',
       nextStepsGrants: 'You choose the grants in the creation dialog before the token is issued.',
       nextStepsCopy: 'The plaintext token is shown once and should be copied immediately.',
       noResultsDetail: 'Clear the current search to see visible tokens in this workspace again.',
@@ -1685,8 +1871,7 @@ const en = {
       updatePreset: 'Update profile',
       emptyPresets: 'No model profiles yet. Save the first profile for a selected model.',
       editorPromptTitle: 'Choose what to configure next',
-      editorPromptDescription:
-        'Pick one item from the left and edit it here.',
+      editorPromptDescription: 'Pick one item from the left and edit it here.',
       openSection: 'Open section',
       updateBinding: 'Update task',
       createBinding: 'Set task',
@@ -1700,7 +1885,8 @@ const en = {
       advancedSettings: 'Advanced settings',
       useCase: 'Use case',
       assignmentsTitle: 'Library tasks',
-      assignmentsSubtitle: 'Choose one credential and one model profile for each task in {library}.',
+      assignmentsSubtitle:
+        'Choose one credential and one model profile for each task in {library}.',
       bindingsTitle: 'Library assignments',
       bindingsSubtitle: 'Working assignments for the active library.',
       summary: {
@@ -1751,7 +1937,8 @@ const en = {
       editPrice: 'Edit price',
       searchPlaceholder: 'Search provider, model, or billing unit',
       newDraft: 'Start new price',
-      newDraftHint: 'Select a current price to edit it, or start a new draft for another model and billing unit.',
+      newDraftHint:
+        'Select a current price to edit it, or start a new draft for another model and billing unit.',
       originWorkspace: 'Current price',
       originBaseline: 'Catalog baseline',
       scheduleTitle: 'Effective period',
@@ -1811,7 +1998,7 @@ const en = {
     statusBadge: {
       active: 'Active',
       ready: 'Ready',
-      ready_no_graph: 'Ready',
+      ready_no_graph: 'Search ready',
       processing: 'Processing',
       failed: 'Failed',
       queued: 'Queued',

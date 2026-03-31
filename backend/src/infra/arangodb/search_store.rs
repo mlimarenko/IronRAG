@@ -70,7 +70,7 @@ pub struct KnowledgeEntitySearchRow {
     pub entity_id: Uuid,
     pub workspace_id: Uuid,
     pub library_id: Uuid,
-    pub canonical_name: String,
+    pub canonical_label: String,
     pub entity_type: String,
     pub summary: Option<String>,
     pub score: f64,
@@ -82,7 +82,7 @@ pub struct KnowledgeRelationSearchRow {
     pub workspace_id: Uuid,
     pub library_id: Uuid,
     pub predicate: String,
-    pub canonical_label: String,
+    pub normalized_assertion: String,
     pub summary: Option<String>,
     pub score: f64,
 }
@@ -343,7 +343,8 @@ impl ArangoSearchStore {
         limit: usize,
     ) -> anyhow::Result<Vec<KnowledgeChunkSearchRow>> {
         let normalized_limit = limit.max(1);
-        let query_lower = query.trim().to_ascii_lowercase();
+        let query_lower = query.trim().to_lowercase();
+        let query_terms = lexical_query_terms(query);
         let cursor = self
             .client
             .query_json(
@@ -352,9 +353,13 @@ impl ArangoSearchStore {
                    AND (
                         ANALYZER(doc.normalized_text IN TOKENS(@query, 'text_en'), 'text_en')
                         OR ANALYZER(doc.content_text IN TOKENS(@query, 'text_en'), 'text_en')
+                        OR ANALYZER(doc.normalized_text IN TOKENS(@query, 'text_ru'), 'text_ru')
+                        OR ANALYZER(doc.content_text IN TOKENS(@query, 'text_ru'), 'text_ru')
                         OR
                         ANALYZER(PHRASE(doc.normalized_text, @query, 'text_en'), 'text_en')
                         OR ANALYZER(PHRASE(doc.content_text, @query, 'text_en'), 'text_en')
+                        OR ANALYZER(PHRASE(doc.normalized_text, @query, 'text_ru'), 'text_ru')
+                        OR ANALYZER(PHRASE(doc.content_text, @query, 'text_ru'), 'text_ru')
                    )
                  LET score = BM25(doc)
                  SORT score DESC, doc.chunk_id ASC
@@ -384,8 +389,7 @@ impl ArangoSearchStore {
             return Ok(rows);
         }
 
-        let should_merge_direct_scan =
-            rows.is_empty() || query_lower.split_whitespace().nth(1).is_some();
+        let should_merge_direct_scan = rows.is_empty() || query_terms.len() > 1;
         if !should_merge_direct_scan {
             return Ok(rows);
         }
@@ -400,17 +404,31 @@ impl ArangoSearchStore {
                 "FOR chunk IN @@collection
                  FILTER chunk.library_id == @library_id
                    AND chunk.chunk_state == 'ready'
-                   AND (
-                        CONTAINS(LOWER(chunk.normalized_text), @query_lower)
-                        OR CONTAINS(LOWER(chunk.content_text), @query_lower)
-                   )
-                 LET normalized_pos = FIND_FIRST(LOWER(chunk.normalized_text), @query_lower)
-                 LET content_pos = FIND_FIRST(LOWER(chunk.content_text), @query_lower)
-                 LET earliest_pos = MIN([
-                    normalized_pos >= 0 ? normalized_pos : 2147483647,
-                    content_pos >= 0 ? content_pos : 2147483647
-                 ])
-                 LET score = 1000000 - earliest_pos
+                 LET normalized_lower = LOWER(chunk.normalized_text)
+                 LET content_lower = LOWER(chunk.content_text)
+                 LET matched_terms = UNIQUE(
+                    FOR term IN @query_terms
+                      FILTER CONTAINS(normalized_lower, term)
+                         OR CONTAINS(content_lower, term)
+                      RETURN term
+                 )
+                 FILTER LENGTH(matched_terms) > 0
+                 LET exact_match =
+                    CONTAINS(normalized_lower, @query_lower)
+                    OR CONTAINS(content_lower, @query_lower)
+                 LET earliest_pos = MIN(
+                    FOR term IN matched_terms
+                      LET normalized_pos = FIND_FIRST(normalized_lower, term)
+                      LET content_pos = FIND_FIRST(content_lower, term)
+                      RETURN MIN([
+                        normalized_pos >= 0 ? normalized_pos : 2147483647,
+                        content_pos >= 0 ? content_pos : 2147483647
+                      ])
+                 )
+                 LET score =
+                    (exact_match ? 1000000 : 0)
+                    + (LENGTH(matched_terms) * 10000)
+                    - earliest_pos
                  SORT score DESC, chunk.revision_id DESC, chunk.chunk_index ASC
                  LIMIT @limit
                  RETURN {
@@ -428,6 +446,7 @@ impl ArangoSearchStore {
                     "@collection": KNOWLEDGE_CHUNK_COLLECTION,
                     "library_id": library_id,
                     "query_lower": query_lower,
+                    "query_terms": query_terms,
                     "limit": normalized_limit,
                 }),
             )
@@ -474,12 +493,18 @@ impl ArangoSearchStore {
             .query_json(
                 "FOR doc IN @@view
                  SEARCH doc.library_id == @library_id
+                   AND doc.entity_id != null
+                   AND doc.entity_state == 'active'
                    AND (
-                        ANALYZER(doc.canonical_name IN TOKENS(@query, 'text_en'), 'text_en')
+                        ANALYZER(doc.canonical_label IN TOKENS(@query, 'text_en'), 'text_en')
                         OR ANALYZER(doc.summary IN TOKENS(@query, 'text_en'), 'text_en')
+                        OR ANALYZER(doc.canonical_label IN TOKENS(@query, 'text_ru'), 'text_ru')
+                        OR ANALYZER(doc.summary IN TOKENS(@query, 'text_ru'), 'text_ru')
                         OR
-                        ANALYZER(PHRASE(doc.canonical_name, @query, 'text_en'), 'text_en')
+                        ANALYZER(PHRASE(doc.canonical_label, @query, 'text_en'), 'text_en')
                         OR ANALYZER(PHRASE(doc.summary, @query, 'text_en'), 'text_en')
+                        OR ANALYZER(PHRASE(doc.canonical_label, @query, 'text_ru'), 'text_ru')
+                        OR ANALYZER(PHRASE(doc.summary, @query, 'text_ru'), 'text_ru')
                    )
                  LET score = BM25(doc)
                  SORT score DESC, doc.entity_id ASC
@@ -488,7 +513,7 @@ impl ArangoSearchStore {
                     entity_id: doc.entity_id,
                     workspace_id: doc.workspace_id,
                     library_id: doc.library_id,
-                    canonical_name: doc.canonical_name,
+                    canonical_label: doc.canonical_label,
                     entity_type: doc.entity_type,
                     summary: doc.summary,
                     score: score
@@ -516,14 +541,22 @@ impl ArangoSearchStore {
             .query_json(
                 "FOR doc IN @@view
                  SEARCH doc.library_id == @library_id
+                   AND doc.relation_id != null
+                   AND doc.relation_state == 'active'
                    AND (
                         ANALYZER(doc.predicate IN TOKENS(@query, 'text_en'), 'text_en')
-                        OR ANALYZER(doc.canonical_label IN TOKENS(@query, 'text_en'), 'text_en')
+                        OR ANALYZER(doc.normalized_assertion IN TOKENS(@query, 'text_en'), 'text_en')
                         OR ANALYZER(doc.summary IN TOKENS(@query, 'text_en'), 'text_en')
+                        OR ANALYZER(doc.predicate IN TOKENS(@query, 'text_ru'), 'text_ru')
+                        OR ANALYZER(doc.normalized_assertion IN TOKENS(@query, 'text_ru'), 'text_ru')
+                        OR ANALYZER(doc.summary IN TOKENS(@query, 'text_ru'), 'text_ru')
                         OR
                         ANALYZER(PHRASE(doc.predicate, @query, 'text_en'), 'text_en')
-                        OR ANALYZER(PHRASE(doc.canonical_label, @query, 'text_en'), 'text_en')
+                        OR ANALYZER(PHRASE(doc.normalized_assertion, @query, 'text_en'), 'text_en')
                         OR ANALYZER(PHRASE(doc.summary, @query, 'text_en'), 'text_en')
+                        OR ANALYZER(PHRASE(doc.predicate, @query, 'text_ru'), 'text_ru')
+                        OR ANALYZER(PHRASE(doc.normalized_assertion, @query, 'text_ru'), 'text_ru')
+                        OR ANALYZER(PHRASE(doc.summary, @query, 'text_ru'), 'text_ru')
                    )
                  LET score = BM25(doc)
                  SORT score DESC, doc.relation_id ASC
@@ -533,7 +566,7 @@ impl ArangoSearchStore {
                     workspace_id: doc.workspace_id,
                     library_id: doc.library_id,
                     predicate: doc.predicate,
-                    canonical_label: doc.canonical_label,
+                    normalized_assertion: doc.normalized_assertion,
                     summary: doc.summary,
                     score: score
                  }",
@@ -645,6 +678,22 @@ fn vector_search_options(n_probe: Option<u64>) -> serde_json::Value {
         .unwrap_or_else(|| serde_json::json!({}))
 }
 
+fn lexical_query_terms(query: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for token in query
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '/')
+        .map(str::trim)
+        .filter(|token| token.chars().count() >= 3)
+        .map(str::to_lowercase)
+    {
+        if seen.insert(token.clone()) {
+            terms.push(token);
+        }
+    }
+    terms
+}
+
 fn decode_single_result<T>(cursor: serde_json::Value) -> anyhow::Result<T>
 where
     T: for<'de> Deserialize<'de>,
@@ -674,4 +723,25 @@ where
         .cloned()
         .ok_or_else(|| anyhow!("ArangoDB cursor response is missing result"))?;
     serde_json::from_value(result).context("failed to decode ArangoDB result rows")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lexical_query_terms;
+
+    #[test]
+    fn lexical_query_terms_keep_cyrillic_and_deduplicate() {
+        assert_eq!(
+            lexical_query_terms(
+                "Кассовый сервер cashserver /system/info endpoint кассовый"
+            ),
+            vec![
+                "кассовый".to_string(),
+                "сервер".to_string(),
+                "cashserver".to_string(),
+                "/system/info".to_string(),
+                "endpoint".to_string(),
+            ]
+        );
+    }
 }

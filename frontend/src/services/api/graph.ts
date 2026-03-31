@@ -1,6 +1,7 @@
 import type {
   GraphCanonicalSummary,
   GraphConvergenceStatus,
+  GraphDocumentPipelineCounters,
   GraphDiagnostics,
   GraphEdge,
   GraphEvidence,
@@ -16,6 +17,7 @@ import { resolveDefaultGraphLayoutMode } from 'src/models/ui/graph'
 import type { DashboardAttentionItem } from 'src/models/ui/dashboard'
 import { i18n } from 'src/lib/i18n'
 import { useShellStore } from 'src/stores/shell'
+import { fetchDocumentSummaryCounters } from './documents'
 import { ApiClientError, apiHttp, unwrap } from './http'
 
 interface RawKnowledgeDocumentRow {
@@ -227,10 +229,21 @@ export interface GraphSurfaceHeartbeat {
   graphGeneration: number
   graphGenerationState: string | null
   lastBuiltAt: string | null
+  documentCounters: GraphDocumentPipelineCounters
   warning: string | null
 }
 
 type RawRow = Record<string, unknown>
+
+function emptyDocumentCounters(): GraphDocumentPipelineCounters {
+  return {
+    queued: 0,
+    processing: 0,
+    ready: 0,
+    readyNoGraph: 0,
+    failed: 0,
+  }
+}
 
 function normalizeKnowledgeDocumentRow(row: RawRow): RawKnowledgeDocumentRow {
   return {
@@ -244,7 +257,9 @@ function normalizeKnowledgeDocumentRow(row: RawRow): RawKnowledgeDocumentRow {
     title: (row.title ?? null) as string | null,
     documentState: String(row.documentState ?? row.document_state ?? ''),
     activeRevisionId: (row.activeRevisionId ?? row.active_revision_id ?? null) as string | null,
-    readableRevisionId: (row.readableRevisionId ?? row.readable_revision_id ?? null) as string | null,
+    readableRevisionId: (row.readableRevisionId ?? row.readable_revision_id ?? null) as
+      | string
+      | null,
     latestRevisionNo: (row.latestRevisionNo ?? row.latest_revision_no ?? null) as number | null,
     createdAt: String(row.createdAt ?? row.created_at ?? ''),
     updatedAt: String(row.updatedAt ?? row.updated_at ?? ''),
@@ -277,7 +292,9 @@ function normalizeKnowledgeRevisionRow(row: RawRow): RawKnowledgeRevisionRow {
     textReadableAt: (row.textReadableAt ?? row.text_readable_at ?? null) as string | null,
     vectorReadyAt: (row.vectorReadyAt ?? row.vector_ready_at ?? null) as string | null,
     graphReadyAt: (row.graphReadyAt ?? row.graph_ready_at ?? null) as string | null,
-    supersededByRevisionId: (row.supersededByRevisionId ?? row.superseded_by_revision_id ?? null) as string | null,
+    supersededByRevisionId: (row.supersededByRevisionId ??
+      row.superseded_by_revision_id ??
+      null) as string | null,
     createdAt: String(row.createdAt ?? row.created_at ?? ''),
   }
 }
@@ -298,8 +315,8 @@ function normalizeKnowledgeChunkRow(row: RawRow): RawKnowledgeChunkRow {
     spanStart: (row.spanStart ?? row.span_start ?? null) as number | null,
     spanEnd: (row.spanEnd ?? row.span_end ?? null) as number | null,
     tokenCount: (row.tokenCount ?? row.token_count ?? null) as number | null,
-    sectionPath: ((row.sectionPath ?? row.section_path ?? []) as string[]),
-    headingTrail: ((row.headingTrail ?? row.heading_trail ?? []) as string[]),
+    sectionPath: (row.sectionPath ?? row.section_path ?? []) as string[],
+    headingTrail: (row.headingTrail ?? row.heading_trail ?? []) as string[],
     chunkState: String(row.chunkState ?? row.chunk_state ?? ''),
     textGeneration: (row.textGeneration ?? row.text_generation ?? null) as number | null,
     vectorGeneration: (row.vectorGeneration ?? row.vector_generation ?? null) as number | null,
@@ -307,18 +324,43 @@ function normalizeKnowledgeChunkRow(row: RawRow): RawKnowledgeChunkRow {
 }
 
 function normalizeKnowledgeGenerationRow(row: RawRow): RawKnowledgeLibraryGenerationRow {
+  const degradedState = String(
+    row.degradedState ?? row.degraded_state ?? row.generationState ?? row.generation_state ?? '',
+  )
+  const updatedAt = String(
+    row.updatedAt ??
+      row.updated_at ??
+      row.completedAt ??
+      row.completed_at ??
+      row.createdAt ??
+      row.created_at ??
+      '',
+  )
+
   return {
     key: String(row.key ?? row._key ?? ''),
     arangoId: (row.arangoId ?? row._id ?? null) as string | null,
     arangoRev: (row.arangoRev ?? row._rev ?? null) as string | null,
-    generationId: String(row.generationId ?? row.generation_id ?? ''),
+    generationId: String(row.generationId ?? row.generation_id ?? row.id ?? ''),
     workspaceId: String(row.workspaceId ?? row.workspace_id ?? ''),
     libraryId: String(row.libraryId ?? row.library_id ?? ''),
-    activeTextGeneration: Number(row.activeTextGeneration ?? row.active_text_generation ?? 0),
-    activeVectorGeneration: Number(row.activeVectorGeneration ?? row.active_vector_generation ?? 0),
-    activeGraphGeneration: Number(row.activeGraphGeneration ?? row.active_graph_generation ?? 0),
-    degradedState: String(row.degradedState ?? row.degraded_state ?? ''),
-    updatedAt: String(row.updatedAt ?? row.updated_at ?? ''),
+    activeTextGeneration: Number(
+      row.activeTextGeneration ??
+        row.active_text_generation ??
+        (degradedState === 'text_readable' ? 1 : 0),
+    ),
+    activeVectorGeneration: Number(
+      row.activeVectorGeneration ??
+        row.active_vector_generation ??
+        (degradedState === 'vector_ready' ? 1 : 0),
+    ),
+    activeGraphGeneration: Number(
+      row.activeGraphGeneration ??
+        row.active_graph_generation ??
+        (degradedState === 'graph_ready' || degradedState === 'ready' ? 1 : 0),
+    ),
+    degradedState,
+    updatedAt,
   }
 }
 
@@ -452,6 +494,7 @@ function buildEmptySurface(): GraphSurfaceResponse {
     hiddenNodeCount: 0,
     filteredArtifactCount: 0,
     lastBuiltAt: null,
+    documentCounters: emptyDocumentCounters(),
     overlay: {
       searchQuery: '',
       searchHits: [],
@@ -523,11 +566,7 @@ function mapConvergenceStatus(
   if (graphStatus === 'ready') {
     return 'current'
   }
-  if (
-    graphStatus === 'partial' ||
-    graphStatus === 'rebuilding' ||
-    generationState === 'accepted'
-  ) {
+  if (graphStatus === 'partial' || graphStatus === 'rebuilding' || generationState === 'accepted') {
     return 'partial'
   }
   if (graphStatus === 'failed' || graphStatus === 'stale') {
@@ -536,7 +575,10 @@ function mapConvergenceStatus(
   return null
 }
 
-function projectionWarning(graphStatus: GraphStatus, generationState: string | null): string | null {
+function projectionWarning(
+  graphStatus: GraphStatus,
+  generationState: string | null,
+): string | null {
   if (graphStatus === 'failed') {
     return 'The canonical Arango knowledge graph generation failed.'
   }
@@ -559,6 +601,7 @@ function buildSurface(
   rawNodes: GraphNode[],
   rawEdges: GraphEdge[] = [],
   hiddenNodeCount = 0,
+  documentCounters: GraphDocumentPipelineCounters = emptyDocumentCounters(),
 ): GraphSurfaceResponse {
   const relationNodeCount = rawNodes.filter((node) => node.nodeType === 'topic').length
   const graphStatus = mapGraphStatus(generation, rawNodes.length, relationNodeCount)
@@ -597,6 +640,7 @@ function buildSurface(
     hiddenNodeCount,
     filteredArtifactCount,
     lastBuiltAt: generation?.updatedAt ?? null,
+    documentCounters,
     overlay: {
       searchQuery: '',
       searchHits: [],
@@ -761,19 +805,13 @@ function entityDisplayLabel(row: RawKnowledgeEntityRow): string {
     }
   }
 
-  return (
-    humanizeGraphLabelToken(row.entityType) ||
-    compactOpaqueIdentifier(row.entityId)
-  )
+  return humanizeGraphLabelToken(row.entityType) || compactOpaqueIdentifier(row.entityId)
 }
 
 function looksMachineRelationLabel(value: string): boolean {
   const trimmed = value.trim()
   return (
-    !trimmed ||
-    trimmed.includes('--') ||
-    /^entity:/i.test(trimmed) ||
-    /^relation:/i.test(trimmed)
+    !trimmed || trimmed.includes('--') || /^entity:/i.test(trimmed) || /^relation:/i.test(trimmed)
   )
 }
 
@@ -920,7 +958,9 @@ function resolveSearchPreview(node: GraphNode, preview: string | null): string |
   }
 
   const normalizedSecondary =
-    node.nodeType === 'topic' ? humanizeGraphLabelToken(trimmedSecondary) || trimmedSecondary : trimmedSecondary
+    node.nodeType === 'topic'
+      ? humanizeGraphLabelToken(trimmedSecondary) || trimmedSecondary
+      : trimmedSecondary
 
   return normalizedSecondary === node.label ? null : normalizedSecondary
 }
@@ -1048,19 +1088,17 @@ function buildDocumentSummary(
     latestRevision?.normalizedText?.slice(0, 220) ??
     latestRevisionChunks[0]?.contentText.slice(0, 220) ??
     'Document revision'
-  const state = latestRevision?.graphState ?? latestRevision?.vectorState ?? latestRevision?.textState
+  const state =
+    latestRevision?.graphState ?? latestRevision?.vectorState ?? latestRevision?.textState
   const confidenceStatus =
-    state === 'graph_ready'
-      ? 'strong'
-      : state === 'vector_ready'
-        ? 'partial'
-        : 'weak'
+    state === 'graph_ready' ? 'strong' : state === 'vector_ready' ? 'partial' : 'weak'
 
   return {
     text,
     confidenceStatus,
     supportCount: latestRevisionChunks.length,
-    warning: latestRevision?.graphState === 'failed' ? 'Latest revision graph generation failed.' : null,
+    warning:
+      latestRevision?.graphState === 'failed' ? 'Latest revision graph generation failed.' : null,
   }
 }
 
@@ -1073,7 +1111,10 @@ function mapDocumentEvidence(
     documentId: document.documentId,
     documentLabel: documentDisplayLabel(document),
     chunkId: chunk.chunkId,
-    pageRef: chunk.sectionPath.length > 0 ? chunk.sectionPath.join(' / ') : `chunk ${chunk.chunkIndex + 1}`,
+    pageRef:
+      chunk.sectionPath.length > 0
+        ? chunk.sectionPath.join(' / ')
+        : `chunk ${chunk.chunkIndex + 1}`,
     evidenceText: chunk.contentText,
     confidenceScore: null,
     createdAt: document.updatedAt,
@@ -1145,7 +1186,8 @@ function mapEntityDetail(
     canonicalSummary: entity.summary
       ? {
           text: entity.summary,
-          confidenceStatus: entity.confidence !== null && entity.confidence >= 0.8 ? 'strong' : 'partial',
+          confidenceStatus:
+            entity.confidence !== null && entity.confidence >= 0.8 ? 'strong' : 'partial',
           supportCount: entity.supportCount,
           warning: null,
         }
@@ -1170,16 +1212,18 @@ function mapRelationDetail(
   const label = relationDisplayLabel(relation)
   const relatedDocuments = dedupeSearchHits(
     supportingEvidence
-    .map((evidence) => findDocumentNode(nodes, evidence.documentId))
-    .filter((node): node is GraphNode => Boolean(node))
-    .map((node) => mapSearchHit(node, null))
+      .map((evidence) => findDocumentNode(nodes, evidence.documentId))
+      .filter((node): node is GraphNode => Boolean(node))
+      .map((node) => mapSearchHit(node, null)),
   )
-  const subjectNode = relation.subjectEntityId ? findEntityNode(nodes, relation.subjectEntityId) : null
+  const subjectNode = relation.subjectEntityId
+    ? findEntityNode(nodes, relation.subjectEntityId)
+    : null
   const objectNode = relation.objectEntityId ? findEntityNode(nodes, relation.objectEntityId) : null
   const connectedNodes = dedupeSearchHits(
     [subjectNode, objectNode]
       .filter((node): node is GraphNode => Boolean(node))
-      .map((node) => mapSearchHit(node, node.secondaryLabel))
+      .map((node) => mapSearchHit(node, node.secondaryLabel)),
   )
   const relationLinks = [
     subjectNode
@@ -1284,13 +1328,16 @@ function mapDocumentDetail(
       ['External key', document.externalKey],
       ['Active revision', document.activeRevisionId ?? '—'],
       ['Readable revision', document.readableRevisionId ?? '—'],
-      ['Latest revision', document.latestRevisionNo !== null ? String(document.latestRevisionNo) : '—'],
+      [
+        'Latest revision',
+        document.latestRevisionNo !== null ? String(document.latestRevisionNo) : '—',
+      ],
     ],
     relatedDocuments: [],
     connectedNodes: [],
     relatedEdges: [],
     evidence,
-    relationCount: latestRevisionChunks.length,
+    relationCount: 0,
     canonicalSummary: summary,
     reconciliationScope: null,
     reconciliationStatus: null,
@@ -1363,7 +1410,9 @@ async function fetchKnowledgeDocumentDetail(
   )
   return {
     document: normalizeKnowledgeDocumentRow(detail.document as unknown as RawRow),
-    revisions: detail.revisions.map((row) => normalizeKnowledgeRevisionRow(row as unknown as RawRow)),
+    revisions: detail.revisions.map((row) =>
+      normalizeKnowledgeRevisionRow(row as unknown as RawRow),
+    ),
     latestRevision: detail.latestRevision
       ? normalizeKnowledgeRevisionRow(detail.latestRevision as unknown as RawRow)
       : null,
@@ -1418,9 +1467,10 @@ export async function fetchGraphSurface(libraryId: string): Promise<GraphSurface
     return buildEmptySurface()
   }
 
-  const [topology, generations] = await Promise.all([
+  const [topology, generations, documentCounters] = await Promise.all([
     fetchKnowledgeGraphTopology(libraryId),
     fetchKnowledgeGenerations(libraryId),
+    fetchDocumentSummaryCounters(libraryId).catch(() => emptyDocumentCounters()),
   ])
 
   const { documents, entities, relations, documentLinks } = topology
@@ -1431,12 +1481,7 @@ export async function fetchGraphSurface(libraryId: string): Promise<GraphSurface
   ]
   const latestGeneration = generations[0] ?? null
   const edges = buildGraphEdges(relations, documentLinks, nodes)
-  return buildSurface(
-    latestGeneration,
-    nodes,
-    edges,
-    0,
-  )
+  return buildSurface(latestGeneration, nodes, edges, 0, documentCounters)
 }
 
 export async function fetchGraphSurfaceHeartbeat(
@@ -1452,11 +1497,16 @@ export async function fetchGraphSurfaceHeartbeat(
       graphGeneration: surface.graphGeneration,
       graphGenerationState: surface.graphGenerationState ?? null,
       lastBuiltAt: surface.lastBuiltAt,
+      documentCounters: surface.documentCounters,
       warning: surface.warning,
     }
   }
 
-  const latestGeneration = (await fetchKnowledgeGenerations(libraryId))[0] ?? null
+  const [generations, documentCounters] = await Promise.all([
+    fetchKnowledgeGenerations(libraryId),
+    fetchDocumentSummaryCounters(libraryId).catch(() => emptyDocumentCounters()),
+  ])
+  const latestGeneration = generations[0] ?? null
   const graphStatus = mapGraphStatus(latestGeneration, nodeCount, relationCount)
   const graphGenerationState = latestGeneration?.degradedState ?? null
 
@@ -1466,6 +1516,7 @@ export async function fetchGraphSurfaceHeartbeat(
     graphGeneration: graphGenerationOf(latestGeneration),
     graphGenerationState,
     lastBuiltAt: latestGeneration?.updatedAt ?? null,
+    documentCounters,
     warning: projectionWarning(graphStatus, graphGenerationState),
   }
 }
@@ -1490,9 +1541,9 @@ function buildGraphDiagnostics(surface: GraphSurfaceResponse): GraphDiagnostics 
         ? ['The canonical Arango knowledge graph is still building.']
         : graphStatus === 'rebuilding'
           ? ['The canonical Arango knowledge graph is rebuilding after recent changes.']
-        : graphStatus === 'stale'
-          ? ['The canonical Arango knowledge graph is stale.']
-          : []
+          : graphStatus === 'stale'
+            ? ['The canonical Arango knowledge graph is stale.']
+            : []
 
   return {
     graphStatus,
@@ -1508,11 +1559,11 @@ function buildGraphDiagnostics(surface: GraphSurfaceResponse): GraphDiagnostics 
           ? 'stale'
           : graphStatus === 'rebuilding'
             ? 'refreshing'
-          : graphStatus === 'building' || graphStatus === 'partial'
-            ? 'lagging'
-            : 'fresh',
-    rebuildBacklogCount: 0,
-    readyNoGraphCount: 0,
+            : graphStatus === 'building' || graphStatus === 'partial'
+              ? 'lagging'
+              : 'fresh',
+    rebuildBacklogCount: surface.documentCounters.queued + surface.documentCounters.processing,
+    readyNoGraphCount: surface.documentCounters.readyNoGraph,
     pendingUpdateCount: 0,
     pendingDeleteCount: 0,
     activeMutationScope: null,
@@ -1579,7 +1630,9 @@ export function searchGraphNodes(
       score: scoreSearchNode(node, normalizedQuery, terms),
     }))
     .filter((candidate) => candidate.score > 0)
-    .sort((left, right) => right.score - left.score || left.node.label.localeCompare(right.node.label))
+    .sort(
+      (left, right) => right.score - left.score || left.node.label.localeCompare(right.node.label),
+    )
 
   const labelCounts = rankedNodes.reduce<Map<string, number>>((counts, candidate) => {
     counts.set(candidate.node.label, (counts.get(candidate.node.label) ?? 0) + 1)
@@ -1596,16 +1649,12 @@ export function searchGraphNodes(
     .slice(0, limit)
 }
 
-export function mapGraphDiagnosticsForDashboard(
-  diagnostics: GraphDiagnostics,
-): {
+export function mapGraphDiagnosticsForDashboard(diagnostics: GraphDiagnostics): {
   statusLabel: string
   attentionItem: DashboardAttentionItem | null
 } {
   const statusKey = `dashboard.graphStatus.${diagnostics.graphStatus}`
-  const statusLabel = i18n.global.te(statusKey)
-    ? i18n.global.t(statusKey)
-    : diagnostics.graphStatus
+  const statusLabel = i18n.global.te(statusKey) ? i18n.global.t(statusKey) : diagnostics.graphStatus
 
   let severity: DashboardAttentionItem['severity'] | null = null
   if (diagnostics.graphStatus === 'failed' || diagnostics.graphStatus === 'stale') {

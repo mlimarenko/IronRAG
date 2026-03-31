@@ -101,8 +101,8 @@ pub async fn list_conversations_by_library(
             updated_at
          from query_conversation
          where library_id = $1
-         order by created_at desc, updated_at desc
-         limit 100",
+         order by updated_at desc, created_at desc
+         limit 5",
     )
     .bind(library_id)
     .fetch_all(postgres)
@@ -134,8 +134,31 @@ pub async fn get_conversation_by_id(
 pub async fn create_conversation(
     postgres: &PgPool,
     input: &NewQueryConversation<'_>,
+    max_library_conversations: usize,
 ) -> Result<QueryConversationRow, sqlx::Error> {
-    sqlx::query_as::<_, QueryConversationRow>(
+    let mut transaction = postgres.begin().await?;
+    let existing_ids = sqlx::query_scalar::<_, Uuid>(
+        "select id
+         from query_conversation
+         where library_id = $1
+         order by created_at asc, id asc",
+    )
+    .bind(input.library_id)
+    .fetch_all(&mut *transaction)
+    .await?;
+
+    let overflow_count =
+        existing_ids.len().saturating_add(1).saturating_sub(max_library_conversations);
+
+    if overflow_count > 0 {
+        let prune_ids = existing_ids.into_iter().take(overflow_count).collect::<Vec<_>>();
+        sqlx::query("delete from query_conversation where id = any($1)")
+            .bind(&prune_ids)
+            .execute(&mut *transaction)
+            .await?;
+    }
+
+    let row = sqlx::query_as::<_, QueryConversationRow>(
         "insert into query_conversation (
             id,
             workspace_id,
@@ -163,6 +186,34 @@ pub async fn create_conversation(
     .bind(input.created_by_principal_id)
     .bind(input.title)
     .bind(input.conversation_state)
+    .fetch_one(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(row)
+}
+
+pub async fn update_conversation_title(
+    postgres: &PgPool,
+    conversation_id: Uuid,
+    title: &str,
+) -> Result<QueryConversationRow, sqlx::Error> {
+    sqlx::query_as::<_, QueryConversationRow>(
+        "update query_conversation
+         set title = $2,
+             updated_at = now()
+         where id = $1
+         returning
+            id,
+            workspace_id,
+            library_id,
+            created_by_principal_id,
+            title,
+            conversation_state::text as conversation_state,
+            created_at,
+            updated_at",
+    )
+    .bind(conversation_id)
+    .bind(title)
     .fetch_one(postgres)
     .await
 }

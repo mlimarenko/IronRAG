@@ -79,45 +79,45 @@ const requestedSection = computed(() =>
 )
 const activeSection = ref<AdminSectionId>(requestedSection.value ?? 'access')
 
-const sectionTabs = computed<AdminSectionTab[]>(() =>
-  [
-    canManageAccess.value
-      ? {
-          id: 'access' as AdminSectionId,
-          label: t('admin.sections.access.title'),
-          count: tokens.value.length,
-        }
-      : null,
-    canManageAccess.value
-      ? {
-          id: 'mcp' as AdminSectionId,
-          label: t('admin.sections.mcp.title'),
-          count: null,
-        }
-      : null,
-    hasOperationsSurface.value
-      ? {
-          id: 'operations' as AdminSectionId,
-          label: t('admin.sections.operations.title'),
-          count: opsSignalCount.value,
-        }
-      : null,
-    canManageAi.value && aiConsole.value
-      ? {
-          id: 'ai' as AdminSectionId,
-          label: t('admin.sections.ai.title'),
-          count: aiSetupCount.value,
-        }
-      : null,
-    canManageAi.value && aiConsole.value
-      ? {
-          id: 'pricing' as AdminSectionId,
-          label: t('admin.sections.pricing.title'),
-          count: pricingCount.value,
-        }
-      : null,
-  ].filter((item): item is AdminSectionTab => item !== null),
-)
+const sectionTabs = computed<AdminSectionTab[]>(() => {
+  const tabs: AdminSectionTab[] = []
+
+  if (canManageAccess.value) {
+    tabs.push({
+      id: 'access',
+      label: t('admin.sections.access.title'),
+      count: tokens.value.length,
+    })
+    tabs.push({
+      id: 'mcp',
+      label: t('admin.sections.mcp.title'),
+      count: null,
+    })
+  }
+
+  if (hasOperationsSurface.value) {
+    tabs.push({
+      id: 'operations',
+      label: t('admin.sections.operations.title'),
+      count: opsSignalCount.value,
+    })
+  }
+
+  if (canManageAi.value && aiConsole.value) {
+    tabs.push({
+      id: 'ai',
+      label: t('admin.sections.ai.title'),
+      count: aiSetupCount.value,
+    })
+    tabs.push({
+      id: 'pricing',
+      label: t('admin.sections.pricing.title'),
+      count: pricingCount.value,
+    })
+  }
+
+  return tabs
+})
 
 watch(
   [sectionTabs, requestedSection],
@@ -379,8 +379,6 @@ async function validateBinding(bindingId: string) {
                 :settings="aiConsole"
                 :saving="pricesSaving"
                 :commit-version="catalogCommitVersion"
-                :workspace-name="context.workspaceName"
-                :library-name="context.libraryName"
                 :error-message="pricesError"
                 @create-price="createPrice"
                 @update-price="updatePrice"
@@ -590,12 +588,13 @@ async function validateBinding(bindingId: string) {
 
 @media (max-width: 1080px) {
   .rr-admin-control {
-    gap: 0.9rem;
+    gap: 0.78rem;
   }
 
   .rr-admin-control__layout {
     grid-template-columns: 1fr;
-    gap: 0.9rem;
+    gap: 0.72rem;
+    min-height: 0;
   }
 
   .rr-admin-control__nav {
@@ -605,7 +604,7 @@ async function validateBinding(bindingId: string) {
 
   .rr-admin-control__nav-list {
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 0.5rem;
+    gap: 0.42rem;
   }
 
   .rr-admin-control__nav-button {
@@ -614,8 +613,29 @@ async function validateBinding(bindingId: string) {
     align-items: flex-start;
   }
 
+  .rr-admin-control__content,
+  .rr-admin-pane {
+    gap: 0.72rem;
+  }
+
+  .rr-admin-section__head {
+    gap: 0.6rem;
+    align-items: start;
+  }
+
+  .rr-admin-section__copy {
+    gap: 0.02rem;
+    max-width: 46ch;
+  }
+
+  .rr-admin-section__copy h2 {
+    margin: 0;
+    font-size: 1.12rem;
+  }
+
   .rr-admin-section__copy p {
-    font-size: 0.82rem;
+    font-size: 0.78rem;
+    line-height: 1.3;
     line-clamp: 2;
     -webkit-line-clamp: 2;
     display: -webkit-box;

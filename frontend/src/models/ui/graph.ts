@@ -50,6 +50,14 @@ export interface GraphLegendItem {
   label: string
 }
 
+export interface GraphDocumentPipelineCounters {
+  queued: number
+  processing: number
+  ready: number
+  readyNoGraph: number
+  failed: number
+}
+
 export interface GraphSurfaceResponse {
   loading: boolean
   error: string | null
@@ -64,6 +72,7 @@ export interface GraphSurfaceResponse {
   hiddenNodeCount: number
   filteredArtifactCount: number | null
   lastBuiltAt: string | null
+  documentCounters: GraphDocumentPipelineCounters
   overlay: GraphOverlayState
   inspector: GraphInspectorState
   warning: string | null

@@ -84,10 +84,11 @@ const attentionItems = computed(() => overview.value?.attentionItems ?? [])
 const recentDocuments = computed(() => overview.value?.recentDocuments ?? [])
 const chartSummary = computed(() => overview.value?.chartSummary ?? null)
 const primaryActions = computed(() => overview.value?.primaryActions ?? [])
+const documentCounts = computed(() => overview.value?.documentCounts ?? null)
 const narrative = computed(() => overview.value?.summaryNarrative ?? t('dashboard.narrative.empty'))
 const heroNarrative = computed(() => {
-  const totalDocuments = Number(metrics.value.find((metric) => metric.key === 'documents')?.value ?? 0)
-  const inFlightCount = Number(metrics.value.find((metric) => metric.key === 'inFlight')?.value ?? 0)
+  const totalDocuments = documentCounts.value?.totalDocuments ?? 0
+  const inFlightCount = documentCounts.value?.inFlightDocuments ?? 0
 
   if (totalDocuments <= 0) {
     return narrative.value
@@ -106,13 +107,16 @@ const heroNarrative = computed(() => {
     : ''
 })
 const isSettledOverview = computed(() => {
-  const totalDocuments = Number(metrics.value.find((metric) => metric.key === 'documents')?.value ?? 0)
-  const readyCount = Number(metrics.value.find((metric) => metric.key === 'ready')?.value ?? 0)
-  const inFlightCount = Number(metrics.value.find((metric) => metric.key === 'inFlight')?.value ?? 0)
+  const totalDocuments = documentCounts.value?.totalDocuments ?? 0
+  const readyCount = documentCounts.value?.graphReadyDocuments ?? 0
+  const inFlightCount = documentCounts.value?.inFlightDocuments ?? 0
 
   return totalDocuments > 0 && readyCount >= totalDocuments && inFlightCount === 0 && attentionItems.value.length === 0
 })
 const showStatusChart = computed(() => Boolean(chartSummary.value) && !isSettledOverview.value)
+const compactStatusChart = computed(
+  () => attentionItems.value.length > 0 || recentDocuments.value.length <= 3,
+)
 const showStatsStrip = computed(() => visibleMetrics.value.length > 1)
 const compactRecentDocuments = computed(
   () => !showStatusChart.value && recentDocuments.value.length > 0 && recentDocuments.value.length <= 3,
@@ -125,7 +129,10 @@ const heroFacts = computed<DashboardHeroFact[]>(() => {
   const facts: DashboardHeroFact[] = []
   const latestDocument = recentDocuments.value[0] ?? null
   const firstAttention = attentionItems.value[0] ?? null
-  const totalDocuments = Number(metrics.value.find((metric) => metric.key === 'documents')?.value ?? 0)
+  const totalDocuments = documentCounts.value?.totalDocuments ?? 0
+  const searchReadyCount = documentCounts.value?.searchReadyDocuments ?? 0
+  const graphReadyCount = documentCounts.value?.graphReadyDocuments ?? 0
+  const graphCatchUpCount = documentCounts.value?.graphCatchUpDocuments ?? 0
 
   if (shellContext) {
     facts.push({
@@ -147,13 +154,20 @@ const heroFacts = computed<DashboardHeroFact[]>(() => {
     tone: latestDocument ? 'default' : 'warning',
   })
 
-  if (isSettledOverview.value && totalDocuments > 0) {
+  if (totalDocuments > 0) {
     facts.push({
       key: 'documents',
       label: t('dashboard.heroFacts.documents'),
       value: String(totalDocuments),
-      supportingText: t('dashboard.heroFacts.documentsHint'),
-      tone: 'success',
+      supportingText:
+        graphCatchUpCount > 0
+          ? t('dashboard.heroFacts.documentsGraphCatchUpHint', {
+              searchReady: searchReadyCount,
+              graphReady: graphReadyCount,
+              catchUp: graphCatchUpCount,
+            })
+          : t('dashboard.heroFacts.documentsHint'),
+      tone: graphCatchUpCount > 0 ? 'warning' : 'success',
     })
   }
 
@@ -220,6 +234,7 @@ const heroFacts = computed<DashboardHeroFact[]>(() => {
         <DashboardStatusChartCard
           v-if="showStatusChart"
           :summary="chartSummary"
+          :compact="compactStatusChart"
         />
         <DashboardRecentDocumentsCard
           :documents="recentDocuments"

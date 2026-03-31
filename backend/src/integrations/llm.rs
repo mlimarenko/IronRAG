@@ -93,6 +93,17 @@ pub struct VisionResponse {
 #[async_trait]
 pub trait LlmGateway: Send + Sync {
     async fn generate(&self, request: ChatRequest) -> Result<ChatResponse>;
+    async fn generate_stream(
+        &self,
+        request: ChatRequest,
+        on_delta: &mut (dyn FnMut(String) + Send),
+    ) -> Result<ChatResponse> {
+        let response = self.generate(request).await?;
+        if !response.output_text.is_empty() {
+            on_delta(response.output_text.clone());
+        }
+        Ok(response)
+    }
     async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse>;
     async fn embed_many(&self, request: EmbeddingBatchRequest) -> Result<EmbeddingBatchResponse>;
     async fn vision_extract(&self, request: VisionRequest) -> Result<VisionResponse>;
@@ -140,6 +151,10 @@ struct OpenAiCompatibleChatCompletionRequest {
     top_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<serde_json::Value>,
     #[serde(flatten)]
     extra_parameters_json: serde_json::Value,
 }
@@ -181,6 +196,7 @@ impl UnifiedGateway {
             top_p,
             max_output_tokens,
             extra_parameters_json,
+            false,
         )?;
         let request_body_is_valid_json = true;
         let max_attempts = self.transport_retry_attempts.max(1);
@@ -262,6 +278,137 @@ impl UnifiedGateway {
             let usage_json = body.get("usage").cloned().unwrap_or_else(|| serde_json::json!({}));
 
             let _ = provider_kind;
+            return Ok((output_text, usage_json));
+        }
+
+        Err(last_error
+            .unwrap_or_else(|| anyhow!("provider request failed: provider={provider_kind}")))
+    }
+
+    async fn call_openai_compatible_stream(
+        &self,
+        provider_kind: &str,
+        api_key: &str,
+        base_url: &str,
+        model_name: &str,
+        messages: Vec<OpenAiCompatibleMessage>,
+        system_prompt: Option<&str>,
+        temperature: Option<f64>,
+        top_p: Option<f64>,
+        max_output_tokens: Option<i32>,
+        extra_parameters_json: &serde_json::Value,
+        on_delta: &mut (dyn FnMut(String) + Send),
+    ) -> Result<(String, serde_json::Value)> {
+        let request_body = serialize_openai_compatible_chat_request(
+            model_name,
+            messages,
+            system_prompt,
+            temperature,
+            top_p,
+            max_output_tokens,
+            extra_parameters_json,
+            true,
+        )?;
+        let request_body_is_valid_json = true;
+        let max_attempts = self.transport_retry_attempts.max(1);
+
+        let mut last_error = None;
+        for attempt in 1..=max_attempts {
+            let response = match self
+                .client
+                .post(format!("{base_url}/chat/completions"))
+                .bearer_auth(api_key)
+                .header(CONTENT_TYPE, "application/json")
+                .header(ACCEPT, "text/event-stream")
+                .body(request_body.clone())
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    if attempt < max_attempts && is_retryable_transport_error(&error) {
+                        last_error = Some(anyhow!(
+                            "provider transport failed: provider={provider_kind} attempt={attempt}/{max_attempts} error={error}",
+                        ));
+                        tokio::time::sleep(transport_retry_delay(
+                            self.transport_retry_base_delay_ms,
+                            attempt,
+                        ))
+                        .await;
+                        continue;
+                    }
+                    return Err(error.into());
+                }
+            };
+
+            let status = response.status();
+            if !status.is_success() {
+                let body_text = response.text().await?;
+                let body = serde_json::from_str::<serde_json::Value>(&body_text)
+                    .unwrap_or_else(|_| serde_json::json!({ "raw_body": body_text }));
+                last_error = Some(anyhow!(
+                    "provider request failed: provider={provider_kind} status={status} body={body}",
+                ));
+                let retryable_parse_failure = is_retryable_upstream_json_parse_failure(
+                    status.as_u16(),
+                    &body,
+                    request_body_is_valid_json,
+                );
+                let retryable_status = is_retryable_upstream_status(status.as_u16());
+                if attempt < max_attempts && (retryable_parse_failure || retryable_status) {
+                    tokio::time::sleep(transport_retry_delay(
+                        self.transport_retry_base_delay_ms,
+                        attempt,
+                    ))
+                    .await;
+                    continue;
+                }
+                if retryable_parse_failure {
+                    return Err(anyhow!(
+                        "upstream protocol failure: upstream rejected a locally valid JSON request body after {attempt} attempt(s): {}",
+                        last_error
+                            .as_ref()
+                            .expect("last_error is set before retryable parse failure returns"),
+                    ));
+                }
+                return Err(last_error.take().unwrap_or_else(|| {
+                    anyhow!("provider request failed: provider={provider_kind}")
+                }));
+            }
+
+            let mut output_text = String::new();
+            let mut usage_json = serde_json::json!({});
+            let mut buffer = String::new();
+
+            let mut response = response;
+            while let Some(chunk) = response.chunk().await? {
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                if buffer.contains('\r') {
+                    buffer = buffer.replace("\r\n", "\n").replace('\r', "\n");
+                }
+                while let Some(boundary) = buffer.find("\n\n") {
+                    let frame = buffer[..boundary].to_string();
+                    buffer = buffer[boundary + 2..].to_string();
+                    if consume_openai_compatible_stream_frame(
+                        &frame,
+                        &mut output_text,
+                        &mut usage_json,
+                        on_delta,
+                    )? {
+                        return Ok((output_text, usage_json));
+                    }
+                }
+            }
+
+            if !buffer.trim().is_empty() {
+                let _ = consume_openai_compatible_stream_frame(
+                    &buffer,
+                    &mut output_text,
+                    &mut usage_json,
+                    on_delta,
+                )?;
+            }
+
             return Ok((output_text, usage_json));
         }
 
@@ -396,6 +543,42 @@ impl LlmGateway for UnifiedGateway {
                 request.top_p,
                 request.max_output_tokens_override,
                 &request.extra_parameters_json,
+            )
+            .await?;
+        Ok(ChatResponse {
+            provider_kind: request.provider_kind,
+            model_name: request.model_name,
+            output_text,
+            usage_json,
+        })
+    }
+
+    async fn generate_stream(
+        &self,
+        request: ChatRequest,
+        on_delta: &mut (dyn FnMut(String) + Send),
+    ) -> Result<ChatResponse> {
+        let (api_key, base_url) = self.resolve_provider(
+            &request.provider_kind,
+            request.api_key_override.as_deref(),
+            request.base_url_override.as_deref(),
+        )?;
+        let (output_text, usage_json) = self
+            .call_openai_compatible_stream(
+                &request.provider_kind,
+                api_key.as_str(),
+                base_url.as_str(),
+                &request.model_name,
+                vec![OpenAiCompatibleMessage {
+                    role: "user".to_string(),
+                    content: OpenAiCompatibleMessageContent::Text(request.prompt.clone()),
+                }],
+                request.system_prompt.as_deref(),
+                request.temperature,
+                request.top_p,
+                request.max_output_tokens_override,
+                &request.extra_parameters_json,
+                on_delta,
             )
             .await?;
         Ok(ChatResponse {
@@ -613,6 +796,66 @@ fn extract_message_content_text(content: &serde_json::Value) -> String {
         .join("\n")
 }
 
+fn consume_openai_compatible_stream_frame(
+    frame: &str,
+    output_text: &mut String,
+    usage_json: &mut serde_json::Value,
+    on_delta: &mut (dyn FnMut(String) + Send),
+) -> Result<bool> {
+    if frame.trim().is_empty() || frame.starts_with(':') {
+        return Ok(false);
+    }
+
+    let mut data_lines = Vec::new();
+    for raw_line in frame.split('\n') {
+        let line = raw_line.trim_end();
+        if let Some(data) = line.strip_prefix("data:") {
+            data_lines.push(data.trim_start());
+        }
+    }
+
+    if data_lines.is_empty() {
+        return Ok(false);
+    }
+
+    let payload_text = data_lines.join("\n");
+    if payload_text.trim() == "[DONE]" {
+        return Ok(true);
+    }
+
+    let payload: serde_json::Value = serde_json::from_str(&payload_text)
+        .context("failed to parse upstream streaming payload as json")?;
+    let delta = extract_stream_delta_text(&payload);
+    if !delta.is_empty() {
+        output_text.push_str(&delta);
+        on_delta(delta);
+    }
+    if let Some(usage) = payload.get("usage").filter(|value| !value.is_null()) {
+        *usage_json = usage.clone();
+    }
+    Ok(false)
+}
+
+fn extract_stream_delta_text(payload: &serde_json::Value) -> String {
+    payload
+        .get("choices")
+        .and_then(serde_json::Value::as_array)
+        .map(|choices| {
+            choices
+                .iter()
+                .filter_map(|choice| {
+                    choice
+                        .get("delta")
+                        .and_then(|delta| delta.get("content"))
+                        .map(extract_message_content_text)
+                        .filter(|value| !value.is_empty())
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default()
+}
+
 fn serialize_openai_compatible_chat_request(
     model_name: &str,
     messages: Vec<OpenAiCompatibleMessage>,
@@ -621,6 +864,7 @@ fn serialize_openai_compatible_chat_request(
     top_p: Option<f64>,
     max_output_tokens: Option<i32>,
     extra_parameters_json: &serde_json::Value,
+    stream: bool,
 ) -> Result<Vec<u8>> {
     let mut request_messages =
         Vec::with_capacity(messages.len() + usize::from(system_prompt.is_some()));
@@ -637,6 +881,8 @@ fn serialize_openai_compatible_chat_request(
         temperature,
         top_p,
         max_output_tokens,
+        stream: stream.then_some(true),
+        stream_options: stream.then(|| serde_json::json!({ "include_usage": true })),
         extra_parameters_json: extra_parameters_json.clone(),
     };
     let body = serde_json::to_vec(&payload).context("failed to serialize provider request body")?;
@@ -695,7 +941,8 @@ fn transport_retry_delay(base_delay_ms: u64, attempt: usize) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::{
-        OpenAiCompatibleMessage, OpenAiCompatibleMessageContent, extract_message_content_text,
+        OpenAiCompatibleMessage, OpenAiCompatibleMessageContent,
+        consume_openai_compatible_stream_frame, extract_message_content_text,
         is_retryable_transport_error_text, is_retryable_upstream_json_parse_failure,
         is_retryable_upstream_status, serialize_openai_compatible_chat_request,
         transport_retry_delay,
@@ -730,6 +977,7 @@ mod tests {
             None,
             None,
             &serde_json::json!({}),
+            false,
         )
         .expect("request body should serialize");
         let value: serde_json::Value =
@@ -783,5 +1031,37 @@ mod tests {
         assert_eq!(transport_retry_delay(250, 1), Duration::from_millis(250));
         assert_eq!(transport_retry_delay(250, 2), Duration::from_millis(500));
         assert_eq!(transport_retry_delay(250, 5), Duration::from_millis(4000));
+    }
+
+    #[test]
+    fn consumes_stream_delta_frames() {
+        let mut output_text = String::new();
+        let mut usage_json = serde_json::json!({});
+        let mut emitted = String::new();
+        let done = consume_openai_compatible_stream_frame(
+            r#"data: {"choices":[{"delta":{"content":"Привет"}}]}"#,
+            &mut output_text,
+            &mut usage_json,
+            &mut |delta| emitted.push_str(&delta),
+        )
+        .expect("stream frame should parse");
+        assert!(!done);
+        assert_eq!(output_text, "Привет");
+        assert_eq!(emitted, "Привет");
+        assert_eq!(usage_json, serde_json::json!({}));
+    }
+
+    #[test]
+    fn marks_done_for_done_frame() {
+        let mut output_text = String::new();
+        let mut usage_json = serde_json::json!({});
+        let done = consume_openai_compatible_stream_frame(
+            "data: [DONE]",
+            &mut output_text,
+            &mut usage_json,
+            &mut |_delta| {},
+        )
+        .expect("done frame should parse");
+        assert!(done);
     }
 }

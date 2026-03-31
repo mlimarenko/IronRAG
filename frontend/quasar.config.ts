@@ -21,6 +21,13 @@ export default configure(function () {
     },
     build: {
       vueRouterMode: 'history',
+      viteVuePluginOptions: {
+        template: {
+          compilerOptions: {
+            isCustomElement: (tagName) => tagName === 'emoji-picker',
+          },
+        },
+      },
       extendViteConf(viteConf) {
         viteConf.build ??= {}
         viteConf.build.rollupOptions ??= {}

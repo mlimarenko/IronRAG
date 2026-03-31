@@ -198,17 +198,6 @@ function clearSearch(): void {
           </button>
         </header>
 
-        <div class="rr-admin-workbench__context">
-          <div class="rr-admin-workbench__context-chip">
-            <span>{{ $t('shell.workspace') }}</span>
-            <strong>{{ workspaceName }}</strong>
-          </div>
-          <div class="rr-admin-workbench__context-chip">
-            <span>{{ $t('shell.library') }}</span>
-            <strong>{{ libraryName }}</strong>
-          </div>
-        </div>
-
         <SearchField
           v-model="searchQuery"
           :placeholder="$t('admin.tokens.searchPlaceholder')"

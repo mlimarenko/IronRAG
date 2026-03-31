@@ -117,8 +117,16 @@ export const useGraphStore = defineStore('graph', {
         nodeCount: 0,
         relationCount: 0,
         edgeCount: 0,
+        hiddenNodeCount: 0,
         filteredArtifactCount: 0,
         lastBuiltAt: null,
+        documentCounters: {
+          queued: 0,
+          processing: 0,
+          ready: 0,
+          readyNoGraph: 0,
+          failed: 0,
+        },
         warning: null,
         nodes: [],
         edges: [],
@@ -223,6 +231,14 @@ export const useGraphStore = defineStore('graph', {
         return
       }
 
+      const previousStatus = this.surface.graphStatus
+      const previousGeneration = this.surface.graphGeneration
+      const previousGenerationState = this.surface.graphGenerationState ?? null
+      const previousLastBuiltAt = this.surface.lastBuiltAt
+      const previousCanvasMode = this.surface.canvasMode
+      const previousNodeCount = this.surface.nodeCount
+      const previousEdgeCount = this.surface.edgeCount
+
       const heartbeat = await fetchGraphSurfaceHeartbeat(
         libraryId,
         this.surface.nodeCount,
@@ -233,28 +249,33 @@ export const useGraphStore = defineStore('graph', {
         return
       }
 
-      const previousStatus = this.surface.graphStatus
-      const previousGeneration = this.surface.graphGeneration
-      const previousGenerationState = this.surface.graphGenerationState ?? null
-
       this.surface.graphStatus = heartbeat.graphStatus
       this.surface.convergenceStatus = heartbeat.convergenceStatus
       this.surface.graphGeneration = heartbeat.graphGeneration
       this.surface.graphGenerationState = heartbeat.graphGenerationState
       this.surface.lastBuiltAt = heartbeat.lastBuiltAt
+      this.surface.documentCounters = heartbeat.documentCounters
       this.surface.warning = heartbeat.warning
       this.routeWarning = heartbeat.warning
 
       const generationChanged = heartbeat.graphGeneration !== previousGeneration
       const generationStateChanged = heartbeat.graphGenerationState !== previousGenerationState
+      const lastBuiltAtChanged = heartbeat.lastBuiltAt !== previousLastBuiltAt
       const statusSettled =
         heartbeat.graphStatus === 'ready' ||
         heartbeat.graphStatus === 'failed' ||
         heartbeat.graphStatus === 'stale'
       const statusChanged = heartbeat.graphStatus !== previousStatus
+      const staleSparseSurface =
+        (previousCanvasMode === 'empty' || previousCanvasMode === 'sparse') &&
+        heartbeat.graphStatus !== 'empty' &&
+        heartbeat.graphStatus !== 'building' &&
+        (previousNodeCount === 0 || previousEdgeCount === 0)
 
       if (
         generationChanged ||
+        lastBuiltAtChanged ||
+        staleSparseSurface ||
         (statusSettled && (statusChanged || generationStateChanged))
       ) {
         await this.loadSurface(libraryId, { preserveUi: true })

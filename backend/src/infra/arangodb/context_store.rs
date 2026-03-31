@@ -969,7 +969,7 @@ impl ArangoContextStore {
                 .cloned()
                 .ok_or_else(|| anyhow!("bundle edge payload must be a JSON object"))?;
             let key = edge_value
-                .get("key")
+                .get("_key")
                 .and_then(|value| value.as_str())
                 .ok_or_else(|| anyhow!("bundle edge is missing key"))?;
             let from = arango_doc_id(KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION, bundle_id);
@@ -991,11 +991,7 @@ impl ArangoContextStore {
                 .query_json(
                     "UPSERT { _key: @key }
                      INSERT @document
-                     UPDATE {
-                        rank: @rank,
-                        score: @score,
-                        inclusion_reason: @inclusion_reason
-                     }
+                     UPDATE @document
                      IN @@collection
                      RETURN NEW",
                     serde_json::json!({

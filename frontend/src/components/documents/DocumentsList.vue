@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import StatusPill from 'src/components/base/StatusPill.vue'
 import { useDisplayFormatters } from 'src/composables/useDisplayFormatters'
 import type { DocumentRowSummary, DocumentsSortField } from 'src/models/ui/documents'
@@ -17,12 +18,15 @@ const emit = defineEmits<{
   sort: [field: DocumentsSortField]
 }>()
 
+const { t } = useI18n()
 const { formatCompactDateTime, formatDateTime } = useDisplayFormatters()
 const showTypeColumn = computed(() => {
-  const visibleTypes = new Set(props.rows.map((row) => row.fileType).filter((value) => value.trim().length > 0))
+  const visibleTypes = new Set(
+    props.rows.map((row) => row.fileType).filter((value) => value.trim().length > 0),
+  )
   return visibleTypes.size > 1
 })
-const showStatusColumn = computed(() => props.rows.some((row) => !['ready', 'ready_no_graph'].includes(row.status)))
+const showStatusColumn = computed(() => props.rows.some((row) => row.status !== 'ready'))
 
 function hasDetailTarget(row: DocumentRowSummary): boolean {
   return row.detailAvailable && row.id.trim().length > 0
@@ -40,7 +44,9 @@ function compactMeta(row: DocumentRowSummary): string {
     showTypeColumn.value ? row.fileType : '',
     row.fileSizeLabel,
     formatCompactDateTime(row.uploadedAt),
-  ].filter(Boolean).join(' · ')
+  ]
+    .filter(Boolean)
+    .join(' · ')
 }
 
 function isSortActive(field: DocumentsSortField): boolean {
@@ -60,24 +66,106 @@ function sortIndicator(field: DocumentsSortField): string {
   }
   return props.sortDirection === 'asc' ? '↑' : '↓'
 }
+
+function isQueued(row: DocumentRowSummary): boolean {
+  return row.status === 'queued'
+}
+
+function isProcessing(row: DocumentRowSummary): boolean {
+  return row.status === 'processing'
+}
+
+function isInFlight(row: DocumentRowSummary): boolean {
+  return isQueued(row) || isProcessing(row)
+}
+
+function isGraphCatchUp(row: DocumentRowSummary): boolean {
+  return row.status === 'ready_no_graph'
+}
+
+function hasStatusDetail(row: DocumentRowSummary): boolean {
+  return Boolean(statusDetailText(row))
+}
+
+function liveLabel(row: DocumentRowSummary): string | null {
+  if (isQueued(row)) {
+    return t('documents.workspace.rowState.queuedEyebrow')
+  }
+
+  if (isProcessing(row)) {
+    return t('documents.workspace.rowState.processingEyebrow')
+  }
+
+  if (isGraphCatchUp(row)) {
+    return t('documents.workspace.rowState.graphCatchUpEyebrow')
+  }
+
+  return null
+}
+
+function statusDetailText(row: DocumentRowSummary): string | null {
+  const normalizedStage = row.stageLabel?.trim() ?? ''
+  const normalizedStatus = row.statusLabel.trim()
+  if (
+    normalizedStage &&
+    normalizedStage.localeCompare(normalizedStatus, undefined, { sensitivity: 'accent' }) !== 0
+  ) {
+    return normalizedStage
+  }
+
+  switch (row.status) {
+    case 'queued':
+      return t('documents.workspace.rowState.queuedDetail')
+    case 'processing':
+      return t('documents.workspace.rowState.processingDetail')
+    case 'ready_no_graph':
+      return t('documents.workspace.rowState.readyNoGraphDetail')
+    case 'failed':
+      return t('documents.workspace.rowState.failedDetail')
+    default:
+      return null
+  }
+}
+
+function normalizedProgress(row: DocumentRowSummary): number | null {
+  if (row.progressPercent === null) {
+    return null
+  }
+  return Math.max(0, Math.min(100, row.progressPercent))
+}
+
+function showProgressBar(row: DocumentRowSummary): boolean {
+  return normalizedProgress(row) !== null && (isInFlight(row) || isGraphCatchUp(row))
+}
+
+function progressText(row: DocumentRowSummary): string | null {
+  const progress = normalizedProgress(row)
+  if (progress === null) {
+    return null
+  }
+  return t('documents.workspace.rowState.progressLabel', { percent: progress })
+}
+
+function lastActivityText(row: DocumentRowSummary): string | null {
+  if (!row.lastActivityAt || row.status === 'ready') {
+    return null
+  }
+  return t('documents.workspace.rowState.lastActivity', {
+    time: formatCompactDateTime(row.lastActivityAt),
+  })
+}
 </script>
 
 <template>
   <div class="rr-docs-table">
     <table>
       <colgroup>
-        <col class="rr-docs-table__col rr-docs-table__col--name">
-        <col
-          v-if="showTypeColumn"
-          class="rr-docs-table__col rr-docs-table__col--type"
-        >
-        <col class="rr-docs-table__col rr-docs-table__col--size">
-        <col class="rr-docs-table__col rr-docs-table__col--date">
-        <col class="rr-docs-table__col rr-docs-table__col--cost">
-        <col
-          v-if="showStatusColumn"
-          class="rr-docs-table__col rr-docs-table__col--status"
-        >
+        <col class="rr-docs-table__col rr-docs-table__col--name" />
+        <col v-if="showTypeColumn" class="rr-docs-table__col rr-docs-table__col--type" />
+        <col class="rr-docs-table__col rr-docs-table__col--size" />
+        <col class="rr-docs-table__col rr-docs-table__col--date" />
+        <col class="rr-docs-table__col rr-docs-table__col--cost" />
+        <col v-if="showStatusColumn" class="rr-docs-table__col rr-docs-table__col--status" />
       </colgroup>
 
       <thead>
@@ -189,11 +277,7 @@ function sortIndicator(field: DocumentsSortField): string {
             scope="col"
             :aria-sort="ariaSort('status')"
           >
-            <button
-              class="rr-docs-table__th-button"
-              type="button"
-              @click="emit('sort', 'status')"
-            >
+            <button class="rr-docs-table__th-button" type="button" @click="emit('sort', 'status')">
               <span>{{ $t('documents.workspace.table.status') }}</span>
               <span
                 class="rr-docs-table__sort-indicator"
@@ -215,6 +299,10 @@ function sortIndicator(field: DocumentsSortField): string {
           :class="{
             'is-selected': row.id === props.selectedId,
             'is-clickable': hasDetailTarget(row),
+            'is-in-flight': isInFlight(row),
+            'is-queued': isQueued(row),
+            'is-processing': isProcessing(row),
+            'is-graph-catchup': isGraphCatchUp(row),
           }"
           :tabindex="hasDetailTarget(row) ? 0 : undefined"
           @click="openDetail(row)"
@@ -223,6 +311,18 @@ function sortIndicator(field: DocumentsSortField): string {
         >
           <td class="rr-docs-table__cell rr-docs-table__cell--name" :title="row.fileName">
             <div class="rr-docs-table__name-stack">
+              <div
+                v-if="liveLabel(row)"
+                class="rr-docs-table__live-indicator"
+                :class="{
+                  'is-queued': isQueued(row),
+                  'is-processing': isProcessing(row),
+                  'is-graph-catchup': isGraphCatchUp(row),
+                }"
+              >
+                <span class="rr-docs-table__live-dot" aria-hidden="true" />
+                <span>{{ liveLabel(row) }}</span>
+              </div>
               <strong>{{ row.fileName }}</strong>
               <span>{{ compactMeta(row) }}</span>
             </div>
@@ -234,10 +334,7 @@ function sortIndicator(field: DocumentsSortField): string {
           >
             {{ row.fileType }}
           </td>
-          <td
-            class="rr-docs-table__cell rr-docs-table__cell--size"
-            :title="row.fileSizeLabel"
-          >
+          <td class="rr-docs-table__cell rr-docs-table__cell--size" :title="row.fileSizeLabel">
             {{ row.fileSizeLabel }}
           </td>
           <td
@@ -253,15 +350,38 @@ function sortIndicator(field: DocumentsSortField): string {
           >
             {{ row.costLabel || '—' }}
           </td>
-          <td
-            v-if="showStatusColumn"
-            class="rr-docs-table__cell rr-docs-table__cell--status"
-          >
-            <div class="rr-docs-table__status-stack">
-              <StatusPill
-                :tone="row.status"
-                :label="row.stageLabel && (row.status === 'processing' || row.status === 'queued') ? row.stageLabel : row.statusLabel"
-              />
+          <td v-if="showStatusColumn" class="rr-docs-table__cell rr-docs-table__cell--status">
+            <div
+              class="rr-docs-table__status-stack"
+              :class="{
+                'is-in-flight': isInFlight(row),
+                'is-graph-catchup': isGraphCatchUp(row),
+                'has-detail': hasStatusDetail(row),
+              }"
+            >
+              <StatusPill :tone="row.status" :label="row.statusLabel" />
+              <p v-if="statusDetailText(row)" class="rr-docs-table__status-copy">
+                {{ statusDetailText(row) }}
+              </p>
+              <div
+                v-if="progressText(row) || lastActivityText(row)"
+                class="rr-docs-table__status-meta"
+              >
+                <span v-if="progressText(row)">{{ progressText(row) }}</span>
+                <span v-if="lastActivityText(row)">{{ lastActivityText(row) }}</span>
+              </div>
+              <div
+                v-if="showProgressBar(row)"
+                class="rr-docs-table__status-progress"
+                :class="{
+                  'is-queued': isQueued(row),
+                  'is-processing': isProcessing(row),
+                  'is-graph-catchup': isGraphCatchUp(row),
+                }"
+                aria-hidden="true"
+              >
+                <span :style="{ width: `${normalizedProgress(row) ?? 0}%` }" />
+              </div>
               <button
                 v-if="row.canRetry"
                 class="rr-docs-table__status-action"
@@ -321,7 +441,7 @@ function sortIndicator(field: DocumentsSortField): string {
 }
 
 .rr-docs-table__col--status {
-  width: 136px;
+  width: 212px;
 }
 
 @media (min-width: 1500px) {
@@ -342,7 +462,7 @@ function sortIndicator(field: DocumentsSortField): string {
   }
 
   .rr-docs-table__col--status {
-    width: 152px;
+    width: 228px;
   }
 
   .rr-docs-table__th,
@@ -377,7 +497,7 @@ function sortIndicator(field: DocumentsSortField): string {
   }
 
   .rr-docs-table__col--status {
-    width: 164px;
+    width: 244px;
   }
 
   .rr-docs-table__th,
@@ -469,8 +589,12 @@ function sortIndicator(field: DocumentsSortField): string {
 }
 
 .rr-docs-table__row {
+  position: relative;
   outline: none;
-  transition: background 120ms ease, box-shadow 120ms ease, transform 120ms ease;
+  transition:
+    background 120ms ease,
+    box-shadow 120ms ease,
+    transform 120ms ease;
 }
 
 .rr-docs-table__row + .rr-docs-table__row .rr-docs-table__cell {
@@ -480,18 +604,15 @@ function sortIndicator(field: DocumentsSortField): string {
 .rr-docs-table__th--size,
 .rr-docs-table__th--date,
 .rr-docs-table__th--cost,
-.rr-docs-table__th--status,
 .rr-docs-table__cell--size,
 .rr-docs-table__cell--date,
-.rr-docs-table__cell--cost,
-.rr-docs-table__cell--status {
+.rr-docs-table__cell--cost {
   text-align: right;
 }
 
 .rr-docs-table__th--size .rr-docs-table__th-button,
 .rr-docs-table__th--date .rr-docs-table__th-button,
-.rr-docs-table__th--cost .rr-docs-table__th-button,
-.rr-docs-table__th--status .rr-docs-table__th-button {
+.rr-docs-table__th--cost .rr-docs-table__th-button {
   justify-content: flex-end;
 }
 
@@ -514,6 +635,44 @@ function sortIndicator(field: DocumentsSortField): string {
 
 .rr-docs-table__row.is-clickable:hover {
   background: linear-gradient(90deg, rgba(242, 246, 255, 0.98), rgba(247, 249, 255, 0.92));
+}
+
+.rr-docs-table__row.is-in-flight {
+  box-shadow: inset 4px 0 0 rgba(59, 130, 246, 0.64);
+}
+
+.rr-docs-table__row.is-in-flight::after {
+  content: '';
+  position: absolute;
+  inset: auto 0 0;
+  height: 2px;
+  opacity: 0.96;
+}
+
+.rr-docs-table__row.is-queued {
+  background: linear-gradient(90deg, rgba(255, 251, 235, 0.96), rgba(255, 255, 255, 0.92));
+  box-shadow: inset 4px 0 0 rgba(245, 158, 11, 0.7);
+}
+
+.rr-docs-table__row.is-queued::after {
+  background: linear-gradient(90deg, rgba(245, 158, 11, 0.92), rgba(251, 191, 36, 0.48));
+}
+
+.rr-docs-table__row.is-processing {
+  background: linear-gradient(90deg, rgba(239, 246, 255, 0.98), rgba(255, 255, 255, 0.94));
+}
+
+.rr-docs-table__row.is-processing::after {
+  background: linear-gradient(90deg, rgba(37, 99, 235, 0.92), rgba(79, 70, 229, 0.44));
+}
+
+.rr-docs-table__row.is-graph-catchup {
+  background: linear-gradient(90deg, rgba(240, 249, 255, 0.98), rgba(255, 255, 255, 0.94));
+  box-shadow: inset 4px 0 0 rgba(14, 116, 144, 0.58);
+}
+
+.rr-docs-table__row.is-graph-catchup::after {
+  background: linear-gradient(90deg, rgba(14, 116, 144, 0.86), rgba(56, 189, 248, 0.4));
 }
 
 .rr-docs-table__row.is-selected {
@@ -549,6 +708,53 @@ function sortIndicator(field: DocumentsSortField): string {
   display: grid;
   gap: 4px;
   min-width: 0;
+}
+
+.rr-docs-table__live-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  width: fit-content;
+  min-height: 1.35rem;
+  padding: 0 0.58rem;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(255, 255, 255, 0.9);
+  color: rgba(71, 85, 105, 0.96);
+  font-size: 0.68rem;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.84);
+}
+
+.rr-docs-table__live-indicator.is-queued {
+  border-color: rgba(245, 158, 11, 0.18);
+  background: rgba(255, 251, 235, 0.92);
+  color: rgba(180, 83, 9, 0.96);
+}
+
+.rr-docs-table__live-indicator.is-processing {
+  border-color: rgba(96, 165, 250, 0.2);
+  background: rgba(239, 246, 255, 0.94);
+  color: rgba(29, 78, 216, 0.96);
+}
+
+.rr-docs-table__live-indicator.is-graph-catchup {
+  border-color: rgba(14, 116, 144, 0.18);
+  background: rgba(240, 249, 255, 0.94);
+  color: rgba(14, 116, 144, 0.96);
+}
+
+.rr-docs-table__live-dot {
+  display: inline-flex;
+  width: 0.44rem;
+  height: 0.44rem;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.18);
+  animation: rr-docs-table-live-pulse 1.8s ease-out infinite;
 }
 
 .rr-docs-table__name-stack strong {
@@ -592,8 +798,89 @@ function sortIndicator(field: DocumentsSortField): string {
 
 .rr-docs-table__status-stack {
   display: grid;
-  justify-items: end;
-  gap: 5px;
+  justify-items: start;
+  gap: 6px;
+  min-width: 0;
+  justify-self: stretch;
+}
+
+.rr-docs-table__status-stack.is-in-flight {
+  padding: 0.56rem 0.68rem;
+  border-radius: 14px;
+  border: 1px solid rgba(191, 219, 254, 0.72);
+  background: rgba(255, 255, 255, 0.76);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.86),
+    0 8px 16px rgba(37, 99, 235, 0.05);
+}
+
+.rr-docs-table__status-stack.is-graph-catchup {
+  padding: 0.56rem 0.68rem;
+  border-radius: 14px;
+  border: 1px solid rgba(186, 230, 253, 0.82);
+  background: rgba(240, 249, 255, 0.72);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 8px 16px rgba(14, 116, 144, 0.04);
+}
+
+.rr-docs-table__status-copy {
+  margin: 0;
+  color: rgba(71, 85, 105, 0.94);
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.42;
+  text-wrap: balance;
+}
+
+.rr-docs-table__status-meta {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.42rem 0.6rem;
+  color: rgba(100, 116, 139, 0.92);
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.rr-docs-table__status-meta span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.rr-docs-table__status-meta span + span::before {
+  content: '•';
+  color: rgba(148, 163, 184, 0.88);
+  margin-right: 0.3rem;
+}
+
+.rr-docs-table__status-progress {
+  position: relative;
+  width: min(100%, 10.5rem);
+  height: 0.42rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(226, 232, 240, 0.9);
+}
+
+.rr-docs-table__status-progress span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  transition: width 180ms ease;
+}
+
+.rr-docs-table__status-progress.is-queued span {
+  background: linear-gradient(90deg, rgba(245, 158, 11, 0.88), rgba(251, 191, 36, 0.72));
+}
+
+.rr-docs-table__status-progress.is-processing span {
+  background: linear-gradient(90deg, rgba(37, 99, 235, 0.9), rgba(79, 70, 229, 0.72));
+}
+
+.rr-docs-table__status-progress.is-graph-catchup span {
+  background: linear-gradient(90deg, rgba(14, 116, 144, 0.88), rgba(56, 189, 248, 0.62));
 }
 
 .rr-docs-table__status-stack :deep(.rr-status-pill) {
@@ -607,8 +894,18 @@ function sortIndicator(field: DocumentsSortField): string {
 }
 
 .rr-docs-table__status-stack :deep(.rr-status-pill--ready_no_graph) {
-  background: rgba(248, 250, 252, 0.92);
-  color: rgba(71, 85, 105, 0.92);
+  background: rgba(240, 249, 255, 0.98);
+  color: rgba(14, 116, 144, 0.96);
+}
+
+.rr-docs-table__status-stack.is-in-flight :deep(.rr-status-pill--queued) {
+  background: rgba(255, 251, 235, 0.98);
+  color: rgba(180, 83, 9, 0.96);
+}
+
+.rr-docs-table__status-stack.is-in-flight :deep(.rr-status-pill--processing) {
+  background: rgba(239, 246, 255, 0.98);
+  color: rgba(29, 78, 216, 0.96);
 }
 
 .rr-docs-table__status-action {
@@ -624,7 +921,10 @@ function sortIndicator(field: DocumentsSortField): string {
   color: rgba(67, 56, 202, 0.92);
   cursor: pointer;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
-  transition: background 100ms ease, border-color 100ms ease, color 100ms ease;
+  transition:
+    background 100ms ease,
+    border-color 100ms ease,
+    color 100ms ease;
 }
 
 .rr-docs-table__status-action:hover {
@@ -634,6 +934,20 @@ function sortIndicator(field: DocumentsSortField): string {
 
 .rr-docs-table__status-stack :deep(.rr-status-pill--failed) {
   background: rgba(254, 242, 242, 0.82);
+}
+
+@keyframes rr-docs-table-live-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.18);
+  }
+
+  70% {
+    box-shadow: 0 0 0 0.36rem rgba(37, 99, 235, 0);
+  }
+
+  100% {
+    box-shadow: 0 0 0 0 rgba(37, 99, 235, 0);
+  }
 }
 
 @media (max-width: 1180px) {
@@ -721,8 +1035,8 @@ function sortIndicator(field: DocumentsSortField): string {
   }
 
   .rr-docs-table__status-stack {
-    justify-items: end;
-    text-align: right;
+    justify-items: start;
+    text-align: left;
     gap: 8px;
   }
 

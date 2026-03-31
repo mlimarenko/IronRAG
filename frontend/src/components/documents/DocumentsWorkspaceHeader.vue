@@ -11,7 +11,8 @@ const props = defineProps<{
   totalCount?: number
   activeCount?: number
   failedCount?: number
-  readyCount?: number
+  graphReadyCount?: number
+  graphCatchUpCount?: number
   costSummary?: LibraryCostSummary | null
   uploadFailures: DocumentUploadFailure[]
   hasDocuments?: boolean
@@ -33,25 +34,28 @@ const uploadFailureSummary = computed(() => {
 
 const hasActiveDocuments = computed(() => (props.activeCount ?? 0) > 0)
 const hasFailedDocuments = computed(() => (props.failedCount ?? 0) > 0)
+const hasGraphCatchUpDocuments = computed(() => (props.graphCatchUpCount ?? 0) > 0)
 const hasCostSummary = computed(() => Boolean(props.costSummary && props.costSummary.totalCost > 0))
 const showTotalStat = computed(() => (props.totalCount ?? 0) > 0 || Boolean(props.hasDocuments))
-const showAvgCostStat = computed(
-  () => hasCostSummary.value && (hasActiveDocuments.value || hasFailedDocuments.value),
+const showAvgCostStat = computed(() =>
+  hasCostSummary.value &&
+  (hasActiveDocuments.value || hasFailedDocuments.value || hasGraphCatchUpDocuments.value),
 )
-const showReadyStat = computed(() => {
-  const readyCount = props.readyCount ?? 0
+const showGraphReadyStat = computed(() => {
+  const graphReadyCount = props.graphReadyCount ?? 0
   const totalCount = props.totalCount ?? 0
-  if (readyCount <= 0) {
+  if (graphReadyCount <= 0) {
     return false
   }
-  if (hasActiveDocuments.value || hasFailedDocuments.value) {
+  if (hasActiveDocuments.value || hasFailedDocuments.value || hasGraphCatchUpDocuments.value) {
     return true
   }
-  return readyCount < totalCount
+  return graphReadyCount < totalCount
 })
 const visibleStatCount = computed(() => {
   let count = showTotalStat.value ? 1 : 0
-  if (showReadyStat.value) count += 1
+  if (showGraphReadyStat.value) count += 1
+  if (hasGraphCatchUpDocuments.value) count += 1
   if (hasActiveDocuments.value) count += 1
   if (hasFailedDocuments.value) count += 1
   if (hasCostSummary.value) count += 1
@@ -134,11 +138,18 @@ defineExpose({ openUploader })
           <span class="rr-docs-header__stat-label">{{ $t('documents.workspace.stats.total') }}</span>
         </div>
         <div
-          v-if="showReadyStat"
+          v-if="showGraphReadyStat"
           class="rr-docs-header__stat rr-docs-header__stat--success"
         >
-          <span class="rr-docs-header__stat-value">{{ readyCount ?? 0 }}</span>
-          <span class="rr-docs-header__stat-label">{{ $t('documents.workspace.stats.ready') }}</span>
+          <span class="rr-docs-header__stat-value">{{ graphReadyCount ?? 0 }}</span>
+          <span class="rr-docs-header__stat-label">{{ $t('documents.workspace.stats.graphReady') }}</span>
+        </div>
+        <div
+          v-if="hasGraphCatchUpDocuments"
+          class="rr-docs-header__stat rr-docs-header__stat--info"
+        >
+          <span class="rr-docs-header__stat-value">{{ graphCatchUpCount ?? 0 }}</span>
+          <span class="rr-docs-header__stat-label">{{ $t('documents.workspace.stats.readyNoGraph') }}</span>
         </div>
         <div v-if="hasActiveDocuments" class="rr-docs-header__stat rr-docs-header__stat--warning">
           <span class="rr-docs-header__stat-value">{{ activeCount }}</span>
@@ -149,14 +160,14 @@ defineExpose({ openUploader })
           <span class="rr-docs-header__stat-label">{{ $t('documents.workspace.stats.failed') }}</span>
         </div>
         <div v-if="hasCostSummary" class="rr-docs-header__stat rr-docs-header__stat--cost">
-          <span class="rr-docs-header__stat-value">{{ formatCost(costSummary.totalCost, costSummary.currencyCode) }}</span>
+          <span class="rr-docs-header__stat-value">{{ formatCost(costSummary!.totalCost, costSummary!.currencyCode) }}</span>
           <span class="rr-docs-header__stat-label">{{ $t('documents.workspace.stats.totalCost') }}</span>
         </div>
         <div
           v-if="showAvgCostStat"
           class="rr-docs-header__stat rr-docs-header__stat--avg-cost"
         >
-          <span class="rr-docs-header__stat-value">{{ formatAvgCost(costSummary.totalCost, costSummary.documentCount, costSummary.currencyCode) }}</span>
+          <span class="rr-docs-header__stat-value">{{ formatAvgCost(costSummary!.totalCost, costSummary!.documentCount, costSummary!.currencyCode) }}</span>
           <span class="rr-docs-header__stat-label">{{ $t('documents.workspace.stats.avgCost') }}</span>
         </div>
       </div>
@@ -377,6 +388,7 @@ defineExpose({ openUploader })
 }
 
 .rr-docs-header__stat--success .rr-docs-header__stat-value { color: #059669; }
+.rr-docs-header__stat--info .rr-docs-header__stat-value { color: #0f766e; }
 .rr-docs-header__stat--warning .rr-docs-header__stat-value { color: #d97706; }
 .rr-docs-header__stat--danger .rr-docs-header__stat-value { color: #dc2626; }
 .rr-docs-header__stat--cost .rr-docs-header__stat-value { color: #7c3aed; }

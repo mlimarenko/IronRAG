@@ -38,10 +38,13 @@ const emit = defineEmits<{
 const { t } = useI18n()
 
 const canvasRef = ref<HTMLDivElement | null>(null)
-const sigmaRef = shallowRef<Sigma<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes> | null>(null)
-const graphRef = shallowRef<
-  MultiUndirectedGraph<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes> | null
->(null)
+const sigmaRef = shallowRef<Sigma<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes> | null>(
+  null,
+)
+const graphRef = shallowRef<MultiUndirectedGraph<
+  GraphCanvasNodeAttributes,
+  GraphCanvasEdgeAttributes
+> | null>(null)
 const pendingDragNodeId = ref<string | null>(null)
 const pendingDragViewport = ref<{ x: number; y: number } | null>(null)
 const draggedNodeId = ref<string | null>(null)
@@ -54,12 +57,18 @@ const skipNextFocusViewportSync = ref(false)
 const didInitialFit = ref(false)
 const renderMode = ref<'sigma' | 'placeholder'>('sigma')
 const webglContextCleanup = ref<(() => void) | null>(null)
-const hoverCursorCleanup = ref<(() => void) | null>(null)
+const interactionCleanup = ref<(() => void) | null>(null)
 const webglUnavailable = ref(false)
 let relayoutTimer: number | null = null
 let cancelRelayoutAnimation: (() => void) | null = null
-let hoverCursorFrame: number | null = null
-const NODE_DRAG_THRESHOLD_PX = 7
+let hoverResolveFrameId: number | null = null
+let pendingHoverViewport: { x: number; y: number } | null = null
+const NODE_DRAG_THRESHOLD_PX = 4
+const DENSE_NODE_HIT_RADIUS_PX = 13.5
+const FOCUSED_NODE_HIT_RADIUS_PX = 11.5
+const DEFAULT_NODE_HIT_RADIUS_PX = 9
+const DEFAULT_PICKING_RATIO = 1
+const DENSE_OVERVIEW_PICKING_RATIO = 1.3
 
 function setStageNodeHover(active: boolean): void {
   canvasRef.value?.classList.toggle('is-node-hover', active)
@@ -74,10 +83,6 @@ function updateHoveredNode(nodeId: string | null): void {
 }
 
 function clearHoveredNode(): void {
-  if (hoverCursorFrame !== null) {
-    window.cancelAnimationFrame(hoverCursorFrame)
-    hoverCursorFrame = null
-  }
   updateHoveredNode(null)
 }
 
@@ -88,6 +93,7 @@ function clearPendingNodeDrag(
   pendingDragViewport.value = null
   if (sigma) {
     sigma.setSetting('enableCameraPanning', true)
+    sigma.setCustomBBox(resolveViewportBBox())
   }
 }
 
@@ -119,7 +125,8 @@ const denseOverview = computed(
   () => !props.focusedNodeId && (baseNodes.value.length > 120 || baseEdges.value.length > 240),
 )
 const denseFocusedGraph = computed(
-  () => Boolean(props.focusedNodeId) && (baseNodes.value.length > 120 || baseEdges.value.length > 240),
+  () =>
+    Boolean(props.focusedNodeId) && (baseNodes.value.length > 120 || baseEdges.value.length > 240),
 )
 
 function supportsWebGL(): boolean {
@@ -127,124 +134,8 @@ function supportsWebGL(): boolean {
   return Boolean(canvas.getContext('webgl2') ?? canvas.getContext('webgl'))
 }
 
-type SigmaInternal = Sigma<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes> & {
-  activeListeners?: {
-    handleMove?: (...args: unknown[]) => void
-    handleMoveBody?: (...args: unknown[]) => void
-    handleClick?: (...args: unknown[]) => void
-    handleRightClick?: (...args: unknown[]) => void
-    handleDoubleClick?: (...args: unknown[]) => void
-    handleWheel?: (...args: unknown[]) => void
-    handleDown?: (...args: unknown[]) => void
-    handleUp?: (...args: unknown[]) => void
-    handleLeave?: (...args: unknown[]) => void
-    handleEnter?: (...args: unknown[]) => void
-  }
+interface SigmaRuntimeHandle {
   pickingDownSizingRatio?: number
-  pixelRatio?: number
-  hoveredNode?: string | null
-  hoveredEdge?: string | null
-}
-
-function resolveDenseOverviewPixelRatio(container: HTMLDivElement): number | null {
-  const area = container.offsetWidth * container.offsetHeight
-  if (area >= 7_000_000) {
-    return 0.78
-  }
-  if (area >= 4_200_000) {
-    return 0.88
-  }
-  return null
-}
-
-function withTemporaryDevicePixelRatio<T>(pixelRatio: number | null, task: () => T): T {
-  if (
-    pixelRatio === null ||
-    !Number.isFinite(pixelRatio) ||
-    Math.abs(pixelRatio - (window.devicePixelRatio ?? 1)) < 0.01
-  ) {
-    return task()
-  }
-
-  try {
-    Object.defineProperty(window, 'devicePixelRatio', {
-      configurable: true,
-      get: () => pixelRatio,
-    })
-  } catch {
-    return task()
-  }
-
-  try {
-    return task()
-  } finally {
-    try {
-      delete (window as Window & { devicePixelRatio?: number }).devicePixelRatio
-    } catch {
-      // Ignore restoration failures and fall back to the browser-provided value.
-    }
-  }
-}
-
-function disableSigmaInteractionListeners(
-  sigma: Sigma<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes>,
-): void {
-  const internalSigma = sigma as SigmaInternal
-  const activeListeners = internalSigma.activeListeners
-  const mouseCaptor = sigma.getMouseCaptor()
-  const touchCaptor = sigma.getTouchCaptor()
-
-  if (activeListeners?.handleMove) {
-    mouseCaptor.removeListener('mousemove', activeListeners.handleMove)
-    touchCaptor.removeListener('touchdown', activeListeners.handleMove)
-    touchCaptor.removeListener('touchmove', activeListeners.handleMove)
-  }
-
-  if (activeListeners?.handleMoveBody) {
-    mouseCaptor.removeListener('mousemovebody', activeListeners.handleMoveBody)
-    touchCaptor.removeListener('touchmove', activeListeners.handleMoveBody)
-  }
-
-  if (activeListeners?.handleClick) {
-    mouseCaptor.removeListener('click', activeListeners.handleClick)
-    touchCaptor.removeListener('tap', activeListeners.handleClick)
-  }
-
-  if (activeListeners?.handleRightClick) {
-    mouseCaptor.removeListener('rightClick', activeListeners.handleRightClick)
-  }
-
-  if (activeListeners?.handleDoubleClick) {
-    mouseCaptor.removeListener('doubleClick', activeListeners.handleDoubleClick)
-    touchCaptor.removeListener('doubletap', activeListeners.handleDoubleClick)
-  }
-
-  if (activeListeners?.handleWheel) {
-    mouseCaptor.removeListener('wheel', activeListeners.handleWheel)
-  }
-
-  if (activeListeners?.handleDown) {
-    mouseCaptor.removeListener('mousedown', activeListeners.handleDown)
-    touchCaptor.removeListener('touchdown', activeListeners.handleDown)
-  }
-
-  if (activeListeners?.handleUp) {
-    mouseCaptor.removeListener('mouseup', activeListeners.handleUp)
-    touchCaptor.removeListener('touchup', activeListeners.handleUp)
-  }
-
-  if (activeListeners?.handleLeave) {
-    mouseCaptor.removeListener('mouseleave', activeListeners.handleLeave)
-  }
-
-  if (activeListeners?.handleEnter) {
-    mouseCaptor.removeListener('mouseenter', activeListeners.handleEnter)
-  }
-
-  if (activeListeners) {
-    internalSigma.hoveredNode = null
-    internalSigma.hoveredEdge = null
-  }
 }
 
 function resolveViewportBBox(): { x: [number, number]; y: [number, number] } | null {
@@ -342,8 +233,10 @@ function fitViewport(duration = 260): void {
 
 function recoverInvalidNodePosition(
   error: unknown,
-  graph: MultiUndirectedGraph<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes> | null =
-    graphRef.value,
+  graph: MultiUndirectedGraph<
+    GraphCanvasNodeAttributes,
+    GraphCanvasEdgeAttributes
+  > | null = graphRef.value,
 ): boolean {
   if (!(error instanceof Error) || !graph) {
     return false
@@ -376,17 +269,21 @@ function createSigma(
   ensureFinitePositions(graph)
   const isDenseOverview = denseOverview.value
   const isDenseFocusedGraph = denseFocusedGraph.value
-  const cappedPixelRatio = isDenseOverview ? resolveDenseOverviewPixelRatio(container) : null
-  const nodeProgramClasses = isDenseOverview
-    ? DEFAULT_NODE_PROGRAM_CLASSES
-    : {
-        ...DEFAULT_NODE_PROGRAM_CLASSES,
-        default: NodeBorderProgram as never,
-      }
+  type SigmaSettings = NonNullable<
+    ConstructorParameters<typeof Sigma<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes>>[2]
+  >
+  const nodeProgramClasses = (
+    isDenseOverview
+      ? DEFAULT_NODE_PROGRAM_CLASSES
+      : {
+          ...DEFAULT_NODE_PROGRAM_CLASSES,
+          default: NodeBorderProgram as never,
+        }
+  ) as SigmaSettings['nodeProgramClasses']
   const edgeProgramClasses = {
     ...DEFAULT_EDGE_PROGRAM_CLASSES,
     curvedNoArrow: createEdgeCurveProgram(),
-  }
+  } as SigmaSettings['edgeProgramClasses']
   const settings = {
     allowInvalidContainer: true,
     defaultNodeType: isDenseOverview ? 'circle' : 'default',
@@ -407,26 +304,20 @@ function createSigma(
     autoCenter: true,
     nodeProgramClasses,
     edgeProgramClasses,
-  } satisfies ConstructorParameters<
-    typeof Sigma<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes>
-  >[2]
+  } satisfies SigmaSettings
 
   try {
-    return withTemporaryDevicePixelRatio(cappedPixelRatio, () =>
-      new Sigma<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes>(
-        graph,
-        container,
-        settings,
-      ),
+    return new Sigma<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes>(
+      graph,
+      container,
+      settings,
     )
   } catch (error) {
     if (recoverInvalidNodePosition(error, graph)) {
-      return withTemporaryDevicePixelRatio(cappedPixelRatio, () =>
-        new Sigma<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes>(
-          graph,
-          container,
-          settings,
-        ),
+      return new Sigma<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes>(
+        graph,
+        container,
+        settings,
       )
     }
     throw error
@@ -437,21 +328,126 @@ function optimizeSigmaRuntime(
   sigma: Sigma<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes>,
   denseOverview: boolean,
 ): void {
-  const internalSigma = sigma as SigmaInternal
-  disableSigmaInteractionListeners(sigma)
+  const internalSigma = sigma as unknown as SigmaRuntimeHandle
 
   if (denseOverview) {
     internalSigma.pickingDownSizingRatio = Math.max(
-      5,
-      (internalSigma.pixelRatio ?? window.devicePixelRatio ?? 1) * 6.4,
+      DENSE_OVERVIEW_PICKING_RATIO,
+      Math.min(1.55, window.devicePixelRatio),
     )
     return
   }
 
-  internalSigma.pickingDownSizingRatio = Math.max(
-    2,
-    (internalSigma.pixelRatio ?? window.devicePixelRatio ?? 1) * 2,
-  )
+  internalSigma.pickingDownSizingRatio = DEFAULT_PICKING_RATIO
+}
+
+function resolveNodeHitRadius(nodeSize: number): number {
+  if (denseOverview.value) {
+    return Math.max(DENSE_NODE_HIT_RADIUS_PX, nodeSize * 1.38 + 6.1)
+  }
+  if (denseFocusedGraph.value) {
+    return Math.max(FOCUSED_NODE_HIT_RADIUS_PX, nodeSize * 1.24 + 5.1)
+  }
+  return Math.max(DEFAULT_NODE_HIT_RADIUS_PX, nodeSize * 1.08 + 4.2)
+}
+
+function resolveInteractiveNodeAtViewport(
+  sigma: Sigma<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes>,
+  viewport: { x: number; y: number },
+  options?: {
+    ambiguityScoreDelta?: number
+    ambiguityDistanceDeltaPx?: number
+  },
+): string | null {
+  const graph = graphRef.value
+  if (!graph) {
+    return null
+  }
+
+  const candidates: { nodeId: string; score: number; distance: number }[] = []
+
+  for (const nodeId of graph.nodes()) {
+    const attributes = graph.getNodeAttributes(nodeId)
+    const viewportPosition = sigma.graphToViewport({ x: attributes.x, y: attributes.y })
+    if (!Number.isFinite(viewportPosition.x) || !Number.isFinite(viewportPosition.y)) {
+      continue
+    }
+
+    const distance = Math.hypot(viewport.x - viewportPosition.x, viewport.y - viewportPosition.y)
+    const hitRadius = resolveNodeHitRadius(attributes.size)
+    if (distance > hitRadius) {
+      continue
+    }
+
+    candidates.push({
+      nodeId,
+      score: distance / hitRadius,
+      distance,
+    })
+  }
+
+  if (candidates.length === 0) {
+    return null
+  }
+
+  candidates.sort((left, right) => {
+    if (left.score === right.score) {
+      return left.distance - right.distance
+    }
+    return left.score - right.score
+  })
+
+  const bestMatch = candidates[0]
+  const secondBestMatch = candidates.length > 1 ? candidates[1] : null
+  const ambiguityScoreDelta = options?.ambiguityScoreDelta ?? 0.08
+  const ambiguityDistanceDeltaPx = options?.ambiguityDistanceDeltaPx ?? 3.5
+
+  if (
+    secondBestMatch &&
+    secondBestMatch.score - bestMatch.score <= ambiguityScoreDelta &&
+    Math.abs(secondBestMatch.distance - bestMatch.distance) <= ambiguityDistanceDeltaPx
+  ) {
+    return null
+  }
+
+  return bestMatch.nodeId
+}
+
+function scheduleHoverResolve(
+  sigma: Sigma<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes>,
+  viewport: { x: number; y: number },
+): void {
+  pendingHoverViewport = viewport
+  if (hoverResolveFrameId !== null) {
+    return
+  }
+
+  hoverResolveFrameId = window.requestAnimationFrame(() => {
+    hoverResolveFrameId = null
+    const nextViewport = pendingHoverViewport
+    pendingHoverViewport = null
+    if (!nextViewport || draggedNodeId.value) {
+      return
+    }
+
+    updateHoveredNode(resolveInteractiveNodeAtViewport(sigma, nextViewport))
+  })
+}
+
+function beginPendingNodeInteraction(
+  sigma: Sigma<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes>,
+  nodeId: string,
+  viewport: { x: number; y: number },
+  originalEvent?: MouseEvent | TouchEvent,
+): void {
+  pendingDragNodeId.value = nodeId
+  pendingDragViewport.value = { x: viewport.x, y: viewport.y }
+  dragStartViewport.value = { x: viewport.x, y: viewport.y }
+  dragMoved.value = false
+  sigma.setSetting('enableCameraPanning', false)
+  updateHoveredNode(nodeId)
+  originalEvent?.preventDefault()
+  originalEvent?.stopPropagation()
 }
 
 function safeRefreshPartial(
@@ -536,15 +532,11 @@ function animateRelayoutNodes(
 
   let cancelled = false
   let refreshFrameId: number | null = null
-  const sigmaWithSchedule = sigma as Sigma<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes> & {
-    scheduleRefresh?: (opts?: { skipIndexation?: boolean }) => void
-  }
-
   const scheduleRenderFrame = () => {
     if (cancelled) {
       return
     }
-    sigmaWithSchedule.scheduleRefresh?.()
+    sigma.scheduleRefresh()
     refreshFrameId = window.requestAnimationFrame(scheduleRenderFrame)
   }
 
@@ -578,10 +570,9 @@ function zoomIn(): void {
   if (!sigma) {
     return
   }
-  void sigma.getCamera().animate(
-    { ratio: Math.max(0.08, sigma.getCamera().ratio / 1.35) },
-    { duration: 180 },
-  )
+  void sigma
+    .getCamera()
+    .animate({ ratio: Math.max(0.08, sigma.getCamera().ratio / 1.35) }, { duration: 180 })
 }
 
 function zoomOut(): void {
@@ -589,10 +580,9 @@ function zoomOut(): void {
   if (!sigma) {
     return
   }
-  void sigma.getCamera().animate(
-    { ratio: Math.min(4, sigma.getCamera().ratio * 1.35) },
-    { duration: 180 },
-  )
+  void sigma
+    .getCamera()
+    .animate({ ratio: Math.min(4, sigma.getCamera().ratio * 1.35) }, { duration: 180 })
 }
 
 function destroyGraph(): void {
@@ -608,10 +598,15 @@ function destroyGraph(): void {
     webglContextCleanup.value()
     webglContextCleanup.value = null
   }
-  if (hoverCursorCleanup.value) {
-    hoverCursorCleanup.value()
-    hoverCursorCleanup.value = null
+  if (interactionCleanup.value) {
+    interactionCleanup.value()
+    interactionCleanup.value = null
   }
+  if (hoverResolveFrameId !== null) {
+    window.cancelAnimationFrame(hoverResolveFrameId)
+    hoverResolveFrameId = null
+  }
+  pendingHoverViewport = null
   if (sigmaRef.value) {
     sigmaRef.value.kill()
     sigmaRef.value = null
@@ -654,155 +649,9 @@ function registerWebglContextLossHandler(container: HTMLDivElement): void {
 function registerSigmaInteractions(
   sigma: Sigma<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes>,
 ): void {
-  const findNearestNodeAtViewportPoint = (x: number, y: number): string | null => {
-    const graph = graphRef.value
-    if (!graph) {
-      return null
-    }
-
-    let nearestNodeId: string | null = null
-    let nearestDistance = Number.POSITIVE_INFINITY
-
-    graph.forEachNode((nodeId, attributes) => {
-      const viewportPosition = sigma.graphToViewport({
-        x: attributes.x,
-        y: attributes.y,
-      })
-      const distance = Math.hypot(viewportPosition.x - x, viewportPosition.y - y)
-      const hitRadius = Math.max(16, attributes.size * 1.9)
-
-      if (distance <= hitRadius && distance < nearestDistance) {
-        nearestDistance = distance
-        nearestNodeId = nodeId
-      }
-    })
-
-    return nearestNodeId
-  }
-
-  let latestHoverPoint: { x: number; y: number } | null = null
-
-  const scheduleHoverSync = (x: number, y: number) => {
-    if (draggedNodeId.value) {
-      return
-    }
-
-    latestHoverPoint = { x, y }
-    if (hoverCursorFrame !== null) {
-      return
-    }
-
-    hoverCursorFrame = window.requestAnimationFrame(() => {
-      hoverCursorFrame = null
-      if (!latestHoverPoint || draggedNodeId.value) {
-        return
-      }
-      updateHoveredNode(findNearestNodeAtViewportPoint(latestHoverPoint.x, latestHoverPoint.y))
-    })
-  }
-
-  const resetHoverSync = () => {
-    latestHoverPoint = null
-    clearHoveredNode()
-  }
-
-  canvasRef.value?.addEventListener('mouseleave', resetHoverSync)
-  hoverCursorCleanup.value = () => {
-    canvasRef.value?.removeEventListener('mouseleave', resetHoverSync)
-    resetHoverSync()
-  }
-
   const graph = graphRef.value
-  const mouseCaptor = sigma.getMouseCaptor()
 
-  mouseCaptor.on('click', (event) => {
-    if (
-      Date.now() < ignoreStageClickUntil.value ||
-      Date.now() < suppressNodeSelectionUntil.value ||
-      dragMoved.value
-    ) {
-      return
-    }
-
-    const nearestNodeId = findNearestNodeAtViewportPoint(event.x, event.y)
-    if (nearestNodeId) {
-      ignoreStageClickUntil.value = Date.now() + 180
-      skipNextFocusViewportSync.value = true
-      emit('selectNode', nearestNodeId)
-      return
-    }
-
-    emit('clearFocus')
-  })
-
-  mouseCaptor.on('mousedown', (event) => {
-    const nearestNodeId = findNearestNodeAtViewportPoint(event.x, event.y)
-    if (!nearestNodeId) {
-      return
-    }
-
-    pendingDragNodeId.value = nearestNodeId
-    pendingDragViewport.value = { x: event.x, y: event.y }
-    dragStartViewport.value = { x: event.x, y: event.y }
-    dragMoved.value = false
-    sigma.setSetting('enableCameraPanning', false)
-    event.preventSigmaDefault()
-    event.original.preventDefault()
-    event.original.stopPropagation()
-  })
-
-  mouseCaptor.on('mousemovebody', (event: SigmaStageEventPayload['event']) => {
-    if (pendingDragNodeId.value && !draggedNodeId.value) {
-      if (!graph?.hasNode(pendingDragNodeId.value)) {
-        clearPendingNodeDrag(sigma)
-        scheduleHoverSync(event.x, event.y)
-        return
-      }
-
-      const pressViewport = pendingDragViewport.value
-      if (pressViewport) {
-        const distance = Math.hypot(event.x - pressViewport.x, event.y - pressViewport.y)
-        if (distance >= NODE_DRAG_THRESHOLD_PX) {
-          startDraggingNode(sigma, pendingDragNodeId.value)
-        } else {
-          return
-        }
-      }
-    }
-
-    if (!draggedNodeId.value || !graph?.hasNode(draggedNodeId.value)) {
-      scheduleHoverSync(event.x, event.y)
-      return
-    }
-
-    if (dragStartViewport.value) {
-      const distance = Math.hypot(
-        event.x - dragStartViewport.value.x,
-        event.y - dragStartViewport.value.y,
-      )
-      if (distance > 5) {
-        dragMoved.value = true
-      }
-    }
-
-    const graphPosition = sigma.viewportToGraph({
-      x: event.x,
-      y: event.y,
-    })
-
-    if (!Number.isFinite(graphPosition.x) || !Number.isFinite(graphPosition.y)) {
-      return
-    }
-
-    graph.setNodeAttribute(draggedNodeId.value, 'x', graphPosition.x)
-    graph.setNodeAttribute(draggedNodeId.value, 'y', graphPosition.y)
-    event.preventSigmaDefault()
-    event.original.preventDefault()
-    event.original.stopPropagation()
-    safeRefreshPartial({ nodes: [draggedNodeId.value] })
-  })
-
-  mouseCaptor.on('mouseup', () => {
+  const finishPointerInteraction = () => {
     if (!draggedNodeId.value) {
       const pendingNodeId = pendingDragNodeId.value
       if (pendingNodeId) {
@@ -816,16 +665,174 @@ function registerSigmaInteractions(
       }
       return
     }
+
     if (dragMoved.value) {
       suppressNodeSelectionUntil.value = Date.now() + 260
       ignoreStageClickUntil.value = suppressNodeSelectionUntil.value
     }
+
     draggedNodeId.value = null
     dragStartViewport.value = null
     dragMoved.value = false
     clearPendingNodeDrag(sigma)
     canvasRef.value?.classList.remove('is-dragging')
+  }
+
+  const handlePointerMove = (
+    viewport: { x: number; y: number },
+    originalEvent?: MouseEvent | TouchEvent,
+  ) => {
+    if (pendingDragNodeId.value && !draggedNodeId.value) {
+      if (!graph?.hasNode(pendingDragNodeId.value)) {
+        clearPendingNodeDrag(sigma)
+        return
+      }
+
+      const pressViewport = pendingDragViewport.value
+      if (pressViewport) {
+        const distance = Math.hypot(viewport.x - pressViewport.x, viewport.y - pressViewport.y)
+        if (distance >= NODE_DRAG_THRESHOLD_PX) {
+          startDraggingNode(sigma, pendingDragNodeId.value)
+        } else {
+          updateHoveredNode(pendingDragNodeId.value)
+          return
+        }
+      }
+    }
+
+    if (!draggedNodeId.value || !graph?.hasNode(draggedNodeId.value)) {
+      if (!pendingDragNodeId.value) {
+        scheduleHoverResolve(sigma, viewport)
+      }
+      return
+    }
+
+    if (dragStartViewport.value) {
+      const distance = Math.hypot(
+        viewport.x - dragStartViewport.value.x,
+        viewport.y - dragStartViewport.value.y,
+      )
+      if (distance > 5) {
+        dragMoved.value = true
+      }
+    }
+
+    const graphPosition = sigma.viewportToGraph(viewport)
+
+    if (!Number.isFinite(graphPosition.x) || !Number.isFinite(graphPosition.y)) {
+      return
+    }
+
+    graph.setNodeAttribute(draggedNodeId.value, 'x', graphPosition.x)
+    graph.setNodeAttribute(draggedNodeId.value, 'y', graphPosition.y)
+    originalEvent?.preventDefault()
+    originalEvent?.stopPropagation()
+    safeRefreshPartial({ nodes: [draggedNodeId.value] })
+  }
+
+  const handleMouseCaptorMove = (event: {
+    x: number
+    y: number
+    original: MouseEvent | TouchEvent
+  }) => {
+    handlePointerMove({ x: event.x, y: event.y }, event.original)
+  }
+
+  const handleTouchCaptorMove = (event: {
+    touches: { x: number; y: number }[]
+    original: TouchEvent
+  }) => {
+    const touch = event.touches[0]
+    handlePointerMove({ x: touch.x, y: touch.y }, event.original)
+  }
+
+  const handleCaptorPointerUp = () => {
+    finishPointerInteraction()
+  }
+
+  const mouseCaptor = sigma.getMouseCaptor()
+  const touchCaptor = sigma.getTouchCaptor()
+  if (interactionCleanup.value) {
+    interactionCleanup.value()
+    interactionCleanup.value = null
+  }
+  mouseCaptor.on('mousemove', handleMouseCaptorMove)
+  mouseCaptor.on('mouseup', handleCaptorPointerUp)
+  touchCaptor.on('touchmove', handleTouchCaptorMove)
+  touchCaptor.on('touchup', handleCaptorPointerUp)
+  interactionCleanup.value = () => {
+    mouseCaptor.off('mousemove', handleMouseCaptorMove)
+    mouseCaptor.off('mouseup', handleCaptorPointerUp)
+    touchCaptor.off('touchmove', handleTouchCaptorMove)
+    touchCaptor.off('touchup', handleCaptorPointerUp)
+  }
+
+  sigma.on('enterNode', ({ node }) => {
+    if (!draggedNodeId.value) {
+      updateHoveredNode(node)
+    }
   })
+
+  sigma.on('leaveNode', () => {
+    if (!draggedNodeId.value) {
+      clearHoveredNode()
+    }
+  })
+
+  sigma.on('leaveStage', () => {
+    if (!draggedNodeId.value) {
+      clearHoveredNode()
+    }
+  })
+
+  sigma.on('clickStage', () => {
+    if (
+      Date.now() < ignoreStageClickUntil.value ||
+      Date.now() < suppressNodeSelectionUntil.value ||
+      dragMoved.value
+    ) {
+      return
+    }
+
+    emit('clearFocus')
+  })
+
+  sigma.on('downNode', ({ node, event }) => {
+    const viewport = { x: event.x, y: event.y }
+    const resolvedNodeId = graph?.hasNode(node) ? node : null
+    if (!resolvedNodeId) {
+      return
+    }
+    beginPendingNodeInteraction(sigma, resolvedNodeId, viewport, event.original)
+    event.preventSigmaDefault()
+  })
+
+  sigma.on('downStage', ({ event }) => {
+    if (draggedNodeId.value) {
+      return
+    }
+
+    const viewport = { x: event.x, y: event.y }
+    const assistedNodeId = resolveInteractiveNodeAtViewport(sigma, viewport, {
+      ambiguityScoreDelta: 0.06,
+      ambiguityDistanceDeltaPx: 3,
+    })
+    if (!assistedNodeId) {
+      return
+    }
+
+    beginPendingNodeInteraction(sigma, assistedNodeId, viewport, event.original)
+    event.preventSigmaDefault()
+  })
+
+  sigma.on('moveBody', ({ event }: SigmaStageEventPayload) => {
+    if (!pendingDragNodeId.value && !draggedNodeId.value) {
+      scheduleHoverResolve(sigma, { x: event.x, y: event.y })
+    }
+  })
+
+  sigma.on('upNode', finishPointerInteraction)
+  sigma.on('upStage', finishPointerInteraction)
 }
 
 function mountSigmaGraph(
@@ -861,10 +868,7 @@ function mountSigmaGraph(
     return
   }
 
-  optimizeSigmaRuntime(
-    sigma,
-    denseOverview.value,
-  )
+  optimizeSigmaRuntime(sigma, denseOverview.value)
   graphRef.value = graph
   sigmaRef.value = sigma
   webglUnavailable.value = false
@@ -873,9 +877,15 @@ function mountSigmaGraph(
   registerSigmaInteractions(sigma)
 
   emit('ready', {
-    fitViewport: () => { fitViewport() },
-    zoomIn: () => { zoomIn() },
-    zoomOut: () => { zoomOut() },
+    fitViewport: () => {
+      fitViewport()
+    },
+    zoomIn: () => {
+      zoomIn()
+    },
+    zoomOut: () => {
+      zoomOut()
+    },
   })
 
   window.setTimeout(() => {
@@ -902,13 +912,9 @@ function rebuildGraph(): void {
 
   destroyGraph()
   mountSigmaGraph(
-    createGraphModel(
-      baseNodes.value,
-      baseEdges.value,
-      props.focusedNodeId,
-      props.layoutMode,
-      { applyLayout: true },
-    ),
+    createGraphModel(baseNodes.value, baseEdges.value, props.focusedNodeId, props.layoutMode, {
+      applyLayout: true,
+    }),
   )
 }
 
@@ -916,13 +922,9 @@ function buildTargetGraphModel(): MultiUndirectedGraph<
   GraphCanvasNodeAttributes,
   GraphCanvasEdgeAttributes
 > {
-  return createGraphModel(
-    baseNodes.value,
-    baseEdges.value,
-    props.focusedNodeId,
-    props.layoutMode,
-    { applyLayout: false },
-  )
+  return createGraphModel(baseNodes.value, baseEdges.value, props.focusedNodeId, props.layoutMode, {
+    applyLayout: false,
+  })
 }
 
 function applyTargetGraph(
@@ -1010,7 +1012,7 @@ function syncGraphData(options?: {
 
   if (
     options?.styleOnly &&
-    !options?.relayout &&
+    !options.relayout &&
     graph.order === baseNodes.value.length &&
     graph.size === baseEdges.value.length
   ) {
@@ -1020,12 +1022,10 @@ function syncGraphData(options?: {
       baseEdges.value,
       props.focusedNodeId,
     )
-    safeRefreshPartial(
-      {
-        nodes: refreshDelta.nodeIds,
-        edges: refreshDelta.edgeKeys,
-      },
-    )
+    safeRefreshPartial({
+      nodes: refreshDelta.nodeIds,
+      edges: refreshDelta.edgeKeys,
+    })
     if (options.fitViewport) {
       fitViewport(180)
     }
@@ -1038,13 +1038,9 @@ function syncGraphData(options?: {
   }
 
   const targetGraph = options?.relayout
-    ? createGraphModel(
-        baseNodes.value,
-        baseEdges.value,
-        props.focusedNodeId,
-        props.layoutMode,
-        { applyLayout: true },
-      )
+    ? createGraphModel(baseNodes.value, baseEdges.value, props.focusedNodeId, props.layoutMode, {
+        applyLayout: true,
+      })
     : buildTargetGraphModel()
 
   const needsStructureSync = !graphStructureMatchesSource(graph)
@@ -1097,16 +1093,13 @@ function syncGraphData(options?: {
   }, relayoutDuration + 24)
 }
 
-watch(
-  denseOverview,
-  (isDenseOverview) => {
-    const sigma = sigmaRef.value
-    if (!sigma) {
-      return
-    }
-    optimizeSigmaRuntime(sigma, isDenseOverview)
-  },
-)
+watch(denseOverview, (isDenseOverview) => {
+  const sigma = sigmaRef.value
+  if (!sigma) {
+    return
+  }
+  optimizeSigmaRuntime(sigma, isDenseOverview)
+})
 
 watch(
   () => props.filter,
@@ -1143,10 +1136,12 @@ watch(
 
 watch(
   () => props.focusedNodeId,
-  async () => {
+  async (nextFocusedNodeId, previousFocusedNodeId) => {
     await nextTick()
     const skipViewportFit = skipNextFocusViewportSync.value
-    const fitViewport = Boolean(props.focusedNodeId) && !skipViewportFit
+    const fitViewport =
+      !skipViewportFit &&
+      (Boolean(nextFocusedNodeId) || Boolean(previousFocusedNodeId && !nextFocusedNodeId))
     syncGraphData({ fitViewport, styleOnly: true })
     skipNextFocusViewportSync.value = false
   },
@@ -1159,17 +1154,10 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="rr-graph-canvas">
-    <div
-      v-if="renderMode === 'placeholder'"
-      class="rr-graph-canvas__placeholder"
-    >
+    <div v-if="renderMode === 'placeholder'" class="rr-graph-canvas__placeholder">
       <strong>{{ t('graph.webglUnavailableTitle') }}</strong>
       <p>{{ t('graph.webglUnavailableDescription') }}</p>
     </div>
-    <div
-      v-else
-      ref="canvasRef"
-      class="rr-graph-canvas__stage"
-    />
+    <div v-else ref="canvasRef" class="rr-graph-canvas__stage" />
   </div>
 </template>

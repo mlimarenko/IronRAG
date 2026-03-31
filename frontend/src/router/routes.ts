@@ -28,6 +28,12 @@ const routes = [
         meta: { title: 'Graph', widthMode: 'full' },
       },
       {
+        path: 'assistant',
+        name: 'assistant',
+        component: () => import('src/pages/AssistantPage.vue'),
+        meta: { title: 'AI Assistant', widthMode: 'full' },
+      },
+      {
         path: 'admin',
         name: 'admin',
         component: () => import('src/pages/AdminPage.vue'),

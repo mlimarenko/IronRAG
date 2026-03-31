@@ -49,11 +49,21 @@ export interface DashboardChartSegment {
 
 export interface DashboardOverviewSurface {
   summaryNarrative: string
+  documentCounts: DashboardDocumentCounts
   metrics: DashboardMetric[]
   attentionItems: DashboardAttentionItem[]
   recentDocuments: DashboardRecentDocument[]
   chartSummary: DashboardChartSummary | null
   primaryActions: DashboardPrimaryAction[]
+}
+
+export interface DashboardDocumentCounts {
+  totalDocuments: number
+  inFlightDocuments: number
+  failedDocuments: number
+  searchReadyDocuments: number
+  graphReadyDocuments: number
+  graphCatchUpDocuments: number
 }
 
 export interface DashboardPrimaryAction {
@@ -66,7 +76,9 @@ export interface DashboardPrimaryAction {
 export function resolveDashboardVisibleMetrics(metrics: DashboardMetric[]): DashboardMetric[] {
   const metricMap = new Map(metrics.map((metric) => [metric.key, metric]))
   const documentCount = Number(metricMap.get('documents')?.value ?? 0)
-  const readyCount = Number(metricMap.get('ready')?.value ?? 0)
+  const readyCount = Number(
+    metricMap.get('graphReady')?.value ?? metricMap.get('ready')?.value ?? 0,
+  )
   const inFlightCount = Number(metricMap.get('inFlight')?.value ?? 0)
   const attentionCount = Number(metricMap.get('attention')?.value ?? 0)
   const fullySettled =
@@ -79,7 +91,7 @@ export function resolveDashboardVisibleMetrics(metrics: DashboardMetric[]): Dash
         !(
           (metric.key === 'inFlight' && inFlightCount === 0) ||
           (metric.key === 'attention' && attentionCount === 0) ||
-          (metric.key === 'ready' && fullySettled)
+          ((metric.key === 'ready' || metric.key === 'graphReady') && fullySettled)
         ),
     )
 }

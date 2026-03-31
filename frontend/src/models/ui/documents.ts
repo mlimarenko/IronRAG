@@ -274,7 +274,12 @@ export interface DocumentRowSummary {
   uploadedAt: string
   status: DocumentStatus
   statusLabel: string
+  stage: string | null
   stageLabel: string | null
+  progressPercent: number | null
+  activityStatus: DocumentActivityStatus
+  lastActivityAt: string | null
+  stalledReason: string | null
   costAmount: number | null
   costLabel: string | null
   canRetry: boolean

@@ -440,6 +440,7 @@ impl OpsStateFixture {
                 title: Some("Ops State Failure Conversation"),
                 conversation_state: "active",
             },
+            5,
         )
         .await
         .context("failed to create ops_state query conversation")?;
