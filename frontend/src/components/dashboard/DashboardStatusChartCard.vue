@@ -5,6 +5,7 @@ import type { DashboardChartSummary } from 'src/models/ui/dashboard'
 
 const props = defineProps<{
   summary: DashboardChartSummary | null
+  compact?: boolean
 }>()
 
 const { t } = useI18n()
@@ -27,13 +28,27 @@ const barSegments = computed(() => {
 })
 
 const hasData = computed(() => totalCount.value > 0)
-const readySegment = computed(() => props.summary?.segments.find((segment) => segment.key === 'ready') ?? null)
+const graphReadySegment = computed(
+  () =>
+    props.summary?.segments.find(
+      (segment) => segment.key === 'graphReady' || segment.key === 'ready',
+    ) ?? null,
+)
+const graphCatchUpSegment = computed(
+  () => props.summary?.segments.find((segment) => segment.key === 'graphCatchUp') ?? null,
+)
 const processingSegment = computed(() => props.summary?.segments.find((segment) => segment.key === 'processing') ?? null)
 const failedSegment = computed(() => props.summary?.segments.find((segment) => segment.key === 'failed') ?? null)
 const singleStatus = computed(() => (nonZeroSegments.value.length === 1 ? nonZeroSegments.value[0] : null))
 const mixedStatus = computed(() => nonZeroSegments.value.length > 1)
-const settledReady = computed(() => singleStatus.value?.key === 'ready')
+const settledReady = computed(
+  () => singleStatus.value?.key === 'ready' || singleStatus.value?.key === 'graphReady',
+)
 const leanMode = computed(() => {
+  if (props.compact) {
+    return true
+  }
+
   if (!props.summary || settledReady.value) {
     return false
   }
@@ -57,7 +72,8 @@ const summaryLine = computed(() => {
   }
 
   return t('dashboard.chart.summaryMixed', {
-    ready: readySegment.value?.value ?? 0,
+    graphReady: graphReadySegment.value?.value ?? 0,
+    graphCatchUp: graphCatchUpSegment.value?.value ?? 0,
     processing: processingSegment.value?.value ?? 0,
     failed: failedSegment.value?.value ?? 0,
   })

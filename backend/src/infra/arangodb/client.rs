@@ -591,8 +591,8 @@ mod tests {
             "knowledge_chunk": {
                 "includeAllFields": true,
                 "fields": {
-                    "content_text": { "analyzers": ["text_en"] },
-                    "normalized_text": { "analyzers": ["text_en"] }
+                    "content_text": { "analyzers": ["text_en", "text_ru"] },
+                    "normalized_text": { "analyzers": ["text_en", "text_ru"] }
                 }
             }
         });
@@ -609,8 +609,8 @@ mod tests {
             "knowledge_chunk": {
                 "analyzers": ["identity"],
                 "fields": {
-                    "content_text": { "analyzers": ["text_en"] },
-                    "normalized_text": { "analyzers": ["text_en"] }
+                    "content_text": { "analyzers": ["text_en", "text_ru"] },
+                    "normalized_text": { "analyzers": ["text_en", "text_ru"] }
                 },
                 "includeAllFields": true,
                 "storeValues": "none",
@@ -627,8 +627,8 @@ mod tests {
             "knowledge_chunk": {
                 "includeAllFields": true,
                 "fields": {
-                    "content_text": { "analyzers": ["text_en"] },
-                    "normalized_text": { "analyzers": ["text_en"] }
+                    "content_text": { "analyzers": ["text_en", "text_ru"] },
+                    "normalized_text": { "analyzers": ["text_en", "text_ru"] }
                 }
             }
         });
@@ -636,7 +636,7 @@ mod tests {
             "knowledge_chunk": {
                 "analyzers": ["identity"],
                 "fields": {
-                    "content_text": { "analyzers": ["text_en"] }
+                    "content_text": { "analyzers": ["text_en", "text_ru"] }
                 },
                 "includeAllFields": true
             }

@@ -11,6 +11,9 @@ const props = defineProps<{
   visibleCount?: number
   totalCount?: number
   showMeta?: boolean
+  activeQueuedCount?: number
+  activeProcessingCount?: number
+  activeReadyNoGraphCount?: number
 }>()
 
 const emit = defineEmits<{
@@ -18,7 +21,9 @@ const emit = defineEmits<{
   updateStatus: [value: DocumentDisplayStatus | '']
 }>()
 
-const hasActiveFilter = computed(() => props.searchQuery.trim().length > 0 || props.statusFilter !== '')
+const hasActiveFilter = computed(
+  () => props.searchQuery.trim().length > 0 || props.statusFilter !== '',
+)
 const activeFilterCount = computed(
   () => Number(Boolean(props.searchQuery.trim())) + Number(props.statusFilter !== ''),
 )
@@ -52,6 +57,14 @@ const visibleCount = computed(() => {
   }
   return 0
 })
+
+const activeQueuedCount = computed(() => props.activeQueuedCount ?? 0)
+const activeProcessingCount = computed(() => props.activeProcessingCount ?? 0)
+const activeReadyNoGraphCount = computed(() => props.activeReadyNoGraphCount ?? 0)
+const activeBacklogCount = computed(() => activeQueuedCount.value + activeProcessingCount.value)
+const showActivityStrip = computed(
+  () => activeBacklogCount.value > 0 || activeReadyNoGraphCount.value > 0,
+)
 </script>
 
 <template>
@@ -81,21 +94,44 @@ const visibleCount = computed(() => {
     <template v-if="showSummary" #summary>
       <div class="rr-documents-filters__summary">
         <span class="rr-documents-filters__count">{{ visibleCount }}</span>
-        <p
-          v-if="metaLabel"
-          class="rr-documents-filters__caption"
-        >
+        <p v-if="metaLabel" class="rr-documents-filters__caption">
           {{ $t(metaLabel.key, metaLabel.params) }}
         </p>
-        <p
-          v-else-if="hasActiveFilter"
-          class="rr-documents-filters__caption"
-        >
+        <p v-else-if="hasActiveFilter" class="rr-documents-filters__caption">
           {{ $t('documents.workspace.filtersApplied', { count: activeFilterCount }) }}
         </p>
       </div>
     </template>
   </FilterBar>
+
+  <div
+    v-if="showActivityStrip"
+    class="rr-documents-filters__activity"
+    role="status"
+    aria-live="polite"
+  >
+    <div class="rr-documents-filters__activity-main">
+      <span class="rr-documents-filters__activity-pulse" aria-hidden="true" />
+      <strong v-if="activeBacklogCount > 0">
+        {{ $t('documents.workspace.processingStrip.title', { count: activeBacklogCount }) }}
+      </strong>
+      <strong v-else>
+        {{ $t('documents.workspace.processingStrip.graphCatchUpTitle', { count: activeReadyNoGraphCount }) }}
+      </strong>
+    </div>
+
+    <div class="rr-documents-filters__activity-breakdown">
+      <span v-if="activeProcessingCount > 0">
+        {{ $t('documents.workspace.processingStrip.processing', { count: activeProcessingCount }) }}
+      </span>
+      <span v-if="activeQueuedCount > 0">
+        {{ $t('documents.workspace.processingStrip.queued', { count: activeQueuedCount }) }}
+      </span>
+      <span v-if="activeReadyNoGraphCount > 0" class="is-graph-catchup">
+        {{ $t('documents.workspace.processingStrip.graphCatchUp', { count: activeReadyNoGraphCount }) }}
+      </span>
+    </div>
+  </div>
 </template>
 
 <style scoped lang="scss">
@@ -110,8 +146,12 @@ const visibleCount = computed(() => {
   border: 1px solid rgba(203, 213, 225, 0.8);
   border-radius: 18px 18px 0 0;
   border-bottom-color: rgba(203, 213, 225, 0.88);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.985), rgba(248, 250, 252, 0.965) 78%, rgba(255, 255, 255, 0.88));
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.985),
+    rgba(248, 250, 252, 0.965) 78%,
+    rgba(255, 255, 255, 0.88)
+  );
   backdrop-filter: blur(16px);
   box-shadow:
     0 10px 18px rgba(15, 23, 42, 0.04),
@@ -188,6 +228,92 @@ const visibleCount = computed(() => {
   line-height: 1.35;
 }
 
+.rr-documents-filters__activity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem 1rem;
+  margin-top: 0.42rem;
+  padding: 0.72rem 0.92rem;
+  border: 1px solid rgba(96, 165, 250, 0.22);
+  border-radius: 14px;
+  background:
+    linear-gradient(135deg, rgba(239, 246, 255, 0.96), rgba(245, 248, 255, 0.92)),
+    rgba(255, 255, 255, 0.94);
+  box-shadow:
+    0 10px 22px rgba(37, 99, 235, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.82);
+}
+
+.rr-documents-filters__activity-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.56rem;
+  min-width: 0;
+}
+
+.rr-documents-filters__activity-main strong {
+  color: rgba(30, 64, 175, 0.96);
+  font-size: 0.83rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  line-height: 1.35;
+}
+
+.rr-documents-filters__activity-pulse {
+  position: relative;
+  display: inline-flex;
+  width: 0.68rem;
+  height: 0.68rem;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #2563eb, #4f46e5);
+  box-shadow: 0 0 0 0 rgba(79, 70, 229, 0.28);
+  animation: rr-documents-filters-pulse 1.8s ease-out infinite;
+}
+
+.rr-documents-filters__activity-breakdown {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.45rem;
+}
+
+.rr-documents-filters__activity-breakdown span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.85rem;
+  padding: 0 0.7rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  color: rgba(71, 85, 105, 0.92);
+  font-size: 0.74rem;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.84);
+}
+
+.rr-documents-filters__activity-breakdown span.is-graph-catchup {
+  border-color: rgba(14, 116, 144, 0.18);
+  background: rgba(240, 249, 255, 0.92);
+  color: rgba(14, 116, 144, 0.96);
+}
+
+@keyframes rr-documents-filters-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(79, 70, 229, 0.24);
+  }
+
+  70% {
+    box-shadow: 0 0 0 0.48rem rgba(79, 70, 229, 0);
+  }
+
+  100% {
+    box-shadow: 0 0 0 0 rgba(79, 70, 229, 0);
+  }
+}
+
 @media (max-width: 920px) {
   .rr-documents-filters {
     gap: 0.38rem;
@@ -230,6 +356,21 @@ const visibleCount = computed(() => {
   .rr-documents-filters__caption {
     font-size: 0.74rem;
   }
+
+  .rr-documents-filters__activity {
+    gap: 0.6rem 0.8rem;
+    padding: 0.68rem 0.78rem;
+  }
+
+  .rr-documents-filters__activity-main strong {
+    font-size: 0.79rem;
+  }
+
+  .rr-documents-filters__activity-breakdown span {
+    min-height: 1.76rem;
+    padding-inline: 0.64rem;
+    font-size: 0.72rem;
+  }
 }
 
 @media (min-width: 1800px) {
@@ -254,6 +395,15 @@ const visibleCount = computed(() => {
   .rr-documents-filters :deep(.rr-filter-bar__meta) {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .rr-documents-filters__activity {
+    align-items: flex-start;
+    justify-content: flex-start;
+  }
+
+  .rr-documents-filters__activity-breakdown {
+    justify-content: flex-start;
   }
 }
 

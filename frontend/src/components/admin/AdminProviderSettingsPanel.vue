@@ -860,17 +860,6 @@ watch(
           </div>
         </header>
 
-        <div class="rr-admin-workbench__context">
-          <div class="rr-admin-workbench__context-chip">
-            <span>{{ $t('shell.workspace') }}</span>
-            <strong>{{ settings.workspaceName }}</strong>
-          </div>
-          <div class="rr-admin-workbench__context-chip">
-            <span>{{ $t('shell.library') }}</span>
-            <strong>{{ settings.libraryName }}</strong>
-          </div>
-        </div>
-
         <SearchField
           v-model="searchQuery"
           :placeholder="$t('admin.aiCatalog.searchPlaceholder')"
@@ -1413,30 +1402,26 @@ watch(
             </span>
           </header>
 
-          <dl class="rr-admin-workbench__detail-grid">
-            <div>
-              <dt>{{ $t('admin.headers.purpose') }}</dt>
-              <dd>{{ bindingPurposeLabel(selectedTask.purpose) }}</dd>
-            </div>
-            <div>
-              <dt>{{ $t('admin.headers.credential') }}</dt>
-              <dd>{{ selectedTask.binding?.credential?.label ?? '—' }}</dd>
-            </div>
-            <div>
-              <dt>{{ $t('admin.headers.preset') }}</dt>
-              <dd>{{ selectedTask.binding?.preset?.presetName ?? '—' }}</dd>
-            </div>
-            <div>
-              <dt>{{ $t('admin.headers.validation') }}</dt>
-              <dd>
+          <div class="rr-admin-ai-workbench__assignment-summary">
+            <article class="rr-admin-ai-workbench__assignment-chip">
+              <span>{{ $t('admin.headers.credential') }}</span>
+              <strong>{{ selectedTask.binding?.credential?.label ?? '—' }}</strong>
+            </article>
+            <article class="rr-admin-ai-workbench__assignment-chip">
+              <span>{{ $t('admin.headers.preset') }}</span>
+              <strong>{{ selectedTask.binding?.preset?.presetName ?? '—' }}</strong>
+            </article>
+            <article class="rr-admin-ai-workbench__assignment-chip">
+              <span>{{ $t('admin.headers.validation') }}</span>
+              <strong>
                 {{
                   selectedTask.binding
                     ? assignmentValidationLabel(selectedTask.binding)
                     : $t('admin.aiCatalog.unconfiguredTask')
                 }}
-              </dd>
-            </div>
-          </dl>
+              </strong>
+            </article>
+          </div>
 
           <div class="rr-admin-ai-workbench__form-grid">
             <label class="rr-admin-ai-workbench__field rr-admin-ai-workbench__field--wide">
@@ -1699,9 +1684,39 @@ watch(
   margin: 0;
 }
 
+.rr-admin-ai-workbench__assignment-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.rr-admin-ai-workbench__assignment-chip {
+  display: grid;
+  gap: 4px;
+  padding: 11px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(226, 232, 240, 0.82);
+  background: rgba(248, 250, 252, 0.78);
+}
+
+.rr-admin-ai-workbench__assignment-chip span {
+  color: var(--rr-text-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rr-admin-ai-workbench__assignment-chip strong {
+  color: var(--rr-text-primary);
+  font-size: 0.88rem;
+  line-height: 1.4;
+}
+
 @media (max-width: 900px) {
   .rr-admin-ai-workbench__switcher,
-  .rr-admin-ai-workbench__form-grid {
+  .rr-admin-ai-workbench__form-grid,
+  .rr-admin-ai-workbench__assignment-summary {
     grid-template-columns: 1fr;
   }
 }

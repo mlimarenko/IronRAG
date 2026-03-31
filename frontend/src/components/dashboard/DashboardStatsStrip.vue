@@ -14,7 +14,7 @@ function toneClass(metric: DashboardMetric): string {
   const val = Number(metric.value)
   if (metric.key === 'attention') return val > 0 ? 'is-warning' : 'is-quiet'
   if (metric.key === 'inFlight') return val > 0 ? 'is-active' : 'is-quiet'
-  if (metric.key === 'ready') return val > 0 ? 'is-ready' : 'is-quiet'
+  if (metric.key === 'ready' || metric.key === 'graphReady') return val > 0 ? 'is-ready' : 'is-quiet'
   return ''
 }
 </script>

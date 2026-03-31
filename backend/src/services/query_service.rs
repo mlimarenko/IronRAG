@@ -3,9 +3,11 @@ use std::{
     time::Instant,
 };
 
+use anyhow::Context;
 use chrono::Utc;
 use serde_json::json;
-use tracing::warn;
+use tokio::sync::mpsc::UnboundedSender;
+use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -15,7 +17,7 @@ use crate::{
     domains::query::{
         QueryChunkReference, QueryConversation, QueryConversationDetail, QueryExecution,
         QueryExecutionDetail, QueryGraphEdgeReference, QueryGraphNodeReference, QueryTurn,
-        RuntimeQueryMode,
+        QueryTurnStreamStage, RuntimeQueryMode,
     },
     infra::{
         arangodb::{
@@ -39,9 +41,14 @@ use crate::{
     interfaces::http::router_support::ApiError,
     services::{
         billing_service::CaptureQueryExecutionBillingCommand,
-        ops_service::CreateAsyncOperationCommand, query_execution::execute_answer_query,
+        ops_service::CreateAsyncOperationCommand,
+        query_execution::{generate_answer_query, prepare_answer_query},
     },
 };
+
+const MAX_LIBRARY_CONVERSATIONS: usize = 5;
+const QUERY_CONVERSATION_TITLE_LIMIT: usize = 72;
+const CANONICAL_QUERY_MODE: RuntimeQueryMode = RuntimeQueryMode::Mix;
 
 #[derive(Debug, Clone)]
 pub struct CreateConversationCommand {
@@ -56,7 +63,6 @@ pub struct ExecuteConversationTurnCommand {
     pub conversation_id: Uuid,
     pub author_principal_id: Option<Uuid>,
     pub content_text: String,
-    pub mode: RuntimeQueryMode,
     pub top_k: usize,
     pub include_debug: bool,
 }
@@ -68,6 +74,12 @@ pub struct QueryTurnExecutionResult {
     pub response_turn: Option<QueryTurn>,
     pub execution: QueryExecution,
     pub context_bundle_id: Uuid,
+}
+
+#[derive(Debug, Clone)]
+pub enum QueryTurnProgressEvent {
+    Stage(QueryTurnStreamStage),
+    AnswerDelta(String),
 }
 
 #[derive(Clone, Default)]
@@ -148,6 +160,7 @@ impl QueryService {
                 title: title.as_deref(),
                 conversation_state: "active",
             },
+            MAX_LIBRARY_CONVERSATIONS,
         )
         .await
         .map_err(|_| ApiError::Internal)?;
@@ -159,7 +172,25 @@ impl QueryService {
         state: &AppState,
         command: ExecuteConversationTurnCommand,
     ) -> Result<QueryTurnExecutionResult, ApiError> {
-        let conversation = query_repository::get_conversation_by_id(
+        self.execute_turn_with_progress(state, command, None).await
+    }
+
+    pub async fn execute_turn_stream(
+        &self,
+        state: &AppState,
+        command: ExecuteConversationTurnCommand,
+        progress: UnboundedSender<QueryTurnProgressEvent>,
+    ) -> Result<QueryTurnExecutionResult, ApiError> {
+        self.execute_turn_with_progress(state, command, Some(progress)).await
+    }
+
+    async fn execute_turn_with_progress(
+        &self,
+        state: &AppState,
+        command: ExecuteConversationTurnCommand,
+        progress: Option<UnboundedSender<QueryTurnProgressEvent>>,
+    ) -> Result<QueryTurnExecutionResult, ApiError> {
+        let mut conversation = query_repository::get_conversation_by_id(
             &state.persistence.postgres,
             command.conversation_id,
         )
@@ -197,6 +228,18 @@ impl QueryService {
         )
         .await
         .map_err(|_| ApiError::Internal)?;
+
+        if let Some(derived_title) = derive_conversation_title(&content_text) {
+            if should_refresh_conversation_title(conversation.title.as_deref(), &derived_title) {
+                conversation = query_repository::update_conversation_title(
+                    &state.persistence.postgres,
+                    conversation.id,
+                    &derived_title,
+                )
+                .await
+                .map_err(|_| ApiError::Internal)?;
+            }
+        }
 
         let binding_id = ai_repository::get_active_library_binding_by_purpose(
             &state.persistence.postgres,
@@ -260,13 +303,14 @@ impl QueryService {
             )
             .await?;
 
-        let top_k = command.top_k.clamp(1, 12);
-        let runtime_result = match execute_answer_query(
+        emit_query_turn_stage(progress.as_ref(), QueryTurnStreamStage::Retrieving);
+
+        let top_k = command.top_k.clamp(1, 32);
+        let prepared = match prepare_answer_query(
             state,
             library.id,
             content_text.clone(),
-            None,
-            command.mode,
+            CANONICAL_QUERY_MODE,
             top_k,
             command.include_debug,
         )
@@ -303,6 +347,7 @@ impl QueryService {
                     )
                     .await;
                 return Err(map_query_execution_error_message(
+                    state,
                     failed.id,
                     &failed.query_text,
                     message,
@@ -310,21 +355,30 @@ impl QueryService {
             }
         };
 
+        emit_query_turn_stage(progress.as_ref(), QueryTurnStreamStage::Grounding);
+
         match assemble_context_bundle(
             state,
             &conversation,
             execution.id,
             execution_context_bundle_id,
             &content_text,
-            command.mode,
+            CANONICAL_QUERY_MODE,
             top_k,
             command.include_debug,
-            runtime_result.structured.planned_mode,
+            prepared.structured.planned_mode,
         )
         .await
         {
             Ok(()) => {}
             Err(error) => {
+                error!(
+                    execution_id = %execution.id,
+                    conversation_id = %conversation.id,
+                    library_id = %conversation.library_id,
+                    error = ?error,
+                    "failed to assemble knowledge context bundle"
+                );
                 let message = format!("failed to assemble knowledge context bundle: {error}");
                 let failed = query_repository::update_execution(
                     &state.persistence.postgres,
@@ -354,6 +408,79 @@ impl QueryService {
                     )
                     .await;
                 return Err(map_query_execution_error_message(
+                    state,
+                    failed.id,
+                    &failed.query_text,
+                    message,
+                ));
+            }
+        };
+
+        let execution = query_repository::update_execution(
+            &state.persistence.postgres,
+            execution.id,
+            &query_repository::UpdateQueryExecution {
+                execution_state: "answering",
+                request_turn_id: Some(request_turn.id),
+                response_turn_id: None,
+                failure_code: None,
+                completed_at: None,
+            },
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .ok_or_else(|| ApiError::resource_not_found("query_execution", execution.id))?;
+
+        emit_query_turn_stage(progress.as_ref(), QueryTurnStreamStage::Answering);
+
+        let mut stream_answer_delta = |delta: String| {
+            if let Some(progress) = progress.as_ref() {
+                let _ = progress.send(QueryTurnProgressEvent::AnswerDelta(delta));
+            }
+        };
+        let runtime_result = match generate_answer_query(
+            state,
+            library.id,
+            execution.id,
+            &content_text,
+            None,
+            prepared,
+            progress.as_ref().map(|_| &mut stream_answer_delta as &mut (dyn FnMut(String) + Send)),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                let message = error.to_string();
+                let failed = query_repository::update_execution(
+                    &state.persistence.postgres,
+                    execution.id,
+                    &query_repository::UpdateQueryExecution {
+                        execution_state: "failed",
+                        request_turn_id: Some(request_turn.id),
+                        response_turn_id: None,
+                        failure_code: Some(truncate_failure_code(&message)),
+                        completed_at: Some(Utc::now()),
+                    },
+                )
+                .await
+                .map_err(|_| ApiError::Internal)?
+                .ok_or_else(|| ApiError::resource_not_found("query_execution", execution.id))?;
+                let _ = state
+                    .canonical_services
+                    .ops
+                    .update_async_operation(
+                        state,
+                        crate::services::ops_service::UpdateAsyncOperationCommand {
+                            operation_id: async_operation.id,
+                            status: "failed".to_string(),
+                            completed_at: Some(Utc::now()),
+                            failure_code: Some(truncate_failure_code(&message).to_string()),
+                        },
+                    )
+                    .await;
+                return Err(map_query_execution_error_message(
+                    state,
                     failed.id,
                     &failed.query_text,
                     message,
@@ -476,6 +603,15 @@ impl QueryService {
     }
 }
 
+fn emit_query_turn_stage(
+    progress: Option<&UnboundedSender<QueryTurnProgressEvent>>,
+    stage: QueryTurnStreamStage,
+) {
+    if let Some(progress) = progress {
+        let _ = progress.send(QueryTurnProgressEvent::Stage(stage));
+    }
+}
+
 #[derive(Debug, Clone)]
 struct QueryEmbeddingContext {
     model_catalog_id: Uuid,
@@ -500,7 +636,7 @@ async fn assemble_context_bundle(
     top_k: usize,
     include_debug: bool,
     resolved_mode: RuntimeQueryMode,
-) -> Result<(), ApiError> {
+) -> anyhow::Result<()> {
     let started_at = Instant::now();
     let candidate_limit = top_k.saturating_mul(3).max(6);
 
@@ -508,17 +644,17 @@ async fn assemble_context_bundle(
         .arango_search_store
         .search_chunks(conversation.library_id, query_text, candidate_limit)
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .context("failed lexical chunk search while assembling query context bundle")?;
     let lexical_entity_hits = state
         .arango_search_store
         .search_entities(conversation.library_id, query_text, candidate_limit)
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .context("failed lexical entity search while assembling query context bundle")?;
     let lexical_relation_hits = state
         .arango_search_store
         .search_relations(conversation.library_id, query_text, candidate_limit)
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .context("failed lexical relation search while assembling query context bundle")?;
 
     let embedding_context =
         match resolve_query_embedding_context(state, conversation.library_id, query_text).await {
@@ -547,7 +683,7 @@ async fn assemble_context_bundle(
                 Some(16),
             )
             .await
-            .map_err(|_| ApiError::Internal)?
+            .context("failed vector chunk search while assembling query context bundle")?
     } else {
         Vec::new()
     };
@@ -563,7 +699,7 @@ async fn assemble_context_bundle(
                 Some(16),
             )
             .await
-            .map_err(|_| ApiError::Internal)?
+            .context("failed vector entity search while assembling query context bundle")?
     } else {
         Vec::new()
     };
@@ -626,7 +762,11 @@ async fn assemble_context_bundle(
             .arango_graph_store
             .list_entity_neighborhood(entity_id, conversation.library_id, 2, candidate_limit * 4)
             .await
-            .map_err(|_| ApiError::Internal)?;
+            .with_context(|| {
+                format!(
+                    "failed to load entity neighborhood while assembling query context bundle for entity {entity_id}"
+                )
+            })?;
         entity_neighborhood_rows = entity_neighborhood_rows.saturating_add(neighborhood.len());
         for row in neighborhood {
             absorb_traversal_row(
@@ -648,7 +788,11 @@ async fn assemble_context_bundle(
             .arango_graph_store
             .expand_relation_centric(relation_id, conversation.library_id, 2, candidate_limit * 4)
             .await
-            .map_err(|_| ApiError::Internal)?;
+            .with_context(|| {
+                format!(
+                    "failed to expand relation-centric neighborhood while assembling query context bundle for relation {relation_id}"
+                )
+            })?;
         relation_traversal_rows = relation_traversal_rows.saturating_add(traversal.len());
         for row in traversal {
             absorb_traversal_row(
@@ -665,7 +809,11 @@ async fn assemble_context_bundle(
             .arango_graph_store
             .list_relation_evidence_lookup(relation_id, conversation.library_id, candidate_limit)
             .await
-            .map_err(|_| ApiError::Internal)?;
+            .with_context(|| {
+                format!(
+                    "failed to load relation evidence lookup while assembling query context bundle for relation {relation_id}"
+                )
+            })?;
         relation_evidence_rows = relation_evidence_rows.saturating_add(evidence_lookup.len());
         for (index, row) in evidence_lookup.into_iter().enumerate() {
             merge_ranked_reference(
@@ -699,7 +847,7 @@ async fn assemble_context_bundle(
         .arango_document_store
         .list_library_generations(conversation.library_id)
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .context("failed to list library generations while assembling query context bundle")?;
     let generation = generations.first().cloned();
     let freshness_snapshot =
         generation.as_ref().map(freshness_snapshot_json).unwrap_or_else(|| json!({}));
@@ -752,27 +900,31 @@ async fn assemble_context_bundle(
         created_at: now,
         updated_at: now,
     };
-    state.arango_context_store.upsert_bundle(&bundle_row).await.map_err(|_| ApiError::Internal)?;
+    state
+        .arango_context_store
+        .upsert_bundle(&bundle_row)
+        .await
+        .context("failed to upsert knowledge context bundle document")?;
     state
         .arango_context_store
         .replace_bundle_chunk_edges(bundle_id, &chunk_edges)
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .context("failed to replace bundle chunk edges")?;
     state
         .arango_context_store
         .replace_bundle_entity_edges(bundle_id, &entity_edges)
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .context("failed to replace bundle entity edges")?;
     state
         .arango_context_store
         .replace_bundle_relation_edges(bundle_id, &relation_edges)
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .context("failed to replace bundle relation edges")?;
     state
         .arango_context_store
         .replace_bundle_evidence_edges(bundle_id, &evidence_edges)
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .context("failed to replace bundle evidence edges")?;
 
     if include_debug {
         let trace = KnowledgeRetrievalTraceRow {
@@ -795,7 +947,11 @@ async fn assemble_context_bundle(
             created_at: now,
             updated_at: now,
         };
-        state.arango_context_store.upsert_trace(&trace).await.map_err(|_| ApiError::Internal)?;
+        state
+            .arango_context_store
+            .upsert_trace(&trace)
+            .await
+            .context("failed to upsert knowledge retrieval trace")?;
     }
 
     Ok(())
@@ -1178,6 +1334,44 @@ fn normalize_required_text(value: &str, field: &str) -> Result<String, ApiError>
     Ok(normalized.to_string())
 }
 
+fn derive_conversation_title(value: &str) -> Option<String> {
+    let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+
+    let truncated = if collapsed.chars().count() <= QUERY_CONVERSATION_TITLE_LIMIT {
+        collapsed
+    } else {
+        let cutoff = collapsed
+            .char_indices()
+            .nth(QUERY_CONVERSATION_TITLE_LIMIT)
+            .map_or(collapsed.len(), |(index, _)| index);
+        format!("{}…", collapsed[..cutoff].trim_end())
+    };
+
+    Some(truncated)
+}
+
+fn should_refresh_conversation_title(current: Option<&str>, candidate: &str) -> bool {
+    match current {
+        None => true,
+        Some(current) => {
+            is_weak_conversation_title(current) && !is_weak_conversation_title(candidate)
+        }
+    }
+}
+
+fn is_weak_conversation_title(value: &str) -> bool {
+    let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return true;
+    }
+    let chars = collapsed.chars().count();
+    let words = collapsed.split_whitespace().count();
+    chars <= 6 || (words <= 1 && chars <= 14)
+}
+
 fn saturating_rank(index: usize) -> i32 {
     i32::try_from(index.saturating_add(1)).unwrap_or(i32::MAX)
 }
@@ -1195,21 +1389,37 @@ fn truncate_failure_code(message: &str) -> &str {
 }
 
 fn map_query_execution_error_message(
+    state: &AppState,
     execution_id: Uuid,
     query_text: &str,
     message: String,
 ) -> ApiError {
     let normalized = message.to_ascii_lowercase();
-    if normalized.contains("missing openai api key")
+    let formatted = format!("query execution {execution_id} for '{query_text}' failed: {message}");
+    let provider_failure = &state
+        .resolve_settle_blockers_services
+        .provider_failure_classification
+        .classify_error_message(&message);
+
+    if normalized.contains("active answer binding is not configured")
+        || normalized.contains("active embedding binding is not configured")
+        || normalized.contains("missing provider api key")
+        || normalized.contains("missing openai api key")
         || normalized.contains("missing deepseek api key")
         || normalized.contains("missing qwen api key")
+        || normalized.contains("unsupported provider kind")
+    {
+        return ApiError::Conflict(formatted);
+    }
+
+    if provider_failure.is_some()
+        || normalized.contains("provider request failed")
+        || normalized.contains("embedding request failed")
         || normalized.contains("failed to generate grounded answer")
         || normalized.contains("failed to embed runtime query")
     {
-        ApiError::Conflict(format!(
-            "query execution {execution_id} for '{query_text}' failed: {message}"
-        ))
-    } else {
-        ApiError::Internal
+        return ApiError::ProviderFailure(formatted);
     }
+
+    ApiError::Internal
 }

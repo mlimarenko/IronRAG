@@ -15,9 +15,13 @@ import { downloadDocumentExtractedText } from 'src/services/api/documents'
 import { useDocumentsStore } from 'src/stores/documents'
 import { useShellStore } from 'src/stores/shell'
 
+interface DocumentsWorkspaceHeaderHandle {
+  openUploader: () => void
+}
+
 const documentsStore = useDocumentsStore()
 const shellStore = useShellStore()
-const headerRef = ref<InstanceType<typeof DocumentsWorkspaceHeader> | null>(null)
+const headerRef = ref<DocumentsWorkspaceHeaderHandle | null>(null)
 const downloadingId = ref<string | null>(null)
 const removeDialogDocumentId = ref<string | null>(null)
 const removeLoading = ref(false)
@@ -63,30 +67,38 @@ watch(
   { immediate: true },
 )
 
-onBeforeUnmount(() => stopPolling())
+onBeforeUnmount(() => {
+  stopPolling()
+})
 
 const hasActiveFilters = computed(
-  () => Boolean(workspace.value.filters.searchQuery.trim()) || workspace.value.filters.statusFilter !== '',
+  () =>
+    Boolean(workspace.value.filters.searchQuery.trim()) ||
+    workspace.value.filters.statusFilter !== '',
 )
-const hasDocuments = computed(
-  () => Boolean(workspace.value.rows.length || workspace.value.uploadQueue.length),
+const hasDocuments = computed(() =>
+  Boolean(workspace.value.rows.length || workspace.value.uploadQueue.length),
 )
 const detail = computed(() => workspace.value.inspector.detail)
 const detailLoading = computed(() => workspace.value.inspector.loading)
 const detailError = computed(() => workspace.value.inspector.error)
-const detailOpen = computed(() => Boolean(workspace.value.selectedDocumentId))
+const detailOpen = computed(() => workspace.value.selectedDocumentId !== null)
 const showInspector = computed(
-  () => detailOpen.value && Boolean(detail.value || detailLoading.value || detailError.value),
+  () =>
+    detailOpen.value &&
+    (detailLoading.value || detail.value !== null || detailError.value !== null),
 )
 const compactPrimarySurface = computed(
   () => !showInspector.value && filteredRows.value.length > 0 && filteredRows.value.length <= 3,
 )
+const compactLoadingSurface = computed(
+  () => workspace.value.loading && !hasDocuments.value && !hasActiveFilters.value,
+)
 const activeBacklogCount = computed(
   () => workspace.value.counters.queued + workspace.value.counters.processing,
 )
-const readyCount = computed(
-  () => workspace.value.counters.ready + workspace.value.counters.readyNoGraph,
-)
+const graphReadyCount = computed(() => workspace.value.counters.ready)
+const graphCatchUpCount = computed(() => workspace.value.counters.readyNoGraph)
 const removeDialogDocumentName = computed(() => {
   const documentId = removeDialogDocumentId.value
   if (!documentId) {
@@ -159,7 +171,7 @@ async function confirmRemove(): Promise<void> {
 }
 
 function triggerUpload(): void {
-  headerRef.value?.openUploader?.()
+  headerRef.value?.openUploader()
 }
 
 function clearFilters(): void {
@@ -178,7 +190,8 @@ function clearFilters(): void {
       :total-count="workspace.rows.length"
       :active-count="activeBacklogCount"
       :failed-count="workspace.counters.failed"
-      :ready-count="readyCount"
+      :graph-ready-count="graphReadyCount"
+      :graph-catch-up-count="graphCatchUpCount"
       :cost-summary="workspace.costSummary"
       :upload-failures="workspace.uploadFailures"
       :has-documents="hasDocuments"
@@ -186,82 +199,88 @@ function clearFilters(): void {
       @clear-failures="documentsStore.clearUploadFailures"
     />
 
-      <section
-        v-if="!workspace.error || hasDocuments"
-        class="rr-docs-page__workspace"
-        :class="{ 'has-inspector': showInspector }"
+    <section
+      v-if="!workspace.error || hasDocuments"
+      class="rr-docs-page__workspace"
+      :class="{ 'has-inspector': showInspector }"
+    >
+      <div
+        class="rr-docs-page__primary"
+        :class="{
+          'is-sparse': compactPrimarySurface,
+          'is-loading-empty': compactLoadingSurface,
+        }"
       >
-        <div
-          class="rr-docs-page__primary"
-          :class="{ 'is-sparse': compactPrimarySurface }"
-        >
-          <DocumentsFiltersBar
-            v-if="hasDocuments || hasActiveFilters"
-            :search-query="workspace.filters.searchQuery"
-            :status-filter="workspace.filters.statusFilter"
-            :visible-count="filteredRows.length"
-            :total-count="mergedRows.length"
-            :show-meta="hasActiveFilters && filteredRows.length !== mergedRows.length"
-            @update-search="documentsStore.setSearchQuery"
-            @update-status="documentsStore.setStatusFilter"
-          />
-
-          <DocumentsList
-            v-if="filteredRows.length"
-            :rows="filteredRows"
-            :selected-id="detailOpen ? detail?.id ?? null : null"
-            :sort-field="workspace.filters.sortField"
-            :sort-direction="workspace.filters.sortDirection"
-            @detail="documentsStore.openDetail"
-            @retry="documentsStore.retryDocument"
-            @sort="documentsStore.toggleSort"
-          />
-
-          <DocumentsEmptyState
-            v-else
-            :loading="workspace.loading"
-            :has-documents="hasDocuments"
-            :has-active-filters="hasActiveFilters"
-            @upload="triggerUpload"
-            @clear-filters="clearFilters"
-          />
-        </div>
-
-        <div
-          v-if="showInspector"
-          class="rr-docs-page__inspector"
-          :class="{ 'is-open': showInspector }"
-        >
-          <DocumentInspectorPane
-            :open="detailOpen"
-            :detail="detail"
-            :loading="detailLoading"
-            :error="detailError"
-            :downloading-id="downloadingId"
-            @close="documentsStore.closeDetail"
-            @append="documentsStore.openAppendDialog"
-            @replace="documentsStore.openReplaceDialog"
-            @retry="documentsStore.retryDocument"
-            @remove="requestRemove"
-            @open-in-graph="openInGraph"
-            @download-text="downloadText"
-          />
-        </div>
-
-        <button
-          v-if="showInspector"
-          type="button"
-          class="rr-docs-page__backdrop"
-          :aria-label="$t('dialogs.close')"
-          @click="documentsStore.closeDetail"
+        <DocumentsFiltersBar
+          v-if="hasDocuments || hasActiveFilters"
+          :search-query="workspace.filters.searchQuery"
+          :status-filter="workspace.filters.statusFilter"
+          :visible-count="filteredRows.length"
+          :total-count="mergedRows.length"
+          :show-meta="hasActiveFilters && filteredRows.length !== mergedRows.length"
+          :active-queued-count="workspace.counters.queued"
+          :active-processing-count="workspace.counters.processing"
+          :active-ready-no-graph-count="workspace.counters.readyNoGraph"
+          @update-search="documentsStore.setSearchQuery"
+          @update-status="documentsStore.setStatusFilter"
         />
-      </section>
 
-      <ErrorStateCard
-        v-else
-        :title="$t('documents.workspace.title')"
-        :description="workspace.error ?? $t('documents.loading')"
+        <DocumentsList
+          v-if="filteredRows.length"
+          :rows="filteredRows"
+          :selected-id="detailOpen ? (detail?.id ?? null) : null"
+          :sort-field="workspace.filters.sortField"
+          :sort-direction="workspace.filters.sortDirection"
+          @detail="documentsStore.openDetail"
+          @retry="documentsStore.retryDocument"
+          @sort="documentsStore.toggleSort"
+        />
+
+        <DocumentsEmptyState
+          v-else
+          :loading="workspace.loading"
+          :has-documents="hasDocuments"
+          :has-active-filters="hasActiveFilters"
+          @upload="triggerUpload"
+          @clear-filters="clearFilters"
+        />
+      </div>
+
+      <div
+        v-if="showInspector"
+        class="rr-docs-page__inspector"
+        :class="{ 'is-open': showInspector }"
+      >
+        <DocumentInspectorPane
+          :open="detailOpen"
+          :detail="detail"
+          :loading="detailLoading"
+          :error="detailError"
+          :downloading-id="downloadingId"
+          @close="documentsStore.closeDetail"
+          @append="documentsStore.openAppendDialog"
+          @replace="documentsStore.openReplaceDialog"
+          @retry="documentsStore.retryDocument"
+          @remove="requestRemove"
+          @open-in-graph="openInGraph"
+          @download-text="downloadText"
+        />
+      </div>
+
+      <button
+        v-if="showInspector"
+        type="button"
+        class="rr-docs-page__backdrop"
+        :aria-label="$t('dialogs.close')"
+        @click="documentsStore.closeDetail"
       />
+    </section>
+
+    <ErrorStateCard
+      v-else
+      :title="$t('documents.workspace.title')"
+      :description="workspace.error ?? $t('documents.loading')"
+    />
   </div>
 
   <AppendDocumentDialog
@@ -333,6 +352,15 @@ function clearFilters(): void {
 .rr-docs-page__primary.is-sparse {
   min-height: 0;
   padding-block: 9px 10px;
+}
+
+.rr-docs-page__primary.is-loading-empty {
+  min-height: min(26rem, calc(100vh - 16rem));
+  align-content: center;
+}
+
+.rr-docs-page__primary.is-loading-empty :deep(.rr-feedback-card) {
+  min-height: 180px;
 }
 
 .rr-docs-page__inspector {
@@ -431,7 +459,9 @@ function clearFilters(): void {
     opacity: 0;
     pointer-events: none;
     transform: translateY(1rem);
-    transition: opacity 0.18s ease, transform 0.18s ease;
+    transition:
+      opacity 0.18s ease,
+      transform 0.18s ease;
   }
 
   .rr-docs-page__inspector.is-open {
@@ -461,6 +491,14 @@ function clearFilters(): void {
   .rr-docs-page__primary.is-sparse {
     min-height: 0;
     padding-block: 12px;
+  }
+
+  .rr-docs-page__primary.is-loading-empty {
+    min-height: 18rem;
+  }
+
+  .rr-docs-page__primary.is-loading-empty :deep(.rr-feedback-card) {
+    min-height: 152px;
   }
 
   .rr-docs-page__backdrop {

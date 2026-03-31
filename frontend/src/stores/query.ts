@@ -3,6 +3,7 @@ import { ApiClientError } from 'src/services/api/http'
 import {
   createQuerySession,
   executeQueryTurn,
+  type ExecuteQueryTurnStreamHandlers,
   fetchKnowledgeContextBundle,
   fetchQueryExecutionDetail,
   fetchQuerySessionDetail,
@@ -144,8 +145,8 @@ export const useQueryStore = defineStore('query', {
           title: payload?.title ?? null,
         })
         this.activeLibraryId = session.libraryId
-        this.sessions = [session, ...this.sessions.filter((item) => item.id !== session.id)]
         await this.loadSession(session.id)
+        await this.loadSessions(session.libraryId)
         return session
       } catch (error) {
         this.error = normalizeErrorMessage(error, 'Failed to create query session')
@@ -172,11 +173,15 @@ export const useQueryStore = defineStore('query', {
         this.loadingSession = false
       }
     },
-    async runTurn(sessionId: string, payload: ExecuteQueryTurnPayload): Promise<void> {
+    async runTurn(
+      sessionId: string,
+      payload: ExecuteQueryTurnPayload,
+      handlers: ExecuteQueryTurnStreamHandlers = {},
+    ): Promise<void> {
       this.executingTurn = true
       this.error = null
       try {
-        const result = await executeQueryTurn(sessionId, payload)
+        const result = await executeQueryTurn(sessionId, payload, handlers)
         this.activeLibraryId = result.session.libraryId
         await this.loadSession(result.session.id)
         await this.loadExecution(result.execution.id)
@@ -194,7 +199,15 @@ export const useQueryStore = defineStore('query', {
         const detail = await fetchQueryExecutionDetail(executionId)
         this.activeExecution = detail
         if (detail.contextBundleId) {
-          this.activeBundle = await fetchKnowledgeContextBundle(detail.contextBundleId)
+          try {
+            this.activeBundle = await fetchKnowledgeContextBundle(detail.contextBundleId)
+          } catch (error) {
+            if (error instanceof ApiClientError && error.statusCode === 404) {
+              this.activeBundle = null
+            } else {
+              throw error
+            }
+          }
         } else {
           this.activeBundle = null
         }

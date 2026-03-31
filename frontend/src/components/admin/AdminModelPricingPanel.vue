@@ -25,8 +25,6 @@ const props = defineProps<{
   settings: AdminAiConsoleState
   saving: boolean
   commitVersion: number
-  workspaceName: string
-  libraryName: string
   errorMessage?: string | null
 }>()
 
@@ -337,17 +335,6 @@ watch(
           </button>
         </header>
 
-        <div class="rr-admin-workbench__context">
-          <div class="rr-admin-workbench__context-chip">
-            <span>{{ $t('shell.workspace') }}</span>
-            <strong>{{ workspaceName }}</strong>
-          </div>
-          <div class="rr-admin-workbench__context-chip">
-            <span>{{ $t('shell.library') }}</span>
-            <strong>{{ libraryName }}</strong>
-          </div>
-        </div>
-
         <SearchField
           v-model="searchQuery"
           :placeholder="$t('admin.pricing.searchPlaceholder')"
@@ -454,27 +441,27 @@ watch(
             </div>
           </header>
 
-          <dl
+          <div
             v-if="selectedPrice"
-            class="rr-admin-workbench__detail-grid"
+            class="rr-admin-pricing__summary-strip"
           >
-            <div>
-              <dt>{{ $t('admin.headers.provider') }}</dt>
-              <dd>{{ selectedPrice.provider?.displayName ?? '—' }}</dd>
-            </div>
-            <div>
-              <dt>{{ $t('admin.headers.billingUnit') }}</dt>
-              <dd>{{ billingUnitLabel(selectedPrice.billingUnit) }}</dd>
-            </div>
-            <div>
-              <dt>{{ $t('admin.headers.price') }}</dt>
-              <dd>{{ formatPrice(selectedPrice) }}</dd>
-            </div>
-            <div>
-              <dt>{{ $t('admin.pricing.scheduleTitle') }}</dt>
-              <dd>{{ effectivePeriodLabel(selectedPrice) }}</dd>
-            </div>
-          </dl>
+            <article class="rr-admin-pricing__summary-chip">
+              <span>{{ $t('admin.headers.provider') }}</span>
+              <strong>{{ selectedPrice.provider?.displayName ?? '—' }}</strong>
+            </article>
+            <article class="rr-admin-pricing__summary-chip">
+              <span>{{ $t('admin.headers.billingUnit') }}</span>
+              <strong>{{ billingUnitLabel(selectedPrice.billingUnit) }}</strong>
+            </article>
+            <article class="rr-admin-pricing__summary-chip">
+              <span>{{ $t('admin.pricing.scheduleTitle') }}</span>
+              <strong>{{ effectivePeriodLabel(selectedPrice) }}</strong>
+            </article>
+            <article class="rr-admin-pricing__summary-chip">
+              <span>{{ $t('admin.headers.state') }}</span>
+              <strong>{{ sourceLabel(selectedPrice) }}</strong>
+            </article>
+          </div>
           <p
             v-else
             class="rr-admin-workbench__feedback rr-admin-workbench__feedback--info"
@@ -572,6 +559,35 @@ watch(
 </template>
 
 <style scoped>
+.rr-admin-pricing__summary-strip {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.rr-admin-pricing__summary-chip {
+  display: grid;
+  gap: 4px;
+  padding: 11px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(226, 232, 240, 0.82);
+  background: rgba(248, 250, 252, 0.78);
+}
+
+.rr-admin-pricing__summary-chip span {
+  color: var(--rr-text-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rr-admin-pricing__summary-chip strong {
+  color: var(--rr-text-primary);
+  font-size: 0.88rem;
+  line-height: 1.4;
+}
+
 .rr-admin-pricing__form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -614,6 +630,7 @@ watch(
 }
 
 @media (max-width: 1024px) {
+  .rr-admin-pricing__summary-strip,
   .rr-admin-pricing__form-grid {
     grid-template-columns: 1fr;
   }

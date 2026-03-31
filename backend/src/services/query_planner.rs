@@ -2,9 +2,9 @@ use std::collections::BTreeSet;
 
 use crate::domains::query::{QueryPlanningMetadata, RuntimeQueryMode};
 
-const MAX_TOP_K: usize = 12;
+const MAX_TOP_K: usize = 48;
 const DEFAULT_TOP_K: usize = 8;
-const DEFAULT_CONTEXT_BUDGET_CHARS: usize = 6_000;
+const DEFAULT_CONTEXT_BUDGET_CHARS: usize = 22_000;
 const STOP_WORDS: &[&str] = &[
     "a", "an", "and", "are", "for", "from", "into", "that", "the", "this", "what", "which", "with",
     "your", "about", "there", "their", "have", "will", "would", "should", "could",
@@ -165,7 +165,7 @@ mod tests {
 
         assert_eq!(plan.requested_mode, RuntimeQueryMode::Mix);
         assert_eq!(plan.planned_mode, RuntimeQueryMode::Mix);
-        assert_eq!(plan.top_k, 12);
+        assert_eq!(plan.top_k, 48);
     }
 
     #[test]

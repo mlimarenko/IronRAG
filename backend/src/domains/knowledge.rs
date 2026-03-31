@@ -62,7 +62,7 @@ pub struct KnowledgeLibraryGeneration {
 pub struct KnowledgeEntity {
     pub id: Uuid,
     pub library_id: Uuid,
-    pub canonical_name: String,
+    pub canonical_label: String,
     pub entity_type: String,
     pub summary: Option<String>,
 }

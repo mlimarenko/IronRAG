@@ -13,9 +13,8 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::content::{
-        ContentDocument, ContentDocumentHead, ContentDocumentPipelineState,
-        ContentDocumentSummary, ContentMutation, ContentMutationItem, ContentRevision,
-        ContentRevisionReadiness,
+        ContentDocument, ContentDocumentHead, ContentDocumentPipelineState, ContentDocumentSummary,
+        ContentMutation, ContentMutationItem, ContentRevision, ContentRevisionReadiness,
     },
     interfaces::http::{
         auth::AuthContext,
@@ -643,9 +642,7 @@ async fn reprocess_document(
         .resolve_revision_storage_key(&state, active_revision.id)
         .await?;
     if active_revision.storage_key.is_none() && resolved_storage_key.is_none() {
-        return Err(ApiError::BadRequest(
-            "document has no stored source to reprocess".to_string(),
-        ));
+        return Err(ApiError::BadRequest("document has no stored source to reprocess".to_string()));
     }
     let admission = state
         .canonical_services

@@ -7,6 +7,7 @@ const tabs = [
   { to: '/', labelKey: 'shell.home' },
   { to: '/documents', labelKey: 'shell.documents' },
   { to: '/graph', labelKey: 'shell.graph' },
+  { to: '/assistant', labelKey: 'shell.assistant' },
   { to: '/admin', labelKey: 'shell.admin' },
   { to: '/swagger', labelKey: 'shell.swagger' },
 ] as const
