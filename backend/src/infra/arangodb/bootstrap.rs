@@ -163,7 +163,12 @@ pub async fn bootstrap_knowledge_plane(
     Ok(())
 }
 
+fn knowledge_text_analyzers() -> serde_json::Value {
+    serde_json::json!(["text_en", "text_ru"])
+}
+
 fn knowledge_search_view_links() -> serde_json::Value {
+    let text_analyzers = knowledge_text_analyzers();
     serde_json::json!({
         KNOWLEDGE_DOCUMENT_COLLECTION: {
             "includeAllFields": false,
@@ -174,30 +179,30 @@ fn knowledge_search_view_links() -> serde_json::Value {
         KNOWLEDGE_CHUNK_COLLECTION: {
             "includeAllFields": true,
             "fields": {
-                "content_text": { "analyzers": ["text_en"] },
-                "normalized_text": { "analyzers": ["text_en"] }
+                "content_text": { "analyzers": text_analyzers.clone() },
+                "normalized_text": { "analyzers": text_analyzers.clone() }
             }
         },
         KNOWLEDGE_ENTITY_COLLECTION: {
             "includeAllFields": true,
             "fields": {
-                "canonical_name": { "analyzers": ["text_en"] },
-                "summary": { "analyzers": ["text_en"] }
+                "canonical_label": { "analyzers": text_analyzers.clone() },
+                "summary": { "analyzers": text_analyzers.clone() }
             }
         },
         KNOWLEDGE_RELATION_COLLECTION: {
             "includeAllFields": true,
             "fields": {
-                "predicate": { "analyzers": ["text_en"] },
-                "canonical_label": { "analyzers": ["text_en"] },
-                "summary": { "analyzers": ["text_en"] }
+                "predicate": { "analyzers": text_analyzers.clone() },
+                "normalized_assertion": { "analyzers": text_analyzers.clone() },
+                "summary": { "analyzers": text_analyzers.clone() }
             }
         },
         KNOWLEDGE_EVIDENCE_COLLECTION: {
             "includeAllFields": true,
             "fields": {
-                "quote_text": { "analyzers": ["text_en"] },
-                "summary": { "analyzers": ["text_en"] }
+                "quote_text": { "analyzers": text_analyzers.clone() },
+                "summary": { "analyzers": text_analyzers.clone() }
             }
         },
         KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION: {

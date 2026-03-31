@@ -408,6 +408,45 @@ function stageLabelFor(job: RawIngestJob | null, mutationState: string | null = 
   return documentStageLabel(stageKey)
 }
 
+function progressPercentForState(
+  status: DocumentStatus,
+  activityStatus: DocumentActivityStatus,
+  stageKey: string | null,
+): number | null {
+  if (status === 'failed') {
+    return null
+  }
+
+  if (status === 'ready') {
+    return 100
+  }
+
+  if (status === 'ready_no_graph') {
+    return 92
+  }
+
+  switch (stageKey) {
+    case 'accepted':
+      return 8
+    case 'claimed':
+      return 16
+    case 'extracting_content':
+      return 34
+    case 'chunking':
+      return 58
+    case 'embedding_chunks':
+      return 74
+    case 'building_graph':
+      return 88
+    case 'finalizing':
+      return 96
+    case 'completed':
+      return 100
+    default:
+      return activityStatus === 'queued' ? 8 : activityStatus === 'active' ? 24 : null
+  }
+}
+
 function terminalStageForStatus(status: DocumentStatus): string {
   return status === 'failed' ? 'failed' : 'completed'
 }
@@ -848,22 +887,35 @@ function buildCanonicalState(
 }
 
 function buildKnowledgeReadiness(
-  revision: RawKnowledgeRevisionRow | null,
+  revision: RawKnowledgeRevisionRow | RawContentRevisionReadiness | null,
 ): DocumentDetail['knowledgeReadiness'] {
   if (!revision) {
     return null
   }
 
+  const revisionId = 'revisionId' in revision ? revision.revisionId : revision.revision_id
+  const revisionNo = 'revisionNumber' in revision ? revision.revisionNumber : null
+  const revisionKind = 'revisionKind' in revision ? revision.revisionKind : null
+  const textState = 'textState' in revision ? revision.textState : revision.text_state
+  const vectorState = 'vectorState' in revision ? revision.vectorState : revision.vector_state
+  const graphState = 'graphState' in revision ? revision.graphState : revision.graph_state
+  const textReadableAt =
+    'textReadableAt' in revision ? revision.textReadableAt : revision.text_readable_at
+  const vectorReadyAt =
+    'vectorReadyAt' in revision ? revision.vectorReadyAt : revision.vector_ready_at
+  const graphReadyAt =
+    'graphReadyAt' in revision ? revision.graphReadyAt : revision.graph_ready_at
+
   return {
-    revisionId: revision.revisionId,
-    revisionNo: revision.revisionNumber,
-    revisionKind: revision.revisionKind,
-    textState: revision.textState,
-    vectorState: revision.vectorState,
-    graphState: revision.graphState,
-    textReadableAt: revision.textReadableAt,
-    vectorReadyAt: revision.vectorReadyAt,
-    graphReadyAt: revision.graphReadyAt,
+    revisionId,
+    revisionNo,
+    revisionKind,
+    textState,
+    vectorState,
+    graphState,
+    textReadableAt,
+    vectorReadyAt,
+    graphReadyAt,
   }
 }
 
@@ -1186,15 +1238,18 @@ function mapSurfaceRow(
   const revisions = document.active_revision ? [document.active_revision] : []
   const currentMutation = selectCurrentMutation(document, relatedMutations)
   const currentJob = selectMutationJob(document, currentMutation, relatedJobs)
+  const currentMutationStatus = currentMutationState(currentMutation)
   const documentStatus = documentStatusFromCurrentState(
     document.readiness,
-    currentMutation?.mutation.mutation_state ?? null,
+    currentMutationStatus,
     currentJob?.queue_state ?? null,
   )
+  const activityStatus = activityStatusFromCurrentState(documentStatus, currentJob, currentMutationStatus)
+  const stage = stageKeyFor(currentJob, currentMutationStatus)
   const activeRevision = document.active_revision
   const fileName = buildDocumentFileName(document, activeRevision, revisions)
   const fileType = buildDocumentFileType(document, activeRevision, revisions)
-  const mutationState = buildMutationState(currentMutation?.mutation ?? null)
+  const lastActivityAt = latestActivityAt(currentJob)
 
   return {
     id: document.document.id,
@@ -1205,7 +1260,12 @@ function mapSurfaceRow(
     uploadedAt: document.document.created_at,
     status: documentStatus,
     statusLabel: statusLabelFor(documentStatus),
-    stageLabel: stageLabelFor(currentJob, currentMutationState(currentMutation)),
+    stage,
+    stageLabel: stageLabelFor(currentJob, currentMutationStatus),
+    progressPercent: progressPercentForState(documentStatus, activityStatus, stage),
+    activityStatus,
+    lastActivityAt,
+    stalledReason: stalledReason(activityStatus, lastActivityAt),
     costAmount: null,
     costLabel: null,
     canRetry:
@@ -1482,18 +1542,20 @@ function normalizeUploadRejectionDetails(details: unknown): UploadRejectionDetai
   }
 }
 
-async function fetchSurfaceDocuments(): Promise<RawContentDocumentDetailResponse[]> {
-  const shellStore = useShellStore()
-  const libraryId = shellStore.context?.activeLibrary.id
-  if (!libraryId) {
+async function fetchSurfaceDocumentsForLibrary(
+  libraryId?: string | null,
+): Promise<RawContentDocumentDetailResponse[]> {
+  const resolvedLibraryId = libraryId ?? useShellStore().context?.activeLibrary.id ?? null
+  if (!resolvedLibraryId) {
     return []
   }
 
   const documents = await unwrap(
     apiHttp.get<RawContentDocumentDetailResponse[]>('/content/documents', {
-      params: { libraryId, includeDeleted: false },
+      params: { libraryId: resolvedLibraryId, includeDeleted: false },
     }),
   )
+
   return documents.map(normalizeContentDocumentDetailResponse)
 }
 
@@ -1591,22 +1653,6 @@ function buildSurfaceResponse(
   }
 }
 
-function dashboardRowPriority(row: DocumentRowSummary): number {
-  switch (row.status) {
-    case 'failed':
-      return 5
-    case 'processing':
-      return 4
-    case 'queued':
-      return 3
-    case 'ready_no_graph':
-      return 2
-    case 'ready':
-    default:
-      return 1
-  }
-}
-
 export function mapDashboardRecentDocuments(
   rows: DocumentRowSummary[],
   limit = 8,
@@ -1614,11 +1660,11 @@ export function mapDashboardRecentDocuments(
   return rows
     .slice()
     .sort((left, right) => {
-      const priorityDelta = dashboardRowPriority(right) - dashboardRowPriority(left)
-      if (priorityDelta !== 0) {
-        return priorityDelta
+      const uploadedAtDelta = compareIsoDates(left.uploadedAt, right.uploadedAt)
+      if (uploadedAtDelta !== 0) {
+        return uploadedAtDelta
       }
-      return compareIsoDates(left.uploadedAt, right.uploadedAt)
+      return left.fileName.localeCompare(right.fileName)
     })
     .slice(0, limit)
     .map((row) => ({
@@ -1740,7 +1786,7 @@ export async function fetchDocumentsSurface(): Promise<DocumentsSurfaceResponse>
   const shellStore = useShellStore()
   const libraryId = shellStore.context?.activeLibrary.id ?? null
   const [documents, documentCosts] = await Promise.all([
-    fetchSurfaceDocuments(),
+    fetchSurfaceDocumentsForLibrary(libraryId),
     libraryId ? fetchLibraryDocumentCosts(libraryId) : Promise.resolve([]),
   ])
 
@@ -1758,6 +1804,13 @@ export async function fetchDocumentsSurface(): Promise<DocumentsSurfaceResponse>
   }
 
   return surface
+}
+
+export async function fetchDocumentSummaryCounters(
+  libraryId?: string | null,
+): Promise<DocumentSummaryCounters> {
+  const documents = await fetchSurfaceDocumentsForLibrary(libraryId)
+  return buildSurfaceResponse(documents).counters
 }
 
 export async function fetchDocumentDetail(id: string): Promise<DocumentDetail> {
@@ -1880,10 +1933,15 @@ async function fetchDocumentRowFromDetail(id: string): Promise<DocumentRowSummar
     uploadedAt: detail.uploadedAt,
     status: detail.status,
     statusLabel: statusLabelFor(detail.status),
+    stage: detail.stage,
     stageLabel:
       detail.status === 'processing' || detail.status === 'queued'
         ? documentStageLabel(detail.stage)
         : null,
+    progressPercent: detail.progressPercent,
+    activityStatus: detail.activityStatus,
+    lastActivityAt: detail.lastActivityAt,
+    stalledReason: detail.stalledReason,
     costAmount: detail.totalEstimatedCost && detail.totalEstimatedCost > 0
       ? detail.totalEstimatedCost
       : null,

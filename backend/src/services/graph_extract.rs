@@ -535,38 +535,8 @@ pub async fn extract_and_persist_chunk_graph_result(
     provider_profile: &EffectiveProviderProfile,
     request: &GraphExtractionRequest,
 ) -> std::result::Result<GraphExtractionOutcome, GraphExtractionExecutionError> {
-    match resolve_graph_extraction(state, provider_profile, request).await {
-        Ok(resolved) => {
-            let outcome = GraphExtractionOutcome {
-                provider_kind: resolved.provider_kind.clone(),
-                model_name: resolved.model_name.clone(),
-                prompt_hash: resolved.prompt_hash.clone(),
-                raw_output_json: build_raw_output_json(
-                    &resolved.output_text,
-                    resolved.usage_json.clone(),
-                    &resolved.lifecycle,
-                    &resolved.recovery,
-                    &resolved.recovery_summary,
-                    &resolved.usage_calls,
-                ),
-                usage_json: resolved.usage_json.clone(),
-                usage_calls: resolved.usage_calls.clone(),
-                request_shape_key: resolved.request_shape_key.clone(),
-                request_size_bytes: resolved.request_size_bytes,
-                provider_failure: resolved.provider_failure.clone(),
-                normalized: resolved.normalized,
-                recovery_summary: resolved.recovery_summary,
-                recovery_attempts: resolved.recovery_attempts,
-                resume_state: GraphExtractionResumeState {
-                    resumed_from_checkpoint: false,
-                    replay_count: request
-                        .resume_hint
-                        .as_ref()
-                        .map(|hint| hint.replay_count)
-                        .unwrap_or(0),
-                    downgrade_level: normalized_downgrade_level(request),
-                },
-            };
+    match extract_chunk_graph_candidates(state, provider_profile, request).await {
+        Ok(outcome) => {
             let raw_output_json = outcome.raw_output_json.clone();
             let normalized_json =
                 serde_json::to_value(&outcome.normalized).unwrap_or_else(|_| serde_json::json!({}));
@@ -582,7 +552,7 @@ pub async fn extract_and_persist_chunk_graph_result(
                 "ready",
                 raw_output_json,
                 normalized_json,
-                i32::try_from(resolved.recovery.provider_attempt_count).unwrap_or(i32::MAX),
+                i32::try_from(outcome.usage_calls.len()).unwrap_or(i32::MAX),
                 None,
             )
             .await
@@ -597,58 +567,100 @@ pub async fn extract_and_persist_chunk_graph_result(
             })?;
             Ok(outcome)
         }
-        Err(failure) => {
+        Err(error) => {
             repositories::create_runtime_graph_extraction_record(
                 &state.persistence.postgres,
                 request.project_id,
                 request.document.id,
                 request.chunk.id,
-                &failure.provider_kind,
-                &failure.model_name,
+                error
+                    .provider_failure
+                    .as_ref()
+                    .and_then(|failure| failure.provider_kind.as_deref())
+                    .unwrap_or("unknown"),
+                error
+                    .provider_failure
+                    .as_ref()
+                    .and_then(|failure| failure.model_name.as_deref())
+                    .unwrap_or("unknown"),
                 GRAPH_EXTRACTION_VERSION,
-                &failure.prompt_hash,
+                "unknown",
                 "failed",
-                failure.raw_output_json,
+                serde_json::json!({}),
                 serde_json::json!({ "entities": [], "relations": [] }),
-                i32::try_from(failure.provider_attempt_count).unwrap_or(i32::MAX),
-                Some(&failure.error_message),
+                i32::try_from(error.resume_state.replay_count).unwrap_or(i32::MAX),
+                Some(&error.message),
             )
             .await
-            .map_err(|error| GraphExtractionExecutionError {
-                message: format!("failed to persist graph extraction failure record: {error:#}"),
-                request_shape_key: failure.request_shape_key.clone(),
-                request_size_bytes: failure.request_size_bytes,
-                provider_failure: failure.provider_failure.clone(),
-                recovery_summary: failure.recovery_summary.clone(),
-                recovery_attempts: failure.recovery_attempts.clone(),
-                resume_state: GraphExtractionResumeState {
-                    resumed_from_checkpoint: false,
-                    replay_count: request
-                        .resume_hint
-                        .as_ref()
-                        .map(|hint| hint.replay_count.saturating_add(1))
-                        .unwrap_or(1),
-                    downgrade_level: normalized_downgrade_level(request),
-                },
+            .map_err(|persist_error| GraphExtractionExecutionError {
+                message: format!(
+                    "failed to persist graph extraction failure record: {persist_error:#}"
+                ),
+                request_shape_key: error.request_shape_key.clone(),
+                request_size_bytes: error.request_size_bytes,
+                provider_failure: error.provider_failure.clone(),
+                recovery_summary: error.recovery_summary.clone(),
+                recovery_attempts: error.recovery_attempts.clone(),
+                resume_state: error.resume_state.clone(),
             })?;
-            Err(GraphExtractionExecutionError {
-                message: failure.error_message,
-                request_shape_key: failure.request_shape_key,
-                request_size_bytes: failure.request_size_bytes,
-                provider_failure: failure.provider_failure,
-                recovery_summary: failure.recovery_summary,
-                recovery_attempts: failure.recovery_attempts,
-                resume_state: GraphExtractionResumeState {
-                    resumed_from_checkpoint: false,
-                    replay_count: request
-                        .resume_hint
-                        .as_ref()
-                        .map(|hint| hint.replay_count.saturating_add(1))
-                        .unwrap_or(1),
-                    downgrade_level: normalized_downgrade_level(request),
-                },
-            })
+            Err(error)
         }
+    }
+}
+
+pub async fn extract_chunk_graph_candidates(
+    state: &AppState,
+    provider_profile: &EffectiveProviderProfile,
+    request: &GraphExtractionRequest,
+) -> std::result::Result<GraphExtractionOutcome, GraphExtractionExecutionError> {
+    match resolve_graph_extraction(state, provider_profile, request).await {
+        Ok(resolved) => Ok(GraphExtractionOutcome {
+            provider_kind: resolved.provider_kind.clone(),
+            model_name: resolved.model_name.clone(),
+            prompt_hash: resolved.prompt_hash.clone(),
+            raw_output_json: build_raw_output_json(
+                &resolved.output_text,
+                resolved.usage_json.clone(),
+                &resolved.lifecycle,
+                &resolved.recovery,
+                &resolved.recovery_summary,
+                &resolved.usage_calls,
+            ),
+            usage_json: resolved.usage_json.clone(),
+            usage_calls: resolved.usage_calls.clone(),
+            normalized: resolved.normalized,
+            request_shape_key: resolved.request_shape_key.clone(),
+            request_size_bytes: resolved.request_size_bytes,
+            provider_failure: resolved.provider_failure.clone(),
+            recovery_summary: resolved.recovery_summary,
+            recovery_attempts: resolved.recovery_attempts,
+            resume_state: GraphExtractionResumeState {
+                resumed_from_checkpoint: false,
+                replay_count: request
+                    .resume_hint
+                    .as_ref()
+                    .map(|hint| hint.replay_count)
+                    .unwrap_or(0),
+                downgrade_level: normalized_downgrade_level(request),
+            },
+        }),
+        Err(failure) => Err(GraphExtractionExecutionError {
+            message: failure.error_message,
+            request_shape_key: failure.request_shape_key,
+            request_size_bytes: failure.request_size_bytes,
+            provider_failure: failure.provider_failure,
+            recovery_summary: failure.recovery_summary,
+            recovery_attempts: failure.recovery_attempts,
+            resume_state: GraphExtractionResumeState {
+                resumed_from_checkpoint: false,
+                replay_count: request
+                    .resume_hint
+                    .as_ref()
+                    .map(|hint| hint.replay_count.saturating_add(1))
+                    .unwrap_or(1),
+                downgrade_level: normalized_downgrade_level(request),
+            },
+        }),
     }
 }
 

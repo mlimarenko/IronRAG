@@ -82,6 +82,9 @@ const showNoResultsState = computed(
   () => !showLoadingState.value && props.rows.length > 0 && filteredRows.value.length === 0,
 )
 const showSparseWorkbench = computed(() => showEmptyState.value || showNoResultsState.value)
+const showSingleTokenWorkbench = computed(
+  () => !showSparseWorkbench.value && filteredRows.value.length === 1,
+)
 const genericPrincipalKindLabel = computed(() =>
   enumLabel('admin.tokens.principalKinds', 'api_token'),
 )
@@ -175,7 +178,7 @@ function clearSearch(): void {
 <template>
   <section
     class="rr-admin-workbench rr-admin-workbench--access"
-    :class="{ 'is-sparse': showSparseWorkbench }"
+    :class="{ 'is-sparse': showSparseWorkbench, 'is-single': showSingleTokenWorkbench }"
   >
     <div class="rr-admin-workbench__layout">
       <aside class="rr-admin-workbench__rail">
@@ -194,17 +197,6 @@ function clearSearch(): void {
             {{ $t('admin.createToken') }}
           </button>
         </header>
-
-        <div class="rr-admin-workbench__context">
-          <div class="rr-admin-workbench__context-chip">
-            <span>{{ $t('shell.workspace') }}</span>
-            <strong>{{ workspaceName }}</strong>
-          </div>
-          <div class="rr-admin-workbench__context-chip">
-            <span>{{ $t('shell.library') }}</span>
-            <strong>{{ libraryName }}</strong>
-          </div>
-        </div>
 
         <SearchField
           v-model="searchQuery"
@@ -442,8 +434,32 @@ function clearSearch(): void {
   align-items: start;
 }
 
+.rr-admin-workbench--access.is-single .rr-admin-workbench__layout {
+  min-height: 0;
+  align-items: start;
+}
+
+@media (min-width: 981px) {
+  .rr-admin-workbench--access.is-sparse .rr-admin-workbench__layout {
+    grid-template-columns: minmax(320px, 24rem) minmax(360px, 42rem);
+    justify-content: start;
+  }
+
+  .rr-admin-workbench--access.is-single .rr-admin-workbench__layout {
+    grid-template-columns: minmax(300px, 24rem) minmax(380px, 44rem);
+    justify-content: start;
+  }
+}
+
 .rr-admin-workbench--access.is-sparse .rr-admin-workbench__rail,
 .rr-admin-workbench--access.is-sparse .rr-admin-workbench__detail {
+  height: auto;
+  min-height: 0;
+  align-self: start;
+}
+
+.rr-admin-workbench--access.is-single .rr-admin-workbench__rail,
+.rr-admin-workbench--access.is-single .rr-admin-workbench__detail {
   height: auto;
   min-height: 0;
   align-self: start;
@@ -470,6 +486,14 @@ function clearSearch(): void {
 
 .rr-admin-workbench--access .rr-admin-workbench__detail-actions {
   margin-top: 2px;
+}
+
+.rr-admin-workbench--access.is-sparse .rr-admin-workbench__detail-card {
+  max-width: 42rem;
+}
+
+.rr-admin-workbench--access.is-single .rr-admin-workbench__detail-card {
+  max-width: 44rem;
 }
 
 .rr-admin-token-detail__checklist,

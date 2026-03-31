@@ -23,6 +23,7 @@ use crate::{
         repositories::{self, IngestionJobRow, content_repository, ingest_repository},
     },
     services::{
+        content_service::MaterializeRevisionGraphCandidatesCommand,
         document_accounting,
         extract_service::PersistExtractContentCommand,
         graph_extract::{
@@ -5047,6 +5048,60 @@ async fn run_canonical_ingest_pipeline(
         .context("failed to record embed_chunk stage event")?;
 
     // --- Stage: extract_graph -------------------------------------------------
+    state
+        .canonical_services
+        .ingest
+        .record_stage_event(
+            state,
+            RecordStageEventCommand {
+                attempt_id,
+                stage_name: "extract_graph".to_string(),
+                stage_state: "started".to_string(),
+                message: Some("extracting graph candidates from chunks".to_string()),
+                details_json: serde_json::json!({
+                    "libraryId": revision.library_id,
+                    "revisionId": revision_id,
+                }),
+            },
+        )
+        .await
+        .context("failed to record extract_graph start stage event")?;
+    let graph_materialization = match state
+        .canonical_services
+        .content
+        .materialize_revision_graph_candidates(
+            state,
+            MaterializeRevisionGraphCandidatesCommand {
+                workspace_id: revision.workspace_id,
+                library_id: revision.library_id,
+                revision_id,
+                attempt_id,
+            },
+        )
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            state
+                .canonical_services
+                .ingest
+                .record_stage_event(
+                    state,
+                    RecordStageEventCommand {
+                        attempt_id,
+                        stage_name: "extract_graph".to_string(),
+                        stage_state: "failed".to_string(),
+                        message: Some("graph candidate extraction failed".to_string()),
+                        details_json: serde_json::json!({
+                            "error": error.to_string(),
+                        }),
+                    },
+                )
+                .await
+                .context("failed to record extract_graph extraction failure stage event")?;
+            return Err(anyhow::anyhow!("canonical graph candidate extraction failed: {}", error));
+        }
+    };
     let graph_outcome =
         state.canonical_services.graph.rebuild_arango_library_graph(state, job.library_id).await;
 
@@ -5061,8 +5116,11 @@ async fn run_canonical_ingest_pipeline(
                         attempt_id,
                         stage_name: "extract_graph".to_string(),
                         stage_state: "completed".to_string(),
-                        message: Some("graph candidates reconciled".to_string()),
+                        message: Some("graph candidates extracted and reconciled".to_string()),
                         details_json: serde_json::json!({
+                            "chunksProcessed": graph_materialization.chunk_count,
+                            "extractedEntityCandidates": graph_materialization.extracted_entities,
+                            "extractedRelationCandidates": graph_materialization.extracted_relations,
                             "upsertedEntities": outcome.upserted_entities,
                             "upsertedRelations": outcome.upserted_relations,
                         }),
@@ -5089,6 +5147,9 @@ async fn run_canonical_ingest_pipeline(
                         stage_state: "failed".to_string(),
                         message: Some("graph rebuild failed".to_string()),
                         details_json: serde_json::json!({
+                            "chunksProcessed": graph_materialization.chunk_count,
+                            "extractedEntityCandidates": graph_materialization.extracted_entities,
+                            "extractedRelationCandidates": graph_materialization.extracted_relations,
                             "error": format!("{graph_error:#}"),
                         }),
                     },

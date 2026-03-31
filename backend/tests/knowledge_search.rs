@@ -549,7 +549,6 @@ impl KnowledgeSearchHttpFixture {
             "workspace_id": workspace.id,
             "library_id": library.id,
             "canonical_label": "Orion Signal",
-            "canonical_name": "Orion Signal",
             "aliases": ["Signal Orion"],
             "entity_type": "concept",
             "summary": "Orion entity summary",
@@ -1528,7 +1527,7 @@ async fn search_documents_endpoint_returns_hybrid_knowledge_payload() -> Result<
         let entity_hits = body["entityHits"].as_array().context("entityHits must be an array")?;
         assert_eq!(entity_hits.len(), 1);
         assert_eq!(entity_hits[0]["entityId"], json!(fixture.entity_id));
-        assert_eq!(entity_hits[0]["canonicalName"], json!("Orion Signal"));
+        assert_eq!(entity_hits[0]["canonicalLabel"], json!("Orion Signal"));
 
         let relation_hits =
             body["relationHits"].as_array().context("relationHits must be an array")?;

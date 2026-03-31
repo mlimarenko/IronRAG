@@ -1,10 +1,10 @@
 use std::io::Cursor;
 
 use anyhow::{Context, Result, anyhow};
-use image::{
-    DynamicImage, ImageBuffer, ImageFormat, Luma, LumaA, Rgb, Rgba, imageops::FilterType,
+use image::{DynamicImage, ImageBuffer, ImageFormat, Luma, LumaA, Rgb, Rgba, imageops::FilterType};
+use png::{
+    ColorType as PngColorType, Decoder as PngDecoder, Transformations as PngTransformations,
 };
-use png::{ColorType as PngColorType, Decoder as PngDecoder, Transformations as PngTransformations};
 
 use crate::{
     integrations::llm::{LlmGateway, VisionRequest},
@@ -70,7 +70,8 @@ fn prepare_vision_image_payload(
     file_bytes: &[u8],
     mime_type: &str,
 ) -> Result<PreparedVisionPayload> {
-    let mut image = load_normalizable_image(file_bytes, mime_type).context("failed to decode image bytes")?;
+    let mut image =
+        load_normalizable_image(file_bytes, mime_type).context("failed to decode image bytes")?;
     let mut warnings = Vec::new();
 
     let width = image.width();
@@ -128,20 +129,28 @@ fn decode_png_ignoring_checksums(file_bytes: &[u8]) -> Result<DynamicImage> {
     let pixels = buffer[..output.buffer_size()].to_vec();
 
     match output.color_type {
-        PngColorType::Grayscale => ImageBuffer::<Luma<u8>, _>::from_raw(output.width, output.height, pixels)
-            .map(DynamicImage::ImageLuma8)
-            .ok_or_else(|| anyhow!("failed to construct luma image from decoded png buffer")),
+        PngColorType::Grayscale => {
+            ImageBuffer::<Luma<u8>, _>::from_raw(output.width, output.height, pixels)
+                .map(DynamicImage::ImageLuma8)
+                .ok_or_else(|| anyhow!("failed to construct luma image from decoded png buffer"))
+        }
         PngColorType::GrayscaleAlpha => {
             ImageBuffer::<LumaA<u8>, _>::from_raw(output.width, output.height, pixels)
                 .map(DynamicImage::ImageLumaA8)
-                .ok_or_else(|| anyhow!("failed to construct luma-alpha image from decoded png buffer"))
+                .ok_or_else(|| {
+                    anyhow!("failed to construct luma-alpha image from decoded png buffer")
+                })
         }
-        PngColorType::Rgb => ImageBuffer::<Rgb<u8>, _>::from_raw(output.width, output.height, pixels)
-            .map(DynamicImage::ImageRgb8)
-            .ok_or_else(|| anyhow!("failed to construct rgb image from decoded png buffer")),
-        PngColorType::Rgba => ImageBuffer::<Rgba<u8>, _>::from_raw(output.width, output.height, pixels)
-            .map(DynamicImage::ImageRgba8)
-            .ok_or_else(|| anyhow!("failed to construct rgba image from decoded png buffer")),
+        PngColorType::Rgb => {
+            ImageBuffer::<Rgb<u8>, _>::from_raw(output.width, output.height, pixels)
+                .map(DynamicImage::ImageRgb8)
+                .ok_or_else(|| anyhow!("failed to construct rgb image from decoded png buffer"))
+        }
+        PngColorType::Rgba => {
+            ImageBuffer::<Rgba<u8>, _>::from_raw(output.width, output.height, pixels)
+                .map(DynamicImage::ImageRgba8)
+                .ok_or_else(|| anyhow!("failed to construct rgba image from decoded png buffer"))
+        }
         PngColorType::Indexed => {
             Err(anyhow!("png decoder returned indexed output after normalization"))
         }
@@ -257,9 +266,11 @@ mod tests {
         assert_eq!(decoded.width(), 64);
         assert_eq!(decoded.height(), 64);
         assert_eq!(decoded.color(), image::ColorType::Rgb8);
-        assert!(payload
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("upscaled image from 1x1 to 64x64")));
+        assert!(
+            payload
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("upscaled image from 1x1 to 64x64"))
+        );
     }
 }

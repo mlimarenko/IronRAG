@@ -15,7 +15,7 @@ const { t } = useI18n()
 const router = useRouter()
 const { formatCompactDateTime } = useDisplayFormatters()
 const showFileType = computed(() => new Set(props.documents.map((row) => row.fileType)).size > 1)
-const showStatusBadge = computed(() => props.documents.some((row) => !['ready', 'ready_no_graph'].includes(row.status)))
+const showStatusBadge = computed(() => props.documents.some((row) => row.status !== 'ready'))
 function rowMeta(row: DashboardRecentDocument): string {
   return `${row.fileSizeLabel} · ${formatCompactDateTime(row.uploadedAt)}`
 }

@@ -1,4 +1,5 @@
 use chrono::Utc;
+use futures::{StreamExt, TryStreamExt, stream};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -6,8 +7,8 @@ use crate::{
     app::state::AppState,
     domains::content::{
         ContentChunk, ContentDocument, ContentDocumentHead, ContentDocumentPipelineJob,
-        ContentDocumentPipelineState, ContentDocumentSummary, ContentMutation,
-        ContentMutationItem, ContentRevision, ContentRevisionReadiness,
+        ContentDocumentPipelineState, ContentDocumentSummary, ContentMutation, ContentMutationItem,
+        ContentRevision, ContentRevisionReadiness,
     },
     domains::{
         ai::AiBindingPurpose, ingest::IngestStageEvent, provider_profiles::ProviderModelSelection,
@@ -17,13 +18,12 @@ use crate::{
         KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeRevisionRow,
     },
     infra::repositories::{
-        catalog_repository,
+        self, catalog_repository,
         content_repository::{
             self, NewContentDocument, NewContentDocumentHead, NewContentMutation,
             NewContentMutationItem, NewContentRevision,
         },
     },
-    integrations::llm::ChatRequest,
     interfaces::http::router_support::ApiError,
     services::{
         billing_service::CaptureIngestAttemptBillingCommand,
@@ -32,17 +32,17 @@ use crate::{
             MaterializeChunkResultCommand, NewEdgeCandidate, NewNodeCandidate,
             PersistExtractContentCommand,
         },
-        graph_extract::parse_graph_extraction_output,
+        graph_extract::{GraphExtractionRequest, extract_chunk_graph_candidates},
         ingest_service::AdmitIngestJobCommand,
         ingest_service::{
-            FinalizeAttemptCommand, IngestJobHandle, LeaseAttemptCommand,
-            RecordStageEventCommand,
+            FinalizeAttemptCommand, IngestJobHandle, LeaseAttemptCommand, RecordStageEventCommand,
         },
         knowledge_service::{
             CreateKnowledgeChunkCommand, CreateKnowledgeDocumentCommand,
             CreateKnowledgeRevisionCommand, PromoteKnowledgeDocumentCommand,
         },
         ops_service::{CreateAsyncOperationCommand, UpdateAsyncOperationCommand},
+        runtime_ingestion::resolve_effective_provider_profile,
     },
     shared::{
         chunking::{ChunkingProfile, split_text_into_chunks_with_profile},
@@ -245,6 +245,21 @@ struct InlineMutationContext {
 }
 
 #[derive(Debug, Clone)]
+pub struct MaterializeRevisionGraphCandidatesCommand {
+    pub workspace_id: Uuid,
+    pub library_id: Uuid,
+    pub revision_id: Uuid,
+    pub attempt_id: Uuid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RevisionGraphCandidateMaterialization {
+    pub chunk_count: usize,
+    pub extracted_entities: usize,
+    pub extracted_relations: usize,
+}
+
+#[derive(Debug, Clone)]
 struct AppendableDocumentContext {
     current_content: String,
     mime_type: String,
@@ -346,10 +361,11 @@ impl ContentService {
         state: &AppState,
         revision_id: Uuid,
     ) -> Result<Option<String>, ApiError> {
-        let revision = content_repository::get_revision_by_id(&state.persistence.postgres, revision_id)
-            .await
-            .map_err(|_| ApiError::Internal)?
-            .ok_or_else(|| ApiError::resource_not_found("revision", revision_id))?;
+        let revision =
+            content_repository::get_revision_by_id(&state.persistence.postgres, revision_id)
+                .await
+                .map_err(|_| ApiError::Internal)?
+                .ok_or_else(|| ApiError::resource_not_found("revision", revision_id))?;
         if let Some(storage_key) = revision
             .storage_key
             .as_deref()
@@ -421,10 +437,8 @@ impl ContentService {
         )
         .await
         .map_err(|_| ApiError::Internal)?;
-        let latest_mutation_ids = content_heads
-            .iter()
-            .filter_map(|row| row.latest_mutation_id)
-            .collect::<Vec<_>>();
+        let latest_mutation_ids =
+            content_heads.iter().filter_map(|row| row.latest_mutation_id).collect::<Vec<_>>();
         let mutations_by_id = content_repository::list_mutations_by_ids(
             &state.persistence.postgres,
             &latest_mutation_ids,
@@ -492,13 +506,12 @@ impl ContentService {
                 .await
                 .map_err(|_| ApiError::Internal)?;
         let latest_mutation = match content_head.as_ref().and_then(|head| head.latest_mutation_id) {
-            Some(mutation_id) => content_repository::get_mutation_by_id(
-                &state.persistence.postgres,
-                mutation_id,
-            )
-            .await
-            .map_err(|_| ApiError::Internal)?
-            .map(map_mutation_row),
+            Some(mutation_id) => {
+                content_repository::get_mutation_by_id(&state.persistence.postgres, mutation_id)
+                    .await
+                    .map_err(|_| ApiError::Internal)?
+                    .map(map_mutation_row)
+            }
             None => None,
         };
         let latest_job = match content_head.as_ref().and_then(|head| head.latest_mutation_id) {
@@ -510,15 +523,14 @@ impl ContentService {
                 .map(map_document_pipeline_job),
             None => None,
         };
-        self
-            .build_document_summary_from_knowledge(
-                state,
-                row,
-                content_head.as_ref(),
-                latest_mutation,
-                latest_job,
-            )
-            .await
+        self.build_document_summary_from_knowledge(
+            state,
+            row,
+            content_head.as_ref(),
+            latest_mutation,
+            latest_job,
+        )
+        .await
     }
 
     pub async fn get_document_head(
@@ -852,38 +864,37 @@ impl ContentService {
                 &command.file_bytes,
             )
             .await?;
-        self
-            .admit_document(
-                state,
-                AdmitDocumentCommand {
-                    workspace_id: command.workspace_id,
-                    library_id: command.library_id,
-                    external_key: command.external_key,
-                    idempotency_key: command.idempotency_key,
-                    created_by_principal_id: command.requested_by_principal_id,
-                    request_surface: command.request_surface.clone(),
-                    source_identity: command.source_identity.clone(),
-                    revision: Some(RevisionAdmissionMetadata {
-                        content_source_kind: "upload".to_string(),
-                        checksum: format!("sha256:{file_checksum}"),
-                        mime_type: infer_inline_mime_type(
-                            command.mime_type.as_deref(),
-                            Some(&file_name),
-                            "upload",
-                        ),
-                        byte_size: i64::try_from(command.file_bytes.len()).unwrap_or(i64::MAX),
-                        title: Some(title),
-                        language_code: None,
-                        source_uri: Some(source_uri_for_inline_payload(
-                            "upload",
-                            command.source_identity.as_deref(),
-                            Some(&file_name),
-                        )),
-                        storage_key: Some(storage_key),
-                    }),
-                },
-            )
-            .await
+        self.admit_document(
+            state,
+            AdmitDocumentCommand {
+                workspace_id: command.workspace_id,
+                library_id: command.library_id,
+                external_key: command.external_key,
+                idempotency_key: command.idempotency_key,
+                created_by_principal_id: command.requested_by_principal_id,
+                request_surface: command.request_surface.clone(),
+                source_identity: command.source_identity.clone(),
+                revision: Some(RevisionAdmissionMetadata {
+                    content_source_kind: "upload".to_string(),
+                    checksum: format!("sha256:{file_checksum}"),
+                    mime_type: infer_inline_mime_type(
+                        command.mime_type.as_deref(),
+                        Some(&file_name),
+                        "upload",
+                    ),
+                    byte_size: i64::try_from(command.file_bytes.len()).unwrap_or(i64::MAX),
+                    title: Some(title),
+                    language_code: None,
+                    source_uri: Some(source_uri_for_inline_payload(
+                        "upload",
+                        command.source_identity.as_deref(),
+                        Some(&file_name),
+                    )),
+                    storage_key: Some(storage_key),
+                }),
+            },
+        )
+        .await
     }
 
     pub async fn create_revision(
@@ -1216,45 +1227,44 @@ impl ContentService {
                 &command.file_bytes,
             )
             .await?;
-        self
-            .admit_mutation(
-                state,
-                AdmitMutationCommand {
-                    workspace_id: command.workspace_id,
-                    library_id: command.library_id,
-                    document_id: command.document_id,
-                    operation_kind: "replace".to_string(),
-                    idempotency_key: command.idempotency_key,
-                    requested_by_principal_id: command.requested_by_principal_id,
-                    request_surface: command.request_surface,
-                    source_identity: command.source_identity.clone(),
-                    revision: Some(RevisionAdmissionMetadata {
-                        content_source_kind: "replace".to_string(),
-                        checksum: format!("sha256:{file_checksum}"),
-                        mime_type: infer_inline_mime_type(
-                            command.mime_type.as_deref(),
-                            Some(&command.file_name),
-                            "replace",
-                        ),
-                        byte_size: i64::try_from(command.file_bytes.len()).unwrap_or(i64::MAX),
-                        title: Some(
-                            base_revision
-                                .as_ref()
-                                .and_then(|row| row.title.clone())
-                                .filter(|value| !value.trim().is_empty())
-                                .unwrap_or_else(|| command.file_name.clone()),
-                        ),
-                        language_code: None,
-                        source_uri: Some(source_uri_for_inline_payload(
-                            "replace",
-                            command.source_identity.as_deref(),
-                            Some(&command.file_name),
-                        )),
-                        storage_key: Some(storage_key),
-                    }),
-                },
-            )
-            .await
+        self.admit_mutation(
+            state,
+            AdmitMutationCommand {
+                workspace_id: command.workspace_id,
+                library_id: command.library_id,
+                document_id: command.document_id,
+                operation_kind: "replace".to_string(),
+                idempotency_key: command.idempotency_key,
+                requested_by_principal_id: command.requested_by_principal_id,
+                request_surface: command.request_surface,
+                source_identity: command.source_identity.clone(),
+                revision: Some(RevisionAdmissionMetadata {
+                    content_source_kind: "replace".to_string(),
+                    checksum: format!("sha256:{file_checksum}"),
+                    mime_type: infer_inline_mime_type(
+                        command.mime_type.as_deref(),
+                        Some(&command.file_name),
+                        "replace",
+                    ),
+                    byte_size: i64::try_from(command.file_bytes.len()).unwrap_or(i64::MAX),
+                    title: Some(
+                        base_revision
+                            .as_ref()
+                            .and_then(|row| row.title.clone())
+                            .filter(|value| !value.trim().is_empty())
+                            .unwrap_or_else(|| command.file_name.clone()),
+                    ),
+                    language_code: None,
+                    source_uri: Some(source_uri_for_inline_payload(
+                        "replace",
+                        command.source_identity.as_deref(),
+                        Some(&command.file_name),
+                    )),
+                    storage_key: Some(storage_key),
+                }),
+            },
+        )
+        .await
     }
 
     pub async fn delete_document(
@@ -1981,8 +1991,17 @@ impl ContentService {
                 },
             )
             .await?;
-        let (chunk_count, extracted_entities, extracted_relations) =
-            self.materialize_inline_graph_candidates(state, context, attempt_id).await?;
+        let graph_materialization = self
+            .materialize_revision_graph_candidates(
+                state,
+                MaterializeRevisionGraphCandidatesCommand {
+                    workspace_id: context.workspace_id,
+                    library_id: context.library_id,
+                    revision_id: context.revision_id,
+                    attempt_id,
+                },
+            )
+            .await?;
         let graph_outcome = state
             .canonical_services
             .graph
@@ -2002,9 +2021,9 @@ impl ContentService {
                     stage_state: "completed".to_string(),
                     message: Some("graph candidates extracted and reconciled".to_string()),
                     details_json: serde_json::json!({
-                        "chunksProcessed": chunk_count,
-                        "extractedEntityCandidates": extracted_entities,
-                        "extractedRelationCandidates": extracted_relations,
+                        "chunksProcessed": graph_materialization.chunk_count,
+                        "extractedEntityCandidates": graph_materialization.extracted_entities,
+                        "extractedRelationCandidates": graph_materialization.extracted_relations,
                         "upsertedEntities": graph_outcome.upserted_entities,
                         "upsertedRelations": graph_outcome.upserted_relations,
                     }),
@@ -2039,152 +2058,166 @@ impl ContentService {
         Ok(())
     }
 
-    async fn materialize_inline_graph_candidates(
+    pub async fn materialize_revision_graph_candidates(
         &self,
         state: &AppState,
-        context: &InlineMutationContext,
-        attempt_id: Uuid,
-    ) -> Result<(usize, usize, usize), ApiError> {
-        let graph_binding = state
-            .canonical_services
-            .ai_catalog
-            .resolve_active_runtime_binding(
-                state,
-                context.library_id,
-                AiBindingPurpose::ExtractGraph,
-            )
-            .await?
+        command: MaterializeRevisionGraphCandidatesCommand,
+    ) -> Result<RevisionGraphCandidateMaterialization, ApiError> {
+        let provider_profile = resolve_effective_provider_profile(state, command.library_id)
+            .await
+            .map_err(|error| {
+                ApiError::BadRequest(format!(
+                    "active extract_graph binding is required for graph extraction: {error:#}"
+                ))
+            })?;
+        let revision = state
+            .arango_document_store
+            .get_revision(command.revision_id)
+            .await
+            .map_err(|_| ApiError::Internal)?
             .ok_or_else(|| {
-                ApiError::BadRequest(
-                    "active extract_graph binding is required for inline graph extraction"
-                        .to_string(),
-                )
+                ApiError::resource_not_found("knowledge_revision", command.revision_id)
+            })?;
+        let document = state
+            .arango_document_store
+            .get_document(revision.document_id)
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .ok_or_else(|| {
+                ApiError::resource_not_found("knowledge_document", revision.document_id)
             })?;
         let chunks = state
             .arango_document_store
-            .list_chunks_by_revision(context.revision_id)
+            .list_chunks_by_revision(command.revision_id)
             .await
             .map_err(|_| ApiError::Internal)?;
-        let mut extracted_entities = 0usize;
-        let mut extracted_relations = 0usize;
+        let chunk_count = chunks.len();
+        let graph_extract_parallelism = state.settings.ingestion_worker_concurrency.clamp(1, 4);
 
-        for chunk in &chunks {
-            let prompt = format!(
-                "Extract graph entities and relations from the text chunk.\n\
-Return STRICT JSON object:\n\
-{{\"entities\":[{{\"label\":\"...\",\"node_type\":\"entity|topic|document\",\"aliases\":[...],\"summary\":\"...\"}}],\"relations\":[{{\"source_label\":\"...\",\"target_label\":\"...\",\"relation_type\":\"...\",\"summary\":\"...\"}}]}}\n\
-No markdown and no prose.\n\
-Chunk:\n{}",
-                chunk.content_text
-            );
-            let response = state
-                .llm_gateway
-                .generate(ChatRequest {
-                    provider_kind: graph_binding.provider_kind.clone(),
-                    model_name: graph_binding.model_name.clone(),
-                    prompt,
-                    api_key_override: Some(graph_binding.api_key.clone()),
-                    base_url_override: graph_binding.provider_base_url.clone(),
-                    system_prompt: graph_binding.system_prompt.clone(),
-                    temperature: None,
-                    top_p: None,
-                    // Provider adapters in `UnifiedGateway` normalize output token controls.
-                    // Some OpenAI-compatible routes reject explicit max_output_tokens.
-                    max_output_tokens_override: None,
-                    extra_parameters_json: graph_binding.extra_parameters_json.clone(),
-                })
+        let per_chunk_totals = stream::iter(chunks.into_iter().map(|chunk| {
+            let state = state.clone();
+            let provider_profile = provider_profile.clone();
+            let document = document.clone();
+            let revision = revision.clone();
+            let command = command.clone();
+
+            async move {
+                let response = extract_chunk_graph_candidates(
+                    &state,
+                    &provider_profile,
+                    &build_canonical_graph_extraction_request(
+                        &document,
+                        &revision,
+                        &chunk,
+                        command.attempt_id,
+                    ),
+                )
                 .await
                 .map_err(|error| {
                     ApiError::BadRequest(format!(
-                        "inline graph provider call failed for chunk {}: {error:#}",
-                        chunk.chunk_id
+                        "graph extraction failed for chunk {}: {}",
+                        chunk.chunk_id, error.message
                     ))
                 })?;
-            let _ = state
-                .canonical_services
-                .billing
-                .capture_ingest_attempt(
-                    state,
-                    CaptureIngestAttemptBillingCommand {
-                        workspace_id: context.workspace_id,
-                        library_id: context.library_id,
-                        attempt_id,
-                        binding_id: Some(graph_binding.binding_id),
-                        provider_kind: response.provider_kind.clone(),
-                        model_name: response.model_name.clone(),
-                        call_kind: "extract_graph".to_string(),
-                        usage_json: response.usage_json.clone(),
-                    },
-                )
-                .await?;
-            let parsed = parse_graph_extraction_output(&response.output_text).map_err(|error| {
-                ApiError::BadRequest(format!(
-                    "inline graph parse failed for chunk {}: {error:#}",
-                    chunk.chunk_id
-                ))
-            })?;
 
-            let node_candidates = parsed
-                .entities
-                .iter()
-                .map(|entity| NewNodeCandidate {
-                    canonical_key: crate::services::graph_merge::canonical_node_key(
-                        entity.node_type.clone(),
-                        &entity.label,
-                    ),
-                    node_kind: inline_runtime_node_type_slug(&entity.node_type).to_string(),
-                    display_label: entity.label.clone(),
-                    summary: entity.summary.clone(),
-                })
-                .collect::<Vec<_>>();
-            let edge_candidates = parsed
-                .relations
-                .iter()
-                .map(|relation| {
-                    let from_key = crate::services::graph_merge::canonical_node_key(
-                        RuntimeNodeType::Entity,
-                        &relation.source_label,
-                    );
-                    let to_key = crate::services::graph_merge::canonical_node_key(
-                        RuntimeNodeType::Entity,
-                        &relation.target_label,
-                    );
-                    NewEdgeCandidate {
-                        canonical_key: crate::services::graph_merge::canonical_edge_key(
-                            &from_key,
-                            &relation.relation_type,
-                            &to_key,
+                let _ = state
+                    .canonical_services
+                    .billing
+                    .capture_ingest_attempt(
+                        &state,
+                        CaptureIngestAttemptBillingCommand {
+                            workspace_id: command.workspace_id,
+                            library_id: command.library_id,
+                            attempt_id: command.attempt_id,
+                            binding_id: None,
+                            provider_kind: response.provider_kind.clone(),
+                            model_name: response.model_name.clone(),
+                            call_kind: "extract_graph".to_string(),
+                            usage_json: response.usage_json.clone(),
+                        },
+                    )
+                    .await?;
+
+                let node_candidates = response
+                    .normalized
+                    .entities
+                    .iter()
+                    .map(|entity| NewNodeCandidate {
+                        canonical_key: crate::services::graph_merge::canonical_node_key(
+                            entity.node_type.clone(),
+                            &entity.label,
                         ),
-                        edge_kind: relation.relation_type.clone(),
-                        from_canonical_key: from_key,
-                        to_canonical_key: to_key,
-                        summary: relation.summary.clone(),
-                    }
-                })
-                .collect::<Vec<_>>();
-            extracted_entities += node_candidates.len();
-            extracted_relations += edge_candidates.len();
+                        node_kind: inline_runtime_node_type_slug(&entity.node_type).to_string(),
+                        display_label: entity.label.clone(),
+                        summary: entity.summary.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let edge_candidates = response
+                    .normalized
+                    .relations
+                    .iter()
+                    .map(|relation| {
+                        let from_key = crate::services::graph_merge::canonical_node_key(
+                            RuntimeNodeType::Entity,
+                            &relation.source_label,
+                        );
+                        let to_key = crate::services::graph_merge::canonical_node_key(
+                            RuntimeNodeType::Entity,
+                            &relation.target_label,
+                        );
+                        NewEdgeCandidate {
+                            canonical_key: crate::services::graph_merge::canonical_edge_key(
+                                &from_key,
+                                &relation.relation_type,
+                                &to_key,
+                            ),
+                            edge_kind: relation.relation_type.clone(),
+                            from_canonical_key: from_key,
+                            to_canonical_key: to_key,
+                            summary: relation.summary.clone(),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let extracted_entities = node_candidates.len();
+                let extracted_relations = edge_candidates.len();
 
-            let _ = state
-                .canonical_services
-                .extract
-                .materialize_chunk_result(
-                    state,
-                    MaterializeChunkResultCommand {
-                        chunk_id: chunk.chunk_id,
-                        attempt_id,
-                        extract_state: "ready".to_string(),
-                        provider_call_id: None,
-                        finished_at: Some(Utc::now()),
-                        failure_code: None,
-                        node_candidates,
-                        edge_candidates,
-                    },
-                )
-                .await?;
-        }
+                let _ = state
+                    .canonical_services
+                    .extract
+                    .materialize_chunk_result(
+                        &state,
+                        MaterializeChunkResultCommand {
+                            chunk_id: chunk.chunk_id,
+                            attempt_id: command.attempt_id,
+                            extract_state: "ready".to_string(),
+                            provider_call_id: None,
+                            finished_at: Some(Utc::now()),
+                            failure_code: None,
+                            node_candidates,
+                            edge_candidates,
+                        },
+                    )
+                    .await?;
 
-        Ok((chunks.len(), extracted_entities, extracted_relations))
+                Ok::<(usize, usize), ApiError>((extracted_entities, extracted_relations))
+            }
+        }))
+        .buffer_unordered(graph_extract_parallelism)
+        .try_collect::<Vec<_>>()
+        .await?;
+
+        let (extracted_entities, extracted_relations) = per_chunk_totals.into_iter().fold(
+            (0usize, 0usize),
+            |(entities_total, relations_total), (entities, relations)| {
+                (entities_total.saturating_add(entities), relations_total.saturating_add(relations))
+            },
+        );
+
+        Ok(RevisionGraphCandidateMaterialization {
+            chunk_count,
+            extracted_entities,
+            extracted_relations,
+        })
     }
 
     async fn lease_inline_attempt(
@@ -2589,12 +2622,7 @@ fn storage_backed_revision_file_name(
         .map(str::trim)
         .filter(|value| !value.is_empty() && *value != "inline")
         .map(ToString::to_string)
-        .or_else(|| {
-            title
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToString::to_string)
-        })
+        .or_else(|| title.map(str::trim).filter(|value| !value.is_empty()).map(ToString::to_string))
 }
 
 fn map_knowledge_document_row(row: KnowledgeDocumentRow) -> ContentDocument {
@@ -2816,6 +2844,52 @@ fn infer_inline_mime_type(
 fn file_extension(file_name: &str) -> Option<String> {
     let (_, extension) = file_name.rsplit_once('.')?;
     Some(extension.trim().to_ascii_lowercase())
+}
+
+fn build_canonical_graph_extraction_request(
+    document: &KnowledgeDocumentRow,
+    revision: &KnowledgeRevisionRow,
+    chunk: &KnowledgeChunkRow,
+    attempt_id: Uuid,
+) -> GraphExtractionRequest {
+    GraphExtractionRequest {
+        project_id: revision.library_id,
+        document: repositories::DocumentRow {
+            id: document.document_id,
+            project_id: document.library_id,
+            source_id: None,
+            external_key: document.external_key.clone(),
+            title: document.title.clone(),
+            mime_type: Some(revision.mime_type.clone()),
+            checksum: Some(revision.checksum.clone()),
+            current_revision_id: Some(revision.revision_id),
+            active_status: document.document_state.clone(),
+            active_mutation_kind: None,
+            active_mutation_status: None,
+            deleted_at: document.deleted_at,
+            created_at: document.created_at,
+            updated_at: document.updated_at,
+        },
+        chunk: repositories::ChunkRow {
+            id: chunk.chunk_id,
+            document_id: chunk.document_id,
+            project_id: chunk.library_id,
+            ordinal: chunk.chunk_index,
+            content: chunk.content_text.clone(),
+            token_count: chunk.token_count,
+            metadata_json: serde_json::json!({
+                "section_path": chunk.section_path,
+                "heading_trail": chunk.heading_trail,
+                "chunk_state": chunk.chunk_state,
+                "text_generation": chunk.text_generation,
+                "vector_generation": chunk.vector_generation,
+            }),
+            created_at: revision.created_at,
+        },
+        revision_id: Some(revision.revision_id),
+        activated_by_attempt_id: Some(attempt_id),
+        resume_hint: None,
+    }
 }
 
 fn inline_runtime_node_type_slug(node_type: &RuntimeNodeType) -> &'static str {

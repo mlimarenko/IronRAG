@@ -28,12 +28,8 @@ impl ContentStorageService {
         checksum: &str,
         file_bytes: &[u8],
     ) -> anyhow::Result<String> {
-        let storage_key = Self::build_revision_storage_key(
-            workspace_id,
-            library_id,
-            file_name,
-            checksum,
-        );
+        let storage_key =
+            Self::build_revision_storage_key(workspace_id, library_id, file_name, checksum);
         let target_path = self.resolve_storage_path(&storage_key)?;
         if let Some(parent) = target_path.parent() {
             fs::create_dir_all(parent).await.with_context(|| {

@@ -1373,37 +1373,46 @@ impl ArangoGraphStore {
                  OPTIONS { bfs: true, uniqueVertices: \"global\" }
                  FILTER HAS(vertex, \"library_id\")
                    AND vertex.library_id == @library_id
-                 LET vertex_kind = COLLECTION_NAME(vertex)
+                 LET vertex_kind = PARSE_IDENTIFIER(vertex._id).collection
+                 FILTER vertex_kind == @entity_collection
+                    OR vertex_kind == @relation_collection
+                    OR vertex_kind == @evidence_collection
+                    OR vertex_kind == @chunk_collection
+                    OR vertex_kind == @revision_collection
+                    OR vertex_kind == @document_collection
                  LET vertex_id = vertex_kind == @entity_collection ? vertex.entity_id :
                      vertex_kind == @relation_collection ? vertex.relation_id :
                      vertex_kind == @evidence_collection ? vertex.evidence_id :
                      vertex_kind == @chunk_collection ? vertex.chunk_id :
                      vertex_kind == @revision_collection ? vertex.revision_id :
-                     vertex.document_id
+                     vertex_kind == @document_collection ? vertex.document_id :
+                     null
+                 FILTER vertex_id != null
                  SORT LENGTH(path.vertices) ASC, vertex_kind ASC, vertex_id ASC
                  LIMIT @limit
                  RETURN {
                     path_length: LENGTH(path.vertices) - 1,
                     vertex_kind,
                     vertex_id,
-                    edge_kind: edge == null ? null : COLLECTION_NAME(edge),
+                    edge_kind: edge == null ? null : PARSE_IDENTIFIER(edge._id).collection,
                     edge_key: edge == null ? null : edge._key,
                     edge_rank: edge == null ? null : edge.rank,
                     edge_score: edge == null ? null : edge.score,
                     edge_inclusion_reason: edge == null ? null : edge.inclusionReason,
                     vertex
-                 }",
+                }",
                 serde_json::json!({
-                    "@graph_name": KNOWLEDGE_GRAPH_NAME,
-                    "@start_vertex": format!("{}/{}", KNOWLEDGE_ENTITY_COLLECTION, entity_id),
-                    "@library_id": library_id,
-                    "@max_depth": max_depth.max(1),
-                    "@limit": limit.max(1),
-                    "@entity_collection": KNOWLEDGE_ENTITY_COLLECTION,
-                    "@relation_collection": KNOWLEDGE_RELATION_COLLECTION,
-                    "@evidence_collection": KNOWLEDGE_EVIDENCE_COLLECTION,
-                    "@chunk_collection": KNOWLEDGE_CHUNK_COLLECTION,
-                    "@revision_collection": KNOWLEDGE_REVISION_COLLECTION,
+                    "graph_name": KNOWLEDGE_GRAPH_NAME,
+                    "start_vertex": format!("{}/{}", KNOWLEDGE_ENTITY_COLLECTION, entity_id),
+                    "library_id": library_id,
+                    "max_depth": max_depth.max(1),
+                    "limit": limit.max(1),
+                    "entity_collection": KNOWLEDGE_ENTITY_COLLECTION,
+                    "relation_collection": KNOWLEDGE_RELATION_COLLECTION,
+                    "evidence_collection": KNOWLEDGE_EVIDENCE_COLLECTION,
+                    "chunk_collection": KNOWLEDGE_CHUNK_COLLECTION,
+                    "revision_collection": KNOWLEDGE_REVISION_COLLECTION,
+                    "document_collection": KNOWLEDGE_DOCUMENT_COLLECTION,
                 }),
             )
             .await
@@ -1425,37 +1434,46 @@ impl ArangoGraphStore {
                  OPTIONS { bfs: true, uniqueVertices: \"global\" }
                  FILTER HAS(vertex, \"library_id\")
                    AND vertex.library_id == @library_id
-                 LET vertex_kind = COLLECTION_NAME(vertex)
+                 LET vertex_kind = PARSE_IDENTIFIER(vertex._id).collection
+                 FILTER vertex_kind == @entity_collection
+                    OR vertex_kind == @relation_collection
+                    OR vertex_kind == @evidence_collection
+                    OR vertex_kind == @chunk_collection
+                    OR vertex_kind == @revision_collection
+                    OR vertex_kind == @document_collection
                  LET vertex_id = vertex_kind == @entity_collection ? vertex.entity_id :
                      vertex_kind == @relation_collection ? vertex.relation_id :
                      vertex_kind == @evidence_collection ? vertex.evidence_id :
                      vertex_kind == @chunk_collection ? vertex.chunk_id :
                      vertex_kind == @revision_collection ? vertex.revision_id :
-                     vertex.document_id
+                     vertex_kind == @document_collection ? vertex.document_id :
+                     null
+                 FILTER vertex_id != null
                  SORT LENGTH(path.vertices) ASC, vertex_kind ASC, vertex_id ASC
                  LIMIT @limit
                  RETURN {
                     path_length: LENGTH(path.vertices) - 1,
                     vertex_kind,
                     vertex_id,
-                    edge_kind: edge == null ? null : COLLECTION_NAME(edge),
+                    edge_kind: edge == null ? null : PARSE_IDENTIFIER(edge._id).collection,
                     edge_key: edge == null ? null : edge._key,
                     edge_rank: edge == null ? null : edge.rank,
                     edge_score: edge == null ? null : edge.score,
                     edge_inclusion_reason: edge == null ? null : edge.inclusionReason,
                     vertex
-                 }",
+                }",
                 serde_json::json!({
-                    "@graph_name": KNOWLEDGE_GRAPH_NAME,
-                    "@start_vertex": format!("{}/{}", KNOWLEDGE_RELATION_COLLECTION, relation_id),
-                    "@library_id": library_id,
-                    "@max_depth": max_depth.max(1),
-                    "@limit": limit.max(1),
-                    "@entity_collection": KNOWLEDGE_ENTITY_COLLECTION,
-                    "@relation_collection": KNOWLEDGE_RELATION_COLLECTION,
-                    "@evidence_collection": KNOWLEDGE_EVIDENCE_COLLECTION,
-                    "@chunk_collection": KNOWLEDGE_CHUNK_COLLECTION,
-                    "@revision_collection": KNOWLEDGE_REVISION_COLLECTION,
+                    "graph_name": KNOWLEDGE_GRAPH_NAME,
+                    "start_vertex": format!("{}/{}", KNOWLEDGE_RELATION_COLLECTION, relation_id),
+                    "library_id": library_id,
+                    "max_depth": max_depth.max(1),
+                    "limit": limit.max(1),
+                    "entity_collection": KNOWLEDGE_ENTITY_COLLECTION,
+                    "relation_collection": KNOWLEDGE_RELATION_COLLECTION,
+                    "evidence_collection": KNOWLEDGE_EVIDENCE_COLLECTION,
+                    "chunk_collection": KNOWLEDGE_CHUNK_COLLECTION,
+                    "revision_collection": KNOWLEDGE_REVISION_COLLECTION,
+                    "document_collection": KNOWLEDGE_DOCUMENT_COLLECTION,
                 }),
             )
             .await
@@ -1475,8 +1493,8 @@ impl ArangoGraphStore {
                 "FOR relation IN @@relation_collection
                  FILTER relation.relation_id == @relation_id
                    AND relation.library_id == @library_id
-                 FOR evidence, edge, path IN 1..1 INBOUND CONCAT(@relation_collection, \"/\", relation.relation_id) GRAPH @graph_name
-                 FILTER COLLECTION_NAME(evidence) == @evidence_collection
+                 FOR evidence, edge, path IN 1..1 INBOUND relation._id GRAPH @graph_name
+                 FILTER PARSE_IDENTIFIER(evidence._id).collection == @evidence_collection
                  SORT edge.rank ASC, edge.created_at ASC, evidence.created_at ASC, evidence.evidence_id ASC
                  LIMIT @limit
                  LET source_document = FIRST(
@@ -1507,11 +1525,11 @@ impl ArangoGraphStore {
                     source_document,
                     source_revision,
                     source_chunk
-                 }",
+                }",
                 serde_json::json!({
-                    "@graph_name": KNOWLEDGE_GRAPH_NAME,
+                    "graph_name": KNOWLEDGE_GRAPH_NAME,
                     "@relation_collection": KNOWLEDGE_RELATION_COLLECTION,
-                    "@evidence_collection": KNOWLEDGE_EVIDENCE_COLLECTION,
+                    "evidence_collection": KNOWLEDGE_EVIDENCE_COLLECTION,
                     "@document_collection": KNOWLEDGE_DOCUMENT_COLLECTION,
                     "@revision_collection": KNOWLEDGE_REVISION_COLLECTION,
                     "@chunk_collection": KNOWLEDGE_CHUNK_COLLECTION,

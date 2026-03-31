@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useDisplayFormatters } from 'src/composables/useDisplayFormatters'
-import type { GraphNodeDetail } from 'src/models/ui/graph'
+import type { GraphEvidence, GraphNodeDetail } from 'src/models/ui/graph'
 
 const props = defineProps<{
   detail: GraphNodeDetail | null
@@ -16,12 +16,14 @@ defineEmits<{
 
 const { t } = useI18n()
 const {
+  formatCompactDateTime,
   graphEvidenceLabel,
   graphNodeKindLabel,
   graphPropertyLabel,
   graphPropertyValue,
   graphWarningLabel,
   humanizeToken,
+  shortIdentifier,
 } = useDisplayFormatters()
 
 const canonicalSummary = computed(() => props.detail?.canonicalSummary ?? null)
@@ -46,31 +48,150 @@ const visibleEvidence = computed(
       .map((item) => ({
         ...item,
         evidenceText: normalizeEvidenceText(item.evidenceText),
+        metaParts: buildEvidenceMetaParts(item),
       })) ?? [],
 )
 
-const visibleRelatedDocuments = computed(() => props.detail?.relatedDocuments.slice(0, 4) ?? [])
+const visibleLinks = computed(() => {
+  const seen = new Set<string>()
+  return (
+    props.detail?.relatedEdges
+      .filter((item) => {
+        const key = `${item.otherNodeId}:${item.relationType}`
+        if (seen.has(key)) {
+          return false
+        }
+        seen.add(key)
+        return true
+      })
+      .slice(0, 5) ?? []
+  )
+})
+
+const linkedNodeIds = computed(() => new Set(visibleLinks.value.map((item) => item.otherNodeId)))
+const visibleEvidenceDocumentIds = computed(
+  () =>
+    new Set(
+      visibleEvidence.value
+        .map((item) => item.documentId)
+        .filter((value): value is string => Boolean(value)),
+    ),
+)
+
+const visibleRelatedDocuments = computed(
+  () =>
+    props.detail?.relatedDocuments
+      .filter(
+        (item) =>
+          !linkedNodeIds.value.has(item.id) && !visibleEvidenceDocumentIds.value.has(item.id),
+      )
+      .slice(0, 4) ?? [],
+)
 
 const visibleConnectedNodes = computed(() => {
   if (!props.detail) {
     return []
   }
 
-  const relatedDocumentIds = new Set(props.detail.relatedDocuments.map((item) => item.id))
-  return props.detail.connectedNodes.filter((item) => !relatedDocumentIds.has(item.id)).slice(0, 4)
+  const excludedIds = new Set<string>([
+    ...props.detail.relatedDocuments.map((item) => item.id),
+    ...linkedNodeIds.value,
+    ...visibleEvidenceDocumentIds.value,
+  ])
+  return props.detail.connectedNodes.filter((item) => !excludedIds.has(item.id)).slice(0, 4)
 })
 
-const visibleLinks = computed(() => props.detail?.relatedEdges.slice(0, 5) ?? [])
 const evidenceCount = computed(() => props.detail?.evidence.length ?? 0)
 const relatedDocumentCount = computed(() => props.detail?.relatedDocuments.length ?? 0)
+const connectedNodeCount = computed(() => props.detail?.connectedNodes.length ?? 0)
+const relatedEdgeCount = computed(() => props.detail?.relatedEdges.length ?? 0)
+const overviewStats = computed(() => {
+  if (!props.detail) {
+    return []
+  }
+
+  const stats: { key: string; label: string; value: string }[] = []
+
+  if (relatedEdgeCount.value > 0) {
+    stats.push({
+      key: 'relations',
+      label: t('graph.relatedEdges'),
+      value: String(relatedEdgeCount.value),
+    })
+  }
+
+  if (evidenceCount.value > 0) {
+    stats.push({
+      key: 'evidence',
+      label: t('graph.evidence'),
+      value: String(evidenceCount.value),
+    })
+  }
+
+  if (relatedDocumentCount.value > 0) {
+    stats.push({
+      key: 'documents',
+      label: t('graph.relatedDocuments'),
+      value: String(relatedDocumentCount.value),
+    })
+  }
+
+  if (connectedNodeCount.value > 0) {
+    stats.push({
+      key: 'nodes',
+      label: t('graph.connectedNodes'),
+      value: String(connectedNodeCount.value),
+    })
+  }
+
+  return stats.slice(0, 4)
+})
 
 function isLowSignalMetadataValue(value: string): boolean {
   const normalized = value.trim().toLowerCase()
-  return !normalized || normalized === '—' || normalized === 'unknown' || normalized === 'none' || normalized === 'n/a'
+  return (
+    !normalized ||
+    normalized === '—' ||
+    normalized === 'unknown' ||
+    normalized === 'none' ||
+    normalized === 'n/a'
+  )
 }
 
 function isUuidLike(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.trim())
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value.trim(),
+  )
+}
+
+function isWideMetadataValue(rawKey: string, value: string): boolean {
+  const normalized = value.trim()
+  if (!normalized) {
+    return false
+  }
+
+  if (/^\d+([.,]\d+)?$/.test(normalized)) {
+    return false
+  }
+
+  if (/\b(alias|synonym|summary|description|details?|notes?)\b/i.test(rawKey)) {
+    return true
+  }
+
+  if (normalized.includes('\n') || normalized.includes(';') || normalized.includes(', ')) {
+    return true
+  }
+
+  if (normalized.length >= 56) {
+    return true
+  }
+
+  const words = normalized.split(/\s+/).filter(Boolean)
+  if (words.length >= 7) {
+    return true
+  }
+
+  return words.some((word) => word.length >= 22)
 }
 
 const visibleProperties = computed(() =>
@@ -84,31 +205,44 @@ const visibleProperties = computed(() =>
 )
 
 const meaningfulProperties = computed(() =>
-  visibleProperties.value.filter(({ rawKey, value }) => {
-    if (rawKey === 'Type') {
-      return false
-    }
-    if (rawKey === 'Assertion' && value.trim() === displayTitle.value.trim()) {
-      return false
-    }
-    if (
-      rawKey === 'State' &&
-      ['active', 'current', 'clean', 'ready'].includes(value.trim().toLowerCase())
-    ) {
-      return false
-    }
-    if (isLowSignalMetadataValue(value)) {
-      return false
-    }
-    if (
-      props.detail?.nodeType === 'document' &&
-      ['External key', 'Active revision', 'Readable revision'].includes(rawKey) &&
-      isUuidLike(value)
-    ) {
-      return false
-    }
-    return true
-  }).slice(0, 6),
+  visibleProperties.value
+    .filter(({ rawKey, value }) => {
+      if (rawKey === 'Type') {
+        return false
+      }
+      if (rawKey === 'Assertion' && value.trim() === displayTitle.value.trim()) {
+        return false
+      }
+      if (
+        rawKey === 'State' &&
+        ['active', 'current', 'clean', 'ready'].includes(value.trim().toLowerCase())
+      ) {
+        return false
+      }
+      if (isLowSignalMetadataValue(value)) {
+        return false
+      }
+      if (
+        props.detail?.nodeType === 'document' &&
+        ['External key', 'Active revision', 'Readable revision'].includes(rawKey) &&
+        isUuidLike(value)
+      ) {
+        return false
+      }
+      return true
+    })
+    .map((property) => ({
+      ...property,
+      isWide: isWideMetadataValue(property.rawKey, property.value),
+    })),
+)
+
+const factProperties = computed(() =>
+  meaningfulProperties.value.filter((property) => !property.isWide),
+)
+
+const longProperties = computed(() =>
+  meaningfulProperties.value.filter((property) => property.isWide),
 )
 
 const primarySummary = computed(() => {
@@ -116,7 +250,8 @@ const primarySummary = computed(() => {
     return ''
   }
 
-  if (props.detail.summary && props.detail.summary.trim() && props.detail.summary !== props.detail.label) {
+  const summary = props.detail.summary.trim()
+  if (summary && summary !== props.detail.label) {
     return props.detail.summary
   }
 
@@ -148,7 +283,8 @@ const heroSummary = computed(() => {
   return t('graph.nodeSummaries.connected', { count: props.detail.relationCount })
 })
 const showHeroSummary = computed(
-  () => heroSummary.value.trim().length > 0 && heroSummary.value.trim() !== displayTitle.value.trim(),
+  () =>
+    heroSummary.value.trim().length > 0 && heroSummary.value.trim() !== displayTitle.value.trim(),
 )
 const compactHero = computed(() => !showHeroSummary.value && !heroWarning.value)
 
@@ -189,13 +325,17 @@ const heroMetaBadges = computed(() => {
     return []
   }
 
-  const badges = [
-    t('graph.summary.confidenceLine', {
-      value: summaryConfidenceLabel(canonicalSummary.value.confidenceStatus),
-    }),
-  ]
+  const badges: string[] = []
 
-  if (canonicalSummary.value.supportCount > 0) {
+  if (canonicalSummary.value.confidenceStatus !== 'strong') {
+    badges.push(
+      t('graph.summary.confidenceLine', {
+        value: summaryConfidenceLabel(canonicalSummary.value.confidenceStatus),
+      }),
+    )
+  }
+
+  if (canonicalSummary.value.supportCount > 1) {
     badges.push(t('graph.summary.supportCount', { count: canonicalSummary.value.supportCount }))
   }
 
@@ -219,7 +359,10 @@ function summaryConfidenceLabel(status: string): string {
 }
 
 function relationLabel(value: string): string {
-  const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, '_')
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_')
   const mapping: Record<string, string> = {
     mentions: t('graph.relationLabels.mentions'),
     uses: t('graph.relationLabels.uses'),
@@ -311,25 +454,25 @@ const stateSummaryLines = computed(() => {
 })
 
 const navigationSections = computed(() => {
-  const sections: Array<
+  const sections: (
     | {
         key: 'documents' | 'nodes'
         kind: 'chips'
         title: string
-        items: Array<{ id: string; label: string }>
+        items: { id: string; label: string }[]
       }
     | {
         key: 'edges'
         kind: 'edges'
         title: string
-        items: Array<{
+        items: {
           id: string
           otherNodeId: string
           otherNodeLabel: string
           relationType: string
-        }>
+        }[]
       }
-  > = []
+  )[] = []
 
   if (visibleRelatedDocuments.value.length) {
     sections.push({
@@ -363,37 +506,94 @@ const navigationSections = computed(() => {
 
 const showNavigation = computed(() => navigationSections.value.length > 0)
 const showNavigationTitles = computed(() => navigationSections.value.length > 1)
-const showStateSectionTitle = computed(
-  () => stateSummaryLines.value.length > 1 || visibleEvidence.value.length > 0 || showNavigation.value || meaningfulProperties.value.length > 0,
+const showNavigationSectionTitle = computed(() => navigationSections.value.length > 1)
+const compactStateSection = computed(
+  () =>
+    stateSummaryLines.value.length === 1 &&
+    !visibleEvidence.value.length &&
+    !showNavigation.value &&
+    overviewStats.value.length === 0,
 )
+const showStateSection = computed(
+  () => stateSummaryLines.value.length > 0 && !compactStateSection.value,
+)
+const headerStateLine = computed(() =>
+  compactStateSection.value ? (stateSummaryLines.value[0] ?? '') : '',
+)
+const showStateSectionTitle = computed(
+  () =>
+    stateSummaryLines.value.length > 1 ||
+    visibleEvidence.value.length > 0 ||
+    showNavigation.value ||
+    meaningfulProperties.value.length > 0,
+)
+const showEvidenceCaption = computed(() => evidenceCount.value > visibleEvidence.value.length)
+const showHeaderCounters = computed(
+  () =>
+    headerCounters.value.length > 0 &&
+    !visibleEvidence.value.length &&
+    !showNavigation.value &&
+    overviewStats.value.length === 0,
+)
+const compactMetadataSection = computed(
+  () =>
+    meaningfulProperties.value.length > 0 &&
+    !showStateSection.value &&
+    !headerCounters.value.length &&
+    !visibleEvidence.value.length &&
+    !showNavigation.value &&
+    overviewStats.value.length === 0,
+)
+const showMetadataTitle = computed(() => !compactMetadataSection.value)
 
 const headerCounters = computed(() => {
   const counters: string[] = []
-  if (relatedDocumentCount.value > 0) {
+  if (relatedDocumentCount.value > 1 && visibleRelatedDocuments.value.length === 0) {
     counters.push(t('graph.relatedDocumentsCount', { count: relatedDocumentCount.value }))
   }
   const summarySupportCount = canonicalSummary.value?.supportCount ?? 0
-  if (evidenceCount.value > 0 && evidenceCount.value !== summarySupportCount) {
+  if (summarySupportCount > 1 && visibleEvidence.value.length === 0) {
+    counters.push(graphEvidenceLabel(summarySupportCount))
+  } else if (
+    evidenceCount.value > 1 &&
+    evidenceCount.value !== summarySupportCount &&
+    visibleEvidence.value.length === 0
+  ) {
     counters.push(graphEvidenceLabel(evidenceCount.value))
   }
   return counters
 })
+
+function buildEvidenceMetaParts(item: GraphEvidence): string[] {
+  const parts: string[] = []
+
+  if (props.detail?.nodeType !== 'document') {
+    parts.push(item.documentLabel ?? t('graph.unknownDocument'))
+  }
+
+  if (item.pageRef) {
+    parts.push(item.pageRef)
+  } else if (item.chunkId) {
+    parts.push(shortIdentifier(item.chunkId, 10))
+  }
+
+  const createdAt = formatCompactDateTime(item.createdAt)
+  if (createdAt !== '—') {
+    parts.push(createdAt)
+  }
+
+  return parts
+}
 </script>
 
 <template>
-  <section class="nc">
-    <div
-      v-if="props.loading"
-      class="nc__loader"
-    >
+  <section class="nc" :class="{ 'is-minimal': compactStateSection || compactMetadataSection }">
+    <div v-if="props.loading" class="nc__loader">
       <div class="nc__loader-spinner" />
       <span>{{ $t('graph.loadingNode') }}</span>
     </div>
 
-    <div
-      v-else-if="props.error && !props.detail"
-      class="nc__error"
-    >
+    <div v-else-if="props.error && !props.detail" class="nc__error">
       <strong>{{ $t('graph.inspectorError') }}</strong>
       <p>{{ props.error }}</p>
     </div>
@@ -404,14 +604,11 @@ const headerCounters = computed(() => {
           <span class="nc__badge nc__badge--type">
             {{ graphNodeKindLabel(props.detail.nodeType) }}
           </span>
-          <span
-            v-if="props.detail.relationCount > 0"
-            class="nc__badge nc__badge--metric"
-          >
+          <span v-if="props.detail.relationCount > 0" class="nc__badge nc__badge--metric">
             {{ $t('graph.relationCount', { count: props.detail.relationCount }) }}
           </span>
           <span
-            v-if="props.detail.convergenceStatus"
+            v-if="props.detail.convergenceStatus && props.detail.convergenceStatus !== 'current'"
             class="nc__badge nc__badge--status"
           >
             {{ $t(`graph.convergence.${props.detail.convergenceStatus}`) }}
@@ -420,191 +617,158 @@ const headerCounters = computed(() => {
 
         <h3 class="nc__title">{{ displayTitle }}</h3>
 
-        <div
-          v-if="showHeroBlock"
-          class="nc__hero"
-          :class="{ 'is-compact': compactHero }"
-        >
+        <div v-if="showHeroBlock" class="nc__hero" :class="{ 'is-compact': compactHero }">
           <p class="nc__eyebrow">{{ $t('graph.inspector.whyItMatters') }}</p>
-          <p
-            v-if="showHeroSummary"
-            class="nc__hero-summary"
-          >
+          <p v-if="showHeroSummary" class="nc__hero-summary">
             {{ heroSummary }}
           </p>
 
-          <div
-            v-if="heroMetaBadges.length"
-            class="nc__hero-meta"
-          >
-            <span
-              v-for="badge in heroMetaBadges"
-              :key="badge"
-              class="nc__badge nc__badge--metric"
-            >
+          <div v-if="heroMetaBadges.length" class="nc__hero-meta">
+            <span v-for="badge in heroMetaBadges" :key="badge" class="nc__badge nc__badge--metric">
               {{ badge }}
             </span>
           </div>
 
-          <p
-            v-if="heroWarning"
-            class="nc__hero-warning"
-          >
+          <p v-if="heroWarning" class="nc__hero-warning">
             {{ heroWarning }}
           </p>
         </div>
 
-        <div
-          v-if="headerCounters.length"
-          class="nc__counters"
-        >
-          <template
-            v-for="(counter, index) in headerCounters"
-            :key="counter"
-          >
+        <div v-if="overviewStats.length" class="nc__overview">
+          <div v-for="item in overviewStats" :key="item.key" class="nc__overview-item">
+            <span>{{ item.label }}</span>
+            <strong>{{ item.value }}</strong>
+          </div>
+        </div>
+
+        <div v-if="showHeaderCounters" class="nc__counters">
+          <template v-for="(counter, index) in headerCounters" :key="counter">
             <span>{{ counter }}</span>
-            <span
-              v-if="index < headerCounters.length - 1"
-              class="nc__dot"
-            />
+            <span v-if="index < headerCounters.length - 1" class="nc__dot" />
           </template>
         </div>
+
+        <p v-if="headerStateLine" class="nc__header-note">
+          {{ headerStateLine }}
+        </p>
       </header>
 
-      <section
-        v-if="stateSummaryLines.length"
-        class="nc__section"
-        :class="{ 'is-compact': !showStateSectionTitle }"
-      >
-        <div class="nc__section-head">
-          <h4
-            v-if="showStateSectionTitle"
-            class="nc__section-title"
-          >
-            {{ $t('graph.inspector.graphState') }}
-          </h4>
-        </div>
-        <div class="nc__state-list">
-          <p
-            v-for="(line, idx) in stateSummaryLines"
-            :key="`state-${idx}`"
-            class="nc__state-line"
-          >
-            {{ line }}
-          </p>
-        </div>
-      </section>
-
-      <section
-        v-if="visibleEvidence.length"
-        class="nc__section"
-      >
-        <div class="nc__section-head">
-          <h4 class="nc__section-title">{{ $t('graph.inspector.evidencePreview') }}</h4>
-          <span class="nc__section-caption">{{ graphEvidenceLabel(evidenceCount) }}</span>
-        </div>
-
-        <ul class="nc__evidence-list">
-          <li
-            v-for="item in visibleEvidence"
-            :key="item.id"
-            class="nc__evidence-item"
-          >
-            <div class="nc__evidence-item-meta">
-              <span v-if="props.detail.nodeType !== 'document'">
-                {{ item.documentLabel ?? $t('graph.unknownDocument') }}
-              </span>
-              <span v-if="item.pageRef">{{ item.pageRef }}</span>
-            </div>
-            <p>{{ item.evidenceText }}</p>
-          </li>
-        </ul>
-      </section>
-
-      <section
-        v-if="showNavigation"
-        class="nc__section"
-      >
-        <div class="nc__section-head">
-          <h4 class="nc__section-title">{{ $t('graph.inspector.jumpTo') }}</h4>
-        </div>
-
-        <div class="nc__nav-groups">
-          <div
-            v-for="section in navigationSections"
-            :key="section.key"
-            class="nc__subsection"
-          >
-            <h5
-              v-if="showNavigationTitles"
-              class="nc__subsection-title"
+      <div class="nc__body">
+        <section
+          v-if="showStateSection"
+          class="nc__section"
+          :class="{ 'is-compact': !showStateSectionTitle }"
+        >
+          <div v-if="showStateSectionTitle" class="nc__section-head">
+            <h4 class="nc__section-title">
+              {{ $t('graph.inspector.graphState') }}
+            </h4>
+          </div>
+          <div class="nc__state-list">
+            <p
+              v-for="(line, idx) in stateSummaryLines"
+              :key="`state-${idx}`"
+              class="nc__state-line"
             >
-              {{ section.title }}
-            </h5>
+              {{ line }}
+            </p>
+          </div>
+        </section>
 
-            <div
-              v-if="section.kind === 'chips'"
-              class="nc__chips"
-            >
-              <button
-                v-for="item in section.items"
-                :key="item.id"
-                type="button"
-                class="nc__chip"
-                @click="$emit('selectNode', item.id)"
-              >
-                {{ item.label }}
-              </button>
-            </div>
+        <section v-if="visibleEvidence.length" class="nc__section">
+          <div class="nc__section-head">
+            <h4 class="nc__section-title">{{ $t('graph.inspector.evidencePreview') }}</h4>
+            <span v-if="showEvidenceCaption" class="nc__section-caption">
+              {{ graphEvidenceLabel(evidenceCount) }}
+            </span>
+          </div>
 
-            <ul
-              v-else
-              class="nc__edges"
-            >
-              <li
-                v-for="edge in section.items"
-                :key="edge.id"
-                class="nc__edge"
-              >
+          <ul class="nc__evidence-list">
+            <li v-for="item in visibleEvidence" :key="item.id" class="nc__evidence-item">
+              <div class="nc__evidence-item-meta">
+                <span v-for="(part, index) in item.metaParts" :key="`${item.id}-${index}`">
+                  {{ part }}
+                </span>
+              </div>
+              <p>{{ item.evidenceText }}</p>
+            </li>
+          </ul>
+        </section>
+
+        <section v-if="showNavigation" class="nc__section">
+          <div class="nc__section-head">
+            <h4 v-if="showNavigationSectionTitle" class="nc__section-title">
+              {{ $t('graph.inspector.jumpTo') }}
+            </h4>
+          </div>
+
+          <div class="nc__nav-groups">
+            <div v-for="section in navigationSections" :key="section.key" class="nc__subsection">
+              <h5 v-if="showNavigationTitles" class="nc__subsection-title">
+                {{ section.title }}
+              </h5>
+
+              <div v-if="section.kind === 'chips'" class="nc__chips">
                 <button
+                  v-for="item in section.items"
+                  :key="item.id"
                   type="button"
-                  class="nc__edge-link"
-                  @click="$emit('selectNode', edge.otherNodeId)"
+                  class="nc__chip"
+                  @click="$emit('selectNode', item.id)"
                 >
-                  {{ edge.otherNodeLabel }}
+                  {{ item.label }}
                 </button>
-                <span class="nc__edge-type">{{ relationLabel(edge.relationType) }}</span>
-              </li>
-            </ul>
-          </div>
-        </div>
-      </section>
+              </div>
 
-      <section
-        v-if="meaningfulProperties.length"
-        class="nc__section"
-      >
-        <div class="nc__section-head">
-          <h4 class="nc__section-title">{{ $t('graph.inspector.metadata') }}</h4>
-        </div>
-
-        <dl class="nc__props">
-          <div
-            v-for="property in meaningfulProperties"
-            :key="property.rawKey"
-            class="nc__prop"
-          >
-            <dt>{{ property.label }}</dt>
-            <dd>{{ property.value }}</dd>
+              <ul v-else class="nc__edges">
+                <li v-for="edge in section.items" :key="edge.id" class="nc__edge">
+                  <button
+                    type="button"
+                    class="nc__edge-link"
+                    @click="$emit('selectNode', edge.otherNodeId)"
+                  >
+                    {{ edge.otherNodeLabel }}
+                  </button>
+                  <span class="nc__edge-type">{{ relationLabel(edge.relationType) }}</span>
+                </li>
+              </ul>
+            </div>
           </div>
-        </dl>
-      </section>
+        </section>
+
+        <section
+          v-if="meaningfulProperties.length"
+          class="nc__section"
+          :class="{ 'is-compact': compactMetadataSection }"
+        >
+          <div v-if="showMetadataTitle" class="nc__section-head">
+            <h4 class="nc__section-title">
+              {{ $t('graph.inspector.metadata') }}
+            </h4>
+          </div>
+
+          <dl v-if="factProperties.length" class="nc__props nc__props--facts">
+            <div v-for="property in factProperties" :key="property.rawKey" class="nc__prop">
+              <dt>{{ property.label }}</dt>
+              <dd>{{ property.value }}</dd>
+            </div>
+          </dl>
+
+          <dl v-if="longProperties.length" class="nc__props nc__props--longform">
+            <div
+              v-for="property in longProperties"
+              :key="property.rawKey"
+              class="nc__prop nc__prop--wide"
+            >
+              <dt>{{ property.label }}</dt>
+              <dd>{{ property.value }}</dd>
+            </div>
+          </dl>
+        </section>
+      </div>
     </template>
 
-    <div
-      v-else
-      class="nc__empty"
-    >
+    <div v-else class="nc__empty">
       {{ $t('graph.selectNodeHint') }}
     </div>
   </section>
@@ -614,19 +778,20 @@ const headerCounters = computed(() => {
 .nc {
   display: flex;
   flex-direction: column;
-  gap: 0;
-  padding: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
+  gap: 12px;
+  padding: 14px;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
   font-size: 13px;
   color: var(--rr-text-primary);
-  scrollbar-width: thin;
 }
 
 .nc__loader,
 .nc__error,
 .nc__empty {
   display: grid;
+  flex: 1;
   gap: 10px;
   padding: 24px 20px;
 }
@@ -669,12 +834,27 @@ const headerCounters = computed(() => {
 
 .nc__header {
   display: grid;
-  gap: 7px;
-  padding: 14px 16px 10px;
-  border-bottom: 1px solid var(--rr-border-soft);
+  gap: 10px;
+  flex: none;
+  padding: 18px 56px 18px 18px;
+  border: 1px solid rgba(176, 190, 214, 0.22);
+  border-radius: 20px;
   background:
-    linear-gradient(180deg, rgba(248, 250, 252, 0.95), rgba(255, 255, 255, 0.98)),
+    linear-gradient(180deg, rgba(248, 250, 252, 0.96), rgba(255, 255, 255, 0.99)),
     rgba(255, 255, 255, 0.98);
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.04);
+}
+
+.nc__body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 2px;
+  scrollbar-width: thin;
 }
 
 .nc__badges,
@@ -726,18 +906,18 @@ const headerCounters = computed(() => {
 
 .nc__hero {
   display: grid;
-  gap: 5px;
-  padding: 9px 11px;
-  border: 1px solid rgba(99, 102, 241, 0.12);
-  border-radius: 14px;
+  gap: 6px;
+  padding: 12px 13px;
+  border: 1px solid rgba(99, 102, 241, 0.14);
+  border-radius: 16px;
   background:
-    linear-gradient(135deg, rgba(99, 102, 241, 0.07), rgba(59, 130, 246, 0.04)),
+    linear-gradient(135deg, rgba(99, 102, 241, 0.08), rgba(59, 130, 246, 0.05)),
     rgba(255, 255, 255, 0.96);
 }
 
 .nc__hero.is-compact {
   gap: 4px;
-  padding: 8px 10px;
+  padding: 10px 11px;
 }
 
 .nc__eyebrow {
@@ -770,6 +950,43 @@ const headerCounters = computed(() => {
   letter-spacing: 0.01em;
 }
 
+.nc__overview {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.nc__overview-item {
+  display: grid;
+  gap: 4px;
+  padding: 10px 11px;
+  border: 1px solid rgba(176, 190, 214, 0.18);
+  border-radius: 14px;
+  background: rgba(248, 250, 252, 0.76);
+}
+
+.nc__overview-item span {
+  color: var(--rr-text-muted);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.nc__overview-item strong {
+  color: var(--rr-text-primary);
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.nc__header-note {
+  margin: 0;
+  color: var(--rr-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .nc__dot {
   width: 3px;
   height: 3px;
@@ -779,13 +996,26 @@ const headerCounters = computed(() => {
 
 .nc__section {
   display: grid;
-  gap: 8px;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--rr-border-soft);
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid rgba(176, 190, 214, 0.18);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.82);
 }
 
 .nc__section.is-compact {
   gap: 6px;
+}
+
+.nc.is-minimal .nc__header {
+  gap: 6px;
+  padding-bottom: 12px;
+}
+
+.nc.is-minimal .nc__section {
+  gap: 6px;
+  padding-top: 10px;
+  padding-bottom: 10px;
 }
 
 .nc__section-title,
@@ -807,15 +1037,15 @@ const headerCounters = computed(() => {
 .nc__state-list,
 .nc__nav-groups {
   display: grid;
-  gap: 7px;
+  gap: 8px;
 }
 
 .nc__state-line {
   margin: 0;
-  padding: 9px 11px;
-  border-radius: 12px;
+  padding: 11px 12px;
+  border-radius: 14px;
   background: rgba(248, 250, 252, 0.96);
-  border: 1px solid rgba(148, 163, 184, 0.14);
+  border: 1px solid rgba(176, 190, 214, 0.18);
   color: var(--rr-text-secondary);
   font-size: 12.5px;
   line-height: 1.5;
@@ -839,17 +1069,19 @@ const headerCounters = computed(() => {
 .nc__chip {
   display: inline-flex;
   align-items: center;
-  min-height: 28px;
+  min-height: 30px;
   max-width: 100%;
-  padding: 0 10px;
-  border: 1px solid rgba(99, 102, 241, 0.15);
-  border-radius: 10px;
-  background: rgba(99, 102, 241, 0.05);
+  padding: 0 12px;
+  border: 1px solid rgba(99, 102, 241, 0.16);
+  border-radius: 12px;
+  background: rgba(99, 102, 241, 0.06);
   color: var(--rr-accent);
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
-  transition: background 120ms, border-color 120ms;
+  transition:
+    background 120ms,
+    border-color 120ms;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -871,10 +1103,12 @@ const headerCounters = computed(() => {
 }
 
 .nc__edge {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 8px;
+  display: grid;
+  gap: 4px;
+  padding: 10px 11px;
+  border: 1px solid rgba(176, 190, 214, 0.18);
+  border-radius: 14px;
+  background: rgba(248, 250, 252, 0.72);
 }
 
 .nc__edge-link {
@@ -896,16 +1130,18 @@ const headerCounters = computed(() => {
 .nc__edge-type {
   color: var(--rr-text-muted);
   font-size: 11.5px;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .nc__evidence-item {
   display: grid;
-  gap: 5px;
-  padding: 8px 10px;
-  border-radius: 12px;
-  background: rgba(248, 250, 252, 0.96);
-  border: 1px solid rgba(148, 163, 184, 0.14);
+  gap: 6px;
+  padding: 11px 12px;
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(248, 250, 252, 0.98), rgba(244, 247, 252, 0.96)),
+    rgba(248, 250, 252, 0.96);
+  border: 1px solid rgba(176, 190, 214, 0.18);
 }
 
 .nc__evidence-item-meta {
@@ -931,18 +1167,37 @@ const headerCounters = computed(() => {
 
 .nc__props {
   display: grid;
-  gap: 7px 10px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 10px;
   margin: 0;
+}
+
+.nc__props--facts {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.nc__props--longform {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .nc__prop {
   display: grid;
-  gap: 4px;
-  padding: 9px 11px;
-  border-radius: 12px;
+  gap: 5px;
+  padding: 10px 11px;
+  border-radius: 14px;
   background: rgba(248, 250, 252, 0.9);
-  border: 1px solid rgba(148, 163, 184, 0.12);
+  border: 1px solid rgba(176, 190, 214, 0.16);
+}
+
+.nc__prop--wide {
+  grid-column: 1 / -1;
+}
+
+.nc.is-minimal .nc__props {
+  gap: 6px 8px;
+}
+
+.nc.is-minimal .nc__prop {
+  padding: 8px 10px;
 }
 
 .nc__prop dt {
@@ -958,24 +1213,52 @@ const headerCounters = computed(() => {
   color: var(--rr-text-primary);
   font-size: 13px;
   font-weight: 500;
-  word-break: break-word;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
 }
 
-@media (min-width: 1280px) {
-  .nc__props {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 640px) {
-  .nc__props {
+@media (max-width: 760px) {
+  .nc__props--facts {
     grid-template-columns: 1fr;
   }
 }
 
-@media (min-width: 1800px) {
-  .nc__props {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+@media (max-width: 1180px) {
+  .nc {
+    height: auto;
+    overflow: visible;
+  }
+
+  .nc__header {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+  }
+
+  .nc__body {
+    flex: none;
+    min-height: auto;
+    overflow: visible;
+    padding-right: 0;
+  }
+}
+
+@media (max-width: 640px) {
+  .nc {
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .nc__header {
+    padding: 16px 52px 16px 16px;
+  }
+
+  .nc__body {
+    gap: 10px;
+  }
+
+  .nc__overview {
+    grid-template-columns: 1fr;
   }
 }
 </style>

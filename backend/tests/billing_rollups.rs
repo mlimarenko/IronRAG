@@ -134,6 +134,7 @@ impl BillingRollupsFixture {
                 title: Some("Billing Rollup Conversation"),
                 conversation_state: "active",
             },
+            5,
         )
         .await
         .context("failed to create query conversation")?;

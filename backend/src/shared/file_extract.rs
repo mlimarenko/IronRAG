@@ -358,8 +358,7 @@ impl UploadAdmissionError {
                 file_size_bytes: None,
                 upload_limit_mb: None,
                 rejection_cause: message,
-                operator_action: "Attach a file field named `file` and retry."
-                    .to_string(),
+                operator_action: "Attach a file field named `file` and retry.".to_string(),
             },
         }
     }
@@ -686,9 +685,10 @@ pub fn validate_upload_file_admission(
             std::str::from_utf8(file_bytes).map_err(|_| FileExtractError::InvalidUtf8)?;
             Ok(file_kind)
         }
-        UploadFileKind::Pdf | UploadFileKind::Image | UploadFileKind::Docx | UploadFileKind::Pptx => {
-            Ok(file_kind)
-        }
+        UploadFileKind::Pdf
+        | UploadFileKind::Image
+        | UploadFileKind::Docx
+        | UploadFileKind::Pptx => Ok(file_kind),
     }
 }
 

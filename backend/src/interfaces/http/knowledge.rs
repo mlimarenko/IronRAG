@@ -41,6 +41,7 @@ use crate::{
         authorization::{POLICY_KNOWLEDGE_READ, load_library_and_authorize},
         router_support::ApiError,
     },
+    shared::text_render::repair_technical_layout_noise,
 };
 
 const DEFAULT_SEARCH_LIMIT: usize = 10;
@@ -216,6 +217,13 @@ struct KnowledgeHybridSearchContext {
     model_catalog_id: Uuid,
     freshness_generation: i64,
     query_vector: Vec<f32>,
+}
+
+fn sanitize_chunk_search_hit(hit: &KnowledgeChunkSearchRow) -> KnowledgeChunkSearchRow {
+    let mut sanitized = hit.clone();
+    sanitized.content_text = repair_technical_layout_noise(&sanitized.content_text);
+    sanitized.normalized_text = repair_technical_layout_noise(&sanitized.normalized_text);
+    sanitized
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -604,7 +612,7 @@ async fn search_documents_impl(
             Some(accumulator.lexical_rank.map_or(rank + 1, |current| current.min(rank + 1)));
         accumulator.lexical_score =
             Some(accumulator.lexical_score.map_or(hit.score, |current| current.max(hit.score)));
-        accumulator.chunk_hits.push(hit.clone());
+        accumulator.chunk_hits.push(sanitize_chunk_search_hit(hit));
     }
 
     for (rank, hit) in vector_chunk_hits.iter().enumerate() {
@@ -964,9 +972,8 @@ async fn get_relation(
             })?;
     let supporting_evidence_ids: Vec<Uuid> =
         supporting_evidence_edges.iter().map(|edge| edge.evidence_id).collect();
-    let supporting_evidence = load_evidence_by_ids(&state, &supporting_evidence_ids)
-        .await
-        .map_err(|error| {
+    let supporting_evidence =
+        load_evidence_by_ids(&state, &supporting_evidence_ids).await.map_err(|error| {
             tracing::error!(
                 %library_id,
                 %relation_id,

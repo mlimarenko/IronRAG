@@ -12,6 +12,14 @@ pub enum RuntimeQueryMode {
     Mix,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryTurnStreamStage {
+    Retrieving,
+    Grounding,
+    Answering,
+}
+
 impl RuntimeQueryMode {
     #[must_use]
     pub const fn as_str(self) -> &'static str {

@@ -20,16 +20,13 @@ const route = useRoute()
 const router = useRouter()
 
 queryStore.setGraphSurfacePriority('secondary')
-const {
-  convergenceStatus,
-  filteredArtifactCount,
-  refreshIntervalMs,
-  surface,
-  routeWarning,
-} = storeToRefs(graphStore)
+const { convergenceStatus, filteredArtifactCount, refreshIntervalMs, surface, routeWarning } =
+  storeToRefs(graphStore)
 
 let refreshTimer: number | null = null
-const isPageVisible = ref(typeof document === 'undefined' ? true : document.visibilityState === 'visible')
+const isPageVisible = ref(
+  typeof document === 'undefined' ? true : document.visibilityState === 'visible',
+)
 const canvasRendererAvailable = ref(true)
 
 function stopPolling() {
@@ -58,11 +55,30 @@ const inspector = computed(() => surface.value?.inspector ?? null)
 const defaultLayoutMode = computed(() =>
   resolveDefaultGraphLayoutMode(surface.value?.nodeCount ?? 0, surface.value?.edgeCount ?? 0),
 )
+const documentCounters = computed(() => surface.value?.documentCounters ?? {
+  queued: 0,
+  processing: 0,
+  ready: 0,
+  readyNoGraph: 0,
+  failed: 0,
+})
+const activeBacklogCount = computed(
+  () => documentCounters.value.queued + documentCounters.value.processing,
+)
+const trackedDocumentCount = computed(
+  () =>
+    documentCounters.value.queued +
+    documentCounters.value.processing +
+    documentCounters.value.ready +
+    documentCounters.value.readyNoGraph +
+    documentCounters.value.failed,
+)
 const focusedNodeId = computed(() => inspector.value?.focusedNodeId ?? null)
 const focusedNodeDetail = computed(() => inspector.value?.detail ?? null)
 const focusedNodeDetailLoading = computed(() => inspector.value?.loading ?? false)
 const showGraphCanvas = computed(
-  () => Boolean(surface.value) && (surface.value?.nodeCount ?? 0) > 0 && canvasMode.value === 'ready',
+  () =>
+    Boolean(surface.value) && (surface.value?.nodeCount ?? 0) > 0 && canvasMode.value === 'ready',
 )
 
 const showControlDock = computed(() => {
@@ -79,7 +95,9 @@ const showNodeInspector = computed(
     canvasRendererAvailable.value &&
     Boolean(surface.value) &&
     Boolean(focusedNodeId.value) &&
-    (focusedNodeDetailLoading.value || Boolean(focusedNodeDetail.value) || Boolean(inspectorError.value)),
+    (focusedNodeDetailLoading.value ||
+      Boolean(focusedNodeDetail.value) ||
+      Boolean(inspectorError.value)),
 )
 
 const overlayState = computed(() => {
@@ -103,26 +121,40 @@ const overlayState = computed(() => {
     return {
       title: t('graph.failedTitle'),
       description:
-        surface.value?.error ??
+        surface.value.error ??
         routeWarning.value ??
-        surface.value?.warning ??
+        surface.value.warning ??
         t('graph.failedDescription'),
       tone: 'failed',
     }
   }
 
   if (canvasMode.value === 'empty') {
+    const description =
+      activeBacklogCount.value > 0
+        ? t('graph.emptyBuildingDescription')
+        : documentCounters.value.readyNoGraph > 0
+          ? t('graph.emptyCatchUpDescription')
+          : t('graph.emptyDescription')
+
     return {
       title: t('graph.emptyTitle'),
-      description: t('graph.emptyDescription'),
+      description,
       tone: 'empty',
     }
   }
 
   if (canvasMode.value === 'sparse') {
+    const description =
+      documentCounters.value.readyNoGraph > 0
+        ? t('graph.sparseCatchUpDescription')
+        : activeBacklogCount.value > 0
+          ? t('graph.sparseBuildingDescription')
+          : t('graph.sparseSettledDescription')
+
     return {
       title: t('graph.sparseTitle'),
-      description: t('graph.sparseDescription'),
+      description,
       tone: 'sparse',
     }
   }
@@ -164,12 +196,64 @@ const overlayDetails = computed(() => {
     return []
   }
 
+  if (overlayState.value.tone === 'empty') {
+    const details = []
+
+    if (trackedDocumentCount.value > 0) {
+      details.push(
+        t('graph.emptyTrackedDocumentsDetail', {
+          count: trackedDocumentCount.value,
+        }),
+      )
+    }
+
+    if (activeBacklogCount.value > 0) {
+      details.push(
+        t('graph.sparseQueueDetail', {
+          queued: documentCounters.value.queued,
+          processing: documentCounters.value.processing,
+        }),
+      )
+    }
+
+    if (documentCounters.value.readyNoGraph > 0) {
+      details.push(
+        t('graph.sparseCatchUpDetail', {
+          count: documentCounters.value.readyNoGraph,
+        }),
+      )
+    }
+
+    return details
+  }
+
   if (overlayState.value.tone === 'sparse') {
-    const details = [
-      t('graph.sparseDocumentsDetail', {
-        count: surface.value.nodeCount,
-      }),
-    ]
+    const details = []
+
+    if (surface.value.nodeCount > 0) {
+      details.push(
+        t('graph.sparseDocumentsDetail', {
+          count: surface.value.nodeCount,
+        }),
+      )
+    }
+
+    if (activeBacklogCount.value > 0) {
+      details.push(
+        t('graph.sparseQueueDetail', {
+          queued: documentCounters.value.queued,
+          processing: documentCounters.value.processing,
+        }),
+      )
+    }
+
+    if (documentCounters.value.readyNoGraph > 0) {
+      details.push(
+        t('graph.sparseCatchUpDetail', {
+          count: documentCounters.value.readyNoGraph,
+        }),
+      )
+    }
 
     if (surface.value.graphGenerationState && surface.value.graphGenerationState !== 'current') {
       details.push(
@@ -228,6 +312,7 @@ watch(
     }
     if (typeof nodeId !== 'string' || !nodeId.trim()) {
       graphStore.clearFocus()
+      graphStore.fitViewport()
       return
     }
 
@@ -291,102 +376,92 @@ async function reloadSurface() {
   <div class="rr-graph-page rr-graph-page--immersive rr-graph-page--reset">
     <h1 class="rr-screen-reader-only">{{ $t('shell.graph') }}</h1>
     <section class="rr-graph-workbench rr-graph-workbench--immersive">
-        <template v-if="showGraphCanvas">
-          <GraphCanvas
-            :nodes="surface.nodes"
-            :edges="surface.edges"
-            :filter="overlay?.nodeTypeFilter ?? ''"
-            :focused-node-id="focusedNodeId"
-            :layout-mode="overlay?.activeLayout ?? defaultLayoutMode"
-            :show-filtered-artifacts="overlay?.showFilteredArtifacts ?? false"
-            :surface-version="surface.graphGeneration"
-            @select-node="focusNode"
-            @clear-focus="clearFocus"
-            @ready="graphStore.registerCanvasControls"
-            @renderer-state="canvasRendererAvailable = $event"
-          />
-        </template>
-
-        <div
-          v-else
-          class="rr-graph-workbench__canvas-fallback"
-        />
-
-        <GraphControls
-          v-if="showControlDock"
-          class="rr-graph-workbench__controls"
-          :query="overlay?.searchQuery ?? ''"
+      <template v-if="showGraphCanvas">
+        <GraphCanvas
+          :nodes="surface?.nodes ?? []"
+          :edges="surface?.edges ?? []"
           :filter="overlay?.nodeTypeFilter ?? ''"
-          :hits="overlay?.searchHits ?? []"
+          :focused-node-id="focusedNodeId"
           :layout-mode="overlay?.activeLayout ?? defaultLayoutMode"
-          :compact="showNodeInspector"
-          :can-clear-focus="Boolean(focusedNodeId)"
-          :graph-status="overlayState ? null : (surface?.graphStatus ?? null)"
-          :convergence-status="overlayState ? null : convergenceStatus"
-          :filtered-artifact-count="filteredArtifactCount"
           :show-filtered-artifacts="overlay?.showFilteredArtifacts ?? false"
-          :node-count="surface?.nodeCount ?? 0"
-          :edge-count="surface?.edgeCount ?? 0"
-          :hidden-node-count="surface?.hiddenNodeCount ?? 0"
-          @zoom-in="graphStore.zoomIn"
-          @zoom-out="graphStore.zoomOut"
-          @fit="graphStore.fitViewport"
-          @set-layout="graphStore.setLayoutMode"
+          :surface-version="surface?.graphGeneration ?? 0"
+          @select-node="focusNode"
           @clear-focus="clearFocus"
-          @toggle-filtered-artifacts="
-            graphStore.setShowFilteredArtifacts(!(overlay?.showFilteredArtifacts ?? false))
-          "
-          @update-query="graphStore.searchNodes"
-          @update-filter="graphStore.setNodeTypeFilter"
-          @select-hit="selectHit"
+          @ready="graphStore.registerCanvasControls"
+          @renderer-state="canvasRendererAvailable = $event"
         />
+      </template>
 
-        <aside
-          v-if="showNodeInspector"
-          class="rr-graph-workbench__inspector"
+      <div v-else class="rr-graph-workbench__canvas-fallback" />
+
+      <GraphControls
+        v-if="showControlDock"
+        class="rr-graph-workbench__controls"
+        :query="overlay?.searchQuery ?? ''"
+        :filter="overlay?.nodeTypeFilter ?? ''"
+        :hits="overlay?.searchHits ?? []"
+        :layout-mode="overlay?.activeLayout ?? defaultLayoutMode"
+        :compact="showNodeInspector"
+        :can-clear-focus="Boolean(focusedNodeId)"
+        :graph-status="overlayState ? null : (surface?.graphStatus ?? null)"
+        :convergence-status="overlayState ? null : convergenceStatus"
+        :filtered-artifact-count="filteredArtifactCount"
+        :show-filtered-artifacts="overlay?.showFilteredArtifacts ?? false"
+        :node-count="surface?.nodeCount ?? 0"
+        :edge-count="surface?.edgeCount ?? 0"
+        :hidden-node-count="surface?.hiddenNodeCount ?? 0"
+        @zoom-in="graphStore.zoomIn"
+        @zoom-out="graphStore.zoomOut"
+        @fit="graphStore.fitViewport"
+        @set-layout="graphStore.setLayoutMode"
+        @clear-focus="clearFocus"
+        @toggle-filtered-artifacts="
+          graphStore.setShowFilteredArtifacts(!(overlay?.showFilteredArtifacts ?? false))
+        "
+        @update-query="graphStore.searchNodes"
+        @update-filter="graphStore.setNodeTypeFilter"
+        @select-hit="selectHit"
+      />
+
+      <aside v-if="showNodeInspector" class="rr-graph-workbench__inspector">
+        <button
+          class="rr-graph-workbench__inspector-close"
+          type="button"
+          :aria-label="$t('graph.closeInspector')"
+          :title="$t('graph.closeInspector')"
+          @click="clearFocus"
         >
-          <button
-            class="rr-graph-workbench__inspector-close"
-            type="button"
-            :aria-label="$t('graph.closeInspector')"
-            :title="$t('graph.closeInspector')"
-            @click="clearFocus"
-          >
-            <svg
-              viewBox="0 0 20 20"
-              fill="none"
-            >
-              <path
-                d="M6 6l8 8M14 6l-8 8"
-                stroke="currentColor"
-                stroke-linecap="round"
-                stroke-width="1.8"
-              />
-            </svg>
-          </button>
-          <GraphNodeDetailsCard
-            :detail="focusedNodeDetail"
-            :loading="focusedNodeDetailLoading"
-            :error="inspectorError"
-            @select-node="focusNode"
-          />
-        </aside>
+          <svg viewBox="0 0 20 20" fill="none">
+            <path
+              d="M6 6l8 8M14 6l-8 8"
+              stroke="currentColor"
+              stroke-linecap="round"
+              stroke-width="1.8"
+            />
+          </svg>
+        </button>
+        <GraphNodeDetailsCard
+          :detail="focusedNodeDetail"
+          :loading="focusedNodeDetailLoading"
+          :error="inspectorError"
+          @select-node="focusNode"
+        />
+      </aside>
 
-        <div
-          v-if="overlayState"
-          class="rr-graph-workbench__state"
-          :class="`is-${overlayState.tone}`"
-        >
-          <FeedbackState
-            :title="overlayState.title"
-            :message="overlayState.description ?? ''"
-            :details="overlayDetails"
-            :kind="overlayState.tone === 'failed' ? 'error' : (overlayState.tone as 'loading' | 'empty' | 'sparse')"
-            :action-label="overlayPrimaryAction?.label"
-            @action="overlayPrimaryAction?.action()"
-          />
-        </div>
-
-      </section>
+      <div v-if="overlayState" class="rr-graph-workbench__state" :class="`is-${overlayState.tone}`">
+        <FeedbackState
+          :title="overlayState.title"
+          :message="overlayState.description ?? ''"
+          :details="overlayDetails"
+          :kind="
+            overlayState.tone === 'failed'
+              ? 'error'
+              : (overlayState.tone as 'loading' | 'empty' | 'sparse')
+          "
+          :action-label="overlayPrimaryAction?.label"
+          @action="overlayPrimaryAction?.action()"
+        />
+      </div>
+    </section>
   </div>
 </template>

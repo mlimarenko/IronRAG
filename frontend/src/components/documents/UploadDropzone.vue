@@ -92,6 +92,7 @@ defineExpose({
     <button
       type="button"
       class="rr-button rr-button--primary rr-button--compact rr-upload-dropzone__button"
+      :title="props.hasDocuments ? metaLabel : undefined"
       @click="openPicker"
     >
       {{ props.hasDocuments ? t('documents.uploadCta') : t('documents.uploadOnboardingCta') }}
@@ -191,16 +192,16 @@ defineExpose({
 
 .rr-upload-dropzone.is-compact {
   min-width: min(100%, 11rem);
-  gap: 0.28rem;
-  padding: 0.28rem 0.34rem;
+  gap: 0;
+  padding: 0.24rem 0.3rem;
   background: rgba(248, 250, 252, 0.92);
 }
 
-.rr-upload-dropzone.is-compact .rr-upload-dropzone__copy {
-  gap: 0.08rem;
+.rr-upload-dropzone.is-compact .rr-upload-dropzone__title {
+  display: none;
 }
 
-.rr-upload-dropzone.is-compact .rr-upload-dropzone__title {
+.rr-upload-dropzone.is-compact .rr-upload-dropzone__copy {
   display: none;
 }
 
@@ -216,19 +217,10 @@ defineExpose({
 @media (max-width: 920px) {
   .rr-upload-dropzone.is-compact {
     min-width: min(100%, 10.8rem);
-    gap: 0.28rem;
-    padding: 0.28rem 0.34rem;
+    gap: 0;
+    padding: 0.24rem 0.3rem;
     border-radius: 14px;
   }
-
-  .rr-upload-dropzone.is-compact .rr-upload-dropzone__copy {
-    gap: 0.08rem;
-  }
-
-  .rr-upload-dropzone.is-compact .rr-upload-dropzone__meta {
-    font-size: 0.54rem;
-  }
-
 }
 
 @media (min-width: 1800px) {

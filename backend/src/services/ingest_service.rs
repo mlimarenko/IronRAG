@@ -551,6 +551,14 @@ impl IngestService {
         state: &AppState,
         command: RecordStageEventCommand,
     ) -> Result<IngestStageEvent, ApiError> {
+        let stage_name = command.stage_name.clone();
+        let attempt = ingest_repository::get_ingest_attempt_by_id(
+            &state.persistence.postgres,
+            command.attempt_id,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .ok_or_else(|| ApiError::resource_not_found("ingest_attempt", command.attempt_id))?;
         let existing_events = ingest_repository::list_ingest_stage_events_by_attempt(
             &state.persistence.postgres,
             command.attempt_id,
@@ -561,12 +569,30 @@ impl IngestService {
             &state.persistence.postgres,
             &NewIngestStageEvent {
                 attempt_id: command.attempt_id,
-                stage_name: command.stage_name,
+                stage_name,
                 stage_state: command.stage_state,
                 ordinal: i32::try_from(existing_events.len()).unwrap_or(i32::MAX) + 1,
                 message: command.message,
                 details_json: command.details_json,
                 recorded_at: None,
+            },
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?;
+        let _ = ingest_repository::update_ingest_attempt(
+            &state.persistence.postgres,
+            command.attempt_id,
+            &UpdateIngestAttempt {
+                worker_principal_id: attempt.worker_principal_id,
+                lease_token: attempt.lease_token,
+                knowledge_generation_id: attempt.knowledge_generation_id,
+                attempt_state: attempt.attempt_state,
+                current_stage: Some(command.stage_name),
+                heartbeat_at: Some(Utc::now()),
+                finished_at: attempt.finished_at,
+                failure_class: attempt.failure_class,
+                failure_code: attempt.failure_code,
+                retryable: attempt.retryable,
             },
         )
         .await

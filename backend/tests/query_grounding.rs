@@ -24,6 +24,7 @@ use rustrag_backend::{
         document_store::{
             ArangoDocumentStore, KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeRevisionRow,
         },
+        graph_store::{ArangoGraphStore, NewKnowledgeEntity},
     },
     services::query_service::QueryService,
 };
@@ -91,6 +92,7 @@ struct QueryGroundingFixture {
     temp_database: TempArangoDatabase,
     document_store: ArangoDocumentStore,
     context_store: ArangoContextStore,
+    graph_store: ArangoGraphStore,
 }
 
 impl QueryGroundingFixture {
@@ -123,7 +125,8 @@ impl QueryGroundingFixture {
         Ok(Self {
             temp_database,
             document_store: ArangoDocumentStore::new(Arc::clone(&client)),
-            context_store: ArangoContextStore::new(client),
+            context_store: ArangoContextStore::new(Arc::clone(&client)),
+            graph_store: ArangoGraphStore::new(Arc::clone(&client)),
         })
     }
 
@@ -151,6 +154,7 @@ impl QueryGroundingFixture {
                 workspace_id,
                 library_id,
                 external_key: format!("grounding-{document_id}"),
+                title: Some("Grounding Document".to_string()),
                 document_state: "active".to_string(),
                 active_revision_id: Some(revision_id),
                 readable_revision_id: Some(revision_id),
@@ -955,6 +959,76 @@ async fn context_bundle_roundtrip_by_query_execution_persists_trace_and_chunk_re
         assert_eq!(traces[0].dropped_reasons[0]["kind"], json!("debug_scaffold"));
         assert_eq!(traces[0].timing_breakdown["bundle_ms"], json!(1));
         assert_eq!(traces[0].diagnostics_json["grounding_kind"], json!("hybrid"));
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local ArangoDB service with database create/drop access"]
+async fn entity_neighborhood_filters_out_context_bundle_vertices() -> Result<()> {
+    let fixture = QueryGroundingFixture::create().await?;
+    let result = async {
+        let workspace_id = Uuid::now_v7();
+        let library_id = Uuid::now_v7();
+        let execution_id = Uuid::now_v7();
+        let entity_id = Uuid::now_v7();
+        let execution = sample_query_execution(
+            workspace_id,
+            library_id,
+            execution_id,
+            "Which neighbors should stay inside the domain graph?",
+        );
+        let bundle = sample_context_bundle(workspace_id, library_id, &execution);
+
+        fixture
+            .graph_store
+            .upsert_entity(&NewKnowledgeEntity {
+                entity_id,
+                workspace_id,
+                library_id,
+                canonical_label: "Paging Parameter".to_string(),
+                aliases: vec!["pageSize".to_string()],
+                entity_type: "parameter".to_string(),
+                summary: Some("Pagination parameter surfaced for regression coverage.".to_string()),
+                confidence: Some(0.99),
+                support_count: 1,
+                freshness_generation: 1,
+                entity_state: "active".to_string(),
+                created_at: Some(Utc::now()),
+                updated_at: Some(Utc::now()),
+            })
+            .await
+            .context("failed to seed entity for traversal regression")?;
+
+        fixture
+            .context_store
+            .upsert_bundle(&bundle)
+            .await
+            .context("failed to persist traversal regression bundle")?;
+        fixture
+            .context_store
+            .replace_bundle_entity_edges(
+                bundle.bundle_id,
+                &[sample_entity_edge(bundle.bundle_id, entity_id)],
+            )
+            .await
+            .context("failed to persist traversal regression bundle edge")?;
+
+        let rows = fixture
+            .graph_store
+            .list_entity_neighborhood(entity_id, library_id, 2, 16)
+            .await
+            .context("failed to list entity neighborhood after bundle edge insert")?;
+
+        assert_eq!(rows.len(), 1, "service should keep only domain vertices in traversal rows");
+        assert_eq!(rows[0].vertex_kind, "knowledge_entity");
+        assert_eq!(rows[0].vertex_id, entity_id);
+        assert_eq!(rows[0].path_length, 0);
 
         Ok(())
     }

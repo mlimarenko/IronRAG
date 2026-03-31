@@ -47,15 +47,20 @@ function buildPrimaryActions(): DashboardPrimaryAction[] {
 function buildStatusChartSummary(
   counters: DocumentsSurfaceResponse['counters'],
 ): DashboardChartSummary {
-  const ready = counters.ready + counters.readyNoGraph
   return {
     label: i18n.global.t('dashboard.chart.title'),
     segments: [
       {
-        key: 'ready',
-        label: i18n.global.t('dashboard.chart.ready'),
-        value: ready,
+        key: 'graphReady',
+        label: i18n.global.t('dashboard.chart.graphReady'),
+        value: counters.ready,
         color: 'var(--rr-success-text)',
+      },
+      {
+        key: 'graphCatchUp',
+        label: i18n.global.t('dashboard.chart.graphCatchUp'),
+        value: counters.readyNoGraph,
+        color: '#0891b2',
       },
       {
         key: 'processing',
@@ -81,12 +86,18 @@ function buildOverviewSurface(
   const totalDocuments = documentsSurface.rows.length
   const inFlightCount = documentsSurface.counters.processing + documentsSurface.counters.queued
   const failedCount = documentsSurface.counters.failed
-  const readyCount = documentsSurface.counters.ready + documentsSurface.counters.readyNoGraph
+  const graphReadyCount = documentsSurface.counters.ready
+  const graphCatchUpCount = documentsSurface.counters.readyNoGraph
+  const searchReadyCount = graphReadyCount + graphCatchUpCount
   const degradedWarnings = (documentsSurface.diagnostics.warnings ?? []).filter(
     (warning) => warning.isDegraded,
   )
   const graphSummary = mapGraphDiagnosticsForDashboard(graphDiagnostics)
-  const attentionCount = failedCount + degradedWarnings.length + (graphSummary.attentionItem ? 1 : 0)
+  const attentionCount =
+    failedCount +
+    degradedWarnings.length +
+    Number(graphCatchUpCount > 0) +
+    Number(Boolean(graphSummary.attentionItem))
 
   const metrics: DashboardMetric[] = [
     {
@@ -107,14 +118,14 @@ function buildOverviewSurface(
           : t('dashboard.metricsHints.inFlightIdle'),
     },
     {
-      key: 'ready',
-      label: t('dashboard.metrics.ready'),
-      value: readyCount,
+      key: 'graphReady',
+      label: t('dashboard.metrics.graphReady'),
+      value: graphReadyCount,
       trend: null,
       supportingText:
-        readyCount > 0
-          ? t('dashboard.metricsHints.readyActive', { count: readyCount })
-          : t('dashboard.metricsHints.readyIdle'),
+        graphReadyCount > 0
+          ? t('dashboard.metricsHints.graphReadyActive', { count: graphReadyCount })
+          : t('dashboard.metricsHints.graphReadyIdle'),
     },
     {
       key: 'attention',
@@ -133,18 +144,23 @@ function buildOverviewSurface(
     summaryNarrative = t('dashboard.narrative.attention', {
       failed: failedCount,
       inFlight: inFlightCount,
+      graphReady: graphReadyCount,
+      graphCatchUp: graphCatchUpCount,
       graph: graphSummary.statusLabel,
     })
   } else if (totalDocuments > 0 && inFlightCount > 0) {
     summaryNarrative = t('dashboard.narrative.active', {
       total: totalDocuments,
       inFlight: inFlightCount,
+      graphReady: graphReadyCount,
+      graphCatchUp: graphCatchUpCount,
       graph: graphSummary.statusLabel,
     })
   } else if (totalDocuments > 0) {
     summaryNarrative = t('dashboard.narrative.settled', {
       total: totalDocuments,
-      ready: readyCount,
+      graphReady: graphReadyCount,
+      searchReady: searchReadyCount,
       graph: graphSummary.statusLabel,
     })
   }
@@ -170,12 +186,32 @@ function buildOverviewSurface(
       actionLabel: t('dashboard.attentionItems.warningsAction'),
     })
   }
+  if (graphCatchUpCount > 0) {
+    attentionItems.push({
+      id: 'graph-catchup',
+      severity: inFlightCount > 0 ? 'info' : 'warning',
+      title: t('dashboard.attentionItems.graphCatchUpTitle'),
+      message: t('dashboard.attentionItems.graphCatchUpMessage', {
+        count: graphCatchUpCount,
+      }),
+      targetRoute: '/documents',
+      actionLabel: t('dashboard.attentionItems.graphCatchUpAction'),
+    })
+  }
   if (graphSummary.attentionItem) {
     attentionItems.push(graphSummary.attentionItem)
   }
 
   return {
     summaryNarrative,
+    documentCounts: {
+      totalDocuments,
+      inFlightDocuments: inFlightCount,
+      failedDocuments: failedCount,
+      searchReadyDocuments: searchReadyCount,
+      graphReadyDocuments: graphReadyCount,
+      graphCatchUpDocuments: graphCatchUpCount,
+    },
     metrics,
     attentionItems,
     recentDocuments: mapDashboardRecentDocuments(documentsSurface.rows),
