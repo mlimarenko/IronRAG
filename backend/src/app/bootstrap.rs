@@ -54,10 +54,15 @@ async fn ensure_default_workspace_and_library(
     Ok((workspace, project))
 }
 
+pub(crate) struct DefaultCatalogBootstrapOutcome {
+    pub workspace_id: Uuid,
+    pub library_id: Uuid,
+}
+
 pub(crate) async fn ensure_default_catalog_workspace_and_library(
     state: &AppState,
     principal_id: Uuid,
-) -> Result<(), ApiError> {
+) -> Result<DefaultCatalogBootstrapOutcome, ApiError> {
     let workspace = if let Some(existing) =
         catalog_repository::get_workspace_by_slug(&state.persistence.postgres, "default")
             .await
@@ -69,29 +74,32 @@ pub(crate) async fn ensure_default_catalog_workspace_and_library(
             &state.persistence.postgres,
             "default",
             "Default workspace",
-            Some(principal_id),
+            None,
         )
         .await
         .map_err(|_| ApiError::Internal)?
     };
 
-    let has_library =
-        !catalog_repository::list_libraries(&state.persistence.postgres, Some(workspace.id))
+    let library = if let Some(existing) =
+        catalog_repository::list_libraries(&state.persistence.postgres, Some(workspace.id))
             .await
             .map_err(|_| ApiError::Internal)?
-            .is_empty();
-    if !has_library {
+            .into_iter()
+            .find(|entry| entry.slug == "default-library")
+    {
+        existing
+    } else {
         catalog_repository::create_library(
             &state.persistence.postgres,
             workspace.id,
             "default-library",
             "Default library",
             Some("Backstage default library for the primary documents and ask flow"),
-            Some(principal_id),
+            None,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
-    }
+        .map_err(|_| ApiError::Internal)?
+    };
 
     iam_repository::upsert_workspace_membership(
         &state.persistence.postgres,
@@ -102,13 +110,18 @@ pub(crate) async fn ensure_default_catalog_workspace_and_library(
     .await
     .map_err(|_| ApiError::Internal)?;
 
+    Ok(DefaultCatalogBootstrapOutcome { workspace_id: workspace.id, library_id: library.id })
+}
+
+pub(crate) async fn apply_configured_default_catalog_ai_setup(
+    state: &AppState,
+    catalog: &DefaultCatalogBootstrapOutcome,
+) -> Result<bool, ApiError> {
     state
         .canonical_services
         .ai_catalog
-        .ensure_workspace_runtime_profiles(state, workspace.id, Some(principal_id))
-        .await?;
-
-    Ok(())
+        .apply_configured_bootstrap_ai_setup(state, catalog.workspace_id, catalog.library_id, None)
+        .await
 }
 
 async fn ensure_bootstrap_api_token(
@@ -254,7 +267,8 @@ pub async fn ensure_canonical_bootstrap_admin(state: &AppState) -> Result<(), Ap
         claimed.principal_id
     };
 
-    ensure_default_catalog_workspace_and_library(state, principal_id).await?;
+    let catalog = ensure_default_catalog_workspace_and_library(state, principal_id).await?;
+    let _ = apply_configured_default_catalog_ai_setup(state, &catalog).await?;
     if let Some(api_token) = bootstrap_admin.api_token.as_deref() {
         ensure_bootstrap_api_token(state, principal_id, api_token).await?;
     }

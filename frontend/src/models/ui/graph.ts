@@ -1,3 +1,5 @@
+import type { LibraryGraphCoverageSummary, LibraryReadinessSummary } from './documents'
+
 export type GraphNodeType = 'document' | 'entity' | 'topic'
 export type GraphStatus =
   | 'empty'
@@ -50,14 +52,6 @@ export interface GraphLegendItem {
   label: string
 }
 
-export interface GraphDocumentPipelineCounters {
-  queued: number
-  processing: number
-  ready: number
-  readyNoGraph: number
-  failed: number
-}
-
 export interface GraphSurfaceResponse {
   loading: boolean
   error: string | null
@@ -72,7 +66,8 @@ export interface GraphSurfaceResponse {
   hiddenNodeCount: number
   filteredArtifactCount: number | null
   lastBuiltAt: string | null
-  documentCounters: GraphDocumentPipelineCounters
+  readinessSummary: LibraryReadinessSummary | null
+  graphCoverage: LibraryGraphCoverageSummary | null
   overlay: GraphOverlayState
   inspector: GraphInspectorState
   warning: string | null
@@ -163,7 +158,7 @@ export interface GraphDiagnostics {
   edgeCount: number
   graphFreshness: string
   rebuildBacklogCount: number
-  readyNoGraphCount: number
+  graphSparseCount: number
   pendingUpdateCount: number
   pendingDeleteCount: number
   activeMutationScope: GraphMutationImpactScopeSummary | null

@@ -81,10 +81,13 @@ const showEmptyState = computed(() => !showLoadingState.value && props.rows.leng
 const showNoResultsState = computed(
   () => !showLoadingState.value && props.rows.length > 0 && filteredRows.value.length === 0,
 )
-const showSparseWorkbench = computed(() => showEmptyState.value || showNoResultsState.value)
+const showSparseWorkbench = computed(
+  () => showLoadingState.value || showEmptyState.value || showNoResultsState.value,
+)
 const showSingleTokenWorkbench = computed(
   () => !showSparseWorkbench.value && filteredRows.value.length === 1,
 )
+const showDetailPane = computed(() => !showSparseWorkbench.value && Boolean(selectedRow.value))
 const genericPrincipalKindLabel = computed(() =>
   enumLabel('admin.tokens.principalKinds', 'api_token'),
 )
@@ -177,6 +180,66 @@ function clearSearch(): void {
 
 <template>
   <section
+    v-if="showSparseWorkbench"
+    class="rr-admin-workbench rr-admin-workbench--access is-sparse"
+  >
+    <div class="rr-admin-workbench__sparse-card">
+      <header class="rr-admin-workbench__pane-head">
+        <div class="rr-admin-workbench__pane-copy">
+          <h3>{{ $t('admin.tokens.title') }}</h3>
+          <p>{{ $t('admin.tokens.subtitle') }}</p>
+        </div>
+        <button
+          v-if="showEmptyState"
+          class="rr-button"
+          type="button"
+          :disabled="loading"
+          @click="emit('create')"
+        >
+          {{ $t('admin.createToken') }}
+        </button>
+      </header>
+
+      <SearchField
+        v-if="showNoResultsState"
+        v-model="searchQuery"
+        :placeholder="$t('admin.tokens.searchPlaceholder')"
+        @clear="searchQuery = ''"
+      />
+
+      <p
+        v-if="errorMessage"
+        class="rr-admin-workbench__feedback rr-admin-workbench__feedback--error"
+      >
+        {{ errorMessage }}
+      </p>
+
+      <div v-if="showLoadingState" class="rr-admin-workbench__state">
+        <span>{{ $t('admin.loading') }}</span>
+      </div>
+      <div v-else-if="showEmptyState" class="rr-admin-workbench__state">
+        <span>{{ $t('admin.tokens.emptyDetailTitle') }}</span>
+        <p class="rr-admin-workbench__state-copy">
+          {{ $t('admin.tokens.emptyDetailDescription') }}
+        </p>
+        <p class="rr-admin-workbench__state-copy rr-admin-workbench__state-copy--muted">
+          {{ $t('admin.tokens.scopeLine', { workspace: workspaceName, library: libraryName }) }}
+        </p>
+      </div>
+      <div v-else class="rr-admin-workbench__state">
+        <span>{{ $t('shared.feedbackState.noResults') }}</span>
+        <p class="rr-admin-workbench__state-copy">
+          {{ $t('admin.tokens.noResultsDetail') }}
+        </p>
+        <button class="rr-button rr-button--ghost" type="button" @click="clearSearch">
+          {{ $t('search.clear') }}
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <section
+    v-else
     class="rr-admin-workbench rr-admin-workbench--access"
     :class="{ 'is-sparse': showSparseWorkbench, 'is-single': showSingleTokenWorkbench }"
   >
@@ -204,10 +267,7 @@ function clearSearch(): void {
           @clear="searchQuery = ''"
         />
 
-        <div
-          v-if="showSummary"
-          class="rr-admin-workbench__summary"
-        >
+        <div v-if="showSummary" class="rr-admin-workbench__summary">
           <article class="rr-admin-workbench__metric">
             <strong>{{ summary.total }}</strong>
             <span>{{ $t('admin.tokens.summary.total') }}</span>
@@ -229,28 +289,22 @@ function clearSearch(): void {
           {{ errorMessage }}
         </p>
 
-        <div
-          v-if="showLoadingState"
-          class="rr-admin-workbench__state"
-        >
+        <div v-if="showLoadingState" class="rr-admin-workbench__state">
           {{ $t('admin.loading') }}
         </div>
-        <div
-          v-else-if="showEmptyState"
-          class="rr-admin-workbench__state"
-        >
-          {{ $t('admin.tokens.empty') }}
+        <div v-else-if="showEmptyState" class="rr-admin-workbench__state">
+          <span>{{ $t('admin.tokens.empty') }}</span>
+          <button class="rr-button" type="button" :disabled="loading" @click="emit('create')">
+            {{ $t('admin.createToken') }}
+          </button>
         </div>
-        <div
-          v-else-if="showNoResultsState"
-          class="rr-admin-workbench__state"
-        >
-          {{ $t('shared.feedbackState.noResults') }}
+        <div v-else-if="showNoResultsState" class="rr-admin-workbench__state">
+          <span>{{ $t('shared.feedbackState.noResults') }}</span>
+          <button class="rr-button rr-button--ghost" type="button" @click="clearSearch">
+            {{ $t('search.clear') }}
+          </button>
         </div>
-        <div
-          v-else
-          class="rr-admin-workbench__list"
-        >
+        <div v-else class="rr-admin-workbench__list">
           <button
             v-for="row in filteredRows"
             :key="row.principalId"
@@ -261,10 +315,7 @@ function clearSearch(): void {
           >
             <div class="rr-admin-workbench__row-head">
               <strong>{{ row.label }}</strong>
-              <span
-                class="rr-status-pill"
-                :class="statusClass(row.status)"
-              >
+              <span class="rr-status-pill" :class="statusClass(row.status)">
                 {{ statusBadgeLabel(row.status) }}
               </span>
             </div>
@@ -286,20 +337,14 @@ function clearSearch(): void {
         </div>
       </aside>
 
-      <section class="rr-admin-workbench__detail">
-        <div
-          v-if="selectedRow"
-          class="rr-admin-workbench__detail-card"
-        >
+      <section v-if="showDetailPane" class="rr-admin-workbench__detail">
+        <div v-if="selectedRow" class="rr-admin-workbench__detail-card">
           <header class="rr-admin-workbench__detail-head">
             <div class="rr-admin-workbench__pane-copy">
               <h3>{{ selectedRow.label }}</h3>
               <p>{{ selectedRow.tokenPrefix }}</p>
             </div>
-            <span
-              class="rr-status-pill"
-              :class="statusClass(selectedRow.status)"
-            >
+            <span class="rr-status-pill" :class="statusClass(selectedRow.status)">
               {{ statusBadgeLabel(selectedRow.status) }}
             </span>
           </header>
@@ -366,63 +411,6 @@ function clearSearch(): void {
             </button>
           </div>
         </div>
-        <div
-          v-else-if="showEmptyState"
-          class="rr-admin-workbench__detail-card"
-        >
-          <header class="rr-admin-workbench__detail-head">
-            <div class="rr-admin-workbench__pane-copy">
-              <h3>{{ $t('admin.tokens.emptyDetailTitle') }}</h3>
-              <p>{{ $t('admin.tokens.emptyDetailDescription') }}</p>
-            </div>
-          </header>
-
-          <p class="rr-admin-workbench__feedback rr-admin-workbench__feedback--info">
-            {{ $t('admin.tokens.scope.library', { library: libraryName }) }}
-          </p>
-
-          <div class="rr-admin-workbench__detail-actions">
-            <button
-              class="rr-button"
-              type="button"
-              :disabled="loading"
-              @click="emit('create')"
-            >
-              {{ $t('admin.createToken') }}
-            </button>
-          </div>
-        </div>
-        <div
-          v-else-if="showNoResultsState"
-          class="rr-admin-workbench__detail-card"
-        >
-          <header class="rr-admin-workbench__detail-head">
-            <div class="rr-admin-workbench__pane-copy">
-              <h3>{{ $t('shared.feedbackState.noResults') }}</h3>
-              <p>{{ $t('admin.tokens.noResultsDetail') }}</p>
-            </div>
-          </header>
-
-          <p class="rr-admin-workbench__feedback rr-admin-workbench__feedback--info">
-            {{ $t('admin.tokens.searchPlaceholder') }}
-          </p>
-
-          <div class="rr-admin-workbench__detail-actions">
-            <button
-              class="rr-button rr-button--ghost"
-              type="button"
-              @click="clearSearch"
-            >
-              {{ $t('search.clear') }}
-            </button>
-          </div>
-        </div>
-        <div
-          v-else
-          class="rr-admin-workbench__state rr-admin-workbench__state--detail"
-        >
-          {{ $t('admin.tokens.emptyDetail') }}
-        </div>
       </section>
     </div>
   </section>
@@ -432,6 +420,7 @@ function clearSearch(): void {
 .rr-admin-workbench--access.is-sparse .rr-admin-workbench__layout {
   min-height: 0;
   align-items: start;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .rr-admin-workbench--access.is-single .rr-admin-workbench__layout {
@@ -441,13 +430,11 @@ function clearSearch(): void {
 
 @media (min-width: 981px) {
   .rr-admin-workbench--access.is-sparse .rr-admin-workbench__layout {
-    grid-template-columns: minmax(320px, 24rem) minmax(360px, 42rem);
-    justify-content: start;
+    grid-template-columns: minmax(320px, 26rem) minmax(0, 1fr);
   }
 
   .rr-admin-workbench--access.is-single .rr-admin-workbench__layout {
-    grid-template-columns: minmax(300px, 24rem) minmax(380px, 44rem);
-    justify-content: start;
+    grid-template-columns: minmax(320px, 26rem) minmax(0, 1fr);
   }
 }
 
@@ -456,6 +443,40 @@ function clearSearch(): void {
   height: auto;
   min-height: 0;
   align-self: start;
+}
+
+.rr-admin-workbench--access.is-sparse .rr-admin-workbench__state {
+  display: grid;
+  gap: 0.75rem;
+  justify-items: start;
+}
+
+.rr-admin-workbench--access .rr-admin-workbench__sparse-card {
+  display: grid;
+  gap: 0.9rem;
+  width: min(100%, 64rem);
+  padding: 20px;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.025);
+}
+
+.rr-admin-workbench--access .rr-admin-workbench__state-copy {
+  margin: 0;
+  color: var(--rr-text-secondary);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.rr-admin-workbench--access .rr-admin-workbench__state-copy--muted {
+  color: var(--rr-text-muted);
+}
+
+.rr-admin-workbench--access .rr-admin-workbench__list {
+  max-height: min(58vh, 42rem);
+  overflow: auto;
+  padding-right: 2px;
 }
 
 .rr-admin-workbench--access.is-single .rr-admin-workbench__rail,
@@ -489,11 +510,11 @@ function clearSearch(): void {
 }
 
 .rr-admin-workbench--access.is-sparse .rr-admin-workbench__detail-card {
-  max-width: 42rem;
+  max-width: none;
 }
 
 .rr-admin-workbench--access.is-single .rr-admin-workbench__detail-card {
-  max-width: 44rem;
+  max-width: none;
 }
 
 .rr-admin-token-detail__checklist,

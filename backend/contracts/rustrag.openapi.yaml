@@ -3,13 +3,12 @@ info:
   title: RustRAG API
   version: 0.1.0
   description: |
-    Canonical API contract for the current ArangoDB-centered RustRAG backend surface.
-
-    This contract tracks the active public Axum routes mounted from `backend/src/interfaces/http`
-    and is rewritten at request time with proxy-safe server origins for the current entrypoint.
+    Public HTTP API for the ArangoDB-backed RustRAG backend (`backend/src/interfaces/http`).
+    Operation paths include the `/v1` prefix. `servers.url` is only the origin (e.g. `/` or `https://api.example.com`).
+    Set `RUSTRAG_OPENAPI_PUBLIC_ORIGIN` to that origin; a trailing `/v1` is stripped if present.
 servers:
-  - url: /v1
-    description: Relative API root
+  - url: /
+    description: Same origin (paths include /v1)
 security:
   - bearerAuth: []
 tags:
@@ -329,6 +328,32 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiErrorBody"
+    delete:
+      tags: [catalog]
+      summary: Delete one workspace
+      operationId: deleteCatalogWorkspace
+      parameters:
+        - in: path
+          name: workspaceId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Workspace deleted
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Workspace not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
   /v1/catalog/workspaces/{workspaceId}/libraries:
     get:
       tags: [catalog]
@@ -394,6 +419,39 @@ paths:
                 $ref: "#/components/schemas/ApiErrorBody"
         "409":
           description: Library slug conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/catalog/workspaces/{workspaceId}/libraries/{libraryId}:
+    delete:
+      tags: [catalog]
+      summary: Delete one library from one workspace
+      operationId: deleteCatalogLibrary
+      parameters:
+        - in: path
+          name: workspaceId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Library deleted
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Library not found
           content:
             application/json:
               schema:
@@ -1036,6 +1094,169 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/web-runs:
+    get:
+      tags: [content]
+      summary: List web ingest runs for one library
+      operationId: listContentWebIngestRuns
+      parameters:
+        - in: query
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Web ingest runs in the requested library
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WebIngestRunSummary"
+        "400":
+          description: Invalid web ingest list request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+    post:
+      tags: [content]
+      summary: Submit one canonical web ingest run
+      operationId: createContentWebIngestRun
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWebIngestRunRequest"
+      responses:
+        "202":
+          description: Web ingest run accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebIngestRunReceipt"
+        "400":
+          description: Invalid web ingest submission
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Library not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/web-runs/{runId}:
+    get:
+      tags: [content]
+      summary: Get one canonical web ingest run
+      operationId: getContentWebIngestRun
+      parameters:
+        - in: path
+          name: runId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Web ingest run detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebIngestRun"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Run not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/web-runs/{runId}/pages:
+    get:
+      tags: [content]
+      summary: List page outcomes for one web ingest run
+      operationId: listContentWebIngestRunPages
+      parameters:
+        - in: path
+          name: runId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Discovered pages and outcomes for the requested run
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WebDiscoveredPage"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Run not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/web-runs/{runId}/cancel:
+    post:
+      tags: [content]
+      summary: Request cancellation for one web ingest run
+      operationId: cancelContentWebIngestRun
+      parameters:
+        - in: path
+          name: runId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "202":
+          description: Web ingest cancellation accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebIngestRunReceipt"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Run not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
   /v1/content/documents/upload:
     post:
       tags: [content]
@@ -1121,6 +1342,94 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ContentMutationDetailResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/documents/{documentId}/prepared-segments:
+    get:
+      tags: [content]
+      summary: List prepared segments for the readable revision of one logical document
+      operationId: listContentPreparedSegments
+      parameters:
+        - in: path
+          name: documentId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: offset
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+      responses:
+        "200":
+          description: Prepared segments for the current readable revision
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PreparedSegmentsPageResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/documents/{documentId}/technical-facts:
+    get:
+      tags: [content]
+      summary: List typed technical facts for the readable revision of one logical document
+      operationId: listContentTechnicalFacts
+      parameters:
+        - in: path
+          name: documentId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: offset
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+      responses:
+        "200":
+          description: Typed technical facts for the current readable revision
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TechnicalFactsPageResponse"
         "401":
           description: Missing or insufficient authorization
           content:
@@ -1726,6 +2035,29 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/libraries/{libraryId}/summary:
+    get:
+      tags: [knowledge]
+      summary: Get canonical knowledge summary for one library
+      operationId: getKnowledgeLibrarySummary
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Library readiness, graph coverage, and latest generation snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LibraryKnowledgeSummaryResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/InternalError"
   /v1/knowledge/libraries/{libraryId}/context-bundles:
@@ -2515,14 +2847,212 @@ components:
     BillingExecutionCost: *genericObject
     BillingProviderCall: *genericObject
     BindingValidationResponse: *genericObject
+    BootstrapBindingPurpose:
+      type: string
+      enum: [extract_graph, embed_chunk, query_answer, vision]
+    BootstrapCredentialSource:
+      type: string
+      enum: [missing, env]
     BootstrapClaimRequest: *genericObject
     BootstrapClaimResponse: *genericObject
-    BootstrapSetupRequest: *genericObject
-    BootstrapStatusResponse: *genericObject
+    BootstrapProviderCatalogEntryResponse:
+      type: object
+      additionalProperties: false
+      required: [id, providerKind, displayName, apiStyle, lifecycleState, credentialSource]
+      properties:
+        id:
+          type: string
+          format: uuid
+        providerKind:
+          type: string
+        displayName:
+          type: string
+        apiStyle:
+          type: string
+        lifecycleState:
+          type: string
+        credentialSource:
+          $ref: "#/components/schemas/BootstrapCredentialSource"
+    BootstrapModelCatalogEntryResponse:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          id,
+          providerCatalogId,
+          modelName,
+          capabilityKind,
+          modalityKind,
+          allowedBindingPurposes,
+        ]
+      properties:
+        id:
+          type: string
+          format: uuid
+        providerCatalogId:
+          type: string
+          format: uuid
+        modelName:
+          type: string
+        capabilityKind:
+          type: string
+        modalityKind:
+          type: string
+        allowedBindingPurposes:
+          type: array
+          items:
+            $ref: "#/components/schemas/BootstrapBindingPurpose"
+        contextWindow:
+          oneOf:
+            - type: integer
+            - type: "null"
+        maxOutputTokens:
+          oneOf:
+            - type: integer
+            - type: "null"
+    BootstrapBindingSelectionResponse:
+      type: object
+      additionalProperties: false
+      required: [bindingPurpose, configured]
+      properties:
+        bindingPurpose:
+          $ref: "#/components/schemas/BootstrapBindingPurpose"
+        providerKind:
+          oneOf:
+            - type: string
+            - type: "null"
+        modelCatalogId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        configured:
+          type: boolean
+    BootstrapAiSetupResponse:
+      type: object
+      additionalProperties: false
+      required: [providers, models, bindingSelections]
+      properties:
+        providers:
+          type: array
+          items:
+            $ref: "#/components/schemas/BootstrapProviderCatalogEntryResponse"
+        models:
+          type: array
+          items:
+            $ref: "#/components/schemas/BootstrapModelCatalogEntryResponse"
+        bindingSelections:
+          type: array
+          items:
+            $ref: "#/components/schemas/BootstrapBindingSelectionResponse"
+    BootstrapCredentialInputRequest:
+      type: object
+      additionalProperties: false
+      required: [providerKind]
+      properties:
+        providerKind:
+          type: string
+        apiKey:
+          oneOf:
+            - type: string
+            - type: "null"
+    BootstrapBindingSelectionRequest:
+      type: object
+      additionalProperties: false
+      required: [bindingPurpose, providerKind, modelCatalogId]
+      properties:
+        bindingPurpose:
+          $ref: "#/components/schemas/BootstrapBindingPurpose"
+        providerKind:
+          type: string
+        modelCatalogId:
+          type: string
+          format: uuid
+    BootstrapSetupAiRequest:
+      type: object
+      additionalProperties: false
+      required: [credentials, bindingSelections]
+      properties:
+        credentials:
+          type: array
+          items:
+            $ref: "#/components/schemas/BootstrapCredentialInputRequest"
+        bindingSelections:
+          type: array
+          items:
+            $ref: "#/components/schemas/BootstrapBindingSelectionRequest"
+    BootstrapSetupRequest:
+      type: object
+      additionalProperties: false
+      required: [login, password]
+      properties:
+        login:
+          type: string
+        displayName:
+          oneOf:
+            - type: string
+            - type: "null"
+        password:
+          type: string
+        aiSetup:
+          oneOf:
+            - $ref: "#/components/schemas/BootstrapSetupAiRequest"
+            - type: "null"
+    BootstrapStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [setupRequired]
+      properties:
+        setupRequired:
+          type: boolean
+        aiSetup:
+          oneOf:
+            - $ref: "#/components/schemas/BootstrapAiSetupResponse"
+            - type: "null"
     CatalogLibraryResponse: *genericObject
     CatalogWorkspaceResponse: *genericObject
     ChunkSummary: *genericObject
-    ContentDocumentDetailResponse: *genericObject
+    ContentDocumentDetailResponse:
+      type: object
+      additionalProperties: true
+      required: [document, fileName, pipeline]
+      properties:
+        document: *genericObject
+        fileName:
+          type: string
+        head:
+          oneOf:
+            - *genericObject
+            - type: "null"
+        activeRevision:
+          oneOf:
+            - *genericObject
+            - type: "null"
+        readiness:
+          oneOf:
+            - *genericObject
+            - type: "null"
+        readinessSummary:
+          oneOf:
+            - $ref: "#/components/schemas/DocumentReadinessSummary"
+            - type: "null"
+        preparedRevision:
+          oneOf:
+            - $ref: "#/components/schemas/StructuredDocumentRevisionSummary"
+            - type: "null"
+        preparedSegmentCount:
+          oneOf:
+            - type: integer
+            - type: "null"
+        technicalFactCount:
+          oneOf:
+            - type: integer
+            - type: "null"
+        webPageProvenance:
+          oneOf:
+            - $ref: "#/components/schemas/WebPageProvenance"
+            - type: "null"
+        pipeline: *genericObject
     ContentMutationDetailResponse: *genericObject
     ContentRevision: *genericObject
     CreateCatalogLibraryRequest: *genericObject
@@ -2559,6 +3089,39 @@ components:
     KnowledgeRelationSearchRow: *genericObject
     KnowledgeRetrievalTraceRow: *genericObject
     KnowledgeRevisionRow: *genericObject
+    LibraryKnowledgeSummaryResponse:
+      type: object
+      additionalProperties: true
+      required:
+        [
+          libraryId,
+          documentCountsByReadiness,
+          graphReadyDocumentCount,
+          graphSparseDocumentCount,
+          typedFactDocumentCount,
+          updatedAt,
+        ]
+      properties:
+        libraryId:
+          type: string
+          format: uuid
+        documentCountsByReadiness:
+          type: object
+          additionalProperties:
+            type: integer
+        graphReadyDocumentCount:
+          type: integer
+        graphSparseDocumentCount:
+          type: integer
+        typedFactDocumentCount:
+          type: integer
+        latestGeneration:
+          oneOf:
+            - $ref: "#/components/schemas/KnowledgeLibraryGeneration"
+            - type: "null"
+        updatedAt:
+          type: string
+          format: date-time
     LibraryModelBindingResponse: *genericObject
     LoginSessionRequest: *genericObject
     McpCapabilitySnapshot: *genericObject
@@ -2575,15 +3138,770 @@ components:
     OpsLibraryStateResponse: *genericObject
     OpsLibraryWarning: *genericObject
     PriceCatalogEntryResponse: *genericObject
+    PreparedSegmentDetail:
+      type: object
+      additionalProperties: true
+      required: [segment, text, normalizedText, supportChunkIds]
+      properties:
+        segment:
+          $ref: "#/components/schemas/PreparedSegmentListItem"
+        text:
+          type: string
+        normalizedText:
+          type: string
+        sourceSpan:
+          oneOf:
+            - $ref: "#/components/schemas/StructuredSourceSpan"
+            - type: "null"
+        parentBlockId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        tableCoordinates:
+          oneOf:
+            - $ref: "#/components/schemas/StructuredTableCoordinates"
+            - type: "null"
+        codeLanguage:
+          oneOf:
+            - type: string
+            - type: "null"
+        supportChunkIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+    CreateWebIngestRunRequest:
+      type: object
+      additionalProperties: false
+      required: [libraryId, seedUrl, mode]
+      properties:
+        libraryId:
+          type: string
+          format: uuid
+        seedUrl:
+          type: string
+          format: uri
+        mode:
+          type: string
+          enum: [single_page, recursive_crawl]
+        boundaryPolicy:
+          oneOf:
+            - type: string
+              enum: [same_host, allow_external]
+            - type: "null"
+        maxDepth:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - type: "null"
+        maxPages:
+          oneOf:
+            - type: integer
+              minimum: 1
+            - type: "null"
+        idempotencyKey:
+          oneOf:
+            - type: string
+            - type: "null"
+    WebIngestRunReceipt:
+      type: object
+      additionalProperties: false
+      required: [runId, libraryId, mode, runState, counts]
+      properties:
+        runId:
+          type: string
+          format: uuid
+        libraryId:
+          type: string
+          format: uuid
+        mode:
+          type: string
+          enum: [single_page, recursive_crawl]
+        runState:
+          type: string
+          enum: [accepted, discovering, processing, completed, completed_partial, failed, canceled]
+        asyncOperationId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        counts:
+          $ref: "#/components/schemas/WebRunCounts"
+        failureCode:
+          oneOf:
+            - $ref: "#/components/schemas/WebRunFailureCode"
+            - type: "null"
+        cancelRequestedAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+    WebRunCounts:
+      type: object
+      additionalProperties: false
+      required:
+        [discovered, eligible, processed, queued, processing, duplicates, excluded, blocked, failed, canceled]
+      properties:
+        discovered:
+          type: integer
+        eligible:
+          type: integer
+        processed:
+          type: integer
+        queued:
+          type: integer
+        processing:
+          type: integer
+        duplicates:
+          type: integer
+        excluded:
+          type: integer
+        blocked:
+          type: integer
+        failed:
+          type: integer
+        canceled:
+          type: integer
+    WebIngestRunSummary:
+      type: object
+      additionalProperties: false
+      required:
+        [runId, libraryId, mode, boundaryPolicy, maxDepth, maxPages, runState, seedUrl, counts]
+      properties:
+        runId:
+          type: string
+          format: uuid
+        libraryId:
+          type: string
+          format: uuid
+        mode:
+          type: string
+          enum: [single_page, recursive_crawl]
+        boundaryPolicy:
+          type: string
+          enum: [same_host, allow_external]
+        maxDepth:
+          type: integer
+        maxPages:
+          type: integer
+        runState:
+          type: string
+          enum: [accepted, discovering, processing, completed, completed_partial, failed, canceled]
+        seedUrl:
+          type: string
+          format: uri
+        counts:
+          $ref: "#/components/schemas/WebRunCounts"
+        lastActivityAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+    WebIngestRun:
+      type: object
+      additionalProperties: false
+      required:
+        [runId, mutationId, workspaceId, libraryId, mode, seedUrl, normalizedSeedUrl, boundaryPolicy, maxDepth, maxPages, runState, requestedAt, counts]
+      properties:
+        runId:
+          type: string
+          format: uuid
+        mutationId:
+          type: string
+          format: uuid
+        asyncOperationId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        workspaceId:
+          type: string
+          format: uuid
+        libraryId:
+          type: string
+          format: uuid
+        mode:
+          type: string
+          enum: [single_page, recursive_crawl]
+        seedUrl:
+          type: string
+          format: uri
+        normalizedSeedUrl:
+          type: string
+          format: uri
+        boundaryPolicy:
+          type: string
+          enum: [same_host, allow_external]
+        maxDepth:
+          type: integer
+        maxPages:
+          type: integer
+        runState:
+          type: string
+          enum: [accepted, discovering, processing, completed, completed_partial, failed, canceled]
+        requestedByPrincipalId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        requestedAt:
+          type: string
+          format: date-time
+        completedAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        failureCode:
+          oneOf:
+            - $ref: "#/components/schemas/WebRunFailureCode"
+            - type: "null"
+        cancelRequestedAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        counts:
+          $ref: "#/components/schemas/WebRunCounts"
+        lastActivityAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+    WebDiscoveredPage:
+      type: object
+      additionalProperties: false
+      required:
+        [candidateId, runId, normalizedUrl, depth, hostClassification, candidateState, discoveredAt, updatedAt]
+      properties:
+        candidateId:
+          type: string
+          format: uuid
+        runId:
+          type: string
+          format: uuid
+        discoveredUrl:
+          oneOf:
+            - type: string
+              format: uri
+            - type: "null"
+        normalizedUrl:
+          type: string
+          format: uri
+        finalUrl:
+          oneOf:
+            - type: string
+              format: uri
+            - type: "null"
+        canonicalUrl:
+          oneOf:
+            - type: string
+              format: uri
+            - type: "null"
+        depth:
+          type: integer
+        referrerCandidateId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        hostClassification:
+          type: string
+          enum: [same_host, external]
+        candidateState:
+          type: string
+          enum: [discovered, eligible, duplicate, excluded, blocked, queued, processing, processed, failed, canceled]
+        classificationReason:
+          oneOf:
+            - $ref: "#/components/schemas/WebClassificationReason"
+            - type: "null"
+        contentType:
+          oneOf:
+            - type: string
+            - type: "null"
+        httpStatus:
+          oneOf:
+            - type: integer
+            - type: "null"
+        discoveredAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        documentId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        resultRevisionId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        mutationItemId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+    WebPageProvenance:
+      type: object
+      additionalProperties: false
+      properties:
+        runId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        candidateId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        sourceUri:
+          oneOf:
+            - type: string
+              format: uri
+            - type: "null"
+        canonicalUrl:
+          oneOf:
+            - type: string
+              format: uri
+            - type: "null"
+    WebClassificationReason:
+      type: string
+      enum:
+        - seed_accepted
+        - duplicate_canonical_url
+        - outside_boundary_policy
+        - exceeded_max_depth
+        - exceeded_max_pages
+        - system_page
+        - unsupported_scheme
+        - invalid_url
+        - inaccessible
+        - unsupported_content
+        - cancel_requested
+    WebRunFailureCode:
+      type: string
+      enum:
+        - inaccessible
+        - invalid_url
+        - unsupported_content
+        - web_discovery_failed
+        - web_snapshot_persist_failed
+        - web_snapshot_missing
+        - web_snapshot_missing_final_url
+        - web_snapshot_unavailable
+        - web_capture_materialization_failed
+        - recursive_crawl_failed
+    PreparedSegmentListItem:
+      type: object
+      additionalProperties: true
+      required:
+        [segmentId, revisionId, ordinal, blockKind, headingTrail, sectionPath, excerpt]
+      properties:
+        segmentId:
+          type: string
+          format: uuid
+        revisionId:
+          type: string
+          format: uuid
+        ordinal:
+          type: integer
+        blockKind:
+          type: string
+        headingTrail:
+          type: array
+          items:
+            type: string
+        sectionPath:
+          type: array
+          items:
+            type: string
+        pageNumber:
+          oneOf:
+            - type: integer
+            - type: "null"
+        excerpt:
+          type: string
+    PreparedSegmentsPageResponse:
+      type: object
+      additionalProperties: true
+      required: [documentId, total, offset, limit, items]
+      properties:
+        documentId:
+          type: string
+          format: uuid
+        revisionId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        total:
+          type: integer
+        offset:
+          type: integer
+        limit:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PreparedSegmentDetail"
     ProviderCatalogEntryResponse: *genericObject
     ProviderCredentialResponse: *genericObject
     QueryConversation: *genericObject
     QueryConversationDetailResponse: *genericObject
-    QueryExecutionDetailResponse: *genericObject
-    QueryTurnExecutionResponse: *genericObject
+    QueryExecutionDetailResponse:
+      type: object
+      additionalProperties: true
+      required:
+        [contextBundleId, execution, chunkReferences, preparedSegmentReferences, technicalFactReferences, entityReferences, relationReferences, verificationState, verificationWarnings]
+      properties:
+        contextBundleId:
+          type: string
+          format: uuid
+        execution: *genericObject
+        requestTurn:
+          oneOf:
+            - *genericObject
+            - type: "null"
+        responseTurn:
+          oneOf:
+            - *genericObject
+            - type: "null"
+        chunkReferences:
+          type: array
+          items: *genericObject
+        preparedSegmentReferences:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueryPreparedSegmentReference"
+        technicalFactReferences:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueryTechnicalFactReference"
+        entityReferences:
+          type: array
+          items: *genericObject
+        relationReferences:
+          type: array
+          items: *genericObject
+        verificationState:
+          type: string
+          enum: [not_run, verified, partially_supported, conflicting, insufficient_evidence, failed]
+        verificationWarnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueryVerificationWarning"
+    QueryPreparedSegmentReference:
+      type: object
+      additionalProperties: true
+      required:
+        [executionId, segmentId, revisionId, blockKind, rank, score, headingTrail, sectionPath]
+      properties:
+        executionId:
+          type: string
+          format: uuid
+        segmentId:
+          type: string
+          format: uuid
+        revisionId:
+          type: string
+          format: uuid
+        blockKind:
+          type: string
+        rank:
+          type: integer
+        score:
+          type: number
+        headingTrail:
+          type: array
+          items:
+            type: string
+        sectionPath:
+          type: array
+          items:
+            type: string
+    QueryTechnicalFactReference:
+      type: object
+      additionalProperties: true
+      required:
+        [executionId, factId, revisionId, factKind, canonicalValue, displayValue, rank, score]
+      properties:
+        executionId:
+          type: string
+          format: uuid
+        factId:
+          type: string
+          format: uuid
+        revisionId:
+          type: string
+          format: uuid
+        factKind:
+          type: string
+        canonicalValue:
+          type: string
+        displayValue:
+          type: string
+        rank:
+          type: integer
+        score:
+          type: number
+    QueryVerificationWarning:
+      type: object
+      additionalProperties: true
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        relatedSegmentId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        relatedFactId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+    QueryTurnExecutionResponse:
+      type: object
+      additionalProperties: true
+      required:
+        [contextBundleId, session, requestTurn, execution, chunkReferences, preparedSegmentReferences, technicalFactReferences, entityReferences, relationReferences, verificationState, verificationWarnings]
+      properties:
+        contextBundleId:
+          type: string
+          format: uuid
+        session: *genericObject
+        requestTurn: *genericObject
+        responseTurn:
+          oneOf:
+            - *genericObject
+            - type: "null"
+        execution: *genericObject
+        chunkReferences:
+          type: array
+          items: *genericObject
+        preparedSegmentReferences:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueryPreparedSegmentReference"
+        technicalFactReferences:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueryTechnicalFactReference"
+        entityReferences:
+          type: array
+          items: *genericObject
+        relationReferences:
+          type: array
+          items: *genericObject
+        verificationState:
+          type: string
+          enum: [not_run, verified, partially_supported, conflicting, insufficient_evidence, failed]
+        verificationWarnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueryVerificationWarning"
     ReadinessResponse: *genericObject
     ReplaceContentDocumentRequest: *genericObject
+    DocumentReadinessSummary:
+      type: object
+      additionalProperties: true
+      required:
+        [documentId, readinessKind, activityStatus, preparationState, graphCoverageKind, updatedAt]
+      properties:
+        documentId:
+          type: string
+          format: uuid
+        activeRevisionId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        readinessKind:
+          type: string
+        activityStatus:
+          type: string
+        stalledReason:
+          oneOf:
+            - type: string
+            - type: "null"
+        preparationState:
+          type: string
+        graphCoverageKind:
+          type: string
+        typedFactCoverage:
+          oneOf:
+            - type: number
+            - type: "null"
+        lastMutationId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        lastJobStage:
+          oneOf:
+            - type: string
+            - type: "null"
+        updatedAt:
+          type: string
+          format: date-time
     SessionResponse: *genericObject
+    StructuredDocumentRevisionSummary:
+      type: object
+      additionalProperties: true
+      required:
+        [revisionId, documentId, workspaceId, libraryId, preparationState, normalizationProfile, sourceFormat, blockCount, chunkCount, typedFactCount, outline, preparedAt]
+      properties:
+        revisionId:
+          type: string
+          format: uuid
+        documentId:
+          type: string
+          format: uuid
+        workspaceId:
+          type: string
+          format: uuid
+        libraryId:
+          type: string
+          format: uuid
+        preparationState:
+          type: string
+        normalizationProfile:
+          type: string
+        sourceFormat:
+          type: string
+        languageCode:
+          oneOf:
+            - type: string
+            - type: "null"
+        blockCount:
+          type: integer
+        chunkCount:
+          type: integer
+        typedFactCount:
+          type: integer
+        outline:
+          type: array
+          items: *genericObject
+        preparedAt:
+          type: string
+          format: date-time
+    StructuredSourceSpan:
+      type: object
+      additionalProperties: true
+      required: [startOffset, endOffset]
+      properties:
+        startOffset:
+          type: integer
+        endOffset:
+          type: integer
+    StructuredTableCoordinates:
+      type: object
+      additionalProperties: true
+      required: [rowIndex, columnIndex, rowSpan, columnSpan]
+      properties:
+        rowIndex:
+          type: integer
+        columnIndex:
+          type: integer
+        rowSpan:
+          type: integer
+        columnSpan:
+          type: integer
+    TechnicalFactQualifier:
+      type: object
+      additionalProperties: true
+      required: [key, value]
+      properties:
+        key:
+          type: string
+        value:
+          type: string
+    TechnicalFactValue: *genericObject
+    TechnicalFactsPageResponse:
+      type: object
+      additionalProperties: true
+      required: [documentId, total, offset, limit, items]
+      properties:
+        documentId:
+          type: string
+          format: uuid
+        revisionId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        total:
+          type: integer
+        offset:
+          type: integer
+        limit:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/TypedTechnicalFact"
+    TypedTechnicalFact:
+      type: object
+      additionalProperties: true
+      required:
+        [factId, revisionId, documentId, workspaceId, libraryId, factKind, canonicalValue, displayValue, qualifiers, supportBlockIds, supportChunkIds, extractionKind, createdAt]
+      properties:
+        factId:
+          type: string
+          format: uuid
+        revisionId:
+          type: string
+          format: uuid
+        documentId:
+          type: string
+          format: uuid
+        workspaceId:
+          type: string
+          format: uuid
+        libraryId:
+          type: string
+          format: uuid
+        factKind:
+          type: string
+        canonicalValue:
+          $ref: "#/components/schemas/TechnicalFactValue"
+        displayValue:
+          type: string
+        qualifiers:
+          type: array
+          items:
+            $ref: "#/components/schemas/TechnicalFactQualifier"
+        supportBlockIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+        supportChunkIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+        confidence:
+          oneOf:
+            - type: number
+            - type: "null"
+        extractionKind:
+          type: string
+        conflictGroupId:
+          oneOf:
+            - type: string
+            - type: "null"
+        createdAt:
+          type: string
+          format: date-time
     TokenResponse: *genericObject
     Unauthorized: *genericObject
     UpdateLibraryBindingRequest: *genericObject

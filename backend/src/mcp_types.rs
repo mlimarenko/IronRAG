@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -47,6 +49,10 @@ pub struct McpLibraryDescriptor {
     pub readable_document_count: usize,
     pub processing_document_count: usize,
     pub failed_document_count: usize,
+    pub document_counts_by_readiness: BTreeMap<String, usize>,
+    pub graph_ready_document_count: usize,
+    pub graph_sparse_document_count: usize,
+    pub typed_fact_document_count: usize,
     pub supports_search: bool,
     pub supports_read: bool,
     pub supports_write: bool,
@@ -151,6 +157,18 @@ pub struct McpEvidenceReference {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct McpTechnicalFactReference {
+    pub fact_id: Uuid,
+    pub fact_kind: String,
+    pub canonical_value: String,
+    pub display_value: String,
+    pub rank: i32,
+    pub score: f64,
+    pub inclusion_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct McpDocumentHit {
     pub document_id: Uuid,
     pub logical_document_id: Uuid,
@@ -163,8 +181,11 @@ pub struct McpDocumentHit {
     pub excerpt_start_offset: Option<usize>,
     pub excerpt_end_offset: Option<usize>,
     pub readability_state: McpReadabilityState,
+    pub readiness_kind: String,
+    pub graph_coverage_kind: String,
     pub status_reason: Option<String>,
     pub chunk_references: Vec<McpChunkReference>,
+    pub technical_fact_references: Vec<McpTechnicalFactReference>,
     pub entity_references: Vec<McpEntityReference>,
     pub relation_references: Vec<McpRelationReference>,
     pub evidence_references: Vec<McpEvidenceReference>,
@@ -262,6 +283,45 @@ pub struct McpGetMutationStatusRequest {
     pub receipt_id: Uuid,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpSubmitWebIngestRunRequest {
+    #[serde(alias = "library_id")]
+    pub library_id: Uuid,
+    #[serde(alias = "seed_url")]
+    pub seed_url: String,
+    pub mode: String,
+    #[serde(default, alias = "boundary_policy")]
+    pub boundary_policy: Option<String>,
+    #[serde(default, alias = "max_depth")]
+    pub max_depth: Option<i32>,
+    #[serde(default, alias = "max_pages")]
+    pub max_pages: Option<i32>,
+    #[serde(default, alias = "idempotency_key")]
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpGetWebIngestRunRequest {
+    #[serde(alias = "run_id")]
+    pub run_id: Uuid,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpListWebIngestRunPagesRequest {
+    #[serde(alias = "run_id")]
+    pub run_id: Uuid,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpCancelWebIngestRunRequest {
+    #[serde(alias = "run_id")]
+    pub run_id: Uuid,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpMutationOperationKind {
@@ -293,6 +353,10 @@ pub enum McpAuditActionKind {
     UploadDocuments,
     UpdateDocument,
     GetMutationStatus,
+    SubmitWebIngestRun,
+    GetWebIngestRun,
+    ListWebIngestRunPages,
+    CancelWebIngestRun,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,6 +384,8 @@ pub struct McpReadDocumentResponse {
     pub latest_revision_id: Option<Uuid>,
     pub read_mode: McpReadMode,
     pub readability_state: McpReadabilityState,
+    pub readiness_kind: String,
+    pub graph_coverage_kind: String,
     pub status_reason: Option<String>,
     pub content: Option<String>,
     pub slice_start_offset: usize,
@@ -328,6 +394,7 @@ pub struct McpReadDocumentResponse {
     pub continuation_token: Option<String>,
     pub has_more: bool,
     pub chunk_references: Vec<McpChunkReference>,
+    pub technical_fact_references: Vec<McpTechnicalFactReference>,
     pub entity_references: Vec<McpEntityReference>,
     pub relation_references: Vec<McpRelationReference>,
     pub evidence_references: Vec<McpEvidenceReference>,
@@ -336,8 +403,10 @@ pub struct McpReadDocumentResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        McpGetMutationStatusRequest, McpReadDocumentRequest, McpSearchDocumentsRequest,
-        McpUpdateDocumentRequest, McpUploadDocumentInput, McpUploadDocumentsRequest,
+        McpCancelWebIngestRunRequest, McpGetMutationStatusRequest, McpGetWebIngestRunRequest,
+        McpListWebIngestRunPagesRequest, McpReadDocumentRequest, McpSearchDocumentsRequest,
+        McpSubmitWebIngestRunRequest, McpUpdateDocumentRequest, McpUploadDocumentInput,
+        McpUploadDocumentsRequest,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -429,6 +498,62 @@ mod tests {
         .expect("request should deserialize");
 
         assert_eq!(request.receipt_id, receipt_id);
+    }
+
+    #[test]
+    fn submit_web_ingest_run_request_accepts_snake_case_fields() {
+        let library_id = Uuid::now_v7();
+        let request: McpSubmitWebIngestRunRequest = serde_json::from_value(json!({
+            "library_id": library_id,
+            "seed_url": "https://example.com/docs",
+            "mode": "single_page",
+            "boundary_policy": "same_host",
+            "max_depth": 0,
+            "max_pages": 1,
+            "idempotency_key": "web-seed-1"
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(request.library_id, library_id);
+        assert_eq!(request.seed_url, "https://example.com/docs");
+        assert_eq!(request.mode, "single_page");
+        assert_eq!(request.boundary_policy.as_deref(), Some("same_host"));
+        assert_eq!(request.max_depth, Some(0));
+        assert_eq!(request.max_pages, Some(1));
+        assert_eq!(request.idempotency_key.as_deref(), Some("web-seed-1"));
+    }
+
+    #[test]
+    fn get_web_ingest_run_request_accepts_snake_case_field() {
+        let run_id = Uuid::now_v7();
+        let request: McpGetWebIngestRunRequest = serde_json::from_value(json!({
+            "run_id": run_id
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(request.run_id, run_id);
+    }
+
+    #[test]
+    fn list_web_ingest_run_pages_request_accepts_snake_case_field() {
+        let run_id = Uuid::now_v7();
+        let request: McpListWebIngestRunPagesRequest = serde_json::from_value(json!({
+            "run_id": run_id
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(request.run_id, run_id);
+    }
+
+    #[test]
+    fn cancel_web_ingest_run_request_accepts_snake_case_field() {
+        let run_id = Uuid::now_v7();
+        let request: McpCancelWebIngestRunRequest = serde_json::from_value(json!({
+            "run_id": run_id
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(request.run_id, run_id);
     }
 
     #[test]

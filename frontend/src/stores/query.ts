@@ -17,9 +17,13 @@ import {
   type KnowledgeContextBundleDetail,
   type QueryExecution,
   type QueryExecutionDetail,
+  type QueryPreparedSegmentReference,
   type QuerySession,
   type QuerySessionDetail,
+  type QueryTechnicalFactReference,
   type QueryTurn,
+  type QueryVerificationState,
+  type QueryVerificationWarning,
 } from 'src/services/api/query'
 import { useShellStore } from './shell'
 
@@ -78,6 +82,12 @@ export const useQueryStore = defineStore('query', {
     groundedChunkReferences(state): KnowledgeBundleChunkReference[] {
       return state.activeBundle?.chunkReferences ?? []
     },
+    groundedPreparedSegmentReferences(state): QueryPreparedSegmentReference[] {
+      return state.activeExecution?.preparedSegmentReferences ?? []
+    },
+    groundedTechnicalFactReferences(state): QueryTechnicalFactReference[] {
+      return state.activeExecution?.technicalFactReferences ?? []
+    },
     groundedEntityReferences(state): KnowledgeBundleEntityReference[] {
       return state.activeBundle?.entityReferences ?? []
     },
@@ -86,6 +96,12 @@ export const useQueryStore = defineStore('query', {
     },
     groundedEvidenceReferences(state): KnowledgeBundleEvidenceReference[] {
       return state.activeBundle?.evidenceReferences ?? []
+    },
+    verificationState(state): QueryVerificationState {
+      return state.activeExecution?.verificationState ?? 'not_run'
+    },
+    verificationWarnings(state): QueryVerificationWarning[] {
+      return state.activeExecution?.verificationWarnings ?? []
     },
     activeBundleId(state): string | null {
       return state.activeExecution?.contextBundleId ?? state.activeBundle?.bundle.bundleId ?? null

@@ -18,16 +18,24 @@ const emit = defineEmits<{
   sort: [field: DocumentsSortField]
 }>()
 
-const { t } = useI18n()
-const { formatCompactDateTime, formatDateTime } = useDisplayFormatters()
+const i18n = useI18n()
+const t = (key: string, named?: Record<string, unknown>) => i18n.t(key, named ?? {})
+const te = (key: string) => i18n.te(key)
+const formatters = useDisplayFormatters()
+const formatCompactDateTime = (value: string | null | undefined) =>
+  formatters.formatCompactDateTime(value ?? null)
+const formatDateTime = (value: string | null | undefined) =>
+  formatters.formatDateTime(value ?? null)
 const showTypeColumn = computed(() => {
   const visibleTypes = new Set(
     props.rows.map((row) => row.fileType).filter((value) => value.trim().length > 0),
   )
   return visibleTypes.size > 1
 })
-const showStatusColumn = computed(() => props.rows.some((row) => row.status !== 'ready'))
 
+const showCostColumn = computed(() =>
+  props.rows.some((row) => Boolean(row.costLabel && row.costLabel.trim().length > 0)),
+)
 function hasDetailTarget(row: DocumentRowSummary): boolean {
   return row.detailAvailable && row.id.trim().length > 0
 }
@@ -75,13 +83,70 @@ function isProcessing(row: DocumentRowSummary): boolean {
   return row.status === 'processing'
 }
 
+function readinessKind(row: DocumentRowSummary): string | null {
+  return row.preparation?.readinessKind ?? null
+}
+
 function isInFlight(row: DocumentRowSummary): boolean {
   return isQueued(row) || isProcessing(row)
 }
 
-function isGraphCatchUp(row: DocumentRowSummary): boolean {
-  return row.status === 'ready_no_graph'
+function isReadable(row: DocumentRowSummary): boolean {
+  return readinessKind(row) === 'readable'
 }
+
+function isGraphSparse(row: DocumentRowSummary): boolean {
+  return readinessKind(row) === 'graph_sparse'
+}
+
+function showsProgressFeedback(row: DocumentRowSummary): boolean {
+  return isInFlight(row) || isReadable(row) || isGraphSparse(row)
+}
+
+function statusTone(
+  row: DocumentRowSummary,
+): 'queued' | 'processing' | 'readable' | 'graph_sparse' | 'graph_ready' | 'failed' {
+  switch (readinessKind(row) ?? row.status) {
+    case 'queued':
+      return 'queued'
+    case 'processing':
+      return 'processing'
+    case 'readable':
+      return 'readable'
+    case 'graph_sparse':
+      return 'graph_sparse'
+    case 'graph_ready':
+    case 'ready':
+      return 'graph_ready'
+    case 'failed':
+    default:
+      return 'failed'
+  }
+}
+
+function statusBadgeLabel(row: DocumentRowSummary): string {
+  const readiness = readinessKind(row)
+  if (readiness) {
+    const readinessKey = `documents.readinessKinds.${readiness}`
+    if (te(readinessKey)) {
+      return t(readinessKey)
+    }
+  }
+
+  const statusKey = `documents.statuses.${row.status}`
+  if (te(statusKey)) {
+    return t(statusKey)
+  }
+
+  return row.statusLabel
+}
+
+const showStatusColumn = computed(() =>
+  props.rows.some((row) => {
+    const readiness = readinessKind(row)
+    return readiness ? readiness !== 'graph_ready' : row.status !== 'ready'
+  }),
+)
 
 function hasStatusDetail(row: DocumentRowSummary): boolean {
   return Boolean(statusDetailText(row))
@@ -96,16 +161,27 @@ function liveLabel(row: DocumentRowSummary): string | null {
     return t('documents.workspace.rowState.processingEyebrow')
   }
 
-  if (isGraphCatchUp(row)) {
-    return t('documents.workspace.rowState.graphCatchUpEyebrow')
+  if (isReadable(row)) {
+    return t('documents.workspace.rowState.readableEyebrow')
+  }
+
+  if (isGraphSparse(row)) {
+    return t('documents.workspace.rowState.graphSparseEyebrow')
   }
 
   return null
 }
 
 function statusDetailText(row: DocumentRowSummary): string | null {
+  if ((readinessKind(row) ?? row.status) === 'failed' && row.failureMessage) {
+    if (row.failureMessage === t('documents.details.failureGeneric')) {
+      return t('documents.workspace.rowState.failedGenericDetail')
+    }
+    return row.failureMessage
+  }
+
   const normalizedStage = row.stageLabel?.trim() ?? ''
-  const normalizedStatus = row.statusLabel.trim()
+  const normalizedStatus = statusBadgeLabel(row).trim()
   if (
     normalizedStage &&
     normalizedStage.localeCompare(normalizedStatus, undefined, { sensitivity: 'accent' }) !== 0
@@ -113,13 +189,15 @@ function statusDetailText(row: DocumentRowSummary): string | null {
     return normalizedStage
   }
 
-  switch (row.status) {
+  switch (readinessKind(row) ?? row.status) {
     case 'queued':
       return t('documents.workspace.rowState.queuedDetail')
     case 'processing':
       return t('documents.workspace.rowState.processingDetail')
-    case 'ready_no_graph':
-      return t('documents.workspace.rowState.readyNoGraphDetail')
+    case 'readable':
+      return t('documents.workspace.rowState.readableDetail')
+    case 'graph_sparse':
+      return t('documents.workspace.rowState.graphSparseDetail')
     case 'failed':
       return t('documents.workspace.rowState.failedDetail')
     default:
@@ -128,17 +206,30 @@ function statusDetailText(row: DocumentRowSummary): string | null {
 }
 
 function normalizedProgress(row: DocumentRowSummary): number | null {
-  if (row.progressPercent === null) {
+  if (row.progressPercent === null || !showsProgressFeedback(row)) {
     return null
   }
-  return Math.max(0, Math.min(100, row.progressPercent))
+  const bounded = Math.max(0, Math.min(100, row.progressPercent))
+  if (isInFlight(row)) {
+    return Math.max(8, Math.min(96, bounded))
+  }
+  if (isReadable(row)) {
+    return Math.max(72, Math.min(84, bounded))
+  }
+  if (isGraphSparse(row)) {
+    return Math.max(86, Math.min(94, bounded))
+  }
+  return bounded
 }
 
 function showProgressBar(row: DocumentRowSummary): boolean {
-  return normalizedProgress(row) !== null && (isInFlight(row) || isGraphCatchUp(row))
+  return normalizedProgress(row) !== null
 }
 
 function progressText(row: DocumentRowSummary): string | null {
+  if (!showsProgressFeedback(row)) {
+    return null
+  }
   const progress = normalizedProgress(row)
   if (progress === null) {
     return null
@@ -147,7 +238,7 @@ function progressText(row: DocumentRowSummary): string | null {
 }
 
 function lastActivityText(row: DocumentRowSummary): string | null {
-  if (!row.lastActivityAt || row.status === 'ready') {
+  if (!row.lastActivityAt || !showsProgressFeedback(row) || readinessKind(row) === 'graph_ready') {
     return null
   }
   return t('documents.workspace.rowState.lastActivity', {
@@ -164,7 +255,7 @@ function lastActivityText(row: DocumentRowSummary): string | null {
         <col v-if="showTypeColumn" class="rr-docs-table__col rr-docs-table__col--type" />
         <col class="rr-docs-table__col rr-docs-table__col--size" />
         <col class="rr-docs-table__col rr-docs-table__col--date" />
-        <col class="rr-docs-table__col rr-docs-table__col--cost" />
+        <col v-if="showCostColumn" class="rr-docs-table__col rr-docs-table__col--cost" />
         <col v-if="showStatusColumn" class="rr-docs-table__col rr-docs-table__col--status" />
       </colgroup>
 
@@ -252,6 +343,7 @@ function lastActivityText(row: DocumentRowSummary): string | null {
             </button>
           </th>
           <th
+            v-if="showCostColumn"
             class="rr-docs-table__th rr-docs-table__th--cost"
             scope="col"
             :aria-sort="ariaSort('costAmount')"
@@ -302,7 +394,8 @@ function lastActivityText(row: DocumentRowSummary): string | null {
             'is-in-flight': isInFlight(row),
             'is-queued': isQueued(row),
             'is-processing': isProcessing(row),
-            'is-graph-catchup': isGraphCatchUp(row),
+            'is-readable': isReadable(row),
+            'is-graph-sparse': isGraphSparse(row),
           }"
           :tabindex="hasDetailTarget(row) ? 0 : undefined"
           @click="openDetail(row)"
@@ -317,7 +410,8 @@ function lastActivityText(row: DocumentRowSummary): string | null {
                 :class="{
                   'is-queued': isQueued(row),
                   'is-processing': isProcessing(row),
-                  'is-graph-catchup': isGraphCatchUp(row),
+                  'is-readable': isReadable(row),
+                  'is-graph-sparse': isGraphSparse(row),
                 }"
               >
                 <span class="rr-docs-table__live-dot" aria-hidden="true" />
@@ -344,6 +438,7 @@ function lastActivityText(row: DocumentRowSummary): string | null {
             {{ formatCompactDateTime(row.uploadedAt) }}
           </td>
           <td
+            v-if="showCostColumn"
             class="rr-docs-table__cell rr-docs-table__cell--cost"
             :class="{ 'has-cost': row.costLabel }"
             :title="row.costLabel || '—'"
@@ -355,11 +450,23 @@ function lastActivityText(row: DocumentRowSummary): string | null {
               class="rr-docs-table__status-stack"
               :class="{
                 'is-in-flight': isInFlight(row),
-                'is-graph-catchup': isGraphCatchUp(row),
+                'is-readable': isReadable(row),
+                'is-graph-sparse': isGraphSparse(row),
                 'has-detail': hasStatusDetail(row),
               }"
             >
-              <StatusPill :tone="row.status" :label="row.statusLabel" />
+              <div class="rr-docs-table__status-top">
+                <StatusPill :tone="statusTone(row)" :label="statusBadgeLabel(row)" />
+                <button
+                  v-if="row.canRetry"
+                  class="rr-docs-table__status-action"
+                  type="button"
+                  @click.stop
+                  @click="emit('retry', row.id)"
+                >
+                  {{ $t('documents.actions.retry') }}
+                </button>
+              </div>
               <p v-if="statusDetailText(row)" class="rr-docs-table__status-copy">
                 {{ statusDetailText(row) }}
               </p>
@@ -376,21 +483,13 @@ function lastActivityText(row: DocumentRowSummary): string | null {
                 :class="{
                   'is-queued': isQueued(row),
                   'is-processing': isProcessing(row),
-                  'is-graph-catchup': isGraphCatchUp(row),
+                  'is-readable': isReadable(row),
+                  'is-graph-sparse': isGraphSparse(row),
                 }"
                 aria-hidden="true"
               >
                 <span :style="{ width: `${normalizedProgress(row) ?? 0}%` }" />
               </div>
-              <button
-                v-if="row.canRetry"
-                class="rr-docs-table__status-action"
-                type="button"
-                @click.stop
-                @click="emit('retry', row.id)"
-              >
-                {{ $t('documents.actions.retry') }}
-              </button>
             </div>
           </td>
         </tr>
@@ -403,14 +502,14 @@ function lastActivityText(row: DocumentRowSummary): string | null {
 .rr-docs-table {
   position: relative;
   overflow-x: auto;
-  overflow-y: visible;
+  overflow-y: hidden;
   border: 1px solid rgba(203, 213, 225, 0.86);
   border-top: 0;
-  border-radius: 0 0 16px 16px;
+  border-radius: 0 0 18px 18px;
   background: #fff;
   box-shadow:
-    0 18px 30px rgba(15, 23, 42, 0.05),
-    inset 0 1px 0 rgba(255, 255, 255, 0.7);
+    0 12px 24px rgba(15, 23, 42, 0.04),
+    inset 0 1px 0 rgba(255, 255, 255, 0.82);
 }
 
 .rr-docs-table table {
@@ -425,49 +524,49 @@ function lastActivityText(row: DocumentRowSummary): string | null {
 }
 
 .rr-docs-table__col--type {
-  width: 76px;
+  width: 70px;
 }
 
 .rr-docs-table__col--size {
-  width: 84px;
+  width: 78px;
 }
 
 .rr-docs-table__col--date {
-  width: 132px;
+  width: 118px;
 }
 
 .rr-docs-table__col--cost {
-  width: 90px;
+  width: 78px;
 }
 
 .rr-docs-table__col--status {
-  width: 212px;
+  width: 286px;
 }
 
 @media (min-width: 1500px) {
   .rr-docs-table__col--type {
-    width: 92px;
+    width: 82px;
   }
 
   .rr-docs-table__col--size {
-    width: 100px;
+    width: 90px;
   }
 
   .rr-docs-table__col--date {
-    width: 156px;
+    width: 138px;
   }
 
   .rr-docs-table__col--cost {
-    width: 104px;
+    width: 84px;
   }
 
   .rr-docs-table__col--status {
-    width: 228px;
+    width: 316px;
   }
 
   .rr-docs-table__th,
   .rr-docs-table__cell {
-    padding-inline: 18px;
+    padding-inline: 16px;
   }
 
   .rr-docs-table__cell {
@@ -481,33 +580,33 @@ function lastActivityText(row: DocumentRowSummary): string | null {
 
 @media (min-width: 1900px) {
   .rr-docs-table__col--type {
-    width: 104px;
+    width: 92px;
   }
 
   .rr-docs-table__col--size {
-    width: 112px;
+    width: 96px;
   }
 
   .rr-docs-table__col--date {
-    width: 168px;
+    width: 148px;
   }
 
   .rr-docs-table__col--cost {
-    width: 112px;
+    width: 88px;
   }
 
   .rr-docs-table__col--status {
-    width: 244px;
+    width: 336px;
   }
 
   .rr-docs-table__th,
   .rr-docs-table__cell {
-    padding-inline: 22px;
+    padding-inline: 18px;
   }
 
   .rr-docs-table__cell {
-    padding-block: 13px;
-    font-size: 0.89rem;
+    padding-block: 10px;
+    font-size: 0.87rem;
   }
 
   .rr-docs-table__name-stack strong {
@@ -532,15 +631,15 @@ function lastActivityText(row: DocumentRowSummary): string | null {
   position: sticky;
   top: 0;
   z-index: 3;
-  background: rgba(248, 250, 252, 0.96);
+  background: rgba(249, 250, 251, 0.96);
   box-shadow:
     inset 0 -1px 0 rgba(148, 163, 184, 0.92),
     inset 0 1px 0 rgba(255, 255, 255, 0.86);
 }
 
 .rr-docs-table__th {
-  padding: 12px 16px 10px;
-  font-size: 0.72rem;
+  padding: 10px 14px 8px;
+  font-size: 0.68rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.072em;
@@ -634,62 +733,66 @@ function lastActivityText(row: DocumentRowSummary): string | null {
 }
 
 .rr-docs-table__row.is-clickable:hover {
-  background: linear-gradient(90deg, rgba(242, 246, 255, 0.98), rgba(247, 249, 255, 0.92));
+  background:
+    linear-gradient(180deg, rgba(248, 250, 252, 0.92), rgba(255, 255, 255, 0.96)),
+    rgba(248, 250, 252, 0.74);
 }
 
 .rr-docs-table__row.is-in-flight {
-  box-shadow: inset 4px 0 0 rgba(59, 130, 246, 0.64);
+  box-shadow: inset 1px 0 0 rgba(59, 130, 246, 0.28);
 }
 
 .rr-docs-table__row.is-in-flight::after {
   content: '';
   position: absolute;
   inset: auto 0 0;
-  height: 2px;
-  opacity: 0.96;
+  height: 1px;
+  opacity: 0.72;
 }
 
 .rr-docs-table__row.is-queued {
-  background: linear-gradient(90deg, rgba(255, 251, 235, 0.96), rgba(255, 255, 255, 0.92));
-  box-shadow: inset 4px 0 0 rgba(245, 158, 11, 0.7);
+  background: rgba(255, 251, 235, 0.12);
+  box-shadow: inset 1px 0 0 rgba(245, 158, 11, 0.34);
 }
 
 .rr-docs-table__row.is-queued::after {
-  background: linear-gradient(90deg, rgba(245, 158, 11, 0.92), rgba(251, 191, 36, 0.48));
+  background: linear-gradient(90deg, rgba(245, 158, 11, 0.74), rgba(251, 191, 36, 0.28));
 }
 
 .rr-docs-table__row.is-processing {
-  background: linear-gradient(90deg, rgba(239, 246, 255, 0.98), rgba(255, 255, 255, 0.94));
+  background: rgba(239, 246, 255, 0.14);
 }
 
 .rr-docs-table__row.is-processing::after {
-  background: linear-gradient(90deg, rgba(37, 99, 235, 0.92), rgba(79, 70, 229, 0.44));
+  background: linear-gradient(90deg, rgba(37, 99, 235, 0.74), rgba(79, 70, 229, 0.28));
 }
 
-.rr-docs-table__row.is-graph-catchup {
-  background: linear-gradient(90deg, rgba(240, 249, 255, 0.98), rgba(255, 255, 255, 0.94));
-  box-shadow: inset 4px 0 0 rgba(14, 116, 144, 0.58);
+.rr-docs-table__row.is-readable,
+.rr-docs-table__row.is-graph-sparse {
+  background: rgba(240, 249, 255, 0.12);
+  box-shadow: inset 1px 0 0 rgba(14, 116, 144, 0.28);
 }
 
-.rr-docs-table__row.is-graph-catchup::after {
-  background: linear-gradient(90deg, rgba(14, 116, 144, 0.86), rgba(56, 189, 248, 0.4));
+.rr-docs-table__row.is-readable::after,
+.rr-docs-table__row.is-graph-sparse::after {
+  background: linear-gradient(90deg, rgba(14, 116, 144, 0.68), rgba(56, 189, 248, 0.24));
 }
 
 .rr-docs-table__row.is-selected {
-  background: linear-gradient(90deg, rgba(232, 240, 255, 0.98), rgba(241, 246, 255, 0.92));
+  background: rgba(238, 244, 255, 0.78);
   box-shadow:
-    inset 4px 0 0 rgba(79, 70, 229, 0.9),
+    inset 1px 0 0 rgba(79, 70, 229, 0.7),
     inset 0 1px 0 rgba(255, 255, 255, 0.92);
 }
 
 .rr-docs-table__cell {
-  padding: 12px 16px;
+  padding: 7px 12px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.84rem;
+  font-size: 0.82rem;
   color: var(--rr-text-primary, #0f172a);
-  vertical-align: middle;
+  vertical-align: top;
 }
 
 .rr-docs-table__cell--name {
@@ -706,7 +809,7 @@ function lastActivityText(row: DocumentRowSummary): string | null {
 
 .rr-docs-table__name-stack {
   display: grid;
-  gap: 4px;
+  gap: 3px;
   min-width: 0;
 }
 
@@ -715,18 +818,18 @@ function lastActivityText(row: DocumentRowSummary): string | null {
   align-items: center;
   gap: 0.42rem;
   width: fit-content;
-  min-height: 1.35rem;
-  padding: 0 0.58rem;
+  min-height: 1rem;
+  padding: 0 0.36rem;
   border-radius: 999px;
   border: 1px solid rgba(148, 163, 184, 0.22);
-  background: rgba(255, 255, 255, 0.9);
+  background: rgba(255, 255, 255, 0.82);
   color: rgba(71, 85, 105, 0.96);
-  font-size: 0.68rem;
+  font-size: 0.58rem;
   font-weight: 800;
   line-height: 1;
   letter-spacing: 0.02em;
   text-transform: uppercase;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.84);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.92);
 }
 
 .rr-docs-table__live-indicator.is-queued {
@@ -741,7 +844,8 @@ function lastActivityText(row: DocumentRowSummary): string | null {
   color: rgba(29, 78, 216, 0.96);
 }
 
-.rr-docs-table__live-indicator.is-graph-catchup {
+.rr-docs-table__live-indicator.is-readable,
+.rr-docs-table__live-indicator.is-graph-sparse {
   border-color: rgba(14, 116, 144, 0.18);
   background: rgba(240, 249, 255, 0.94);
   color: rgba(14, 116, 144, 0.96);
@@ -761,7 +865,7 @@ function lastActivityText(row: DocumentRowSummary): string | null {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.89rem;
+  font-size: 0.84rem;
   font-weight: 700;
   line-height: 1.35;
 }
@@ -777,13 +881,13 @@ function lastActivityText(row: DocumentRowSummary): string | null {
 .rr-docs-table__cell--size,
 .rr-docs-table__cell--date {
   color: var(--rr-text-secondary, rgba(15, 23, 42, 0.72));
-  font-size: 0.79rem;
+  font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
 }
 
 .rr-docs-table__cell--cost {
   color: color-mix(in srgb, var(--rr-text-secondary, #334155) 72%, #ffffff 28%);
-  font-size: 0.77rem;
+  font-size: 0.73rem;
   font-variant-numeric: tabular-nums;
 }
 
@@ -794,53 +898,72 @@ function lastActivityText(row: DocumentRowSummary): string | null {
 
 .rr-docs-table__cell--status {
   white-space: normal;
+  padding-block: 8px;
 }
 
 .rr-docs-table__status-stack {
   display: grid;
   justify-items: start;
-  gap: 6px;
+  gap: 0.28rem;
   min-width: 0;
   justify-self: stretch;
+  width: 100%;
+  overflow: hidden;
+}
+
+.rr-docs-table__status-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
 }
 
 .rr-docs-table__status-stack.is-in-flight {
-  padding: 0.56rem 0.68rem;
-  border-radius: 14px;
-  border: 1px solid rgba(191, 219, 254, 0.72);
-  background: rgba(255, 255, 255, 0.76);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.86),
-    0 8px 16px rgba(37, 99, 235, 0.05);
+  min-height: 0;
+  padding: 0.36rem 0.46rem;
+  border-radius: 10px;
+  border: 1px solid rgba(191, 219, 254, 0.44);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(246, 249, 255, 0.68)),
+    rgba(255, 255, 255, 0.72);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.88);
 }
 
-.rr-docs-table__status-stack.is-graph-catchup {
-  padding: 0.56rem 0.68rem;
-  border-radius: 14px;
-  border: 1px solid rgba(186, 230, 253, 0.82);
-  background: rgba(240, 249, 255, 0.72);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.9),
-    0 8px 16px rgba(14, 116, 144, 0.04);
+.rr-docs-table__status-stack.is-readable,
+.rr-docs-table__status-stack.is-graph-sparse {
+  min-height: 0;
+  padding: 0.36rem 0.46rem;
+  border-radius: 10px;
+  border: 1px solid rgba(186, 230, 253, 0.5);
+  background:
+    linear-gradient(180deg, rgba(248, 252, 255, 0.92), rgba(240, 249, 255, 0.74)),
+    rgba(248, 252, 255, 0.78);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
 
 .rr-docs-table__status-copy {
   margin: 0;
   color: rgba(71, 85, 105, 0.94);
-  font-size: 0.72rem;
+  font-size: 0.65rem;
   font-weight: 600;
   line-height: 1.42;
-  text-wrap: balance;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow-wrap: anywhere;
 }
 
 .rr-docs-table__status-meta {
-  display: inline-flex;
+  display: flex;
   flex-wrap: wrap;
-  gap: 0.42rem 0.6rem;
+  gap: 0.3rem 0.45rem;
   color: rgba(100, 116, 139, 0.92);
-  font-size: 0.68rem;
+  font-size: 0.64rem;
   font-weight: 700;
   line-height: 1.35;
+  width: 100%;
 }
 
 .rr-docs-table__status-meta span {
@@ -857,8 +980,8 @@ function lastActivityText(row: DocumentRowSummary): string | null {
 
 .rr-docs-table__status-progress {
   position: relative;
-  width: min(100%, 10.5rem);
-  height: 0.42rem;
+  width: 100%;
+  height: 0.26rem;
   overflow: hidden;
   border-radius: 999px;
   background: rgba(226, 232, 240, 0.9);
@@ -879,7 +1002,8 @@ function lastActivityText(row: DocumentRowSummary): string | null {
   background: linear-gradient(90deg, rgba(37, 99, 235, 0.9), rgba(79, 70, 229, 0.72));
 }
 
-.rr-docs-table__status-progress.is-graph-catchup span {
+.rr-docs-table__status-progress.is-readable span,
+.rr-docs-table__status-progress.is-graph-sparse span {
   background: linear-gradient(90deg, rgba(14, 116, 144, 0.88), rgba(56, 189, 248, 0.62));
 }
 
@@ -888,12 +1012,14 @@ function lastActivityText(row: DocumentRowSummary): string | null {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
 }
 
-.rr-docs-table__status-stack :deep(.rr-status-pill--ready) {
+.rr-docs-table__status-stack :deep(.rr-status-pill--ready),
+.rr-docs-table__status-stack :deep(.rr-status-pill--graph_ready) {
   background: rgba(240, 253, 248, 0.56);
   color: rgba(5, 150, 105, 0.78);
 }
 
-.rr-docs-table__status-stack :deep(.rr-status-pill--ready_no_graph) {
+.rr-docs-table__status-stack :deep(.rr-status-pill--readable),
+.rr-docs-table__status-stack :deep(.rr-status-pill--graph_sparse) {
   background: rgba(240, 249, 255, 0.98);
   color: rgba(14, 116, 144, 0.96);
 }
@@ -911,12 +1037,14 @@ function lastActivityText(row: DocumentRowSummary): string | null {
 .rr-docs-table__status-action {
   display: inline-flex;
   align-items: center;
-  padding: 2px 8px;
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 2px 6px;
   border: 1px solid rgba(99, 102, 241, 0.16);
   border-radius: 999px;
   background: rgba(99, 102, 241, 0.06);
   font: inherit;
-  font-size: 0.7rem;
+  font-size: 0.66rem;
   font-weight: 600;
   color: rgba(67, 56, 202, 0.92);
   cursor: pointer;
@@ -951,12 +1079,8 @@ function lastActivityText(row: DocumentRowSummary): string | null {
 }
 
 @media (max-width: 1180px) {
-  .rr-docs-table__name-stack {
-    gap: 3px;
-  }
-
-  .rr-docs-table__name-stack span {
-    display: block;
+  .rr-docs-table__col--status {
+    width: 270px;
   }
 
   .rr-docs-table__cell--type,
@@ -1006,8 +1130,8 @@ function lastActivityText(row: DocumentRowSummary): string | null {
 
   .rr-docs-table tr.rr-docs-table__row {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 0;
+    grid-template-columns: 1fr;
+    gap: 8px;
     padding: 10px 0;
   }
 
@@ -1019,7 +1143,7 @@ function lastActivityText(row: DocumentRowSummary): string | null {
   }
 
   .rr-docs-table td.rr-docs-table__cell {
-    padding: 2px 16px;
+    padding: 0 14px;
     border-bottom: 0;
   }
 
@@ -1028,16 +1152,20 @@ function lastActivityText(row: DocumentRowSummary): string | null {
   }
 
   .rr-docs-table td.rr-docs-table__cell--status {
-    padding-top: 6px;
-    display: flex;
-    justify-content: flex-end;
-    align-items: flex-start;
+    padding-top: 0;
+    display: block;
   }
 
   .rr-docs-table__status-stack {
     justify-items: start;
     text-align: left;
-    gap: 8px;
+    gap: 6px;
+    padding: 0.52rem 0.62rem;
+    width: 100%;
+  }
+
+  .rr-docs-table__status-copy {
+    -webkit-line-clamp: 3;
   }
 
   .rr-docs-table__status-cost {

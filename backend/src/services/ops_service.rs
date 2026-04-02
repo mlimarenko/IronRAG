@@ -1,10 +1,19 @@
+use std::collections::BTreeMap;
+
 use chrono::Utc;
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::knowledge::{KnowledgeLibraryGeneration, KnowledgeRevision},
     domains::ops::{OpsAsyncOperation, OpsLibraryState, OpsLibraryWarning},
+    domains::{
+        content::{
+            ContentDocumentPipelineJob, ContentDocumentSummary, ContentMutation,
+            DocumentReadinessSummary, LibraryKnowledgeCoverage, revision_text_state_is_readable,
+        },
+        knowledge::{KnowledgeLibraryGeneration, KnowledgeRevision, StructuredDocumentRevision},
+    },
+    infra::arangodb::document_store::KnowledgeRevisionRow,
     infra::repositories::ops_repository,
     interfaces::http::router_support::ApiError,
 };
@@ -38,6 +47,18 @@ pub struct OpsService;
 pub struct OpsLibraryStateSnapshot {
     pub state: OpsLibraryState,
     pub knowledge_generations: Vec<KnowledgeLibraryGeneration>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocumentKnowledgeCoverageState {
+    pub processing_active: bool,
+    pub failed: bool,
+    pub readable: bool,
+    pub graph_ready: bool,
+    pub readiness_kind: String,
+    pub preparation_state: String,
+    pub graph_coverage_kind: String,
+    pub typed_fact_coverage: Option<f64>,
 }
 
 impl OpsService {
@@ -135,6 +156,11 @@ impl OpsService {
         knowledge_generations.sort_by(|left, right| {
             right.created_at.cmp(&left.created_at).then_with(|| right.id.cmp(&left.id))
         });
+        let coverage = state
+            .canonical_services
+            .knowledge
+            .get_library_knowledge_coverage(state, library_id)
+            .await?;
         let revision_health =
             load_library_revision_health(state, library.workspace_id, library_id).await?;
         let failed_attempts = ops_repository::list_recent_failed_ingest_attempts(
@@ -153,6 +179,7 @@ impl OpsService {
         .map_err(|_| ApiError::Internal)?;
         let state = map_library_facts_row(
             &facts,
+            &coverage,
             &knowledge_generations,
             &revision_health,
             !failed_attempts.is_empty(),
@@ -185,6 +212,219 @@ impl OpsService {
         .map_err(|_| ApiError::Internal)?;
         Ok(build_library_warnings(library_id, &revision_health, &failed_attempts, &bundle_failures))
     }
+
+    #[must_use]
+    pub fn classify_document_knowledge_state(
+        &self,
+        effective_readiness_row: Option<&KnowledgeRevisionRow>,
+        prepared_revision: Option<&StructuredDocumentRevision>,
+        latest_mutation: Option<&ContentMutation>,
+        latest_job: Option<&ContentDocumentPipelineJob>,
+    ) -> DocumentKnowledgeCoverageState {
+        let processing_active = latest_job
+            .as_ref()
+            .is_some_and(|job| matches!(job.queue_state.as_str(), "queued" | "leased"))
+            || latest_mutation.as_ref().is_some_and(|mutation| {
+                matches!(mutation.mutation_state.as_str(), "accepted" | "running")
+            });
+        let failed = latest_job
+            .as_ref()
+            .is_some_and(|job| matches!(job.queue_state.as_str(), "failed" | "canceled"))
+            || latest_mutation.as_ref().is_some_and(|mutation| {
+                matches!(mutation.mutation_state.as_str(), "failed" | "conflicted" | "canceled")
+            })
+            || effective_readiness_row.as_ref().is_some_and(|revision| {
+                matches!(revision.text_state.as_str(), "failed" | "unavailable")
+                    || revision.vector_state == "failed"
+                    || revision.graph_state == "failed"
+            })
+            || prepared_revision
+                .as_ref()
+                .is_some_and(|revision| revision.preparation_state == "failed");
+        let revision_text_ready = effective_readiness_row
+            .as_ref()
+            .is_some_and(|revision| revision_text_state_is_readable(&revision.text_state));
+        let revision_graph_ready = effective_readiness_row.as_ref().is_some_and(|revision| {
+            matches!(revision.graph_state.as_str(), "ready" | "graph_ready")
+        });
+        let preparation_ready = prepared_revision
+            .as_ref()
+            .is_some_and(|revision| revision.preparation_state == "prepared");
+        let readable = preparation_ready || revision_text_ready;
+        let graph_ready = preparation_ready && revision_graph_ready;
+        let graph_sparse = readable && !graph_ready && (preparation_ready || revision_graph_ready);
+        let readiness_kind = if failed {
+            "failed"
+        } else if processing_active && readable {
+            "readable"
+        } else if processing_active {
+            "processing"
+        } else if graph_ready {
+            "graph_ready"
+        } else if graph_sparse {
+            "graph_sparse"
+        } else if readable {
+            "readable"
+        } else {
+            "processing"
+        };
+        let graph_coverage_kind = if failed {
+            "failed"
+        } else if graph_ready {
+            "graph_ready"
+        } else if graph_sparse {
+            "graph_sparse"
+        } else {
+            "processing"
+        };
+        let preparation_state = prepared_revision
+            .as_ref()
+            .map(|revision| revision.preparation_state.clone())
+            .unwrap_or_else(|| {
+                if failed {
+                    "failed".to_string()
+                } else if processing_active {
+                    "building".to_string()
+                } else if preparation_ready {
+                    "prepared".to_string()
+                } else {
+                    "pending".to_string()
+                }
+            });
+        let typed_fact_coverage = prepared_revision.as_ref().map(|revision| {
+            if revision.block_count <= 0 {
+                0.0
+            } else {
+                (f64::from(revision.typed_fact_count) / f64::from(revision.block_count))
+                    .clamp(0.0, 1.0)
+            }
+        });
+
+        DocumentKnowledgeCoverageState {
+            processing_active,
+            failed,
+            readable,
+            graph_ready,
+            readiness_kind: readiness_kind.to_string(),
+            preparation_state,
+            graph_coverage_kind: graph_coverage_kind.to_string(),
+            typed_fact_coverage,
+        }
+    }
+
+    pub fn derive_document_readiness_summary(
+        &self,
+        state: &AppState,
+        document_id: Uuid,
+        active_revision_id: Option<Uuid>,
+        effective_readiness_row: Option<&KnowledgeRevisionRow>,
+        prepared_revision: Option<&StructuredDocumentRevision>,
+        latest_mutation: Option<&ContentMutation>,
+        latest_job: Option<&ContentDocumentPipelineJob>,
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) -> DocumentReadinessSummary {
+        let classification = self.classify_document_knowledge_state(
+            effective_readiness_row,
+            prepared_revision,
+            latest_mutation,
+            latest_job,
+        );
+        let now = Utc::now();
+        let activity_status =
+            state.bulk_ingest_hardening_services.ingest_activity.derive_document_activity(
+                latest_mutation,
+                latest_job,
+                classification.readable,
+                classification.graph_ready,
+                now,
+            );
+        let stalled_reason =
+            state.bulk_ingest_hardening_services.ingest_activity.document_stalled_reason(
+                latest_mutation,
+                latest_job,
+                classification.readable,
+                classification.graph_ready,
+                now,
+            );
+        let updated_at = [
+            Some(created_at),
+            latest_job.and_then(|job| job.completed_at.or(Some(job.queued_at))),
+            latest_mutation.map(|mutation| mutation.requested_at),
+            effective_readiness_row.and_then(|revision| revision.text_readable_at),
+            effective_readiness_row.and_then(|revision| revision.vector_ready_at),
+            effective_readiness_row.and_then(|revision| revision.graph_ready_at),
+            prepared_revision.map(|revision| revision.prepared_at),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(created_at);
+
+        DocumentReadinessSummary {
+            document_id,
+            active_revision_id,
+            readiness_kind: classification.readiness_kind,
+            activity_status,
+            stalled_reason,
+            preparation_state: classification.preparation_state,
+            graph_coverage_kind: classification.graph_coverage_kind,
+            typed_fact_coverage: classification.typed_fact_coverage,
+            last_mutation_id: latest_mutation.map(|mutation| mutation.id),
+            last_job_stage: latest_job.and_then(|job| job.current_stage.clone()),
+            updated_at,
+        }
+    }
+
+    #[must_use]
+    pub fn derive_library_knowledge_coverage(
+        &self,
+        library_id: Uuid,
+        summaries: &[ContentDocumentSummary],
+        last_generation_id: Option<Uuid>,
+    ) -> LibraryKnowledgeCoverage {
+        let mut document_counts_by_readiness = BTreeMap::<String, i64>::new();
+        let mut graph_ready_document_count = 0_i64;
+        let mut graph_sparse_document_count = 0_i64;
+        let mut typed_fact_document_count = 0_i64;
+        let mut updated_at = summaries
+            .iter()
+            .filter_map(|summary| summary.readiness_summary.as_ref().map(|item| item.updated_at))
+            .max()
+            .unwrap_or_else(Utc::now);
+
+        for summary in
+            summaries.iter().filter(|summary| summary.document.document_state != "deleted")
+        {
+            let Some(readiness) = summary.readiness_summary.as_ref() else {
+                continue;
+            };
+            *document_counts_by_readiness.entry(readiness.readiness_kind.clone()).or_default() += 1;
+            match readiness.graph_coverage_kind.as_str() {
+                "graph_ready" => graph_ready_document_count += 1,
+                "graph_sparse" => graph_sparse_document_count += 1,
+                _ => {}
+            }
+            if readiness.typed_fact_coverage.unwrap_or_default() > 0.0
+                || summary
+                    .prepared_revision
+                    .as_ref()
+                    .is_some_and(|revision| revision.typed_fact_count > 0)
+            {
+                typed_fact_document_count += 1;
+            }
+            updated_at = updated_at.max(readiness.updated_at);
+        }
+
+        LibraryKnowledgeCoverage {
+            library_id,
+            document_counts_by_readiness,
+            graph_ready_document_count,
+            graph_sparse_document_count,
+            typed_fact_document_count,
+            last_generation_id,
+            updated_at,
+        }
+    }
 }
 
 fn map_async_operation_row(row: ops_repository::OpsAsyncOperationRow) -> OpsAsyncOperation {
@@ -205,6 +445,7 @@ fn map_async_operation_row(row: ops_repository::OpsAsyncOperationRow) -> OpsAsyn
 
 fn map_library_facts_row(
     row: &ops_repository::OpsLibraryFactsRow,
+    coverage: &LibraryKnowledgeCoverage,
     knowledge_generations: &[KnowledgeLibraryGeneration],
     revision_health: &[KnowledgeRevision],
     has_failed_attempts: bool,
@@ -212,9 +453,11 @@ fn map_library_facts_row(
 ) -> OpsLibraryState {
     let latest_knowledge_generation = knowledge_generations.first();
     let readable_document_count =
-        revision_health.iter().filter(|revision| is_revision_text_readable(revision)).count();
+        coverage.document_counts_by_readiness.get("readable").copied().unwrap_or_default()
+            + coverage.graph_sparse_document_count
+            + coverage.graph_ready_document_count;
     let failed_document_count =
-        revision_health.iter().filter(|revision| is_revision_failed(revision)).count();
+        coverage.document_counts_by_readiness.get("failed").copied().unwrap_or_default();
     let stale_vector_count =
         revision_health.iter().filter(|revision| is_revision_vector_stale(revision)).count();
     let stale_relation_count =
@@ -224,12 +467,12 @@ fn map_library_facts_row(
         library_id: row.library_id,
         queue_depth: row.queue_depth,
         running_attempts: row.running_attempts,
-        readable_document_count: i64::try_from(readable_document_count).unwrap_or(i64::MAX),
-        failed_document_count: i64::try_from(failed_document_count).unwrap_or(i64::MAX),
+        readable_document_count,
+        failed_document_count,
         degraded_state: derive_degraded_state(
             row.queue_depth,
             row.running_attempts,
-            failed_document_count,
+            usize::try_from(failed_document_count).unwrap_or(usize::MAX),
             stale_vector_count,
             stale_relation_count,
             has_failed_attempts,
@@ -291,24 +534,14 @@ async fn load_library_revision_health(
     Ok(revisions)
 }
 
-fn is_revision_text_readable(revision: &KnowledgeRevision) -> bool {
-    matches!(revision.text_state.as_str(), "readable" | "ready" | "text_readable")
-}
-
 fn is_revision_vector_stale(revision: &KnowledgeRevision) -> bool {
-    is_revision_text_readable(revision)
+    revision_text_state_is_readable(&revision.text_state)
         && !matches!(revision.vector_state.as_str(), "ready" | "vector_ready")
 }
 
 fn is_revision_graph_stale(revision: &KnowledgeRevision) -> bool {
-    is_revision_text_readable(revision)
+    revision_text_state_is_readable(&revision.text_state)
         && !matches!(revision.graph_state.as_str(), "ready" | "graph_ready")
-}
-
-fn is_revision_failed(revision: &KnowledgeRevision) -> bool {
-    matches!(revision.text_state.as_str(), "failed" | "unavailable")
-        || revision.vector_state == "failed"
-        || revision.graph_state == "failed"
 }
 
 fn derive_degraded_state(

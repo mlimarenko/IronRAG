@@ -9,15 +9,16 @@ use rustrag_backend::{
         arangodb::collections::{
             DOCUMENT_COLLECTIONS, EDGE_COLLECTIONS, KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
             KNOWLEDGE_CHUNK_VECTOR_INDEX, KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
-            KNOWLEDGE_ENTITY_VECTOR_INDEX, KNOWLEDGE_GRAPH_NAME, KNOWLEDGE_SEARCH_VIEW,
+            KNOWLEDGE_ENTITY_VECTOR_INDEX, KNOWLEDGE_GRAPH_NAME, KNOWLEDGE_PERSISTENT_INDEXES,
+            KNOWLEDGE_SEARCH_VIEW,
         },
         persistence::{canonical_ai_catalog_seeded, canonical_baseline_present},
     },
 };
 
 const SEEDED_PROVIDER_COUNT: i64 = 3;
-const SEEDED_MODEL_COUNT: i64 = 7;
-const SEEDED_PRICE_COUNT: i64 = 12;
+const SEEDED_MODEL_COUNT: i64 = 40;
+const SEEDED_PRICE_COUNT: i64 = 118;
 
 struct TempDatabase {
     name: String,
@@ -183,6 +184,48 @@ impl TempArangoDatabase {
             .any(|row| row.get("name").and_then(serde_json::Value::as_str) == Some(index_name)))
     }
 
+    async fn has_persistent_index(
+        &self,
+        collection: &str,
+        index_name: &str,
+        fields: &[&str],
+        unique: bool,
+        sparse: bool,
+    ) -> Result<bool> {
+        let payload = self
+            .http
+            .get(self.db_api_url(&format!("_api/index?collection={collection}")))
+            .basic_auth(&self.username, Some(&self.password))
+            .send()
+            .await
+            .context("failed to list Arango indexes")?
+            .error_for_status()
+            .context("Arango index listing failed")?
+            .json::<serde_json::Value>()
+            .await
+            .context("failed to decode Arango index list")?;
+        let indexes = payload
+            .get("indexes")
+            .and_then(serde_json::Value::as_array)
+            .context("Arango index list missing `indexes`")?;
+
+        Ok(indexes.iter().any(|row| {
+            row.get("name").and_then(serde_json::Value::as_str) == Some(index_name)
+                && row.get("type").and_then(serde_json::Value::as_str) == Some("persistent")
+                && row.get("fields").and_then(serde_json::Value::as_array).is_some_and(
+                    |actual_fields| {
+                        actual_fields.len() == fields.len()
+                            && actual_fields
+                                .iter()
+                                .zip(fields.iter().copied())
+                                .all(|(actual, expected)| actual.as_str() == Some(expected))
+                    },
+                )
+                && row.get("unique").and_then(serde_json::Value::as_bool) == Some(unique)
+                && row.get("sparse").and_then(serde_json::Value::as_bool) == Some(sparse)
+        }))
+    }
+
     async fn drop(self) -> Result<()> {
         let response = self
             .http
@@ -324,6 +367,23 @@ async fn fresh_startup_bootstraps_postgres_catalog_and_arango_knowledge_plane() 
                 .has_index(KNOWLEDGE_ENTITY_VECTOR_COLLECTION, KNOWLEDGE_ENTITY_VECTOR_INDEX)
                 .await?
         );
+        for index in KNOWLEDGE_PERSISTENT_INDEXES {
+            assert!(
+                fixture
+                    .temp_arango
+                    .has_persistent_index(
+                        index.collection,
+                        index.name,
+                        index.fields,
+                        index.unique,
+                        index.sparse,
+                    )
+                    .await?,
+                "missing or mismatched persistent index {} on {}",
+                index.name,
+                index.collection
+            );
+        }
 
         Ok(())
     }

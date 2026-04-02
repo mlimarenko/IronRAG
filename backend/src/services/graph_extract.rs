@@ -19,10 +19,12 @@ use crate::{
     services::{
         ai_catalog_service::ResolvedRuntimeBinding,
         extraction_recovery::{ExtractionRecoveryService, ParserRepairClassification},
+        graph_identity,
     },
+    shared::technical_facts::TechnicalFactQualifier,
 };
 
-const GRAPH_EXTRACTION_VERSION: &str = "graph_extract_v1";
+const GRAPH_EXTRACTION_VERSION: &str = "graph_extract_v5";
 const GRAPH_EXTRACTION_MAX_PROVIDER_ATTEMPTS: usize = 2;
 const GRAPH_EXTRACTION_REQUEST_OVERHEAD_BYTES: usize = 8 * 1024;
 const GRAPH_EXTRACTION_MAX_SEGMENTS: usize = 3;
@@ -57,9 +59,28 @@ pub struct GraphExtractionRequest {
     pub project_id: uuid::Uuid,
     pub document: DocumentRow,
     pub chunk: ChunkRow,
+    pub structured_chunk: GraphExtractionStructuredChunkContext,
+    pub technical_facts: Vec<GraphExtractionTechnicalFact>,
     pub revision_id: Option<uuid::Uuid>,
     pub activated_by_attempt_id: Option<uuid::Uuid>,
     pub resume_hint: Option<GraphExtractionResumeHint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct GraphExtractionStructuredChunkContext {
+    pub chunk_kind: Option<String>,
+    pub section_path: Vec<String>,
+    pub heading_trail: Vec<String>,
+    pub support_block_ids: Vec<uuid::Uuid>,
+    pub literal_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GraphExtractionTechnicalFact {
+    pub fact_kind: String,
+    pub canonical_value: String,
+    pub display_value: String,
+    pub qualifiers: Vec<TechnicalFactQualifier>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -216,13 +237,8 @@ struct ResolvedGraphExtraction {
 
 #[derive(Debug, Clone)]
 struct GraphExtractionFailureOutcome {
-    provider_kind: String,
-    model_name: String,
-    prompt_hash: String,
     request_shape_key: String,
     request_size_bytes: usize,
-    provider_attempt_count: usize,
-    raw_output_json: serde_json::Value,
     error_message: String,
     provider_failure: Option<RuntimeProviderFailureDetail>,
     recovery_summary: ExtractionRecoverySummary,
@@ -248,17 +264,12 @@ struct GraphExtractionPromptPlan {
 }
 
 fn unconfigured_graph_extraction_failure(
-    request: &GraphExtractionRequest,
+    _request: &GraphExtractionRequest,
     error_message: impl Into<String>,
 ) -> GraphExtractionFailureOutcome {
     GraphExtractionFailureOutcome {
-        provider_kind: "unconfigured".to_string(),
-        model_name: "unconfigured".to_string(),
-        prompt_hash: sha256_hex(&build_graph_extraction_prompt(request)),
-        request_shape_key: "graph_extract_v3:unconfigured".to_string(),
+        request_shape_key: "graph_extract_v5:unconfigured".to_string(),
         request_size_bytes: 0,
-        provider_attempt_count: 0,
-        raw_output_json: serde_json::json!({}),
         error_message: error_message.into(),
         provider_failure: None,
         recovery_summary: ExtractionRecoverySummary {
@@ -322,6 +333,7 @@ enum GraphExtractionPromptVariant {
     SecondPass,
 }
 
+#[cfg(test)]
 #[must_use]
 pub fn build_graph_extraction_prompt(request: &GraphExtractionRequest) -> String {
     build_graph_extraction_prompt_plan(
@@ -371,13 +383,6 @@ fn build_graph_extraction_prompt_plan(
         request_size_soft_limit_bytes.max(GRAPH_EXTRACTION_REQUEST_OVERHEAD_BYTES + 1024),
         downgrade_level,
     );
-    let chunk_text_budget = safe_limit.saturating_sub(GRAPH_EXTRACTION_REQUEST_OVERHEAD_BYTES);
-    let chunk_segments = segment_chunk_text_for_prompt(
-        &request.chunk.content,
-        chunk_text_budget.max(1024),
-        downgraded_max_segments(downgrade_level),
-    );
-
     let mut sections: Vec<(String, String)> = Vec::new();
     sections.push((
         "task".to_string(),
@@ -385,7 +390,10 @@ fn build_graph_extraction_prompt_plan(
     ));
     sections.push((
         "schema".to_string(),
-        "Return strict JSON with keys `entities` and `relations`. Each entity must include `label`, `node_type` (`entity` or `topic`), `aliases`, and `summary`. Each relation must include `source_label`, `target_label`, `relation_type`, and `summary`.".to_string(),
+        format!(
+            "Return strict JSON with keys `entities` and `relations`. Each entity must include `label`, `node_type` (only `entity` or `topic`; omit the whole entity if any other value appears), `aliases`, and `summary`. Each relation must include `source_label`, `target_label`, `relation_type`, and `summary`. `relation_type` must be copied verbatim from this catalog: {}. Use lowercase ASCII snake_case only. Never translate, localize, paraphrase, or invent a new relation_type. If no concise summary is available, emit an empty string. If none fit exactly, omit the relation.",
+            graph_identity::canonical_relation_type_catalog().join(", ")
+        ),
     ));
     sections.push((
         "rules".to_string(),
@@ -395,6 +403,15 @@ fn build_graph_extraction_prompt_plan(
         "document".to_string(),
         format!("Document: {document_label}\nChunk ordinal: {}", request.chunk.ordinal),
     ));
+    sections.push((
+        "structured_chunk".to_string(),
+        render_structured_chunk_context(&request.structured_chunk),
+    ));
+    if let Some(technical_fact_section) =
+        render_graph_extraction_technical_facts(&request.technical_facts, safe_limit / 5)
+    {
+        sections.push(("technical_facts".to_string(), technical_fact_section));
+    }
 
     if downgrade_level > 0 {
         sections.push((
@@ -428,6 +445,17 @@ fn build_graph_extraction_prompt_plan(
         ));
     }
 
+    let reserved_bytes = sections
+        .iter()
+        .map(|(title, body)| title.len().saturating_add(body.len()).saturating_add(8))
+        .sum::<usize>();
+    let chunk_text_budget =
+        safe_limit.saturating_sub(reserved_bytes).max(GRAPH_EXTRACTION_REQUEST_OVERHEAD_BYTES / 4);
+    let chunk_segments = segment_chunk_text_for_prompt(
+        &request.chunk.content,
+        chunk_text_budget,
+        downgraded_max_segments(downgrade_level),
+    );
     for (index, segment) in chunk_segments.iter().enumerate() {
         sections.push((format!("chunk_segment_{}", index + 1), segment.clone()));
     }
@@ -439,7 +467,7 @@ fn build_graph_extraction_prompt_plan(
         .join("\n\n");
     let request_size_bytes = prompt.len();
     let request_shape_key = format!(
-        "graph_extract_v3:{}:segments_{}:downgrade_{}:{}",
+        "graph_extract_v5:{}:segments_{}:downgrade_{}:{}",
         match variant {
             GraphExtractionPromptVariant::Initial => "initial",
             GraphExtractionPromptVariant::ProviderRetry => "provider_retry",
@@ -459,11 +487,11 @@ fn segment_chunk_text_for_prompt(
     max_segments: usize,
 ) -> Vec<String> {
     if content.is_empty() {
-        return vec!["Chunk text:".to_string()];
+        return vec!["Prepared chunk text:".to_string()];
     }
 
     if content.len() <= max_total_bytes {
-        return vec![format!("Chunk text:\n{content}")];
+        return vec![format!("Prepared chunk text:\n{content}")];
     }
 
     let segment_count = max_segments.max(1);
@@ -474,14 +502,14 @@ fn segment_chunk_text_for_prompt(
     let edge_chars = approx_chars_per_segment.min(total_chars);
     let head = chars[..edge_chars].iter().collect::<String>();
     if segment_count == 1 {
-        return vec![format!("Chunk text segment 1/1:\n{head}")];
+        return vec![format!("Prepared chunk text segment 1/1:\n{head}")];
     }
 
     if segment_count == 2 {
         let tail = chars[total_chars.saturating_sub(edge_chars)..].iter().collect::<String>();
         return vec![
-            "Chunk text segment 1/2:\n".to_string() + &head,
-            "Chunk text segment 2/2:\n".to_string() + &tail,
+            "Prepared chunk text segment 1/2:\n".to_string() + &head,
+            "Prepared chunk text segment 2/2:\n".to_string() + &tail,
         ];
     }
 
@@ -491,10 +519,127 @@ fn segment_chunk_text_for_prompt(
     let tail = chars[total_chars.saturating_sub(edge_chars)..].iter().collect::<String>();
 
     vec![
-        format!("Chunk text segment 1/{segment_count}:\n{head}"),
-        format!("Chunk text segment 2/{segment_count}:\n{middle}"),
-        format!("Chunk text segment 3/{segment_count}:\n{tail}"),
+        format!("Prepared chunk text segment 1/{segment_count}:\n{head}"),
+        format!("Prepared chunk text segment 2/{segment_count}:\n{middle}"),
+        format!("Prepared chunk text segment 3/{segment_count}:\n{tail}"),
     ]
+}
+
+fn render_structured_chunk_context(context: &GraphExtractionStructuredChunkContext) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("Chunk kind: {}", context.chunk_kind.as_deref().unwrap_or("unknown")));
+    if !context.section_path.is_empty() {
+        lines.push(format!("Section path: {}", context.section_path.join(" > ")));
+    }
+    if !context.heading_trail.is_empty() {
+        lines.push(format!("Heading trail: {}", context.heading_trail.join(" > ")));
+    }
+    if !context.support_block_ids.is_empty() {
+        lines.push(format!("Support block count: {}", context.support_block_ids.len()));
+    }
+    if let Some(literal_digest) = &context.literal_digest {
+        lines.push(format!("Literal digest: {literal_digest}"));
+    }
+    lines.join("\n")
+}
+
+fn render_graph_extraction_technical_facts(
+    facts: &[GraphExtractionTechnicalFact],
+    max_bytes: usize,
+) -> Option<String> {
+    if facts.is_empty() {
+        return None;
+    }
+
+    let mut rendered = String::new();
+    for fact in facts {
+        let qualifiers = if fact.qualifiers.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " | qualifiers: {}",
+                fact.qualifiers
+                    .iter()
+                    .map(|qualifier| format!("{}={}", qualifier.key, qualifier.value))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let line = format!(
+            "- {}: {} | display: {}{}",
+            fact.fact_kind, fact.canonical_value, fact.display_value, qualifiers
+        );
+        let next_len = rendered.len().saturating_add(line.len()).saturating_add(1);
+        if !rendered.is_empty() && next_len > max_bytes.max(256) {
+            break;
+        }
+        if !rendered.is_empty() {
+            rendered.push('\n');
+        }
+        rendered.push_str(&line);
+    }
+
+    (!rendered.is_empty()).then_some(rendered)
+}
+
+fn graph_extraction_response_format_json(provider_kind: &str) -> serde_json::Value {
+    if provider_kind == "deepseek" {
+        return serde_json::json!({
+            "type": "json_object"
+        });
+    }
+
+    serde_json::json!({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "graph_extraction",
+            "strict": true,
+            "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "entities": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "label": { "type": "string" },
+                                "node_type": {
+                                    "type": "string",
+                                    "enum": ["entity", "topic"]
+                                },
+                                "aliases": {
+                                    "type": "array",
+                                    "items": { "type": "string" }
+                                },
+                                "summary": { "type": "string" }
+                            },
+                            "required": ["label", "node_type", "aliases", "summary"]
+                        }
+                    },
+                    "relations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "source_label": { "type": "string" },
+                                "target_label": { "type": "string" },
+                                "relation_type": {
+                                    "type": "string",
+                                    "enum": graph_identity::canonical_relation_type_catalog()
+                                },
+                                "summary": { "type": "string" }
+                            },
+                            "required": ["source_label", "target_label", "relation_type", "summary"]
+                        }
+                    }
+                },
+                "required": ["entities", "relations"]
+            }
+        }
+    })
 }
 
 #[must_use]
@@ -715,7 +860,7 @@ pub fn extraction_outcome_from_resume_state(
         request_shape_key: row
             .request_shape_key
             .clone()
-            .unwrap_or_else(|| "graph_extract_v3:resumed".to_string()),
+            .unwrap_or_else(|| "graph_extract_v5:resumed".to_string()),
         request_size_bytes: row
             .request_size_bytes
             .and_then(|value| usize::try_from(value).ok())
@@ -934,20 +1079,8 @@ async fn resolve_graph_extraction_with_gateway(
                     true,
                 );
                 return Err(GraphExtractionFailureOutcome {
-                    provider_kind: provider_kind.clone(),
-                    model_name: model_name.clone(),
-                    prompt_hash: sha256_hex(&prompt_plan.prompt),
                     request_shape_key: prompt_plan.request_shape_key,
                     request_size_bytes: prompt_plan.request_size_bytes,
-                    provider_attempt_count: trace.provider_attempt_count,
-                    raw_output_json: build_raw_output_json(
-                        "",
-                        aggregate_provider_usage_json(&provider_kind, &model_name, &usage_samples),
-                        &lifecycle,
-                        &trace,
-                        &recovery_summary,
-                        &usage_calls,
-                    ),
                     error_message: if provider_attempt_no == 1 {
                         format!(
                             "graph extraction provider call failed before normalization retry: {error:#}"
@@ -1206,24 +1339,8 @@ async fn resolve_graph_extraction_with_gateway(
                         true,
                     );
                     return Err(GraphExtractionFailureOutcome {
-                        provider_kind: raw.provider_kind.clone(),
-                        model_name: raw.model_name.clone(),
-                        prompt_hash: raw.prompt_hash.clone(),
                         request_shape_key: raw.request_shape_key.clone(),
                         request_size_bytes: raw.request_size_bytes,
-                        provider_attempt_count: trace.provider_attempt_count,
-                        raw_output_json: build_raw_output_json(
-                            &raw.output_text,
-                            aggregate_provider_usage_json(
-                                &raw.provider_kind,
-                                &raw.model_name,
-                                &usage_samples,
-                            ),
-                            &raw.lifecycle,
-                            &trace,
-                            &recovery_summary,
-                            &usage_calls,
-                        ),
                         error_message: format!(
                             "failed to normalize graph extraction output after {} provider attempt(s): {}",
                             provider_attempt_count, parse_error,
@@ -1251,35 +1368,15 @@ async fn resolve_graph_extraction_with_gateway(
         }
     }
 
-    let aggregate_usage =
-        aggregate_provider_usage_json(&provider_kind, &model_name, &usage_samples);
     Err(GraphExtractionFailureOutcome {
-        provider_kind,
-        model_name,
-        prompt_hash: sha256_hex(&build_graph_extraction_prompt(request)),
-        request_shape_key: "graph_extract_v3:unknown".to_string(),
+        request_shape_key: "graph_extract_v5:unknown".to_string(),
         request_size_bytes: 0,
-        provider_attempt_count: trace.provider_attempt_count,
         recovery_summary: extraction_recovery.classify_outcome(
             trace.provider_attempt_count,
             trace.local_repair_applied,
             pending_recovery_records.iter().any(|record| record.recovery_kind == "second_pass"),
             false,
             true,
-        ),
-        raw_output_json: build_raw_output_json(
-            "",
-            aggregate_usage,
-            &lifecycle,
-            &trace,
-            &extraction_recovery.classify_outcome(
-                trace.provider_attempt_count,
-                trace.local_repair_applied,
-                pending_recovery_records.iter().any(|record| record.recovery_kind == "second_pass"),
-                false,
-                true,
-            ),
-            &usage_calls,
         ),
         error_message: "graph extraction retry loop ended without a terminal outcome".to_string(),
         provider_failure: None,
@@ -1319,6 +1416,9 @@ async fn request_graph_extraction_with_prompt_plan(
             temperature: runtime_binding.temperature,
             top_p: runtime_binding.top_p,
             max_output_tokens_override: runtime_binding.max_output_tokens_override,
+            response_format_json: Some(graph_extraction_response_format_json(
+                &runtime_binding.provider_kind,
+            )),
             extra_parameters_json: runtime_binding.extra_parameters_json.clone(),
         })
         .await
@@ -1612,16 +1712,21 @@ fn parse_entity_candidate(value: &serde_json::Value) -> Option<GraphEntityCandid
     if label.is_empty() {
         return None;
     }
-    let node_type = match value
-        .get("node_type")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("entity")
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "topic" => RuntimeNodeType::Topic,
-        _ => RuntimeNodeType::Entity,
+    let node_type = match value.get("node_type").and_then(serde_json::Value::as_str) {
+        None => RuntimeNodeType::Entity,
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                RuntimeNodeType::Entity
+            } else {
+                match trimmed.to_ascii_lowercase().as_str() {
+                    "entity" => RuntimeNodeType::Entity,
+                    "topic" => RuntimeNodeType::Topic,
+                    "document" => RuntimeNodeType::Document,
+                    _ => return None,
+                }
+            }
+        }
     };
     let aliases = value
         .get("aliases")
@@ -1669,10 +1774,11 @@ fn parse_relation_candidate(value: &serde_json::Value) -> Option<GraphRelationCa
     if source_label.is_empty() || target_label.is_empty() || relation_type.is_empty() {
         return None;
     }
-    let normalized_relation_type = normalize_relation_candidate_type(relation_type)?;
-    if relation_type_is_semantically_void(&normalized_relation_type) {
+    let relation_slug = graph_identity::normalize_graph_identity_component(relation_type);
+    if graph_identity::is_noise_relation_type(&relation_slug) {
         return None;
     }
+    let normalized_relation_type = normalize_relation_candidate_type(relation_type)?;
 
     Some(GraphRelationCandidate {
         source_label: source_label.to_string(),
@@ -1688,31 +1794,18 @@ fn parse_relation_candidate(value: &serde_json::Value) -> Option<GraphRelationCa
 }
 
 fn normalize_relation_candidate_type(relation_type: &str) -> Option<String> {
-    let normalized = relation_type
-        .trim()
-        .to_ascii_lowercase()
-        .chars()
-        .map(|char| if char.is_ascii_alphanumeric() { char } else { '_' })
-        .collect::<String>()
-        .split('_')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("_");
-    (!normalized.is_empty()).then_some(normalized)
+    let normalized = graph_identity::normalize_relation_type(relation_type);
+    if normalized.is_empty()
+        || !relation_type_is_canonical_ascii(&normalized)
+        || !graph_identity::is_canonical_relation_type(&normalized)
+    {
+        return None;
+    }
+    Some(normalized)
 }
 
-fn relation_type_is_semantically_void(normalized_relation_type: &str) -> bool {
-    matches!(
-        normalized_relation_type,
-        "na" | "n_a"
-            | "none"
-            | "null"
-            | "unknown"
-            | "unspecified"
-            | "tbd"
-            | "relation"
-            | "relationship"
-    )
+fn relation_type_is_canonical_ascii(normalized_relation_type: &str) -> bool {
+    normalized_relation_type.bytes().all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_'))
 }
 
 fn extract_json_payload(output_text: &str) -> Result<serde_json::Value> {
@@ -1739,18 +1832,22 @@ fn extract_json_payload(output_text: &str) -> Result<serde_json::Value> {
     candidates.extend(repaired_candidates);
 
     let mut parse_errors = Vec::new();
-    for candidate in candidates {
-        match serde_json::from_str::<serde_json::Value>(&candidate) {
+    for candidate in &candidates {
+        match serde_json::from_str::<serde_json::Value>(candidate) {
             Ok(value) => return Ok(value),
-            Err(json_error) => {
-                parse_errors.push(format!("strict json: {json_error}"));
-            }
+            Err(json_error) => parse_errors.push(format!("strict json: {json_error}")),
         }
-        match json5::from_str::<serde_json::Value>(&candidate) {
-            Ok(value) => return Ok(value),
-            Err(json5_error) => {
-                parse_errors.push(format!("json5 fallback: {json5_error}"));
+    }
+    for candidate in &candidates {
+        match json5::from_str::<serde_json::Value>(candidate) {
+            Ok(value) => {
+                tracing::warn!(
+                    target: "rustrag::graph_extract",
+                    "graph extraction JSON parsed via json5 fallback; prefer provider structured output"
+                );
+                return Ok(value);
             }
+            Err(json5_error) => parse_errors.push(format!("json5 fallback: {json5_error}")),
         }
     }
 
@@ -1912,7 +2009,7 @@ mod tests {
         EffectiveProviderProfile {
             indexing: ProviderModelSelection {
                 provider_kind: SupportedProviderKind::OpenAi,
-                model_name: "gpt-5-mini".to_string(),
+                model_name: "gpt-5.4-mini".to_string(),
             },
             embedding: ProviderModelSelection {
                 provider_kind: SupportedProviderKind::OpenAi,
@@ -1924,7 +2021,7 @@ mod tests {
             },
             vision: ProviderModelSelection {
                 provider_kind: SupportedProviderKind::OpenAi,
-                model_name: "gpt-5-mini".to_string(),
+                model_name: "gpt-5.4-mini".to_string(),
             },
         }
     }
@@ -1942,7 +2039,7 @@ mod tests {
             credential_id: uuid::Uuid::now_v7(),
             api_key: "test-api-key".to_string(),
             model_catalog_id: uuid::Uuid::now_v7(),
-            model_name: "gpt-5-mini".to_string(),
+            model_name: "gpt-5.4-mini".to_string(),
             system_prompt: None,
             temperature: None,
             top_p: None,
@@ -1956,6 +2053,30 @@ mod tests {
             project_id: uuid::Uuid::nil(),
             document: sample_document(),
             chunk: sample_chunk(),
+            structured_chunk: GraphExtractionStructuredChunkContext {
+                chunk_kind: Some("endpoint_block".to_string()),
+                section_path: vec!["REST API".to_string(), "Status".to_string()],
+                heading_trail: vec!["REST API".to_string()],
+                support_block_ids: vec![uuid::Uuid::now_v7()],
+                literal_digest: Some("digest".to_string()),
+            },
+            technical_facts: vec![
+                GraphExtractionTechnicalFact {
+                    fact_kind: "http_method".to_string(),
+                    canonical_value: "GET".to_string(),
+                    display_value: "GET".to_string(),
+                    qualifiers: Vec::new(),
+                },
+                GraphExtractionTechnicalFact {
+                    fact_kind: "endpoint_path".to_string(),
+                    canonical_value: "/annual-report/graph".to_string(),
+                    display_value: "/annual-report/graph".to_string(),
+                    qualifiers: vec![TechnicalFactQualifier {
+                        key: "method".to_string(),
+                        value: "GET".to_string(),
+                    }],
+                },
+            ],
             revision_id: None,
             activated_by_attempt_id: None,
             resume_hint: None,
@@ -1979,10 +2100,10 @@ mod tests {
             resume_hit_count: 1,
             downgrade_level: 1,
             provider_kind: Some("openai".to_string()),
-            model_name: Some("gpt-5-mini".to_string()),
+            model_name: Some("gpt-5.4-mini".to_string()),
             prompt_hash: Some("prompt-hash".to_string()),
             request_shape_key: Some(
-                "graph_extract_v3:initial:segments_2:downgrade_1:full".to_string(),
+                "graph_extract_v5:initial:segments_2:downgrade_1:full".to_string(),
             ),
             request_size_bytes: Some(2048),
             provider_failure_class: None,
@@ -2019,18 +2140,15 @@ mod tests {
 
     #[test]
     fn prompt_mentions_json_contract_and_chunk_text() {
-        let prompt = build_graph_extraction_prompt(&GraphExtractionRequest {
-            project_id: uuid::Uuid::nil(),
-            document: sample_document(),
-            chunk: sample_chunk(),
-            revision_id: None,
-            activated_by_attempt_id: None,
-            resume_hint: None,
-        });
+        let prompt = build_graph_extraction_prompt(&sample_request());
 
         assert!(prompt.contains("strict JSON"));
         assert!(prompt.contains("entities"));
         assert!(prompt.contains("annual report graph"));
+        assert!(prompt.contains("Chunk kind"));
+        assert!(prompt.contains("technical_facts"));
+        assert!(prompt.contains("copied verbatim from this catalog"));
+        assert!(!prompt.contains("`topic`, or `document`"));
     }
 
     #[test]
@@ -2066,6 +2184,39 @@ mod tests {
     }
 
     #[test]
+    fn response_format_enum_matches_canonical_relation_catalog() {
+        let response_format = graph_extraction_response_format_json("openai");
+        let enum_values = response_format
+            .get("json_schema")
+            .and_then(|value| value.get("schema"))
+            .and_then(|value| value.get("properties"))
+            .and_then(|value| value.get("relations"))
+            .and_then(|value| value.get("items"))
+            .and_then(|value| value.get("properties"))
+            .and_then(|value| value.get("relation_type"))
+            .and_then(|value| value.get("enum"))
+            .and_then(serde_json::Value::as_array)
+            .expect("relation_type enum");
+        let rendered = enum_values
+            .iter()
+            .map(|value| value.as_str().expect("enum string"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered, graph_identity::canonical_relation_type_catalog());
+    }
+
+    #[test]
+    fn deepseek_uses_json_object_response_format() {
+        let response_format = graph_extraction_response_format_json("deepseek");
+
+        assert_eq!(
+            response_format.get("type").and_then(serde_json::Value::as_str),
+            Some("json_object")
+        );
+        assert!(response_format.get("json_schema").is_none());
+    }
+
+    #[test]
     fn normalizes_json_and_string_candidates() {
         let normalized = parse_graph_extraction_output(
             r#"{
@@ -2084,6 +2235,23 @@ mod tests {
         assert_eq!(normalized.entities[0].label, "Annual report");
         assert_eq!(normalized.entities[1].node_type, RuntimeNodeType::Topic);
         assert_eq!(normalized.relations[0].relation_type, "mentions");
+    }
+
+    #[test]
+    fn drops_entities_with_invalid_node_type_values() {
+        let normalized = parse_graph_extraction_output(
+            r#"{
+              "entities": [
+                { "label": "Valid", "node_type": "topic", "aliases": [], "summary": "" },
+                { "label": "Invalid", "node_type": "organization", "aliases": [], "summary": "" }
+              ],
+              "relations": []
+            }"#,
+        )
+        .expect("parse graph extraction");
+
+        assert_eq!(normalized.entities.len(), 1);
+        assert_eq!(normalized.entities[0].label, "Valid");
     }
 
     #[test]
@@ -2126,6 +2294,23 @@ mod tests {
               "entities": [],
               "relations": [
                 { "source_label": "Alpha", "target_label": "Beta", "relation_type": "unknown" },
+                { "source_label": "Alpha", "target_label": "Beta", "relation_type": "supports" }
+              ]
+            }"#,
+        )
+        .expect("normalize graph extraction");
+
+        assert_eq!(normalized.relations.len(), 1);
+        assert_eq!(normalized.relations[0].relation_type, "supports");
+    }
+
+    #[test]
+    fn drops_non_canonical_non_ascii_relation_types_at_parse_time() {
+        let normalized = parse_graph_extraction_output(
+            r#"{
+              "entities": [],
+              "relations": [
+                { "source_label": "Alpha", "target_label": "Beta", "relation_type": "включает" },
                 { "source_label": "Alpha", "target_label": "Beta", "relation_type": "supports" }
               ]
             }"#,
@@ -2202,7 +2387,7 @@ mod tests {
             responses: Mutex::new(vec![
                 Ok(ChatResponse {
                     provider_kind: "openai".to_string(),
-                    model_name: "gpt-5-mini".to_string(),
+                    model_name: "gpt-5.4-mini".to_string(),
                     output_text: "this is not json".to_string(),
                     usage_json: serde_json::json!({
                         "prompt_tokens": 11,
@@ -2212,7 +2397,7 @@ mod tests {
                 }),
                 Ok(ChatResponse {
                     provider_kind: "openai".to_string(),
-                    model_name: "gpt-5-mini".to_string(),
+                    model_name: "gpt-5.4-mini".to_string(),
                     output_text: r#"{"entities":["OpenAI"],"relations":[]}"#.to_string(),
                     usage_json: serde_json::json!({
                         "prompt_tokens": 7,
@@ -2279,7 +2464,7 @@ mod tests {
                 )),
                 Ok(ChatResponse {
                     provider_kind: "openai".to_string(),
-                    model_name: "gpt-5-mini".to_string(),
+                    model_name: "gpt-5.4-mini".to_string(),
                     output_text: r#"{"entities":["OpenAI"],"relations":[]}"#.to_string(),
                     usage_json: serde_json::json!({
                         "prompt_tokens": 9,
@@ -2325,7 +2510,7 @@ mod tests {
                 )),
                 Ok(ChatResponse {
                     provider_kind: "openai".to_string(),
-                    model_name: "gpt-5-mini".to_string(),
+                    model_name: "gpt-5.4-mini".to_string(),
                     output_text: r#"{"entities":["OpenAI"],"relations":[]}"#.to_string(),
                     usage_json: serde_json::json!({
                         "prompt_tokens": 11,
@@ -2368,7 +2553,7 @@ mod tests {
             provider_call_no: 1,
             provider_attempt_no: 1,
             prompt_hash: "hash-1".to_string(),
-            request_shape_key: "graph_extract_v3:initial:segments_1:full".to_string(),
+            request_shape_key: "graph_extract_v5:initial:segments_1:full".to_string(),
             request_size_bytes: 120,
             usage_json: serde_json::json!({ "total_tokens": 24 }),
             timing: GraphExtractionCallTiming {
@@ -2385,7 +2570,7 @@ mod tests {
             provider_call_no: 2,
             provider_attempt_no: 2,
             prompt_hash: "hash-2".to_string(),
-            request_shape_key: "graph_extract_v3:provider_retry:segments_1:full".to_string(),
+            request_shape_key: "graph_extract_v5:provider_retry:segments_1:full".to_string(),
             request_size_bytes: 132,
             usage_json: serde_json::json!({ "total_tokens": 18 }),
             timing: GraphExtractionCallTiming {
@@ -2434,13 +2619,13 @@ mod tests {
             responses: Mutex::new(vec![
                 Ok(ChatResponse {
                     provider_kind: "openai".to_string(),
-                    model_name: "gpt-5-mini".to_string(),
+                    model_name: "gpt-5.4-mini".to_string(),
                     output_text: "broken payload".to_string(),
                     usage_json: serde_json::json!({ "prompt_tokens": 5 }),
                 }),
                 Ok(ChatResponse {
                     provider_kind: "openai".to_string(),
-                    model_name: "gpt-5-mini".to_string(),
+                    model_name: "gpt-5.4-mini".to_string(),
                     output_text: "still broken".to_string(),
                     usage_json: serde_json::json!({ "prompt_tokens": 6 }),
                 }),
@@ -2462,24 +2647,6 @@ mod tests {
         .expect_err("malformed output should fail after retry exhaustion");
 
         assert!(failure.error_message.contains("after 2 provider attempt(s)"));
-        assert_eq!(failure.provider_attempt_count, 2);
-        assert_eq!(
-            failure
-                .raw_output_json
-                .get("recovery")
-                .and_then(|value| value.get("attempts"))
-                .and_then(serde_json::Value::as_array)
-                .map(Vec::len),
-            Some(2)
-        );
-        assert_eq!(
-            failure
-                .raw_output_json
-                .get("provider_calls")
-                .and_then(serde_json::Value::as_array)
-                .map(Vec::len),
-            Some(2)
-        );
         assert_eq!(
             failure.provider_failure.as_ref().map(|detail| detail.failure_class.clone()),
             Some(RuntimeProviderFailureClass::InvalidModelOutput)
@@ -2490,7 +2657,7 @@ mod tests {
     fn provider_usage_payload_keeps_provider_metadata() {
         let usage = build_provider_usage_json(
             "openai",
-            "gpt-5-mini",
+            "gpt-5.4-mini",
             serde_json::json!({
                 "prompt_tokens": 21,
                 "completion_tokens": 9,
@@ -2498,7 +2665,10 @@ mod tests {
         );
 
         assert_eq!(usage.get("provider_kind").and_then(serde_json::Value::as_str), Some("openai"));
-        assert_eq!(usage.get("model_name").and_then(serde_json::Value::as_str), Some("gpt-5-mini"));
+        assert_eq!(
+            usage.get("model_name").and_then(serde_json::Value::as_str),
+            Some("gpt-5.4-mini")
+        );
         assert_eq!(usage.get("prompt_tokens").and_then(serde_json::Value::as_i64), Some(21));
     }
 }

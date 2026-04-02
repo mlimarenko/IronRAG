@@ -200,7 +200,8 @@ export interface paths {
         get: operations["getCatalogWorkspace"];
         put?: never;
         post?: never;
-        delete?: never;
+        /** Delete one workspace */
+        delete: operations["deleteCatalogWorkspace"];
         options?: never;
         head?: never;
         patch?: never;
@@ -219,6 +220,23 @@ export interface paths {
         /** Create a library in one workspace */
         post: operations["createCatalogLibrary"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/catalog/workspaces/{workspaceId}/libraries/{libraryId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete one library from one workspace */
+        delete: operations["deleteCatalogLibrary"];
         options?: never;
         head?: never;
         patch?: never;
@@ -551,6 +569,75 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/content/web-runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List web ingest runs for one library */
+        get: operations["listContentWebIngestRuns"];
+        put?: never;
+        /** Submit one canonical web ingest run */
+        post: operations["createContentWebIngestRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/content/web-runs/{runId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get one canonical web ingest run */
+        get: operations["getContentWebIngestRun"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/content/web-runs/{runId}/pages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List page outcomes for one web ingest run */
+        get: operations["listContentWebIngestRunPages"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/content/web-runs/{runId}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Request cancellation for one web ingest run */
+        post: operations["cancelContentWebIngestRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/content/documents/upload": {
         parameters: {
             query?: never;
@@ -581,6 +668,40 @@ export interface paths {
         post?: never;
         /** Delete one logical document through a canonical mutation */
         delete: operations["deleteContentDocument"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/content/documents/{documentId}/prepared-segments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List prepared segments for the readable revision of one logical document */
+        get: operations["listContentPreparedSegments"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/content/documents/{documentId}/technical-facts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List typed technical facts for the readable revision of one logical document */
+        get: operations["listContentTechnicalFacts"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -783,6 +904,23 @@ export interface paths {
         };
         /** Get document detail with revisions and latest chunks */
         get: operations["getKnowledgeDocument"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/knowledge/libraries/{libraryId}/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get canonical knowledge summary for one library */
+        get: operations["getKnowledgeLibrarySummary"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1126,17 +1264,71 @@ export interface components {
         BindingValidationResponse: {
             [key: string]: unknown;
         };
+        /** @enum {string} */
+        BootstrapBindingPurpose: "extract_graph" | "embed_chunk" | "query_answer" | "vision";
+        /** @enum {string} */
+        BootstrapCredentialSource: "missing" | "env";
         BootstrapClaimRequest: {
             [key: string]: unknown;
         };
         BootstrapClaimResponse: {
             [key: string]: unknown;
         };
+        BootstrapProviderCatalogEntryResponse: {
+            /** Format: uuid */
+            id: string;
+            providerKind: string;
+            displayName: string;
+            apiStyle: string;
+            lifecycleState: string;
+            credentialSource: components["schemas"]["BootstrapCredentialSource"];
+        };
+        BootstrapModelCatalogEntryResponse: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            providerCatalogId: string;
+            modelName: string;
+            capabilityKind: string;
+            modalityKind: string;
+            allowedBindingPurposes: components["schemas"]["BootstrapBindingPurpose"][];
+            contextWindow?: number | null;
+            maxOutputTokens?: number | null;
+        };
+        BootstrapBindingSelectionResponse: {
+            bindingPurpose: components["schemas"]["BootstrapBindingPurpose"];
+            providerKind?: string | null;
+            modelCatalogId?: string | null;
+            configured: boolean;
+        };
+        BootstrapAiSetupResponse: {
+            providers: components["schemas"]["BootstrapProviderCatalogEntryResponse"][];
+            models: components["schemas"]["BootstrapModelCatalogEntryResponse"][];
+            bindingSelections: components["schemas"]["BootstrapBindingSelectionResponse"][];
+        };
+        BootstrapCredentialInputRequest: {
+            providerKind: string;
+            apiKey?: string | null;
+        };
+        BootstrapBindingSelectionRequest: {
+            bindingPurpose: components["schemas"]["BootstrapBindingPurpose"];
+            providerKind: string;
+            /** Format: uuid */
+            modelCatalogId: string;
+        };
+        BootstrapSetupAiRequest: {
+            credentials: components["schemas"]["BootstrapCredentialInputRequest"][];
+            bindingSelections: components["schemas"]["BootstrapBindingSelectionRequest"][];
+        };
         BootstrapSetupRequest: {
-            [key: string]: unknown;
+            login: string;
+            displayName?: string | null;
+            password: string;
+            aiSetup?: components["schemas"]["BootstrapSetupAiRequest"] | null;
         };
         BootstrapStatusResponse: {
-            [key: string]: unknown;
+            setupRequired: boolean;
+            aiSetup?: components["schemas"]["BootstrapAiSetupResponse"] | null;
         };
         CatalogLibraryResponse: {
             [key: string]: unknown;
@@ -1148,6 +1340,28 @@ export interface components {
             [key: string]: unknown;
         };
         ContentDocumentDetailResponse: {
+            document: {
+                [key: string]: unknown;
+            };
+            fileName: string;
+            head?: {
+                [key: string]: unknown;
+            } | null;
+            activeRevision?: {
+                [key: string]: unknown;
+            } | null;
+            readiness?: {
+                [key: string]: unknown;
+            } | null;
+            readinessSummary?: components["schemas"]["DocumentReadinessSummary"] | null;
+            preparedRevision?: components["schemas"]["StructuredDocumentRevisionSummary"] | null;
+            preparedSegmentCount?: number | null;
+            technicalFactCount?: number | null;
+            webPageProvenance?: components["schemas"]["WebPageProvenance"] | null;
+            pipeline: {
+                [key: string]: unknown;
+            };
+        } & {
             [key: string]: unknown;
         };
         ContentMutationDetailResponse: {
@@ -1258,6 +1472,21 @@ export interface components {
         KnowledgeRevisionRow: {
             [key: string]: unknown;
         };
+        LibraryKnowledgeSummaryResponse: {
+            /** Format: uuid */
+            libraryId: string;
+            documentCountsByReadiness: {
+                [key: string]: number;
+            };
+            graphReadyDocumentCount: number;
+            graphSparseDocumentCount: number;
+            typedFactDocumentCount: number;
+            latestGeneration?: components["schemas"]["KnowledgeLibraryGeneration"] | null;
+            /** Format: date-time */
+            updatedAt: string;
+        } & {
+            [key: string]: unknown;
+        };
         LibraryModelBindingResponse: {
             [key: string]: unknown;
         };
@@ -1306,6 +1535,167 @@ export interface components {
         PriceCatalogEntryResponse: {
             [key: string]: unknown;
         };
+        PreparedSegmentDetail: {
+            segment: components["schemas"]["PreparedSegmentListItem"];
+            text: string;
+            normalizedText: string;
+            sourceSpan?: components["schemas"]["StructuredSourceSpan"] | null;
+            parentBlockId?: string | null;
+            tableCoordinates?: components["schemas"]["StructuredTableCoordinates"] | null;
+            codeLanguage?: string | null;
+            supportChunkIds: string[];
+        } & {
+            [key: string]: unknown;
+        };
+        CreateWebIngestRunRequest: {
+            /** Format: uuid */
+            libraryId: string;
+            /** Format: uri */
+            seedUrl: string;
+            /** @enum {string} */
+            mode: "single_page" | "recursive_crawl";
+            boundaryPolicy?: ("same_host" | "allow_external") | null;
+            maxDepth?: number | null;
+            maxPages?: number | null;
+            idempotencyKey?: string | null;
+        };
+        WebIngestRunReceipt: {
+            /** Format: uuid */
+            runId: string;
+            /** Format: uuid */
+            libraryId: string;
+            /** @enum {string} */
+            mode: "single_page" | "recursive_crawl";
+            /** @enum {string} */
+            runState: "accepted" | "discovering" | "processing" | "completed" | "completed_partial" | "failed" | "canceled";
+            asyncOperationId?: string | null;
+            counts: components["schemas"]["WebRunCounts"];
+            failureCode?: components["schemas"]["WebRunFailureCode"] | null;
+            cancelRequestedAt?: string | null;
+        };
+        WebRunCounts: {
+            discovered: number;
+            eligible: number;
+            processed: number;
+            queued: number;
+            processing: number;
+            duplicates: number;
+            excluded: number;
+            blocked: number;
+            failed: number;
+            canceled: number;
+        };
+        WebIngestRunSummary: {
+            /** Format: uuid */
+            runId: string;
+            /** Format: uuid */
+            libraryId: string;
+            /** @enum {string} */
+            mode: "single_page" | "recursive_crawl";
+            /** @enum {string} */
+            boundaryPolicy: "same_host" | "allow_external";
+            maxDepth: number;
+            maxPages: number;
+            /** @enum {string} */
+            runState: "accepted" | "discovering" | "processing" | "completed" | "completed_partial" | "failed" | "canceled";
+            /** Format: uri */
+            seedUrl: string;
+            counts: components["schemas"]["WebRunCounts"];
+            lastActivityAt?: string | null;
+        };
+        WebIngestRun: {
+            /** Format: uuid */
+            runId: string;
+            /** Format: uuid */
+            mutationId: string;
+            asyncOperationId?: string | null;
+            /** Format: uuid */
+            workspaceId: string;
+            /** Format: uuid */
+            libraryId: string;
+            /** @enum {string} */
+            mode: "single_page" | "recursive_crawl";
+            /** Format: uri */
+            seedUrl: string;
+            /** Format: uri */
+            normalizedSeedUrl: string;
+            /** @enum {string} */
+            boundaryPolicy: "same_host" | "allow_external";
+            maxDepth: number;
+            maxPages: number;
+            /** @enum {string} */
+            runState: "accepted" | "discovering" | "processing" | "completed" | "completed_partial" | "failed" | "canceled";
+            requestedByPrincipalId?: string | null;
+            /** Format: date-time */
+            requestedAt: string;
+            completedAt?: string | null;
+            failureCode?: components["schemas"]["WebRunFailureCode"] | null;
+            cancelRequestedAt?: string | null;
+            counts: components["schemas"]["WebRunCounts"];
+            lastActivityAt?: string | null;
+        };
+        WebDiscoveredPage: {
+            /** Format: uuid */
+            candidateId: string;
+            /** Format: uuid */
+            runId: string;
+            discoveredUrl?: string | null;
+            /** Format: uri */
+            normalizedUrl: string;
+            finalUrl?: string | null;
+            canonicalUrl?: string | null;
+            depth: number;
+            referrerCandidateId?: string | null;
+            /** @enum {string} */
+            hostClassification: "same_host" | "external";
+            /** @enum {string} */
+            candidateState: "discovered" | "eligible" | "duplicate" | "excluded" | "blocked" | "queued" | "processing" | "processed" | "failed" | "canceled";
+            classificationReason?: components["schemas"]["WebClassificationReason"] | null;
+            contentType?: string | null;
+            httpStatus?: number | null;
+            /** Format: date-time */
+            discoveredAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+            documentId?: string | null;
+            resultRevisionId?: string | null;
+            mutationItemId?: string | null;
+        };
+        WebPageProvenance: {
+            runId?: string | null;
+            candidateId?: string | null;
+            sourceUri?: string | null;
+            canonicalUrl?: string | null;
+        };
+        /** @enum {string} */
+        WebClassificationReason: "seed_accepted" | "duplicate_canonical_url" | "outside_boundary_policy" | "exceeded_max_depth" | "exceeded_max_pages" | "system_page" | "unsupported_scheme" | "invalid_url" | "inaccessible" | "unsupported_content" | "cancel_requested";
+        /** @enum {string} */
+        WebRunFailureCode: "inaccessible" | "invalid_url" | "unsupported_content" | "web_discovery_failed" | "web_snapshot_persist_failed" | "web_snapshot_missing" | "web_snapshot_missing_final_url" | "web_snapshot_unavailable" | "web_capture_materialization_failed" | "recursive_crawl_failed";
+        PreparedSegmentListItem: {
+            /** Format: uuid */
+            segmentId: string;
+            /** Format: uuid */
+            revisionId: string;
+            ordinal: number;
+            blockKind: string;
+            headingTrail: string[];
+            sectionPath: string[];
+            pageNumber?: number | null;
+            excerpt: string;
+        } & {
+            [key: string]: unknown;
+        };
+        PreparedSegmentsPageResponse: {
+            /** Format: uuid */
+            documentId: string;
+            revisionId?: string | null;
+            total: number;
+            offset: number;
+            limit: number;
+            items: components["schemas"]["PreparedSegmentDetail"][];
+        } & {
+            [key: string]: unknown;
+        };
         ProviderCatalogEntryResponse: {
             [key: string]: unknown;
         };
@@ -1319,9 +1709,102 @@ export interface components {
             [key: string]: unknown;
         };
         QueryExecutionDetailResponse: {
+            /** Format: uuid */
+            contextBundleId: string;
+            execution: {
+                [key: string]: unknown;
+            };
+            requestTurn?: {
+                [key: string]: unknown;
+            } | null;
+            responseTurn?: {
+                [key: string]: unknown;
+            } | null;
+            chunkReferences: {
+                [key: string]: unknown;
+            }[];
+            preparedSegmentReferences: components["schemas"]["QueryPreparedSegmentReference"][];
+            technicalFactReferences: components["schemas"]["QueryTechnicalFactReference"][];
+            entityReferences: {
+                [key: string]: unknown;
+            }[];
+            relationReferences: {
+                [key: string]: unknown;
+            }[];
+            /** @enum {string} */
+            verificationState: "not_run" | "verified" | "partially_supported" | "conflicting" | "insufficient_evidence" | "failed";
+            verificationWarnings: components["schemas"]["QueryVerificationWarning"][];
+        } & {
+            [key: string]: unknown;
+        };
+        QueryPreparedSegmentReference: {
+            /** Format: uuid */
+            executionId: string;
+            /** Format: uuid */
+            segmentId: string;
+            /** Format: uuid */
+            revisionId: string;
+            blockKind: string;
+            rank: number;
+            score: number;
+            headingTrail: string[];
+            sectionPath: string[];
+        } & {
+            [key: string]: unknown;
+        };
+        QueryTechnicalFactReference: {
+            /** Format: uuid */
+            executionId: string;
+            /** Format: uuid */
+            factId: string;
+            /** Format: uuid */
+            revisionId: string;
+            factKind: string;
+            canonicalValue: string;
+            displayValue: string;
+            rank: number;
+            score: number;
+        } & {
+            [key: string]: unknown;
+        };
+        QueryVerificationWarning: {
+            code: string;
+            message: string;
+            relatedSegmentId?: string | null;
+            relatedFactId?: string | null;
+        } & {
             [key: string]: unknown;
         };
         QueryTurnExecutionResponse: {
+            /** Format: uuid */
+            contextBundleId: string;
+            session: {
+                [key: string]: unknown;
+            };
+            requestTurn: {
+                [key: string]: unknown;
+            };
+            responseTurn?: {
+                [key: string]: unknown;
+            } | null;
+            execution: {
+                [key: string]: unknown;
+            };
+            chunkReferences: {
+                [key: string]: unknown;
+            }[];
+            preparedSegmentReferences: components["schemas"]["QueryPreparedSegmentReference"][];
+            technicalFactReferences: components["schemas"]["QueryTechnicalFactReference"][];
+            entityReferences: {
+                [key: string]: unknown;
+            }[];
+            relationReferences: {
+                [key: string]: unknown;
+            }[];
+            /** @enum {string} */
+            verificationState: "not_run" | "verified" | "partially_supported" | "conflicting" | "insufficient_evidence" | "failed";
+            verificationWarnings: components["schemas"]["QueryVerificationWarning"][];
+        } & {
             [key: string]: unknown;
         };
         ReadinessResponse: {
@@ -1330,16 +1813,116 @@ export interface components {
         ReplaceContentDocumentRequest: {
             [key: string]: unknown;
         };
+        DocumentReadinessSummary: {
+            /** Format: uuid */
+            documentId: string;
+            activeRevisionId?: string | null;
+            readinessKind: string;
+            activityStatus: string;
+            stalledReason?: string | null;
+            preparationState: string;
+            graphCoverageKind: string;
+            typedFactCoverage?: number | null;
+            lastMutationId?: string | null;
+            lastJobStage?: string | null;
+            /** Format: date-time */
+            updatedAt: string;
+        } & {
+            [key: string]: unknown;
+        };
         SessionResponse: {
+            [key: string]: unknown;
+        };
+        StructuredDocumentRevisionSummary: {
+            /** Format: uuid */
+            revisionId: string;
+            /** Format: uuid */
+            documentId: string;
+            /** Format: uuid */
+            workspaceId: string;
+            /** Format: uuid */
+            libraryId: string;
+            preparationState: string;
+            normalizationProfile: string;
+            sourceFormat: string;
+            languageCode?: string | null;
+            blockCount: number;
+            chunkCount: number;
+            typedFactCount: number;
+            outline: {
+                [key: string]: unknown;
+            }[];
+            /** Format: date-time */
+            preparedAt: string;
+        } & {
+            [key: string]: unknown;
+        };
+        StructuredSourceSpan: {
+            startOffset: number;
+            endOffset: number;
+        } & {
+            [key: string]: unknown;
+        };
+        StructuredTableCoordinates: {
+            rowIndex: number;
+            columnIndex: number;
+            rowSpan: number;
+            columnSpan: number;
+        } & {
+            [key: string]: unknown;
+        };
+        TechnicalFactQualifier: {
+            key: string;
+            value: string;
+        } & {
+            [key: string]: unknown;
+        };
+        TechnicalFactValue: {
+            [key: string]: unknown;
+        };
+        TechnicalFactsPageResponse: {
+            /** Format: uuid */
+            documentId: string;
+            revisionId?: string | null;
+            total: number;
+            offset: number;
+            limit: number;
+            items: components["schemas"]["TypedTechnicalFact"][];
+        } & {
+            [key: string]: unknown;
+        };
+        TypedTechnicalFact: {
+            /** Format: uuid */
+            factId: string;
+            /** Format: uuid */
+            revisionId: string;
+            /** Format: uuid */
+            documentId: string;
+            /** Format: uuid */
+            workspaceId: string;
+            /** Format: uuid */
+            libraryId: string;
+            factKind: string;
+            canonicalValue: components["schemas"]["TechnicalFactValue"];
+            displayValue: string;
+            qualifiers: components["schemas"]["TechnicalFactQualifier"][];
+            supportBlockIds: string[];
+            supportChunkIds: string[];
+            confidence?: number | null;
+            extractionKind: string;
+            conflictGroupId?: string | null;
+            /** Format: date-time */
+            createdAt: string;
+        } & {
             [key: string]: unknown;
         };
         TokenResponse: {
             [key: string]: unknown;
         };
-        UpdateLibraryBindingRequest: {
+        Unauthorized: {
             [key: string]: unknown;
         };
-        Unauthorized: {
+        UpdateLibraryBindingRequest: {
             [key: string]: unknown;
         };
         UploadContentDocumentRequest: {
@@ -1786,6 +2369,44 @@ export interface operations {
             };
         };
     };
+    deleteCatalogWorkspace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspaceId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Workspace deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or insufficient authorization */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Workspace not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
     listCatalogLibraries: {
         parameters: {
             query?: never;
@@ -1861,6 +2482,45 @@ export interface operations {
             };
             /** @description Library slug conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    deleteCatalogLibrary: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspaceId: string;
+                libraryId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Library deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or insufficient authorization */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Library not found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2486,6 +3146,48 @@ export interface operations {
             };
         };
     };
+    createAiLibraryBinding: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateLibraryBindingRequest"];
+            };
+        };
+        responses: {
+            /** @description Library model binding created */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LibraryModelBindingResponse"];
+                };
+            };
+            /** @description Invalid library binding payload */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Missing or insufficient authorization */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
     updateAiLibraryBinding: {
         parameters: {
             query?: never;
@@ -2530,48 +3232,6 @@ export interface operations {
             };
             /** @description Binding not found */
             404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    createAiLibraryBinding: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateLibraryBindingRequest"];
-            };
-        };
-        responses: {
-            /** @description Library model binding created */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["LibraryModelBindingResponse"];
-                };
-            };
-            /** @description Invalid library binding payload */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2704,6 +3364,217 @@ export interface operations {
             };
         };
     };
+    listContentWebIngestRuns: {
+        parameters: {
+            query: {
+                libraryId: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Web ingest runs in the requested library */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebIngestRunSummary"][];
+                };
+            };
+            /** @description Invalid web ingest list request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Missing or insufficient authorization */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    createContentWebIngestRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateWebIngestRunRequest"];
+            };
+        };
+        responses: {
+            /** @description Web ingest run accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebIngestRunReceipt"];
+                };
+            };
+            /** @description Invalid web ingest submission */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Missing or insufficient authorization */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Library not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    getContentWebIngestRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                runId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Web ingest run detail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebIngestRun"];
+                };
+            };
+            /** @description Missing or insufficient authorization */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Run not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    listContentWebIngestRunPages: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                runId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Discovered pages and outcomes for the requested run */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebDiscoveredPage"][];
+                };
+            };
+            /** @description Missing or insufficient authorization */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Run not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    cancelContentWebIngestRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                runId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Web ingest cancellation accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebIngestRunReceipt"];
+                };
+            };
+            /** @description Missing or insufficient authorization */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Run not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
     uploadContentDocument: {
         parameters: {
             query?: never;
@@ -2813,6 +3684,92 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ContentMutationDetailResponse"];
+                };
+            };
+            /** @description Missing or insufficient authorization */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Document not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    listContentPreparedSegments: {
+        parameters: {
+            query?: {
+                offset?: number;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                documentId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Prepared segments for the current readable revision */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PreparedSegmentsPageResponse"];
+                };
+            };
+            /** @description Missing or insufficient authorization */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Document not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    listContentTechnicalFacts: {
+        parameters: {
+            query?: {
+                offset?: number;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                documentId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Typed technical facts for the current readable revision */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TechnicalFactsPageResponse"];
                 };
             };
             /** @description Missing or insufficient authorization */
@@ -3404,6 +4361,30 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    getKnowledgeLibrarySummary: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                libraryId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Library readiness, graph coverage, and latest generation snapshot */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LibraryKnowledgeSummaryResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     listKnowledgeContextBundles: {
         parameters: {
             query?: never;
@@ -3826,14 +4807,17 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                executionKind: string;
+                executionKind: "query_execution" | "ingest_attempt";
                 executionId: string;
             };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description Cost rollup for one execution owner */
+            /**
+             * @description Cost rollup for one execution owner.
+             *     For executions with no billable provider calls, the API returns a deterministic zero-cost rollup.
+             */
             200: {
                 headers: {
                     [name: string]: unknown;

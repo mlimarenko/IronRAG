@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="RustRAG">
+  <defs>
+    <linearGradient id="rr-favicon-gradient" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4f46e5" />
+      <stop offset="1" stop-color="#2563eb" />
+    </linearGradient>
+  </defs>
+  <rect x="6" y="6" width="52" height="52" rx="16" fill="url(#rr-favicon-gradient)" />
+  <path
+    d="M22 20h14.5c5.4 0 9 3.1 9 8.1 0 3.5-1.8 5.9-4.9 7.1L46 44h-7.4l-4.7-7.4h-5.7V44H22V20Zm6.2 11.8h7.2c2.5 0 3.9-1.2 3.9-3.4s-1.4-3.3-3.9-3.3h-7.2v6.7Z"
+    fill="#ffffff"
+  />
+</svg>

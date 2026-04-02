@@ -57,10 +57,7 @@ function submit(): void {
     @click.self="close"
     @keydown.escape="close"
   >
-    <div
-      ref="rootRef"
-      class="rr-dialog rr-document-dialog rr-document-dialog--frame"
-    >
+    <div ref="rootRef" class="rr-dialog rr-document-dialog rr-document-dialog--frame">
       <header class="rr-document-dialog__header">
         <h3 :id="titleId">{{ props.title }}</h3>
         <p>{{ props.subtitle }}</p>

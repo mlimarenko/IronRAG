@@ -68,9 +68,7 @@ function deriveLibraryCreateCapability(
     return false
   }
 
-  return (
-    capabilities.canCreateWorkspace || capabilities.creatableWorkspaceIds.includes(workspaceId)
-  )
+  return capabilities.canCreateWorkspace || capabilities.creatableWorkspaceIds.includes(workspaceId)
 }
 
 export const useShellStore = defineStore('shell', {
@@ -159,13 +157,9 @@ export const useShellStore = defineStore('shell', {
       this.loading = true
       try {
         const preferredWorkspaceId =
-          options?.preferredWorkspaceId ??
-          readStoredSelection(ACTIVE_WORKSPACE_STORAGE_KEY) ??
-          null
+          options?.preferredWorkspaceId ?? readStoredSelection(ACTIVE_WORKSPACE_STORAGE_KEY) ?? null
         const preferredLibraryId =
-          options?.preferredLibraryId ??
-          readStoredSelection(ACTIVE_LIBRARY_STORAGE_KEY) ??
-          null
+          options?.preferredLibraryId ?? readStoredSelection(ACTIVE_LIBRARY_STORAGE_KEY) ?? null
         const bootstrap = await fetchShellBootstrap({
           preferredWorkspaceId,
           preferredLibraryId,

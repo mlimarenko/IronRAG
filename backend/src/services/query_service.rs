@@ -15,9 +15,10 @@ use crate::{
     domains::ai::AiBindingPurpose,
     domains::catalog::CatalogLifecycleState,
     domains::query::{
-        QueryChunkReference, QueryConversation, QueryConversationDetail, QueryExecution,
-        QueryExecutionDetail, QueryGraphEdgeReference, QueryGraphNodeReference, QueryTurn,
-        QueryTurnStreamStage, RuntimeQueryMode,
+        PreparedSegmentReference, QueryChunkReference, QueryConversation, QueryConversationDetail,
+        QueryExecution, QueryExecutionDetail, QueryGraphEdgeReference, QueryGraphNodeReference,
+        QueryTurn, QueryTurnStreamStage, QueryVerificationState, RuntimeQueryMode,
+        TechnicalFactReference,
     },
     infra::{
         arangodb::{
@@ -32,8 +33,11 @@ use crate::{
                 KnowledgeContextBundleReferenceSetRow, KnowledgeContextBundleRow,
                 KnowledgeRetrievalTraceRow,
             },
-            document_store::KnowledgeLibraryGenerationRow,
-            graph_store::KnowledgeGraphTraversalRow,
+            document_store::{
+                KnowledgeChunkRow, KnowledgeLibraryGenerationRow, KnowledgeStructuredBlockRow,
+                KnowledgeTechnicalFactRow,
+            },
+            graph_store::{KnowledgeEvidenceRow, KnowledgeGraphTraversalRow},
         },
         repositories::{ai_repository, query_repository},
     },
@@ -41,6 +45,7 @@ use crate::{
     interfaces::http::router_support::ApiError,
     services::{
         billing_service::CaptureQueryExecutionBillingCommand,
+        graph_identity::normalize_graph_identity_component,
         ops_service::CreateAsyncOperationCommand,
         query_execution::{generate_answer_query, prepare_answer_query},
     },
@@ -48,7 +53,44 @@ use crate::{
 
 const MAX_LIBRARY_CONVERSATIONS: usize = 5;
 const QUERY_CONVERSATION_TITLE_LIMIT: usize = 72;
+const MAX_PROMPT_HISTORY_TURNS: usize = 6;
+const MAX_PROMPT_HISTORY_TURN_CHARS: usize = 360;
+const MAX_EFFECTIVE_QUERY_HISTORY_TURNS: usize = 3;
+const MAX_EFFECTIVE_QUERY_TURN_CHARS: usize = 220;
 const CANONICAL_QUERY_MODE: RuntimeQueryMode = RuntimeQueryMode::Mix;
+const MAX_DETAIL_TECHNICAL_FACT_REFERENCES: usize = 24;
+const MAX_DETAIL_PREPARED_SEGMENT_REFERENCES: usize = 48;
+const MAX_DETAIL_PREPARED_SEGMENT_REFERENCES_PER_REVISION: usize = 8;
+const PREPARED_SEGMENT_FOCUS_STOPWORDS: &[&str] = &[
+    "a",
+    "an",
+    "and",
+    "are",
+    "for",
+    "how",
+    "in",
+    "is",
+    "of",
+    "the",
+    "to",
+    "what",
+    "как",
+    "какая",
+    "какие",
+    "какой",
+    "по",
+    "про",
+    "такое",
+    "этой",
+    "этот",
+    "это",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConversationRuntimeContext {
+    effective_query_text: String,
+    prompt_history_text: Option<String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct CreateConversationCommand {
@@ -74,6 +116,13 @@ pub struct QueryTurnExecutionResult {
     pub response_turn: Option<QueryTurn>,
     pub execution: QueryExecution,
     pub context_bundle_id: Uuid,
+    pub chunk_references: Vec<QueryChunkReference>,
+    pub prepared_segment_references: Vec<PreparedSegmentReference>,
+    pub technical_fact_references: Vec<TechnicalFactReference>,
+    pub graph_node_references: Vec<QueryGraphNodeReference>,
+    pub graph_edge_references: Vec<QueryGraphEdgeReference>,
+    pub verification_state: QueryVerificationState,
+    pub verification_warnings: Vec<crate::domains::query::QueryVerificationWarning>,
 }
 
 #[derive(Debug, Clone)]
@@ -240,6 +289,14 @@ impl QueryService {
                 .map_err(|_| ApiError::Internal)?;
             }
         }
+        let conversation_turns = query_repository::list_turns_by_conversation(
+            &state.persistence.postgres,
+            conversation.id,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?;
+        let conversation_context =
+            build_conversation_runtime_context(&conversation_turns, request_turn.id);
 
         let binding_id = ai_repository::get_active_library_binding_by_purpose(
             &state.persistence.postgres,
@@ -309,7 +366,7 @@ impl QueryService {
         let prepared = match prepare_answer_query(
             state,
             library.id,
-            content_text.clone(),
+            conversation_context.effective_query_text.clone(),
             CANONICAL_QUERY_MODE,
             top_k,
             command.include_debug,
@@ -362,7 +419,7 @@ impl QueryService {
             &conversation,
             execution.id,
             execution_context_bundle_id,
-            &content_text,
+            &conversation_context.effective_query_text,
             CANONICAL_QUERY_MODE,
             top_k,
             command.include_debug,
@@ -442,7 +499,9 @@ impl QueryService {
             state,
             library.id,
             execution.id,
+            &conversation_context.effective_query_text,
             &content_text,
+            conversation_context.prompt_history_text.as_deref(),
             None,
             prepared,
             progress.as_ref().map(|_| &mut stream_answer_delta as &mut (dyn FnMut(String) + Send)),
@@ -549,12 +608,21 @@ impl QueryService {
             warn!(error = %error, execution_id = %execution.id, "canonical query billing capture failed");
         }
 
+        let detail = self.get_execution(state, execution.id).await?;
+        let request_turn = detail.request_turn.ok_or(ApiError::Internal)?;
         Ok(QueryTurnExecutionResult {
             conversation: map_conversation_row(conversation),
-            request_turn: map_turn_row(request_turn),
-            response_turn: Some(map_turn_row(response_turn)),
-            execution: map_execution_row(execution),
+            request_turn,
+            response_turn: detail.response_turn,
+            execution: detail.execution,
             context_bundle_id: execution_context_bundle_id,
+            chunk_references: detail.chunk_references,
+            prepared_segment_references: detail.prepared_segment_references,
+            technical_fact_references: detail.technical_fact_references,
+            graph_node_references: detail.graph_node_references,
+            graph_edge_references: detail.graph_edge_references,
+            verification_state: detail.verification_state,
+            verification_warnings: detail.verification_warnings,
         })
     }
 
@@ -587,18 +655,113 @@ impl QueryService {
             .get_bundle_reference_set_by_query_execution(execution.id)
             .await
             .map_err(|_| ApiError::Internal)?;
+        let chunk_rows = match bundle_refs.as_ref() {
+            Some(bundle) => state
+                .arango_document_store
+                .list_chunks_by_ids(
+                    &bundle
+                        .chunk_references
+                        .iter()
+                        .map(|reference| reference.chunk_id)
+                        .collect::<Vec<_>>(),
+                )
+                .await
+                .map_err(|_| ApiError::Internal)?,
+            None => Vec::new(),
+        };
+        let evidence_rows = match bundle_refs.as_ref() {
+            Some(bundle) => state
+                .arango_graph_store
+                .list_evidence_by_ids(
+                    &bundle
+                        .evidence_references
+                        .iter()
+                        .map(|reference| reference.evidence_id)
+                        .collect::<Vec<_>>(),
+                )
+                .await
+                .map_err(|_| ApiError::Internal)?,
+            None => Vec::new(),
+        };
+        let mut fact_rank_refs = bundle_refs
+            .as_ref()
+            .map_or_else(HashMap::new, |bundle| derive_fact_rank_refs(bundle, &evidence_rows));
+        let chunk_supported_fact_rows = if chunk_rows.is_empty() {
+            Vec::new()
+        } else {
+            state
+                .arango_document_store
+                .list_technical_facts_by_chunk_ids(
+                    &chunk_rows.iter().map(|row| row.chunk_id).collect::<Vec<_>>(),
+                )
+                .await
+                .map_err(|_| ApiError::Internal)?
+        };
+        augment_fact_rank_refs_from_chunk_support(
+            bundle_refs.as_ref(),
+            &chunk_supported_fact_rows,
+            &mut fact_rank_refs,
+        );
+        let technical_fact_rows = if fact_rank_refs.is_empty()
+            && bundle_refs.as_ref().is_none_or(|bundle| bundle.bundle.selected_fact_ids.is_empty())
+        {
+            Vec::new()
+        } else {
+            state
+                .arango_document_store
+                .list_technical_facts_by_ids(
+                    &bundle_refs
+                        .as_ref()
+                        .map(|bundle| selected_fact_ids_for_detail(bundle, &fact_rank_refs))
+                        .unwrap_or_default(),
+                )
+                .await
+                .map_err(|_| ApiError::Internal)?
+        };
+        let block_rank_refs = bundle_refs.as_ref().map_or_else(HashMap::new, |bundle| {
+            derive_block_rank_refs(bundle, &evidence_rows, &technical_fact_rows, &chunk_rows)
+        });
+        let structured_block_rows = if block_rank_refs.is_empty() {
+            Vec::new()
+        } else {
+            state
+                .arango_document_store
+                .list_structured_blocks_by_ids(&block_rank_refs.keys().copied().collect::<Vec<_>>())
+                .await
+                .map_err(|_| ApiError::Internal)?
+        };
 
+        let query_text = execution.query_text.clone();
         Ok(QueryExecutionDetail {
             execution: map_execution_row(execution),
             request_turn,
             response_turn,
             chunk_references: bundle_refs.as_ref().map_or_else(Vec::new, map_chunk_references),
+            prepared_segment_references: build_prepared_segment_references(
+                bundle_refs.as_ref(),
+                &structured_block_rows,
+                &block_rank_refs,
+                &query_text,
+            ),
+            technical_fact_references: build_technical_fact_references(
+                bundle_refs.as_ref(),
+                &technical_fact_rows,
+                &fact_rank_refs,
+            ),
             graph_node_references: bundle_refs
                 .as_ref()
                 .map_or_else(Vec::new, map_entity_references),
             graph_edge_references: bundle_refs
                 .as_ref()
                 .map_or_else(Vec::new, map_relation_references),
+            verification_state: bundle_refs
+                .as_ref()
+                .map_or(QueryVerificationState::NotRun, |bundle| {
+                    parse_query_verification_state(&bundle.bundle.verification_state)
+                }),
+            verification_warnings: bundle_refs.as_ref().map_or_else(Vec::new, |bundle| {
+                parse_query_verification_warnings(&bundle.bundle.verification_warnings)
+            }),
         })
     }
 }
@@ -639,22 +802,19 @@ async fn assemble_context_bundle(
 ) -> anyhow::Result<()> {
     let started_at = Instant::now();
     let candidate_limit = top_k.saturating_mul(3).max(6);
-
-    let lexical_chunk_hits = state
-        .arango_search_store
-        .search_chunks(conversation.library_id, query_text, candidate_limit)
+    let lexical_search = state
+        .canonical_services
+        .search
+        .search_query_evidence(state, conversation.library_id, query_text, candidate_limit)
         .await
-        .context("failed lexical chunk search while assembling query context bundle")?;
-    let lexical_entity_hits = state
-        .arango_search_store
-        .search_entities(conversation.library_id, query_text, candidate_limit)
-        .await
-        .context("failed lexical entity search while assembling query context bundle")?;
-    let lexical_relation_hits = state
-        .arango_search_store
-        .search_relations(conversation.library_id, query_text, candidate_limit)
-        .await
-        .context("failed lexical relation search while assembling query context bundle")?;
+        .context(
+            "failed canonical lexical evidence search while assembling query context bundle",
+        )?;
+    let lexical_chunk_hits = lexical_search.chunk_hits;
+    let lexical_entity_hits = lexical_search.entity_hits;
+    let lexical_relation_hits = lexical_search.relation_hits;
+    let lexical_fact_hits = lexical_search.technical_fact_hits;
+    let exact_literal_bias = lexical_search.exact_literal_bias;
 
     let embedding_context =
         match resolve_query_embedding_context(state, conversation.library_id, query_text).await {
@@ -705,6 +865,7 @@ async fn assemble_context_bundle(
     };
 
     let mut chunk_refs: HashMap<Uuid, RankedBundleReference> = HashMap::new();
+    let mut fact_refs: HashMap<Uuid, RankedBundleReference> = HashMap::new();
     let mut entity_refs: HashMap<Uuid, RankedBundleReference> = HashMap::new();
     let mut relation_refs: HashMap<Uuid, RankedBundleReference> = HashMap::new();
     let mut evidence_refs: HashMap<Uuid, RankedBundleReference> = HashMap::new();
@@ -716,6 +877,15 @@ async fn assemble_context_bundle(
             saturating_rank(index),
             hit.score,
             "lexical_chunk",
+        );
+    }
+    for (index, hit) in lexical_fact_hits.iter().enumerate() {
+        merge_ranked_reference(
+            &mut fact_refs,
+            hit.fact_id,
+            saturating_rank(index),
+            hit.score,
+            if hit.exact_match { "lexical_fact_exact" } else { "lexical_fact" },
         );
     }
     for (index, hit) in vector_chunk_hits.iter().enumerate() {
@@ -842,6 +1012,42 @@ async fn assemble_context_bundle(
         }
     }
 
+    let evidence_rows = state
+        .arango_graph_store
+        .list_evidence_by_ids(&top_ranked_ids(&evidence_refs, candidate_limit * 4))
+        .await
+        .context("failed to load evidence rows while assembling query context bundle")?;
+    for evidence in &evidence_rows {
+        if let Some(fact_id) = evidence.fact_id {
+            merge_ranked_reference(
+                &mut fact_refs,
+                fact_id,
+                evidence_rank_for_bundle(&evidence_refs, evidence.evidence_id),
+                evidence_score_for_bundle(&evidence_refs, evidence.evidence_id),
+                "evidence_fact",
+            );
+        }
+    }
+
+    let mut fact_rows = state
+        .arango_document_store
+        .list_technical_facts_by_ids(&top_ranked_ids(&fact_refs, candidate_limit * 3))
+        .await
+        .context("failed to load technical facts while assembling query context bundle")?;
+    for fact in &fact_rows {
+        let rank = fact_rank_for_bundle(&fact_refs, fact.fact_id);
+        let score = fact_score_for_bundle(&fact_refs, fact.fact_id);
+        for chunk_id in &fact.support_chunk_ids {
+            merge_ranked_reference(
+                &mut chunk_refs,
+                *chunk_id,
+                rank,
+                score,
+                "technical_fact_support",
+            );
+        }
+    }
+
     let now = Utc::now();
     let generations = state
         .arango_document_store
@@ -857,17 +1063,138 @@ async fn assemble_context_bundle(
     let entity_edges = build_entity_bundle_edges(bundle_id, &entity_refs, now);
     let relation_edges = build_relation_bundle_edges(bundle_id, &relation_refs, now);
     let evidence_edges = build_evidence_bundle_edges(bundle_id, &evidence_refs, now);
+    let selected_chunk_rows = if chunk_refs.is_empty() {
+        Vec::new()
+    } else {
+        state
+            .arango_document_store
+            .list_chunks_by_ids(&top_ranked_ids(&chunk_refs, candidate_limit * 3))
+            .await
+            .context("failed to load chunk rows while assembling query context bundle")?
+    };
+    let mut fact_refs = fact_refs;
+    let chunk_supported_fact_rows = if selected_chunk_rows.is_empty() {
+        Vec::new()
+    } else {
+        state
+            .arango_document_store
+            .list_technical_facts_by_chunk_ids(
+                &selected_chunk_rows.iter().map(|row| row.chunk_id).collect::<Vec<_>>(),
+            )
+            .await
+            .context("failed to load technical facts by chunk support while assembling query context bundle")?
+    };
+    let provisional_bundle = KnowledgeContextBundleReferenceSetRow {
+        bundle: KnowledgeContextBundleRow {
+            key: bundle_id.to_string(),
+            arango_id: None,
+            arango_rev: None,
+            bundle_id,
+            workspace_id: conversation.workspace_id,
+            library_id: conversation.library_id,
+            query_execution_id: Some(execution_id),
+            bundle_state: "ready".to_string(),
+            bundle_strategy: retrieval_strategy.clone(),
+            requested_mode: runtime_mode_label(requested_mode).to_string(),
+            resolved_mode: runtime_mode_label(resolved_mode).to_string(),
+            selected_fact_ids: Vec::new(),
+            verification_state: "not_run".to_string(),
+            verification_warnings: json!([]),
+            freshness_snapshot: freshness_snapshot.clone(),
+            candidate_summary: json!({}),
+            assembly_diagnostics: json!({}),
+            created_at: now,
+            updated_at: now,
+        },
+        chunk_references: chunk_edges
+            .iter()
+            .map(|edge| crate::infra::arangodb::context_store::KnowledgeBundleChunkReferenceRow {
+                key: edge.key.clone(),
+                bundle_id: edge.bundle_id,
+                chunk_id: edge.chunk_id,
+                rank: edge.rank,
+                score: edge.score,
+                inclusion_reason: edge.inclusion_reason.clone(),
+                created_at: edge.created_at,
+            })
+            .collect(),
+        entity_references: entity_edges
+            .iter()
+            .map(|edge| crate::infra::arangodb::context_store::KnowledgeBundleEntityReferenceRow {
+                key: edge.key.clone(),
+                bundle_id: edge.bundle_id,
+                entity_id: edge.entity_id,
+                rank: edge.rank,
+                score: edge.score,
+                inclusion_reason: edge.inclusion_reason.clone(),
+                created_at: edge.created_at,
+            })
+            .collect(),
+        relation_references: relation_edges
+            .iter()
+            .map(|edge| {
+                crate::infra::arangodb::context_store::KnowledgeBundleRelationReferenceRow {
+                    key: edge.key.clone(),
+                    bundle_id: edge.bundle_id,
+                    relation_id: edge.relation_id,
+                    rank: edge.rank,
+                    score: edge.score,
+                    inclusion_reason: edge.inclusion_reason.clone(),
+                    created_at: edge.created_at,
+                }
+            })
+            .collect(),
+        evidence_references: evidence_edges
+            .iter()
+            .map(|edge| {
+                crate::infra::arangodb::context_store::KnowledgeBundleEvidenceReferenceRow {
+                    key: edge.key.clone(),
+                    bundle_id: edge.bundle_id,
+                    evidence_id: edge.evidence_id,
+                    rank: edge.rank,
+                    score: edge.score,
+                    inclusion_reason: edge.inclusion_reason.clone(),
+                    created_at: edge.created_at,
+                }
+            })
+            .collect(),
+    };
+    augment_fact_rank_refs_from_chunk_support(
+        Some(&provisional_bundle),
+        &chunk_supported_fact_rows,
+        &mut fact_refs,
+    );
+    merge_technical_fact_rows(&mut fact_rows, &chunk_supported_fact_rows);
+    let selected_fact_ids = top_ranked_ids(&fact_refs, top_k.max(6));
+    let block_rank_refs = derive_block_rank_refs(
+        &KnowledgeContextBundleReferenceSetRow {
+            bundle: KnowledgeContextBundleRow {
+                selected_fact_ids: selected_fact_ids.clone(),
+                ..provisional_bundle.bundle.clone()
+            },
+            ..provisional_bundle
+        },
+        &evidence_rows,
+        &fact_rows,
+        &selected_chunk_rows,
+    );
 
     let candidate_summary = json!({
         "lexicalChunkHits": lexical_chunk_hits.len(),
+        "lexicalFactHits": lexical_fact_hits.len(),
         "vectorChunkHits": vector_chunk_hits.len(),
         "lexicalEntityHits": lexical_entity_hits.len(),
         "vectorEntityHits": vector_entity_hits.len(),
         "lexicalRelationHits": lexical_relation_hits.len(),
+        "exactLiteralBias": exact_literal_bias,
         "entityNeighborhoodRows": entity_neighborhood_rows,
         "relationTraversalRows": relation_traversal_rows,
         "relationEvidenceRows": relation_evidence_rows,
+        "evidenceRows": evidence_rows.len(),
+        "factRows": fact_rows.len(),
         "finalChunkReferences": chunk_edges.len(),
+        "finalPreparedSegmentReferences": block_rank_refs.len(),
+        "finalTechnicalFactReferences": selected_fact_ids.len(),
         "finalEntityReferences": entity_edges.len(),
         "finalRelationReferences": relation_edges.len(),
         "finalEvidenceReferences": evidence_edges.len(),
@@ -878,6 +1205,7 @@ async fn assemble_context_bundle(
         "candidateLimit": candidate_limit,
         "vectorCandidateLimit": vector_limit,
         "vectorEnabled": embedding_context.is_some(),
+        "exactLiteralBias": exact_literal_bias,
         "bundleId": bundle_id,
         "queryExecutionId": execution_id,
     });
@@ -894,6 +1222,9 @@ async fn assemble_context_bundle(
         bundle_strategy: retrieval_strategy.clone(),
         requested_mode: runtime_mode_label(requested_mode).to_string(),
         resolved_mode: runtime_mode_label(resolved_mode).to_string(),
+        selected_fact_ids,
+        verification_state: "not_run".to_string(),
+        verification_warnings: json!([]),
         freshness_snapshot: freshness_snapshot.clone(),
         candidate_summary: candidate_summary.clone(),
         assembly_diagnostics: assembly_diagnostics.clone(),
@@ -1200,6 +1531,385 @@ fn build_evidence_bundle_edges(
         .collect()
 }
 
+fn evidence_rank_for_bundle(refs: &HashMap<Uuid, RankedBundleReference>, evidence_id: Uuid) -> i32 {
+    refs.get(&evidence_id).map_or(i32::MAX, |reference| reference.rank)
+}
+
+fn evidence_score_for_bundle(
+    refs: &HashMap<Uuid, RankedBundleReference>,
+    evidence_id: Uuid,
+) -> f64 {
+    refs.get(&evidence_id).map_or(0.0, |reference| reference.score)
+}
+
+fn fact_rank_for_bundle(refs: &HashMap<Uuid, RankedBundleReference>, fact_id: Uuid) -> i32 {
+    refs.get(&fact_id).map_or(i32::MAX, |reference| reference.rank)
+}
+
+fn fact_score_for_bundle(refs: &HashMap<Uuid, RankedBundleReference>, fact_id: Uuid) -> f64 {
+    refs.get(&fact_id).map_or(0.0, |reference| reference.score)
+}
+
+fn derive_chunk_rank_refs(
+    bundle: &KnowledgeContextBundleReferenceSetRow,
+) -> HashMap<Uuid, RankedBundleReference> {
+    let mut chunk_refs = HashMap::<Uuid, RankedBundleReference>::new();
+    for reference in &bundle.chunk_references {
+        merge_ranked_reference(
+            &mut chunk_refs,
+            reference.chunk_id,
+            reference.rank,
+            reference.score,
+            reference.inclusion_reason.as_deref().unwrap_or("bundle_chunk"),
+        );
+    }
+    chunk_refs
+}
+
+fn augment_fact_rank_refs_from_chunk_support(
+    bundle: Option<&KnowledgeContextBundleReferenceSetRow>,
+    technical_fact_rows: &[KnowledgeTechnicalFactRow],
+    fact_rank_refs: &mut HashMap<Uuid, RankedBundleReference>,
+) {
+    let Some(bundle) = bundle else {
+        return;
+    };
+    let chunk_rank_refs = derive_chunk_rank_refs(bundle);
+    if chunk_rank_refs.is_empty() {
+        return;
+    }
+    for fact in technical_fact_rows {
+        let mut best_rank = None::<i32>;
+        let mut best_score = 0.0_f64;
+        for chunk_id in &fact.support_chunk_ids {
+            let Some(reference) = chunk_rank_refs.get(chunk_id) else {
+                continue;
+            };
+            best_rank = Some(best_rank.map_or(reference.rank, |rank| rank.min(reference.rank)));
+            if reference.score > best_score {
+                best_score = reference.score;
+            }
+        }
+        let Some(rank) = best_rank else {
+            continue;
+        };
+        merge_ranked_reference(
+            fact_rank_refs,
+            fact.fact_id,
+            rank,
+            best_score.max(1.0),
+            "selected_chunk_support",
+        );
+    }
+}
+
+fn merge_technical_fact_rows(
+    target: &mut Vec<KnowledgeTechnicalFactRow>,
+    additional: &[KnowledgeTechnicalFactRow],
+) {
+    let mut seen = target.iter().map(|row| row.fact_id).collect::<BTreeSet<_>>();
+    for row in additional {
+        if seen.insert(row.fact_id) {
+            target.push(row.clone());
+        }
+    }
+    target.sort_by(|left, right| {
+        left.fact_kind.cmp(&right.fact_kind).then_with(|| left.fact_id.cmp(&right.fact_id))
+    });
+}
+
+fn derive_fact_rank_refs(
+    bundle: &KnowledgeContextBundleReferenceSetRow,
+    evidence_rows: &[KnowledgeEvidenceRow],
+) -> HashMap<Uuid, RankedBundleReference> {
+    let mut fact_refs = HashMap::<Uuid, RankedBundleReference>::new();
+    let evidence_by_id = evidence_rows
+        .iter()
+        .map(|evidence| (evidence.evidence_id, evidence))
+        .collect::<HashMap<_, _>>();
+    for reference in &bundle.evidence_references {
+        let Some(evidence) = evidence_by_id.get(&reference.evidence_id) else {
+            continue;
+        };
+        let Some(fact_id) = evidence.fact_id else {
+            continue;
+        };
+        merge_ranked_reference(
+            &mut fact_refs,
+            fact_id,
+            reference.rank,
+            reference.score,
+            reference.inclusion_reason.as_deref().unwrap_or("bundle_evidence"),
+        );
+    }
+    for (index, fact_id) in bundle.bundle.selected_fact_ids.iter().copied().enumerate() {
+        let score = fact_refs.get(&fact_id).map_or(1.0, |reference| reference.score.max(1.0));
+        merge_ranked_reference(
+            &mut fact_refs,
+            fact_id,
+            saturating_rank(index),
+            score,
+            "bundle_selected_fact",
+        );
+    }
+    fact_refs
+}
+
+fn derive_block_rank_refs(
+    bundle: &KnowledgeContextBundleReferenceSetRow,
+    evidence_rows: &[KnowledgeEvidenceRow],
+    technical_fact_rows: &[KnowledgeTechnicalFactRow],
+    chunk_rows: &[KnowledgeChunkRow],
+) -> HashMap<Uuid, RankedBundleReference> {
+    let mut block_refs = HashMap::<Uuid, RankedBundleReference>::new();
+    let evidence_by_id = evidence_rows
+        .iter()
+        .map(|evidence| (evidence.evidence_id, evidence))
+        .collect::<HashMap<_, _>>();
+    for reference in &bundle.evidence_references {
+        let Some(evidence) = evidence_by_id.get(&reference.evidence_id) else {
+            continue;
+        };
+        let Some(block_id) = evidence.block_id else {
+            continue;
+        };
+        merge_ranked_reference(
+            &mut block_refs,
+            block_id,
+            reference.rank,
+            reference.score,
+            reference.inclusion_reason.as_deref().unwrap_or("bundle_evidence"),
+        );
+    }
+    let fact_rank_refs = derive_fact_rank_refs(bundle, evidence_rows);
+    for fact in technical_fact_rows {
+        let rank = fact_rank_for_bundle(&fact_rank_refs, fact.fact_id);
+        let score = fact_score_for_bundle(&fact_rank_refs, fact.fact_id).max(1.0);
+        for block_id in &fact.support_block_ids {
+            merge_ranked_reference(
+                &mut block_refs,
+                *block_id,
+                rank,
+                score,
+                "technical_fact_support",
+            );
+        }
+    }
+    let chunk_rank_refs = derive_chunk_rank_refs(bundle);
+    for chunk in chunk_rows {
+        let Some(reference) = chunk_rank_refs.get(&chunk.chunk_id) else {
+            continue;
+        };
+        for block_id in &chunk.support_block_ids {
+            merge_ranked_reference(
+                &mut block_refs,
+                *block_id,
+                reference.rank,
+                reference.score.max(1.0),
+                "selected_chunk_support",
+            );
+        }
+    }
+    block_refs
+}
+
+fn selected_fact_ids_for_detail(
+    bundle: &KnowledgeContextBundleReferenceSetRow,
+    fact_rank_refs: &HashMap<Uuid, RankedBundleReference>,
+) -> Vec<Uuid> {
+    let mut fact_ids = bundle.bundle.selected_fact_ids.clone();
+    for fact_id in top_ranked_ids(fact_rank_refs, MAX_DETAIL_TECHNICAL_FACT_REFERENCES) {
+        if fact_ids.len() >= MAX_DETAIL_TECHNICAL_FACT_REFERENCES {
+            break;
+        }
+        if !fact_ids.contains(&fact_id) {
+            fact_ids.push(fact_id);
+        }
+    }
+    fact_ids.truncate(MAX_DETAIL_TECHNICAL_FACT_REFERENCES);
+    fact_ids
+}
+
+fn build_prepared_segment_references(
+    bundle: Option<&KnowledgeContextBundleReferenceSetRow>,
+    blocks: &[KnowledgeStructuredBlockRow],
+    block_rank_refs: &HashMap<Uuid, RankedBundleReference>,
+    query_text: &str,
+) -> Vec<PreparedSegmentReference> {
+    let Some(bundle) = bundle else {
+        return Vec::new();
+    };
+    let execution_id = bundle
+        .bundle
+        .query_execution_id
+        .expect("query context bundle must carry query_execution_id");
+    let query_focus_tokens = prepared_segment_focus_tokens(query_text);
+    let mut revision_focus_scores = HashMap::<Uuid, usize>::new();
+    for block in blocks {
+        if !block_rank_refs.contains_key(&block.block_id) {
+            continue;
+        }
+        let focus_score = prepared_segment_focus_score(&query_focus_tokens, block);
+        if focus_score == 0 {
+            continue;
+        }
+        revision_focus_scores
+            .entry(block.revision_id)
+            .and_modify(|current| *current = (*current).max(focus_score))
+            .or_insert(focus_score);
+    }
+    let max_revision_focus_score = revision_focus_scores.values().copied().max().unwrap_or(0);
+    let mut items = blocks
+        .iter()
+        .filter_map(|block| {
+            let reference = block_rank_refs.get(&block.block_id)?;
+            if max_revision_focus_score >= 2
+                && revision_focus_scores.get(&block.revision_id).copied().unwrap_or(0)
+                    < max_revision_focus_score
+            {
+                return None;
+            }
+            let block_kind = block.block_kind.parse().ok()?;
+            let reference = PreparedSegmentReference {
+                execution_id,
+                segment_id: block.block_id,
+                revision_id: block.revision_id,
+                block_kind,
+                rank: reference.rank,
+                score: reference.score,
+                heading_trail: block.heading_trail.clone(),
+                section_path: block.section_path.clone(),
+            };
+            Some((
+                reference,
+                prepared_segment_focus_score(&query_focus_tokens, block),
+                prepared_segment_kind_priority(&block.block_kind),
+                block.ordinal,
+            ))
+        })
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| left.0.rank.cmp(&right.0.rank))
+            .then_with(|| right.0.score.total_cmp(&left.0.score))
+            .then_with(|| right.2.cmp(&left.2))
+            .then_with(|| left.3.cmp(&right.3))
+            .then_with(|| left.0.segment_id.cmp(&right.0.segment_id))
+    });
+    let mut per_revision_counts = HashMap::<Uuid, usize>::new();
+    let mut limited = Vec::with_capacity(items.len().min(MAX_DETAIL_PREPARED_SEGMENT_REFERENCES));
+    for (reference, _, _, _) in items {
+        let per_revision = per_revision_counts.entry(reference.revision_id).or_insert(0);
+        if *per_revision >= MAX_DETAIL_PREPARED_SEGMENT_REFERENCES_PER_REVISION {
+            continue;
+        }
+        limited.push(reference);
+        *per_revision += 1;
+        if limited.len() >= MAX_DETAIL_PREPARED_SEGMENT_REFERENCES {
+            break;
+        }
+    }
+    limited
+}
+
+fn prepared_segment_focus_tokens(query_text: &str) -> BTreeSet<String> {
+    normalize_graph_identity_component(query_text)
+        .split('_')
+        .filter(|token| token.len() >= 3)
+        .filter(|token| !PREPARED_SEGMENT_FOCUS_STOPWORDS.contains(token))
+        .map(str::to_string)
+        .collect()
+}
+
+fn prepared_segment_focus_score(
+    query_focus_tokens: &BTreeSet<String>,
+    block: &KnowledgeStructuredBlockRow,
+) -> usize {
+    if query_focus_tokens.is_empty() {
+        return 0;
+    }
+    let mut focus_haystack = String::new();
+    if !block.heading_trail.is_empty() {
+        focus_haystack.push_str(&block.heading_trail.join(" "));
+        focus_haystack.push(' ');
+    }
+    if !block.section_path.is_empty() {
+        focus_haystack.push_str(&block.section_path.join(" "));
+    }
+    let normalized_focus_haystack = normalize_graph_identity_component(&focus_haystack);
+    let block_tokens = normalized_focus_haystack
+        .split('_')
+        .filter(|token| !token.is_empty())
+        .collect::<BTreeSet<_>>();
+    query_focus_tokens.iter().filter(|token| block_tokens.contains(token.as_str())).count()
+}
+
+fn prepared_segment_kind_priority(block_kind: &str) -> u8 {
+    match block_kind {
+        "heading" | "endpoint_block" => 4,
+        "paragraph" | "code_block" | "table_row" => 3,
+        "list_item" | "table" => 2,
+        "quote_block" | "metadata_block" => 1,
+        _ => 0,
+    }
+}
+
+fn build_technical_fact_references(
+    bundle: Option<&KnowledgeContextBundleReferenceSetRow>,
+    facts: &[KnowledgeTechnicalFactRow],
+    fact_rank_refs: &HashMap<Uuid, RankedBundleReference>,
+) -> Vec<TechnicalFactReference> {
+    let Some(bundle) = bundle else {
+        return Vec::new();
+    };
+    let execution_id = bundle
+        .bundle
+        .query_execution_id
+        .expect("query context bundle must carry query_execution_id");
+    let mut items = facts
+        .iter()
+        .filter_map(|fact| {
+            let reference = fact_rank_refs.get(&fact.fact_id)?;
+            Some(TechnicalFactReference {
+                execution_id,
+                fact_id: fact.fact_id,
+                revision_id: fact.revision_id,
+                fact_kind: fact.fact_kind.parse().ok()?,
+                canonical_value: fact.canonical_value_text.clone(),
+                display_value: fact.display_value.clone(),
+                rank: reference.rank,
+                score: reference.score,
+            })
+        })
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        left.rank
+            .cmp(&right.rank)
+            .then_with(|| right.score.total_cmp(&left.score))
+            .then_with(|| left.fact_id.cmp(&right.fact_id))
+    });
+    items
+}
+
+fn parse_query_verification_state(value: &str) -> QueryVerificationState {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "verified" => QueryVerificationState::Verified,
+        "partially_supported" => QueryVerificationState::PartiallySupported,
+        "conflicting_evidence" | "conflicting" => QueryVerificationState::Conflicting,
+        "insufficient_evidence" => QueryVerificationState::InsufficientEvidence,
+        "failed" => QueryVerificationState::Failed,
+        _ => QueryVerificationState::NotRun,
+    }
+}
+
+fn parse_query_verification_warnings(
+    value: &serde_json::Value,
+) -> Vec<crate::domains::query::QueryVerificationWarning> {
+    serde_json::from_value(value.clone()).unwrap_or_default()
+}
+
 fn freshness_snapshot_json(row: &KnowledgeLibraryGenerationRow) -> serde_json::Value {
     json!({
         "generationId": row.generation_id,
@@ -1372,6 +2082,193 @@ fn is_weak_conversation_title(value: &str) -> bool {
     chars <= 6 || (words <= 1 && chars <= 14)
 }
 
+fn build_conversation_runtime_context(
+    turns: &[query_repository::QueryTurnRow],
+    current_turn_id: Uuid,
+) -> ConversationRuntimeContext {
+    if turns.is_empty() {
+        return ConversationRuntimeContext {
+            effective_query_text: String::new(),
+            prompt_history_text: None,
+        };
+    }
+    let current_index = turns
+        .iter()
+        .position(|turn| turn.id == current_turn_id)
+        .unwrap_or_else(|| turns.len().saturating_sub(1));
+    let relevant_turns = &turns[..=current_index.min(turns.len().saturating_sub(1))];
+    let current_turn = relevant_turns.last();
+    let current_text = current_turn
+        .map(|turn| turn.content_text.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default();
+    let previous_turns =
+        relevant_turns[..relevant_turns.len().saturating_sub(1)].iter().collect::<Vec<_>>();
+    let prompt_history_text = render_turn_history(
+        &previous_turns,
+        MAX_PROMPT_HISTORY_TURNS,
+        MAX_PROMPT_HISTORY_TURN_CHARS,
+    );
+
+    let effective_query_text = if is_context_dependent_follow_up(&current_text) {
+        render_effective_query_text(&previous_turns, &current_text)
+            .unwrap_or_else(|| current_text.clone())
+    } else {
+        current_text.clone()
+    };
+
+    ConversationRuntimeContext { effective_query_text, prompt_history_text }
+}
+
+fn render_effective_query_text(
+    previous_turns: &[&query_repository::QueryTurnRow],
+    current_text: &str,
+) -> Option<String> {
+    let mut lines = previous_turns
+        .iter()
+        .rev()
+        .filter_map(|turn| {
+            let text =
+                compact_conversation_turn_text(&turn.content_text, MAX_EFFECTIVE_QUERY_TURN_CHARS);
+            (!text.is_empty()).then_some(text)
+        })
+        .take(MAX_EFFECTIVE_QUERY_HISTORY_TURNS)
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return None;
+    }
+    lines.reverse();
+    lines.push(current_text.to_string());
+    Some(lines.join("\n"))
+}
+
+fn render_turn_history(
+    turns: &[&query_repository::QueryTurnRow],
+    limit: usize,
+    max_chars_per_turn: usize,
+) -> Option<String> {
+    let selected = turns
+        .iter()
+        .rev()
+        .filter_map(|turn| {
+            let text = compact_conversation_turn_text(&turn.content_text, max_chars_per_turn);
+            (!text.is_empty())
+                .then(|| format!("{}: {}", conversation_turn_speaker(&turn.turn_kind), text))
+        })
+        .take(limit)
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        None
+    } else {
+        Some(selected.into_iter().rev().collect::<Vec<_>>().join("\n"))
+    }
+}
+
+fn compact_conversation_turn_text(value: &str, max_chars: usize) -> String {
+    let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= max_chars {
+        return collapsed;
+    }
+    let cutoff =
+        collapsed.char_indices().nth(max_chars).map_or(collapsed.len(), |(index, _)| index);
+    format!("{}…", collapsed[..cutoff].trim_end())
+}
+
+fn conversation_turn_speaker(turn_kind: &str) -> &'static str {
+    match turn_kind {
+        "assistant" => "Assistant",
+        _ => "User",
+    }
+}
+
+fn is_context_dependent_follow_up(value: &str) -> bool {
+    const EXPLICIT_FOLLOW_UP_MARKERS: &[&str] = &[
+        "да",
+        "давай",
+        "ага",
+        "угу",
+        "ок",
+        "okay",
+        "ok",
+        "хорошо",
+        "продолжай",
+        "продолжи",
+        "дальше",
+        "ещё",
+        "еще",
+        "подробнее",
+        "детальнее",
+        "распиши",
+        "пошагово",
+        "покажи",
+        "поясни",
+        "continue",
+        "go on",
+        "more",
+        "show me",
+        "walk me through",
+    ];
+    const CONTEXT_WORDS: &[&str] = &[
+        "это",
+        "этот",
+        "эта",
+        "эту",
+        "этом",
+        "этим",
+        "эти",
+        "того",
+        "такое",
+        "такой",
+        "так",
+        "там",
+        "тут",
+        "сюда",
+        "туда",
+        "дальше",
+        "потом",
+        "здесь",
+        "here",
+        "there",
+        "this",
+        "that",
+        "it",
+        "them",
+        "those",
+        "same",
+        "again",
+        "further",
+    ];
+    const LOW_SIGNAL_WORDS: &[&str] =
+        &["а", "и", "ну", "же", "ли", "бы", "please", "just", "the", "this", "that", "it"];
+
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+    let tokens = normalized
+        .split_whitespace()
+        .map(|token| token.trim_matches(|ch: char| !ch.is_alphanumeric()))
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return false;
+    }
+    if EXPLICIT_FOLLOW_UP_MARKERS.iter().any(|marker| {
+        marker
+            .contains(' ')
+            .then_some(normalized.contains(marker))
+            .unwrap_or_else(|| tokens.iter().any(|token| token == marker))
+    }) {
+        return true;
+    }
+    let informative_tokens = tokens
+        .iter()
+        .filter(|token| token.chars().count() >= 4 && !LOW_SIGNAL_WORDS.contains(token))
+        .count();
+    tokens.len() <= 6
+        && (informative_tokens <= 1 || tokens.iter().any(|token| CONTEXT_WORDS.contains(token)))
+}
+
 fn saturating_rank(index: usize) -> i32 {
     i32::try_from(index.saturating_add(1)).unwrap_or(i32::MAX)
 }
@@ -1422,4 +2319,361 @@ fn map_query_execution_error_message(
     }
 
     ApiError::Internal
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    #[test]
+    fn derive_fact_rank_refs_merges_evidence_and_selected_fact_ids() {
+        let bundle_id = Uuid::now_v7();
+        let execution_id = Uuid::now_v7();
+        let fact_id = Uuid::now_v7();
+        let evidence_id = Uuid::now_v7();
+        let bundle = KnowledgeContextBundleReferenceSetRow {
+            bundle: KnowledgeContextBundleRow {
+                key: bundle_id.to_string(),
+                arango_id: None,
+                arango_rev: None,
+                bundle_id,
+                workspace_id: Uuid::now_v7(),
+                library_id: Uuid::now_v7(),
+                query_execution_id: Some(execution_id),
+                bundle_state: "ready".to_string(),
+                bundle_strategy: "hybrid".to_string(),
+                requested_mode: "mix".to_string(),
+                resolved_mode: "mix".to_string(),
+                selected_fact_ids: vec![fact_id],
+                verification_state: "not_run".to_string(),
+                verification_warnings: json!([]),
+                freshness_snapshot: json!({}),
+                candidate_summary: json!({}),
+                assembly_diagnostics: json!({}),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+            chunk_references: Vec::new(),
+            entity_references: Vec::new(),
+            relation_references: Vec::new(),
+            evidence_references: vec![
+                crate::infra::arangodb::context_store::KnowledgeBundleEvidenceReferenceRow {
+                    key: format!("{bundle_id}:{evidence_id}"),
+                    bundle_id,
+                    evidence_id,
+                    rank: 2,
+                    score: 42.0,
+                    inclusion_reason: Some("relation_evidence".to_string()),
+                    created_at: Utc::now(),
+                },
+            ],
+        };
+        let evidence_rows = vec![KnowledgeEvidenceRow {
+            key: evidence_id.to_string(),
+            arango_id: None,
+            arango_rev: None,
+            evidence_id,
+            workspace_id: bundle.bundle.workspace_id,
+            library_id: bundle.bundle.library_id,
+            document_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_id: None,
+            block_id: Some(Uuid::now_v7()),
+            fact_id: Some(fact_id),
+            span_start: None,
+            span_end: None,
+            quote_text: "GET /api/status".to_string(),
+            literal_spans_json: json!([]),
+            evidence_kind: "relation_fact_support".to_string(),
+            extraction_method: "graph_extract".to_string(),
+            confidence: Some(0.9),
+            evidence_state: "active".to_string(),
+            freshness_generation: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }];
+
+        let fact_refs = derive_fact_rank_refs(&bundle, &evidence_rows);
+        let reference = fact_refs.get(&fact_id).expect("fact reference");
+        assert_eq!(reference.rank, 1);
+        assert!(reference.score >= 42.0);
+    }
+
+    #[test]
+    fn selected_fact_ids_for_detail_stays_bounded_to_canonical_limit() {
+        let bundle_id = Uuid::now_v7();
+        let execution_id = Uuid::now_v7();
+        let selected_fact_id = Uuid::now_v7();
+        let bundle = KnowledgeContextBundleReferenceSetRow {
+            bundle: KnowledgeContextBundleRow {
+                key: bundle_id.to_string(),
+                arango_id: None,
+                arango_rev: None,
+                bundle_id,
+                workspace_id: Uuid::now_v7(),
+                library_id: Uuid::now_v7(),
+                query_execution_id: Some(execution_id),
+                bundle_state: "ready".to_string(),
+                bundle_strategy: "hybrid".to_string(),
+                requested_mode: "mix".to_string(),
+                resolved_mode: "mix".to_string(),
+                selected_fact_ids: vec![selected_fact_id],
+                verification_state: "not_run".to_string(),
+                verification_warnings: json!([]),
+                freshness_snapshot: json!({}),
+                candidate_summary: json!({}),
+                assembly_diagnostics: json!({}),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+            chunk_references: Vec::new(),
+            entity_references: Vec::new(),
+            relation_references: Vec::new(),
+            evidence_references: Vec::new(),
+        };
+        let fact_rank_refs = (0..40)
+            .map(|index| {
+                (
+                    Uuid::now_v7(),
+                    RankedBundleReference {
+                        rank: index + 1,
+                        score: 100.0 - index as f64,
+                        reasons: BTreeSet::from(["test".to_string()]),
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        let fact_ids = selected_fact_ids_for_detail(&bundle, &fact_rank_refs);
+        assert_eq!(fact_ids.len(), MAX_DETAIL_TECHNICAL_FACT_REFERENCES);
+        assert_eq!(fact_ids.first().copied(), Some(selected_fact_id));
+    }
+
+    #[test]
+    fn build_prepared_segment_references_prioritizes_query_matching_headings_and_limits_revision_fanout()
+     {
+        let bundle_id = Uuid::now_v7();
+        let execution_id = Uuid::now_v7();
+        let telegram_revision_id = Uuid::now_v7();
+        let control_revision_id = Uuid::now_v7();
+        let bundle = KnowledgeContextBundleReferenceSetRow {
+            bundle: KnowledgeContextBundleRow {
+                key: bundle_id.to_string(),
+                arango_id: None,
+                arango_rev: None,
+                bundle_id,
+                workspace_id: Uuid::now_v7(),
+                library_id: Uuid::now_v7(),
+                query_execution_id: Some(execution_id),
+                bundle_state: "ready".to_string(),
+                bundle_strategy: "hybrid".to_string(),
+                requested_mode: "mix".to_string(),
+                resolved_mode: "mix".to_string(),
+                selected_fact_ids: Vec::new(),
+                verification_state: "not_run".to_string(),
+                verification_warnings: json!([]),
+                freshness_snapshot: json!({}),
+                candidate_summary: json!({}),
+                assembly_diagnostics: json!({}),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+            chunk_references: Vec::new(),
+            entity_references: Vec::new(),
+            relation_references: Vec::new(),
+            evidence_references: Vec::new(),
+        };
+        let mut block_rank_refs = HashMap::new();
+        let mut blocks = Vec::new();
+        for ordinal in 0..12_i32 {
+            let block_id = Uuid::now_v7();
+            blocks.push(KnowledgeStructuredBlockRow {
+                key: block_id.to_string(),
+                arango_id: None,
+                arango_rev: None,
+                block_id,
+                workspace_id: Uuid::now_v7(),
+                library_id: Uuid::now_v7(),
+                document_id: Uuid::now_v7(),
+                revision_id: telegram_revision_id,
+                ordinal,
+                block_kind: if ordinal == 0 {
+                    "heading".to_string()
+                } else {
+                    "list_item".to_string()
+                },
+                text: "telegram".to_string(),
+                normalized_text: "telegram".to_string(),
+                heading_trail: vec!["Acme Telegram Bot - Example".to_string()],
+                section_path: vec!["acme-telegram-bot-example".to_string()],
+                page_number: None,
+                span_start: None,
+                span_end: None,
+                parent_block_id: None,
+                table_coordinates_json: None,
+                code_language: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            });
+            block_rank_refs.insert(
+                block_id,
+                RankedBundleReference {
+                    rank: 1,
+                    score: 100.0 - ordinal as f64,
+                    reasons: BTreeSet::from(["test".to_string()]),
+                },
+            );
+        }
+        let control_heading_id = Uuid::now_v7();
+        blocks.push(KnowledgeStructuredBlockRow {
+            key: control_heading_id.to_string(),
+            arango_id: None,
+            arango_rev: None,
+            block_id: control_heading_id,
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            document_id: Uuid::now_v7(),
+            revision_id: control_revision_id,
+            ordinal: 0,
+            block_kind: "heading".to_string(),
+            text: "control center".to_string(),
+            normalized_text: "control center".to_string(),
+            heading_trail: vec!["Acme Control Center - Example".to_string()],
+            section_path: vec!["acme-control-center-example".to_string()],
+            page_number: None,
+            span_start: None,
+            span_end: None,
+            parent_block_id: None,
+            table_coordinates_json: None,
+            code_language: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+        block_rank_refs.insert(
+            control_heading_id,
+            RankedBundleReference {
+                rank: 2,
+                score: 90.0,
+                reasons: BTreeSet::from(["test".to_string()]),
+            },
+        );
+
+        let references = build_prepared_segment_references(
+            Some(&bundle),
+            &blocks,
+            &block_rank_refs,
+            "Что такое Acme Control Center?",
+        );
+
+        assert_eq!(
+            references.first().map(|reference| reference.heading_trail.first().cloned()).flatten(),
+            Some("Acme Control Center - Example".to_string())
+        );
+        assert!(
+            references.iter().all(|reference| reference.revision_id == control_revision_id),
+            "focused query should retain only the best matching revision when focus is explicit"
+        );
+        assert!(references.len() <= MAX_DETAIL_PREPARED_SEGMENT_REFERENCES);
+        assert!(
+            references
+                .iter()
+                .filter(|reference| reference.revision_id == telegram_revision_id)
+                .count()
+                <= MAX_DETAIL_PREPARED_SEGMENT_REFERENCES_PER_REVISION
+        );
+    }
+
+    #[test]
+    fn parse_query_verification_state_maps_canonical_values() {
+        assert_eq!(parse_query_verification_state("verified"), QueryVerificationState::Verified);
+        assert_eq!(
+            parse_query_verification_state("insufficient_evidence"),
+            QueryVerificationState::InsufficientEvidence
+        );
+        assert_eq!(parse_query_verification_state("unknown"), QueryVerificationState::NotRun);
+    }
+
+    #[test]
+    fn build_conversation_runtime_context_rewrites_short_follow_up_from_history() {
+        let conversation_id = Uuid::now_v7();
+        let first_user_turn = query_repository::QueryTurnRow {
+            id: Uuid::now_v7(),
+            conversation_id,
+            turn_index: 1,
+            turn_kind: "user".to_string(),
+            author_principal_id: None,
+            content_text: "как в далионе перемещение сделать скажи".to_string(),
+            execution_id: None,
+            created_at: Utc::now(),
+        };
+        let assistant_turn = query_repository::QueryTurnRow {
+            id: Uuid::now_v7(),
+            conversation_id,
+            turn_index: 2,
+            turn_kind: "assistant".to_string(),
+            author_principal_id: None,
+            content_text: "Могу сразу расписать это пошагово для Далиона.".to_string(),
+            execution_id: Some(Uuid::now_v7()),
+            created_at: Utc::now(),
+        };
+        let follow_up_turn = query_repository::QueryTurnRow {
+            id: Uuid::now_v7(),
+            conversation_id,
+            turn_index: 3,
+            turn_kind: "user".to_string(),
+            author_principal_id: None,
+            content_text: "давай".to_string(),
+            execution_id: None,
+            created_at: Utc::now(),
+        };
+
+        let context = build_conversation_runtime_context(
+            &[first_user_turn, assistant_turn, follow_up_turn.clone()],
+            follow_up_turn.id,
+        );
+
+        assert!(context.effective_query_text.contains("как в далионе перемещение сделать скажи"));
+        assert!(
+            context.effective_query_text.contains("Могу сразу расписать это пошагово для Далиона.")
+        );
+        assert!(context.effective_query_text.ends_with("давай"));
+        assert_eq!(
+            context.prompt_history_text.as_deref(),
+            Some(
+                "User: как в далионе перемещение сделать скажи\nAssistant: Могу сразу расписать это пошагово для Далиона."
+            )
+        );
+    }
+
+    #[test]
+    fn build_conversation_runtime_context_keeps_standalone_question_without_rewrite() {
+        let conversation_id = Uuid::now_v7();
+        let first_turn = query_repository::QueryTurnRow {
+            id: Uuid::now_v7(),
+            conversation_id,
+            turn_index: 1,
+            turn_kind: "user".to_string(),
+            author_principal_id: None,
+            content_text: "как перемещение оформить".to_string(),
+            execution_id: None,
+            created_at: Utc::now(),
+        };
+        let second_turn = query_repository::QueryTurnRow {
+            id: Uuid::now_v7(),
+            conversation_id,
+            turn_index: 2,
+            turn_kind: "user".to_string(),
+            author_principal_id: None,
+            content_text: "как в далионе перемещение сделать скажи".to_string(),
+            execution_id: None,
+            created_at: Utc::now(),
+        };
+
+        let context =
+            build_conversation_runtime_context(&[first_turn, second_turn.clone()], second_turn.id);
+
+        assert_eq!(context.effective_query_text, "как в далионе перемещение сделать скажи");
+        assert_eq!(context.prompt_history_text.as_deref(), Some("User: как перемещение оформить"));
+    }
 }

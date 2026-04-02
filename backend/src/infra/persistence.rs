@@ -7,9 +7,12 @@ use crate::infra::arangodb::{
     collections::{
         DOCUMENT_COLLECTIONS, KNOWLEDGE_CHUNK_VECTOR_COLLECTION, KNOWLEDGE_CHUNK_VECTOR_INDEX,
         KNOWLEDGE_ENTITY_VECTOR_COLLECTION, KNOWLEDGE_ENTITY_VECTOR_INDEX, KNOWLEDGE_GRAPH_NAME,
-        KNOWLEDGE_SEARCH_VIEW,
+        KNOWLEDGE_PERSISTENT_INDEXES, KNOWLEDGE_SEARCH_VIEW,
     },
 };
+
+// Forces the crate to rebuild whenever the migration set changes, including file deletions.
+const _SQLX_MIGRATIONS_FINGERPRINT: &str = env!("RUSTRAG_MIGRATIONS_FINGERPRINT");
 
 const SEEDED_PROVIDER_KINDS: [&str; 3] = ["openai", "deepseek", "qwen"];
 const CANONICAL_BASELINE_TABLES: [&str; 7] = [
@@ -76,14 +79,27 @@ pub async fn validate_arango_bootstrap_state(
     arango_client: &ArangoClient,
     settings: &Settings,
 ) -> anyhow::Result<()> {
-    if !settings.destructive_fresh_bootstrap_settings().required {
-        return Ok(());
-    }
-
     for collection in DOCUMENT_COLLECTIONS {
         anyhow::ensure!(
             arango_client.collection_exists(collection).await?,
             "canonical bootstrap validation failed: required Arango collection `{collection}` is missing",
+        );
+    }
+
+    for index in KNOWLEDGE_PERSISTENT_INDEXES {
+        anyhow::ensure!(
+            arango_client
+                .persistent_index_matches(
+                    index.collection,
+                    index.name,
+                    index.fields,
+                    index.unique,
+                    index.sparse
+                )
+                .await?,
+            "canonical bootstrap validation failed: required Arango persistent index `{}` on `{}` is missing or mismatched",
+            index.name,
+            index.collection,
         );
     }
 

@@ -199,7 +199,7 @@ grounded benchmark:
     - test -n "$RUSTRAG_BENCHMARK_WORKSPACE_ID" || (echo "RUSTRAG_BENCHMARK_WORKSPACE_ID is required" && exit 1)
     - export RUSTRAG_SESSION_COOKIE="$RUSTRAG_BENCHMARK_SESSION_COOKIE"
     - export RUSTRAG_BENCHMARK_OUTPUT_DIR="tmp-grounded-benchmarks"
-    - export RUSTRAG_BENCHMARK_SUITES="${RUSTRAG_BENCHMARK_SUITES:-backend/benchmarks/grounded_query/grad_api_suite.json backend/benchmarks/grounded_query/grad_agent_workflows_suite.json}"
+    - export RUSTRAG_BENCHMARK_SUITES="${RUSTRAG_BENCHMARK_SUITES:-backend/benchmarks/grounded_query/api_baseline_suite.json backend/benchmarks/grounded_query/workflow_strict_suite.json backend/benchmarks/grounded_query/layout_noise_suite.json backend/benchmarks/grounded_query/graph_multihop_suite.json}"
     - make benchmark-grounded-all
   artifacts:
     when: always

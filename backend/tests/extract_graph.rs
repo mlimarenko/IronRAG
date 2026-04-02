@@ -236,11 +236,13 @@ impl ExtractGraphFixture {
                     ),
                     text_checksum: Some("sha256:extract-graph".to_string()),
                     warning_count: 0,
+                    preparation_state: None,
+                    preparation_checkpoint: None,
                 },
             )
             .await
             .context("failed to persist extract content")?;
-        let chunk_result = extract_service
+        let _chunk_result = extract_service
             .materialize_chunk_result(
                 &self.state,
                 MaterializeChunkResultCommand {
@@ -250,18 +252,27 @@ impl ExtractGraphFixture {
                     provider_call_id: None,
                     finished_at: Some(Utc::now()),
                     failure_code: None,
-                    node_candidates: vec![NewNodeCandidate {
-                        canonical_key: "entity:greenfield-test".to_string(),
-                        node_kind: "entity".to_string(),
-                        display_label: "Greenfield Test".to_string(),
-                        summary: Some("Typed node candidate".to_string()),
-                    }],
+                    node_candidates: vec![
+                        NewNodeCandidate {
+                            canonical_key: "entity:greenfield-test".to_string(),
+                            node_kind: "entity".to_string(),
+                            display_label: "Greenfield Test".to_string(),
+                            summary: Some("Typed node candidate".to_string()),
+                        },
+                        NewNodeCandidate {
+                            canonical_key: "entity:greenfield-other".to_string(),
+                            node_kind: "entity".to_string(),
+                            display_label: "Greenfield Other".to_string(),
+                            summary: None,
+                        },
+                    ],
                     edge_candidates: vec![NewEdgeCandidate {
-                        canonical_key:
-                            "entity:greenfield-test--relates_to--entity:greenfield-other"
-                                .to_string(),
-                        edge_kind: "relates_to".to_string(),
+                        canonical_key: "entity:greenfield-test--mentions--entity:greenfield-other"
+                            .to_string(),
+                        edge_kind: "mentions".to_string(),
+                        from_display_label: "Greenfield Test".to_string(),
                         from_canonical_key: "entity:greenfield-test".to_string(),
+                        to_display_label: "Greenfield Other".to_string(),
                         to_canonical_key: "entity:greenfield-other".to_string(),
                         summary: Some("Typed edge candidate".to_string()),
                     }],

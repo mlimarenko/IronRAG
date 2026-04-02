@@ -33,12 +33,14 @@ pub async fn run() -> anyhow::Result<()> {
     crate::shared::telemetry::init(&config.log_filter);
 
     let state = state::AppState::new(config.clone()).await?;
-    run_startup_bootstraps(
-        &state,
-        &config.bootstrap_settings(),
-        &config.destructive_fresh_bootstrap_settings(),
-    )
-    .await?;
+    if config.runs_http_api() {
+        run_startup_bootstraps(
+            &state,
+            &config.bootstrap_settings(),
+            &config.destructive_fresh_bootstrap_settings(),
+        )
+        .await?;
+    }
     let graph_backend = state.graph_runtime.backend_name.as_str();
     let shutdown = shutdown::ShutdownSignal::new();
     let signal_listener = spawn_signal_listener(shutdown.clone());

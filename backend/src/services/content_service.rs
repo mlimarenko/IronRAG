@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use chrono::Utc;
 use futures::{StreamExt, TryStreamExt, stream};
 use sha2::{Digest, Sha256};
@@ -8,14 +10,19 @@ use crate::{
     domains::content::{
         ContentChunk, ContentDocument, ContentDocumentHead, ContentDocumentPipelineJob,
         ContentDocumentPipelineState, ContentDocumentSummary, ContentMutation, ContentMutationItem,
-        ContentRevision, ContentRevisionReadiness,
+        ContentRevision, ContentRevisionReadiness, WebPageProvenance,
+    },
+    domains::knowledge::{
+        PreparedSegmentDetail, PreparedSegmentListItem, StructuredDocumentRevision,
+        TypedTechnicalFact,
     },
     domains::{
         ai::AiBindingPurpose, ingest::IngestStageEvent, provider_profiles::ProviderModelSelection,
         runtime_graph::RuntimeNodeType,
     },
     infra::arangodb::document_store::{
-        KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeRevisionRow,
+        KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeRevisionRow, KnowledgeStructuredBlockRow,
+        KnowledgeStructuredRevisionRow, KnowledgeTechnicalFactRow,
     },
     infra::repositories::{
         self, catalog_repository,
@@ -23,6 +30,7 @@ use crate::{
             self, NewContentDocument, NewContentDocumentHead, NewContentMutation,
             NewContentMutationItem, NewContentRevision,
         },
+        ingest_repository,
     },
     interfaces::http::router_support::ApiError,
     services::{
@@ -32,10 +40,16 @@ use crate::{
             MaterializeChunkResultCommand, NewEdgeCandidate, NewNodeCandidate,
             PersistExtractContentCommand,
         },
-        graph_extract::{GraphExtractionRequest, extract_chunk_graph_candidates},
-        ingest_service::AdmitIngestJobCommand,
+        graph_extract::{
+            GraphExtractionRequest, GraphExtractionStructuredChunkContext,
+            GraphExtractionTechnicalFact, extract_chunk_graph_candidates,
+        },
         ingest_service::{
-            FinalizeAttemptCommand, IngestJobHandle, LeaseAttemptCommand, RecordStageEventCommand,
+            AdmitIngestJobCommand, FinalizeAttemptCommand, INGEST_STAGE_CHUNK_CONTENT,
+            INGEST_STAGE_EMBED_CHUNK, INGEST_STAGE_EXTRACT_CONTENT, INGEST_STAGE_EXTRACT_GRAPH,
+            INGEST_STAGE_EXTRACT_TECHNICAL_FACTS, INGEST_STAGE_FINALIZING,
+            INGEST_STAGE_PREPARE_STRUCTURE, IngestJobHandle, LeaseAttemptCommand,
+            RecordStageEventCommand,
         },
         knowledge_service::{
             CreateKnowledgeChunkCommand, CreateKnowledgeDocumentCommand,
@@ -43,13 +57,13 @@ use crate::{
         },
         ops_service::{CreateAsyncOperationCommand, UpdateAsyncOperationCommand},
         runtime_ingestion::resolve_effective_provider_profile,
+        structured_preparation_service::PrepareStructuredRevisionCommand,
+        technical_fact_service::ExtractTechnicalFactsCommand,
     },
-    shared::{
-        chunking::{ChunkingProfile, split_text_into_chunks_with_profile},
-        file_extract::{
-            FileExtractError, FileExtractionPlan, UploadAdmissionError, UploadFileKind,
-            build_runtime_file_extraction_plan, validate_upload_file_admission,
-        },
+    shared::file_extract::{
+        FileExtractError, FileExtractionPlan, UploadAdmissionError, UploadFileKind,
+        build_inline_text_extraction_plan, build_runtime_file_extraction_plan,
+        validate_upload_file_admission,
     },
 };
 
@@ -220,11 +234,33 @@ pub struct ReplaceInlineMutationCommand {
 }
 
 #[derive(Debug, Clone)]
+pub struct MaterializeWebCaptureCommand {
+    pub workspace_id: Uuid,
+    pub library_id: Uuid,
+    pub mutation_id: Uuid,
+    pub requested_by_principal_id: Option<Uuid>,
+    pub final_url: String,
+    pub checksum: String,
+    pub mime_type: String,
+    pub byte_size: i64,
+    pub title: Option<String>,
+    pub storage_key: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct ContentMutationAdmission {
     pub mutation: ContentMutation,
     pub items: Vec<ContentMutationItem>,
     pub job_id: Option<Uuid>,
     pub async_operation_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MaterializedWebCapture {
+    pub document: ContentDocument,
+    pub revision: ContentRevision,
+    pub mutation_item: ContentMutationItem,
+    pub job_id: Uuid,
 }
 
 #[derive(Debug, Clone)]
@@ -249,7 +285,7 @@ pub struct MaterializeRevisionGraphCandidatesCommand {
     pub workspace_id: Uuid,
     pub library_id: Uuid,
     pub revision_id: Uuid,
-    pub attempt_id: Uuid,
+    pub attempt_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,12 +309,32 @@ struct PendingChunkInsert {
     start_offset: i32,
     end_offset: i32,
     token_count: Option<i32>,
+    chunk_kind: Option<String>,
     normalized_text: String,
     text_checksum: String,
+    support_block_ids: Vec<Uuid>,
+    section_path: Vec<String>,
+    heading_trail: Vec<String>,
+    literal_digest: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedRevisionPersistenceSummary {
+    pub prepared_revision: StructuredDocumentRevision,
+    pub chunk_count: usize,
+    pub technical_fact_count: usize,
+    pub technical_conflict_count: usize,
+    pub normalization_profile: String,
 }
 
 #[derive(Clone, Default)]
 pub struct ContentService;
+
+struct PrefetchedDocumentSummaryData {
+    revisions_by_id: HashMap<Uuid, KnowledgeRevisionRow>,
+    structured_revisions_by_revision_id: HashMap<Uuid, KnowledgeStructuredRevisionRow>,
+    web_pages_by_result_revision_id: HashMap<Uuid, ingest_repository::WebDiscoveredPageRow>,
+}
 
 impl ContentService {
     #[must_use]
@@ -430,6 +486,8 @@ impl ContentService {
             .list_documents_by_library(library.workspace_id, library_id)
             .await
             .map_err(|_| ApiError::Internal)?;
+        let prefetched_summary_data =
+            self.prefetch_document_summary_data(state, &documents).await?;
         let document_ids = documents.iter().map(|row| row.document_id).collect::<Vec<_>>();
         let content_heads = content_repository::list_document_heads_by_document_ids(
             &state.persistence.postgres,
@@ -447,7 +505,7 @@ impl ContentService {
         .map_err(|_| ApiError::Internal)?
         .into_iter()
         .map(|row| (row.id, row))
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<HashMap<_, _>>();
         let job_handles_by_mutation_id = state
             .canonical_services
             .ingest
@@ -460,11 +518,9 @@ impl ContentService {
             .await?
             .into_iter()
             .filter_map(|handle| handle.job.mutation_id.map(|mutation_id| (mutation_id, handle)))
-            .collect::<std::collections::HashMap<_, _>>();
-        let heads_by_document_id = content_heads
-            .into_iter()
-            .map(|row| (row.document_id, row))
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<HashMap<_, _>>();
+        let heads_by_document_id =
+            content_heads.into_iter().map(|row| (row.document_id, row)).collect::<HashMap<_, _>>();
         let mut summaries = Vec::with_capacity(documents.len());
         for row in documents {
             let content_head = heads_by_document_id.get(&row.document_id);
@@ -476,16 +532,14 @@ impl ContentService {
                 .and_then(|head| head.latest_mutation_id)
                 .and_then(|mutation_id| job_handles_by_mutation_id.get(&mutation_id).cloned())
                 .map(map_document_pipeline_job);
-            summaries.push(
-                self.build_document_summary_from_knowledge(
-                    state,
-                    row,
-                    content_head,
-                    latest_mutation,
-                    latest_job,
-                )
-                .await?,
-            );
+            summaries.push(self.build_document_summary_from_prefetched(
+                state,
+                row,
+                content_head,
+                latest_mutation,
+                latest_job,
+                &prefetched_summary_data,
+            ));
         }
         Ok(summaries)
     }
@@ -531,6 +585,22 @@ impl ContentService {
             latest_job,
         )
         .await
+    }
+
+    pub async fn get_document_by_external_key(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+        external_key: &str,
+    ) -> Result<Option<ContentDocument>, ApiError> {
+        let row = content_repository::get_document_by_external_key(
+            &state.persistence.postgres,
+            library_id,
+            external_key,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?;
+        Ok(row.map(map_document_row))
     }
 
     pub async fn get_document_head(
@@ -585,6 +655,58 @@ impl ContentService {
             .await
             .map_err(|_| ApiError::Internal)?;
         Ok(rows.into_iter().map(map_knowledge_chunk_row).collect())
+    }
+
+    pub async fn list_prepared_segments(
+        &self,
+        state: &AppState,
+        revision_id: Uuid,
+    ) -> Result<Vec<PreparedSegmentDetail>, ApiError> {
+        let blocks =
+            state.canonical_services.knowledge.list_structured_blocks(state, revision_id).await?;
+        let chunk_rows = state
+            .arango_document_store
+            .list_chunks_by_revision(revision_id)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+        let mut support_chunk_ids_by_block = std::collections::BTreeMap::<Uuid, Vec<Uuid>>::new();
+        for chunk in chunk_rows {
+            for block_id in chunk.support_block_ids {
+                support_chunk_ids_by_block.entry(block_id).or_default().push(chunk.chunk_id);
+            }
+        }
+        Ok(blocks
+            .into_iter()
+            .map(|block| PreparedSegmentDetail {
+                segment: PreparedSegmentListItem {
+                    segment_id: block.block_id,
+                    revision_id: block.revision_id,
+                    ordinal: block.ordinal,
+                    block_kind: block.block_kind.clone(),
+                    heading_trail: block.heading_trail.clone(),
+                    section_path: block.section_path.clone(),
+                    page_number: block.page_number,
+                    excerpt: segment_excerpt(&block.normalized_text),
+                },
+                text: block.text,
+                normalized_text: block.normalized_text,
+                source_span: block.source_span,
+                parent_block_id: block.parent_block_id,
+                table_coordinates: block.table_coordinates,
+                code_language: block.code_language,
+                support_chunk_ids: support_chunk_ids_by_block
+                    .remove(&block.block_id)
+                    .unwrap_or_default(),
+            })
+            .collect())
+    }
+
+    pub async fn list_technical_facts(
+        &self,
+        state: &AppState,
+        revision_id: Uuid,
+    ) -> Result<Vec<TypedTechnicalFact>, ApiError> {
+        state.canonical_services.knowledge.list_typed_technical_facts(state, revision_id).await
     }
 
     pub async fn create_document(
@@ -895,6 +1017,100 @@ impl ContentService {
             },
         )
         .await
+    }
+
+    pub async fn materialize_web_capture(
+        &self,
+        state: &AppState,
+        command: MaterializeWebCaptureCommand,
+    ) -> Result<MaterializedWebCapture, ApiError> {
+        let document = match self
+            .get_document_by_external_key(state, command.library_id, &command.final_url)
+            .await?
+        {
+            Some(document) => document,
+            None => {
+                self.create_document(
+                    state,
+                    CreateDocumentCommand {
+                        workspace_id: command.workspace_id,
+                        library_id: command.library_id,
+                        external_key: Some(command.final_url.clone()),
+                        created_by_principal_id: command.requested_by_principal_id,
+                    },
+                )
+                .await?
+            }
+        };
+
+        let current_head = self.get_document_head(state, document.id).await?;
+        let base_revision_id = current_head
+            .as_ref()
+            .and_then(|head| head.active_revision_id.or(head.readable_revision_id));
+        let revision = self
+            .create_revision(
+                state,
+                CreateRevisionCommand {
+                    document_id: document.id,
+                    content_source_kind: "web_page".to_string(),
+                    checksum: command.checksum,
+                    mime_type: command.mime_type,
+                    byte_size: command.byte_size,
+                    title: command.title,
+                    language_code: None,
+                    source_uri: Some(command.final_url.clone()),
+                    storage_key: Some(command.storage_key),
+                    created_by_principal_id: command.requested_by_principal_id,
+                },
+            )
+            .await?;
+        let mutation_item = self
+            .create_mutation_item(
+                state,
+                CreateMutationItemCommand {
+                    mutation_id: command.mutation_id,
+                    document_id: Some(document.id),
+                    base_revision_id,
+                    result_revision_id: Some(revision.id),
+                    item_state: "pending".to_string(),
+                    message: Some("web page accepted and queued for ingest".to_string()),
+                },
+            )
+            .await?;
+        let _ = self
+            .promote_document_head(
+                state,
+                PromoteHeadCommand {
+                    document_id: document.id,
+                    active_revision_id: Some(revision.id),
+                    readable_revision_id: current_head.and_then(|head| head.readable_revision_id),
+                    latest_mutation_id: Some(command.mutation_id),
+                    latest_successful_attempt_id: None,
+                },
+            )
+            .await?;
+        let job = state
+            .canonical_services
+            .ingest
+            .admit_job(
+                state,
+                AdmitIngestJobCommand {
+                    workspace_id: command.workspace_id,
+                    library_id: command.library_id,
+                    mutation_id: Some(command.mutation_id),
+                    connector_id: None,
+                    async_operation_id: None,
+                    knowledge_document_id: Some(document.id),
+                    knowledge_revision_id: Some(revision.id),
+                    job_kind: "content_mutation".to_string(),
+                    priority: 100,
+                    dedupe_key: None,
+                    available_at: None,
+                },
+            )
+            .await?;
+
+        Ok(MaterializedWebCapture { document, revision, mutation_item, job_id: job.id })
     }
 
     pub async fn create_revision(
@@ -1314,6 +1530,7 @@ impl ContentService {
                 },
             )
             .await?;
+        self.converge_document_technical_facts(state, document_id, None).await?;
 
         Ok(ContentDocument {
             id: document.id,
@@ -1812,7 +2029,7 @@ impl ContentService {
                 state,
                 RecordStageEventCommand {
                     attempt_id: attempt.id,
-                    stage_name: "extract_content".to_string(),
+                    stage_name: INGEST_STAGE_EXTRACT_CONTENT.to_string(),
                     stage_state: "started".to_string(),
                     message: Some("materializing appended text".to_string()),
                     details_json: serde_json::json!({
@@ -1834,6 +2051,8 @@ impl ContentService {
                     normalized_text: Some(text.clone()),
                     text_checksum: Some(sha256_hex_text(&text)),
                     warning_count: 0,
+                    preparation_state: None,
+                    preparation_checkpoint: None,
                 },
             )
             .await?;
@@ -1844,14 +2063,13 @@ impl ContentService {
                 state,
                 RecordStageEventCommand {
                     attempt_id: attempt.id,
-                    stage_name: "extract_content".to_string(),
+                    stage_name: INGEST_STAGE_EXTRACT_CONTENT.to_string(),
                     stage_state: "completed".to_string(),
                     message: Some("appended text materialized".to_string()),
                     details_json: serde_json::json!({ "contentLength": text.chars().count() }),
                 },
             )
             .await?;
-        self.persist_revision_chunks(state, context.revision_id, &text).await?;
         state
             .canonical_services
             .ingest
@@ -1859,10 +2077,133 @@ impl ContentService {
                 state,
                 RecordStageEventCommand {
                     attempt_id: attempt.id,
-                    stage_name: "chunk_content".to_string(),
+                    stage_name: INGEST_STAGE_PREPARE_STRUCTURE.to_string(),
+                    stage_state: "started".to_string(),
+                    message: Some("building structured revision from normalized text".to_string()),
+                    details_json: serde_json::json!({ "revisionId": context.revision_id }),
+                },
+            )
+            .await?;
+        let extraction_plan = build_inline_text_extraction_plan(&text);
+        let _ = state
+            .canonical_services
+            .extract
+            .persist_extract_content(
+                state,
+                PersistExtractContentCommand {
+                    revision_id: context.revision_id,
+                    attempt_id: Some(attempt.id),
+                    extract_state: "ready".to_string(),
+                    normalized_text: extraction_plan.normalized_text.clone(),
+                    text_checksum: extraction_plan.normalized_text.as_deref().map(sha256_hex_text),
+                    warning_count: i32::try_from(extraction_plan.extraction_warnings.len())
+                        .unwrap_or(i32::MAX),
+                    preparation_state: Some("started".to_string()),
+                    preparation_checkpoint: Some(
+                        crate::domains::extract::StructurePreparationCheckpoint {
+                            stage_name: INGEST_STAGE_PREPARE_STRUCTURE.to_string(),
+                            total_line_count: extraction_plan.source_format_metadata.line_count,
+                            completed_line_ordinal: -1,
+                            block_count: 0,
+                            chunk_count: 0,
+                            typed_fact_count: 0,
+                            text_checksum: extraction_plan
+                                .normalized_text
+                                .as_deref()
+                                .map(sha256_hex_text),
+                        },
+                    ),
+                },
+            )
+            .await?;
+        let preparation = self
+            .prepare_and_persist_revision_structure(state, context.revision_id, &extraction_plan)
+            .await?;
+        let _ = state
+            .canonical_services
+            .extract
+            .persist_extract_content(
+                state,
+                PersistExtractContentCommand {
+                    revision_id: context.revision_id,
+                    attempt_id: Some(attempt.id),
+                    extract_state: "ready".to_string(),
+                    normalized_text: extraction_plan.normalized_text.clone(),
+                    text_checksum: extraction_plan.normalized_text.as_deref().map(sha256_hex_text),
+                    warning_count: i32::try_from(extraction_plan.extraction_warnings.len())
+                        .unwrap_or(i32::MAX),
+                    preparation_state: Some("completed".to_string()),
+                    preparation_checkpoint: Some(
+                        crate::domains::extract::StructurePreparationCheckpoint {
+                            stage_name: INGEST_STAGE_PREPARE_STRUCTURE.to_string(),
+                            total_line_count: extraction_plan.source_format_metadata.line_count,
+                            completed_line_ordinal: extraction_plan
+                                .source_format_metadata
+                                .line_count
+                                .saturating_sub(1),
+                            block_count: preparation.prepared_revision.block_count,
+                            chunk_count: preparation.prepared_revision.chunk_count,
+                            typed_fact_count: preparation.prepared_revision.typed_fact_count,
+                            text_checksum: extraction_plan
+                                .normalized_text
+                                .as_deref()
+                                .map(sha256_hex_text),
+                        },
+                    ),
+                },
+            )
+            .await?;
+        state
+            .canonical_services
+            .ingest
+            .record_stage_event(
+                state,
+                RecordStageEventCommand {
+                    attempt_id: attempt.id,
+                    stage_name: INGEST_STAGE_PREPARE_STRUCTURE.to_string(),
+                    stage_state: "completed".to_string(),
+                    message: Some("structured revision prepared".to_string()),
+                    details_json: serde_json::json!({
+                        "revisionId": context.revision_id,
+                        "normalizationProfile": preparation.normalization_profile,
+                        "blockCount": preparation.prepared_revision.block_count,
+                        "chunkCount": preparation.chunk_count,
+                    }),
+                },
+            )
+            .await?;
+        state
+            .canonical_services
+            .ingest
+            .record_stage_event(
+                state,
+                RecordStageEventCommand {
+                    attempt_id: attempt.id,
+                    stage_name: INGEST_STAGE_CHUNK_CONTENT.to_string(),
                     stage_state: "completed".to_string(),
                     message: Some("content chunks persisted".to_string()),
-                    details_json: serde_json::json!({ "revisionId": context.revision_id }),
+                    details_json: serde_json::json!({
+                        "revisionId": context.revision_id,
+                        "chunkCount": preparation.chunk_count,
+                    }),
+                },
+            )
+            .await?;
+        state
+            .canonical_services
+            .ingest
+            .record_stage_event(
+                state,
+                RecordStageEventCommand {
+                    attempt_id: attempt.id,
+                    stage_name: INGEST_STAGE_EXTRACT_TECHNICAL_FACTS.to_string(),
+                    stage_state: "completed".to_string(),
+                    message: Some("technical facts extracted from structured revision".to_string()),
+                    details_json: serde_json::json!({
+                        "revisionId": context.revision_id,
+                        "technicalFactCount": preparation.technical_fact_count,
+                        "technicalConflictCount": preparation.technical_conflict_count,
+                    }),
                 },
             )
             .await?;
@@ -1888,6 +2229,12 @@ impl ContentService {
                 },
             )
             .await?;
+        self.converge_document_technical_facts(
+            state,
+            context.document_id,
+            Some(context.revision_id),
+        )
+        .await?;
         let _ = self
             .update_mutation_item(
                 state,
@@ -1922,7 +2269,7 @@ impl ContentService {
                     attempt_id,
                     knowledge_generation_id: None,
                     attempt_state: "succeeded".to_string(),
-                    current_stage: Some("chunk_content".to_string()),
+                    current_stage: Some(INGEST_STAGE_FINALIZING.to_string()),
                     failure_class: None,
                     failure_code: None,
                     retryable: false,
@@ -1930,6 +2277,30 @@ impl ContentService {
             )
             .await?;
         self.get_mutation_admission(state, context.mutation_id).await
+    }
+
+    pub async fn converge_document_technical_facts(
+        &self,
+        state: &AppState,
+        document_id: Uuid,
+        retained_revision_id: Option<Uuid>,
+    ) -> Result<(), ApiError> {
+        let revisions = state
+            .arango_document_store
+            .list_revisions_by_document(document_id)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+        for revision in revisions {
+            if Some(revision.revision_id) == retained_revision_id {
+                continue;
+            }
+            let _ = state
+                .arango_document_store
+                .delete_technical_facts_by_revision(revision.revision_id)
+                .await
+                .map_err(|_| ApiError::Internal)?;
+        }
+        Ok(())
     }
 
     async fn run_inline_post_chunk_pipeline(
@@ -1945,7 +2316,7 @@ impl ContentService {
                 state,
                 RecordStageEventCommand {
                     attempt_id,
-                    stage_name: "embed_chunk".to_string(),
+                    stage_name: INGEST_STAGE_EMBED_CHUNK.to_string(),
                     stage_state: "started".to_string(),
                     message: Some("rebuilding chunk embeddings for inline mutation".to_string()),
                     details_json: serde_json::json!({
@@ -1962,7 +2333,7 @@ impl ContentService {
                 state,
                 RecordStageEventCommand {
                     attempt_id,
-                    stage_name: "embed_chunk".to_string(),
+                    stage_name: INGEST_STAGE_EMBED_CHUNK.to_string(),
                     stage_state: "completed".to_string(),
                     message: Some(
                         "vector stage deferred to keep inline ingestion non-blocking".to_string(),
@@ -1981,7 +2352,7 @@ impl ContentService {
                 state,
                 RecordStageEventCommand {
                     attempt_id,
-                    stage_name: "extract_graph".to_string(),
+                    stage_name: INGEST_STAGE_EXTRACT_GRAPH.to_string(),
                     stage_state: "started".to_string(),
                     message: Some("extracting graph candidates from chunks".to_string()),
                     details_json: serde_json::json!({
@@ -1998,38 +2369,100 @@ impl ContentService {
                     workspace_id: context.workspace_id,
                     library_id: context.library_id,
                     revision_id: context.revision_id,
-                    attempt_id,
+                    attempt_id: Some(attempt_id),
                 },
             )
-            .await?;
-        let graph_outcome = state
-            .canonical_services
-            .graph
-            .rebuild_arango_library_graph(state, context.library_id)
-            .await
-            .map_err(|error| {
-                ApiError::BadRequest(format!("inline graph stage failed: {error:#}"))
-            })?;
-        state
-            .canonical_services
-            .ingest
-            .record_stage_event(
-                state,
-                RecordStageEventCommand {
-                    attempt_id,
-                    stage_name: "extract_graph".to_string(),
-                    stage_state: "completed".to_string(),
-                    message: Some("graph candidates extracted and reconciled".to_string()),
-                    details_json: serde_json::json!({
-                        "chunksProcessed": graph_materialization.chunk_count,
-                        "extractedEntityCandidates": graph_materialization.extracted_entities,
-                        "extractedRelationCandidates": graph_materialization.extracted_relations,
-                        "upsertedEntities": graph_outcome.upserted_entities,
-                        "upsertedRelations": graph_outcome.upserted_relations,
-                    }),
-                },
-            )
-            .await?;
+            .await;
+        let mut graph_ready = false;
+
+        match graph_materialization {
+            Ok(graph_materialization) => {
+                let graph_outcome = state
+                    .canonical_services
+                    .graph
+                    .rebuild_arango_library_graph(state, context.library_id)
+                    .await;
+                graph_ready = graph_outcome.as_ref().is_ok_and(
+                    crate::services::graph_service::ArangoGraphRebuildOutcome::has_materialized_graph,
+                );
+
+                match graph_outcome {
+                    Ok(graph_outcome) => {
+                        state
+                            .canonical_services
+                            .ingest
+                            .record_stage_event(
+                                state,
+                                RecordStageEventCommand {
+                                    attempt_id,
+                                    stage_name: INGEST_STAGE_EXTRACT_GRAPH.to_string(),
+                                    stage_state: "completed".to_string(),
+                                    message: Some("graph candidates extracted and reconciled".to_string()),
+                                    details_json: serde_json::json!({
+                                        "chunksProcessed": graph_materialization.chunk_count,
+                                        "extractedEntityCandidates": graph_materialization.extracted_entities,
+                                        "extractedRelationCandidates": graph_materialization.extracted_relations,
+                                        "upsertedEntities": graph_outcome.upserted_entities,
+                                        "upsertedRelations": graph_outcome.upserted_relations,
+                                        "upsertedEvidence": graph_outcome.upserted_evidence,
+                                        "graphReady": graph_ready,
+                                    }),
+                                },
+                            )
+                            .await?;
+                    }
+                    Err(error) => {
+                        state
+                            .canonical_services
+                            .ingest
+                            .record_stage_event(
+                                state,
+                                RecordStageEventCommand {
+                                    attempt_id,
+                                    stage_name: INGEST_STAGE_EXTRACT_GRAPH.to_string(),
+                                    stage_state: "failed".to_string(),
+                                    message: Some(
+                                        "inline graph rebuild failed; readable revision preserved"
+                                            .to_string(),
+                                    ),
+                                    details_json: serde_json::json!({
+                                        "chunksProcessed": graph_materialization.chunk_count,
+                                        "extractedEntityCandidates": graph_materialization.extracted_entities,
+                                        "extractedRelationCandidates": graph_materialization.extracted_relations,
+                                        "graphReady": false,
+                                        "degradedToReadable": true,
+                                        "error": format!("{error:#}"),
+                                    }),
+                                },
+                            )
+                            .await?;
+                    }
+                }
+            }
+            Err(error) => {
+                state
+                    .canonical_services
+                    .ingest
+                    .record_stage_event(
+                        state,
+                        RecordStageEventCommand {
+                            attempt_id,
+                            stage_name: INGEST_STAGE_EXTRACT_GRAPH.to_string(),
+                            stage_state: "failed".to_string(),
+                            message: Some(
+                                "inline graph candidate extraction failed; readable revision preserved"
+                                    .to_string(),
+                            ),
+                            details_json: serde_json::json!({
+                                "graphReady": false,
+                                "degradedToReadable": true,
+                                "error": error.to_string(),
+                            }),
+                        },
+                    )
+                    .await?;
+            }
+        }
 
         let revision = state
             .arango_document_store
@@ -2046,10 +2479,10 @@ impl ContentService {
                 revision.revision_id,
                 &revision.text_state,
                 "ready",
-                "ready",
+                if graph_ready { "ready" } else { "processing" },
                 revision.text_readable_at,
                 revision.vector_ready_at.or(Some(now)),
-                revision.graph_ready_at.or(Some(now)),
+                revision.graph_ready_at.or(graph_ready.then_some(now)),
                 revision.superseded_by_revision_id,
             )
             .await
@@ -2091,8 +2524,25 @@ impl ContentService {
             .list_chunks_by_revision(command.revision_id)
             .await
             .map_err(|_| ApiError::Internal)?;
+        let revision_facts = state
+            .canonical_services
+            .knowledge
+            .list_typed_technical_facts(state, command.revision_id)
+            .await?;
         let chunk_count = chunks.len();
         let graph_extract_parallelism = state.settings.ingestion_worker_concurrency.clamp(1, 4);
+        let materialization_attempt_id = command.attempt_id.unwrap_or_else(Uuid::now_v7);
+
+        let _ = state
+            .arango_graph_store
+            .delete_entity_candidates_by_revision(command.revision_id)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+        let _ = state
+            .arango_graph_store
+            .delete_relation_candidates_by_revision(command.revision_id)
+            .await
+            .map_err(|_| ApiError::Internal)?;
 
         let per_chunk_totals = stream::iter(chunks.into_iter().map(|chunk| {
             let state = state.clone();
@@ -2100,8 +2550,15 @@ impl ContentService {
             let document = document.clone();
             let revision = revision.clone();
             let command = command.clone();
+            let revision_facts = revision_facts.clone();
+            let materialization_attempt_id = materialization_attempt_id;
 
             async move {
+                let chunk_facts = revision_facts
+                    .iter()
+                    .filter(|fact| typed_fact_supports_chunk(fact, &chunk))
+                    .cloned()
+                    .collect::<Vec<_>>();
                 let response = extract_chunk_graph_candidates(
                     &state,
                     &provider_profile,
@@ -2109,6 +2566,7 @@ impl ContentService {
                         &document,
                         &revision,
                         &chunk,
+                        &chunk_facts,
                         command.attempt_id,
                     ),
                 )
@@ -2120,36 +2578,53 @@ impl ContentService {
                     ))
                 })?;
 
-                let _ = state
-                    .canonical_services
-                    .billing
-                    .capture_ingest_attempt(
-                        &state,
-                        CaptureIngestAttemptBillingCommand {
-                            workspace_id: command.workspace_id,
-                            library_id: command.library_id,
-                            attempt_id: command.attempt_id,
-                            binding_id: None,
-                            provider_kind: response.provider_kind.clone(),
-                            model_name: response.model_name.clone(),
-                            call_kind: "extract_graph".to_string(),
-                            usage_json: response.usage_json.clone(),
-                        },
-                    )
-                    .await?;
+                if let Some(attempt_id) = command.attempt_id {
+                    let _ = state
+                        .canonical_services
+                        .billing
+                        .capture_ingest_attempt(
+                            &state,
+                            CaptureIngestAttemptBillingCommand {
+                                workspace_id: command.workspace_id,
+                                library_id: command.library_id,
+                                attempt_id,
+                                binding_id: None,
+                                provider_kind: response.provider_kind.clone(),
+                                model_name: response.model_name.clone(),
+                                call_kind: "extract_graph".to_string(),
+                                usage_json: response.usage_json.clone(),
+                            },
+                        )
+                        .await?;
+                }
 
+                let mut entity_key_index =
+                    crate::services::graph_identity::GraphLabelNodeTypeIndex::new();
+                for entity in &response.normalized.entities {
+                    entity_key_index.insert_aliases(
+                        &entity.label,
+                        &entity.aliases,
+                        entity.node_type.clone(),
+                    );
+                }
                 let node_candidates = response
                     .normalized
                     .entities
                     .iter()
-                    .map(|entity| NewNodeCandidate {
-                        canonical_key: crate::services::graph_merge::canonical_node_key(
-                            entity.node_type.clone(),
-                            &entity.label,
-                        ),
-                        node_kind: inline_runtime_node_type_slug(&entity.node_type).to_string(),
-                        display_label: entity.label.clone(),
-                        summary: entity.summary.clone(),
+                    .map(|entity| {
+                        let canonical_key =
+                            entity_key_index.canonical_node_key_for_label(&entity.label);
+                        let canonical_node_type =
+                            crate::services::graph_identity::runtime_node_type_from_key(
+                                &canonical_key,
+                            );
+                        NewNodeCandidate {
+                            canonical_key,
+                            node_kind: inline_runtime_node_type_slug(&canonical_node_type)
+                                .to_string(),
+                            display_label: entity.label.clone(),
+                            summary: entity.summary.clone(),
+                        }
                     })
                     .collect::<Vec<_>>();
                 let edge_candidates = response
@@ -2157,23 +2632,21 @@ impl ContentService {
                     .relations
                     .iter()
                     .map(|relation| {
-                        let from_key = crate::services::graph_merge::canonical_node_key(
-                            RuntimeNodeType::Entity,
-                            &relation.source_label,
-                        );
-                        let to_key = crate::services::graph_merge::canonical_node_key(
-                            RuntimeNodeType::Entity,
-                            &relation.target_label,
-                        );
+                        let from_canonical_key =
+                            entity_key_index.canonical_node_key_for_label(&relation.source_label);
+                        let to_canonical_key =
+                            entity_key_index.canonical_node_key_for_label(&relation.target_label);
                         NewEdgeCandidate {
-                            canonical_key: crate::services::graph_merge::canonical_edge_key(
-                                &from_key,
+                            canonical_key: crate::services::graph_identity::canonical_edge_key(
+                                &from_canonical_key,
                                 &relation.relation_type,
-                                &to_key,
+                                &to_canonical_key,
                             ),
                             edge_kind: relation.relation_type.clone(),
-                            from_canonical_key: from_key,
-                            to_canonical_key: to_key,
+                            from_display_label: relation.source_label.clone(),
+                            from_canonical_key,
+                            to_display_label: relation.target_label.clone(),
+                            to_canonical_key,
                             summary: relation.summary.clone(),
                         }
                     })
@@ -2188,7 +2661,7 @@ impl ContentService {
                         &state,
                         MaterializeChunkResultCommand {
                             chunk_id: chunk.chunk_id,
-                            attempt_id: command.attempt_id,
+                            attempt_id: materialization_attempt_id,
                             extract_state: "ready".to_string(),
                             provider_call_id: None,
                             finished_at: Some(Utc::now()),
@@ -2235,7 +2708,7 @@ impl ContentService {
                     worker_principal_id: None,
                     lease_token: Some(format!("inline-{}", Uuid::now_v7())),
                     knowledge_generation_id: None,
-                    current_stage: Some("extract_content".to_string()),
+                    current_stage: Some(INGEST_STAGE_EXTRACT_CONTENT.to_string()),
                 },
             )
             .await
@@ -2257,41 +2730,142 @@ impl ContentService {
             .map_err(|_| ApiError::Internal)
     }
 
-    async fn persist_revision_chunks(
+    pub async fn prepare_and_persist_revision_structure(
         &self,
         state: &AppState,
         revision_id: Uuid,
-        text: &str,
-    ) -> Result<(), ApiError> {
+        extraction_plan: &FileExtractionPlan,
+    ) -> Result<PreparedRevisionPersistenceSummary, ApiError> {
         let revision = state
             .arango_document_store
             .get_revision(revision_id)
             .await
             .map_err(|_| ApiError::Internal)?
             .ok_or_else(|| ApiError::resource_not_found("revision", revision_id))?;
+        let source_text = extraction_plan.source_text.clone().unwrap_or_default();
+        let normalized_text =
+            extraction_plan.normalized_text.clone().unwrap_or_else(|| source_text.clone());
+        let mut prepared = state
+            .canonical_services
+            .structured_preparation
+            .prepare_revision(PrepareStructuredRevisionCommand {
+                revision_id,
+                document_id: revision.document_id,
+                workspace_id: revision.workspace_id,
+                library_id: revision.library_id,
+                preparation_state: "prepared".to_string(),
+                normalization_profile: extraction_plan.normalization_profile.clone(),
+                source_format: extraction_plan.source_format_metadata.source_format.clone(),
+                language_code: None,
+                source_text,
+                normalized_text: normalized_text.clone(),
+                structure_hints: extraction_plan.structure_hints.clone(),
+                typed_fact_count: 0,
+                prepared_at: Utc::now(),
+            })
+            .map_err(|error| {
+                ApiError::BadRequest(format!(
+                    "structured preparation failed for {revision_id}: {error}"
+                ))
+            })?;
+        let extracted_facts = state.canonical_services.technical_facts.extract_from_blocks(
+            ExtractTechnicalFactsCommand {
+                revision_id,
+                document_id: revision.document_id,
+                workspace_id: revision.workspace_id,
+                library_id: revision.library_id,
+                blocks: prepared.ordered_blocks.clone(),
+            },
+        );
+        prepared.prepared_revision.typed_fact_count =
+            i32::try_from(extracted_facts.facts.len()).unwrap_or(i32::MAX);
+
+        let now = Utc::now();
+        let _ = state
+            .arango_document_store
+            .upsert_structured_revision(&KnowledgeStructuredRevisionRow {
+                key: revision_id.to_string(),
+                arango_id: None,
+                arango_rev: None,
+                revision_id,
+                workspace_id: revision.workspace_id,
+                library_id: revision.library_id,
+                document_id: revision.document_id,
+                preparation_state: prepared.prepared_revision.preparation_state.clone(),
+                normalization_profile: prepared.prepared_revision.normalization_profile.clone(),
+                source_format: prepared.prepared_revision.source_format.clone(),
+                language_code: prepared.prepared_revision.language_code.clone(),
+                block_count: prepared.prepared_revision.block_count,
+                chunk_count: prepared.prepared_revision.chunk_count,
+                typed_fact_count: prepared.prepared_revision.typed_fact_count,
+                outline_json: serde_json::to_value(&prepared.prepared_revision.outline)
+                    .unwrap_or_else(|_| serde_json::json!([])),
+                prepared_at: prepared.prepared_revision.prepared_at,
+                updated_at: now,
+            })
+            .await
+            .map_err(|_| ApiError::Internal)?;
+        let structured_block_rows = prepared
+            .ordered_blocks
+            .iter()
+            .map(|block| KnowledgeStructuredBlockRow {
+                key: block.block_id.to_string(),
+                arango_id: None,
+                arango_rev: None,
+                block_id: block.block_id,
+                workspace_id: revision.workspace_id,
+                library_id: revision.library_id,
+                document_id: revision.document_id,
+                revision_id,
+                ordinal: block.ordinal,
+                block_kind: block.block_kind.as_str().to_string(),
+                text: block.text.clone(),
+                normalized_text: block.normalized_text.clone(),
+                heading_trail: block.heading_trail.clone(),
+                section_path: block.section_path.clone(),
+                page_number: block.page_number,
+                span_start: block.source_span.as_ref().map(|span| span.start_offset),
+                span_end: block.source_span.as_ref().map(|span| span.end_offset),
+                parent_block_id: block.parent_block_id,
+                table_coordinates_json: block.table_coordinates.as_ref().map(|coordinates| {
+                    serde_json::to_value(coordinates).unwrap_or(serde_json::Value::Null)
+                }),
+                code_language: block.code_language.clone(),
+                created_at: now,
+                updated_at: now,
+            })
+            .collect::<Vec<_>>();
+        let _ = state
+            .arango_document_store
+            .replace_structured_blocks(revision_id, &structured_block_rows)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+
         let _ =
             content_repository::delete_chunks_by_revision(&state.persistence.postgres, revision_id)
                 .await
                 .map_err(|_| ApiError::Internal)?;
         let _ =
             state.canonical_services.knowledge.delete_revision_chunks(state, revision_id).await?;
-        let chunks = split_text_into_chunks_with_profile(text, ChunkingProfile::default());
         let mut next_search_char = 0usize;
-        let mut pending_chunks = Vec::with_capacity(chunks.len());
-        let mut knowledge_chunks = Vec::with_capacity(chunks.len());
-        for (chunk_index, chunk_text) in chunks.iter().enumerate() {
+        let mut pending_chunks = Vec::with_capacity(prepared.chunk_windows.len());
+        let mut knowledge_chunks = Vec::with_capacity(prepared.chunk_windows.len());
+        for chunk in &prepared.chunk_windows {
             let (start_offset, end_offset) =
-                locate_chunk_offsets(text, chunk_text, next_search_char);
+                locate_chunk_offsets(&normalized_text, &chunk.normalized_text, next_search_char);
             next_search_char = end_offset;
             pending_chunks.push(PendingChunkInsert {
-                chunk_index: i32::try_from(chunk_index).unwrap_or(i32::MAX),
+                chunk_index: chunk.chunk_index,
                 start_offset: i32::try_from(start_offset).unwrap_or(i32::MAX),
                 end_offset: i32::try_from(end_offset).unwrap_or(i32::MAX),
-                token_count: Some(
-                    i32::try_from(chunk_text.split_whitespace().count()).unwrap_or(i32::MAX),
-                ),
-                normalized_text: chunk_text.to_string(),
-                text_checksum: sha256_hex_text(chunk_text),
+                token_count: chunk.token_count,
+                chunk_kind: Some(chunk.chunk_kind.as_str().to_string()),
+                normalized_text: chunk.normalized_text.clone(),
+                text_checksum: sha256_hex_text(&chunk.normalized_text),
+                support_block_ids: chunk.support_block_ids.clone(),
+                section_path: chunk.section_path.clone(),
+                heading_trail: chunk.heading_trail.clone(),
+                literal_digest: chunk.literal_digest.clone(),
             });
         }
         let postgres_chunks = pending_chunks
@@ -2310,7 +2884,11 @@ impl ContentService {
             content_repository::create_chunks(&state.persistence.postgres, &postgres_chunks)
                 .await
                 .map_err(|_| ApiError::Internal)?;
+        let mut block_to_chunk_ids = std::collections::BTreeMap::<Uuid, Vec<Uuid>>::new();
         for (chunk, pending_chunk) in created_chunks.into_iter().zip(pending_chunks.iter()) {
+            for block_id in &pending_chunk.support_block_ids {
+                block_to_chunk_ids.entry(*block_id).or_default().push(chunk.id);
+            }
             knowledge_chunks.push(CreateKnowledgeChunkCommand {
                 chunk_id: chunk.id,
                 workspace_id: revision.workspace_id,
@@ -2318,20 +2896,81 @@ impl ContentService {
                 document_id: revision.document_id,
                 revision_id,
                 chunk_index: chunk.chunk_index,
+                chunk_kind: pending_chunk.chunk_kind.clone(),
                 content_text: pending_chunk.normalized_text.clone(),
                 normalized_text: chunk.normalized_text,
                 span_start: Some(chunk.start_offset),
                 span_end: Some(chunk.end_offset),
                 token_count: chunk.token_count,
-                section_path: Vec::new(),
-                heading_trail: Vec::new(),
+                support_block_ids: pending_chunk.support_block_ids.clone(),
+                section_path: pending_chunk.section_path.clone(),
+                heading_trail: pending_chunk.heading_trail.clone(),
+                literal_digest: pending_chunk.literal_digest.clone(),
                 chunk_state: "ready".to_string(),
                 text_generation: Some(revision.revision_number),
                 vector_generation: None,
             });
         }
         let _ = state.canonical_services.knowledge.write_chunks(state, knowledge_chunks).await?;
-        Ok(())
+
+        let technical_fact_rows = extracted_facts
+            .facts
+            .iter()
+            .map(|fact| {
+                let support_chunk_ids = fact
+                    .support_block_ids
+                    .iter()
+                    .filter_map(|block_id| block_to_chunk_ids.get(block_id))
+                    .flatten()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                KnowledgeTechnicalFactRow {
+                    key: fact.fact_id.to_string(),
+                    arango_id: None,
+                    arango_rev: None,
+                    fact_id: fact.fact_id,
+                    workspace_id: fact.workspace_id,
+                    library_id: fact.library_id,
+                    document_id: fact.document_id,
+                    revision_id: fact.revision_id,
+                    fact_kind: fact.fact_kind.as_str().to_string(),
+                    canonical_value_text: fact.canonical_value.canonical_string(),
+                    canonical_value_exact: fact
+                        .canonical_value
+                        .canonical_string()
+                        .chars()
+                        .filter(|character| !character.is_whitespace())
+                        .collect(),
+                    canonical_value_json: serde_json::to_value(&fact.canonical_value)
+                        .unwrap_or(serde_json::Value::Null),
+                    display_value: fact.display_value.clone(),
+                    qualifiers_json: serde_json::to_value(&fact.qualifiers)
+                        .unwrap_or_else(|_| serde_json::json!([])),
+                    support_block_ids: fact.support_block_ids.clone(),
+                    support_chunk_ids,
+                    confidence: fact.confidence,
+                    extraction_kind: fact.extraction_kind.clone(),
+                    conflict_group_id: fact.conflict_group_id.clone(),
+                    created_at: fact.created_at,
+                    updated_at: now,
+                }
+            })
+            .collect::<Vec<_>>();
+        let _ = state
+            .arango_document_store
+            .replace_technical_facts(revision_id, &technical_fact_rows)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+
+        Ok(PreparedRevisionPersistenceSummary {
+            prepared_revision: map_structured_revision_data(&prepared.prepared_revision),
+            chunk_count: prepared.chunk_windows.len(),
+            technical_fact_count: extracted_facts.facts.len(),
+            technical_conflict_count: extracted_facts.conflicts.len(),
+            normalization_profile: prepared.prepared_revision.normalization_profile.clone(),
+        })
     }
 
     fn inline_mutation_context_from_admission(
@@ -2441,30 +3080,175 @@ impl ContentService {
         } else {
             None
         };
-        let active_revision = active_revision_row.clone().map(map_knowledge_revision_row);
-        let effective_readiness_row = match (
-            document_row.readable_revision_id,
-            document_row.active_revision_id,
-            active_revision_row.as_ref(),
-        ) {
-            (Some(readable_revision_id), Some(active_revision_id), Some(active_row))
-                if readable_revision_id == active_revision_id =>
-            {
-                Some(active_row.clone())
-            }
-            (Some(readable_revision_id), _, _) => state
-                .arango_document_store
-                .get_revision(readable_revision_id)
-                .await
-                .map_err(|_| ApiError::Internal)?,
-            (None, Some(_), Some(active_row)) => Some(active_row.clone()),
-            (None, Some(active_revision_id), None) => state
-                .arango_document_store
-                .get_revision(active_revision_id)
-                .await
-                .map_err(|_| ApiError::Internal)?,
-            (None, None, _) => None,
+        let readable_revision_row =
+            match (document_row.readable_revision_id, active_revision_row.as_ref()) {
+                (Some(readable_revision_id), Some(active_row))
+                    if readable_revision_id == active_row.revision_id =>
+                {
+                    Some(active_row.clone())
+                }
+                (Some(readable_revision_id), _) => state
+                    .arango_document_store
+                    .get_revision(readable_revision_id)
+                    .await
+                    .map_err(|_| ApiError::Internal)?,
+                (None, _) => None,
+            };
+        let effective_readiness_row =
+            readable_revision_row.clone().or_else(|| active_revision_row.clone());
+        let prepared_revision_row =
+            match effective_readiness_row.as_ref().map(|row| row.revision_id) {
+                Some(revision_id) => state
+                    .arango_document_store
+                    .get_structured_revision(revision_id)
+                    .await
+                    .map_err(|_| ApiError::Internal)?,
+                None => None,
+            };
+        let web_page_row = match active_revision_row
+            .as_ref()
+            .filter(|revision| revision.revision_kind == "web_page")
+            .map(|revision| revision.revision_id)
+        {
+            Some(revision_id) => ingest_repository::get_web_discovered_page_by_result_revision_id(
+                &state.persistence.postgres,
+                revision_id,
+            )
+            .await
+            .map_err(|_| ApiError::Internal)?,
+            None => None,
         };
+
+        let mut revisions_by_id = HashMap::new();
+        if let Some(revision) = active_revision_row.clone() {
+            revisions_by_id.insert(revision.revision_id, revision);
+        }
+        if let Some(revision) = readable_revision_row {
+            revisions_by_id.entry(revision.revision_id).or_insert(revision);
+        }
+        if let Some(revision) = effective_readiness_row.clone() {
+            revisions_by_id.entry(revision.revision_id).or_insert(revision);
+        }
+
+        let mut structured_revisions_by_revision_id = HashMap::new();
+        if let Some(revision) = prepared_revision_row {
+            structured_revisions_by_revision_id.insert(revision.revision_id, revision);
+        }
+
+        let mut web_pages_by_result_revision_id = HashMap::new();
+        if let Some(page) = web_page_row
+            .and_then(|row| row.result_revision_id.map(|revision_id| (revision_id, row)))
+        {
+            web_pages_by_result_revision_id.insert(page.0, page.1);
+        }
+
+        Ok(self.build_document_summary_from_prefetched(
+            state,
+            document_row,
+            content_head,
+            latest_mutation,
+            latest_job,
+            &PrefetchedDocumentSummaryData {
+                revisions_by_id,
+                structured_revisions_by_revision_id,
+                web_pages_by_result_revision_id,
+            },
+        ))
+    }
+
+    async fn prefetch_document_summary_data(
+        &self,
+        state: &AppState,
+        documents: &[KnowledgeDocumentRow],
+    ) -> Result<PrefetchedDocumentSummaryData, ApiError> {
+        let revision_ids = documents
+            .iter()
+            .flat_map(|document| [document.active_revision_id, document.readable_revision_id])
+            .flatten()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let revisions_by_id = state
+            .arango_document_store
+            .list_revisions_by_ids(&revision_ids)
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .into_iter()
+            .map(|row| (row.revision_id, row))
+            .collect::<HashMap<_, _>>();
+
+        let effective_revision_ids = documents
+            .iter()
+            .filter_map(|document| {
+                self.resolve_effective_readiness_row(document, None, &revisions_by_id)
+            })
+            .map(|revision| revision.revision_id)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let structured_revisions_by_revision_id = state
+            .arango_document_store
+            .list_structured_revisions_by_revision_ids(&effective_revision_ids)
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .into_iter()
+            .map(|row| (row.revision_id, row))
+            .collect::<HashMap<_, _>>();
+
+        let web_page_revision_ids = documents
+            .iter()
+            .filter_map(|document| document.active_revision_id)
+            .filter(|revision_id| {
+                revisions_by_id
+                    .get(revision_id)
+                    .is_some_and(|revision| revision.revision_kind == "web_page")
+            })
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let web_pages_by_result_revision_id =
+            ingest_repository::list_web_discovered_pages_by_result_revision_ids(
+                &state.persistence.postgres,
+                &web_page_revision_ids,
+            )
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .into_iter()
+            .filter_map(|row| row.result_revision_id.map(|revision_id| (revision_id, row)))
+            .collect::<HashMap<_, _>>();
+
+        Ok(PrefetchedDocumentSummaryData {
+            revisions_by_id,
+            structured_revisions_by_revision_id,
+            web_pages_by_result_revision_id,
+        })
+    }
+
+    fn build_document_summary_from_prefetched(
+        &self,
+        state: &AppState,
+        document_row: KnowledgeDocumentRow,
+        content_head: Option<&content_repository::ContentDocumentHeadRow>,
+        latest_mutation: Option<ContentMutation>,
+        latest_job: Option<ContentDocumentPipelineJob>,
+        prefetched: &PrefetchedDocumentSummaryData,
+    ) -> ContentDocumentSummary {
+        let active_revision_row = document_row
+            .active_revision_id
+            .and_then(|revision_id| prefetched.revisions_by_id.get(&revision_id).cloned());
+        let active_revision = active_revision_row.clone().map(map_knowledge_revision_row);
+        let effective_readiness_row = self.resolve_effective_readiness_row(
+            &document_row,
+            active_revision_row.as_ref(),
+            &prefetched.revisions_by_id,
+        );
+        let prepared_revision = effective_readiness_row
+            .as_ref()
+            .and_then(|revision| {
+                prefetched.structured_revisions_by_revision_id.get(&revision.revision_id)
+            })
+            .cloned()
+            .map(map_structured_revision_row);
         let head = Some(ContentDocumentHead {
             document_id: document_row.document_id,
             active_revision_id: document_row.active_revision_id,
@@ -2475,14 +3259,73 @@ impl ContentService {
             head_updated_at: content_head
                 .map_or(document_row.updated_at, |row| row.head_updated_at),
         });
+        let readiness_summary =
+            Some(state.canonical_services.ops.derive_document_readiness_summary(
+                state,
+                document_row.document_id,
+                document_row.active_revision_id,
+                effective_readiness_row.as_ref(),
+                prepared_revision.as_ref(),
+                latest_mutation.as_ref(),
+                latest_job.as_ref(),
+                document_row.created_at,
+            ));
+        let web_page_provenance = active_revision_row
+            .as_ref()
+            .filter(|revision| revision.revision_kind == "web_page")
+            .and_then(|revision| {
+                prefetched
+                    .web_pages_by_result_revision_id
+                    .get(&revision.revision_id)
+                    .map(map_web_page_provenance_row)
+                    .or_else(|| {
+                        Some(WebPageProvenance {
+                            run_id: None,
+                            candidate_id: None,
+                            source_uri: revision.source_uri.clone(),
+                            canonical_url: revision.source_uri.clone(),
+                        })
+                    })
+            });
 
-        Ok(ContentDocumentSummary {
+        ContentDocumentSummary {
             document: map_knowledge_document_row(document_row),
             head,
             active_revision,
             readiness: effective_readiness_row.map(map_knowledge_revision_readiness),
+            readiness_summary,
+            prepared_revision,
+            web_page_provenance,
             pipeline: ContentDocumentPipelineState { latest_mutation, latest_job },
-        })
+        }
+    }
+
+    fn resolve_effective_readiness_row(
+        &self,
+        document_row: &KnowledgeDocumentRow,
+        active_revision_row: Option<&KnowledgeRevisionRow>,
+        revisions_by_id: &HashMap<Uuid, KnowledgeRevisionRow>,
+    ) -> Option<KnowledgeRevisionRow> {
+        match (
+            document_row.readable_revision_id,
+            document_row.active_revision_id,
+            active_revision_row,
+        ) {
+            (Some(readable_revision_id), Some(active_revision_id), Some(active_row))
+                if readable_revision_id == active_revision_id =>
+            {
+                Some(active_row.clone())
+            }
+            (Some(readable_revision_id), _, _) => revisions_by_id
+                .get(&readable_revision_id)
+                .cloned()
+                .or_else(|| active_revision_row.cloned()),
+            (None, Some(_), Some(active_row)) => Some(active_row.clone()),
+            (None, Some(active_revision_id), None) => {
+                revisions_by_id.get(&active_revision_id).cloned()
+            }
+            (None, None, _) => None,
+        }
     }
 
     async fn create_revision_from_metadata(
@@ -2625,9 +3468,31 @@ fn storage_backed_revision_file_name(
         .or_else(|| title.map(str::trim).filter(|value| !value.is_empty()).map(ToString::to_string))
 }
 
+fn segment_excerpt(text: &str) -> String {
+    const EXCERPT_LIMIT: usize = 180;
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= EXCERPT_LIMIT {
+        compact
+    } else {
+        let prefix = compact.chars().take(EXCERPT_LIMIT).collect::<String>();
+        format!("{prefix}...")
+    }
+}
+
 fn map_knowledge_document_row(row: KnowledgeDocumentRow) -> ContentDocument {
     ContentDocument {
         id: row.document_id,
+        workspace_id: row.workspace_id,
+        library_id: row.library_id,
+        external_key: row.external_key,
+        document_state: row.document_state,
+        created_at: row.created_at,
+    }
+}
+
+fn map_document_row(row: content_repository::ContentDocumentRow) -> ContentDocument {
+    ContentDocument {
+        id: row.id,
         workspace_id: row.workspace_id,
         library_id: row.library_id,
         external_key: row.external_key,
@@ -2690,6 +3555,54 @@ fn map_knowledge_revision_readiness(row: KnowledgeRevisionRow) -> ContentRevisio
     }
 }
 
+fn map_structured_revision_row(row: KnowledgeStructuredRevisionRow) -> StructuredDocumentRevision {
+    let outline = serde_json::from_value(row.outline_json).unwrap_or_default();
+    StructuredDocumentRevision {
+        revision_id: row.revision_id,
+        document_id: row.document_id,
+        workspace_id: row.workspace_id,
+        library_id: row.library_id,
+        preparation_state: row.preparation_state,
+        normalization_profile: row.normalization_profile,
+        source_format: row.source_format,
+        language_code: row.language_code,
+        block_count: row.block_count,
+        chunk_count: row.chunk_count,
+        typed_fact_count: row.typed_fact_count,
+        outline,
+        prepared_at: row.prepared_at,
+    }
+}
+
+fn map_web_page_provenance_row(row: &ingest_repository::WebDiscoveredPageRow) -> WebPageProvenance {
+    WebPageProvenance {
+        run_id: Some(row.run_id),
+        candidate_id: Some(row.id),
+        source_uri: row.final_url.clone().or(row.discovered_url.clone()),
+        canonical_url: row.canonical_url.clone().or(row.final_url.clone()),
+    }
+}
+
+fn map_structured_revision_data(
+    data: &crate::shared::structured_document::StructuredDocumentRevisionData,
+) -> StructuredDocumentRevision {
+    StructuredDocumentRevision {
+        revision_id: data.revision_id,
+        document_id: data.document_id,
+        workspace_id: data.workspace_id,
+        library_id: data.library_id,
+        preparation_state: data.preparation_state.clone(),
+        normalization_profile: data.normalization_profile.clone(),
+        source_format: data.source_format.clone(),
+        language_code: data.language_code.clone(),
+        block_count: data.block_count,
+        chunk_count: data.chunk_count,
+        typed_fact_count: data.typed_fact_count,
+        outline: data.outline.clone(),
+        prepared_at: data.prepared_at,
+    }
+}
+
 fn map_knowledge_chunk_row(row: KnowledgeChunkRow) -> ContentChunk {
     let start_offset = row.span_start.unwrap_or(0);
     let end_offset = row.span_end.unwrap_or_else(|| {
@@ -2739,6 +3652,13 @@ fn map_document_pipeline_job(handle: IngestJobHandle) -> ContentDocumentPipeline
         queued_at: handle.job.queued_at,
         available_at: handle.job.available_at,
         completed_at: handle.job.completed_at,
+        claimed_at: latest_attempt.as_ref().map(|attempt| attempt.started_at),
+        last_activity_at: latest_attempt
+            .as_ref()
+            .and_then(|attempt| {
+                attempt.heartbeat_at.or(attempt.finished_at).or(Some(attempt.started_at))
+            })
+            .or(handle.job.completed_at),
         current_stage: latest_attempt.as_ref().and_then(|attempt| attempt.current_stage.clone()),
         failure_code: latest_attempt.as_ref().and_then(|attempt| attempt.failure_code.clone()),
         retryable: latest_attempt.as_ref().is_some_and(|attempt| attempt.retryable),
@@ -2850,7 +3770,8 @@ fn build_canonical_graph_extraction_request(
     document: &KnowledgeDocumentRow,
     revision: &KnowledgeRevisionRow,
     chunk: &KnowledgeChunkRow,
-    attempt_id: Uuid,
+    technical_facts: &[TypedTechnicalFact],
+    attempt_id: Option<Uuid>,
 ) -> GraphExtractionRequest {
     GraphExtractionRequest {
         project_id: revision.library_id,
@@ -2878,18 +3799,42 @@ fn build_canonical_graph_extraction_request(
             content: chunk.content_text.clone(),
             token_count: chunk.token_count,
             metadata_json: serde_json::json!({
+                "chunk_kind": chunk.chunk_kind,
+                "support_block_ids": chunk.support_block_ids,
                 "section_path": chunk.section_path,
                 "heading_trail": chunk.heading_trail,
+                "literal_digest": chunk.literal_digest,
                 "chunk_state": chunk.chunk_state,
                 "text_generation": chunk.text_generation,
                 "vector_generation": chunk.vector_generation,
             }),
             created_at: revision.created_at,
         },
+        structured_chunk: GraphExtractionStructuredChunkContext {
+            chunk_kind: chunk.chunk_kind.clone(),
+            section_path: chunk.section_path.clone(),
+            heading_trail: chunk.heading_trail.clone(),
+            support_block_ids: chunk.support_block_ids.clone(),
+            literal_digest: chunk.literal_digest.clone(),
+        },
+        technical_facts: technical_facts
+            .iter()
+            .map(|fact| GraphExtractionTechnicalFact {
+                fact_kind: fact.fact_kind.as_str().to_string(),
+                canonical_value: fact.canonical_value.canonical_string(),
+                display_value: fact.display_value.clone(),
+                qualifiers: fact.qualifiers.clone(),
+            })
+            .collect(),
         revision_id: Some(revision.revision_id),
-        activated_by_attempt_id: Some(attempt_id),
+        activated_by_attempt_id: attempt_id,
         resume_hint: None,
     }
+}
+
+fn typed_fact_supports_chunk(fact: &TypedTechnicalFact, chunk: &KnowledgeChunkRow) -> bool {
+    fact.support_chunk_ids.contains(&chunk.chunk_id)
+        || fact.support_block_ids.iter().any(|block_id| chunk.support_block_ids.contains(block_id))
 }
 
 fn inline_runtime_node_type_slug(node_type: &RuntimeNodeType) -> &'static str {
@@ -2907,7 +3852,7 @@ fn validate_extraction_plan(
     extraction_plan: &FileExtractionPlan,
 ) -> Result<(), UploadAdmissionError> {
     if extraction_plan.file_kind == UploadFileKind::TextLike
-        && extraction_plan.extracted_text.as_deref().is_some_and(|text| text.trim().is_empty())
+        && extraction_plan.normalized_text.as_deref().is_some_and(|text| text.trim().is_empty())
     {
         return Err(UploadAdmissionError::from_file_extract_error(
             file_name,

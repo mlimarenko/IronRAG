@@ -25,7 +25,7 @@ const { t } = useI18n()
       :placeholder="placeholder"
       :disabled="disabled"
       @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
-    >
+    />
     <button
       v-if="modelValue"
       type="button"

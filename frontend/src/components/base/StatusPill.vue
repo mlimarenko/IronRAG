@@ -6,7 +6,9 @@ const props = defineProps<{
     | 'queued'
     | 'processing'
     | 'ready'
-    | 'ready_no_graph'
+    | 'graph_ready'
+    | 'readable'
+    | 'graph_sparse'
     | 'failed'
     | 'active'
     | 'blocked'
@@ -17,8 +19,5 @@ const props = defineProps<{
 </script>
 
 <template>
-  <StatusBadge
-    :kind="props.tone"
-    :label="props.label"
-  />
+  <StatusBadge :kind="props.tone" :label="props.label" />
 </template>

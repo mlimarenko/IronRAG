@@ -31,16 +31,10 @@ onMounted(async () => {
 <template>
   <div class="rr-app-shell">
     <AppTopBar />
-    <p
-      v-if="shellStore.error"
-      class="rr-shell-error-banner"
-      role="alert"
-    >
+    <p v-if="shellStore.error" class="rr-shell-error-banner" role="alert">
       {{ shellStore.error }}
     </p>
-    <main
-      class="rr-app-shell__content"
-    >
+    <main class="rr-app-shell__content">
       <PageFrame :width-mode="routeWidthMode">
         <router-view />
       </PageFrame>

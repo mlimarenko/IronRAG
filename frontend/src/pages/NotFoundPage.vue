@@ -9,10 +9,7 @@ const { t } = useI18n()
     <div class="rr-not-found__card">
       <h1>404</h1>
       <p>{{ t('notFound.message', 'Page not found') }}</p>
-      <router-link
-        to="/"
-        class="rr-button rr-button--primary"
-      >
+      <router-link to="/" class="rr-button rr-button--primary">
         {{ t('notFound.home', 'Go to home') }}
       </router-link>
     </div>

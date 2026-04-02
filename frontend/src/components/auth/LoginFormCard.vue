@@ -32,10 +32,7 @@ function submit() {
     <h2>{{ t('auth.title') }}</h2>
     <p>{{ t('auth.subtitle') }}</p>
 
-    <form
-      class="rr-form"
-      @submit.prevent="submit"
-    >
+    <form class="rr-form" @submit.prevent="submit">
       <div class="rr-field">
         <label for="login">{{ t('auth.login') }}</label>
         <input
@@ -44,7 +41,7 @@ function submit() {
           type="text"
           placeholder="admin"
           autocomplete="username"
-        >
+        />
       </div>
 
       <div class="rr-field">
@@ -55,29 +52,19 @@ function submit() {
           type="password"
           placeholder="••••••••"
           autocomplete="current-password"
-        >
+        />
       </div>
 
       <label class="rr-form__checkbox">
-        <input
-          v-model="form.rememberMe"
-          type="checkbox"
-        >
+        <input v-model="form.rememberMe" type="checkbox" />
         <span>{{ t('auth.remember') }}</span>
       </label>
 
-      <button
-        class="rr-button rr-button--primary"
-        type="submit"
-        :disabled="props.loading"
-      >
+      <button class="rr-button rr-button--primary" type="submit" :disabled="props.loading">
         {{ t('auth.submit') }}
       </button>
 
-      <p
-        v-if="props.error"
-        class="rr-error-card"
-      >
+      <p v-if="props.error" class="rr-error-card">
         {{ props.error }}
       </p>
     </form>

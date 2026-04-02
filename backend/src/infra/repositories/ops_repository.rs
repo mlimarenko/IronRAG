@@ -90,6 +90,35 @@ pub async fn get_async_operation_by_id(
     .await
 }
 
+pub async fn list_async_operations_by_ids(
+    postgres: &PgPool,
+    operation_ids: &[Uuid],
+) -> Result<Vec<OpsAsyncOperationRow>, sqlx::Error> {
+    if operation_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, OpsAsyncOperationRow>(
+        "select
+            id,
+            workspace_id,
+            library_id,
+            operation_kind,
+            surface_kind::text as surface_kind,
+            status::text as status,
+            subject_kind,
+            subject_id,
+            created_at,
+            completed_at,
+            failure_code
+         from ops_async_operation
+         where id = any($1)",
+    )
+    .bind(operation_ids)
+    .fetch_all(postgres)
+    .await
+}
+
 pub async fn get_latest_async_operation_by_subject(
     postgres: &PgPool,
     subject_kind: &str,

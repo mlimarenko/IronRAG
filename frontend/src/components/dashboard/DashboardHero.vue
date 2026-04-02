@@ -41,18 +41,11 @@ function severityIcon(severity: DashboardAttentionItem['severity']): string {
 </script>
 
 <template>
-  <header
-    class="rr-dash-hero"
-    :class="{ 'is-compact': compact }"
-  >
+  <header class="rr-dash-hero" :class="{ 'is-compact': compact }">
     <div class="rr-dash-hero__top">
       <div class="rr-dash-hero__copy">
-        <p class="rr-dash-hero__eyebrow">{{ t('dashboard.eyebrow') }}</p>
         <h1 class="rr-dash-hero__title">{{ t('dashboard.title') }}</h1>
-        <p
-          v-if="props.narrative.trim().length"
-          class="rr-dash-hero__subtitle"
-        >
+        <p v-if="props.narrative.trim().length" class="rr-dash-hero__subtitle">
           {{ props.narrative }}
         </p>
       </div>
@@ -80,6 +73,7 @@ function severityIcon(severity: DashboardAttentionItem['severity']): string {
     <div
       v-if="props.facts?.length"
       class="rr-dash-hero__facts"
+      :class="{ 'rr-dash-hero__facts--inline': compact }"
       :style="{ '--rr-dash-hero-fact-columns': `${Math.min(props.facts.length, 4)}` }"
     >
       <article
@@ -88,21 +82,21 @@ function severityIcon(severity: DashboardAttentionItem['severity']): string {
         class="rr-dash-hero__fact"
         :class="`rr-dash-hero__fact--${fact.tone}`"
       >
-        <p class="rr-dash-hero__fact-label">{{ fact.label }}</p>
-        <strong class="rr-dash-hero__fact-value">{{ fact.value }}</strong>
-        <p
-          v-if="fact.supportingText"
-          class="rr-dash-hero__fact-meta"
-        >
-          {{ fact.supportingText }}
-        </p>
+        <template v-if="compact">
+          <span class="rr-dash-hero__fact-inline-label">{{ fact.label }}</span>
+          <strong class="rr-dash-hero__fact-inline-value">{{ fact.value }}</strong>
+        </template>
+        <template v-else>
+          <p class="rr-dash-hero__fact-label">{{ fact.label }}</p>
+          <strong class="rr-dash-hero__fact-value">{{ fact.value }}</strong>
+          <p v-if="fact.supportingText" class="rr-dash-hero__fact-meta">
+            {{ fact.supportingText }}
+          </p>
+        </template>
       </article>
     </div>
 
-    <div
-      v-if="props.attentionItems?.length"
-      class="rr-dash-hero__alerts"
-    >
+    <div v-if="props.attentionItems?.length" class="rr-dash-hero__alerts">
       <button
         v-for="item in props.attentionItems"
         :key="item.id"
@@ -115,10 +109,7 @@ function severityIcon(severity: DashboardAttentionItem['severity']): string {
         <span class="rr-dash-alert__text">
           <strong>{{ item.title }}</strong> — {{ item.message }}
         </span>
-        <span
-          v-if="item.actionLabel"
-          class="rr-dash-alert__action"
-        >
+        <span v-if="item.actionLabel" class="rr-dash-alert__action">
           {{ item.actionLabel }} →
         </span>
       </button>

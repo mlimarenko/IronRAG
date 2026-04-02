@@ -1,12 +1,16 @@
 pub mod auth_tokens;
 pub mod chunking;
-pub mod errors;
 pub mod extraction;
 pub mod file_extract;
+pub mod json_coercion;
 pub mod provenance;
 pub mod retry;
 pub mod similarity;
 pub mod slugs;
 pub mod status;
+pub mod structured_document;
+pub mod technical_facts;
 pub mod telemetry;
 pub mod text_render;
+pub mod url_identity;
+pub mod web_ingest;

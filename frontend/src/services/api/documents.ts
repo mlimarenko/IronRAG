@@ -1,5 +1,4 @@
 import type {
-  CanonicalDocumentHead,
   CanonicalDocumentIdentity,
   CanonicalDocumentMutation,
   CanonicalDocumentMutationItem,
@@ -7,53 +6,64 @@ import type {
   CanonicalIngestAttempt,
   CanonicalIngestJob,
   CanonicalIngestStageEvent,
+  CreateWebIngestRunInput,
   DocumentAccountingStatus,
   DocumentActivityStatus,
   DocumentAttemptGroup,
   DocumentAttemptSummary,
   DocumentCollectionAccountingSummary,
   DocumentCollectionDiagnostics,
-  DocumentCollectionFormatDiagnostics,
+  DocumentCollectionWarning,
   DocumentCollectionGraphThroughputSummary,
   DocumentCollectionProgressCounters,
   DocumentCollectionSettlementSummary,
-  DocumentCollectionStageDiagnostics,
-  DocumentCollectionWarning,
   DocumentDetail,
-  DocumentFilterValues,
   DocumentGraphHealthSummary,
   DocumentGraphThroughputSummary,
   DocumentGraphStats,
   DocumentMutationAccepted,
-  DocumentMutationImpactScopeSummary,
   DocumentMutationState,
-  DocumentProviderFailureSummary,
-  DocumentQueueIsolationSummary,
-  DocumentQueueWaitingReason,
+  DocumentGraphCoverageKind,
+  DocumentPreparationReadinessKind,
+  DocumentPreparationSummary,
+  DocumentPreparedSegmentKind,
   DocumentRevisionHistoryItem,
   DocumentRowSummary,
   DocumentStatus,
   DocumentSummaryCounters,
+  DocumentTechnicalFactKind,
   DocumentsWorkspaceDiagnosticChip,
   DocumentsWorkspaceNotice,
   DocumentsWorkspacePrimarySummary,
+  LibraryGraphCoverageSummary,
+  LibraryReadinessSummary,
   DocumentsWorkspaceSummary,
   DocumentsSurfaceResponse,
   DocumentUploadFailure,
   DocumentCostEntry,
   LibraryCostSummary,
+  PreparedSegmentRow,
+  TechnicalFactRow,
   UploadDocumentsResponse,
   UploadRejectionDetails,
+  WebDiscoveredPage,
+  WebClassificationReason,
+  WebHostClassification,
+  WebIngestRun,
+  WebIngestRunReceipt,
+  WebIngestRunSummary,
+  WebRunCounts,
+  WebRunFailureCode,
+  WebPageProvenance,
 } from 'src/models/ui/documents'
 import type { DashboardRecentDocument } from 'src/models/ui/dashboard'
-import {
-  DOCUMENT_UPLOAD_FORMAT_TOKENS,
-  inferDocumentFileType,
-} from 'src/models/ui/documentFormats'
+import { DOCUMENT_UPLOAD_FORMAT_TOKENS, inferDocumentFileType } from 'src/models/ui/documentFormats'
 import type { GraphCanonicalSummary } from 'src/models/ui/graph'
 import { i18n } from 'src/lib/i18n'
 import { useShellStore } from 'src/stores/shell'
 import { ApiClientError, apiHttp, unwrap } from './http'
+
+type RawRow = Record<string, unknown>
 
 interface RawContentDocument {
   id: string
@@ -102,6 +112,178 @@ interface RawContentRevisionReadiness {
   graph_ready_at: string | null
 }
 
+interface RawContentDocumentReadinessSummary {
+  documentId: string
+  activeRevisionId: string | null
+  readinessKind: string
+  activityStatus?: string | null
+  stalledReason?: string | null
+  preparationState: string
+  graphCoverageKind: string
+  typedFactCoverage: number | null
+  lastMutationId: string | null
+  lastJobStage: string | null
+  updatedAt: string
+}
+
+interface RawKnowledgeLibrarySummaryResponse {
+  libraryId: string
+  documentCountsByReadiness?: Record<string, number> | null
+  graphReadyDocumentCount?: number | null
+  graphSparseDocumentCount?: number | null
+  typedFactDocumentCount?: number | null
+  updatedAt?: string | null
+  latestGeneration?: RawRow | null
+}
+
+interface RawWebPageProvenance {
+  runId: string | null
+  candidateId: string | null
+  sourceUri: string | null
+  canonicalUrl: string | null
+}
+
+export interface LibraryKnowledgeSummaryResponse {
+  libraryId: string
+  readinessSummary: LibraryReadinessSummary
+  graphCoverage: LibraryGraphCoverageSummary
+  latestGeneration: RawRow | null
+}
+
+export interface LibraryKnowledgeSummarySnapshot {
+  summary: LibraryKnowledgeSummaryResponse | null
+  unavailable: boolean
+}
+
+export const KNOWLEDGE_SUMMARY_UNAVAILABLE_WARNING =
+  'The canonical knowledge summary is temporarily unavailable.'
+
+export interface LibraryKnowledgeSummaryProjection {
+  summary: LibraryKnowledgeSummaryResponse | null
+  warning: string | null
+}
+
+interface RawWebRunCounts {
+  discovered?: number | null
+  eligible?: number | null
+  processed?: number | null
+  queued?: number | null
+  processing?: number | null
+  duplicates?: number | null
+  excluded?: number | null
+  blocked?: number | null
+  failed?: number | null
+  canceled?: number | null
+}
+
+interface RawWebIngestRunReceipt {
+  runId: string
+  libraryId: string
+  mode: string
+  runState: string
+  asyncOperationId?: string | null
+  counts?: RawWebRunCounts | null
+  failureCode?: string | null
+  cancelRequestedAt?: string | null
+}
+
+interface RawWebIngestRunSummary {
+  runId: string
+  libraryId: string
+  mode: string
+  boundaryPolicy: string
+  maxDepth: number
+  maxPages: number
+  runState: string
+  seedUrl: string
+  counts: RawWebRunCounts
+  lastActivityAt?: string | null
+}
+
+interface RawWebIngestRun extends RawWebIngestRunSummary {
+  mutationId: string
+  asyncOperationId?: string | null
+  workspaceId: string
+  normalizedSeedUrl: string
+  requestedByPrincipalId?: string | null
+  requestedAt: string
+  completedAt?: string | null
+  failureCode?: string | null
+  cancelRequestedAt?: string | null
+}
+
+interface RawWebDiscoveredPage {
+  candidateId: string
+  runId: string
+  discoveredUrl?: string | null
+  normalizedUrl: string
+  finalUrl?: string | null
+  canonicalUrl?: string | null
+  depth: number
+  referrerCandidateId?: string | null
+  hostClassification: string
+  candidateState: string
+  classificationReason?: string | null
+  contentType?: string | null
+  httpStatus?: number | null
+  discoveredAt: string
+  updatedAt: string
+  documentId?: string | null
+  resultRevisionId?: string | null
+  mutationItemId?: string | null
+}
+
+const WEB_CLASSIFICATION_REASONS = [
+  'seed_accepted',
+  'duplicate_canonical_url',
+  'outside_boundary_policy',
+  'exceeded_max_depth',
+  'exceeded_max_pages',
+  'unsupported_scheme',
+  'invalid_url',
+  'inaccessible',
+  'unsupported_content',
+  'cancel_requested',
+] as const satisfies readonly WebClassificationReason[]
+
+const WEB_RUN_FAILURE_CODES = [
+  'inaccessible',
+  'invalid_url',
+  'unsupported_content',
+  'web_discovery_failed',
+  'web_snapshot_persist_failed',
+  'web_snapshot_missing',
+  'web_snapshot_missing_final_url',
+  'web_snapshot_unavailable',
+  'web_capture_materialization_failed',
+  'recursive_crawl_failed',
+] as const satisfies readonly WebRunFailureCode[]
+
+interface RawStructuredOutlineEntry {
+  blockId: string
+  blockOrdinal: number
+  depth: number
+  heading: string
+  headingTrail: string[]
+  sectionPath: string[]
+}
+
+interface RawStructuredDocumentRevision {
+  revisionId: string
+  documentId: string
+  workspaceId: string
+  libraryId: string
+  preparationState: string
+  normalizationProfile: string
+  sourceFormat: string
+  languageCode: string | null
+  blockCount: number
+  chunkCount: number
+  typedFactCount: number
+  outline: RawStructuredOutlineEntry[]
+  preparedAt: string
+}
+
 interface RawContentMutation {
   id: string
   workspace_id: string
@@ -133,6 +315,16 @@ interface RawContentDocumentDetailResponse {
   head: RawContentDocumentHead | null
   active_revision: RawContentRevision | null
   readiness: RawContentRevisionReadiness | null
+  readiness_summary?: RawContentDocumentReadinessSummary | null
+  readinessSummary?: RawContentDocumentReadinessSummary | null
+  web_page_provenance?: RawWebPageProvenance | null
+  webPageProvenance?: RawWebPageProvenance | null
+  prepared_revision?: RawStructuredDocumentRevision | null
+  preparedRevision?: RawStructuredDocumentRevision | null
+  prepared_segment_count?: number | null
+  preparedSegmentCount?: number | null
+  technical_fact_count?: number | null
+  technicalFactCount?: number | null
   pipeline: RawContentDocumentPipelineState
 }
 
@@ -143,10 +335,12 @@ interface RawContentDocumentPipelineJob {
   mutation_id: string | null
   async_operation_id: string | null
   job_kind: string
-  queue_state: 'queued' | 'leased' | 'completed' | 'failed' | 'canceled' | string
+  queue_state: string
   queued_at: string
   available_at: string
   completed_at: string | null
+  claimed_at?: string | null
+  last_activity_at?: string | null
   current_stage: string | null
   failure_code: string | null
   retryable: boolean
@@ -221,7 +415,7 @@ interface RawIngestJob {
   connector_id: string | null
   async_operation_id?: string | null
   job_kind: string
-  queue_state: 'queued' | 'leased' | 'completed' | 'failed' | 'canceled' | string
+  queue_state: string
   priority: number
   dedupe_key: string | null
   queued_at: string
@@ -230,25 +424,6 @@ interface RawIngestJob {
   current_stage?: string | null
   failure_code?: string | null
   retryable?: boolean
-}
-
-interface RawIngestAttempt {
-  id: string
-  job_id: string
-  attempt_number: number
-  attempt_state: string
-  current_stage: string | null
-  started_at: string
-  heartbeat_at: string | null
-  finished_at: string | null
-  failure_class: string | null
-  failure_code: string | null
-  retryable: boolean
-}
-
-interface RawIngestJobResponse {
-  job: RawIngestJob
-  latest_attempt?: RawIngestAttempt | null
 }
 
 interface RawChunkSummary {
@@ -260,15 +435,89 @@ interface RawChunkSummary {
   token_count: number | null
 }
 
-interface CanonicalLibraryBundle {
-  documents: RawContentDocumentDetailResponse[]
-  mutations: RawContentMutationDetailResponse[]
-  jobs: RawIngestJob[]
+interface RawPreparedSegmentListItem {
+  segmentId: string
+  revisionId: string
+  ordinal: number
+  blockKind: string
+  headingTrail: string[]
+  sectionPath: string[]
+  pageNumber: number | null
+  excerpt: string
 }
 
-interface CanonicalDocumentRelation {
-  mutations: RawContentMutationDetailResponse[]
-  jobs: RawIngestJob[]
+interface RawStructuredSourceSpan {
+  startOffset: number
+  endOffset: number
+}
+
+interface RawStructuredTableCoordinates {
+  rowIndex: number
+  columnIndex: number
+  rowSpan: number
+  columnSpan: number
+}
+
+interface RawPreparedSegmentDetail {
+  segment: RawPreparedSegmentListItem
+  text: string
+  normalizedText: string
+  sourceSpan: RawStructuredSourceSpan | null
+  parentBlockId: string | null
+  tableCoordinates: RawStructuredTableCoordinates | null
+  codeLanguage: string | null
+  supportChunkIds: string[]
+}
+
+interface RawPreparedSegmentsPageResponse {
+  documentId: string
+  revisionId: string | null
+  total: number
+  offset: number
+  limit: number
+  items: RawPreparedSegmentDetail[]
+}
+
+type RawTechnicalFactValue =
+  | {
+      valueType: 'text'
+      value: string
+    }
+  | {
+      valueType: 'integer'
+      value: number
+    }
+
+interface RawTechnicalFactQualifier {
+  key: string
+  value: string
+}
+
+interface RawTypedTechnicalFact {
+  factId: string
+  revisionId: string
+  documentId: string
+  workspaceId: string
+  libraryId: string
+  factKind: string
+  canonicalValue: RawTechnicalFactValue
+  displayValue: string
+  qualifiers: RawTechnicalFactQualifier[]
+  supportBlockIds: string[]
+  supportChunkIds: string[]
+  confidence: number | null
+  extractionKind: string
+  conflictGroupId: string | null
+  createdAt: string
+}
+
+interface RawTechnicalFactsPageResponse {
+  documentId: string
+  revisionId: string | null
+  total: number
+  offset: number
+  limit: number
+  items: RawTypedTechnicalFact[]
 }
 
 const DEFAULT_ACCEPTED_FORMATS = [...DOCUMENT_UPLOAD_FORMAT_TOKENS]
@@ -294,14 +543,53 @@ function normalizeContentDocumentDetailResponse(
     fileName?: string | null
     activeRevision?: RawContentRevision | null
     readiness?: RawContentRevisionReadiness | null
+    readinessSummary?: RawContentDocumentReadinessSummary | null
+    webPageProvenance?: RawWebPageProvenance | null
+    preparedRevision?: RawStructuredDocumentRevision | null
+    preparedSegmentCount?: number | null
+    technicalFactCount?: number | null
     pipeline?: RawContentDocumentPipelineState | null
   }
+  const fileName =
+    ('file_name' in detail && typeof detail.file_name === 'string'
+      ? detail.file_name
+      : detail.fileName) ?? detail.document.external_key
+  const activeRevision =
+    ('active_revision' in detail ? detail.active_revision : undefined) ??
+    detail.activeRevision ??
+    null
+  const readiness = ('readiness' in detail ? detail.readiness : undefined) ?? null
+  const readinessSummary =
+    ('readiness_summary' in detail ? detail.readiness_summary : undefined) ??
+    detail.readinessSummary ??
+    null
+  const preparedRevision =
+    ('prepared_revision' in detail ? detail.prepared_revision : undefined) ??
+    detail.preparedRevision ??
+    null
+  const webPageProvenance =
+    ('web_page_provenance' in detail ? detail.web_page_provenance : undefined) ??
+    detail.webPageProvenance ??
+    null
+  const preparedSegmentCount =
+    ('prepared_segment_count' in detail ? detail.prepared_segment_count : undefined) ??
+    detail.preparedSegmentCount ??
+    null
+  const technicalFactCount =
+    ('technical_fact_count' in detail ? detail.technical_fact_count : undefined) ??
+    detail.technicalFactCount ??
+    null
   return {
     document: detail.document,
-    file_name: detail.file_name ?? detail.fileName ?? detail.document.external_key,
+    file_name: fileName,
     head: detail.head ?? null,
-    active_revision: detail.active_revision ?? detail.activeRevision ?? null,
-    readiness: detail.readiness ?? null,
+    active_revision: activeRevision,
+    readiness,
+    readiness_summary: readinessSummary,
+    web_page_provenance: webPageProvenance,
+    prepared_revision: preparedRevision,
+    prepared_segment_count: preparedSegmentCount,
+    technical_fact_count: technicalFactCount,
     pipeline: detail.pipeline ?? {
       latest_mutation: null,
       latest_job: null,
@@ -337,21 +625,412 @@ function formatFileSizeLabel(sizeBytes: number): string {
   return `${String(sizeBytes)} B`
 }
 
-function formatDateTime(value: string | null): string {
-  if (!value) {
-    return '—'
-  }
-  const parsed = new Date(value)
-  if (Number.isNaN(parsed.getTime())) {
-    return value
-  }
-  return new Intl.DateTimeFormat(i18n.global.locale.value || undefined, {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  }).format(parsed)
+function humanizeToken(value: string): string {
+  return value
+    .replaceAll('.', ' ')
+    .replaceAll('_', ' ')
+    .replaceAll('-', ' ')
+    .trim()
+    .split(/\s+/)
+    .filter((part) => part.length > 0)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ')
 }
 
-function statusLabelFor(status: DocumentStatus): string {
+function normalizeFailureMessage(value: string): string {
+  return value.replace(/\s+/g, ' ').trim()
+}
+
+function findMutationFailureMessage(
+  mutation: RawContentMutationDetailResponse | null | undefined,
+): string | null {
+  if (!mutation) {
+    return null
+  }
+  const failedItem =
+    mutation.items.find((item) => item.item_state === 'failed' && item.message?.trim().length) ??
+    mutation.items.find((item) => item.message?.trim().length) ??
+    null
+  return failedItem?.message ? normalizeFailureMessage(failedItem.message) : null
+}
+
+function isMissingGraphBindingFailure(value: string | null | undefined): boolean {
+  if (!value) {
+    return false
+  }
+  const normalized = value.toLowerCase()
+  return (
+    normalized.includes('active extract_graph binding is required') ||
+    normalized.includes('binding is not configured for library')
+  )
+}
+
+function buildDocumentFailureMessage(
+  mutation: RawContentMutationDetailResponse | null,
+  job: RawIngestJob | null,
+  status: DocumentStatus,
+): string | null {
+  const mutationMessage = findMutationFailureMessage(mutation)
+  if (isMissingGraphBindingFailure(mutationMessage)) {
+    return i18n.global.t('documents.details.failureNeedsGraphBinding')
+  }
+
+  const normalizedMessage = mutationMessage ?? normalizeFailureMessage(job?.failure_code ?? '')
+  if (normalizedMessage) {
+    if (normalizedMessage === 'canonical_pipeline_failed') {
+      return i18n.global.t('documents.details.failureGeneric')
+    }
+    return normalizedMessage
+  }
+
+  if (status === 'failed') {
+    return i18n.global.t('documents.details.failureGeneric')
+  }
+  return null
+}
+
+function buildDocumentFailureActionMessage(
+  mutation: RawContentMutationDetailResponse | null,
+  job: RawIngestJob | null,
+): string | null {
+  const message = findMutationFailureMessage(mutation) ?? job?.failure_code ?? null
+  if (isMissingGraphBindingFailure(message)) {
+    return i18n.global.t('documents.details.failureNeedsGraphBindingAction')
+  }
+  return null
+}
+
+function mapPreparationReadinessKind(
+  value: string | null | undefined,
+): DocumentPreparationReadinessKind {
+  switch (value) {
+    case 'readable':
+    case 'graph_sparse':
+    case 'graph_ready':
+    case 'failed':
+      return value
+    case 'processing':
+    default:
+      return 'processing'
+  }
+}
+
+function mapGraphCoverageKind(value: string | null | undefined): DocumentGraphCoverageKind {
+  switch (value) {
+    case 'graph_sparse':
+    case 'graph_ready':
+    case 'failed':
+      return value
+    case 'processing':
+    default:
+      return 'processing'
+  }
+}
+
+function emptyReadinessCounters(): DocumentSummaryCounters {
+  return {
+    processing: 0,
+    readable: 0,
+    graphSparse: 0,
+    graphReady: 0,
+    failed: 0,
+  }
+}
+
+export function emptyLibraryReadinessSummary(libraryId = ''): LibraryReadinessSummary {
+  return {
+    libraryId,
+    documentCountsByReadiness: emptyReadinessCounters(),
+    updatedAt: null,
+  }
+}
+
+export function emptyLibraryGraphCoverage(libraryId = ''): LibraryGraphCoverageSummary {
+  return {
+    libraryId,
+    graphReadyDocumentCount: 0,
+    graphSparseDocumentCount: 0,
+    typedFactDocumentCount: 0,
+    lastGenerationId: null,
+    updatedAt: null,
+  }
+}
+
+export function emptyLibraryKnowledgeSummary(libraryId = ''): LibraryKnowledgeSummaryResponse {
+  return {
+    libraryId,
+    readinessSummary: emptyLibraryReadinessSummary(libraryId),
+    graphCoverage: emptyLibraryGraphCoverage(libraryId),
+    latestGeneration: null,
+  }
+}
+
+function mapReadinessCounterKey(value: string): keyof DocumentSummaryCounters | null {
+  switch (value.trim().toLowerCase()) {
+    case 'processing':
+      return 'processing'
+    case 'readable':
+      return 'readable'
+    case 'graph_sparse':
+      return 'graphSparse'
+    case 'graph_ready':
+      return 'graphReady'
+    case 'failed':
+      return 'failed'
+    default:
+      return null
+  }
+}
+
+function normalizeReadinessCounters(
+  counts:
+    | DocumentSummaryCounters
+    | Partial<Record<keyof DocumentSummaryCounters, number>>
+    | Partial<Record<string, number>>
+    | null
+    | undefined,
+): DocumentSummaryCounters {
+  const normalized = emptyReadinessCounters()
+  for (const [key, rawValue] of Object.entries(counts ?? {})) {
+    const targetKey = mapReadinessCounterKey(key)
+    if (!targetKey) {
+      continue
+    }
+    normalized[targetKey] = Number.isFinite(rawValue) ? Math.max(0, Number(rawValue)) : 0
+  }
+  return normalized
+}
+
+export function buildEmptyLibraryKnowledgeSummary(libraryId = ''): LibraryKnowledgeSummaryResponse {
+  return {
+    libraryId,
+    readinessSummary: {
+      libraryId,
+      documentCountsByReadiness: emptyReadinessCounters(),
+      updatedAt: null,
+    },
+    graphCoverage: {
+      libraryId,
+      graphReadyDocumentCount: 0,
+      graphSparseDocumentCount: 0,
+      typedFactDocumentCount: 0,
+      lastGenerationId: null,
+      updatedAt: null,
+    },
+    latestGeneration: null,
+  }
+}
+
+function mapPreparedSegmentKind(value: string): DocumentPreparedSegmentKind {
+  switch (value) {
+    case 'heading':
+    case 'paragraph':
+    case 'list_item':
+    case 'table':
+    case 'table_row':
+    case 'code_block':
+    case 'endpoint_block':
+    case 'quote_block':
+    case 'metadata_block':
+      return value
+    default:
+      return 'paragraph'
+  }
+}
+
+function mapTechnicalFactKind(value: string): DocumentTechnicalFactKind {
+  switch (value) {
+    case 'url':
+    case 'endpoint_path':
+    case 'http_method':
+    case 'port':
+    case 'parameter_name':
+    case 'status_code':
+    case 'protocol':
+    case 'auth_rule':
+    case 'identifier':
+      return value
+    default:
+      return 'identifier'
+  }
+}
+
+function technicalFactValueLabel(value: RawTechnicalFactValue): string {
+  return typeof value.value === 'number' ? String(value.value) : value.value
+}
+
+function buildPreparationSummary(
+  detail: RawContentDocumentDetailResponse,
+): DocumentPreparationSummary | null {
+  const summary = detail.readiness_summary ?? null
+  const preparedRevision = detail.prepared_revision ?? null
+  if (!summary && !preparedRevision) {
+    return null
+  }
+  return {
+    readinessKind: mapPreparationReadinessKind(summary?.readinessKind),
+    preparationState: summary?.preparationState ?? preparedRevision?.preparationState ?? 'pending',
+    graphCoverageKind: mapGraphCoverageKind(summary?.graphCoverageKind),
+    typedFactCoverage: summary?.typedFactCoverage ?? null,
+    lastProcessingStage: summary?.lastJobStage ?? null,
+    updatedAt: summary?.updatedAt ?? preparedRevision?.preparedAt ?? null,
+    sourceFormat: preparedRevision?.sourceFormat ?? null,
+    normalizationProfile: preparedRevision?.normalizationProfile ?? null,
+    preparedSegmentCount:
+      detail.prepared_segment_count ?? detail.prepared_revision?.blockCount ?? 0,
+    technicalFactCount:
+      detail.technical_fact_count ?? detail.prepared_revision?.typedFactCount ?? 0,
+  }
+}
+
+export function mapLibraryKnowledgeSummary(
+  libraryId: string,
+  response: RawKnowledgeLibrarySummaryResponse,
+): LibraryKnowledgeSummaryResponse {
+  const resolvedLibraryId = response.libraryId || libraryId
+  const latestGeneration = response.latestGeneration ?? null
+  const lastGenerationIdValue =
+    latestGeneration?.['generationId'] ??
+    latestGeneration?.['generation_id'] ??
+    latestGeneration?.['id'] ??
+    null
+  const lastGenerationId = lastGenerationIdValue == null ? null : String(lastGenerationIdValue)
+  const updatedAt = response.updatedAt ?? null
+
+  return {
+    libraryId: resolvedLibraryId,
+    readinessSummary: {
+      libraryId: resolvedLibraryId,
+      documentCountsByReadiness: normalizeReadinessCounters(response.documentCountsByReadiness),
+      updatedAt,
+    },
+    graphCoverage: {
+      libraryId: resolvedLibraryId,
+      graphReadyDocumentCount: Math.max(0, Number(response.graphReadyDocumentCount ?? 0)),
+      graphSparseDocumentCount: Math.max(0, Number(response.graphSparseDocumentCount ?? 0)),
+      typedFactDocumentCount: Math.max(0, Number(response.typedFactDocumentCount ?? 0)),
+      lastGenerationId,
+      updatedAt,
+    },
+    latestGeneration,
+  }
+}
+
+function resolveContextLibraryId(libraryId?: string | null): string | null {
+  return libraryId ?? useShellStore().context?.activeLibrary.id ?? null
+}
+
+export async function resolveLibraryKnowledgeSummaryProjection(
+  libraryId?: string | null,
+  fallback: LibraryKnowledgeSummaryResponse | null = null,
+): Promise<LibraryKnowledgeSummaryProjection> {
+  const resolvedLibraryId = resolveContextLibraryId(libraryId)
+  if (!resolvedLibraryId) {
+    return {
+      summary: fallback,
+      warning: null,
+    }
+  }
+
+  try {
+    return {
+      summary: await fetchLibraryKnowledgeSummary(resolvedLibraryId),
+      warning: null,
+    }
+  } catch {
+    return {
+      summary: fallback ?? buildEmptyLibraryKnowledgeSummary(resolvedLibraryId),
+      warning: KNOWLEDGE_SUMMARY_UNAVAILABLE_WARNING,
+    }
+  }
+}
+
+function mapPreparedSegments(items: RawPreparedSegmentDetail[]): PreparedSegmentRow[] {
+  return items.map((item) => ({
+    id: item.segment.segmentId,
+    revisionId: item.segment.revisionId,
+    ordinal: item.segment.ordinal,
+    kind: mapPreparedSegmentKind(item.segment.blockKind),
+    headingTrail: item.segment.headingTrail,
+    sectionPath: item.segment.sectionPath,
+    excerpt: item.segment.excerpt,
+    text: item.text,
+    normalizedText: item.normalizedText,
+    location: {
+      pageNumber: item.segment.pageNumber,
+      startOffset: item.sourceSpan?.startOffset ?? null,
+      endOffset: item.sourceSpan?.endOffset ?? null,
+      supportChunkCount: item.supportChunkIds.length,
+    },
+    parentSegmentId: item.parentBlockId,
+    codeLanguage: item.codeLanguage,
+    tableCoordinates: item.tableCoordinates
+      ? {
+          rowIndex: item.tableCoordinates.rowIndex,
+          columnIndex: item.tableCoordinates.columnIndex,
+          rowSpan: item.tableCoordinates.rowSpan,
+          columnSpan: item.tableCoordinates.columnSpan,
+        }
+      : null,
+    supportChunkIds: item.supportChunkIds,
+  }))
+}
+
+function mapTechnicalFacts(
+  items: RawTypedTechnicalFact[],
+  preparedSegments: PreparedSegmentRow[],
+): TechnicalFactRow[] {
+  const segmentIndex = new Map(
+    preparedSegments.map(
+      (segment) =>
+        [
+          segment.id,
+          {
+            segmentId: segment.id,
+            ordinal: segment.ordinal,
+            label:
+              segment.headingTrail.at(-1) ??
+              segment.sectionPath.at(-1) ??
+              `${humanizeToken(segment.kind)} #${String(segment.ordinal + 1)}`,
+          },
+        ] as const,
+    ),
+  )
+
+  return items.map((item) => ({
+    id: item.factId,
+    revisionId: item.revisionId,
+    documentId: item.documentId,
+    kind: mapTechnicalFactKind(item.factKind),
+    canonicalValueLabel: technicalFactValueLabel(item.canonicalValue),
+    displayValue: item.displayValue,
+    qualifiers: item.qualifiers.map((qualifier) => ({
+      key: qualifier.key,
+      value: qualifier.value,
+    })),
+    supportChunkIds: item.supportChunkIds,
+    supportSegments: item.supportBlockIds
+      .map((segmentId) => segmentIndex.get(segmentId))
+      .filter((segment): segment is NonNullable<typeof segment> => segment !== undefined),
+    confidence: item.confidence,
+    extractionKind: item.extractionKind,
+    conflictGroupId: item.conflictGroupId,
+    createdAt: item.createdAt,
+  }))
+}
+
+function readinessLabelFor(value: DocumentPreparationReadinessKind): string {
+  const key = `documents.readinessKinds.${value}`
+  return i18n.global.te(key) ? i18n.global.t(key) : humanizeToken(value)
+}
+
+function statusLabelFor(
+  status: DocumentStatus,
+  preparation: DocumentPreparationSummary | null = null,
+): string {
+  if (preparation) {
+    return readinessLabelFor(preparation.readinessKind)
+  }
   const key = `documents.statuses.${status}`
   return i18n.global.te(key) ? i18n.global.t(key) : status
 }
@@ -369,10 +1048,7 @@ function documentStageLabel(stage: string): string {
   return i18n.global.te(key) ? i18n.global.t(key) : stage
 }
 
-function stageKeyFor(
-  job: RawIngestJob | null,
-  mutationState: string | null = null,
-): string | null {
+function stageKeyFor(job: RawIngestJob | null, mutationState: string | null = null): string | null {
   if (job) {
     const state = job.queue_state
     if (state === 'queued') return 'accepted'
@@ -401,7 +1077,10 @@ function stageKeyFor(
   }
 }
 
-function stageLabelFor(job: RawIngestJob | null, mutationState: string | null = null): string | null {
+function stageLabelFor(
+  job: RawIngestJob | null,
+  mutationState: string | null = null,
+): string | null {
   const stageKey = stageKeyFor(job, mutationState)
   if (!stageKey) return null
   if (stageKey === 'completed') return null
@@ -409,10 +1088,33 @@ function stageLabelFor(job: RawIngestJob | null, mutationState: string | null = 
 }
 
 function progressPercentForState(
+  preparation: DocumentPreparationSummary | null,
   status: DocumentStatus,
   activityStatus: DocumentActivityStatus,
   stageKey: string | null,
 ): number | null {
+  const inFlight =
+    status === 'queued' ||
+    status === 'processing' ||
+    activityStatus === 'queued' ||
+    activityStatus === 'active' ||
+    activityStatus === 'retrying' ||
+    activityStatus === 'blocked' ||
+    activityStatus === 'stalled'
+
+  switch (preparation?.readinessKind) {
+    case 'graph_ready':
+      return 100
+    case 'graph_sparse':
+      return 92
+    case 'readable':
+      return 78
+    case 'failed':
+      return null
+    default:
+      break
+  }
+
   if (status === 'failed') {
     return null
   }
@@ -422,7 +1124,29 @@ function progressPercentForState(
   }
 
   if (status === 'ready_no_graph') {
-    return 92
+    return 84
+  }
+
+  if (inFlight) {
+    switch (stageKey) {
+      case 'accepted':
+        return 8
+      case 'claimed':
+        return 16
+      case 'extracting_content':
+        return 34
+      case 'chunking':
+        return 58
+      case 'embedding_chunks':
+        return 74
+      case 'building_graph':
+        return 88
+      case 'finalizing':
+      case 'completed':
+        return 96
+      default:
+        return activityStatus === 'queued' ? 8 : 24
+    }
   }
 
   switch (stageKey) {
@@ -443,7 +1167,7 @@ function progressPercentForState(
     case 'completed':
       return 100
     default:
-      return activityStatus === 'queued' ? 8 : activityStatus === 'active' ? 24 : null
+      return null
   }
 }
 
@@ -466,7 +1190,9 @@ function stageKeyForDetail(
   return stageKeyFor(job, mutationState) ?? terminalStageForStatus(status)
 }
 
-function mutationStatusFromState(value: string): 'accepted' | 'reconciling' | 'completed' | 'failed' {
+function mutationStatusFromState(
+  value: string,
+): 'accepted' | 'reconciling' | 'completed' | 'failed' {
   switch (value) {
     case 'accepted':
       return 'accepted'
@@ -505,19 +1231,27 @@ function isReadableTextState(textState: string | null | undefined): boolean {
   return textState === 'readable' || textState === 'ready' || textState === 'text_readable'
 }
 
-function readinessTextState(readiness: RawContentRevisionReadiness | RawKnowledgeRevisionRow): string {
+function readinessTextState(
+  readiness: RawContentRevisionReadiness | RawKnowledgeRevisionRow,
+): string {
   return 'text_state' in readiness ? readiness.text_state : readiness.textState
 }
 
-function readinessVectorState(readiness: RawContentRevisionReadiness | RawKnowledgeRevisionRow): string {
+function readinessVectorState(
+  readiness: RawContentRevisionReadiness | RawKnowledgeRevisionRow,
+): string {
   return 'vector_state' in readiness ? readiness.vector_state : readiness.vectorState
 }
 
-function readinessGraphState(readiness: RawContentRevisionReadiness | RawKnowledgeRevisionRow): string {
+function readinessGraphState(
+  readiness: RawContentRevisionReadiness | RawKnowledgeRevisionRow,
+): string {
   return 'graph_state' in readiness ? readiness.graph_state : readiness.graphState
 }
 
-function isFailedReadiness(readiness: RawContentRevisionReadiness | RawKnowledgeRevisionRow | null): boolean {
+function isFailedReadiness(
+  readiness: RawContentRevisionReadiness | RawKnowledgeRevisionRow | null,
+): boolean {
   if (!readiness) {
     return false
   }
@@ -538,7 +1272,9 @@ function isOpenMutationState(mutationState: string | null | undefined): boolean 
 }
 
 function isFailedMutationState(mutationState: string | null | undefined): boolean {
-  return mutationState === 'failed' || mutationState === 'conflicted' || mutationState === 'canceled'
+  return (
+    mutationState === 'failed' || mutationState === 'conflicted' || mutationState === 'canceled'
+  )
 }
 
 function documentStatusFromCurrentState(
@@ -566,6 +1302,35 @@ function documentStatusFromCurrentState(
   return documentStatusFromQueueState(queueState, false)
 }
 
+function documentStatusFromPreparationState(
+  preparation: DocumentPreparationSummary | null,
+  readiness: RawContentRevisionReadiness | RawKnowledgeRevisionRow | null,
+  mutationState: string | null,
+  queueState: RawIngestJob['queue_state'] | null,
+): DocumentStatus {
+  if (isOpenMutationState(mutationState)) {
+    return queueState === 'queued' ? 'queued' : 'processing'
+  }
+
+  if (isFailedMutationState(mutationState)) {
+    return 'failed'
+  }
+
+  switch (preparation?.readinessKind) {
+    case 'graph_ready':
+      return 'ready'
+    case 'readable':
+    case 'graph_sparse':
+      return 'ready_no_graph'
+    case 'failed':
+      return 'failed'
+    case 'processing':
+      return queueState === 'queued' ? 'queued' : 'processing'
+    default:
+      return documentStatusFromCurrentState(readiness, mutationState, queueState)
+  }
+}
+
 function activityStatusFromQueueState(
   queueState: RawIngestJob['queue_state'] | null,
   lastActivityAt: string | null,
@@ -590,10 +1355,7 @@ function activityStatusFromQueueState(
       break
   }
 
-  if (
-    (activityStatus === 'queued' || activityStatus === 'active') &&
-    lastActivityAt !== null
-  ) {
+  if ((activityStatus === 'queued' || activityStatus === 'active') && lastActivityAt !== null) {
     const lastSeenAt = Date.parse(lastActivityAt)
     if (!Number.isNaN(lastSeenAt) && Date.now() - lastSeenAt >= STALLED_ACTIVITY_AFTER_MS) {
       return 'stalled'
@@ -627,7 +1389,10 @@ function activityStatusFromCurrentState(
   return 'queued'
 }
 
-function stalledReason(activityStatus: DocumentActivityStatus, lastActivityAt: string | null): string | null {
+function stalledReason(
+  activityStatus: DocumentActivityStatus,
+  lastActivityAt: string | null,
+): string | null {
   if (activityStatus !== 'stalled' || !lastActivityAt) {
     return null
   }
@@ -678,7 +1443,8 @@ function buildCanonicalAttempt(job: RawIngestJob): CanonicalIngestAttempt {
     startedAt: job.queued_at,
     heartbeatAt: lastActivity,
     finishedAt: job.completed_at,
-    failureClass: job.queue_state === 'failed' || job.queue_state === 'canceled' ? 'ingest_failed' : null,
+    failureClass:
+      job.queue_state === 'failed' || job.queue_state === 'canceled' ? 'ingest_failed' : null,
     failureCode: null,
     retryable: Boolean(job.retryable),
   }
@@ -751,6 +1517,151 @@ function buildCanonicalRevision(revision: RawContentRevision): CanonicalDocument
   }
 }
 
+function buildWebPageProvenance(
+  provenance: RawWebPageProvenance | null | undefined,
+): WebPageProvenance | null {
+  if (!provenance) {
+    return null
+  }
+  return {
+    runId: provenance.runId,
+    candidateId: provenance.candidateId,
+    sourceUri: provenance.sourceUri,
+    canonicalUrl: provenance.canonicalUrl,
+  }
+}
+
+function normalizeWebRunCounts(raw: RawWebRunCounts | null | undefined): WebRunCounts {
+  return {
+    discovered: raw?.discovered ?? 0,
+    eligible: raw?.eligible ?? 0,
+    processed: raw?.processed ?? 0,
+    queued: raw?.queued ?? 0,
+    processing: raw?.processing ?? 0,
+    duplicates: raw?.duplicates ?? 0,
+    excluded: raw?.excluded ?? 0,
+    blocked: raw?.blocked ?? 0,
+    failed: raw?.failed ?? 0,
+    canceled: raw?.canceled ?? 0,
+  }
+}
+
+function normalizeWebClassificationReason(
+  reason: string | null | undefined,
+): WebClassificationReason | null {
+  if (!reason || !WEB_CLASSIFICATION_REASONS.includes(reason as WebClassificationReason)) {
+    return null
+  }
+  return reason as WebClassificationReason
+}
+
+function normalizeWebRunFailureCode(
+  failureCode: string | null | undefined,
+): WebRunFailureCode | null {
+  if (!failureCode || !WEB_RUN_FAILURE_CODES.includes(failureCode as WebRunFailureCode)) {
+    return null
+  }
+  return failureCode as WebRunFailureCode
+}
+
+function normalizeWebHostClassification(value: string | null | undefined): WebHostClassification {
+  return value === 'external' ? 'external' : 'same_host'
+}
+
+function mapWebIngestRunReceipt(receipt: RawWebIngestRunReceipt): WebIngestRunReceipt {
+  return {
+    runId: receipt.runId,
+    libraryId: receipt.libraryId,
+    mode: receipt.mode === 'recursive_crawl' ? 'recursive_crawl' : 'single_page',
+    runState:
+      receipt.runState === 'discovering' ||
+      receipt.runState === 'processing' ||
+      receipt.runState === 'completed' ||
+      receipt.runState === 'completed_partial' ||
+      receipt.runState === 'failed' ||
+      receipt.runState === 'canceled'
+        ? receipt.runState
+        : 'accepted',
+    asyncOperationId: receipt.asyncOperationId ?? null,
+    counts: normalizeWebRunCounts(receipt.counts),
+    failureCode: normalizeWebRunFailureCode(receipt.failureCode),
+    cancelRequestedAt: receipt.cancelRequestedAt ?? null,
+  }
+}
+
+function mapWebIngestRunSummary(run: RawWebIngestRunSummary): WebIngestRunSummary {
+  return {
+    runId: run.runId,
+    libraryId: run.libraryId,
+    mode: run.mode === 'recursive_crawl' ? 'recursive_crawl' : 'single_page',
+    boundaryPolicy: run.boundaryPolicy === 'allow_external' ? 'allow_external' : 'same_host',
+    maxDepth: run.maxDepth,
+    maxPages: run.maxPages,
+    runState:
+      run.runState === 'discovering' ||
+      run.runState === 'processing' ||
+      run.runState === 'completed' ||
+      run.runState === 'completed_partial' ||
+      run.runState === 'failed' ||
+      run.runState === 'canceled'
+        ? run.runState
+        : 'accepted',
+    seedUrl: run.seedUrl,
+    counts: normalizeWebRunCounts(run.counts),
+    lastActivityAt: run.lastActivityAt ?? null,
+  }
+}
+
+function mapWebIngestRun(run: RawWebIngestRun): WebIngestRun {
+  const summary = mapWebIngestRunSummary(run)
+  return {
+    ...summary,
+    mutationId: run.mutationId,
+    asyncOperationId: run.asyncOperationId ?? null,
+    workspaceId: run.workspaceId,
+    normalizedSeedUrl: run.normalizedSeedUrl,
+    requestedByPrincipalId: run.requestedByPrincipalId ?? null,
+    requestedAt: run.requestedAt,
+    completedAt: run.completedAt ?? null,
+    failureCode: normalizeWebRunFailureCode(run.failureCode),
+    cancelRequestedAt: run.cancelRequestedAt ?? null,
+  }
+}
+
+function mapWebDiscoveredPage(page: RawWebDiscoveredPage): WebDiscoveredPage {
+  return {
+    candidateId: page.candidateId,
+    runId: page.runId,
+    discoveredUrl: page.discoveredUrl ?? null,
+    normalizedUrl: page.normalizedUrl,
+    finalUrl: page.finalUrl ?? null,
+    canonicalUrl: page.canonicalUrl ?? null,
+    depth: page.depth,
+    referrerCandidateId: page.referrerCandidateId ?? null,
+    hostClassification: normalizeWebHostClassification(page.hostClassification),
+    candidateState:
+      page.candidateState === 'eligible' ||
+      page.candidateState === 'duplicate' ||
+      page.candidateState === 'excluded' ||
+      page.candidateState === 'blocked' ||
+      page.candidateState === 'queued' ||
+      page.candidateState === 'processing' ||
+      page.candidateState === 'processed' ||
+      page.candidateState === 'failed' ||
+      page.candidateState === 'canceled'
+        ? page.candidateState
+        : 'discovered',
+    classificationReason: normalizeWebClassificationReason(page.classificationReason),
+    contentType: page.contentType ?? null,
+    httpStatus: page.httpStatus ?? null,
+    discoveredAt: page.discoveredAt,
+    updatedAt: page.updatedAt,
+    documentId: page.documentId ?? null,
+    resultRevisionId: page.resultRevisionId ?? null,
+    mutationItemId: page.mutationItemId ?? null,
+  }
+}
+
 function buildCanonicalIdentity(document: RawContentDocument): CanonicalDocumentIdentity {
   return {
     id: document.id,
@@ -767,7 +1678,7 @@ function buildDocumentFileName(
   activeRevision: RawContentRevision | null,
   revisions: RawContentRevision[],
 ): string {
-  return detail.file_name ?? activeRevision?.title ?? revisions[0]?.title ?? detail.document.external_key
+  return activeRevision?.title ?? revisions[0]?.title ?? detail.file_name
 }
 
 function buildDocumentFileType(
@@ -775,13 +1686,11 @@ function buildDocumentFileType(
   activeRevision: RawContentRevision | null,
   revisions: RawContentRevision[],
 ): string {
-  const reference = activeRevision ?? revisions[0] ?? null
+  const reference = activeRevision ?? revisions[0]
   if (!reference) {
     return inferDocumentFileType(detail.file_name, null)
   }
-  const fileNameReference =
-    reference.source_uri?.replace(/^upload:\/\//, '') ??
-    detail.file_name
+  const fileNameReference = reference.source_uri?.replace(/^upload:\/\//, '') ?? detail.file_name
   return inferDocumentFileType(fileNameReference, reference.mime_type)
 }
 
@@ -800,7 +1709,10 @@ function buildMutationState(mutation: RawContentMutation | null): DocumentMutati
   }
 }
 
-function buildAttemptSummary(job: RawIngestJob, accountingStatus: DocumentAccountingStatus): DocumentAttemptSummary {
+function buildAttemptSummary(
+  job: RawIngestJob,
+  accountingStatus: DocumentAccountingStatus,
+): DocumentAttemptSummary {
   return {
     totalEstimatedCost: null,
     settledEstimatedCost: null,
@@ -814,7 +1726,10 @@ function buildAttemptSummary(job: RawIngestJob, accountingStatus: DocumentAccoun
   }
 }
 
-function buildAttemptGroup(job: RawIngestJob, revision: RawContentRevision | null): DocumentAttemptGroup {
+function buildAttemptGroup(
+  job: RawIngestJob,
+  revision: RawContentRevision | null,
+): DocumentAttemptGroup {
   const activityStatus = activityStatusFromQueueState(job.queue_state, latestActivityAt(job))
   const summary: DocumentAttemptSummary = buildAttemptSummary(
     job,
@@ -828,12 +1743,13 @@ function buildAttemptGroup(job: RawIngestJob, revision: RawContentRevision | nul
     status: job.queue_state,
     activityStatus,
     lastActivityAt: latestActivityAt(job),
-    queueElapsedMs: elapsedMs(job.queued_at, job.available_at ?? job.completed_at ?? null),
+    queueElapsedMs: elapsedMs(job.queued_at, job.available_at ?? job.completed_at),
     totalElapsedMs: elapsedMs(job.queued_at, job.completed_at ?? new Date().toISOString()),
     startedAt: job.queued_at,
     finishedAt: job.completed_at,
     partialHistory: job.queue_state !== 'completed',
-    partialHistoryReason: job.queue_state === 'failed' || job.queue_state === 'canceled' ? 'ingest_failed' : null,
+    partialHistoryReason:
+      job.queue_state === 'failed' || job.queue_state === 'canceled' ? 'ingest_failed' : null,
     summary,
     benchmarks: [],
   }
@@ -844,7 +1760,10 @@ function buildProcessingHistory(job: RawIngestJob): DocumentDetail['processingHi
     attemptNo: 1,
     status: job.queue_state,
     stage: stageKeyFor(job) ?? 'accepted',
-    errorMessage: job.queue_state === 'failed' || job.queue_state === 'canceled' ? 'Canonical ingest job failed' : null,
+    errorMessage:
+      job.queue_state === 'failed' || job.queue_state === 'canceled'
+        ? 'Canonical ingest job failed'
+        : null,
     startedAt: job.queued_at,
     finishedAt: job.completed_at,
   }
@@ -903,8 +1822,7 @@ function buildKnowledgeReadiness(
     'textReadableAt' in revision ? revision.textReadableAt : revision.text_readable_at
   const vectorReadyAt =
     'vectorReadyAt' in revision ? revision.vectorReadyAt : revision.vector_ready_at
-  const graphReadyAt =
-    'graphReadyAt' in revision ? revision.graphReadyAt : revision.graph_ready_at
+  const graphReadyAt = 'graphReadyAt' in revision ? revision.graphReadyAt : revision.graph_ready_at
 
   return {
     revisionId,
@@ -954,14 +1872,9 @@ function buildGraphThroughput(
 }
 
 function buildCollectionAccounting(
-  rows: DocumentRowSummary[],
+  counters: DocumentSummaryCounters,
 ): DocumentCollectionAccountingSummary {
-  const queued = rows.filter((row) => row.status === 'queued').length
-  const processing = rows.filter((row) => row.status === 'processing').length
-  const ready = rows.filter((row) => row.status === 'ready').length
-  const readyNoGraph = rows.filter((row) => row.status === 'ready_no_graph').length
-  const failed = rows.filter((row) => row.status === 'failed').length
-  const inFlightStageCount = queued + processing
+  const inFlightStageCount = counters.processing
   return {
     totalEstimatedCost: null,
     settledEstimatedCost: null,
@@ -970,29 +1883,32 @@ function buildCollectionAccounting(
     promptTokens: 0,
     completionTokens: 0,
     totalTokens: 0,
-    pricedStageCount: ready + readyNoGraph,
-    unpricedStageCount: queued + processing + failed,
+    pricedStageCount: counters.readable + counters.graphSparse + counters.graphReady,
+    unpricedStageCount: counters.processing + counters.failed,
     inFlightStageCount,
     missingStageCount: 0,
     accountingStatus: inFlightStageCount > 0 ? 'in_flight_unsettled' : 'priced',
   }
 }
 
-function buildCollectionDiagnostics(rows: DocumentRowSummary[]): DocumentCollectionDiagnostics {
-  const queued = rows.filter((row) => row.status === 'queued').length
-  const processing = rows.filter((row) => row.status === 'processing').length
-  const ready = rows.filter((row) => row.status === 'ready').length
-  const readyNoGraph = rows.filter((row) => row.status === 'ready_no_graph').length
-  const failed = rows.filter((row) => row.status === 'failed').length
-  const activeBacklogCount = queued + processing
+function buildCollectionDiagnostics(
+  rows: DocumentRowSummary[],
+  counters: DocumentSummaryCounters,
+): DocumentCollectionDiagnostics {
+  const processing = counters.processing
+  const readable = counters.readable
+  const graphSparse = counters.graphSparse
+  const graphReady = counters.graphReady
+  const failed = counters.failed
+  const activeBacklogCount = processing
   const progress: DocumentCollectionProgressCounters = {
     accepted: rows.length,
-    contentExtracted: ready + readyNoGraph,
-    chunked: ready + readyNoGraph,
-    embedded: ready,
+    contentExtracted: readable + graphSparse + graphReady,
+    chunked: readable + graphSparse + graphReady,
+    embedded: graphSparse + graphReady,
     extractingGraph: processing,
-    graphReady: ready,
-    ready,
+    graphReady,
+    ready: graphReady,
     failed,
   }
   const warnings: DocumentCollectionWarning[] = []
@@ -1016,14 +1932,14 @@ function buildCollectionDiagnostics(rows: DocumentRowSummary[]): DocumentCollect
     failed > 0 ? 'failed' : activeBacklogCount > 0 ? 'retrying_contention' : 'healthy'
   const graphHealth: DocumentGraphHealthSummary = {
     writeHealth,
-    activeWriteCount: ready,
+    activeWriteCount: graphReady,
     retryingWriteCount: processing,
     failedWriteCount: failed,
     pendingNodeWriteCount: activeBacklogCount,
     pendingEdgeWriteCount: activeBacklogCount,
     lastFailureKind: failed > 0 ? 'canonical_ingest_failed' : null,
     lastFailureAt: failed > 0 ? new Date().toISOString() : null,
-    isRuntimeReadable: failed === 0 && activeBacklogCount === 0 && ready > 0,
+    isRuntimeReadable: failed === 0 && activeBacklogCount === 0 && graphReady > 0,
     snapshotAt: new Date().toISOString(),
   }
   const settlement: DocumentCollectionSettlementSummary = {
@@ -1048,18 +1964,13 @@ function buildCollectionDiagnostics(rows: DocumentRowSummary[]): DocumentCollect
           ? 'failed_with_residual_work'
           : 'fully_settled',
     residualReason: failed > 0 ? 'unknown' : null,
-    queuedCount: queued,
+    queuedCount: 0,
     processingCount: processing,
-    pendingGraphCount: readyNoGraph,
+    pendingGraphCount: readable + graphSparse,
     failedDocumentCount: failed,
     settledAt: settlement.settledAt,
     lastTransitionAt:
-      rows.length > 0
-        ? rows
-            .map((row) => row.uploadedAt)
-            .sort(compareIsoDates)
-            [0] ?? null
-        : null,
+      rows.length > 0 ? (rows.map((row) => row.uploadedAt).sort(compareIsoDates)[0] ?? null) : null,
   } satisfies NonNullable<DocumentCollectionDiagnostics['terminalOutcome']>
 
   const graphThroughput: DocumentCollectionGraphThroughputSummary = {
@@ -1068,14 +1979,14 @@ function buildCollectionDiagnostics(rows: DocumentRowSummary[]): DocumentCollect
     ...buildGraphThroughput(
       activeBacklogCount,
       rows.length,
-      ready + readyNoGraph,
+      readable + graphSparse + graphReady,
       failed > 0 ? 'high' : activeBacklogCount > 0 ? 'elevated' : null,
     ),
   }
 
   return {
     progress,
-    queueBacklogCount: queued,
+    queueBacklogCount: 0,
     processingBacklogCount: processing,
     activeBacklogCount,
     queueIsolation: null,
@@ -1091,15 +2002,13 @@ function buildCollectionDiagnostics(rows: DocumentRowSummary[]): DocumentCollect
 
 function buildWorkspaceSummary(
   rows: DocumentRowSummary[],
+  counters: DocumentSummaryCounters,
   diagnostics: DocumentCollectionDiagnostics,
 ): DocumentsWorkspaceSummary {
-  const queued = rows.filter((row) => row.status === 'queued').length
-  const processing = rows.filter((row) => row.status === 'processing').length
-  const ready = rows.filter((row) => row.status === 'ready').length
-  const readyNoGraph = rows.filter((row) => row.status === 'ready_no_graph').length
-  const failed = rows.filter((row) => row.status === 'failed').length
-  const backlogCount = queued + processing
-  const progressCount = ready + readyNoGraph + failed
+  const backlogCount = counters.processing
+  const failed = counters.failed
+  const progressCount =
+    counters.readable + counters.graphSparse + counters.graphReady + counters.failed
   const primarySummary: DocumentsWorkspacePrimarySummary = {
     progressLabel: `${String(progressCount)} / ${String(rows.length)}`,
     spendLabel:
@@ -1121,19 +2030,29 @@ function buildWorkspaceSummary(
       value: String(rows.length),
     },
     {
-      kind: 'queue',
-      label: i18n.global.t('documents.queued'),
-      value: String(queued),
+      kind: 'processing',
+      label: readinessLabelFor('processing'),
+      value: String(counters.processing),
     },
     {
-      kind: 'processing',
-      label: i18n.global.t('documents.processing'),
-      value: String(processing),
+      kind: 'readable',
+      label: readinessLabelFor('readable'),
+      value: String(counters.readable),
+    },
+    {
+      kind: 'graph_sparse',
+      label: readinessLabelFor('graph_sparse'),
+      value: String(counters.graphSparse),
+    },
+    {
+      kind: 'graph_ready',
+      label: readinessLabelFor('graph_ready'),
+      value: String(counters.graphReady),
     },
     {
       kind: 'failed',
       label: i18n.global.t('documents.failed'),
-      value: String(failed),
+      value: String(counters.failed),
     },
   ]
   const degradedNotices: DocumentsWorkspaceNotice[] = []
@@ -1149,12 +2068,23 @@ function buildWorkspaceSummary(
     })
   }
 
-  if (failed > 0) {
+  if (counters.failed > 0) {
     degradedNotices.push({
       kind: 'failed_work',
       title: i18n.global.t('documents.workspace.notices.pipelineFailed.title'),
       message: i18n.global.t('documents.workspace.notices.pipelineFailed.message', {
-        count: failed,
+        count: counters.failed,
+      }),
+    })
+  }
+
+  if (counters.readable > 0 || counters.graphSparse > 0) {
+    informationalNotices.push({
+      kind: 'graph_sparse',
+      title: i18n.global.t('documents.workspace.notices.graphSparse.title'),
+      message: i18n.global.t('documents.workspace.notices.graphSparse.message', {
+        readable: counters.readable,
+        graphSparse: counters.graphSparse,
       }),
     })
   }
@@ -1167,7 +2097,17 @@ function buildWorkspaceSummary(
     tableDocumentCount: rows.length,
     activeFilterCount: 0,
     highlightedStatus:
-      failed > 0 ? 'failed' : backlogCount > 0 ? 'processing' : rows.length > 0 ? 'ready' : null,
+      counters.failed > 0
+        ? 'failed'
+        : backlogCount > 0
+          ? 'processing'
+          : counters.graphSparse > 0
+            ? 'graph_sparse'
+            : counters.graphReady > 0
+              ? 'graph_ready'
+              : counters.readable > 0
+                ? 'readable'
+                : null,
   }
 }
 
@@ -1192,6 +2132,14 @@ function selectCurrentMutation(
   document: RawContentDocumentDetailResponse,
   relatedMutations: RawContentMutationDetailResponse[],
 ): RawContentMutationDetailResponse | null {
+  if (document.head?.latest_mutation_id) {
+    const detailedMutation = relatedMutations.find(
+      (mutation) => mutation.mutation.id === document.head?.latest_mutation_id,
+    )
+    if (detailedMutation) {
+      return detailedMutation
+    }
+  }
   if (document.pipeline.latest_mutation) {
     return {
       mutation: document.pipeline.latest_mutation,
@@ -1200,13 +2148,7 @@ function selectCurrentMutation(
       async_operation_id: document.pipeline.latest_job?.async_operation_id ?? null,
     }
   }
-  if (!document.head?.latest_mutation_id) {
-    return null
-  }
-  return (
-    relatedMutations.find((mutation) => mutation.mutation.id === document.head?.latest_mutation_id) ??
-    null
-  )
+  return null
 }
 
 function mapPipelineJobToRawIngestJob(job: RawContentDocumentPipelineJob): RawIngestJob {
@@ -1239,17 +2181,24 @@ function mapSurfaceRow(
   const currentMutation = selectCurrentMutation(document, relatedMutations)
   const currentJob = selectMutationJob(document, currentMutation, relatedJobs)
   const currentMutationStatus = currentMutationState(currentMutation)
-  const documentStatus = documentStatusFromCurrentState(
+  const preparation = buildPreparationSummary(document)
+  const documentStatus = documentStatusFromPreparationState(
+    preparation,
     document.readiness,
     currentMutationStatus,
     currentJob?.queue_state ?? null,
   )
-  const activityStatus = activityStatusFromCurrentState(documentStatus, currentJob, currentMutationStatus)
+  const activityStatus = activityStatusFromCurrentState(
+    documentStatus,
+    currentJob,
+    currentMutationStatus,
+  )
   const stage = stageKeyFor(currentJob, currentMutationStatus)
   const activeRevision = document.active_revision
   const fileName = buildDocumentFileName(document, activeRevision, revisions)
   const fileType = buildDocumentFileType(document, activeRevision, revisions)
   const lastActivityAt = latestActivityAt(currentJob)
+  const failureMessage = buildDocumentFailureMessage(currentMutation, currentJob, documentStatus)
 
   return {
     id: document.document.id,
@@ -1259,21 +2208,23 @@ function mapSurfaceRow(
     fileSizeLabel: activeRevision ? formatFileSizeLabel(activeRevision.byte_size) : '—',
     uploadedAt: document.document.created_at,
     status: documentStatus,
-    statusLabel: statusLabelFor(documentStatus),
+    statusLabel: statusLabelFor(documentStatus, preparation),
     stage,
     stageLabel: stageLabelFor(currentJob, currentMutationStatus),
-    progressPercent: progressPercentForState(documentStatus, activityStatus, stage),
+    progressPercent: progressPercentForState(preparation, documentStatus, activityStatus, stage),
     activityStatus,
     lastActivityAt,
     stalledReason: stalledReason(activityStatus, lastActivityAt),
     costAmount: null,
     costLabel: null,
+    failureMessage,
     canRetry:
       documentStatus === 'failed' &&
       document.document.document_state === 'active' &&
       activeRevision !== null &&
       currentJob?.retryable === true,
     detailAvailable: document.document.document_state === 'active',
+    preparation,
   }
 }
 
@@ -1299,9 +2250,7 @@ function mapDetailRevisionHistory(
     }))
 }
 
-function mapChunksToPreview(
-  chunks: RawChunkSummary[],
-): {
+function mapChunksToPreview(chunks: RawChunkSummary[]): {
   previewText: string | null
   previewTruncated: boolean
 } {
@@ -1320,9 +2269,7 @@ function mapChunksToPreview(
   }
 }
 
-function mapDetailProcessingHistory(
-  jobs: RawIngestJob[],
-): DocumentDetail['processingHistory'] {
+function mapDetailProcessingHistory(jobs: RawIngestJob[]): DocumentDetail['processingHistory'] {
   return jobs
     .slice()
     .sort((left, right) => compareIsoDates(left.queued_at, right.queued_at))
@@ -1346,6 +2293,8 @@ function mapDocumentDetail(
   document: RawContentDocumentDetailResponse,
   revisions: RawContentRevision[],
   chunks: RawChunkSummary[],
+  preparedSegments: PreparedSegmentRow[],
+  technicalFacts: TechnicalFactRow[],
   relatedMutations: RawContentMutationDetailResponse[],
   relatedJobs: RawIngestJob[],
   latestMutation: RawContentMutationDetailResponse | null,
@@ -1353,14 +2302,15 @@ function mapDocumentDetail(
   knowledgeRevision: RawKnowledgeRevisionRow | null,
 ): DocumentDetail {
   const activeRevision = document.active_revision
-  const readableRevision =
-    document.head?.readable_revision_id
-      ? revisions.find((revision) => revision.id === document.head?.readable_revision_id) ?? null
-      : activeRevision
+  const readableRevision = document.head?.readable_revision_id
+    ? (revisions.find((revision) => revision.id === document.head?.readable_revision_id) ?? null)
+    : activeRevision
   const currentMutation = selectCurrentMutation(document, relatedMutations)
   const currentJob = selectMutationJob(document, currentMutation, relatedJobs)
   const readiness = knowledgeRevision ?? document.readiness
-  const status = documentStatusFromCurrentState(
+  const preparation = buildPreparationSummary(document)
+  const status = documentStatusFromPreparationState(
+    preparation,
     readiness,
     currentMutation?.mutation.mutation_state ?? null,
     currentJob?.queue_state ?? null,
@@ -1376,7 +2326,9 @@ function mapDocumentDetail(
         text: canonicalSummary.previewText,
         confidenceStatus: canonicalSummary.previewTruncated ? 'partial' : 'strong',
         supportCount: chunks.length,
-        warning: canonicalSummary.previewTruncated ? 'Preview truncated from canonical chunks.' : null,
+        warning: canonicalSummary.previewTruncated
+          ? 'Preview truncated from canonical chunks.'
+          : null,
       }
     : null
   const extractionRecovery = null
@@ -1393,10 +2345,19 @@ function mapDocumentDetail(
   const processingHistory = mapDetailProcessingHistory(relatedJobs)
   const latestJobForCanonical = currentJob ?? null
   const stageEvents: CanonicalIngestStageEvent[] = []
+  const resolvedMutation = currentMutation ?? latestMutation
+  const resolvedJob = currentJob ?? latestJobForCanonical
+  const errorMessage = buildDocumentFailureMessage(resolvedMutation, resolvedJob, status)
+  const errorActionMessage = buildDocumentFailureActionMessage(resolvedMutation, resolvedJob)
 
   return {
     id: document.document.id,
     logicalDocumentId: document.document.id,
+    contentSourceKind: activeRevision?.content_source_kind ?? null,
+    sourceUri: activeRevision?.source_uri ?? null,
+    webPageProvenance: buildWebPageProvenance(
+      document.web_page_provenance ?? document.webPageProvenance ?? null,
+    ),
     readabilityState:
       status === 'ready'
         ? 'readable_active'
@@ -1418,18 +2379,7 @@ function mapDocumentDetail(
       currentMutationState(currentMutation, latestMutation),
     ),
     status,
-    progressPercent:
-      status === 'ready'
-        ? 100
-        : status === 'ready_no_graph'
-          ? 95
-          : activityStatus === 'queued'
-            ? 0
-            : activityStatus === 'active'
-              ? 50
-              : activityStatus === 'stalled'
-                ? 25
-                : 100,
+    progressPercent: progressPercentForState(preparation, status, activityStatus, null),
     activityStatus,
     lastActivityAt: lastActivity,
     stalledReason: stalledReason(activityStatus, lastActivity),
@@ -1456,20 +2406,16 @@ function mapDocumentDetail(
       (currentMutation ?? latestMutation)?.mutation.conflict_code ??
       null,
     mutation: mutationState,
-    requestedBy: (currentMutation ?? latestMutation)?.mutation.requested_by_principal_id ?? null,
-    errorMessage:
-      currentMutation?.mutation.failure_code ??
-      currentMutation?.mutation.conflict_code ??
-      (status === 'failed' ? 'Canonical ingestion failed' : null),
+    requestedBy: resolvedMutation?.mutation.requested_by_principal_id ?? null,
+    errorMessage,
+    errorActionMessage,
     failureClass:
       currentJob?.queue_state === 'failed' || currentJob?.queue_state === 'canceled'
         ? 'ingest_failed'
         : null,
     operatorAction: (currentMutation ?? latestMutation)?.mutation.operation_kind ?? null,
     summary:
-      canonicalSummaryPreview?.text ??
-      activeRevision?.title ??
-      document.document.external_key,
+      canonicalSummaryPreview?.text ?? activeRevision?.title ?? document.document.external_key,
     graphNodeId:
       activeRevision && knowledgeReadiness?.graphState === 'ready' ? document.document.id : null,
     canonicalSummaryPreview,
@@ -1507,6 +2453,9 @@ function mapDocumentDetail(
       warnings: [],
     },
     graphStats,
+    preparation,
+    preparedSegments,
+    technicalFacts,
     collectionDiagnostics: null,
     revisionHistory: mapDetailRevisionHistory(document, revisions),
     processingHistory,
@@ -1559,25 +2508,6 @@ async function fetchSurfaceDocumentsForLibrary(
   return documents.map(normalizeContentDocumentDetailResponse)
 }
 
-function normalizeIngestJobResponse(response: RawIngestJobResponse | RawIngestJob): RawIngestJob {
-  if ('job' in response) {
-    const job = { ...response.job }
-    const attempt = response.latest_attempt
-    if (attempt) {
-      job.current_stage = attempt.current_stage
-      job.failure_code = attempt.failure_code
-      job.retryable = attempt.retryable
-    } else if (job.retryable === undefined) {
-      job.retryable = false
-    }
-    return job
-  }
-  return {
-    ...response,
-    retryable: response.retryable ?? false,
-  }
-}
-
 function normalizeContentMutationDetailResponse(
   response: RawContentMutationDetailResponseWire | RawContentMutationDetailResponse,
 ): RawContentMutationDetailResponse {
@@ -1604,12 +2534,29 @@ async function fetchKnowledgeDocumentDetail(
 
 function buildSurfaceResponse(
   documents: RawContentDocumentDetailResponse[],
+  readinessSummary: LibraryReadinessSummary,
+  graphCoverage: LibraryGraphCoverageSummary,
+  summaryWarning: string | null = null,
 ): DocumentsSurfaceResponse {
   const rows = documents
     .map((document) => mapSurfaceRow(document, [], []))
     .sort((left, right) => compareIsoDates(left.uploadedAt, right.uploadedAt))
 
-  const diagnostics = buildCollectionDiagnostics(rows)
+  const counters = normalizeReadinessCounters({
+    ...(readinessSummary?.documentCountsByReadiness ?? {}),
+  })
+  const diagnostics = buildCollectionDiagnostics(rows, counters)
+  const graphWarning =
+    summaryWarning ??
+    (rows.length === 0
+      ? null
+      : counters.failed > 0
+        ? 'One or more canonical documents failed ingestion.'
+        : counters.processing > 0
+          ? 'Canonical ingestion is still in flight.'
+          : counters.readable > 0 || graphCoverage.graphSparseDocumentCount > 0
+            ? 'Some canonical documents are readable but graph coverage is still sparse.'
+            : null)
 
   return {
     acceptedFormats: DEFAULT_ACCEPTED_FORMATS,
@@ -1617,38 +2564,30 @@ function buildSurfaceResponse(
     graphStatus:
       rows.length === 0
         ? 'empty'
-        : diagnostics.activeBacklogCount > 0
-          ? 'building'
-          : rows.some((row) => row.status === 'failed')
-            ? 'failed'
-            : rows.some((row) => row.status === 'ready_no_graph')
-              ? 'partial'
-              : 'ready',
-    graphWarning:
-      rows.length === 0
-        ? null
-        : diagnostics.activeBacklogCount > 0
-          ? 'Canonical ingestion is still in flight.'
-          : rows.some((row) => row.status === 'failed')
-            ? 'One or more canonical documents failed ingestion.'
-            : rows.some((row) => row.status === 'ready_no_graph')
-              ? 'Some canonical documents are ready without graph coverage.'
-              : null,
+        : summaryWarning
+          ? 'partial'
+          : counters.processing > 0
+            ? 'building'
+            : counters.failed > 0 && graphCoverage.graphReadyDocumentCount === 0
+              ? 'failed'
+              : counters.readable > 0 || graphCoverage.graphSparseDocumentCount > 0
+                ? 'partial'
+                : 'ready',
+    graphWarning,
     rebuildBacklogCount: diagnostics.activeBacklogCount,
-    counters: {
-      queued: rows.filter((row) => row.status === 'queued').length,
-      processing: rows.filter((row) => row.status === 'processing').length,
-      ready: rows.filter((row) => row.status === 'ready').length,
-      readyNoGraph: rows.filter((row) => row.status === 'ready_no_graph').length,
-      failed: rows.filter((row) => row.status === 'failed').length,
+    readinessSummary: {
+      ...readinessSummary,
+      documentCountsByReadiness: counters,
     },
+    graphCoverage,
+    counters,
     filters: {
       statuses: Array.from(new Set(rows.map((row) => row.status))).sort(),
       fileTypes: Array.from(new Set(rows.map((row) => row.fileType))).sort(),
     },
-    accounting: buildCollectionAccounting(rows),
+    accounting: buildCollectionAccounting(counters),
     diagnostics,
-    workspace: buildWorkspaceSummary(rows, diagnostics),
+    workspace: buildWorkspaceSummary(rows, counters, diagnostics),
     rows,
   }
 }
@@ -1678,10 +2617,7 @@ export function mapDashboardRecentDocuments(
     }))
 }
 
-export function normalizeDocumentUploadFailure(
-  file: File,
-  error: unknown,
-): DocumentUploadFailure {
+export function normalizeDocumentUploadFailure(file: File, error: unknown): DocumentUploadFailure {
   const details =
     error instanceof ApiClientError ? normalizeUploadRejectionDetails(error.details) : null
   const rawMessage = error instanceof Error ? error.message : 'Failed to upload document'
@@ -1764,7 +2700,9 @@ export async function fetchLibraryDocumentCosts(libraryId: string): Promise<Docu
   }
 }
 
-export async function fetchLibraryCostSummary(libraryId: string): Promise<LibraryCostSummary | null> {
+export async function fetchLibraryCostSummary(
+  libraryId: string,
+): Promise<LibraryCostSummary | null> {
   try {
     const raw = await unwrap(
       apiHttp.get<RawLibraryCostSummary>('/billing/library-cost-summary', {
@@ -1782,15 +2720,39 @@ export async function fetchLibraryCostSummary(libraryId: string): Promise<Librar
   }
 }
 
+export async function fetchLibraryKnowledgeSummary(
+  libraryId?: string | null,
+): Promise<LibraryKnowledgeSummaryResponse | null> {
+  const resolvedLibraryId = resolveContextLibraryId(libraryId)
+  if (!resolvedLibraryId) {
+    return null
+  }
+
+  const response = await unwrap(
+    apiHttp.get<RawKnowledgeLibrarySummaryResponse>(
+      `/knowledge/libraries/${resolvedLibraryId}/summary`,
+    ),
+  )
+  return mapLibraryKnowledgeSummary(resolvedLibraryId, response)
+}
+
 export async function fetchDocumentsSurface(): Promise<DocumentsSurfaceResponse> {
   const shellStore = useShellStore()
   const libraryId = shellStore.context?.activeLibrary.id ?? null
-  const [documents, documentCosts] = await Promise.all([
+  const [documents, documentCosts, knowledgeSummaryProjection] = await Promise.all([
     fetchSurfaceDocumentsForLibrary(libraryId),
     libraryId ? fetchLibraryDocumentCosts(libraryId) : Promise.resolve([]),
+    resolveLibraryKnowledgeSummaryProjection(libraryId),
   ])
 
-  const surface = buildSurfaceResponse(documents)
+  const summary =
+    knowledgeSummaryProjection.summary ?? buildEmptyLibraryKnowledgeSummary(libraryId ?? '')
+  const surface = buildSurfaceResponse(
+    documents,
+    summary.readinessSummary,
+    summary.graphCoverage,
+    knowledgeSummaryProjection.warning,
+  )
 
   if (documentCosts.length > 0) {
     const costMap = new Map(documentCosts.map((c) => [c.documentId, c]))
@@ -1809,8 +2771,10 @@ export async function fetchDocumentsSurface(): Promise<DocumentsSurfaceResponse>
 export async function fetchDocumentSummaryCounters(
   libraryId?: string | null,
 ): Promise<DocumentSummaryCounters> {
-  const documents = await fetchSurfaceDocumentsForLibrary(libraryId)
-  return buildSurfaceResponse(documents).counters
+  const knowledgeSummaryProjection = await resolveLibraryKnowledgeSummaryProjection(libraryId)
+  return normalizeReadinessCounters({
+    ...(knowledgeSummaryProjection.summary?.readinessSummary.documentCountsByReadiness ?? {}),
+  })
 }
 
 export async function fetchDocumentDetail(id: string): Promise<DocumentDetail> {
@@ -1818,30 +2782,62 @@ export async function fetchDocumentDetail(id: string): Promise<DocumentDetail> {
   const document = normalizeContentDocumentDetailResponse(
     await unwrap(apiHttp.get<RawContentDocumentDetailResponse>(`/content/documents/${id}`)),
   )
-  const [revisions, chunks, knowledgeDetail, documentCosts] = await Promise.all([
+  const [
+    revisions,
+    chunks,
+    preparedSegmentsPage,
+    technicalFactsPage,
+    knowledgeDetail,
+    documentCosts,
+    latestMutation,
+  ] = await Promise.all([
     unwrap(apiHttp.get<RawContentRevision[]>(`/content/documents/${id}/revisions`)),
     unwrap(
       apiHttp.get<RawChunkSummary[]>('/chunks', {
         params: { documentId: id },
       }),
     ),
+    unwrap(
+      apiHttp.get<RawPreparedSegmentsPageResponse>(`/content/documents/${id}/prepared-segments`, {
+        params: { offset: 0, limit: 500 },
+      }),
+    ),
+    unwrap(
+      apiHttp.get<RawTechnicalFactsPageResponse>(`/content/documents/${id}/technical-facts`, {
+        params: { offset: 0, limit: 500 },
+      }),
+    ),
     fetchKnowledgeDocumentDetail(document.document.library_id, id),
     fetchLibraryDocumentCosts(document.document.library_id),
+    document.head?.latest_mutation_id
+      ? unwrap(
+          apiHttp.get<RawContentMutationDetailResponseWire>(
+            `/content/mutations/${document.head.latest_mutation_id}`,
+          ),
+        ).then(normalizeContentMutationDetailResponse)
+      : Promise.resolve(null),
   ])
-  const relatedMutations: RawContentMutationDetailResponse[] = []
+  const preparedSegments = mapPreparedSegments(preparedSegmentsPage.items)
+  const technicalFacts = mapTechnicalFacts(technicalFactsPage.items, preparedSegments)
+  const relatedMutations: RawContentMutationDetailResponse[] = latestMutation
+    ? [latestMutation]
+    : []
   const relatedJobs: RawIngestJob[] = []
   const effectiveKnowledgeRevision = document.readiness?.revision_id
-    ? knowledgeDetail.revisions.find((revision) => revision.revisionId === document.readiness?.revision_id) ??
-      knowledgeDetail.latestRevision
+    ? (knowledgeDetail.revisions.find(
+        (revision) => revision.revisionId === document.readiness?.revision_id,
+      ) ?? knowledgeDetail.latestRevision)
     : knowledgeDetail.latestRevision
   const revisionsById = new Map(revisions.map((revision) => [revision.id, revision] as const))
   const readableRevision = document.head?.readable_revision_id
-    ? revisionsById.get(document.head.readable_revision_id) ?? null
+    ? (revisionsById.get(document.head.readable_revision_id) ?? null)
     : document.active_revision
   const detail = mapDocumentDetail(
     document,
     revisions,
     chunks,
+    preparedSegments,
+    technicalFacts,
     relatedMutations,
     relatedJobs,
     null,
@@ -1914,10 +2910,7 @@ export async function deleteDocumentItem(id: string): Promise<void> {
 
 export async function retryDocumentItem(id: string): Promise<DocumentRowSummary> {
   await unwrap(
-    apiHttp.post<RawContentMutationDetailResponse>(
-      `/content/documents/${id}/reprocess`,
-      {},
-    ),
+    apiHttp.post<RawContentMutationDetailResponse>(`/content/documents/${id}/reprocess`, {}),
   )
   return await fetchDocumentRowFromDetail(id)
 }
@@ -1932,7 +2925,7 @@ async function fetchDocumentRowFromDetail(id: string): Promise<DocumentRowSummar
     fileSizeLabel: detail.fileSizeLabel,
     uploadedAt: detail.uploadedAt,
     status: detail.status,
-    statusLabel: statusLabelFor(detail.status),
+    statusLabel: statusLabelFor(detail.status, detail.preparation),
     stage: detail.stage,
     stageLabel:
       detail.status === 'processing' || detail.status === 'queued'
@@ -1942,20 +2935,22 @@ async function fetchDocumentRowFromDetail(id: string): Promise<DocumentRowSummar
     activityStatus: detail.activityStatus,
     lastActivityAt: detail.lastActivityAt,
     stalledReason: detail.stalledReason,
-    costAmount: detail.totalEstimatedCost && detail.totalEstimatedCost > 0
-      ? detail.totalEstimatedCost
-      : null,
-    costLabel: detail.totalEstimatedCost && detail.totalEstimatedCost > 0
-      ? formatCostLabel(detail.totalEstimatedCost)
-      : null,
+    costAmount:
+      detail.totalEstimatedCost && detail.totalEstimatedCost > 0 ? detail.totalEstimatedCost : null,
+    costLabel:
+      detail.totalEstimatedCost && detail.totalEstimatedCost > 0
+        ? formatCostLabel(detail.totalEstimatedCost)
+        : null,
+    failureMessage: detail.errorMessage,
     canRetry: detail.canRetry,
     detailAvailable: detail.detailAvailable,
+    preparation: detail.preparation,
   }
 }
 
-async function buildMutationAcceptedResponse(
+function buildMutationAcceptedResponse(
   response: RawContentMutationDetailResponseWire | RawContentMutationDetailResponse,
-): Promise<DocumentMutationAccepted> {
+): DocumentMutationAccepted {
   const normalized = normalizeContentMutationDetailResponse(response)
   return {
     accepted: true,
@@ -2016,4 +3011,38 @@ export async function downloadDocumentExtractedText(id: string): Promise<Blob> {
     .map((chunk) => chunk.content)
     .join('\n\n')
   return new Blob([content], { type: 'text/plain;charset=utf-8' })
+}
+
+export async function createWebIngestRun(
+  input: CreateWebIngestRunInput,
+): Promise<WebIngestRunReceipt> {
+  return mapWebIngestRunReceipt(
+    await unwrap(apiHttp.post<RawWebIngestRunReceipt>('/content/web-runs', input)),
+  )
+}
+
+export async function fetchWebIngestRuns(libraryId: string): Promise<WebIngestRunSummary[]> {
+  const runs = await unwrap(
+    apiHttp.get<RawWebIngestRunSummary[]>('/content/web-runs', {
+      params: { libraryId },
+    }),
+  )
+  return runs.map(mapWebIngestRunSummary)
+}
+
+export async function fetchWebIngestRun(runId: string): Promise<WebIngestRun> {
+  return mapWebIngestRun(await unwrap(apiHttp.get<RawWebIngestRun>(`/content/web-runs/${runId}`)))
+}
+
+export async function fetchWebIngestRunPages(runId: string): Promise<WebDiscoveredPage[]> {
+  const pages = await unwrap(
+    apiHttp.get<RawWebDiscoveredPage[]>(`/content/web-runs/${runId}/pages`),
+  )
+  return pages.map(mapWebDiscoveredPage)
+}
+
+export async function cancelWebIngestRun(runId: string): Promise<WebIngestRunReceipt> {
+  return mapWebIngestRunReceipt(
+    await unwrap(apiHttp.post<RawWebIngestRunReceipt>(`/content/web-runs/${runId}/cancel`)),
+  )
 }

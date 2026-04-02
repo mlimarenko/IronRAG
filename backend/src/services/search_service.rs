@@ -12,7 +12,10 @@ use crate::{
         collections::KNOWLEDGE_CHUNK_COLLECTION,
         document_store::KnowledgeChunkRow,
         graph_store::KnowledgeEntityRow,
-        search_store::{KnowledgeChunkVectorRow, KnowledgeEntityVectorRow},
+        search_store::{
+            KnowledgeChunkSearchRow, KnowledgeChunkVectorRow, KnowledgeEntitySearchRow,
+            KnowledgeEntityVectorRow, KnowledgeRelationSearchRow, KnowledgeTechnicalFactSearchRow,
+        },
     },
     infra::repositories::ai_repository,
     integrations::llm::EmbeddingBatchRequest,
@@ -35,6 +38,15 @@ pub struct GraphNodeEmbeddingWrite {
     pub active: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct QueryEvidenceSearchResult {
+    pub chunk_hits: Vec<KnowledgeChunkSearchRow>,
+    pub technical_fact_hits: Vec<KnowledgeTechnicalFactSearchRow>,
+    pub entity_hits: Vec<KnowledgeEntitySearchRow>,
+    pub relation_hits: Vec<KnowledgeRelationSearchRow>,
+    pub exact_literal_bias: bool,
+}
+
 #[derive(Clone, Default)]
 pub struct SearchService;
 
@@ -42,6 +54,54 @@ impl SearchService {
     #[must_use]
     pub const fn new() -> Self {
         Self
+    }
+
+    #[must_use]
+    pub fn is_exact_literal_technical_query(&self, query: &str) -> bool {
+        exact_literal_technical_query(query)
+    }
+
+    pub async fn search_query_evidence(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+        query: &str,
+        limit: usize,
+    ) -> Result<QueryEvidenceSearchResult> {
+        let normalized_limit = limit.max(1);
+        let exact_literal_bias = self.is_exact_literal_technical_query(query);
+        let fact_limit = if exact_literal_bias {
+            normalized_limit.saturating_mul(2).max(6)
+        } else {
+            normalized_limit
+        };
+        let chunk_hits = state
+            .arango_search_store
+            .search_chunks(library_id, query, normalized_limit)
+            .await
+            .context("failed to search canonical knowledge chunks")?;
+        let technical_fact_hits = state
+            .arango_search_store
+            .search_technical_facts(library_id, query, fact_limit)
+            .await
+            .context("failed to search canonical technical facts")?;
+        let entity_hits = state
+            .arango_search_store
+            .search_entities(library_id, query, normalized_limit)
+            .await
+            .context("failed to search canonical entities")?;
+        let relation_hits = state
+            .arango_search_store
+            .search_relations(library_id, query, normalized_limit)
+            .await
+            .context("failed to search canonical relations")?;
+        Ok(QueryEvidenceSearchResult {
+            chunk_hits,
+            technical_fact_hits,
+            entity_hits,
+            relation_hits,
+            exact_literal_bias,
+        })
     }
 
     #[must_use]
@@ -351,6 +411,11 @@ impl SearchService {
                 anyhow!("active embedding binding is not configured for library {}", library_id)
             })?;
         let model_catalog_id = embedding_binding.model_catalog_id;
+        state
+            .arango_search_store
+            .delete_entity_vectors_by_library(library_id)
+            .await
+            .context("failed to clear stale entity vectors before rebuild")?;
         let entities = state
             .arango_graph_store
             .list_entities_by_library(library_id)
@@ -433,6 +498,40 @@ impl SearchService {
 
         Ok(rebuilt)
     }
+}
+
+fn exact_literal_technical_query(query: &str) -> bool {
+    let normalized = query.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+    let strong_markers = [
+        "http://",
+        "https://",
+        "wsdl",
+        "endpoint",
+        "method",
+        "path",
+        "port",
+        "status code",
+        "query parameter",
+        "parameter",
+        "url",
+        "graphql",
+        "rest",
+        "soap",
+        "/",
+    ];
+    let has_marker =
+        strong_markers.iter().any(|marker| normalized.contains(marker)) || query.contains("?");
+    let has_code_like_literal =
+        query.chars().any(|ch| ch == '/' || ch == ':' || ch == '_' || ch == '-')
+            || query.split_whitespace().any(|token| {
+                let has_letters = token.chars().any(|ch| ch.is_ascii_alphabetic());
+                let has_digits = token.chars().any(|ch| ch.is_ascii_digit());
+                has_letters && has_digits
+            });
+    has_marker || has_code_like_literal
 }
 
 async fn resolve_embedding_model_catalog_id(
@@ -718,5 +817,13 @@ mod tests {
         let selected =
             SearchService::new().select_current_entity_vector(&candidates).expect("entity vector");
         assert_eq!(selected.freshness_generation, new.freshness_generation);
+    }
+
+    #[test]
+    fn exact_literal_query_detection_prefers_technical_markers() {
+        let service = SearchService::new();
+        assert!(service.is_exact_literal_technical_query("Какой endpoint у GET /v1/system/info?"));
+        assert!(service.is_exact_literal_technical_query("WSDL URL inventory.wsdl"));
+        assert!(!service.is_exact_literal_technical_query("О чем вообще этот документ"));
     }
 }

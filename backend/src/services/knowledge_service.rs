@@ -2,11 +2,16 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::knowledge::{
-        KnowledgeChunk, KnowledgeContextBundle, KnowledgeDocument, KnowledgeLibraryGeneration,
-        KnowledgeRevision,
+    domains::{
+        content::LibraryKnowledgeCoverage,
+        knowledge::{
+            KnowledgeChunk, KnowledgeContextBundle, KnowledgeDocument, KnowledgeLibraryGeneration,
+            KnowledgeLibrarySummary, KnowledgeRevision, StructuredBlock,
+            StructuredDocumentRevision, TypedTechnicalFact,
+        },
     },
     interfaces::http::router_support::ApiError,
+    shared::technical_facts::{TechnicalFactKind, TechnicalFactQualifier, TechnicalFactValue},
 };
 
 #[derive(Debug, Clone)]
@@ -63,13 +68,16 @@ pub struct CreateKnowledgeChunkCommand {
     pub document_id: Uuid,
     pub revision_id: Uuid,
     pub chunk_index: i32,
+    pub chunk_kind: Option<String>,
     pub content_text: String,
     pub normalized_text: String,
     pub span_start: Option<i32>,
     pub span_end: Option<i32>,
     pub token_count: Option<i32>,
+    pub support_block_ids: Vec<Uuid>,
     pub section_path: Vec<String>,
     pub heading_trail: Vec<String>,
+    pub literal_digest: Option<String>,
     pub chunk_state: String,
     pub text_generation: Option<i64>,
     pub vector_generation: Option<i64>,
@@ -266,13 +274,16 @@ impl KnowledgeService {
                 document_id: command.document_id,
                 revision_id: command.revision_id,
                 chunk_index: command.chunk_index,
+                chunk_kind: command.chunk_kind,
                 content_text: command.content_text,
                 normalized_text: command.normalized_text,
                 span_start: command.span_start,
                 span_end: command.span_end,
                 token_count: command.token_count,
+                support_block_ids: command.support_block_ids,
                 section_path: command.section_path,
                 heading_trail: command.heading_trail,
+                literal_digest: command.literal_digest,
                 chunk_state: command.chunk_state,
                 text_generation: command.text_generation,
                 vector_generation: command.vector_generation,
@@ -308,13 +319,16 @@ impl KnowledgeService {
                 document_id: command.document_id,
                 revision_id: command.revision_id,
                 chunk_index: command.chunk_index,
+                chunk_kind: command.chunk_kind.clone(),
                 content_text: command.content_text.clone(),
                 normalized_text: command.normalized_text.clone(),
                 span_start: command.span_start,
                 span_end: command.span_end,
                 token_count: command.token_count,
+                support_block_ids: command.support_block_ids.clone(),
                 section_path: command.section_path.clone(),
                 heading_trail: command.heading_trail.clone(),
+                literal_digest: command.literal_digest.clone(),
                 chunk_state: command.chunk_state.clone(),
                 text_generation: command.text_generation,
                 vector_generation: command.vector_generation,
@@ -353,6 +367,74 @@ impl KnowledgeService {
             .await
             .map_err(|_| ApiError::Internal)?;
         Ok(rows.into_iter().map(map_chunk_row).collect())
+    }
+
+    pub async fn get_structured_revision(
+        &self,
+        state: &AppState,
+        revision_id: Uuid,
+    ) -> Result<Option<StructuredDocumentRevision>, ApiError> {
+        let row = state
+            .arango_document_store
+            .get_structured_revision(revision_id)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+        row.map(map_structured_revision_row).transpose()
+    }
+
+    pub async fn list_document_structured_revisions(
+        &self,
+        state: &AppState,
+        document_id: Uuid,
+    ) -> Result<Vec<StructuredDocumentRevision>, ApiError> {
+        let rows = state
+            .arango_document_store
+            .list_structured_revisions_by_document(document_id)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+        rows.into_iter().map(map_structured_revision_row).collect()
+    }
+
+    pub async fn list_structured_blocks(
+        &self,
+        state: &AppState,
+        revision_id: Uuid,
+    ) -> Result<Vec<StructuredBlock>, ApiError> {
+        let rows = state
+            .arango_document_store
+            .list_structured_blocks_by_revision(revision_id)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+        rows.into_iter().map(map_structured_block_row).collect()
+    }
+
+    pub async fn list_typed_technical_facts(
+        &self,
+        state: &AppState,
+        revision_id: Uuid,
+    ) -> Result<Vec<TypedTechnicalFact>, ApiError> {
+        let rows = state
+            .arango_document_store
+            .list_technical_facts_by_revision(revision_id)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+        rows.into_iter().map(map_typed_technical_fact_row).collect()
+    }
+
+    pub async fn list_typed_technical_facts_by_ids(
+        &self,
+        state: &AppState,
+        fact_ids: &[Uuid],
+    ) -> Result<Vec<TypedTechnicalFact>, ApiError> {
+        if fact_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = state
+            .arango_document_store
+            .list_technical_facts_by_ids(fact_ids)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+        rows.into_iter().map(map_typed_technical_fact_row).collect()
     }
 
     pub async fn delete_revision_chunks(
@@ -420,6 +502,50 @@ impl KnowledgeService {
             .map_err(|_| ApiError::Internal)?;
         Ok(rows.into_iter().map(map_library_generation_row).collect())
     }
+
+    pub async fn get_library_knowledge_coverage(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+    ) -> Result<LibraryKnowledgeCoverage, ApiError> {
+        let summary = self.get_library_summary(state, library_id).await?;
+        let last_generation_id = summary.latest_generation.as_ref().map(|generation| generation.id);
+        Ok(LibraryKnowledgeCoverage {
+            library_id: summary.library_id,
+            document_counts_by_readiness: summary.document_counts_by_readiness,
+            graph_ready_document_count: summary.graph_ready_document_count,
+            graph_sparse_document_count: summary.graph_sparse_document_count,
+            typed_fact_document_count: summary.typed_fact_document_count,
+            last_generation_id,
+            updated_at: summary.updated_at,
+        })
+    }
+
+    pub async fn get_library_summary(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+    ) -> Result<KnowledgeLibrarySummary, ApiError> {
+        let (summaries, generations) = tokio::try_join!(
+            state.canonical_services.content.list_documents(state, library_id),
+            self.list_library_generations(state, library_id),
+        )?;
+        let latest_generation = generations.into_iter().next();
+        let coverage = state.canonical_services.ops.derive_library_knowledge_coverage(
+            library_id,
+            &summaries,
+            latest_generation.as_ref().map(|generation| generation.id),
+        );
+        Ok(KnowledgeLibrarySummary {
+            library_id: coverage.library_id,
+            document_counts_by_readiness: coverage.document_counts_by_readiness,
+            graph_ready_document_count: coverage.graph_ready_document_count,
+            graph_sparse_document_count: coverage.graph_sparse_document_count,
+            typed_fact_document_count: coverage.typed_fact_document_count,
+            updated_at: coverage.updated_at,
+            latest_generation,
+        })
+    }
 }
 
 fn map_document_row(
@@ -472,6 +598,82 @@ fn map_chunk_row(row: crate::infra::arangodb::document_store::KnowledgeChunkRow)
         content_text: row.content_text,
         token_count: row.token_count,
     }
+}
+
+fn map_structured_revision_row(
+    row: crate::infra::arangodb::document_store::KnowledgeStructuredRevisionRow,
+) -> Result<StructuredDocumentRevision, ApiError> {
+    let outline = serde_json::from_value(row.outline_json).map_err(|_| ApiError::Internal)?;
+    Ok(StructuredDocumentRevision {
+        revision_id: row.revision_id,
+        document_id: row.document_id,
+        workspace_id: row.workspace_id,
+        library_id: row.library_id,
+        preparation_state: row.preparation_state,
+        normalization_profile: row.normalization_profile,
+        source_format: row.source_format,
+        language_code: row.language_code,
+        block_count: row.block_count,
+        chunk_count: row.chunk_count,
+        typed_fact_count: row.typed_fact_count,
+        outline,
+        prepared_at: row.prepared_at,
+    })
+}
+
+fn map_structured_block_row(
+    row: crate::infra::arangodb::document_store::KnowledgeStructuredBlockRow,
+) -> Result<StructuredBlock, ApiError> {
+    let block_kind = row.block_kind.parse().map_err(|_| ApiError::Internal)?;
+    let table_coordinates = row
+        .table_coordinates_json
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| ApiError::Internal)?;
+    Ok(StructuredBlock {
+        block_id: row.block_id,
+        revision_id: row.revision_id,
+        ordinal: row.ordinal,
+        block_kind,
+        text: row.text,
+        normalized_text: row.normalized_text,
+        heading_trail: row.heading_trail,
+        section_path: row.section_path,
+        page_number: row.page_number,
+        source_span: row.span_start.zip(row.span_end).map(|(start_offset, end_offset)| {
+            crate::shared::structured_document::StructuredSourceSpan { start_offset, end_offset }
+        }),
+        parent_block_id: row.parent_block_id,
+        table_coordinates,
+        code_language: row.code_language,
+    })
+}
+
+fn map_typed_technical_fact_row(
+    row: crate::infra::arangodb::document_store::KnowledgeTechnicalFactRow,
+) -> Result<TypedTechnicalFact, ApiError> {
+    let fact_kind = row.fact_kind.parse::<TechnicalFactKind>().map_err(|_| ApiError::Internal)?;
+    let canonical_value = serde_json::from_value::<TechnicalFactValue>(row.canonical_value_json)
+        .map_err(|_| ApiError::Internal)?;
+    let qualifiers = serde_json::from_value::<Vec<TechnicalFactQualifier>>(row.qualifiers_json)
+        .map_err(|_| ApiError::Internal)?;
+    Ok(TypedTechnicalFact {
+        fact_id: row.fact_id,
+        revision_id: row.revision_id,
+        document_id: row.document_id,
+        workspace_id: row.workspace_id,
+        library_id: row.library_id,
+        fact_kind,
+        canonical_value,
+        display_value: row.display_value,
+        qualifiers,
+        support_block_ids: row.support_block_ids,
+        support_chunk_ids: row.support_chunk_ids,
+        confidence: row.confidence,
+        extraction_kind: row.extraction_kind,
+        conflict_group_id: row.conflict_group_id,
+        created_at: row.created_at,
+    })
 }
 
 fn map_library_generation_row(

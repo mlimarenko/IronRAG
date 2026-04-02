@@ -2,10 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useDisplayFormatters } from 'src/composables/useDisplayFormatters'
-import type {
-  AdminPermissionKind,
-  CreateApiTokenPayload,
-} from 'src/models/ui/admin'
+import type { AdminPermissionKind, CreateApiTokenPayload } from 'src/models/ui/admin'
 
 const props = defineProps<{
   open: boolean
@@ -58,20 +55,14 @@ const libraryPermissionOptions: AdminPermissionKind[] = [
 ]
 
 const visiblePermissionOptions = computed(() =>
-  grantResourceKind.value === 'workspace'
-    ? workspacePermissionOptions
-    : libraryPermissionOptions,
+  grantResourceKind.value === 'workspace' ? workspacePermissionOptions : libraryPermissionOptions,
 )
 
 const selectedScopeName = computed(() =>
-  grantResourceKind.value === 'workspace'
-    ? props.workspaceName
-    : props.libraryName,
+  grantResourceKind.value === 'workspace' ? props.workspaceName : props.libraryName,
 )
 
-const canSubmit = computed(
-  () => label.value.trim().length > 0 && permissionKinds.value.length > 0,
-)
+const canSubmit = computed(() => label.value.trim().length > 0 && permissionKinds.value.length > 0)
 
 watch(
   () => grantResourceKind.value,
@@ -83,7 +74,9 @@ watch(
 )
 
 const labelMissing = computed(() => showValidation.value && label.value.trim().length === 0)
-const permissionsMissing = computed(() => showValidation.value && permissionKinds.value.length === 0)
+const permissionsMissing = computed(
+  () => showValidation.value && permissionKinds.value.length === 0,
+)
 
 watch(
   () => props.open,
@@ -109,37 +102,24 @@ function submit() {
     label: label.value.trim(),
     expiresInDays: expiresInDays.value === 'never' ? null : Number(expiresInDays.value),
     grantResourceKind: grantResourceKind.value,
-    grantResourceId:
-      grantResourceKind.value === 'workspace' ? props.workspaceId : props.libraryId,
+    grantResourceId: grantResourceKind.value === 'workspace' ? props.workspaceId : props.libraryId,
     permissionKinds: permissionKinds.value,
   })
 }
 </script>
 
 <template>
-  <div
-    v-if="props.open"
-    class="rr-dialog-backdrop"
-    @click.self="emit('close')"
-  >
+  <div v-if="props.open" class="rr-dialog-backdrop" @click.self="emit('close')">
     <div class="rr-dialog rr-admin-dialog">
       <template v-if="props.plaintextToken">
         <h3>{{ $t('admin.dialog.revealTitle') }}</h3>
         <p>{{ $t('admin.dialog.revealDescription') }}</p>
         <div class="rr-admin-dialog__token">{{ props.plaintextToken }}</div>
         <div class="rr-dialog__actions">
-          <button
-            class="rr-button rr-button--ghost"
-            type="button"
-            @click="emit('close')"
-          >
+          <button class="rr-button rr-button--ghost" type="button" @click="emit('close')">
             {{ $t('dialogs.close') }}
           </button>
-          <button
-            class="rr-button"
-            type="button"
-            @click="emit('copy')"
-          >
+          <button class="rr-button" type="button" @click="emit('copy')">
             {{ $t('admin.actions.copy') }}
           </button>
         </div>
@@ -157,19 +137,13 @@ function submit() {
             v-model="label"
             type="text"
             :class="{ 'rr-field--invalid': labelMissing }"
-          >
-          <span
-            v-if="labelMissing"
-            class="rr-field__error"
-          >{{ t('admin.dialog.label') }}</span>
+          />
+          <span v-if="labelMissing" class="rr-field__error">{{ t('admin.dialog.label') }}</span>
         </div>
 
         <div class="rr-field">
           <label for="token-expiry">{{ $t('admin.dialog.expiry') }}</label>
-          <select
-            id="token-expiry"
-            v-model="expiresInDays"
-          >
+          <select id="token-expiry" v-model="expiresInDays">
             <option value="30">{{ $t('admin.dialog.dayOption', { count: 30 }) }}</option>
             <option value="90">{{ $t('admin.dialog.dayOption', { count: 90 }) }}</option>
             <option value="365">{{ $t('admin.dialog.dayOption', { count: 365 }) }}</option>
@@ -181,21 +155,13 @@ function submit() {
           <label>{{ $t('admin.dialog.grantScope') }}</label>
           <div class="rr-admin-dialog__scope-switch">
             <label class="rr-form__checkbox">
-              <input
-                v-model="grantResourceKind"
-                type="radio"
-                value="library"
-              >
+              <input v-model="grantResourceKind" type="radio" value="library" />
               <span>
                 {{ $t('admin.dialog.scope.library', { library: props.libraryName }) }}
               </span>
             </label>
             <label class="rr-form__checkbox">
-              <input
-                v-model="grantResourceKind"
-                type="radio"
-                value="workspace"
-              >
+              <input v-model="grantResourceKind" type="radio" value="workspace" />
               <span>
                 {{ $t('admin.dialog.scope.workspace', { workspace: props.workspaceName }) }}
               </span>
@@ -211,34 +177,20 @@ function submit() {
               :key="permission"
               class="rr-form__checkbox"
             >
-              <input
-                v-model="permissionKinds"
-                type="checkbox"
-                :value="permission"
-              >
+              <input v-model="permissionKinds" type="checkbox" :value="permission" />
               <span>{{ permissionLabel(permission) }}</span>
             </label>
           </div>
-          <span
-            v-if="permissionsMissing"
-            class="rr-field__error"
-          >{{ t('admin.dialog.permissions') }}</span>
+          <span v-if="permissionsMissing" class="rr-field__error">{{
+            t('admin.dialog.permissions')
+          }}</span>
         </div>
 
         <div class="rr-dialog__actions">
-          <button
-            class="rr-button rr-button--ghost"
-            type="button"
-            @click="emit('close')"
-          >
+          <button class="rr-button rr-button--ghost" type="button" @click="emit('close')">
             {{ $t('dialogs.cancel') }}
           </button>
-          <button
-            class="rr-button"
-            type="button"
-            :disabled="!canSubmit"
-            @click="submit"
-          >
+          <button class="rr-button" type="button" :disabled="!canSubmit" @click="submit">
             {{ $t('dialogs.create') }}
           </button>
         </div>

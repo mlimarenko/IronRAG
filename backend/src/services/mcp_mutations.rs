@@ -3,20 +3,25 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::content::ContentMutation,
+    domains::{
+        content::ContentMutation,
+        ingest::{WebDiscoveredPage, WebIngestRun, WebIngestRunReceipt},
+    },
     infra::repositories::catalog_repository::CatalogLibraryRow,
     interfaces::http::{
         auth::AuthContext,
         authorization::{
-            POLICY_DOCUMENTS_WRITE, POLICY_LIBRARY_WRITE, authorize_document_permission,
-            authorize_library_discovery, authorize_library_permission,
+            POLICY_DOCUMENTS_WRITE, POLICY_LIBRARY_READ, POLICY_LIBRARY_WRITE,
+            authorize_document_permission, authorize_library_discovery,
+            authorize_library_permission,
         },
         router_support::ApiError,
     },
     mcp_types::{
-        McpDocumentMutationKind, McpGetMutationStatusRequest, McpMutationOperationKind,
-        McpMutationReceipt, McpMutationReceiptStatus, McpUpdateDocumentRequest,
-        McpUploadDocumentInput, McpUploadDocumentsRequest,
+        McpCancelWebIngestRunRequest, McpDocumentMutationKind, McpGetMutationStatusRequest,
+        McpGetWebIngestRunRequest, McpListWebIngestRunPagesRequest, McpMutationOperationKind,
+        McpMutationReceipt, McpMutationReceiptStatus, McpSubmitWebIngestRunRequest,
+        McpUpdateDocumentRequest, McpUploadDocumentInput, McpUploadDocumentsRequest,
     },
     services::content_service::{
         AppendInlineMutationCommand, ReplaceInlineMutationCommand, UploadInlineDocumentCommand,
@@ -29,6 +34,7 @@ use crate::{
         payload_identity_from_source_uri, validate_mcp_upload_batch_size,
         validate_mcp_upload_file_size,
     },
+    services::web_ingest_service::CreateWebIngestRunCommand,
 };
 
 pub async fn upload_documents(
@@ -285,6 +291,83 @@ pub async fn get_mutation_status(
     resolve_mutation_receipt(state, auth, mutation).await
 }
 
+pub async fn submit_web_ingest_run(
+    auth: &AuthContext,
+    state: &AppState,
+    request: McpSubmitWebIngestRunRequest,
+) -> Result<WebIngestRunReceipt, ApiError> {
+    auth.require_any_scope(POLICY_LIBRARY_WRITE)?;
+    let library = crate::interfaces::http::authorization::load_library_and_authorize(
+        auth,
+        state,
+        request.library_id,
+        POLICY_LIBRARY_WRITE,
+    )
+    .await?;
+    let run = state
+        .canonical_services
+        .web_ingest
+        .create_run(
+            state,
+            CreateWebIngestRunCommand {
+                workspace_id: library.workspace_id,
+                library_id: library.id,
+                seed_url: request.seed_url,
+                mode: request.mode,
+                boundary_policy: request.boundary_policy,
+                max_depth: request.max_depth,
+                max_pages: request.max_pages,
+                requested_by_principal_id: Some(auth.principal_id),
+                request_surface: "mcp".to_string(),
+                idempotency_key: request.idempotency_key,
+            },
+        )
+        .await?;
+    Ok(WebIngestRunReceipt {
+        run_id: run.run_id,
+        library_id: run.library_id,
+        mode: run.mode,
+        run_state: run.run_state,
+        async_operation_id: run.async_operation_id,
+        counts: run.counts,
+        failure_code: run.failure_code,
+        cancel_requested_at: run.cancel_requested_at,
+    })
+}
+
+pub async fn get_web_ingest_run(
+    auth: &AuthContext,
+    state: &AppState,
+    request: McpGetWebIngestRunRequest,
+) -> Result<WebIngestRun, ApiError> {
+    auth.require_any_scope(POLICY_LIBRARY_READ)?;
+    let run = state.canonical_services.web_ingest.get_run(state, request.run_id).await?;
+    authorize_library_permission(auth, run.workspace_id, run.library_id, POLICY_LIBRARY_READ)?;
+    Ok(run)
+}
+
+pub async fn list_web_ingest_run_pages(
+    auth: &AuthContext,
+    state: &AppState,
+    request: McpListWebIngestRunPagesRequest,
+) -> Result<Vec<WebDiscoveredPage>, ApiError> {
+    auth.require_any_scope(POLICY_LIBRARY_READ)?;
+    let run = state.canonical_services.web_ingest.get_run(state, request.run_id).await?;
+    authorize_library_permission(auth, run.workspace_id, run.library_id, POLICY_LIBRARY_READ)?;
+    state.canonical_services.web_ingest.list_pages(state, request.run_id).await
+}
+
+pub async fn cancel_web_ingest_run(
+    auth: &AuthContext,
+    state: &AppState,
+    request: McpCancelWebIngestRunRequest,
+) -> Result<WebIngestRunReceipt, ApiError> {
+    auth.require_any_scope(POLICY_LIBRARY_WRITE)?;
+    let run = state.canonical_services.web_ingest.get_run(state, request.run_id).await?;
+    authorize_library_permission(auth, run.workspace_id, run.library_id, POLICY_LIBRARY_WRITE)?;
+    state.canonical_services.web_ingest.cancel_run(state, request.run_id).await
+}
+
 pub(crate) async fn find_existing_mutation_by_idempotency(
     auth: &AuthContext,
     state: &AppState,
@@ -449,7 +532,7 @@ fn resolve_upload_file_bytes(
             "documents[{index}].sourceType=inline requires body"
         )));
     }
-    if matches!(source_type.as_deref(), Some("file") | Some("binary")) && !has_base64 {
+    if matches!(source_type.as_deref(), Some("file" | "binary")) && !has_base64 {
         return Err(ApiError::invalid_mcp_tool_call(format!(
             "documents[{index}].sourceType={} requires contentBase64",
             source_type.as_deref().unwrap_or("file")

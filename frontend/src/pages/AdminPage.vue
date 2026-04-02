@@ -86,7 +86,7 @@ const sectionTabs = computed<AdminSectionTab[]>(() => {
     tabs.push({
       id: 'access',
       label: t('admin.sections.access.title'),
-      count: tokens.value.length,
+      count: tokens.value.length > 0 ? tokens.value.length : null,
     })
     tabs.push({
       id: 'mcp',
@@ -99,7 +99,7 @@ const sectionTabs = computed<AdminSectionTab[]>(() => {
     tabs.push({
       id: 'operations',
       label: t('admin.sections.operations.title'),
-      count: opsSignalCount.value,
+      count: opsSignalCount.value > 0 ? opsSignalCount.value : null,
     })
   }
 
@@ -107,7 +107,7 @@ const sectionTabs = computed<AdminSectionTab[]>(() => {
     tabs.push({
       id: 'ai',
       label: t('admin.sections.ai.title'),
-      count: aiSetupCount.value,
+      count: aiSetupCount.value > 0 ? aiSetupCount.value : null,
     })
     tabs.push({
       id: 'pricing',
@@ -119,10 +119,21 @@ const sectionTabs = computed<AdminSectionTab[]>(() => {
   return tabs
 })
 
+const navContextLabel = computed(() => {
+  if (!context.value) {
+    return ''
+  }
+  return `${context.value.workspaceName} · ${context.value.libraryName}`
+})
+
 watch(
   [sectionTabs, requestedSection],
   ([tabs, requested]) => {
-    if (requested && tabs.some((tab) => tab.id === requested) && activeSection.value !== requested) {
+    if (
+      requested &&
+      tabs.some((tab) => tab.id === requested) &&
+      activeSection.value !== requested
+    ) {
       activeSection.value = requested
       return
     }
@@ -135,7 +146,7 @@ watch(
 )
 
 watch(activeSection, (val) => {
-  router.replace({ query: { ...route.query, section: val } })
+  void router.replace({ query: { ...route.query, section: val } })
 })
 
 watch(
@@ -172,7 +183,6 @@ async function copyLatestToken() {
   try {
     await navigator.clipboard.writeText(latestPlaintextToken.value)
   } catch {
-    // clipboard access denied or unavailable — token remains visible in dialog
     return
   }
   adminStore.showCreateToken = false
@@ -222,184 +232,117 @@ async function validateBinding(bindingId: string) {
 </script>
 
 <template>
-  <div class="rr-admin-control">
-    <ErrorStateCard
-      v-if="error && !principal"
-      :title="$t('admin.title')"
-      :description="error"
-    />
+  <div class="rr-admin-control" :class="`is-${activeSection}`">
+    <ErrorStateCard v-if="error && !principal" :title="$t('admin.title')" :description="error" />
 
-      <template v-else-if="context && principal">
-        <SurfacePanel
-          v-if="loading"
-          class="rr-admin-control__notice"
-        >
-          {{ $t('admin.loading') }}
-        </SurfacePanel>
+    <template v-else-if="context && principal">
+      <SurfacePanel v-if="error" class="rr-admin-control__notice rr-admin-control__notice--error">
+        {{ error }}
+      </SurfacePanel>
 
-        <SurfacePanel
-          v-if="error"
-          class="rr-admin-control__notice rr-admin-control__notice--error"
-        >
-          {{ error }}
-        </SurfacePanel>
+      <div v-if="sectionTabs.length" class="rr-admin-control__layout">
+        <aside class="rr-admin-control__nav">
+          <div class="rr-admin-control__nav-card">
+            <div class="rr-admin-control__nav-copy">
+              <h1>{{ $t('admin.title') }}</h1>
+              <p v-if="navContextLabel">{{ navContextLabel }}</p>
+            </div>
 
-        <div
-          v-if="sectionTabs.length"
-          class="rr-admin-control__layout"
-          :class="{ 'is-sparse-access': activeSection === 'access' && tokens.length === 0 }"
-        >
-          <aside class="rr-admin-control__nav">
-            <nav class="rr-admin-control__nav-list">
+            <nav class="rr-admin-control__tabs" aria-label="Admin sections">
               <button
                 v-for="tab in sectionTabs"
                 :key="tab.id"
                 type="button"
-                class="rr-admin-control__nav-button"
+                class="rr-admin-control__tab"
                 :class="{ 'is-active': activeSection === tab.id }"
                 @click="activeSection = tab.id"
               >
-                <span class="rr-admin-control__nav-label">{{ tab.label }}</span>
-                <span
-                    v-if="typeof tab.count === 'number' && tab.count > 1"
-                    class="rr-admin-control__nav-count"
-                  >
+                <span>{{ tab.label }}</span>
+                <span v-if="typeof tab.count === 'number'" class="rr-admin-control__tab-count">
                   {{ tab.count }}
                 </span>
               </button>
             </nav>
-          </aside>
+          </div>
+        </aside>
 
-          <section class="rr-admin-control__content">
-            <section
-              v-if="activeSection === 'access' && canManageAccess"
-              class="rr-admin-pane"
-            >
-              <div class="rr-admin-section__head">
-                <div class="rr-admin-section__copy">
-                  <p class="rr-admin-section__eyebrow">{{ $t('admin.sections.access.eyebrow') }}</p>
-                  <h2>{{ $t('admin.sections.access.title') }}</h2>
-                  <p>{{ $t('admin.sections.access.subtitle') }}</p>
-                </div>
-              </div>
-
-              <ApiTokensTable
-                :rows="tokens"
-                :current-principal-id="principal.id"
-                :current-principal-label="principal.displayLabel"
-                :workspace-name="context.workspaceName"
-                :library-name="context.libraryName"
-                :loading="loading || accessSaving"
-                :error-message="accessError"
-                @create="adminStore.showCreateToken = true"
-                @copy="adminStore.copyToken"
-                @revoke="adminStore.revokeToken"
-              />
-            </section>
-
-            <section
-              v-else-if="activeSection === 'mcp' && canManageAccess"
-              class="rr-admin-pane"
-            >
-              <div class="rr-admin-section__head">
-                <div class="rr-admin-section__copy">
-                  <p class="rr-admin-section__eyebrow">{{ $t('admin.sections.mcp.eyebrow') }}</p>
-                  <h2>{{ $t('admin.sections.mcp.title') }}</h2>
-                  <p>{{ $t('admin.sections.mcp.subtitle') }}</p>
-                </div>
-              </div>
-
-              <AdminMcpSetupPanel
-                :workspace-name="context.workspaceName"
-                :library-name="context.libraryName"
-                @create-token="adminStore.showCreateToken = true"
-              />
-            </section>
-
-            <section
-              v-else-if="activeSection === 'operations' && hasOperationsSurface"
-              class="rr-admin-pane"
-            >
-              <div class="rr-admin-section__head">
-                <div class="rr-admin-section__copy">
-                  <p class="rr-admin-section__eyebrow">{{ $t('admin.sections.operations.eyebrow') }}</p>
-                  <h2>{{ $t('admin.sections.operations.title') }}</h2>
-                  <p>{{ $t('admin.sections.operations.subtitle') }}</p>
-                </div>
-              </div>
-
-              <SurfacePanel v-if="canReadOperations || canReadAudit">
-                <AdminOperationsPanel
-                  :snapshot="opsSnapshot"
-                  :events="auditEvents"
-                />
-              </SurfacePanel>
-            </section>
-
-            <section
-              v-else-if="activeSection === 'ai' && canManageAi && aiConsole"
-              class="rr-admin-pane rr-admin-pane--editor"
-            >
-              <div class="rr-admin-section__head">
-                <div class="rr-admin-section__copy">
-                  <p class="rr-admin-section__eyebrow">{{ $t('admin.sections.ai.eyebrow') }}</p>
-                  <h2>{{ $t('admin.sections.ai.title') }}</h2>
-                  <p>{{ $t('admin.sections.ai.subtitle') }}</p>
-                </div>
-              </div>
-
-              <AdminProviderSettingsPanel
-                :settings="aiConsole"
-                :saving="aiSetupSaving"
-                :validating-binding-id="bindingValidatingId"
-                :commit-version="catalogCommitVersion"
-                :error-message="aiSetupError"
-                @create-credential="createCredential"
-                @update-credential="updateCredential"
-                @create-model-preset="createModelPreset"
-                @update-model-preset="updateModelPreset"
-                @save-binding="saveBinding"
-                @validate-binding="validateBinding"
-              />
-            </section>
-
-            <section
-              v-else-if="activeSection === 'pricing' && canManageAi && aiConsole"
-              class="rr-admin-pane rr-admin-pane--editor"
-            >
-              <div class="rr-admin-section__head">
-                <div class="rr-admin-section__copy">
-                  <p class="rr-admin-section__eyebrow">{{ $t('admin.sections.pricing.eyebrow') }}</p>
-                  <h2>{{ $t('admin.sections.pricing.title') }}</h2>
-                  <p>{{ $t('admin.sections.pricing.subtitle') }}</p>
-                </div>
-              </div>
-
-              <AdminModelPricingPanel
-                :settings="aiConsole"
-                :saving="pricesSaving"
-                :commit-version="catalogCommitVersion"
-                :error-message="pricesError"
-                @create-price="createPrice"
-                @update-price="updatePrice"
-              />
-            </section>
-
-            <SurfacePanel
-              v-else
-              class="rr-admin-control__notice"
-            >
-              {{ $t('admin.noVisibleSections') }}
-            </SurfacePanel>
+        <section class="rr-admin-control__content">
+          <section v-if="activeSection === 'access' && canManageAccess" class="rr-admin-pane">
+            <ApiTokensTable
+              :rows="tokens"
+              :current-principal-id="principal.id"
+              :current-principal-label="principal.displayLabel"
+              :workspace-name="context.workspaceName"
+              :library-name="context.libraryName"
+              :loading="loading || accessSaving"
+              :error-message="accessError"
+              @create="adminStore.showCreateToken = true"
+              @copy="adminStore.copyToken"
+              @revoke="adminStore.revokeToken"
+            />
           </section>
-        </div>
 
-        <SurfacePanel
-          v-else
-          class="rr-admin-control__notice"
-        >
-          {{ $t('admin.noVisibleSections') }}
-        </SurfacePanel>
+          <section v-else-if="activeSection === 'mcp' && canManageAccess" class="rr-admin-pane">
+            <AdminMcpSetupPanel
+              :workspace-name="context.workspaceName"
+              :library-name="context.libraryName"
+              @create-token="adminStore.showCreateToken = true"
+            />
+          </section>
+
+          <section
+            v-else-if="activeSection === 'operations' && hasOperationsSurface"
+            class="rr-admin-pane"
+          >
+            <AdminOperationsPanel
+              v-if="canReadOperations || canReadAudit"
+              :snapshot="opsSnapshot"
+              :events="auditEvents"
+            />
+          </section>
+
+          <section
+            v-else-if="activeSection === 'ai' && canManageAi && aiConsole"
+            class="rr-admin-pane rr-admin-pane--editor"
+          >
+            <AdminProviderSettingsPanel
+              :settings="aiConsole"
+              :saving="aiSetupSaving"
+              :validating-binding-id="bindingValidatingId"
+              :commit-version="catalogCommitVersion"
+              :error-message="aiSetupError"
+              @create-credential="createCredential"
+              @update-credential="updateCredential"
+              @create-model-preset="createModelPreset"
+              @update-model-preset="updateModelPreset"
+              @save-binding="saveBinding"
+              @validate-binding="validateBinding"
+            />
+          </section>
+
+          <section
+            v-else-if="activeSection === 'pricing' && canManageAi && aiConsole"
+            class="rr-admin-pane rr-admin-pane--editor"
+          >
+            <AdminModelPricingPanel
+              :settings="aiConsole"
+              :saving="pricesSaving"
+              :commit-version="catalogCommitVersion"
+              :error-message="pricesError"
+              @create-price="createPrice"
+              @update-price="updatePrice"
+            />
+          </section>
+
+          <SurfacePanel v-else class="rr-admin-control__notice">
+            {{ $t('admin.noVisibleSections') }}
+          </SurfacePanel>
+        </section>
+      </div>
+
+      <SurfacePanel v-else class="rr-admin-control__notice">
+        {{ $t('admin.noVisibleSections') }}
+      </SurfacePanel>
     </template>
   </div>
 
@@ -419,105 +362,103 @@ async function validateBinding(bindingId: string) {
 
 <style scoped lang="scss">
 .rr-admin-control {
-  width: min(100%, 1940px);
-  min-height: calc(100vh - 8.4rem);
+  width: min(100%, 1560px);
+  min-height: calc(100vh - 8.1rem);
   margin: 0 auto;
   display: grid;
-  gap: 1rem;
+  gap: 1.1rem;
   align-content: start;
+  padding: 0 10px 22px;
+}
+
+.rr-admin-control__layout,
+.rr-admin-control__content,
+.rr-admin-pane {
+  display: grid;
+  gap: 0.95rem;
+  min-height: 0;
 }
 
 .rr-admin-control__layout {
-  display: grid;
-  grid-template-columns: minmax(192px, 224px) minmax(0, 1fr);
-  gap: 0.85rem;
-  min-height: calc(100vh - 13.5rem);
-  align-items: stretch;
-}
-
-.rr-admin-control__layout.is-sparse-access {
-  grid-template-columns: minmax(176px, 208px) minmax(0, 54rem);
-  justify-content: start;
-}
-
-.rr-admin-control__layout.is-sparse-access .rr-admin-control__content {
-  max-width: 54rem;
+  grid-template-columns: 220px minmax(0, 1fr);
+  align-items: start;
 }
 
 .rr-admin-control__nav {
   position: sticky;
-  top: 5.6rem;
-  display: grid;
-  gap: 0.56rem;
+  top: 5rem;
   align-self: start;
-  align-content: start;
-  height: fit-content;
 }
 
-.rr-admin-control__content,
-.rr-admin-pane {
+.rr-admin-control__nav-card {
   display: grid;
-  gap: 0.9rem;
-  min-height: 0;
+  gap: 0.85rem;
+  padding: 0.9rem;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.025);
+}
+
+.rr-admin-control__nav-copy {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.rr-admin-control__nav-copy h1 {
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.15;
+}
+
+.rr-admin-control__nav-copy p {
+  margin: 0;
+  color: var(--rr-text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.4;
 }
 
 .rr-admin-pane {
   min-height: 100%;
 }
 
-.rr-admin-section__head {
-  display: flex;
-  justify-content: space-between;
-  gap: 1rem;
-  align-items: end;
+.rr-admin-control.is-access .rr-admin-pane,
+.rr-admin-control.is-mcp .rr-admin-pane {
+  width: min(100%, 1160px);
+  justify-self: start;
 }
 
-.rr-admin-section__copy {
+.rr-admin-control.is-operations .rr-admin-pane {
+  width: min(100%, 1220px);
+  justify-self: start;
+}
+
+.rr-admin-control.is-ai .rr-admin-pane,
+.rr-admin-control.is-pricing .rr-admin-pane {
+  width: min(100%, 1320px);
+  justify-self: start;
+}
+
+.rr-admin-control__tabs {
   display: grid;
-  gap: 0.08rem;
-  min-width: 0;
-  max-width: 54ch;
+  gap: 0.38rem;
+  padding: 0;
 }
 
-.rr-admin-section__eyebrow {
-  margin: 0;
-  font-size: 0.67rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--rr-text-muted);
-}
-
-.rr-admin-section__copy h2 {
-  margin: 0.08rem 0 0.18rem;
-  font-size: clamp(1.18rem, 1.45vw, 1.42rem);
-  line-height: 1.1;
-}
-
-.rr-admin-section__copy p {
-  margin: 0;
-  color: var(--rr-text-secondary);
-  font-size: 0.82rem;
-  line-height: 1.36;
-}
-
-.rr-admin-control__nav-list {
-  display: grid;
-  gap: 0.5rem;
-}
-
-.rr-admin-control__nav-button {
-  width: 100%;
+.rr-admin-control__tab {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  gap: 0.55rem;
-  border: 1px solid var(--rr-border-soft);
-  border-radius: 13px;
-  padding: 0.42rem 0.56rem;
-  background: rgba(255, 255, 255, 0.78);
+  justify-content: space-between;
+  gap: 0.42rem;
+  width: 100%;
+  min-height: 2.5rem;
+  padding: 0.56rem 0.78rem;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.92);
   color: var(--rr-text-secondary);
-  font-size: 0.8rem;
+  font-size: 0.78rem;
+  font-weight: 600;
   cursor: pointer;
   transition:
     background 140ms ease,
@@ -525,204 +466,75 @@ async function validateBinding(bindingId: string) {
     box-shadow 140ms ease;
 }
 
-.rr-admin-control__nav-button:hover:not(.is-active) {
+.rr-admin-control__tab:hover:not(.is-active) {
   background: rgba(99, 102, 241, 0.06);
   border-color: rgba(99, 102, 241, 0.12);
 }
 
-.rr-admin-control__nav-button.is-active {
-  border-color: rgba(56, 87, 255, 0.25);
-  color: var(--rr-text-primary);
-  background: rgba(244, 247, 255, 0.96);
-  box-shadow: 0 2px 8px rgba(56, 87, 255, 0.06);
+.rr-admin-control__tab.is-active {
+  color: #334155;
+  background: rgba(244, 247, 255, 0.98);
+  border-color: rgba(99, 102, 241, 0.24);
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.06);
 }
 
-.rr-admin-control__nav-label {
-  min-width: 0;
-  color: var(--rr-text-secondary);
-  font-size: 0.74rem;
-  font-weight: 640;
-  line-height: 1.26;
-}
-
-.rr-admin-control__nav-button.is-active .rr-admin-control__nav-label {
-  color: var(--rr-text-primary);
-}
-
-.rr-admin-control__nav-count {
+.rr-admin-control__tab-count {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 0.9rem;
-  height: 0.9rem;
-  padding: 0 0.18rem;
+  min-width: 1.14rem;
+  min-height: 1.14rem;
+  padding: 0 0.32rem;
   border-radius: 999px;
-  border: 1px solid rgba(203, 213, 225, 0.78);
-  background: rgba(248, 250, 252, 0.94);
-  color: #94a3b8;
-  font-size: 0.52rem;
-  font-weight: 700;
+  background: rgba(241, 245, 249, 0.98);
+  color: var(--rr-text-muted);
+  font-size: 0.64rem;
   line-height: 1;
-  font-variant-numeric: tabular-nums;
 }
 
-.rr-admin-control__nav-button.is-active .rr-admin-control__nav-count {
-  border-color: rgba(56, 87, 255, 0.18);
-  background: rgba(244, 247, 255, 0.94);
-  color: #4360ea;
-}
-
-@media (min-width: 1800px) {
+@media (max-width: 900px) {
   .rr-admin-control {
-    width: min(100%, 2120px);
-    min-height: calc(100vh - 7.8rem);
-    gap: 1.25rem;
-  }
-
-  .rr-admin-control__layout {
-    grid-template-columns: minmax(230px, 292px) minmax(0, 1fr);
-    min-height: calc(100vh - 12.8rem);
-    gap: 1.25rem;
-  }
-}
-
-@media (max-width: 1080px) {
-  .rr-admin-control {
-    gap: 0.78rem;
+    padding-inline: 10px;
   }
 
   .rr-admin-control__layout {
     grid-template-columns: 1fr;
-    gap: 0.72rem;
-    min-height: 0;
   }
 
   .rr-admin-control__nav {
     position: static;
-    height: auto;
   }
 
-  .rr-admin-control__nav-list {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+  .rr-admin-control__nav-card {
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .rr-admin-control__tabs {
+    display: flex;
+    flex-wrap: wrap;
     gap: 0.42rem;
   }
 
-  .rr-admin-control__nav-button {
-    min-width: 0;
-    white-space: normal;
-    align-items: flex-start;
-  }
-
-  .rr-admin-control__content,
-  .rr-admin-pane {
-    gap: 0.72rem;
-  }
-
-  .rr-admin-section__head {
-    gap: 0.6rem;
-    align-items: start;
-  }
-
-  .rr-admin-section__copy {
-    gap: 0.02rem;
-    max-width: 46ch;
-  }
-
-  .rr-admin-section__copy h2 {
-    margin: 0;
-    font-size: 1.12rem;
-  }
-
-  .rr-admin-section__copy p {
-    font-size: 0.78rem;
-    line-height: 1.3;
-    line-clamp: 2;
-    -webkit-line-clamp: 2;
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-}
-
-@media (max-width: 820px) {
-  .rr-admin-control__nav-list {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 720px) {
-  .rr-admin-section__eyebrow {
-    display: none;
-  }
-
-  .rr-admin-section__copy {
-    gap: 0.2rem;
-  }
-
-  .rr-admin-section__copy h2 {
-    margin: 0;
-    font-size: 1.18rem;
-  }
-
-  .rr-admin-section__copy p {
-    font-size: 0.79rem;
-  }
-
-  .rr-admin-control__nav-button {
-    padding: 0.46rem 0.54rem;
-    border-radius: 12px;
-  }
-
-  .rr-admin-control__nav-label {
-    font-size: 0.72rem;
-  }
-
-  .rr-admin-control__nav-list {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0.42rem;
-  }
-}
-
-@media (max-width: 600px) {
-  .rr-admin-section__copy {
-    gap: 0.08rem;
-  }
-
-  .rr-admin-section__copy h2 {
-    font-size: 1.08rem;
-  }
-
-  .rr-admin-section__copy p {
-    display: none;
+  .rr-admin-control__tab {
+    width: auto;
+    min-height: 2.1rem;
+    padding: 0.42rem 0.72rem;
+    border-radius: 999px;
   }
 }
 
 @media (max-width: 640px) {
-  .rr-admin-section__head {
-    flex-direction: column;
-    align-items: stretch;
-  }
-}
-
-@media (max-width: 420px) {
-  .rr-admin-control__nav-list {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0.38rem;
+  .rr-admin-control__nav-copy {
+    display: none;
   }
 
-  .rr-admin-control__nav-button {
-    padding: 0.42rem 0.5rem;
-  }
-
-  .rr-admin-control__nav-label {
-    font-size: 0.7rem;
-    line-height: 1.18;
-  }
-}
-
-@media (max-width: 360px) {
-  .rr-admin-control__nav-list {
-    grid-template-columns: 1fr;
+  .rr-admin-control__tab {
+    min-height: 2.05rem;
+    font-size: 0.76rem;
   }
 }
 </style>

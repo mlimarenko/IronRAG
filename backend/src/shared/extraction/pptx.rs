@@ -4,7 +4,9 @@ use anyhow::{Context, Result};
 use roxmltree::Document;
 use zip::ZipArchive;
 
-use crate::shared::extraction::ExtractionOutput;
+use crate::shared::extraction::{
+    ExtractionOutput, ExtractionSourceMetadata, RawExtractionPage, build_text_layout,
+};
 
 pub fn extract_pptx(file_bytes: &[u8]) -> Result<ExtractionOutput> {
     let reader = Cursor::new(file_bytes);
@@ -20,8 +22,8 @@ pub fn extract_pptx(file_bytes: &[u8]) -> Result<ExtractionOutput> {
         .collect::<Vec<_>>();
     slide_names.sort_by_key(|name| slide_sort_key(name));
 
-    let mut slides = Vec::new();
-    for slide_name in &slide_names {
+    let mut slide_pages = Vec::new();
+    for (index, slide_name) in slide_names.iter().enumerate() {
         let mut slide_xml =
             archive.by_name(slide_name).with_context(|| format!("missing {slide_name} in pptx"))?;
         let mut xml_content = String::new();
@@ -35,16 +37,24 @@ pub fn extract_pptx(file_bytes: &[u8]) -> Result<ExtractionOutput> {
             .filter(|node| node.tag_name().name() == "p")
             .filter_map(|node| extract_paragraph_text(&node))
             .collect::<Vec<_>>();
-        if !paragraphs.is_empty() {
-            slides.push(paragraphs.join("\n"));
-        }
+        slide_pages.push(RawExtractionPage {
+            page_number: Some(i32::try_from(index + 1).unwrap_or(i32::MAX)),
+            lines: paragraphs,
+        });
     }
+    let layout = build_text_layout(&slide_pages);
 
     Ok(ExtractionOutput {
         extraction_kind: "pptx_text".into(),
-        content_text: slides.join("\n\n"),
+        content_text: layout.content_text,
         page_count: Some(u32::try_from(slide_names.len()).unwrap_or(u32::MAX)),
         warnings: Vec::new(),
+        source_metadata: ExtractionSourceMetadata {
+            source_format: "pptx".to_string(),
+            page_count: Some(u32::try_from(slide_names.len()).unwrap_or(u32::MAX)),
+            line_count: i32::try_from(layout.structure_hints.lines.len()).unwrap_or(i32::MAX),
+        },
+        structure_hints: layout.structure_hints,
         source_map: serde_json::json!({
             "slide_count": slide_names.len(),
             "slides": slide_names,

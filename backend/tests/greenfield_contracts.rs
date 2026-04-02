@@ -285,6 +285,9 @@ fn actual_contract_exposes_canonical_content_and_processing_routes() {
     assert!(contract.contains("/v1/content/mutations"));
     assert!(contract.contains("/v1/ingest/jobs/{jobId}"));
     assert!(contract.contains("/v1/ingest/attempts/{attemptId}"));
+    assert!(contract.contains("/v1/knowledge/libraries/{libraryId}/summary"));
     assert!(contract.contains("/v1/knowledge/libraries/{libraryId}/search/documents"));
+    assert!(!contract.contains("/v1/knowledge/libraries/{libraryId}/readiness"));
+    assert!(!contract.contains("/v1/knowledge/libraries/{libraryId}/graph/coverage"));
     assert!(contract.contains("/v1/search/documents"));
 }

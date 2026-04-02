@@ -1,9 +1,22 @@
 use anyhow::{Context, anyhow};
 use reqwest::{Client, Method};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, sleep};
 
 use crate::app::config::Settings;
+
+#[derive(Debug, Clone, Deserialize)]
+struct ArangoIndexRow {
+    name: String,
+    #[serde(rename = "type")]
+    index_type: String,
+    #[serde(default)]
+    fields: Vec<String>,
+    #[serde(default)]
+    unique: bool,
+    #[serde(default)]
+    sparse: bool,
+}
 
 #[derive(Clone)]
 pub struct ArangoClient {
@@ -174,7 +187,23 @@ impl ArangoClient {
         collection: &str,
         index_name: &str,
     ) -> anyhow::Result<bool> {
-        self.index_exists(collection, index_name).await
+        Ok(self
+            .find_index_by_name(collection, index_name)
+            .await?
+            .is_some_and(|index| index.index_type == "vector"))
+    }
+
+    pub async fn persistent_index_matches(
+        &self,
+        collection: &str,
+        index_name: &str,
+        fields: &[&str],
+        unique: bool,
+        sparse: bool,
+    ) -> anyhow::Result<bool> {
+        Ok(self.find_index_by_name(collection, index_name).await?.is_some_and(|index| {
+            persistent_index_definition_matches(&index, fields, unique, sparse)
+        }))
     }
 
     pub async fn ensure_document_collection(&self, name: &str) -> anyhow::Result<()> {
@@ -321,6 +350,53 @@ impl ArangoClient {
         ))
     }
 
+    pub async fn ensure_persistent_index(
+        &self,
+        collection: &str,
+        index_name: &str,
+        fields: &[&str],
+        unique: bool,
+        sparse: bool,
+    ) -> anyhow::Result<()> {
+        if let Some(existing) = self.find_index_by_name(collection, index_name).await? {
+            anyhow::ensure!(
+                persistent_index_definition_matches(&existing, fields, unique, sparse),
+                "persistent index {index_name} on {collection} exists with a different definition",
+            );
+            return Ok(());
+        }
+
+        let body = serde_json::json!({
+            "name": index_name,
+            "type": "persistent",
+            "fields": fields,
+            "unique": unique,
+            "sparse": sparse,
+        });
+        let response = self
+            .request(Method::POST, &format!("_api/index?collection={collection}"))
+            .json(&body)
+            .send()
+            .await?;
+        if response.status().is_success() {
+            return Ok(());
+        }
+        if response.status().as_u16() == 409 {
+            anyhow::ensure!(
+                self.persistent_index_matches(collection, index_name, fields, unique, sparse)
+                    .await?,
+                "persistent index {index_name} on {collection} conflicts with the canonical definition",
+            );
+            return Ok(());
+        }
+
+        let status = response.status();
+        let response_body = response.text().await.unwrap_or_default();
+        Err(anyhow!(
+            "failed to ensure persistent index {index_name} on {collection}: status {status}, body {response_body}",
+        ))
+    }
+
     async fn seed_vector_training_rows(
         &self,
         collection: &str,
@@ -388,6 +464,18 @@ impl ArangoClient {
     }
 
     async fn index_exists(&self, collection: &str, index_name: &str) -> anyhow::Result<bool> {
+        Ok(self.find_index_by_name(collection, index_name).await?.is_some())
+    }
+
+    async fn find_index_by_name(
+        &self,
+        collection: &str,
+        index_name: &str,
+    ) -> anyhow::Result<Option<ArangoIndexRow>> {
+        Ok(self.list_indexes(collection).await?.into_iter().find(|index| index.name == index_name))
+    }
+
+    async fn list_indexes(&self, collection: &str) -> anyhow::Result<Vec<ArangoIndexRow>> {
         let response = self
             .request(Method::GET, &format!("_api/index?collection={collection}"))
             .send()
@@ -406,9 +494,12 @@ impl ArangoClient {
         let Some(indexes) = payload.get("indexes").and_then(serde_json::Value::as_array) else {
             return Err(anyhow!("ArangoDB index listing for {collection} did not include indexes"));
         };
-        Ok(indexes
+        indexes
             .iter()
-            .any(|index| index.get("name").and_then(serde_json::Value::as_str) == Some(index_name)))
+            .cloned()
+            .map(serde_json::from_value::<ArangoIndexRow>)
+            .collect::<Result<Vec<_>, _>>()
+            .with_context(|| format!("failed to decode index metadata for {collection}"))
     }
 
     async fn ensure_view_exists(&self, name: &str) -> anyhow::Result<()> {
@@ -468,6 +559,18 @@ impl ArangoClient {
         };
         Ok(view_links_semantically_match(expected_links, &actual_links))
     }
+}
+
+fn persistent_index_definition_matches(
+    index: &ArangoIndexRow,
+    fields: &[&str],
+    unique: bool,
+    sparse: bool,
+) -> bool {
+    index.index_type == "persistent"
+        && index.fields.iter().map(String::as_str).eq(fields.iter().copied())
+        && index.unique == unique
+        && index.sparse == sparse
 }
 
 fn view_links_semantically_match(
@@ -577,7 +680,38 @@ fn field_link_matches(
 
 #[cfg(test)]
 mod tests {
-    use super::view_links_semantically_match;
+    use super::{
+        ArangoIndexRow, persistent_index_definition_matches, view_links_semantically_match,
+    };
+
+    #[test]
+    fn persistent_index_definition_requires_exact_match() {
+        let index = ArangoIndexRow {
+            name: "knowledge_document_library_updated_index".to_string(),
+            index_type: "persistent".to_string(),
+            fields: vec![
+                "library_id".to_string(),
+                "workspace_id".to_string(),
+                "updated_at".to_string(),
+                "document_id".to_string(),
+            ],
+            unique: false,
+            sparse: false,
+        };
+
+        assert!(persistent_index_definition_matches(
+            &index,
+            &["library_id", "workspace_id", "updated_at", "document_id"],
+            false,
+            false,
+        ));
+        assert!(!persistent_index_definition_matches(
+            &index,
+            &["library_id", "updated_at", "document_id"],
+            false,
+            false,
+        ));
+    }
 
     #[test]
     fn view_links_match_arango_normalized_response_shape() {

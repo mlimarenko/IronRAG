@@ -68,6 +68,9 @@ pub async fn invalidate_library_source_truth(
     Ok(source_truth_version)
 }
 
+/// Resolves query planning metadata for retrieval. Today this is a deterministic fallback derived
+/// from the question text (no LLM call); when a model-backed planner is added, keep the output
+/// shape stable so callers stay predictable.
 pub async fn resolve_intent(
     _state: &AppState,
     request: &IntentResolutionRequest,

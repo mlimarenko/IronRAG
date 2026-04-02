@@ -32,36 +32,18 @@ function close() {
 </script>
 
 <template>
-  <div
-    v-if="open"
-    class="rr-dialog-backdrop"
-    @click.self="close"
-  >
+  <div v-if="open" class="rr-dialog-backdrop" @click.self="close">
     <div class="rr-dialog">
       <h3>{{ t('shell.createWorkspace') }}</h3>
       <div class="rr-field">
         <label for="workspace-name">{{ t('dialogs.name') }}</label>
-        <input
-          id="workspace-name"
-          v-model="name"
-          type="text"
-          @keydown.enter="submit"
-        >
+        <input id="workspace-name" v-model="name" type="text" @keydown.enter="submit" />
       </div>
       <div class="rr-dialog__actions">
-        <button
-          class="rr-button rr-button--ghost"
-          type="button"
-          @click="close"
-        >
+        <button class="rr-button rr-button--ghost" type="button" @click="close">
           {{ t('dialogs.cancel') }}
         </button>
-        <button
-          class="rr-button"
-          type="button"
-          :disabled="!canSubmit"
-          @click="submit"
-        >
+        <button class="rr-button" type="button" :disabled="!canSubmit" @click="submit">
           {{ t('dialogs.create') }}
         </button>
       </div>

@@ -16,8 +16,10 @@ function escapeHtml(value: string): string {
 function renderMarkdown(value: string): string {
   let html = escapeHtml(value)
 
-  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_match, _lang, code) =>
-    `<pre><code>${code.replace(/\n$/, '')}</code></pre>`,
+  html = html.replace(
+    /```(\w*)\n([\s\S]*?)```/g,
+    (_match: string, _lang: string, code: string) =>
+      `<pre><code>${code.replace(/\n$/, '')}</code></pre>`,
   )
   html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>')
   html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
@@ -27,7 +29,7 @@ function renderMarkdown(value: string): string {
     '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>',
   )
 
-  html = html.replace(/((?:^|\n)- .+(?:\n- .+)*)/g, (block) => {
+  html = html.replace(/((?:^|\n)- .+(?:\n- .+)*)/g, (block: string) => {
     const items = block
       .split('\n')
       .filter((line) => line.startsWith('- '))

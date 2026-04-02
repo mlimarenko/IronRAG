@@ -253,12 +253,19 @@ async fn extract_repository_crud_queries_round_trip_greenfield_extract_state() -
             None,
             None,
             1,
+            Some("started"),
+            serde_json::json!({
+                "stageName": "prepare_structure",
+                "totalLineCount": 10,
+                "completedLineOrdinal": -1,
+            }),
         )
         .await
         .context("failed to upsert processing extract_content")?;
         assert_eq!(processing.extract_state, "processing");
         assert_eq!(processing.warning_count, 1);
         assert_eq!(processing.attempt_id, Some(fixture.attempt_id));
+        assert_eq!(processing.preparation_state.as_deref(), Some("started"));
 
         let ready = extract_repository::upsert_extract_content(
             &fixture.postgres,
@@ -268,6 +275,15 @@ async fn extract_repository_crud_queries_round_trip_greenfield_extract_state() -
             Some("Normalized readable text for the revision"),
             Some("sha256:text"),
             2,
+            Some("completed"),
+            serde_json::json!({
+                "stageName": "prepare_structure",
+                "totalLineCount": 10,
+                "completedLineOrdinal": 9,
+                "blockCount": 4,
+                "chunkCount": 2,
+                "typedFactCount": 3,
+            }),
         )
         .await
         .context("failed to upsert ready extract_content")?;
@@ -277,6 +293,7 @@ async fn extract_repository_crud_queries_round_trip_greenfield_extract_state() -
             Some("Normalized readable text for the revision")
         );
         assert_eq!(ready.text_checksum.as_deref(), Some("sha256:text"));
+        assert_eq!(ready.preparation_state.as_deref(), Some("completed"));
 
         let loaded = extract_repository::get_extract_content_by_revision_id(
             &fixture.postgres,
@@ -286,6 +303,7 @@ async fn extract_repository_crud_queries_round_trip_greenfield_extract_state() -
         .context("failed to load extract_content by revision")?
         .context("missing extract_content by revision")?;
         assert_eq!(loaded.extract_state, "ready");
+        assert_eq!(loaded.preparation_state.as_deref(), Some("completed"));
 
         let by_attempt = extract_repository::list_extract_content_by_attempt(
             &fixture.postgres,

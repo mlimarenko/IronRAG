@@ -139,10 +139,7 @@ function deriveInitials(displayName: string, fallbackEmail: string): string {
   return fallbackEmail.charAt(0).toUpperCase() || '?'
 }
 
-function buildAccessLabel(
-  grants: ShellGrant[],
-  capabilities: ShellCapabilities,
-): string {
+function buildAccessLabel(grants: ShellGrant[], capabilities: ShellCapabilities): string {
   if (capabilities.adminEnabled) {
     return 'Admin access'
   }
@@ -158,7 +155,11 @@ function buildAccessLabel(
       'iam_admin',
     ].includes(grant.permissionKind),
   )
-  if (hasWriteGrant || capabilities.canCreateWorkspace || capabilities.creatableWorkspaceIds.length > 0) {
+  if (
+    hasWriteGrant ||
+    capabilities.canCreateWorkspace ||
+    capabilities.creatableWorkspaceIds.length > 0
+  ) {
     return 'Write access'
   }
 
@@ -260,10 +261,12 @@ export async function fetchLibrariesForWorkspace(workspaceId: string): Promise<L
   return items.map(mapLibrary)
 }
 
-export async function fetchShellBootstrap(payload: {
-  preferredWorkspaceId?: string | null
-  preferredLibraryId?: string | null
-} = {}): Promise<ShellBootstrapPayload> {
+export async function fetchShellBootstrap(
+  payload: {
+    preferredWorkspaceId?: string | null
+    preferredLibraryId?: string | null
+  } = {},
+): Promise<ShellBootstrapPayload> {
   const [me, workspaces] = await Promise.all([fetchMe(), fetchWorkspaces()])
   const workspaceMemberships = me.workspaceMemberships.map(mapWorkspaceMembership)
   const effectiveGrants = me.effectiveGrants.map(mapGrant)

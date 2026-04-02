@@ -1,0 +1,92 @@
+{
+  "suiteId": "multiformat_surface_grounded",
+  "description": "Strict benchmark for canonical upload and extraction behavior across synthetic PDF, DOCX, PPTX, PNG, and JPG fixtures.",
+  "strictBlocking": true,
+  "documents": [
+    "corpus/upload_smoke_fixture.pdf",
+    "corpus/upload_smoke_fixture.docx",
+    "corpus/upload_smoke_fixture.png",
+    "corpus/runtime_upload_check.pdf",
+    "corpus/runtime_upload_check.docx",
+    "corpus/runtime_upload_check.pptx",
+    "corpus/runtime_upload_check.png",
+    "corpus/runtime_upload_check.jpg"
+  ],
+  "cases": [
+    {
+      "id": "format_pdf_expected_formats",
+      "question": "Which formats are explicitly listed under test in the PDF smoke fixture?",
+      "searchQuery": "PDF smoke fixture expected formats PDF DOCX PPTX PNG JPG",
+      "expectedDocumentsContains": ["upload_smoke_fixture"],
+      "searchRequiredAll": ["PDF", "DOCX", "PPTX", "PNG", "JPG"],
+      "answerRequiredAll": ["PDF", "DOCX", "PPTX", "PNG", "JPG"],
+      "answerForbiddenAny": ["RDF", "OWL"],
+      "minChunkReferenceCount": 1,
+      "minPreparedSegmentReferenceCount": 1,
+      "minTechnicalFactReferenceCount": 0,
+      "minEntityReferenceCount": 0,
+      "minRelationReferenceCount": 0,
+      "allowedVerificationStates": ["verified"]
+    },
+    {
+      "id": "format_docx_downstream_states",
+      "question": "Which downstream states are expected in the DOCX smoke fixture?",
+      "searchQuery": "DOCX smoke fixture downstream states text ready vector ready graph ready",
+      "expectedDocumentsContains": ["upload_smoke_fixture"],
+      "searchRequiredAll": ["text ready", "vector ready", "graph ready"],
+      "answerRequiredAll": ["text ready", "vector ready", "graph ready"],
+      "answerForbiddenAny": ["Cypher", "GQL"],
+      "minChunkReferenceCount": 1,
+      "minPreparedSegmentReferenceCount": 1,
+      "minTechnicalFactReferenceCount": 0,
+      "minEntityReferenceCount": 0,
+      "minRelationReferenceCount": 0,
+      "allowedVerificationStates": ["verified"]
+    },
+    {
+      "id": "format_runtime_pdf_report_name",
+      "question": "What report name appears in the runtime PDF upload check?",
+      "searchQuery": "runtime PDF upload check quarterly graph report",
+      "expectedDocumentsContains": ["runtime_upload_check"],
+      "searchRequiredAll": ["Quarterly graph report"],
+      "answerRequiredAll": ["Quarterly graph report"],
+      "answerForbiddenAny": ["Semantic Web"],
+      "minChunkReferenceCount": 1,
+      "minPreparedSegmentReferenceCount": 1,
+      "minTechnicalFactReferenceCount": 0,
+      "minEntityReferenceCount": 0,
+      "minRelationReferenceCount": 0,
+      "allowedVerificationStates": ["verified"]
+    },
+    {
+      "id": "format_runtime_docx_validation",
+      "question": "What does the runtime DOCX upload check validate?",
+      "searchQuery": "runtime DOCX upload check canonical pipeline validation",
+      "expectedDocumentsContains": ["runtime_upload_check"],
+      "searchRequiredAll": ["Canonical pipeline validation"],
+      "answerRequiredAll": ["Canonical pipeline validation"],
+      "answerForbiddenAny": ["borrow checker"],
+      "minChunkReferenceCount": 1,
+      "minPreparedSegmentReferenceCount": 1,
+      "minTechnicalFactReferenceCount": 0,
+      "minEntityReferenceCount": 0,
+      "minRelationReferenceCount": 0,
+      "allowedVerificationStates": ["verified"]
+    },
+    {
+      "id": "format_runtime_pptx_title",
+      "question": "What is the title of the runtime PPTX upload check slide deck?",
+      "searchQuery": "runtime PPTX upload check slide deck title",
+      "expectedDocumentsContains": ["runtime_upload_check"],
+      "searchRequiredAll": ["Runtime PPTX upload check"],
+      "answerRequiredAll": ["Runtime PPTX upload check"],
+      "answerForbiddenAny": ["RDF", "Rust Foundation"],
+      "minChunkReferenceCount": 1,
+      "minPreparedSegmentReferenceCount": 1,
+      "minTechnicalFactReferenceCount": 0,
+      "minEntityReferenceCount": 0,
+      "minRelationReferenceCount": 0,
+      "allowedVerificationStates": ["verified"]
+    }
+  ]
+}

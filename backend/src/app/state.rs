@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-    app::config::{Settings, UiBootstrapAdmin},
+    app::config::{Settings, UiBootstrapAdmin, UiBootstrapAiSetup},
     infra::{
         arangodb::{
             bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
@@ -27,6 +27,8 @@ use crate::{
         knowledge_service::KnowledgeService, ops_service::OpsService,
         provider_failure_classification::ProviderFailureClassificationService,
         query_service::QueryService, search_service::SearchService,
+        structured_preparation_service::StructuredPreparationService,
+        technical_fact_service::TechnicalFactService, web_ingest_service::WebIngestService,
     },
 };
 
@@ -80,6 +82,13 @@ pub struct BulkIngestHardeningSettings {
     pub graph_filter_empty_relations: bool,
     pub graph_filter_degenerate_self_loops: bool,
     pub graph_convergence_warning_backlog_threshold: usize,
+}
+
+#[derive(Clone)]
+pub struct WebIngestRuntimeSettings {
+    pub request_timeout_seconds: u64,
+    pub max_redirects: usize,
+    pub user_agent: String,
 }
 
 #[derive(Clone, Debug)]
@@ -156,6 +165,9 @@ pub struct CanonicalServices {
     pub content: ContentService,
     pub ingest: IngestService,
     pub extract: ExtractService,
+    pub structured_preparation: StructuredPreparationService,
+    pub technical_facts: TechnicalFactService,
+    pub web_ingest: WebIngestService,
     pub graph: GraphService,
     pub search: SearchService,
     pub query: QueryService,
@@ -179,6 +191,7 @@ pub struct AppState {
     pub arango_client: Arc<ArangoClient>,
     pub ui_runtime: UiRuntimeSettings,
     pub ui_bootstrap_admin: Option<UiBootstrapAdmin>,
+    pub ui_bootstrap_ai_setup: Option<UiBootstrapAiSetup>,
     pub ui_session_cookie: UiSessionCookieConfig,
     pub arango_runtime: ArangoRuntimeSettings,
     pub graph_runtime: GraphRuntimeSettings,
@@ -189,6 +202,7 @@ pub struct AppState {
     pub retrieval_intelligence: RetrievalIntelligenceSettings,
     pub retrieval_intelligence_services: RetrievalIntelligenceServices,
     pub bulk_ingest_hardening: BulkIngestHardeningSettings,
+    pub web_ingest_runtime: WebIngestRuntimeSettings,
     pub bulk_ingest_hardening_services: BulkIngestHardeningServices,
     pub mcp_memory: McpMemorySettings,
     pub canonical_services: CanonicalServices,
@@ -208,6 +222,7 @@ impl AppState {
         let public_origin_settings = settings.public_origin_settings();
         let content_storage = ContentStorageService::new(settings.content_storage_root.clone());
         let ui_bootstrap_admin = bootstrap_settings.legacy_ui_bootstrap_admin;
+        let ui_bootstrap_ai_setup = settings.resolved_ui_bootstrap_ai_setup();
         let ui_runtime = UiRuntimeSettings {
             frontend_origin: public_origin_settings.raw_frontend_origin,
             default_locale: settings.ui_default_locale.clone(),
@@ -263,6 +278,11 @@ impl AppState {
                 bulk_ingest_hardening.graph_filter_degenerate_self_loops,
             ),
         };
+        let web_ingest_runtime = WebIngestRuntimeSettings {
+            request_timeout_seconds: settings.web_ingest_http_timeout_seconds,
+            max_redirects: settings.web_ingest_max_redirects,
+            user_agent: settings.web_ingest_user_agent.clone(),
+        };
         let mcp_memory = McpMemorySettings {
             default_read_window_chars: settings.mcp_memory_default_read_window_chars,
             max_read_window_chars: settings.mcp_memory_max_read_window_chars,
@@ -280,6 +300,15 @@ impl AppState {
             content: ContentService::new(),
             ingest: IngestService::new(),
             extract: ExtractService::new(),
+            structured_preparation: StructuredPreparationService::new(),
+            technical_facts: TechnicalFactService::new(),
+            web_ingest: WebIngestService::new(
+                crate::services::web_ingest_service::WebIngestRuntimeSettings {
+                    request_timeout_seconds: web_ingest_runtime.request_timeout_seconds,
+                    max_redirects: web_ingest_runtime.max_redirects,
+                    user_agent: web_ingest_runtime.user_agent.clone(),
+                },
+            ),
             graph: GraphService::new(),
             search: SearchService::new(),
             query: QueryService::new(),
@@ -325,6 +354,7 @@ impl AppState {
             persistence,
             ui_runtime,
             ui_bootstrap_admin,
+            ui_bootstrap_ai_setup,
             ui_session_cookie,
             arango_runtime,
             graph_runtime,
@@ -335,6 +365,7 @@ impl AppState {
             retrieval_intelligence,
             retrieval_intelligence_services,
             bulk_ingest_hardening,
+            web_ingest_runtime,
             bulk_ingest_hardening_services,
             mcp_memory,
             canonical_services,

@@ -2,7 +2,7 @@
 
 # RustRAG MCP
 
-### Connect Codex, Cursor, VS Code, Claude Code, or any HTTP MCP client to the same graph-backed document memory used by RustRAG
+### Connect Codex, Cursor, VS Code, Claude Code, or any HTTP MCP client to the same knowledge base used by RustRAG
 
 [README.md](./README.md) | [MCP.ru.md](./MCP.ru.md)
 
@@ -44,6 +44,19 @@ If your RustRAG instance is behind another domain or TLS terminator, replace the
 - `create_workspace`, `create_library` when admin grants allow it
 
 Under the hood, MCP calls the same canonical services as the web app: Postgres for control state, ArangoDB for graph and document truth, and Redis-backed workers for ingestion.
+
+## Access model
+
+- Tokens can be scoped to specific workspaces and libraries.
+- Read-only tokens are useful for assistants that should only search and read.
+- Write-enabled tokens can upload documents or update existing content when you want an agent to maintain the knowledge base.
+- Tool visibility follows grants, so clients only see the operations they are allowed to use.
+
+## What the client gets
+
+- The same searchable documents and grounded retrieval used by the built-in assistant UI.
+- The same canonical document state used by uploads, updates, search, and graph-backed exploration.
+- A practical way to connect internal bots, support assistants, or personal agents to a controlled knowledge base without building a separate adapter layer.
 
 ## OpenAI Codex CLI
 

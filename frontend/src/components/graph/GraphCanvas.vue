@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Sigma from 'sigma'
 import { DEFAULT_EDGE_PROGRAM_CLASSES, DEFAULT_NODE_PROGRAM_CLASSES } from 'sigma/settings'
@@ -26,6 +26,7 @@ const props = defineProps<{
   layoutMode: GraphLayoutMode
   surfaceVersion: number
   showFilteredArtifacts?: boolean
+  pageVisible?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -62,7 +63,11 @@ const webglUnavailable = ref(false)
 let relayoutTimer: number | null = null
 let cancelRelayoutAnimation: (() => void) | null = null
 let hoverResolveFrameId: number | null = null
+let viewportRecoveryFrameId: number | null = null
 let pendingHoverViewport: { x: number; y: number } | null = null
+let resizeObserver: ResizeObserver | null = null
+let lastCanvasSize: { width: number; height: number } | null = null
+const pendingViewportFit = ref(true)
 const NODE_DRAG_THRESHOLD_PX = 4
 const DENSE_NODE_HIT_RADIUS_PX = 13.5
 const FOCUSED_NODE_HIT_RADIUS_PX = 11.5
@@ -227,8 +232,64 @@ function fitViewport(duration = 260): void {
     return
   }
 
+  const rect = canvasRef.value?.getBoundingClientRect()
+  if (!rect || rect.width < 2 || rect.height < 2) {
+    queueViewportRecovery({ fit: true })
+    return
+  }
+
   sigma.setCustomBBox(resolveViewportBBox())
   void sigma.getCamera().animate({ x: 0.5, y: 0.5, ratio: 1.02, angle: 0 }, { duration })
+}
+
+function recoverRendererViewport(options?: {
+  fit?: boolean
+}): boolean {
+  const sigma = sigmaRef.value
+  const container = canvasRef.value
+  if (!sigma || !container) {
+    return false
+  }
+
+  const rect = container.getBoundingClientRect()
+  if (rect.width < 2 || rect.height < 2) {
+    return false
+  }
+
+  sigma.resize()
+  sigma.setCustomBBox(resolveViewportBBox())
+  safeRefreshAll()
+
+  if (options?.fit || !didInitialFit.value) {
+    sigma.getCamera().setState({ x: 0.5, y: 0.5, ratio: 1.02, angle: 0 })
+    fitViewport(0)
+    didInitialFit.value = true
+  } else {
+    sigma.scheduleRefresh()
+  }
+
+  return true
+}
+
+function queueViewportRecovery(options?: {
+  fit?: boolean
+}): void {
+  if (options?.fit) {
+    pendingViewportFit.value = true
+  }
+  if (viewportRecoveryFrameId !== null) {
+    return
+  }
+
+  viewportRecoveryFrameId = window.requestAnimationFrame(() => {
+    viewportRecoveryFrameId = null
+    const shouldFit = pendingViewportFit.value
+    pendingViewportFit.value = false
+    const recovered = recoverRendererViewport({ fit: shouldFit })
+    if (!recovered && shouldFit) {
+      pendingViewportFit.value = true
+    }
+  })
 }
 
 function recoverInvalidNodePosition(
@@ -606,6 +667,16 @@ function destroyGraph(): void {
     window.cancelAnimationFrame(hoverResolveFrameId)
     hoverResolveFrameId = null
   }
+  if (viewportRecoveryFrameId !== null) {
+    window.cancelAnimationFrame(viewportRecoveryFrameId)
+    viewportRecoveryFrameId = null
+  }
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+    resizeObserver = null
+  }
+  lastCanvasSize = null
+  pendingViewportFit.value = true
   pendingHoverViewport = null
   if (sigmaRef.value) {
     sigmaRef.value.kill()
@@ -888,12 +959,7 @@ function mountSigmaGraph(
     },
   })
 
-  window.setTimeout(() => {
-    if (props.focusedNodeId) {
-      fitViewport(0)
-    }
-    didInitialFit.value = true
-  }, 0)
+  queueViewportRecovery({ fit: true })
 }
 
 function rebuildGraph(): void {
@@ -927,10 +993,77 @@ function buildTargetGraphModel(): MultiUndirectedGraph<
   })
 }
 
+function resolveGraphCentroid(
+  graph: MultiUndirectedGraph<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes>,
+): { x: number; y: number } {
+  if (graph.order === 0) {
+    return { x: 0, y: 0 }
+  }
+
+  let sumX = 0
+  let sumY = 0
+  let count = 0
+
+  graph.forEachNode((_, attributes) => {
+    if (!Number.isFinite(attributes.x) || !Number.isFinite(attributes.y)) {
+      return
+    }
+    sumX += attributes.x
+    sumY += attributes.y
+    count += 1
+  })
+
+  if (count === 0) {
+    return { x: 0, y: 0 }
+  }
+
+  return {
+    x: sumX / count,
+    y: sumY / count,
+  }
+}
+
+function resolveSyncSeedPosition(
+  nodeId: string,
+  graph: MultiUndirectedGraph<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes>,
+  targetGraph: MultiUndirectedGraph<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes>,
+): { x: number; y: number } {
+  const neighborPositions: Array<{ x: number; y: number }> = []
+
+  targetGraph.forEachNeighbor(nodeId, (neighborId) => {
+    if (!graph.hasNode(neighborId)) {
+      return
+    }
+    const neighborAttributes = graph.getNodeAttributes(neighborId)
+    if (!Number.isFinite(neighborAttributes.x) || !Number.isFinite(neighborAttributes.y)) {
+      return
+    }
+    neighborPositions.push({ x: neighborAttributes.x, y: neighborAttributes.y })
+  })
+
+  const anchor =
+    neighborPositions.length > 0
+      ? {
+          x:
+            neighborPositions.reduce((sum, position) => sum + position.x, 0) /
+            neighborPositions.length,
+          y:
+            neighborPositions.reduce((sum, position) => sum + position.y, 0) /
+            neighborPositions.length,
+        }
+      : resolveGraphCentroid(graph)
+
+  const fallback = fallbackPosition(nodeId)
+  return {
+    x: anchor.x + fallback.x * 0.08,
+    y: anchor.y + fallback.y * 0.08,
+  }
+}
+
 function applyTargetGraph(
   targetGraph: MultiUndirectedGraph<GraphCanvasNodeAttributes, GraphCanvasEdgeAttributes>,
   options: {
-    preserveNodePositions: boolean
+    applyTargetPositions: boolean
   },
 ): void {
   const graph = graphRef.value
@@ -952,13 +1085,19 @@ function applyTargetGraph(
       const currentAttributes = graph.getNodeAttributes(nodeId)
       graph.replaceNodeAttributes(nodeId, {
         ...targetAttributes,
-        x: options.preserveNodePositions ? currentAttributes.x : targetAttributes.x,
-        y: options.preserveNodePositions ? currentAttributes.y : targetAttributes.y,
+        x: options.applyTargetPositions ? targetAttributes.x : currentAttributes.x,
+        y: options.applyTargetPositions ? targetAttributes.y : currentAttributes.y,
       })
       return
     }
 
-    graph.addNode(nodeId, targetAttributes)
+    const seededPosition = options.applyTargetPositions
+      ? { x: targetAttributes.x, y: targetAttributes.y }
+      : resolveSyncSeedPosition(nodeId, graph, targetGraph)
+    graph.addNode(nodeId, {
+      ...targetAttributes,
+      ...seededPosition,
+    })
   })
 
   graph.clearEdges()
@@ -1046,7 +1185,7 @@ function syncGraphData(options?: {
   const needsStructureSync = !graphStructureMatchesSource(graph)
   if (!options?.relayout || needsStructureSync) {
     applyTargetGraph(targetGraph, {
-      preserveNodePositions: Boolean(options?.relayout),
+      applyTargetPositions: Boolean(options?.relayout),
     })
   }
 
@@ -1146,6 +1285,64 @@ watch(
     skipNextFocusViewportSync.value = false
   },
 )
+
+watch(
+  () => props.pageVisible,
+  async (pageVisible) => {
+    if (!pageVisible) {
+      return
+    }
+    await nextTick()
+    queueViewportRecovery({ fit: true })
+  },
+  { immediate: true },
+)
+
+watch(
+  () => canvasRef.value,
+  (container, previousContainer) => {
+    if (resizeObserver) {
+      resizeObserver.disconnect()
+      resizeObserver = null
+    }
+    lastCanvasSize = null
+
+    if (previousContainer && previousContainer !== container) {
+      previousContainer.classList.remove('is-dragging', 'is-node-hover')
+    }
+
+    if (!container || typeof ResizeObserver === 'undefined') {
+      return
+    }
+
+    resizeObserver = new ResizeObserver((entries) => {
+      const entry = entries[0]
+      const width = Math.round(entry.contentRect.width)
+      const height = Math.round(entry.contentRect.height)
+      if (width < 2 || height < 2) {
+        lastCanvasSize = { width, height }
+        return
+      }
+
+      const previous = lastCanvasSize
+      lastCanvasSize = { width, height }
+      const becameVisible = !previous || previous.width < 2 || previous.height < 2
+      const resized =
+        !previous || previous.width !== width || previous.height !== height
+
+      if (becameVisible || resized) {
+        queueViewportRecovery({ fit: becameVisible || !didInitialFit.value })
+      }
+    })
+    resizeObserver.observe(container)
+    queueViewportRecovery({ fit: true })
+  },
+  { flush: 'post' },
+)
+
+onMounted(() => {
+  queueViewportRecovery({ fit: true })
+})
 
 onBeforeUnmount(() => {
   destroyGraph()

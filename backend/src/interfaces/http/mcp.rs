@@ -17,14 +17,19 @@ use crate::{
     app::state::AppState,
     interfaces::http::{
         auth::AuthContext,
-        authorization::{POLICY_DOCUMENTS_WRITE, POLICY_MCP_MEMORY_READ, POLICY_WORKSPACE_ADMIN},
+        authorization::{
+            POLICY_DOCUMENTS_WRITE, POLICY_LIBRARY_READ, POLICY_LIBRARY_WRITE,
+            POLICY_MCP_MEMORY_READ, POLICY_WORKSPACE_ADMIN,
+        },
         router_support::{ApiError, attach_request_id_header, ensure_or_generate_request_id},
     },
     mcp_types::{
-        McpAuditActionKind, McpAuditScope, McpCapabilitySnapshot, McpCreateLibraryRequest,
-        McpCreateWorkspaceRequest, McpGetMutationStatusRequest, McpListLibrariesRequest,
+        McpAuditActionKind, McpAuditScope, McpCancelWebIngestRunRequest, McpCapabilitySnapshot,
+        McpCreateLibraryRequest, McpCreateWorkspaceRequest, McpGetMutationStatusRequest,
+        McpGetWebIngestRunRequest, McpListLibrariesRequest, McpListWebIngestRunPagesRequest,
         McpMutationReceipt, McpReadDocumentRequest, McpSearchDocumentsRequest,
-        McpSearchDocumentsResponse, McpUpdateDocumentRequest, McpUploadDocumentsRequest,
+        McpSearchDocumentsResponse, McpSubmitWebIngestRunRequest, McpUpdateDocumentRequest,
+        McpUploadDocumentsRequest,
     },
     services::{
         audit_service::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
@@ -52,6 +57,10 @@ pub const MCP_CANONICAL_TOOL_NAMES: &[&str] = &[
     "upload_documents",
     "update_document",
     "get_mutation_status",
+    "submit_web_ingest_run",
+    "get_web_ingest_run",
+    "list_web_ingest_run_pages",
+    "cancel_web_ingest_run",
 ];
 
 pub const MCP_CANONICAL_METHOD_NAMES: &[&str] =
@@ -166,6 +175,14 @@ fn visible_tool_names(auth: &AuthContext) -> Vec<String> {
     if auth.can_write_any_document_memory(POLICY_DOCUMENTS_WRITE) {
         tools.push("update_document".to_string());
         tools.push("get_mutation_status".to_string());
+    }
+    if auth.can_write_any_library_memory(POLICY_LIBRARY_WRITE) {
+        tools.push("submit_web_ingest_run".to_string());
+        tools.push("cancel_web_ingest_run".to_string());
+    }
+    if auth.can_read_any_library_memory(POLICY_LIBRARY_READ) {
+        tools.push("get_web_ingest_run".to_string());
+        tools.push("list_web_ingest_run_pages".to_string());
     }
     tools
 }
@@ -722,6 +739,95 @@ async fn handle_tools_list(
                             "type": "string",
                             "format": "uuid",
                             "description": "Mutation receipt UUID. Also accepts snake_case alias receipt_id."
+                        }
+                    }
+                }),
+            }),
+            "submit_web_ingest_run" => Some(McpToolDescriptor {
+                name: "submit_web_ingest_run",
+                description: "Submit a web ingest run for one seed URL. Default to mode single_page so only the submitted page is processed unless recursive_crawl is explicitly requested.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["libraryId", "seedUrl", "mode"],
+                    "properties": {
+                        "libraryId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Target library UUID from list_libraries. Also accepts snake_case alias library_id."
+                        },
+                        "seedUrl": {
+                            "type": "string",
+                            "format": "uri",
+                            "description": "Seed HTTP or HTTPS URL to ingest. Also accepts snake_case alias seed_url."
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["single_page", "recursive_crawl"],
+                            "description": "Use single_page to process only the submitted URL, or recursive_crawl to discover additional in-scope pages."
+                        },
+                        "boundaryPolicy": {
+                            "type": "string",
+                            "enum": ["same_host", "allow_external"],
+                            "description": "Optional crawl boundary policy. Also accepts snake_case alias boundary_policy."
+                        },
+                        "maxDepth": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Optional crawl depth. single_page forces depth 0; recursive_crawl defaults to 3. Also accepts snake_case alias max_depth."
+                        },
+                        "maxPages": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Optional crawl budget. Also accepts snake_case alias max_pages."
+                        },
+                        "idempotencyKey": {
+                            "type": "string",
+                            "description": "Caller-chosen dedupe key. Also accepts snake_case alias idempotency_key."
+                        }
+                    }
+                }),
+            }),
+            "get_web_ingest_run" => Some(McpToolDescriptor {
+                name: "get_web_ingest_run",
+                description: "Load one web ingest run and return the same run truth, counts, failure code, and cancellation state used by REST and the documents workspace.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["runId"],
+                    "properties": {
+                        "runId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Run UUID returned by submit_web_ingest_run. Also accepts snake_case alias run_id."
+                        }
+                    }
+                }),
+            }),
+            "list_web_ingest_run_pages" => Some(McpToolDescriptor {
+                name: "list_web_ingest_run_pages",
+                description: "List candidate pages and outcomes for one web ingest run using the same candidate-state and reason-code vocabulary exposed by REST.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["runId"],
+                    "properties": {
+                        "runId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Run UUID returned by submit_web_ingest_run. Also accepts snake_case alias run_id."
+                        }
+                    }
+                }),
+            }),
+            "cancel_web_ingest_run" => Some(McpToolDescriptor {
+                name: "cancel_web_ingest_run",
+                description: "Request cancellation for an active web ingest run and return the updated receipt state, counts, failure code, and cancel acceptance timestamp.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["runId"],
+                    "properties": {
+                        "runId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Run UUID returned by submit_web_ingest_run. Also accepts snake_case alias run_id."
                         }
                     }
                 }),
@@ -1425,6 +1531,304 @@ async fn handle_tools_call(
                 }
             }
         }
+        "submit_web_ingest_run" => {
+            match parse_tool_args::<McpSubmitWebIngestRunRequest>(parsed.arguments) {
+                Ok(args) => match mcp_mutations::submit_web_ingest_run(auth, state, args.clone())
+                    .await
+                {
+                    Ok(payload) => {
+                        let canonical_subjects =
+                            build_mcp_web_ingest_subjects(state, std::slice::from_ref(&payload))
+                                .await;
+                        record_canonical_mcp_audit(
+                            state,
+                            auth,
+                            request_id,
+                            "agent.memory.web_ingest.submit",
+                            "succeeded",
+                            Some(format!("accepted web ingest run {}", payload.run_id)),
+                            Some(format!(
+                                "principal {} accepted web ingest run {} in library {}",
+                                auth.principal_id, payload.run_id, payload.library_id
+                            )),
+                            canonical_subjects,
+                        )
+                        .await;
+                        record_success_audit(
+                            auth,
+                            state,
+                            request_id,
+                            McpAuditActionKind::SubmitWebIngestRun,
+                            McpAuditScope {
+                                workspace_id: auth.workspace_id,
+                                library_id: Some(args.library_id),
+                                document_id: None,
+                            },
+                            json!({
+                                "tool": "submit_web_ingest_run",
+                                "runId": payload.run_id,
+                                "mode": payload.mode,
+                                "runState": payload.run_state,
+                            }),
+                        )
+                        .await;
+                        ok_tool_result("Web ingest run accepted.", json!(payload))
+                    }
+                    Err(error) => {
+                        record_error_audit(
+                            auth,
+                            state,
+                            request_id,
+                            McpAuditActionKind::SubmitWebIngestRun,
+                            McpAuditScope {
+                                workspace_id: auth.workspace_id,
+                                library_id: Some(args.library_id),
+                                document_id: None,
+                            },
+                            &error,
+                            json!({ "tool": "submit_web_ingest_run" }),
+                        )
+                        .await;
+                        tool_error_result(error)
+                    }
+                },
+                Err(error) => {
+                    record_error_audit(
+                        auth,
+                        state,
+                        request_id,
+                        McpAuditActionKind::SubmitWebIngestRun,
+                        McpAuditScope {
+                            workspace_id: auth.workspace_id,
+                            library_id: None,
+                            document_id: None,
+                        },
+                        &error,
+                        json!({ "tool": "submit_web_ingest_run" }),
+                    )
+                    .await;
+                    tool_error_result(error)
+                }
+            }
+        }
+        "get_web_ingest_run" => {
+            match parse_tool_args::<McpGetWebIngestRunRequest>(parsed.arguments) {
+                Ok(args) => {
+                    match mcp_mutations::get_web_ingest_run(auth, state, args.clone()).await {
+                        Ok(payload) => {
+                            record_success_audit(
+                                auth,
+                                state,
+                                request_id,
+                                McpAuditActionKind::GetWebIngestRun,
+                                McpAuditScope {
+                                    workspace_id: Some(payload.workspace_id),
+                                    library_id: Some(payload.library_id),
+                                    document_id: None,
+                                },
+                                json!({
+                                    "tool": "get_web_ingest_run",
+                                    "runId": payload.run_id,
+                                    "runState": payload.run_state,
+                                }),
+                            )
+                            .await;
+                            ok_tool_result("Web ingest run loaded.", json!(payload))
+                        }
+                        Err(error) => {
+                            record_error_audit(
+                                auth,
+                                state,
+                                request_id,
+                                McpAuditActionKind::GetWebIngestRun,
+                                McpAuditScope {
+                                    workspace_id: auth.workspace_id,
+                                    library_id: None,
+                                    document_id: None,
+                                },
+                                &error,
+                                json!({ "tool": "get_web_ingest_run", "runId": args.run_id }),
+                            )
+                            .await;
+                            tool_error_result(error)
+                        }
+                    }
+                }
+                Err(error) => {
+                    record_error_audit(
+                        auth,
+                        state,
+                        request_id,
+                        McpAuditActionKind::GetWebIngestRun,
+                        McpAuditScope {
+                            workspace_id: auth.workspace_id,
+                            library_id: None,
+                            document_id: None,
+                        },
+                        &error,
+                        json!({ "tool": "get_web_ingest_run" }),
+                    )
+                    .await;
+                    tool_error_result(error)
+                }
+            }
+        }
+        "list_web_ingest_run_pages" => {
+            match parse_tool_args::<McpListWebIngestRunPagesRequest>(parsed.arguments) {
+                Ok(args) => {
+                    match mcp_mutations::list_web_ingest_run_pages(auth, state, args.clone()).await
+                    {
+                        Ok(payload) => {
+                            let scope = payload.first().map_or(
+                                McpAuditScope {
+                                    workspace_id: auth.workspace_id,
+                                    library_id: None,
+                                    document_id: None,
+                                },
+                                |page| McpAuditScope {
+                                    workspace_id: None,
+                                    library_id: None,
+                                    document_id: page.document_id,
+                                },
+                            );
+                            record_success_audit(
+                                auth,
+                                state,
+                                request_id,
+                                McpAuditActionKind::ListWebIngestRunPages,
+                                scope,
+                                json!({
+                                    "tool": "list_web_ingest_run_pages",
+                                    "runId": args.run_id,
+                                    "pageCount": payload.len(),
+                                }),
+                            )
+                            .await;
+                            ok_tool_result(
+                                "Web ingest run pages loaded.",
+                                json!({ "pages": payload }),
+                            )
+                        }
+                        Err(error) => {
+                            record_error_audit(
+                                auth,
+                                state,
+                                request_id,
+                                McpAuditActionKind::ListWebIngestRunPages,
+                                McpAuditScope {
+                                    workspace_id: auth.workspace_id,
+                                    library_id: None,
+                                    document_id: None,
+                                },
+                                &error,
+                                json!({ "tool": "list_web_ingest_run_pages", "runId": args.run_id }),
+                            )
+                            .await;
+                            tool_error_result(error)
+                        }
+                    }
+                }
+                Err(error) => {
+                    record_error_audit(
+                        auth,
+                        state,
+                        request_id,
+                        McpAuditActionKind::ListWebIngestRunPages,
+                        McpAuditScope {
+                            workspace_id: auth.workspace_id,
+                            library_id: None,
+                            document_id: None,
+                        },
+                        &error,
+                        json!({ "tool": "list_web_ingest_run_pages" }),
+                    )
+                    .await;
+                    tool_error_result(error)
+                }
+            }
+        }
+        "cancel_web_ingest_run" => {
+            match parse_tool_args::<McpCancelWebIngestRunRequest>(parsed.arguments) {
+                Ok(args) => match mcp_mutations::cancel_web_ingest_run(auth, state, args.clone())
+                    .await
+                {
+                    Ok(payload) => {
+                        let canonical_subjects =
+                            build_mcp_web_ingest_subjects(state, std::slice::from_ref(&payload))
+                                .await;
+                        record_canonical_mcp_audit(
+                            state,
+                            auth,
+                            request_id,
+                            "agent.memory.web_ingest.cancel",
+                            "succeeded",
+                            Some(format!(
+                                "accepted cancel request for web ingest run {}",
+                                payload.run_id
+                            )),
+                            Some(format!(
+                                "principal {} accepted cancel request for web ingest run {}",
+                                auth.principal_id, payload.run_id
+                            )),
+                            canonical_subjects,
+                        )
+                        .await;
+                        record_success_audit(
+                            auth,
+                            state,
+                            request_id,
+                            McpAuditActionKind::CancelWebIngestRun,
+                            McpAuditScope {
+                                workspace_id: auth.workspace_id,
+                                library_id: Some(payload.library_id),
+                                document_id: None,
+                            },
+                            json!({
+                                "tool": "cancel_web_ingest_run",
+                                "runId": payload.run_id,
+                                "runState": payload.run_state,
+                            }),
+                        )
+                        .await;
+                        ok_tool_result("Web ingest run cancellation accepted.", json!(payload))
+                    }
+                    Err(error) => {
+                        record_error_audit(
+                            auth,
+                            state,
+                            request_id,
+                            McpAuditActionKind::CancelWebIngestRun,
+                            McpAuditScope {
+                                workspace_id: auth.workspace_id,
+                                library_id: None,
+                                document_id: None,
+                            },
+                            &error,
+                            json!({ "tool": "cancel_web_ingest_run", "runId": args.run_id }),
+                        )
+                        .await;
+                        tool_error_result(error)
+                    }
+                },
+                Err(error) => {
+                    record_error_audit(
+                        auth,
+                        state,
+                        request_id,
+                        McpAuditActionKind::CancelWebIngestRun,
+                        McpAuditScope {
+                            workspace_id: auth.workspace_id,
+                            library_id: None,
+                            document_id: None,
+                        },
+                        &error,
+                        json!({ "tool": "cancel_web_ingest_run" }),
+                    )
+                    .await;
+                    tool_error_result(error)
+                }
+            }
+        }
         _ => tool_error_result(ApiError::invalid_mcp_tool_call(format!(
             "unsupported MCP tool '{}'",
             parsed.name
@@ -1510,6 +1914,31 @@ async fn build_mcp_mutation_subjects(
                 receipt.library_id,
             ));
         }
+    }
+    subjects.sort_by(|left, right| {
+        left.subject_kind
+            .cmp(&right.subject_kind)
+            .then_with(|| left.subject_id.cmp(&right.subject_id))
+    });
+    subjects.dedup_by(|left, right| {
+        left.subject_kind == right.subject_kind && left.subject_id == right.subject_id
+    });
+    subjects
+}
+
+async fn build_mcp_web_ingest_subjects(
+    _state: &AppState,
+    receipts: &[crate::domains::ingest::WebIngestRunReceipt],
+) -> Vec<AppendAuditEventSubjectCommand> {
+    let mut subjects = Vec::new();
+    for receipt in receipts {
+        subjects.push(AppendAuditEventSubjectCommand {
+            subject_kind: "content_web_ingest_run".to_string(),
+            subject_id: receipt.run_id,
+            workspace_id: None,
+            library_id: Some(receipt.library_id),
+            document_id: None,
+        });
     }
     subjects.sort_by(|left, right| {
         left.subject_kind

@@ -3,8 +3,8 @@ use anyhow::Context;
 use crate::infra::arangodb::{
     client::ArangoClient,
     collections::{
-        DOCUMENT_COLLECTIONS, EDGE_COLLECTIONS, KNOWLEDGE_BUNDLE_CHUNK_EDGE,
-        KNOWLEDGE_BUNDLE_ENTITY_EDGE, KNOWLEDGE_BUNDLE_EVIDENCE_EDGE,
+        DOCUMENT_COLLECTIONS, EDGE_COLLECTIONS, KNOWLEDGE_BLOCK_CHUNK_EDGE,
+        KNOWLEDGE_BUNDLE_CHUNK_EDGE, KNOWLEDGE_BUNDLE_ENTITY_EDGE, KNOWLEDGE_BUNDLE_EVIDENCE_EDGE,
         KNOWLEDGE_BUNDLE_RELATION_EDGE, KNOWLEDGE_CHUNK_COLLECTION,
         KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE, KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
         KNOWLEDGE_CHUNK_VECTOR_INDEX, KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION,
@@ -12,10 +12,12 @@ use crate::infra::arangodb::{
         KNOWLEDGE_ENTITY_COLLECTION, KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
         KNOWLEDGE_ENTITY_VECTOR_INDEX, KNOWLEDGE_EVIDENCE_COLLECTION,
         KNOWLEDGE_EVIDENCE_SOURCE_EDGE, KNOWLEDGE_EVIDENCE_SUPPORTS_ENTITY_EDGE,
-        KNOWLEDGE_EVIDENCE_SUPPORTS_RELATION_EDGE, KNOWLEDGE_GRAPH_NAME,
-        KNOWLEDGE_RELATION_COLLECTION, KNOWLEDGE_RELATION_OBJECT_EDGE,
-        KNOWLEDGE_RELATION_SUBJECT_EDGE, KNOWLEDGE_REVISION_CHUNK_EDGE,
+        KNOWLEDGE_EVIDENCE_SUPPORTS_RELATION_EDGE, KNOWLEDGE_FACT_EVIDENCE_EDGE,
+        KNOWLEDGE_GRAPH_NAME, KNOWLEDGE_PERSISTENT_INDEXES, KNOWLEDGE_RELATION_COLLECTION,
+        KNOWLEDGE_RELATION_OBJECT_EDGE, KNOWLEDGE_RELATION_SUBJECT_EDGE,
+        KNOWLEDGE_REVISION_BLOCK_EDGE, KNOWLEDGE_REVISION_CHUNK_EDGE,
         KNOWLEDGE_REVISION_COLLECTION, KNOWLEDGE_SEARCH_VIEW,
+        KNOWLEDGE_STRUCTURED_BLOCK_COLLECTION, KNOWLEDGE_TECHNICAL_FACT_COLLECTION,
     },
 };
 
@@ -54,6 +56,23 @@ pub async fn bootstrap_knowledge_plane(
                 format!("failed to ensure knowledge edge collection {collection}")
             })?;
         }
+        for index in KNOWLEDGE_PERSISTENT_INDEXES {
+            client
+                .ensure_persistent_index(
+                    index.collection,
+                    index.name,
+                    index.fields,
+                    index.unique,
+                    index.sparse,
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to ensure persistent Arango index {} on {}",
+                        index.name, index.collection
+                    )
+                })?;
+        }
     }
 
     if options.views {
@@ -72,8 +91,18 @@ pub async fn bootstrap_knowledge_plane(
                 "to": [KNOWLEDGE_REVISION_COLLECTION]
             },
             {
+                "collection": KNOWLEDGE_REVISION_BLOCK_EDGE,
+                "from": [KNOWLEDGE_REVISION_COLLECTION],
+                "to": [KNOWLEDGE_STRUCTURED_BLOCK_COLLECTION]
+            },
+            {
                 "collection": KNOWLEDGE_REVISION_CHUNK_EDGE,
                 "from": [KNOWLEDGE_REVISION_COLLECTION],
+                "to": [KNOWLEDGE_CHUNK_COLLECTION]
+            },
+            {
+                "collection": KNOWLEDGE_BLOCK_CHUNK_EDGE,
+                "from": [KNOWLEDGE_STRUCTURED_BLOCK_COLLECTION],
                 "to": [KNOWLEDGE_CHUNK_COLLECTION]
             },
             {
@@ -97,6 +126,11 @@ pub async fn bootstrap_knowledge_plane(
                 "to": [KNOWLEDGE_CHUNK_COLLECTION]
             },
             {
+                "collection": KNOWLEDGE_FACT_EVIDENCE_EDGE,
+                "from": [KNOWLEDGE_TECHNICAL_FACT_COLLECTION],
+                "to": [KNOWLEDGE_EVIDENCE_COLLECTION]
+            },
+            {
                 "collection": KNOWLEDGE_EVIDENCE_SUPPORTS_ENTITY_EDGE,
                 "from": [KNOWLEDGE_EVIDENCE_COLLECTION],
                 "to": [KNOWLEDGE_ENTITY_COLLECTION]
@@ -114,7 +148,7 @@ pub async fn bootstrap_knowledge_plane(
             {
                 "collection": KNOWLEDGE_BUNDLE_ENTITY_EDGE,
                 "from": [KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION],
-                "to": ["knowledge_entity"]
+                "to": [KNOWLEDGE_ENTITY_COLLECTION]
             },
             {
                 "collection": KNOWLEDGE_BUNDLE_RELATION_EDGE,
@@ -180,7 +214,28 @@ fn knowledge_search_view_links() -> serde_json::Value {
             "includeAllFields": true,
             "fields": {
                 "content_text": { "analyzers": text_analyzers.clone() },
-                "normalized_text": { "analyzers": text_analyzers.clone() }
+                "normalized_text": { "analyzers": text_analyzers.clone() },
+                "section_path[*]": { "analyzers": text_analyzers.clone() },
+                "heading_trail[*]": { "analyzers": text_analyzers.clone() }
+            }
+        },
+        KNOWLEDGE_STRUCTURED_BLOCK_COLLECTION: {
+            "includeAllFields": true,
+            "fields": {
+                "text": { "analyzers": text_analyzers.clone() },
+                "normalized_text": { "analyzers": text_analyzers.clone() },
+                "heading_trail[*]": { "analyzers": text_analyzers.clone() },
+                "section_path[*]": { "analyzers": text_analyzers.clone() },
+                "block_kind": { "analyzers": ["identity"] }
+            }
+        },
+        KNOWLEDGE_TECHNICAL_FACT_COLLECTION: {
+            "includeAllFields": true,
+            "fields": {
+                "canonical_value_text": { "analyzers": text_analyzers.clone() },
+                "canonical_value_exact": { "analyzers": ["identity"] },
+                "display_value": { "analyzers": text_analyzers.clone() },
+                "fact_kind": { "analyzers": ["identity"] }
             }
         },
         KNOWLEDGE_ENTITY_COLLECTION: {

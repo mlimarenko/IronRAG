@@ -21,19 +21,20 @@ const confirmInput = ref('')
 const inputRef = ref<HTMLInputElement | null>(null)
 const titleId = 'delete-confirm-dialog-title'
 
-const canConfirm = computed(
-  () => confirmInput.value.trim() === props.targetName,
-)
+const canConfirm = computed(() => confirmInput.value.trim() === props.targetName)
 
-watch(() => props.open, (isOpen) => {
-  if (isOpen) {
-    document.body.style.overflow = 'hidden'
-    void nextTick(() => inputRef.value?.focus())
-  } else {
-    confirmInput.value = ''
-    document.body.style.overflow = ''
-  }
-})
+watch(
+  () => props.open,
+  (isOpen) => {
+    if (isOpen) {
+      document.body.style.overflow = 'hidden'
+      void nextTick(() => inputRef.value?.focus())
+    } else {
+      confirmInput.value = ''
+      document.body.style.overflow = ''
+    }
+  },
+)
 
 function submit() {
   if (!canConfirm.value || props.loading) return
@@ -73,7 +74,7 @@ function close() {
           type="text"
           autocomplete="off"
           @keydown.enter="submit"
-        >
+        />
       </div>
       <div class="rr-dialog__actions">
         <button

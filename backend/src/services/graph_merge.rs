@@ -10,6 +10,7 @@ use crate::{
     infra::repositories::{self, ChunkRow, DocumentRow, RuntimeGraphEdgeRow, RuntimeGraphNodeRow},
     services::{
         graph_extract::{GraphExtractionCandidateSet, GraphRelationCandidate},
+        graph_identity,
         graph_quality_guard::GraphQualityGuardService,
     },
 };
@@ -115,11 +116,6 @@ impl GraphMergeScope {
 }
 
 #[must_use]
-pub fn canonical_node_key(node_type: RuntimeNodeType, label: &str) -> String {
-    format!("{}:{}", node_type_slug(node_type), normalize_graph_label(label))
-}
-
-#[must_use]
 pub fn normalize_graph_aliases(label: &str, aliases: &[String]) -> Vec<String> {
     let mut values = BTreeSet::new();
     values.insert(label.trim().to_string());
@@ -132,25 +128,6 @@ pub fn normalize_graph_aliases(label: &str, aliases: &[String]) -> Vec<String> {
     values.into_iter().collect()
 }
 
-#[must_use]
-pub fn normalize_relation_type(relation_type: &str) -> String {
-    relation_type
-        .trim()
-        .to_ascii_lowercase()
-        .chars()
-        .map(|char| if char.is_ascii_alphanumeric() { char } else { '_' })
-        .collect::<String>()
-        .split('_')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("_")
-}
-
-#[must_use]
-pub fn canonical_edge_key(from_node_key: &str, relation_type: &str, to_node_key: &str) -> String {
-    format!("{from_node_key}--{}--{to_node_key}", normalize_relation_type(relation_type))
-}
-
 pub async fn merge_chunk_graph_candidates(
     pool: &sqlx::PgPool,
     graph_quality_guard: &GraphQualityGuardService,
@@ -160,6 +137,7 @@ pub async fn merge_chunk_graph_candidates(
     candidates: &GraphExtractionCandidateSet,
     extraction_recovery: Option<&ExtractionRecoverySummary>,
 ) -> Result<GraphMergeOutcome> {
+    let entity_key_index = build_entity_key_index(candidates);
     let document_node = upsert_document_node(pool, scope, document).await?;
     repositories::create_runtime_graph_evidence(
         pool,
@@ -184,11 +162,13 @@ pub async fn merge_chunk_graph_candidates(
 
     for entity in &candidates.entities {
         let aliases = normalize_graph_aliases(&entity.label, &entity.aliases);
+        let canonical_node_key = entity_key_index.canonical_node_key_for_label(&entity.label);
+        let canonical_node_type = graph_identity::runtime_node_type_from_key(&canonical_node_key);
         let node = upsert_graph_node(
             pool,
             scope,
             &entity.label,
-            entity.node_type.clone(),
+            canonical_node_type,
             &aliases,
             entity.summary.as_deref(),
             extraction_recovery,
@@ -256,6 +236,7 @@ pub async fn merge_chunk_graph_candidates(
             scope,
             document,
             chunk,
+            &entity_key_index,
             relation,
             extraction_recovery,
         )
@@ -297,11 +278,12 @@ async fn merge_relation_candidate(
     scope: &GraphMergeScope,
     document: &DocumentRow,
     chunk: &ChunkRow,
+    entity_key_index: &graph_identity::GraphLabelNodeTypeIndex,
     relation: &GraphRelationCandidate,
     extraction_recovery: Option<&ExtractionRecoverySummary>,
 ) -> Result<RelationMergeOutcome> {
-    let source_node_key = canonical_node_key(RuntimeNodeType::Entity, &relation.source_label);
-    let target_node_key = canonical_node_key(RuntimeNodeType::Entity, &relation.target_label);
+    let source_node_key = entity_key_index.canonical_node_key_for_label(&relation.source_label);
+    let target_node_key = entity_key_index.canonical_node_key_for_label(&relation.target_label);
     if let Some(filter_reason) = graph_quality_guard.filter_reason(
         &source_node_key,
         &target_node_key,
@@ -313,7 +295,11 @@ async fn merge_relation_candidate(
             scope.activated_by_attempt_id,
             scope.revision_id,
             "edge",
-            &canonical_edge_key(&source_node_key, &relation.relation_type, &target_node_key),
+            &graph_identity::canonical_edge_key(
+                &source_node_key,
+                &relation.relation_type,
+                &target_node_key,
+            ),
             Some(&source_node_key),
             Some(&target_node_key),
             Some(&graph_quality_guard.normalized_relation_type(&relation.relation_type)),
@@ -346,7 +332,7 @@ async fn merge_relation_candidate(
         pool,
         scope,
         &relation.source_label,
-        RuntimeNodeType::Entity,
+        graph_identity::runtime_node_type_from_key(&source_node_key),
         &[relation.source_label.clone()],
         None,
         extraction_recovery,
@@ -356,7 +342,7 @@ async fn merge_relation_candidate(
         pool,
         scope,
         &relation.target_label,
-        RuntimeNodeType::Entity,
+        graph_identity::runtime_node_type_from_key(&target_node_key),
         &[relation.target_label.clone()],
         None,
         extraction_recovery,
@@ -414,6 +400,17 @@ async fn merge_relation_candidate(
     })
 }
 
+#[must_use]
+fn build_entity_key_index(
+    candidates: &GraphExtractionCandidateSet,
+) -> graph_identity::GraphLabelNodeTypeIndex {
+    let mut index = graph_identity::GraphLabelNodeTypeIndex::new();
+    for entity in &candidates.entities {
+        index.insert_aliases(&entity.label, &entity.aliases, entity.node_type.clone());
+    }
+    index
+}
+
 async fn upsert_document_node(
     pool: &sqlx::PgPool,
     scope: &GraphMergeScope,
@@ -463,7 +460,7 @@ async fn upsert_graph_node(
     summary: Option<&str>,
     extraction_recovery: Option<&ExtractionRecoverySummary>,
 ) -> Result<RuntimeGraphNodeRow> {
-    let canonical_key = canonical_node_key(node_type.clone(), label);
+    let canonical_key = graph_identity::canonical_node_key(node_type.clone(), label);
     let existing = repositories::get_runtime_graph_node_by_key(
         pool,
         scope.library_id,
@@ -478,7 +475,7 @@ async fn upsert_graph_node(
         scope.library_id,
         &canonical_key,
         label.trim(),
-        node_type_slug(node_type),
+        graph_identity::runtime_node_type_slug(&node_type),
         serde_json::to_value(normalize_graph_aliases(label, aliases))
             .unwrap_or_else(|_| serde_json::json!([])),
         summary,
@@ -503,8 +500,11 @@ async fn upsert_graph_edge(
     summary: Option<&str>,
     extraction_recovery: Option<&ExtractionRecoverySummary>,
 ) -> Result<EdgePersistenceOutcome> {
-    let normalized_relation_type = normalize_relation_type(relation_type);
-    let canonical_key = canonical_edge_key(
+    let normalized_relation_type = graph_identity::normalize_relation_type(relation_type);
+    if normalized_relation_type.is_empty() {
+        return Ok(EdgePersistenceOutcome::Filtered);
+    }
+    let canonical_key = graph_identity::canonical_edge_key(
         &from_node.canonical_key,
         &normalized_relation_type,
         &to_node.canonical_key,
@@ -673,38 +673,10 @@ fn normalize_summary_fragment(value: &str) -> Option<String> {
     if normalized.is_empty() { None } else { Some(normalized) }
 }
 
-fn normalize_graph_label(label: &str) -> String {
-    label
-        .trim()
-        .to_ascii_lowercase()
-        .chars()
-        .map(|char| if char.is_ascii_alphanumeric() { char } else { '_' })
-        .collect::<String>()
-        .split('_')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("_")
-}
-
-fn node_type_slug(node_type: RuntimeNodeType) -> &'static str {
-    match node_type {
-        RuntimeNodeType::Document => "document",
-        RuntimeNodeType::Entity => "entity",
-        RuntimeNodeType::Topic => "topic",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn builds_canonical_node_key_from_type_and_label() {
-        assert_eq!(
-            canonical_node_key(RuntimeNodeType::Entity, "Dr. Sarah Chen"),
-            "entity:dr_sarah_chen"
-        );
-    }
+    use crate::services::graph_extract::GraphEntityCandidate;
 
     #[test]
     fn normalizes_aliases_and_deduplicates_them() {
@@ -714,13 +686,13 @@ mod tests {
 
     #[test]
     fn normalizes_relation_type_to_snake_case() {
-        assert_eq!(normalize_relation_type("Mentions In"), "mentions_in");
+        assert_eq!(graph_identity::normalize_relation_type("Mentions In"), "mentions_in");
     }
 
     #[test]
     fn builds_canonical_edge_key_from_nodes_and_relation() {
         assert_eq!(
-            canonical_edge_key("document:1", "mentions in", "entity:openai"),
+            graph_identity::canonical_edge_key("document:1", "mentions in", "entity:openai"),
             "document:1--mentions_in--entity:openai"
         );
     }
@@ -758,7 +730,56 @@ mod tests {
 
     #[test]
     fn normalizes_labels_to_graph_safe_slug() {
-        assert_eq!(normalize_graph_label(" Knowledge   Graph 2.0 "), "knowledge_graph_2_0");
+        assert_eq!(
+            graph_identity::normalize_graph_identity_component(" Knowledge   Graph 2.0 "),
+            "knowledge_graph_2_0"
+        );
+    }
+
+    #[test]
+    fn normalizes_cyrillic_labels_to_graph_safe_slug() {
+        assert_eq!(
+            graph_identity::normalize_graph_identity_component(" Первый печатный двор "),
+            "первый_печатный_двор"
+        );
+    }
+
+    #[test]
+    fn normalizes_mixed_script_labels_to_graph_safe_slug() {
+        assert_eq!(
+            graph_identity::normalize_graph_identity_component(" Acme: Чек V2 / QR "),
+            "acme_чек_v2_qr"
+        );
+    }
+
+    #[test]
+    fn rejects_non_canonical_cyrillic_relation_types() {
+        assert!(graph_identity::normalize_relation_type(" Является частью ").is_empty());
+    }
+
+    #[test]
+    fn build_entity_key_index_prefers_entity_over_topic_for_same_label() {
+        let candidates = GraphExtractionCandidateSet {
+            entities: vec![
+                GraphEntityCandidate {
+                    label: "Касса".to_string(),
+                    node_type: RuntimeNodeType::Topic,
+                    aliases: vec![],
+                    summary: None,
+                },
+                GraphEntityCandidate {
+                    label: "Касса".to_string(),
+                    node_type: RuntimeNodeType::Entity,
+                    aliases: vec![],
+                    summary: None,
+                },
+            ],
+            relations: vec![],
+        };
+
+        let index = build_entity_key_index(&candidates);
+
+        assert_eq!(index.canonical_node_key_for_label("Касса"), "entity:касса");
     }
 
     #[test]

@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::shared::{structured_document::StructuredBlockKind, technical_facts::TechnicalFactKind};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeQueryMode {
@@ -193,6 +195,53 @@ pub struct QueryGraphEdgeReference {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedSegmentReference {
+    pub execution_id: Uuid,
+    pub segment_id: Uuid,
+    pub revision_id: Uuid,
+    pub block_kind: StructuredBlockKind,
+    pub rank: i32,
+    pub score: f64,
+    pub heading_trail: Vec<String>,
+    pub section_path: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TechnicalFactReference {
+    pub execution_id: Uuid,
+    pub fact_id: Uuid,
+    pub revision_id: Uuid,
+    pub fact_kind: TechnicalFactKind,
+    pub canonical_value: String,
+    pub display_value: String,
+    pub rank: i32,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryVerificationState {
+    #[default]
+    NotRun,
+    Verified,
+    PartiallySupported,
+    Conflicting,
+    InsufficientEvidence,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryVerificationWarning {
+    pub code: String,
+    pub message: String,
+    pub related_segment_id: Option<Uuid>,
+    pub related_fact_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryConversationDetail {
     pub conversation: QueryConversation,
     pub turns: Vec<QueryTurn>,
@@ -205,6 +254,10 @@ pub struct QueryExecutionDetail {
     pub request_turn: Option<QueryTurn>,
     pub response_turn: Option<QueryTurn>,
     pub chunk_references: Vec<QueryChunkReference>,
+    pub prepared_segment_references: Vec<PreparedSegmentReference>,
+    pub technical_fact_references: Vec<TechnicalFactReference>,
     pub graph_node_references: Vec<QueryGraphNodeReference>,
     pub graph_edge_references: Vec<QueryGraphEdgeReference>,
+    pub verification_state: QueryVerificationState,
+    pub verification_warnings: Vec<QueryVerificationWarning>,
 }

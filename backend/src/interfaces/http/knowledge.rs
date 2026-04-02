@@ -1,17 +1,23 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    time::Duration,
+};
 
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
     routing::get,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tokio::time::timeout;
 use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
     domains::ai::AiBindingPurpose,
+    domains::knowledge::{KnowledgeLibraryGeneration, TypedTechnicalFact},
     infra::arangodb::{
         collections::{
             KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE,
@@ -53,6 +59,7 @@ pub fn router() -> Router<AppState> {
         .route("/knowledge/libraries/{library_id}/context-bundles", get(list_context_bundles))
         .route("/knowledge/libraries/{library_id}/documents", get(list_documents))
         .route("/knowledge/libraries/{library_id}/documents/{document_id}", get(get_document))
+        .route("/knowledge/libraries/{library_id}/summary", get(get_library_summary))
         .route("/knowledge/libraries/{library_id}/graph-topology", get(get_graph_topology))
         .route("/knowledge/libraries/{library_id}/entities", get(list_entities))
         .route("/knowledge/libraries/{library_id}/entities/{entity_id}", get(get_entity))
@@ -108,6 +115,9 @@ struct KnowledgeDocumentDetailResponse {
     revisions: Vec<KnowledgeRevisionRow>,
     latest_revision: Option<KnowledgeRevisionRow>,
     latest_revision_chunks: Vec<KnowledgeChunkRow>,
+    latest_revision_typed_facts: Vec<TypedTechnicalFact>,
+    technical_fact_summary: KnowledgeTechnicalFactProvenanceSummary,
+    graph_evidence_summary: KnowledgeGraphEvidenceSummary,
 }
 
 #[derive(Debug, Serialize)]
@@ -135,6 +145,8 @@ struct KnowledgeEntityDetailResponse {
     mentioned_chunks: Vec<KnowledgeChunkRow>,
     supporting_evidence_edges: Vec<KnowledgeEvidenceSupportEntityEdgeRow>,
     supporting_evidence: Vec<KnowledgeEvidenceRow>,
+    supporting_typed_facts: Vec<TypedTechnicalFact>,
+    graph_evidence_summary: KnowledgeGraphEvidenceSummary,
 }
 
 #[derive(Debug, Serialize)]
@@ -143,6 +155,8 @@ struct KnowledgeRelationDetailResponse {
     relation: KnowledgeRelationTopologyRow,
     supporting_evidence_edges: Vec<KnowledgeEvidenceSupportRelationEdgeRow>,
     supporting_evidence: Vec<KnowledgeEvidenceRow>,
+    supporting_typed_facts: Vec<TypedTechnicalFact>,
+    graph_evidence_summary: KnowledgeGraphEvidenceSummary,
 }
 
 #[derive(Debug, Serialize)]
@@ -152,6 +166,18 @@ struct KnowledgeGraphTopologyResponse {
     entities: Vec<KnowledgeEntityRow>,
     relations: Vec<KnowledgeRelationTopologyRow>,
     document_links: Vec<KnowledgeDocumentGraphLinkRow>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct KnowledgeLibrarySummaryResponse {
+    library_id: Uuid,
+    document_counts_by_readiness: BTreeMap<String, i64>,
+    graph_ready_document_count: i64,
+    graph_sparse_document_count: i64,
+    typed_fact_document_count: i64,
+    updated_at: DateTime<Utc>,
+    latest_generation: Option<KnowledgeLibraryGeneration>,
 }
 
 #[derive(Debug, Serialize)]
@@ -167,7 +193,10 @@ struct KnowledgeSearchDocumentHit {
     chunk_hits: Vec<KnowledgeChunkSearchRow>,
     vector_chunk_hits: Vec<KnowledgeChunkVectorSearchRow>,
     evidence_samples: Vec<KnowledgeEvidenceRow>,
+    technical_fact_samples: Vec<TypedTechnicalFact>,
     provenance_summary: KnowledgeDocumentProvenanceSummary,
+    technical_fact_summary: KnowledgeTechnicalFactProvenanceSummary,
+    graph_evidence_summary: KnowledgeGraphEvidenceSummary,
 }
 
 #[derive(Debug, Serialize)]
@@ -208,6 +237,25 @@ struct KnowledgeDocumentProvenanceSummary {
     supporting_evidence_count: usize,
     lexical_chunk_count: usize,
     vector_chunk_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct KnowledgeTechnicalFactProvenanceSummary {
+    typed_fact_count: usize,
+    fact_kind_counts: BTreeMap<String, usize>,
+    conflict_group_count: usize,
+    support_block_count: usize,
+    support_chunk_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct KnowledgeGraphEvidenceSummary {
+    evidence_count: usize,
+    chunk_backed_count: usize,
+    block_backed_count: usize,
+    fact_backed_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -321,6 +369,26 @@ async fn list_documents(
     Ok(Json(documents))
 }
 
+async fn get_library_summary(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(library_id): Path<Uuid>,
+) -> Result<Json<KnowledgeLibrarySummaryResponse>, ApiError> {
+    let library =
+        load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
+    let summary =
+        state.canonical_services.knowledge.get_library_summary(&state, library.id).await?;
+    Ok(Json(KnowledgeLibrarySummaryResponse {
+        library_id: summary.library_id,
+        document_counts_by_readiness: summary.document_counts_by_readiness,
+        graph_ready_document_count: summary.graph_ready_document_count,
+        graph_sparse_document_count: summary.graph_sparse_document_count,
+        typed_fact_document_count: summary.typed_fact_document_count,
+        updated_at: summary.updated_at,
+        latest_generation: summary.latest_generation,
+    }))
+}
+
 async fn get_document(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -351,11 +419,32 @@ async fn get_document(
             .map_err(|_| ApiError::Internal)?,
         None => Vec::new(),
     };
+    let latest_revision_typed_facts = match latest_revision.as_ref() {
+        Some(revision) => {
+            state
+                .canonical_services
+                .knowledge
+                .list_typed_technical_facts(&state, revision.revision_id)
+                .await?
+        }
+        None => Vec::new(),
+    };
+    let latest_revision_evidence = match latest_revision.as_ref() {
+        Some(revision) => state
+            .arango_graph_store
+            .list_evidence_by_revision(revision.revision_id)
+            .await
+            .map_err(|_| ApiError::Internal)?,
+        None => Vec::new(),
+    };
     Ok(Json(KnowledgeDocumentDetailResponse {
         document,
         revisions,
         latest_revision,
         latest_revision_chunks,
+        latest_revision_typed_facts: latest_revision_typed_facts.clone(),
+        technical_fact_summary: summarize_typed_technical_facts(&latest_revision_typed_facts),
+        graph_evidence_summary: summarize_graph_evidence(&latest_revision_evidence),
     }))
 }
 
@@ -364,13 +453,7 @@ async fn get_graph_topology(
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,
 ) -> Result<Json<KnowledgeGraphTopologyResponse>, ApiError> {
-    let library =
-        load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
-    let documents = state
-        .arango_document_store
-        .list_documents_by_library(library.workspace_id, library.id)
-        .await
-        .map_err(|_| ApiError::Internal)?;
+    let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
     let entities = state
         .arango_graph_store
         .list_entities_by_library(library_id)
@@ -383,14 +466,36 @@ async fn get_graph_topology(
                 ApiError::Internal
             },
         )?;
-    let document_links = state
-        .arango_graph_store
-        .list_document_graph_links_by_library(library_id)
+    let document_links = match timeout(
+        Duration::from_secs(3),
+        state.arango_graph_store.list_document_graph_links_by_library(library_id),
+    )
+    .await
+    {
+        Ok(Ok(rows)) => rows,
+        Ok(Err(error)) => {
+            tracing::warn!(
+                %library_id,
+                ?error,
+                "failed to list knowledge document graph links; continuing without document nodes",
+            );
+            Vec::new()
+        }
+        Err(_) => {
+            tracing::warn!(
+                %library_id,
+                "timed out while listing knowledge document graph links; continuing without document nodes",
+            );
+            Vec::new()
+        }
+    };
+    let linked_document_ids =
+        document_links.iter().map(|row| row.document_id).collect::<HashSet<_>>();
+    let documents = state
+        .arango_document_store
+        .list_documents_by_ids(&linked_document_ids.into_iter().collect::<Vec<_>>())
         .await
-        .map_err(|error| {
-            tracing::error!(%library_id, ?error, "failed to list knowledge document graph links");
-            ApiError::Internal
-        })?;
+        .map_err(|_| ApiError::Internal)?;
 
     Ok(Json(KnowledgeGraphTopologyResponse { documents, entities, relations, document_links }))
 }
@@ -711,14 +816,30 @@ async fn search_documents_impl(
             + provenance_bonus;
     }
 
-    let mut document_hits: Vec<KnowledgeSearchDocumentHit> = document_hits
-        .into_iter()
-        .map(|accumulator| KnowledgeSearchDocumentHit {
+    let mut document_hits = document_hits;
+    document_hits.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.document.document_id.cmp(&right.document.document_id))
+    });
+    document_hits.truncate(limit);
+    let mut response_hits = Vec::with_capacity(document_hits.len());
+    for accumulator in document_hits {
+        let technical_fact_samples = state
+            .canonical_services
+            .knowledge
+            .list_typed_technical_facts(&state, accumulator.revision.revision_id)
+            .await?;
+        response_hits.push(KnowledgeSearchDocumentHit {
             provenance_summary: KnowledgeDocumentProvenanceSummary {
                 supporting_evidence_count: accumulator.evidence_samples.len(),
                 lexical_chunk_count: accumulator.chunk_hits.len(),
                 vector_chunk_count: accumulator.vector_chunk_hits.len(),
             },
+            technical_fact_summary: summarize_typed_technical_facts(&technical_fact_samples),
+            graph_evidence_summary: summarize_graph_evidence(&accumulator.evidence_samples),
             document: accumulator.document,
             revision: map_search_revision_summary(accumulator.revision),
             score: accumulator.score,
@@ -729,16 +850,9 @@ async fn search_documents_impl(
             chunk_hits: accumulator.chunk_hits,
             vector_chunk_hits: accumulator.vector_chunk_hits,
             evidence_samples: accumulator.evidence_samples,
-        })
-        .collect();
-    document_hits.sort_by(|left, right| {
-        right
-            .score
-            .partial_cmp(&left.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| left.document.document_id.cmp(&right.document.document_id))
-    });
-    document_hits.truncate(limit);
+            technical_fact_samples,
+        });
+    }
 
     Ok(Json(KnowledgeDocumentSearchResponse {
         library_id,
@@ -760,7 +874,7 @@ async fn search_documents_impl(
             .as_ref()
             .map(|context| context.freshness_generation)
             .unwrap_or_default(),
-        document_hits,
+        document_hits: response_hits,
         entity_hits: lexical_entity_hits,
         relation_hits: lexical_relation_hits,
         vector_chunk_hits,
@@ -934,6 +1048,10 @@ async fn get_entity(
     let supporting_evidence_ids: Vec<Uuid> =
         supporting_evidence_edges.iter().map(|edge| edge.evidence_id).collect();
     let supporting_evidence = load_evidence_by_ids(&state, &supporting_evidence_ids).await?;
+    let supporting_typed_facts =
+        load_typed_technical_facts_for_evidence(&state, &supporting_evidence).await?;
+    let graph_evidence_summary =
+        summarize_graph_evidence_from_support(&supporting_evidence, supporting_typed_facts.len());
 
     Ok(Json(KnowledgeEntityDetailResponse {
         entity,
@@ -941,6 +1059,8 @@ async fn get_entity(
         mentioned_chunks,
         supporting_evidence_edges,
         supporting_evidence,
+        supporting_typed_facts: supporting_typed_facts.clone(),
+        graph_evidence_summary,
     }))
 }
 
@@ -983,11 +1103,17 @@ async fn get_relation(
             );
             error
         })?;
+    let supporting_typed_facts =
+        load_typed_technical_facts_for_evidence(&state, &supporting_evidence).await?;
+    let graph_evidence_summary =
+        summarize_graph_evidence_from_support(&supporting_evidence, supporting_typed_facts.len());
 
     Ok(Json(KnowledgeRelationDetailResponse {
         relation,
         supporting_evidence_edges,
         supporting_evidence,
+        supporting_typed_facts: supporting_typed_facts.clone(),
+        graph_evidence_summary,
     }))
 }
 
@@ -1035,6 +1161,72 @@ async fn load_evidence_by_ids(
         }
     }
     Ok(evidence_rows)
+}
+
+async fn load_typed_technical_facts_for_evidence(
+    state: &AppState,
+    evidence_rows: &[KnowledgeEvidenceRow],
+) -> Result<Vec<TypedTechnicalFact>, ApiError> {
+    let fact_ids = evidence_rows
+        .iter()
+        .filter_map(|evidence| evidence.fact_id)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    state.canonical_services.knowledge.list_typed_technical_facts_by_ids(state, &fact_ids).await
+}
+
+fn summarize_typed_technical_facts(
+    typed_facts: &[TypedTechnicalFact],
+) -> KnowledgeTechnicalFactProvenanceSummary {
+    let mut fact_kind_counts = BTreeMap::<String, usize>::new();
+    let mut conflict_group_ids = HashSet::<String>::new();
+    let mut support_block_ids = HashSet::<Uuid>::new();
+    let mut support_chunk_ids = HashSet::<Uuid>::new();
+    for fact in typed_facts {
+        *fact_kind_counts.entry(fact.fact_kind.as_str().to_string()).or_default() += 1;
+        if let Some(conflict_group_id) = fact.conflict_group_id.as_ref() {
+            conflict_group_ids.insert(conflict_group_id.clone());
+        }
+        support_block_ids.extend(fact.support_block_ids.iter().copied());
+        support_chunk_ids.extend(fact.support_chunk_ids.iter().copied());
+    }
+    KnowledgeTechnicalFactProvenanceSummary {
+        typed_fact_count: typed_facts.len(),
+        fact_kind_counts,
+        conflict_group_count: conflict_group_ids.len(),
+        support_block_count: support_block_ids.len(),
+        support_chunk_count: support_chunk_ids.len(),
+    }
+}
+
+fn summarize_graph_evidence(
+    evidence_rows: &[KnowledgeEvidenceRow],
+) -> KnowledgeGraphEvidenceSummary {
+    KnowledgeGraphEvidenceSummary {
+        evidence_count: evidence_rows.len(),
+        chunk_backed_count: evidence_rows
+            .iter()
+            .filter(|evidence| evidence.chunk_id.is_some())
+            .count(),
+        block_backed_count: evidence_rows
+            .iter()
+            .filter(|evidence| evidence.block_id.is_some())
+            .count(),
+        fact_backed_count: evidence_rows
+            .iter()
+            .filter(|evidence| evidence.fact_id.is_some())
+            .count(),
+    }
+}
+
+fn summarize_graph_evidence_from_support(
+    evidence_rows: &[KnowledgeEvidenceRow],
+    typed_fact_count: usize,
+) -> KnowledgeGraphEvidenceSummary {
+    let mut summary = summarize_graph_evidence(evidence_rows);
+    summary.fact_backed_count = summary.fact_backed_count.max(typed_fact_count);
+    summary
 }
 
 async fn list_entity_mention_edges(
