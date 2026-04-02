@@ -1,20 +1,28 @@
 import { defineStore } from 'pinia'
 import type {
+  CreateWebIngestRunInput,
   DocumentDetail,
   DocumentDisplayStatus,
   DocumentMutationAccepted,
   DocumentRowSummary,
+  WebIngestRun,
   DocumentsSortField,
   DocumentStatus,
   DocumentUploadFailure,
   DocumentsWorkspaceSurface,
+  WebIngestRunReceipt,
 } from 'src/models/ui/documents'
 import { inferDocumentFileType, isAcceptedDocumentUpload } from 'src/models/ui/documentFormats'
 import {
   appendDocumentItem,
+  cancelWebIngestRun,
+  createWebIngestRun,
   deleteDocumentItem,
   fetchDocumentDetail,
   fetchDocumentsSurface,
+  fetchWebIngestRun,
+  fetchWebIngestRunPages,
+  fetchWebIngestRuns,
   fetchLibraryCostSummary,
   normalizeDocumentUploadFailure,
   replaceDocumentItem,
@@ -29,6 +37,10 @@ interface DocumentsState {
   workspace: DocumentsWorkspaceSurface
   mutationLoading: boolean
   mutationError: string | null
+  addLinkDialogOpen: boolean
+  webRunLoading: boolean
+  webRunError: string | null
+  lastAcceptedWebRun: WebIngestRunReceipt | null
   appendDialogDocumentId: string | null
   replaceDialogDocumentId: string | null
   deleteDialogDocumentId: string | null
@@ -81,16 +93,18 @@ function compareNullableString(left: string | null, right: string | null): numbe
   return left.localeCompare(right)
 }
 
-function statusSortRank(status: DocumentStatus): number {
-  switch (status) {
+function rowReadinessRank(row: DocumentRowSummary): number {
+  switch (row.preparation?.readinessKind ?? row.status) {
     case 'failed':
       return 5
     case 'processing':
-      return 4
     case 'queued':
+      return 4
+    case 'readable':
       return 3
-    case 'ready_no_graph':
+    case 'graph_sparse':
       return 2
+    case 'graph_ready':
     case 'ready':
     default:
       return 1
@@ -115,7 +129,7 @@ function compareRowsBySortField(
     case 'costAmount':
       return applyDirection(compareNullableNumber(left.costAmount, right.costAmount))
     case 'status':
-      return applyDirection(statusSortRank(left.status) - statusSortRank(right.status))
+      return applyDirection(rowReadinessRank(left) - rowReadinessRank(right))
     case 'uploadedAt':
     default:
       return applyDirection(compareUploadedAt(left.uploadedAt, right.uploadedAt))
@@ -167,11 +181,12 @@ function createEmptyWorkspace(): DocumentsWorkspaceSurface {
     maxSizeMb: 50,
     loading: false,
     error: null,
+    webRuns: [],
     counters: {
-      queued: 0,
       processing: 0,
-      ready: 0,
-      readyNoGraph: 0,
+      readable: 0,
+      graphSparse: 0,
+      graphReady: 0,
       failed: 0,
     },
     costSummary: null,
@@ -189,10 +204,32 @@ function createEmptyWorkspace(): DocumentsWorkspaceSurface {
       error: null,
       detail: null,
     },
+    webRunInspector: {
+      runId: null,
+      loading: false,
+      error: null,
+      detail: null,
+      pages: [],
+    },
+    webRunActionRunId: null,
     uploadInProgress: false,
     uploadFailures: [],
     uploadQueue: [],
     selectedDocumentId: null,
+    selectedWebRunId: null,
+  }
+}
+
+function normalizeWorkspaceCounters(
+  counters: Partial<DocumentsWorkspaceSurface['counters']> | null | undefined,
+): DocumentsWorkspaceSurface['counters'] {
+  const fallback = createEmptyWorkspace().counters
+  return {
+    processing: counters?.processing ?? fallback.processing,
+    readable: counters?.readable ?? fallback.readable,
+    graphSparse: counters?.graphSparse ?? fallback.graphSparse,
+    graphReady: counters?.graphReady ?? fallback.graphReady,
+    failed: counters?.failed ?? fallback.failed,
   }
 }
 
@@ -215,8 +252,10 @@ function createUploadPlaceholder(file: File): DocumentRowSummary {
     stalledReason: null,
     costAmount: null,
     costLabel: null,
+    failureMessage: null,
     canRetry: false,
     detailAvailable: false,
+    preparation: null,
   }
 }
 
@@ -245,6 +284,10 @@ export const useDocumentsStore = defineStore('documents', {
     workspace: createEmptyWorkspace(),
     mutationLoading: false,
     mutationError: null,
+    addLinkDialogOpen: false,
+    webRunLoading: false,
+    webRunError: null,
+    lastAcceptedWebRun: null,
     appendDialogDocumentId: null,
     replaceDialogDocumentId: null,
     deleteDialogDocumentId: null,
@@ -276,13 +319,20 @@ export const useDocumentsStore = defineStore('documents', {
           if (!statusFilter) {
             return true
           }
+          const readiness = row.preparation?.readinessKind ?? row.status
           if (statusFilter === 'in_progress') {
-            return row.status === 'queued' || row.status === 'processing'
+            return readiness === 'processing' || readiness === 'queued'
           }
           if (statusFilter === 'ready') {
-            return row.status === 'ready' || row.status === 'ready_no_graph'
+            return (
+              readiness === 'readable' ||
+              readiness === 'graph_sparse' ||
+              readiness === 'graph_ready' ||
+              readiness === 'ready' ||
+              readiness === 'ready_no_graph'
+            )
           }
-          return row.status === 'failed'
+          return readiness === 'failed'
         })
 
       const sorted = rows.slice().sort((left, right) => {
@@ -324,11 +374,20 @@ export const useDocumentsStore = defineStore('documents', {
       return state.workspace.rows.find((row) => row.id === state.deleteDialogDocumentId) ?? null
     },
     refreshIntervalMs(state): number {
-      const activeCount = state.workspace.counters.queued + state.workspace.counters.processing
+      const activeCount = normalizeWorkspaceCounters(state.workspace.counters).processing
+      const hasActiveWebRuns = state.workspace.webRuns.some((run) =>
+        ['accepted', 'discovering', 'processing'].includes(run.runState),
+      )
       const inspectorStatus = state.workspace.inspector.detail?.status ?? null
+      const inspectorReadiness =
+        state.workspace.inspector.detail?.preparation?.readinessKind ?? null
       const inspectorActive =
-        inspectorStatus === 'queued' || inspectorStatus === 'processing'
-      return activeCount > 0 || inspectorActive ? REFRESH_INTERVAL_MS : 0
+        inspectorStatus === 'queued' ||
+        inspectorStatus === 'processing' ||
+        inspectorReadiness === 'processing' ||
+        inspectorReadiness === 'readable' ||
+        inspectorReadiness === 'graph_sparse'
+      return activeCount > 0 || inspectorActive || hasActiveWebRuns ? REFRESH_INTERVAL_MS : 0
     },
   },
   actions: {
@@ -340,6 +399,17 @@ export const useDocumentsStore = defineStore('documents', {
     },
     setStatusFilter(value: DocumentDisplayStatus | ''): void {
       this.workspace.filters.statusFilter = value
+    },
+    openAddLinkDialog(): void {
+      this.webRunError = null
+      this.addLinkDialogOpen = true
+    },
+    closeAddLinkDialog(): void {
+      if (this.webRunLoading) {
+        return
+      }
+      this.webRunError = null
+      this.addLinkDialogOpen = false
     },
     toggleSort(field: DocumentsSortField): void {
       if (this.workspace.filters.sortField === field) {
@@ -363,17 +433,20 @@ export const useDocumentsStore = defineStore('documents', {
           return
         }
 
-        const [surface, costSummary] = await Promise.all([
+        const [surface, costSummary, webRuns] = await Promise.all([
           fetchDocumentsSurface(),
-          activeLibrary ? fetchLibraryCostSummary(activeLibrary.id) : Promise.resolve(null),
+          fetchLibraryCostSummary(activeLibrary.id),
+          fetchWebIngestRuns(activeLibrary.id),
         ])
         this.workspace.acceptedFormats = surface.acceptedFormats
         this.workspace.maxSizeMb = surface.maxSizeMb
-        this.workspace.counters = surface.counters
+        this.workspace.counters = normalizeWorkspaceCounters(surface.counters)
         this.workspace.costSummary = costSummary
         this.workspace.rows = surface.rows
+        this.workspace.webRuns = webRuns
         if (options?.syncInspector) {
           await this.refreshInspector().catch(() => undefined)
+          await this.refreshWebRunInspector().catch(() => undefined)
         }
       } catch (error) {
         this.workspace.error =
@@ -390,10 +463,18 @@ export const useDocumentsStore = defineStore('documents', {
       }
       await this.loadDetail(documentId, { silent: true })
     },
+    async refreshWebRunInspector(): Promise<void> {
+      const runId = this.workspace.selectedWebRunId
+      if (!runId) {
+        return
+      }
+      await this.loadWebRun(runId, { silent: true })
+    },
     async loadDetail(id: string, options?: { silent?: boolean }): Promise<DocumentDetail> {
       if (!options?.silent) {
         this.workspace.inspector.loading = true
       }
+      this.workspace.inspector.documentId = id
       this.workspace.inspector.error = null
       try {
         const detail = await fetchDocumentDetail(id)
@@ -424,6 +505,7 @@ export const useDocumentsStore = defineStore('documents', {
         this.closeDetail()
         return
       }
+      this.closeWebRun()
       this.workspace.selectedDocumentId = normalizedId
       await this.loadDetail(normalizedId)
     },
@@ -434,6 +516,55 @@ export const useDocumentsStore = defineStore('documents', {
         loading: false,
         error: null,
         detail: null,
+      }
+    },
+    async loadWebRun(runId: string, options?: { silent?: boolean }): Promise<WebIngestRun> {
+      if (!options?.silent) {
+        this.workspace.webRunInspector.loading = true
+      }
+      this.workspace.webRunInspector.runId = runId
+      this.workspace.webRunInspector.error = null
+      try {
+        const [detail, pages] = await Promise.all([
+          fetchWebIngestRun(runId),
+          fetchWebIngestRunPages(runId),
+        ])
+        this.workspace.webRunInspector.detail = detail
+        this.workspace.webRunInspector.pages = pages
+        this.workspace.webRunInspector.runId = runId
+        return detail
+      } catch (error) {
+        this.workspace.webRunInspector.error =
+          error instanceof Error ? error.message : 'Failed to load web ingest run'
+        if (!options?.silent) {
+          this.workspace.webRunInspector.detail = null
+          this.workspace.webRunInspector.pages = []
+        }
+        throw error
+      } finally {
+        if (!options?.silent) {
+          this.workspace.webRunInspector.loading = false
+        }
+      }
+    },
+    async openWebRun(runId: string): Promise<void> {
+      const normalizedId = runId.trim()
+      if (!normalizedId) {
+        this.closeWebRun()
+        return
+      }
+      this.closeDetail()
+      this.workspace.selectedWebRunId = normalizedId
+      await this.loadWebRun(normalizedId)
+    },
+    closeWebRun(): void {
+      this.workspace.selectedWebRunId = null
+      this.workspace.webRunInspector = {
+        runId: null,
+        loading: false,
+        error: null,
+        detail: null,
+        pages: [],
       }
     },
     openAppendDialog(id: string): void {
@@ -482,7 +613,8 @@ export const useDocumentsStore = defineStore('documents', {
       const libraryId = activeLibrary?.id ?? null
       if (!activeWorkspace || !activeLibrary) {
         this.workspace.uploadInProgress = false
-        this.workspace.error = 'Active workspace and library are required before uploading documents'
+        this.workspace.error =
+          'Active workspace and library are required before uploading documents'
         return
       }
 
@@ -520,7 +652,10 @@ export const useDocumentsStore = defineStore('documents', {
               this.workspace.uploadQueue = this.workspace.uploadQueue.filter(
                 (item) => item.id !== placeholderId,
               )
-              this.workspace.rows = [row, ...this.workspace.rows.filter((item) => item.id !== row.id)]
+              this.workspace.rows = [
+                row,
+                ...this.workspace.rows.filter((item) => item.id !== row.id),
+              ]
             } catch (error) {
               this.workspace.uploadQueue = this.workspace.uploadQueue.filter(
                 (item) => item.id !== placeholderId,
@@ -542,11 +677,35 @@ export const useDocumentsStore = defineStore('documents', {
               : `${String(failures.length)} files failed to upload. First error: ${firstFailure.message}`
         }
       } catch (error) {
-        this.workspace.error =
-          error instanceof Error ? error.message : 'Failed to upload documents'
+        this.workspace.error = error instanceof Error ? error.message : 'Failed to upload documents'
         throw error
       } finally {
         this.workspace.uploadInProgress = false
+      }
+    },
+    async submitWebIngestRun(
+      input: Omit<CreateWebIngestRunInput, 'libraryId'>,
+    ): Promise<WebIngestRunReceipt> {
+      const libraryId = useShellStore().activeLibrary?.id ?? null
+      if (!libraryId) {
+        throw new Error('Active library is not selected')
+      }
+
+      this.webRunLoading = true
+      this.webRunError = null
+      try {
+        const receipt = await createWebIngestRun({ ...input, libraryId })
+        this.lastAcceptedWebRun = receipt
+        this.addLinkDialogOpen = false
+        await this.loadWorkspace({ syncInspector: true })
+        await this.openWebRun(receipt.runId)
+        return receipt
+      } catch (error) {
+        this.webRunError =
+          error instanceof Error ? error.message : 'Failed to submit web ingest run'
+        throw error
+      } finally {
+        this.webRunLoading = false
       }
     },
     async retryDocument(id: string): Promise<void> {
@@ -578,11 +737,30 @@ export const useDocumentsStore = defineStore('documents', {
           this.closeDetail()
         }
       } catch (error) {
-        this.mutationError =
-          error instanceof Error ? error.message : 'Failed to delete document'
+        this.mutationError = error instanceof Error ? error.message : 'Failed to delete document'
         throw error
       } finally {
         this.mutationLoading = false
+      }
+    },
+    async cancelWebRun(runId: string): Promise<WebIngestRunReceipt> {
+      this.webRunLoading = true
+      this.webRunError = null
+      this.workspace.webRunActionRunId = runId
+      try {
+        const receipt = await cancelWebIngestRun(runId)
+        await this.loadWorkspace({ syncInspector: true })
+        if (this.workspace.selectedWebRunId === runId) {
+          await this.loadWebRun(runId, { silent: true }).catch(() => undefined)
+        }
+        return receipt
+      } catch (error) {
+        this.webRunError =
+          error instanceof Error ? error.message : 'Failed to cancel web ingest run'
+        throw error
+      } finally {
+        this.workspace.webRunActionRunId = null
+        this.webRunLoading = false
       }
     },
     async submitAppendDocument(id: string, content: string): Promise<DocumentMutationAccepted> {

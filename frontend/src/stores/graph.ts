@@ -120,13 +120,8 @@ export const useGraphStore = defineStore('graph', {
         hiddenNodeCount: 0,
         filteredArtifactCount: 0,
         lastBuiltAt: null,
-        documentCounters: {
-          queued: 0,
-          processing: 0,
-          ready: 0,
-          readyNoGraph: 0,
-          failed: 0,
-        },
+        readinessSummary: null,
+        graphCoverage: null,
         warning: null,
         nodes: [],
         edges: [],
@@ -144,29 +139,27 @@ export const useGraphStore = defineStore('graph', {
       this.activeLibraryId = libraryId
       const requestId = ++this.loadRequestId
       const shouldShowLoading =
-        !options?.preserveUi || !this.surface || previousLibraryId !== libraryId
+        !options?.preserveUi || this.surface === null || previousLibraryId !== libraryId
 
       if (!this.surface) {
         this.surface = this.createEmptySurface()
       }
+      const currentSurface = this.surface
 
-      if (shouldShowLoading && this.surface) {
-        this.surface.loading = true
+      if (shouldShowLoading) {
+        currentSurface.loading = true
       }
+      currentSurface.error = null
 
-      if (this.surface) {
-        this.surface.error = null
-      }
-
-      if (!options?.preserveUi && this.surface) {
-        this.surface.overlay.searchQuery = ''
-        this.surface.overlay.searchHits = []
-        this.surface.overlay.nodeTypeFilter = ''
-        this.surface.overlay.activeLayout = resolveDefaultGraphLayoutMode(
-          this.surface.nodeCount,
-          this.surface.edgeCount,
+      if (!options?.preserveUi) {
+        currentSurface.overlay.searchQuery = ''
+        currentSurface.overlay.searchHits = []
+        currentSurface.overlay.nodeTypeFilter = ''
+        currentSurface.overlay.activeLayout = resolveDefaultGraphLayoutMode(
+          currentSurface.nodeCount,
+          currentSurface.edgeCount,
         )
-        this.surface.overlay.showFilteredArtifacts = false
+        currentSurface.overlay.showFilteredArtifacts = false
       }
 
       try {
@@ -174,11 +167,11 @@ export const useGraphStore = defineStore('graph', {
         if (this.loadRequestId !== requestId || this.activeLibraryId !== libraryId) {
           return
         }
-        const preservedOverlay = this.surface?.overlay
-        const preservedInspector = this.surface?.inspector
+        const preservedOverlay = currentSurface.overlay
+        const preservedInspector = currentSurface.inspector
         const nextFocusedNodeId = resolveFocusedNodeId(
           surface.nodes,
-          preservedInspector?.focusedNodeId ?? null,
+          preservedInspector.focusedNodeId,
         )
         this.surface = {
           ...surface,
@@ -186,42 +179,38 @@ export const useGraphStore = defineStore('graph', {
             nodeCount: surface.nodeCount,
             edgeCount: surface.edgeCount,
             filteredArtifactCount: surface.filteredArtifactCount ?? 0,
-            searchQuery: preservedOverlay?.searchQuery,
+            searchQuery: preservedOverlay.searchQuery,
             searchHits: [],
-            nodeTypeFilter: preservedOverlay?.nodeTypeFilter,
+            nodeTypeFilter: preservedOverlay.nodeTypeFilter,
             activeLayout: options?.preserveUi
-              ? preservedOverlay?.activeLayout
+              ? preservedOverlay.activeLayout
               : surface.overlay.activeLayout,
-            showFilteredArtifacts: preservedOverlay?.showFilteredArtifacts,
-            showLegend: preservedOverlay?.showLegend,
-            showFilters: preservedOverlay?.showFilters,
-            zoomLevel: preservedOverlay?.zoomLevel,
+            showFilteredArtifacts: preservedOverlay.showFilteredArtifacts,
+            showLegend: preservedOverlay.showLegend,
+            showFilters: preservedOverlay.showFilters,
+            zoomLevel: preservedOverlay.zoomLevel,
           }),
           inspector: createGraphInspectorState({
             focusedNodeId: nextFocusedNodeId,
-            detail: preservedInspector?.detail ?? null,
-            loading: preservedInspector?.loading ?? false,
-            error: preservedInspector?.error ?? null,
+            detail: preservedInspector.detail,
+            loading: preservedInspector.loading,
+            error: preservedInspector.error,
           }),
         }
         this.syncSearchHits()
-        this.routeWarning = surface.warning ?? null
+        this.routeWarning = surface.warning
         await this.loadFocusedNodeDetail(libraryId, nextFocusedNodeId)
       } catch (error) {
         if (this.loadRequestId !== requestId || this.activeLibraryId !== libraryId) {
           return
         }
-        if (this.surface) {
-          this.surface.error =
-            error instanceof Error ? error.message : 'Failed to load graph surface'
-          this.surface.canvasMode = 'error'
-        }
+        currentSurface.error =
+          error instanceof Error ? error.message : 'Failed to load graph surface'
+        currentSurface.canvasMode = 'error'
         throw error
       } finally {
         if (this.loadRequestId === requestId) {
-          if (this.surface) {
-            this.surface.loading = false
-          }
+          currentSurface.loading = false
         }
       }
     },
@@ -233,7 +222,7 @@ export const useGraphStore = defineStore('graph', {
 
       const previousStatus = this.surface.graphStatus
       const previousGeneration = this.surface.graphGeneration
-      const previousGenerationState = this.surface.graphGenerationState ?? null
+      const previousGenerationState = this.surface.graphGenerationState
       const previousLastBuiltAt = this.surface.lastBuiltAt
       const previousCanvasMode = this.surface.canvasMode
       const previousNodeCount = this.surface.nodeCount
@@ -243,9 +232,19 @@ export const useGraphStore = defineStore('graph', {
         libraryId,
         this.surface.nodeCount,
         this.surface.relationCount,
+        {
+          graphStatus: this.surface.graphStatus,
+          convergenceStatus: this.surface.convergenceStatus,
+          graphGeneration: this.surface.graphGeneration,
+          graphGenerationState: this.surface.graphGenerationState ?? null,
+          lastBuiltAt: this.surface.lastBuiltAt,
+          readinessSummary: this.surface.readinessSummary,
+          graphCoverage: this.surface.graphCoverage,
+          warning: this.surface.warning,
+        },
       )
 
-      if (this.activeLibraryId !== libraryId || !this.surface) {
+      if (this.activeLibraryId !== libraryId) {
         return
       }
 
@@ -254,7 +253,8 @@ export const useGraphStore = defineStore('graph', {
       this.surface.graphGeneration = heartbeat.graphGeneration
       this.surface.graphGenerationState = heartbeat.graphGenerationState
       this.surface.lastBuiltAt = heartbeat.lastBuiltAt
-      this.surface.documentCounters = heartbeat.documentCounters
+      this.surface.readinessSummary = heartbeat.readinessSummary
+      this.surface.graphCoverage = heartbeat.graphCoverage
       this.surface.warning = heartbeat.warning
       this.routeWarning = heartbeat.warning
 
@@ -300,7 +300,7 @@ export const useGraphStore = defineStore('graph', {
       if (!this.surface) {
         return
       }
-      const resolved = resolveFocusedNodeId(this.surface.nodes ?? [], identifier)
+      const resolved = resolveFocusedNodeId(this.surface.nodes, identifier)
       this.surface.inspector.focusedNodeId = resolved
       await this.loadFocusedNodeDetail(this.activeLibraryId, resolved)
     },
@@ -317,7 +317,7 @@ export const useGraphStore = defineStore('graph', {
       this.surface.overlay.nodeTypeFilter = value
       this.syncSearchHits()
     },
-    async setShowFilteredArtifacts(value: boolean): Promise<void> {
+    setShowFilteredArtifacts(value: boolean): void {
       if (!this.surface) {
         return
       }
@@ -354,11 +354,7 @@ export const useGraphStore = defineStore('graph', {
       this.surface.inspector.error = null
 
       try {
-        const detail = await fetchGraphNodeDetail(
-          resolvedLibraryId,
-          this.surface.nodes ?? [],
-          identifier,
-        )
+        const detail = await fetchGraphNodeDetail(resolvedLibraryId, this.surface.nodes, identifier)
         if (this.detailRequestId !== requestId || this.activeLibraryId !== resolvedLibraryId) {
           return
         }
@@ -372,19 +368,15 @@ export const useGraphStore = defineStore('graph', {
         if (this.detailRequestId !== requestId) {
           return
         }
-        if (this.surface) {
-          this.surface.inspector = createGraphInspectorState({
-            focusedNodeId: identifier,
-            detail: null,
-            loading: false,
-            error: 'Failed to load node detail',
-          })
-        }
+        this.surface.inspector = createGraphInspectorState({
+          focusedNodeId: identifier,
+          detail: null,
+          loading: false,
+          error: 'Failed to load node detail',
+        })
       } finally {
         if (this.detailRequestId === requestId) {
-          if (this.surface) {
-            this.surface.inspector.loading = false
-          }
+          this.surface.inspector.loading = false
         }
       }
     },

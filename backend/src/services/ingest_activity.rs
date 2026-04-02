@@ -1,6 +1,9 @@
 use chrono::{DateTime, Duration, Utc};
 
-use crate::domains::runtime_ingestion::{RuntimeDocumentActivityStatus, RuntimeIngestionStatus};
+use crate::domains::{
+    content::{ContentDocumentPipelineJob, ContentMutation},
+    runtime_ingestion::{RuntimeDocumentActivityStatus, RuntimeIngestionStatus},
+};
 
 #[derive(Debug, Clone)]
 pub struct IngestActivityService {
@@ -123,6 +126,113 @@ impl IngestActivityService {
             }
         })
     }
+
+    #[must_use]
+    pub fn derive_document_activity(
+        &self,
+        latest_mutation: Option<&ContentMutation>,
+        latest_job: Option<&ContentDocumentPipelineJob>,
+        text_ready: bool,
+        graph_ready: bool,
+        now: DateTime<Utc>,
+    ) -> RuntimeDocumentActivityStatus {
+        let signal = document_activity_signal(latest_mutation, latest_job, text_ready, graph_ready);
+        self.derive_status(
+            signal.run_status,
+            signal.claimed_at,
+            signal.last_activity_at,
+            signal.latest_error,
+            now,
+        )
+    }
+
+    #[must_use]
+    pub fn document_stalled_reason(
+        &self,
+        latest_mutation: Option<&ContentMutation>,
+        latest_job: Option<&ContentDocumentPipelineJob>,
+        text_ready: bool,
+        graph_ready: bool,
+        now: DateTime<Utc>,
+    ) -> Option<String> {
+        let signal = document_activity_signal(latest_mutation, latest_job, text_ready, graph_ready);
+        self.stalled_reason(
+            signal.run_status,
+            signal.claimed_at,
+            signal.last_activity_at,
+            signal.latest_error,
+            now,
+        )
+    }
+}
+
+struct DocumentActivitySignal<'a> {
+    run_status: RuntimeIngestionStatus,
+    claimed_at: Option<DateTime<Utc>>,
+    last_activity_at: Option<DateTime<Utc>>,
+    latest_error: Option<&'a str>,
+}
+
+fn document_activity_signal<'a>(
+    latest_mutation: Option<&'a ContentMutation>,
+    latest_job: Option<&'a ContentDocumentPipelineJob>,
+    text_ready: bool,
+    graph_ready: bool,
+) -> DocumentActivitySignal<'a> {
+    if let Some(job) = latest_job {
+        let run_status = map_job_queue_state(&job.queue_state, text_ready, graph_ready);
+        return DocumentActivitySignal {
+            run_status,
+            claimed_at: job.claimed_at,
+            last_activity_at: job.last_activity_at.or(job.completed_at).or(Some(job.queued_at)),
+            latest_error: job.failure_code.as_deref(),
+        };
+    }
+
+    if let Some(mutation) = latest_mutation {
+        let run_status = match mutation.mutation_state.as_str() {
+            "accepted" | "running" => RuntimeIngestionStatus::Processing,
+            "failed" | "conflicted" | "canceled" => RuntimeIngestionStatus::Failed,
+            _ if graph_ready => RuntimeIngestionStatus::Ready,
+            _ if text_ready => RuntimeIngestionStatus::ReadyNoGraph,
+            _ => RuntimeIngestionStatus::Queued,
+        };
+        return DocumentActivitySignal {
+            run_status,
+            claimed_at: Some(mutation.requested_at),
+            last_activity_at: mutation.completed_at.or(Some(mutation.requested_at)),
+            latest_error: mutation.failure_code.as_deref(),
+        };
+    }
+
+    DocumentActivitySignal {
+        run_status: if graph_ready {
+            RuntimeIngestionStatus::Ready
+        } else if text_ready {
+            RuntimeIngestionStatus::ReadyNoGraph
+        } else {
+            RuntimeIngestionStatus::Queued
+        },
+        claimed_at: None,
+        last_activity_at: None,
+        latest_error: None,
+    }
+}
+
+fn map_job_queue_state(
+    queue_state: &str,
+    text_ready: bool,
+    graph_ready: bool,
+) -> RuntimeIngestionStatus {
+    match queue_state {
+        "queued" => RuntimeIngestionStatus::Queued,
+        "leased" => RuntimeIngestionStatus::Processing,
+        "completed" if graph_ready => RuntimeIngestionStatus::Ready,
+        "completed" if text_ready => RuntimeIngestionStatus::ReadyNoGraph,
+        "completed" => RuntimeIngestionStatus::Processing,
+        "failed" | "canceled" => RuntimeIngestionStatus::Failed,
+        _ => RuntimeIngestionStatus::Processing,
+    }
 }
 
 fn derive_queued_status(
@@ -155,6 +265,8 @@ fn is_blocked_message(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domains::content::{ContentDocumentPipelineJob, ContentMutation};
+    use uuid::Uuid;
 
     #[test]
     fn processing_with_fresh_activity_is_active() {
@@ -242,5 +354,64 @@ mod tests {
             ),
             Some("claimed but no visible activity followed for 300s".to_string())
         );
+    }
+
+    #[test]
+    fn leased_document_job_with_stale_heartbeat_becomes_stalled() {
+        let service = IngestActivityService::new(45, 180);
+        let now = Utc::now();
+        let job = ContentDocumentPipelineJob {
+            id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            mutation_id: Some(Uuid::now_v7()),
+            async_operation_id: None,
+            job_kind: "content_mutation".to_string(),
+            queue_state: "leased".to_string(),
+            queued_at: now - Duration::seconds(600),
+            available_at: now - Duration::seconds(600),
+            completed_at: None,
+            claimed_at: Some(now - Duration::seconds(300)),
+            last_activity_at: Some(now - Duration::seconds(300)),
+            current_stage: Some("extract_content".to_string()),
+            failure_code: None,
+            retryable: false,
+        };
+
+        assert_eq!(
+            service.derive_document_activity(None, Some(&job), false, false, now),
+            RuntimeDocumentActivityStatus::Stalled
+        );
+        assert_eq!(
+            service.document_stalled_reason(None, Some(&job), false, false, now),
+            Some("no visible activity for 300s".to_string())
+        );
+    }
+
+    #[test]
+    fn applied_document_mutation_without_job_is_ready_when_text_is_readable() {
+        let service = IngestActivityService::default();
+        let now = Utc::now();
+        let mutation = ContentMutation {
+            id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            operation_kind: "web_capture".to_string(),
+            mutation_state: "applied".to_string(),
+            requested_at: now - Duration::seconds(10),
+            completed_at: Some(now - Duration::seconds(5)),
+            requested_by_principal_id: None,
+            request_surface: "test".to_string(),
+            idempotency_key: None,
+            source_identity: None,
+            failure_code: None,
+            conflict_code: None,
+        };
+
+        assert_eq!(
+            service.derive_document_activity(Some(&mutation), None, true, false, now),
+            RuntimeDocumentActivityStatus::Ready
+        );
+        assert_eq!(service.document_stalled_reason(Some(&mutation), None, true, false, now), None);
     }
 }

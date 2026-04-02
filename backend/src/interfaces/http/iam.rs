@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
+    domains::ai::{AiBindingPurpose, ModelCatalogEntry},
     domains::iam::{Grant, GrantResourceKind, WorkspaceMembership},
     infra::repositories::{
         ai_repository, catalog_repository, iam_repository, ops_repository, query_repository,
@@ -21,10 +22,14 @@ use crate::{
         router_support::{ApiError, RequestId},
         ui_support::{build_cleared_session_cookie, build_session_cookie},
     },
+    services::ai_catalog_service::{
+        BootstrapAiBindingInput, BootstrapAiCredentialInput, BootstrapAiCredentialSource,
+        BootstrapAiProviderDescriptor, BootstrapAiSetupDescriptor,
+    },
     services::audit_service::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
     services::iam_service::{
-        AuthenticateSessionCommand, BootstrapClaimCommand, BootstrapSetupCommand,
-        CreateGrantCommand,
+        AuthenticateSessionCommand, BootstrapClaimCommand, BootstrapSetupAiCommand,
+        BootstrapSetupCommand, CreateGrantCommand,
     },
 };
 
@@ -179,6 +184,7 @@ pub struct BootstrapClaimResponse {
 #[serde(rename_all = "camelCase")]
 pub struct BootstrapStatusResponse {
     pub setup_required: bool,
+    pub ai_setup: Option<BootstrapAiSetupResponse>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -204,6 +210,70 @@ pub struct BootstrapSetupRequest {
     pub login: String,
     pub display_name: Option<String>,
     pub password: String,
+    pub ai_setup: Option<BootstrapSetupAiRequest>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapProviderCatalogEntryResponse {
+    pub id: Uuid,
+    pub provider_kind: String,
+    pub display_name: String,
+    pub api_style: String,
+    pub lifecycle_state: String,
+    pub credential_source: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapModelCatalogEntryResponse {
+    pub id: Uuid,
+    pub provider_catalog_id: Uuid,
+    pub model_name: String,
+    pub capability_kind: String,
+    pub modality_kind: String,
+    pub allowed_binding_purposes: Vec<AiBindingPurpose>,
+    pub context_window: Option<i32>,
+    pub max_output_tokens: Option<i32>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapBindingSelectionResponse {
+    pub binding_purpose: AiBindingPurpose,
+    pub provider_kind: Option<String>,
+    pub model_catalog_id: Option<Uuid>,
+    pub configured: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapAiSetupResponse {
+    pub providers: Vec<BootstrapProviderCatalogEntryResponse>,
+    pub models: Vec<BootstrapModelCatalogEntryResponse>,
+    pub binding_selections: Vec<BootstrapBindingSelectionResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapBindingSelectionRequest {
+    pub binding_purpose: AiBindingPurpose,
+    pub provider_kind: String,
+    pub model_catalog_id: Uuid,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapCredentialInputRequest {
+    pub provider_kind: String,
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapSetupAiRequest {
+    pub credentials: Vec<BootstrapCredentialInputRequest>,
+    pub binding_selections: Vec<BootstrapBindingSelectionRequest>,
 }
 
 #[derive(Debug, Serialize)]
@@ -242,7 +312,10 @@ async fn get_bootstrap_status(
     State(state): State<AppState>,
 ) -> Result<Json<BootstrapStatusResponse>, ApiError> {
     let outcome = state.canonical_services.iam.get_bootstrap_status(&state).await?;
-    Ok(Json(BootstrapStatusResponse { setup_required: outcome.setup_required }))
+    Ok(Json(BootstrapStatusResponse {
+        setup_required: outcome.setup_required,
+        ai_setup: outcome.ai_setup.map(map_bootstrap_ai_setup),
+    }))
 }
 
 async fn setup_bootstrap_admin(
@@ -260,6 +333,25 @@ async fn setup_bootstrap_admin(
                 login: payload.login,
                 display_name: payload.display_name,
                 password: payload.password,
+                ai_setup: payload.ai_setup.map(|ai_setup| BootstrapSetupAiCommand {
+                    credentials: ai_setup
+                        .credentials
+                        .into_iter()
+                        .map(|credential| BootstrapAiCredentialInput {
+                            provider_kind: credential.provider_kind,
+                            api_key: credential.api_key,
+                        })
+                        .collect(),
+                    binding_selections: ai_setup
+                        .binding_selections
+                        .into_iter()
+                        .map(|selection| BootstrapAiBindingInput {
+                            binding_purpose: selection.binding_purpose,
+                            provider_kind: selection.provider_kind,
+                            model_catalog_id: selection.model_catalog_id,
+                        })
+                        .collect(),
+                }),
                 ttl_hours: state.ui_session_cookie.ttl_hours,
                 request_id: request_id.clone(),
             },
@@ -1158,6 +1250,52 @@ fn validate_permission_kind_for_resource(
             permission_kind.as_str(),
             resource_kind.as_str()
         )))
+    }
+}
+
+fn map_bootstrap_ai_setup(descriptor: BootstrapAiSetupDescriptor) -> BootstrapAiSetupResponse {
+    BootstrapAiSetupResponse {
+        providers: descriptor.providers.into_iter().map(map_bootstrap_provider).collect(),
+        models: descriptor.models.into_iter().map(map_bootstrap_model).collect(),
+        binding_selections: descriptor
+            .binding_selections
+            .into_iter()
+            .map(|selection| BootstrapBindingSelectionResponse {
+                binding_purpose: selection.binding_purpose,
+                provider_kind: selection.provider_kind,
+                model_catalog_id: selection.model_catalog_id,
+                configured: selection.configured,
+            })
+            .collect(),
+    }
+}
+
+fn map_bootstrap_provider(
+    entry: BootstrapAiProviderDescriptor,
+) -> BootstrapProviderCatalogEntryResponse {
+    BootstrapProviderCatalogEntryResponse {
+        id: entry.provider_catalog_id,
+        provider_kind: entry.provider_kind,
+        display_name: entry.display_name,
+        api_style: entry.api_style,
+        lifecycle_state: entry.lifecycle_state,
+        credential_source: match entry.credential_source {
+            BootstrapAiCredentialSource::Missing => "missing".to_string(),
+            BootstrapAiCredentialSource::Env => "env".to_string(),
+        },
+    }
+}
+
+fn map_bootstrap_model(entry: ModelCatalogEntry) -> BootstrapModelCatalogEntryResponse {
+    BootstrapModelCatalogEntryResponse {
+        id: entry.id,
+        provider_catalog_id: entry.provider_catalog_id,
+        model_name: entry.model_name,
+        capability_kind: entry.capability_kind,
+        modality_kind: entry.modality_kind,
+        allowed_binding_purposes: entry.allowed_binding_purposes,
+        context_window: entry.context_window,
+        max_output_tokens: entry.max_output_tokens,
     }
 }
 

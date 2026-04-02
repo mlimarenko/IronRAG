@@ -1,3 +1,6 @@
+#[path = "support/web_ingest_support.rs"]
+mod web_ingest_support;
+
 use std::{sync::Arc, time::Duration as StdDuration};
 
 use anyhow::{Context, Result};
@@ -25,6 +28,7 @@ use rustrag_backend::{
             PromoteKnowledgeDocumentCommand, RefreshKnowledgeLibraryGenerationCommand,
         },
         ops_service::CreateAsyncOperationCommand,
+        web_ingest_service::CreateWebIngestRunCommand,
     },
 };
 
@@ -234,6 +238,7 @@ impl IngestAttemptsFixture {
                     workspace_id: workspace.id,
                     library_id: library.id,
                     external_key: format!("ingest-attempts-doc-{}", Uuid::now_v7().simple()),
+                    title: Some("Ingest Attempts Fixture".to_string()),
                     document_state: "active".to_string(),
                 },
             )
@@ -655,6 +660,90 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
     }
     .await;
 
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with canonical extensions"]
+async fn canonical_web_ingest_jobs_queue_page_materialization_only_after_discovery() -> Result<()> {
+    let fixture = IngestAttemptsFixture::create().await?;
+    let server = web_ingest_support::WebTestServer::start().await?;
+
+    let result = async {
+        let run = fixture
+            .state
+            .canonical_services
+            .web_ingest
+            .create_run(
+                &fixture.state,
+                CreateWebIngestRunCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    seed_url: server.url("/recursive/seed"),
+                    mode: "recursive_crawl".to_string(),
+                    boundary_policy: Some("same_host".to_string()),
+                    max_depth: Some(1),
+                    max_pages: Some(20),
+                    requested_by_principal_id: None,
+                    request_surface: "test".to_string(),
+                    idempotency_key: None,
+                },
+            )
+            .await
+            .context("failed to submit recursive web ingest run for queue-order test")?;
+
+        let admitted_jobs = fixture
+            .state
+            .canonical_services
+            .ingest
+            .list_jobs(&fixture.state, Some(fixture.workspace_id), Some(fixture.library_id))
+            .await
+            .context("failed to list admitted canonical jobs")?;
+        assert_eq!(admitted_jobs.len(), 1);
+        assert_eq!(admitted_jobs[0].job_kind, "web_discovery");
+
+        fixture
+            .state
+            .canonical_services
+            .web_ingest
+            .execute_recursive_discovery_job(&fixture.state, run.run_id)
+            .await
+            .context("failed to execute recursive discovery job directly")?;
+
+        let queued_jobs = fixture
+            .state
+            .canonical_services
+            .ingest
+            .list_jobs(&fixture.state, Some(fixture.workspace_id), Some(fixture.library_id))
+            .await
+            .context("failed to list canonical jobs after discovery")?;
+        let discovery_jobs =
+            queued_jobs.iter().filter(|job| job.job_kind == "web_discovery").collect::<Vec<_>>();
+        let page_jobs = queued_jobs
+            .iter()
+            .filter(|job| job.job_kind == "web_materialize_page")
+            .collect::<Vec<_>>();
+
+        assert_eq!(discovery_jobs.len(), 1);
+        assert!(!page_jobs.is_empty());
+        assert!(page_jobs.iter().all(|job| job.queued_at >= discovery_jobs[0].queued_at));
+
+        let refreshed_run = fixture
+            .state
+            .canonical_services
+            .web_ingest
+            .get_run(&fixture.state, run.run_id)
+            .await
+            .context("failed to refresh recursive run after discovery")?;
+        assert_eq!(refreshed_run.run_state, "processing");
+        assert!(refreshed_run.counts.queued > 0);
+
+        Ok(())
+    }
+    .await;
+
+    server.shutdown().await?;
     fixture.cleanup().await?;
     result
 }

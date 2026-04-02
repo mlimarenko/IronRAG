@@ -218,11 +218,9 @@ export const useAdminStore = defineStore('admin', {
       try {
         const contextKey = `${context.workspaceId}:${context.libraryId}`
         const principal = await fetchAdminPrincipal()
-        const canManageAi = hasScopedPermission(
-          principal,
-          context,
-          WORKSPACE_DISCOVERY_PERMISSIONS,
-        ) || hasScopedPermission(principal, context, LIBRARY_DISCOVERY_PERMISSIONS)
+        const canManageAi =
+          hasScopedPermission(principal, context, WORKSPACE_DISCOVERY_PERMISSIONS) ||
+          hasScopedPermission(principal, context, LIBRARY_DISCOVERY_PERMISSIONS)
         const canManageAccess = hasScopedPermission(principal, context, ACCESS_PERMISSIONS)
         const canReadOperations = hasScopedPermission(principal, context, OPERATIONS_PERMISSIONS)
         const canReadAudit = hasScopedPermission(principal, context, AUDIT_PERMISSIONS)
@@ -232,9 +230,7 @@ export const useAdminStore = defineStore('admin', {
         const [aiConsole, tokens, opsSnapshot, auditEvents] = await Promise.all([
           canManageAi ? fetchAdminAiConsole(context) : Promise.resolve(null),
           canManageAccess ? fetchAdminApiTokens(context.workspaceId) : Promise.resolve([]),
-          canReadOperations
-            ? fetchAdminLibraryOpsState(context.libraryId)
-            : Promise.resolve(null),
+          canReadOperations ? fetchAdminLibraryOpsState(context.libraryId) : Promise.resolve(null),
           canReadAudit
             ? fetchAdminAuditEvents({
                 workspaceId: context.workspaceId,
@@ -442,7 +438,8 @@ export const useAdminStore = defineStore('admin', {
         await this.reloadAiConsole()
         this.catalogCommitVersion += 1
       } catch (error) {
-        this.aiSetupError = error instanceof Error ? error.message : 'Failed to save library binding'
+        this.aiSetupError =
+          error instanceof Error ? error.message : 'Failed to save library binding'
         throw error
       } finally {
         this.aiSetupSaving = false
@@ -459,9 +456,7 @@ export const useAdminStore = defineStore('admin', {
         this.aiConsole = {
           ...this.aiConsole,
           bindings: this.aiConsole.bindings.map((binding) =>
-            binding.id === bindingId
-              ? { ...binding, latestValidation: validation }
-              : binding,
+            binding.id === bindingId ? { ...binding, latestValidation: validation } : binding,
           ),
         }
       } catch (error) {

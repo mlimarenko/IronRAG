@@ -7,10 +7,19 @@ use uuid::Uuid;
 
 use rustrag_backend::{
     app::{config::Settings, state::AppState},
+    domains::{
+        content::{
+            ContentDocument, ContentDocumentPipelineJob, ContentDocumentPipelineState,
+            ContentDocumentSummary, ContentMutation, ContentRevision, ContentRevisionReadiness,
+            DocumentReadinessSummary, RuntimeDocumentActivityStatus,
+        },
+        knowledge::StructuredDocumentRevision,
+    },
     infra::{
         arangodb::{
             bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
             client::ArangoClient,
+            document_store::KnowledgeRevisionRow,
         },
         persistence::Persistence,
         repositories::{ingest_repository, query_repository},
@@ -21,6 +30,7 @@ use rustrag_backend::{
             CreateKnowledgeDocumentCommand, CreateKnowledgeRevisionCommand,
             PromoteKnowledgeDocumentCommand, RefreshKnowledgeLibraryGenerationCommand,
         },
+        ops_service::OpsService,
     },
 };
 
@@ -234,6 +244,7 @@ impl OpsStateFixture {
                     workspace_id: workspace.id,
                     library_id: library.id,
                     external_key: format!("ops-state-doc-{suffix}"),
+                    title: Some("Ops State Fixture".to_string()),
                     document_state: "active".to_string(),
                 },
             )
@@ -712,4 +723,263 @@ async fn canonical_ops_warnings_cover_stale_and_failed_rebuild_signals() -> Resu
 
     fixture.cleanup().await?;
     result
+}
+
+fn sample_revision_row(
+    text_state: &str,
+    vector_state: &str,
+    graph_state: &str,
+) -> KnowledgeRevisionRow {
+    let now = Utc::now();
+    KnowledgeRevisionRow {
+        key: Uuid::now_v7().to_string(),
+        arango_id: None,
+        arango_rev: None,
+        revision_id: Uuid::now_v7(),
+        workspace_id: Uuid::now_v7(),
+        library_id: Uuid::now_v7(),
+        document_id: Uuid::now_v7(),
+        revision_number: 1,
+        revision_state: "active".to_string(),
+        revision_kind: "upload".to_string(),
+        storage_ref: Some("memory://ops-state".to_string()),
+        source_uri: Some("memory://ops-state/source".to_string()),
+        mime_type: "text/plain".to_string(),
+        checksum: "checksum".to_string(),
+        title: Some("Ops State".to_string()),
+        byte_size: 64,
+        normalized_text: Some("content".to_string()),
+        text_checksum: Some("text-checksum".to_string()),
+        text_state: text_state.to_string(),
+        vector_state: vector_state.to_string(),
+        graph_state: graph_state.to_string(),
+        text_readable_at: Some(now),
+        vector_ready_at: Some(now),
+        graph_ready_at: Some(now),
+        superseded_by_revision_id: None,
+        created_at: now,
+    }
+}
+
+fn sample_mutation(state: &str) -> ContentMutation {
+    ContentMutation {
+        id: Uuid::now_v7(),
+        workspace_id: Uuid::now_v7(),
+        library_id: Uuid::now_v7(),
+        operation_kind: "replace".to_string(),
+        mutation_state: state.to_string(),
+        requested_at: Utc::now(),
+        completed_at: None,
+        requested_by_principal_id: None,
+        request_surface: "test".to_string(),
+        idempotency_key: None,
+        source_identity: None,
+        failure_code: None,
+        conflict_code: None,
+    }
+}
+
+fn sample_job(state: &str) -> ContentDocumentPipelineJob {
+    let now = Utc::now();
+    ContentDocumentPipelineJob {
+        id: Uuid::now_v7(),
+        workspace_id: Uuid::now_v7(),
+        library_id: Uuid::now_v7(),
+        mutation_id: None,
+        async_operation_id: None,
+        job_kind: "process_document".to_string(),
+        queue_state: state.to_string(),
+        queued_at: now,
+        available_at: now,
+        completed_at: None,
+        claimed_at: None,
+        last_activity_at: Some(now),
+        current_stage: Some("prepare_structure".to_string()),
+        failure_code: None,
+        retryable: true,
+    }
+}
+
+fn sample_prepared_revision(
+    preparation_state: &str,
+    block_count: i32,
+    typed_fact_count: i32,
+) -> StructuredDocumentRevision {
+    StructuredDocumentRevision {
+        revision_id: Uuid::now_v7(),
+        document_id: Uuid::now_v7(),
+        workspace_id: Uuid::now_v7(),
+        library_id: Uuid::now_v7(),
+        preparation_state: preparation_state.to_string(),
+        normalization_profile: "canonical".to_string(),
+        source_format: "text/plain".to_string(),
+        language_code: Some("ru".to_string()),
+        block_count,
+        chunk_count: 1,
+        typed_fact_count,
+        outline: Vec::new(),
+        prepared_at: Utc::now(),
+    }
+}
+
+fn sample_document_summary(
+    readiness_kind: &str,
+    graph_coverage_kind: &str,
+    typed_fact_coverage: Option<f64>,
+) -> ContentDocumentSummary {
+    let document_id = Uuid::now_v7();
+    let revision_id = Uuid::now_v7();
+    ContentDocumentSummary {
+        document: ContentDocument {
+            id: document_id,
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            external_key: format!("doc-{document_id}"),
+            document_state: "active".to_string(),
+            created_at: Utc::now(),
+        },
+        head: None,
+        active_revision: Some(ContentRevision {
+            id: revision_id,
+            document_id,
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            revision_number: 1,
+            parent_revision_id: None,
+            content_source_kind: "upload".to_string(),
+            checksum: "checksum".to_string(),
+            mime_type: "text/plain".to_string(),
+            byte_size: 64,
+            title: Some("Ops Summary".to_string()),
+            language_code: Some("ru".to_string()),
+            source_uri: None,
+            storage_key: None,
+            created_by_principal_id: None,
+            created_at: Utc::now(),
+        }),
+        readiness: Some(ContentRevisionReadiness {
+            revision_id,
+            text_state: "text_readable".to_string(),
+            vector_state: "vector_ready".to_string(),
+            graph_state: if graph_coverage_kind == "graph_ready" {
+                "graph_ready".to_string()
+            } else {
+                "pending".to_string()
+            },
+            text_readable_at: Some(Utc::now()),
+            vector_ready_at: Some(Utc::now()),
+            graph_ready_at: Some(Utc::now()),
+        }),
+        readiness_summary: Some(DocumentReadinessSummary {
+            document_id,
+            active_revision_id: Some(revision_id),
+            readiness_kind: readiness_kind.to_string(),
+            activity_status: RuntimeDocumentActivityStatus::Ready,
+            stalled_reason: None,
+            preparation_state: "prepared".to_string(),
+            graph_coverage_kind: graph_coverage_kind.to_string(),
+            typed_fact_coverage,
+            last_mutation_id: None,
+            last_job_stage: None,
+            updated_at: Utc::now(),
+        }),
+        prepared_revision: Some(sample_prepared_revision(
+            "prepared",
+            10,
+            if typed_fact_coverage.unwrap_or_default() > 0.0 { 2 } else { 0 },
+        )),
+        web_page_provenance: None,
+        pipeline: ContentDocumentPipelineState { latest_mutation: None, latest_job: None },
+    }
+}
+
+#[test]
+fn canonical_document_knowledge_state_classifies_all_five_readiness_kinds() {
+    let service = OpsService::new();
+
+    let processing = service.classify_document_knowledge_state(
+        None,
+        None,
+        Some(&sample_mutation("accepted")),
+        None,
+    );
+    assert_eq!(processing.readiness_kind, "processing");
+    assert_eq!(processing.graph_coverage_kind, "processing");
+
+    let readable = service.classify_document_knowledge_state(
+        Some(&sample_revision_row("text_readable", "pending", "pending")),
+        Some(&sample_prepared_revision("prepared", 10, 1)),
+        None,
+        Some(&sample_job("queued")),
+    );
+    assert_eq!(readable.readiness_kind, "readable");
+    assert_eq!(readable.graph_coverage_kind, "graph_sparse");
+    assert!(readable.typed_fact_coverage.unwrap_or_default() > 0.0);
+
+    let graph_sparse = service.classify_document_knowledge_state(
+        Some(&sample_revision_row("text_readable", "vector_ready", "pending")),
+        Some(&sample_prepared_revision("prepared", 10, 0)),
+        None,
+        None,
+    );
+    assert_eq!(graph_sparse.readiness_kind, "graph_sparse");
+    assert_eq!(graph_sparse.graph_coverage_kind, "graph_sparse");
+
+    let graph_ready = service.classify_document_knowledge_state(
+        Some(&sample_revision_row("text_readable", "vector_ready", "graph_ready")),
+        Some(&sample_prepared_revision("prepared", 10, 3)),
+        None,
+        None,
+    );
+    assert_eq!(graph_ready.readiness_kind, "graph_ready");
+    assert_eq!(graph_ready.graph_coverage_kind, "graph_ready");
+
+    let legacy_ready_without_prepared_revision = service.classify_document_knowledge_state(
+        Some(&sample_revision_row("text_readable", "vector_ready", "graph_ready")),
+        None,
+        None,
+        None,
+    );
+    assert_eq!(legacy_ready_without_prepared_revision.readiness_kind, "graph_sparse");
+    assert_eq!(legacy_ready_without_prepared_revision.graph_coverage_kind, "graph_sparse");
+    assert_eq!(legacy_ready_without_prepared_revision.preparation_state, "pending");
+    assert!(legacy_ready_without_prepared_revision.readable);
+    assert!(!legacy_ready_without_prepared_revision.graph_ready);
+
+    let failed = service.classify_document_knowledge_state(
+        Some(&sample_revision_row("failed", "failed", "failed")),
+        Some(&sample_prepared_revision("failed", 10, 0)),
+        None,
+        None,
+    );
+    assert_eq!(failed.readiness_kind, "failed");
+    assert_eq!(failed.graph_coverage_kind, "failed");
+}
+
+#[test]
+fn canonical_library_knowledge_coverage_aggregates_readiness_and_graph_sparse_counts() {
+    let service = OpsService::new();
+    let library_id = Uuid::now_v7();
+    let coverage = service.derive_library_knowledge_coverage(
+        library_id,
+        &[
+            sample_document_summary("processing", "processing", None),
+            sample_document_summary("readable", "graph_sparse", Some(0.1)),
+            sample_document_summary("graph_sparse", "graph_sparse", None),
+            sample_document_summary("graph_ready", "graph_ready", Some(0.2)),
+            sample_document_summary("failed", "failed", None),
+        ],
+        Some(Uuid::now_v7()),
+    );
+
+    assert_eq!(coverage.library_id, library_id);
+    assert_eq!(coverage.document_counts_by_readiness.get("processing"), Some(&1));
+    assert_eq!(coverage.document_counts_by_readiness.get("readable"), Some(&1));
+    assert_eq!(coverage.document_counts_by_readiness.get("graph_sparse"), Some(&1));
+    assert_eq!(coverage.document_counts_by_readiness.get("graph_ready"), Some(&1));
+    assert_eq!(coverage.document_counts_by_readiness.get("failed"), Some(&1));
+    assert_eq!(coverage.graph_sparse_document_count, 2);
+    assert_eq!(coverage.graph_ready_document_count, 1);
+    assert_eq!(coverage.typed_fact_document_count, 2);
+    assert!(coverage.last_generation_id.is_some());
 }

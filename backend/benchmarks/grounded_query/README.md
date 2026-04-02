@@ -1,72 +1,109 @@
-# Grounded Query Live Benchmark
+# Grounded Query Benchmark Corpus
 
-Live benchmark harness for real RustRAG ingestion + retrieval + grounded answer quality.
+This benchmark package uses a neutral corpus made of:
 
-Suites:
-- `grad_api_suite.json`: baseline literal-fidelity and grounded-answer regression gate.
-- `grad_agent_workflows_suite.json`: stricter graph-backed agent workflow suite with higher chunk/entity/relation thresholds.
+- English Wikipedia plaintext extracts and related-context dossiers for semantic QA coverage
+- Wikimedia Commons images for non-text ingestion coverage
+- locally generated multiformat smoke fixtures for PDF, DOCX, PPTX, PNG, and JPG upload coverage
 
-Both suites:
-- upload the same three API-spec PDFs from `/home/leader/Nextcloud/Personal/GRAD/`
-- wait until documents become readable
-- keep polling until the pipeline goes quiet or the timeout expires
-- run fixed grounded questions
-- score:
-  - top retrieved document correctness
-  - whether retrieved chunk text contains required facts
-  - whether the final answer preserves those facts
-  - whether the query execution actually uses graph references when the case requires it
-  - whether the system refuses to invent unsupported APIs when the case is intentionally absent from the corpus
+Corpus files:
 
-Usage:
+- `knowledge_graph_wikipedia.md`
+- `graph_database_wikipedia.md`
+- `vector_database_wikipedia.md`
+- `large_language_model_wikipedia.md`
+- `rust_programming_language_wikipedia.md`
+- `retrieval_augmented_generation_wikipedia.md`
+- `optical_character_recognition_wikipedia.md`
+- `transformer_deep_learning_wikipedia.md`
+- `semantic_web_wikipedia.md`
+- `named_entity_recognition_wikipedia.md`
+- `information_retrieval_wikipedia.md`
+- `question_answering_wikipedia.md`
+- `knowledge_graph_diagram_wikipedia.png`
+- `rust_logo_wikipedia.png`
+- `semantic_web_stack_wikimedia.jpg`
+- `ocr_basic_wikimedia.png`
+- `upload_smoke_fixture.pdf`
+- `upload_smoke_fixture.docx`
+- `upload_smoke_fixture.png`
+- `runtime_upload_check.pdf`
+- `runtime_upload_check.docx`
+- `runtime_upload_check.pptx`
+- `runtime_upload_check.png`
+- `runtime_upload_check.jpg`
+
+Primary sources:
+
+- <https://en.wikipedia.org/wiki/Knowledge_graph>
+- <https://en.wikipedia.org/wiki/Graph_database>
+- <https://en.wikipedia.org/wiki/Vector_database>
+- <https://en.wikipedia.org/wiki/Large_language_model>
+- <https://en.wikipedia.org/wiki/Rust_(programming_language)>
+- <https://en.wikipedia.org/wiki/Retrieval-augmented_generation>
+- <https://en.wikipedia.org/wiki/Optical_character_recognition>
+- <https://en.wikipedia.org/wiki/Transformer_(deep_learning_architecture)>
+- <https://en.wikipedia.org/wiki/Semantic_Web>
+- <https://en.wikipedia.org/wiki/Named-entity_recognition>
+- <https://en.wikipedia.org/wiki/Information_retrieval>
+- <https://en.wikipedia.org/wiki/Question_answering>
+- <https://commons.wikimedia.org/wiki/File:W3c_semantic_web_stack.jpg>
+- <https://commons.wikimedia.org/wiki/File:OCRBasic.png>
+
+Local generated fixtures:
+
+- `upload_smoke_fixture.*` and `runtime_upload_check.*` are privacy-safe synthetic files used to exercise non-Markdown ingestion and query paths.
+
+The benchmark matrix is intentionally split into:
+
+- `api_baseline_suite.json`: single-document grounded recall
+- `workflow_strict_suite.json`: strict cross-document grounded QA
+- `layout_noise_suite.json`: literal-heavy lists and grouped terms
+- `graph_multihop_suite.json`: exploratory cross-document suite that stays non-blocking when graph participation is not deterministic on this neutral corpus
+- `multiformat_surface_suite.json`: strict upload and extraction checks across PDF, DOCX, PPTX, PNG, and JPG fixtures
+
+## Load the benchmark corpus into a deployed stack
+
+From the repository root:
 
 ```bash
-cd backend
-RUSTRAG_SESSION_COOKIE='<session-cookie>' \
-python3 benchmarks/grounded_query/run_live_benchmark.py \
-  --workspace-id 019d203e-9bb1-7042-b514-57fdcdaebe01 \
-  --output /tmp/rustrag-grounded-benchmark.json
+cd /home/leader/sources/RustRAG/rustrag
+export RUSTRAG_SESSION_COOKIE="..."
+export RUSTRAG_BENCHMARK_WORKSPACE_ID="workspace-uuid"
+make benchmark-grounded-seed
 ```
 
-Strict mode for regression gates:
+What this does:
+
+- creates a fresh benchmark library unless `RUSTRAG_BENCHMARK_LIBRARY_ID` is provided
+- uploads the full corpus referenced by the configured suite matrix
+- waits until the library becomes readable and quiet
+- writes `tmp-grounded-benchmarks/upload.result.json`
+- prints the created or reused `library.id` so you can inspect the data in the UI
+
+Useful variables:
+
+- `RUSTRAG_BENCHMARK_BASE_URL`: deployed API base URL, default `http://127.0.0.1:19000/v1`
+- `RUSTRAG_BENCHMARK_WORKSPACE_ID`: workspace UUID where the benchmark library should live
+- `RUSTRAG_SESSION_COOKIE`: value of `rustrag_ui_session`
+- `RUSTRAG_BENCHMARK_LIBRARY_NAME`: display name for a new seeded library
+- `RUSTRAG_BENCHMARK_LIBRARY_ID`: reuse an existing library instead of creating a fresh one
+- `RUSTRAG_BENCHMARK_SUITES`: override the suite list if you want to upload only a subset of the corpus
+
+Examples:
 
 ```bash
-cd backend
-RUSTRAG_SESSION_COOKIE='<session-cookie>' \
-python3 benchmarks/grounded_query/run_live_benchmark.py \
-  --workspace-id 019d203e-9bb1-7042-b514-57fdcdaebe01 \
-  --strict
+# seed the full corpus into a new library
+make benchmark-grounded-seed
+
+# seed only the multiformat fixtures into an existing library
+make benchmark-grounded-seed \\
+  RUSTRAG_BENCHMARK_LIBRARY_ID="library-uuid" \\
+  RUSTRAG_BENCHMARK_SUITES="backend/benchmarks/grounded_query/multiformat_surface_suite.json"
 ```
 
-Recommended interpretation:
-- `topDocumentPassRate` isolates ranking quality.
-- `retrievalPassRate` shows whether chunk retrieval exposes the required facts.
-- `answerPassRate` shows whether the answer stage preserves grounded facts without hallucinating over them.
-- `graphUsagePassRate` shows whether execution still routes through chunk/entity/relation references instead of silently falling back to a graph-blind path.
-- `strictCasePassRate` is the real regression-gate score: document ranking + retrieval facts + final answer + required graph participation.
-
-If retrieval passes but answer fails, the main problem is answer fidelity, not chunk discovery.
-If answer passes but graph usage fails, the system is still vulnerable to regressing into a chunk-only assistant while the benchmark looks green.
-
-Fast rerun on an existing ready corpus:
+After the corpus is loaded, run the full matrix:
 
 ```bash
-cd backend
-RUSTRAG_SESSION_COOKIE='<session-cookie>' \
-python3 benchmarks/grounded_query/run_live_benchmark.py \
-  --workspace-id 019d203e-9bb1-7042-b514-57fdcdaebe01 \
-  --library-id <existing-library-id> \
-  --skip-upload \
-  --output /tmp/rustrag-grounded-benchmark.json
-```
-
-Canonical local regression path from the repo root:
-
-```bash
-RUSTRAG_SESSION_COOKIE='<session-cookie>' \
-RUSTRAG_BENCHMARK_WORKSPACE_ID='019d203e-9bb1-7042-b514-57fdcdaebe01' \
-RUSTRAG_BENCHMARK_LIBRARY_ID='<existing-library-id>' \
 make benchmark-grounded-all
 ```
-
-This writes one JSON result per suite into `tmp-grounded-benchmarks/`.

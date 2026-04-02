@@ -1,18 +1,10 @@
 import type { GraphCanonicalSummary } from './graph'
 
-export type DocumentStatus =
-  | 'queued'
-  | 'processing'
-  | 'ready'
-  | 'ready_no_graph'
-  | 'failed'
+export type DocumentStatus = 'queued' | 'processing' | 'ready' | 'ready_no_graph' | 'failed'
 
 export type DocumentDisplayStatus = 'in_progress' | 'ready' | 'failed'
 
-export type DocumentReadabilityState =
-  | 'unreadable'
-  | 'readable_active'
-  | 'readable_stale'
+export type DocumentReadabilityState = 'unreadable' | 'readable_active' | 'readable_stale'
 
 export type DocumentActivityStatus =
   | 'queued'
@@ -23,11 +15,7 @@ export type DocumentActivityStatus =
   | 'ready'
   | 'failed'
 
-export type DocumentAccountingStatus =
-  | 'priced'
-  | 'partial'
-  | 'unpriced'
-  | 'in_flight_unsettled'
+export type DocumentAccountingStatus = 'priced' | 'partial' | 'unpriced' | 'in_flight_unsettled'
 
 export type DocumentQueueWaitingReason =
   | 'ordinary_backlog'
@@ -57,11 +45,7 @@ export type DocumentCollectionResidualReason =
 
 export type DocumentGraphProgressCadence = 'fast' | 'watch' | 'calm'
 
-export type DocumentGraphWriteHealth =
-  | 'healthy'
-  | 'retrying_contention'
-  | 'degraded'
-  | 'failed'
+export type DocumentGraphWriteHealth = 'healthy' | 'retrying_contention' | 'degraded' | 'failed'
 
 export type DocumentCollectionWarningKind =
   | 'ordinary_backlog'
@@ -80,11 +64,7 @@ export type DocumentMutationImpactScopeStatus =
   | 'completed'
   | 'failed'
 export type DocumentMutationImpactScopeConfidence = 'high' | 'medium' | 'low'
-export type DocumentExtractionRecoveryStatus =
-  | 'clean'
-  | 'recovered'
-  | 'partial'
-  | 'failed'
+export type DocumentExtractionRecoveryStatus = 'clean' | 'recovered' | 'partial' | 'failed'
 
 export type DocumentProviderFailureClass =
   | 'internal_request_invalid'
@@ -101,6 +81,138 @@ export interface DocumentMutationAccepted {
   revisionId: string | null
   mutationId: string | null
   attemptNo: number | null
+}
+
+export type WebIngestMode = 'single_page' | 'recursive_crawl'
+export type WebBoundaryPolicy = 'same_host' | 'allow_external'
+export type WebHostClassification = 'same_host' | 'external'
+export type WebRunState =
+  | 'accepted'
+  | 'discovering'
+  | 'processing'
+  | 'completed'
+  | 'completed_partial'
+  | 'failed'
+  | 'canceled'
+export type WebCandidateState =
+  | 'discovered'
+  | 'eligible'
+  | 'duplicate'
+  | 'excluded'
+  | 'blocked'
+  | 'queued'
+  | 'processing'
+  | 'processed'
+  | 'failed'
+  | 'canceled'
+export type WebClassificationReason =
+  | 'seed_accepted'
+  | 'duplicate_canonical_url'
+  | 'outside_boundary_policy'
+  | 'exceeded_max_depth'
+  | 'exceeded_max_pages'
+  | 'unsupported_scheme'
+  | 'invalid_url'
+  | 'inaccessible'
+  | 'unsupported_content'
+  | 'cancel_requested'
+export type WebRunFailureCode =
+  | 'inaccessible'
+  | 'invalid_url'
+  | 'unsupported_content'
+  | 'web_discovery_failed'
+  | 'web_snapshot_persist_failed'
+  | 'web_snapshot_missing'
+  | 'web_snapshot_missing_final_url'
+  | 'web_snapshot_unavailable'
+  | 'web_capture_materialization_failed'
+  | 'recursive_crawl_failed'
+
+export interface WebRunCounts {
+  discovered: number
+  eligible: number
+  processed: number
+  queued: number
+  processing: number
+  duplicates: number
+  excluded: number
+  blocked: number
+  failed: number
+  canceled: number
+}
+
+export interface WebIngestRunReceipt {
+  runId: string
+  libraryId: string
+  mode: WebIngestMode
+  runState: WebRunState
+  asyncOperationId: string | null
+  counts: WebRunCounts
+  failureCode: WebRunFailureCode | null
+  cancelRequestedAt: string | null
+}
+
+export interface WebIngestRunSummary {
+  runId: string
+  libraryId: string
+  mode: WebIngestMode
+  boundaryPolicy: WebBoundaryPolicy
+  maxDepth: number
+  maxPages: number
+  runState: WebRunState
+  seedUrl: string
+  counts: WebRunCounts
+  lastActivityAt: string | null
+}
+
+export interface WebIngestRun extends WebIngestRunSummary {
+  mutationId: string
+  asyncOperationId: string | null
+  workspaceId: string
+  normalizedSeedUrl: string
+  requestedByPrincipalId: string | null
+  requestedAt: string
+  completedAt: string | null
+  failureCode: WebRunFailureCode | null
+  cancelRequestedAt: string | null
+}
+
+export interface WebDiscoveredPage {
+  candidateId: string
+  runId: string
+  discoveredUrl: string | null
+  normalizedUrl: string
+  finalUrl: string | null
+  canonicalUrl: string | null
+  depth: number
+  referrerCandidateId: string | null
+  hostClassification: WebHostClassification
+  candidateState: WebCandidateState
+  classificationReason: WebClassificationReason | null
+  contentType: string | null
+  httpStatus: number | null
+  discoveredAt: string
+  updatedAt: string
+  documentId: string | null
+  resultRevisionId: string | null
+  mutationItemId: string | null
+}
+
+export interface WebPageProvenance {
+  runId: string | null
+  candidateId: string | null
+  sourceUri: string | null
+  canonicalUrl: string | null
+}
+
+export interface CreateWebIngestRunInput {
+  libraryId: string
+  seedUrl: string
+  mode: WebIngestMode
+  boundaryPolicy?: WebBoundaryPolicy | null
+  maxDepth?: number | null
+  maxPages?: number | null
+  idempotencyKey?: string | null
 }
 
 export interface CanonicalDocumentIdentity {
@@ -239,10 +351,10 @@ export interface DocumentExtractionRecovery {
 }
 
 export interface DocumentSummaryCounters {
-  queued: number
   processing: number
-  ready: number
-  readyNoGraph: number
+  readable: number
+  graphSparse: number
+  graphReady: number
   failed: number
 }
 
@@ -282,8 +394,10 @@ export interface DocumentRowSummary {
   stalledReason: string | null
   costAmount: number | null
   costLabel: string | null
+  failureMessage: string | null
   canRetry: boolean
   detailAvailable: boolean
+  preparation: DocumentPreparationSummary | null
 }
 
 export type DocumentsSortField =
@@ -336,6 +450,106 @@ export interface DocumentGraphStats {
   nodeCount: number
   edgeCount: number
   evidenceCount: number
+}
+
+export type DocumentPreparationReadinessKind =
+  | 'processing'
+  | 'readable'
+  | 'graph_sparse'
+  | 'graph_ready'
+  | 'failed'
+
+export type DocumentGraphCoverageKind = 'processing' | 'graph_sparse' | 'graph_ready' | 'failed'
+
+export type DocumentPreparedSegmentKind =
+  | 'heading'
+  | 'paragraph'
+  | 'list_item'
+  | 'table'
+  | 'table_row'
+  | 'code_block'
+  | 'endpoint_block'
+  | 'quote_block'
+  | 'metadata_block'
+
+export type DocumentTechnicalFactKind =
+  | 'url'
+  | 'endpoint_path'
+  | 'http_method'
+  | 'port'
+  | 'parameter_name'
+  | 'status_code'
+  | 'protocol'
+  | 'auth_rule'
+  | 'identifier'
+
+export interface DocumentPreparationSummary {
+  readinessKind: DocumentPreparationReadinessKind
+  preparationState: string
+  graphCoverageKind: DocumentGraphCoverageKind
+  typedFactCoverage: number | null
+  lastProcessingStage: string | null
+  updatedAt: string | null
+  sourceFormat: string | null
+  normalizationProfile: string | null
+  preparedSegmentCount: number
+  technicalFactCount: number
+}
+
+export interface PreparedSegmentSourceLocation {
+  pageNumber: number | null
+  startOffset: number | null
+  endOffset: number | null
+  supportChunkCount: number
+}
+
+export interface PreparedSegmentRow {
+  id: string
+  revisionId: string
+  ordinal: number
+  kind: DocumentPreparedSegmentKind
+  headingTrail: string[]
+  sectionPath: string[]
+  excerpt: string
+  text: string
+  normalizedText: string
+  location: PreparedSegmentSourceLocation
+  parentSegmentId: string | null
+  codeLanguage: string | null
+  tableCoordinates: {
+    rowIndex: number
+    columnIndex: number
+    rowSpan: number
+    columnSpan: number
+  } | null
+  supportChunkIds: string[]
+}
+
+export interface TechnicalFactQualifierRow {
+  key: string
+  value: string
+}
+
+export interface TechnicalFactSupportReference {
+  segmentId: string
+  ordinal: number
+  label: string
+}
+
+export interface TechnicalFactRow {
+  id: string
+  revisionId: string
+  documentId: string
+  kind: DocumentTechnicalFactKind
+  canonicalValueLabel: string
+  displayValue: string
+  qualifiers: TechnicalFactQualifierRow[]
+  supportChunkIds: string[]
+  supportSegments: TechnicalFactSupportReference[]
+  confidence: number | null
+  extractionKind: string
+  conflictGroupId: string | null
+  createdAt: string
 }
 
 export interface DocumentRevisionHistoryItem {
@@ -468,12 +682,30 @@ export interface DocumentsWorkspaceSummary {
   informationalNotices: DocumentsWorkspaceNotice[]
   tableDocumentCount: number
   activeFilterCount: number
-  highlightedStatus: string | null
+  highlightedStatus: DocumentPreparationReadinessKind | null
+}
+
+export interface LibraryReadinessSummary {
+  libraryId: string
+  documentCountsByReadiness: DocumentSummaryCounters
+  updatedAt: string | null
+}
+
+export interface LibraryGraphCoverageSummary {
+  libraryId: string
+  graphReadyDocumentCount: number
+  graphSparseDocumentCount: number
+  typedFactDocumentCount: number
+  lastGenerationId: string | null
+  updatedAt: string | null
 }
 
 export interface DocumentDetail {
   id: string
   logicalDocumentId: string | null
+  contentSourceKind: string | null
+  sourceUri: string | null
+  webPageProvenance: WebPageProvenance | null
   readabilityState: DocumentReadabilityState
   activeRevisionId: string | null
   readableRevisionId: string | null
@@ -507,6 +739,7 @@ export interface DocumentDetail {
   mutation: DocumentMutationState
   requestedBy: string | null
   errorMessage: string | null
+  errorActionMessage: string | null
   failureClass: string | null
   operatorAction: string | null
   summary: string
@@ -524,6 +757,9 @@ export interface DocumentDetail {
   knowledgeReadiness: DocumentKnowledgeReadiness | null
   extractedStats: DocumentExtractedStats
   graphStats: DocumentGraphStats
+  preparation: DocumentPreparationSummary | null
+  preparedSegments: PreparedSegmentRow[]
+  technicalFacts: TechnicalFactRow[]
   collectionDiagnostics: DocumentCollectionDiagnostics | null
   revisionHistory: DocumentRevisionHistoryItem[]
   processingHistory: DocumentHistoryItem[]
@@ -537,6 +773,8 @@ export interface DocumentsSurfaceResponse {
   graphStatus: 'empty' | 'building' | 'ready' | 'partial' | 'failed' | 'stale'
   graphWarning: string | null
   rebuildBacklogCount: number
+  readinessSummary: LibraryReadinessSummary | null
+  graphCoverage: LibraryGraphCoverageSummary | null
   counters: DocumentSummaryCounters
   filters: DocumentFilterValues
   accounting: DocumentCollectionAccountingSummary
@@ -659,8 +897,7 @@ export interface DocumentGraphThroughputSummary {
   bottleneckRank: number | null
 }
 
-export interface DocumentCollectionGraphThroughputSummary
-  extends DocumentGraphThroughputSummary {
+export interface DocumentCollectionGraphThroughputSummary extends DocumentGraphThroughputSummary {
   trackedDocumentCount: number
   activeDocumentCount: number
 }
@@ -728,6 +965,14 @@ export interface DocumentInspectorState {
   detail: DocumentDetail | null
 }
 
+export interface WebRunInspectorState {
+  runId: string | null
+  loading: boolean
+  error: string | null
+  detail: WebIngestRun | null
+  pages: WebDiscoveredPage[]
+}
+
 export interface DocumentsFilterState {
   searchQuery: string
   statusFilter: DocumentDisplayStatus | ''
@@ -741,13 +986,17 @@ export interface DocumentsWorkspaceSurface {
   maxSizeMb: number
   loading: boolean
   error: string | null
+  webRuns: WebIngestRunSummary[]
   counters: DocumentSummaryCounters
   costSummary: LibraryCostSummary | null
   rows: DocumentRowSummary[]
   filters: DocumentsFilterState
   inspector: DocumentInspectorState
+  webRunInspector: WebRunInspectorState
+  webRunActionRunId: string | null
   uploadInProgress: boolean
   uploadFailures: DocumentUploadFailure[]
   uploadQueue: DocumentRowSummary[]
   selectedDocumentId: string | null
+  selectedWebRunId: string | null
 }

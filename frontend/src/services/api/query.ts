@@ -1,9 +1,4 @@
-import {
-  ApiClientError,
-  apiHttp,
-  resolveApiPath,
-  unwrap,
-} from './http'
+import { ApiClientError, apiHttp, resolveApiPath, unwrap } from './http'
 
 export type QueryTurnStreamStage = 'retrieving' | 'grounding' | 'answering'
 
@@ -68,6 +63,43 @@ export interface QueryRelationReference {
   score: number
 }
 
+export type QueryVerificationState =
+  | 'not_run'
+  | 'verified'
+  | 'partially_supported'
+  | 'conflicting_evidence'
+  | 'insufficient_evidence'
+  | 'failed'
+
+export interface QueryPreparedSegmentReference {
+  executionId: string
+  segmentId: string
+  revisionId: string
+  blockKind: string
+  rank: number
+  score: number
+  headingTrail: string[]
+  sectionPath: string[]
+}
+
+export interface QueryTechnicalFactReference {
+  executionId: string
+  factId: string
+  revisionId: string
+  factKind: string
+  canonicalValue: string
+  displayValue: string
+  rank: number
+  score: number
+}
+
+export interface QueryVerificationWarning {
+  code: string
+  message: string
+  relatedSegmentId: string | null
+  relatedFactId: string | null
+}
+
 export interface QuerySessionDetail {
   session: QuerySession
   turns: QueryTurn[]
@@ -80,8 +112,12 @@ export interface QueryExecutionDetail {
   requestTurn: QueryTurn | null
   responseTurn: QueryTurn | null
   chunkReferences: QueryChunkReference[]
+  preparedSegmentReferences: QueryPreparedSegmentReference[]
+  technicalFactReferences: QueryTechnicalFactReference[]
   entityReferences: QueryEntityReference[]
   relationReferences: QueryRelationReference[]
+  verificationState: QueryVerificationState
+  verificationWarnings: QueryVerificationWarning[]
 }
 
 export interface QueryTurnExecutionResult {
@@ -90,6 +126,13 @@ export interface QueryTurnExecutionResult {
   requestTurn: QueryTurn
   responseTurn: QueryTurn | null
   execution: QueryExecution
+  chunkReferences: QueryChunkReference[]
+  preparedSegmentReferences: QueryPreparedSegmentReference[]
+  technicalFactReferences: QueryTechnicalFactReference[]
+  entityReferences: QueryEntityReference[]
+  relationReferences: QueryRelationReference[]
+  verificationState: QueryVerificationState
+  verificationWarnings: QueryVerificationWarning[]
 }
 
 export interface KnowledgeContextBundle {
@@ -194,15 +237,64 @@ export interface ExecuteQueryTurnStreamHandlers {
   onAnswerDelta?: (delta: string) => void
 }
 
+const TECHNICAL_QUERY_MARKERS = [
+  /\bhttps?:\/\//i,
+  /\bgraphql\b/i,
+  /\bendpoint\b/i,
+  /\bmethod\b/i,
+  /\bpath\b/i,
+  /\burl\b/i,
+  /\bport\b/i,
+  /\bstatus\s*code\b/i,
+  /\bhttp\b/i,
+  /\bparameter\b/i,
+  /\bquery\s+param/i,
+  /\bheader\b/i,
+  /\bauth\b/i,
+  /\btoken\b/i,
+  /\bwsdl\b/i,
+  /\brest\b/i,
+  /\bapi\b/i,
+  /\bget\b|\bpost\b|\bput\b|\bpatch\b|\bdelete\b/i,
+  /\/[a-z0-9._~!$&'()*+,;=:@/%-]+/i,
+]
+
+export function isExactTechnicalQuery(value: string | null | undefined): boolean {
+  const query = normalizeString(value).trim()
+  if (!query) {
+    return false
+  }
+  return TECHNICAL_QUERY_MARKERS.some((pattern) => pattern.test(query))
+}
+
 function normalizeString(value: unknown): string {
-  return typeof value === 'string' ? value : String(value ?? '')
+  if (value === null || value === undefined) {
+    return ''
+  }
+  if (
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean' ||
+    typeof value === 'bigint'
+  ) {
+    return String(value)
+  }
+  return ''
 }
 
 function normalizeNullableString(value: unknown): string | null {
   if (value === null || value === undefined || value === '') {
     return null
   }
-  return String(value)
+  if (
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean' ||
+    typeof value === 'bigint'
+  ) {
+    return String(value)
+  }
+  return null
 }
 
 function normalizeNumber(value: unknown): number {
@@ -211,6 +303,10 @@ function normalizeNumber(value: unknown): number {
   }
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : 0
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((item) => normalizeString(item)).filter(Boolean) : []
 }
 
 function normalizeBooleanRecord(value: unknown): Record<string, unknown> {
@@ -238,9 +334,7 @@ function normalizeQueryTurnRow(row: RawRow): QueryTurn {
     conversationId: normalizeString(row.conversationId ?? row.conversation_id),
     turnIndex: normalizeNumber(row.turnIndex ?? row.turn_index),
     turnKind: normalizeString(row.turnKind ?? row.turn_kind),
-    authorPrincipalId: normalizeNullableString(
-      row.authorPrincipalId ?? row.author_principal_id,
-    ),
+    authorPrincipalId: normalizeNullableString(row.authorPrincipalId ?? row.author_principal_id),
     contentText: normalizeString(row.contentText ?? row.content_text),
     executionId: normalizeNullableString(row.executionId ?? row.execution_id),
     createdAt: normalizeString(row.createdAt ?? row.created_at),
@@ -292,6 +386,55 @@ function normalizeQueryRelationReference(row: RawRow): QueryRelationReference {
   }
 }
 
+function normalizeQueryPreparedSegmentReference(row: RawRow): QueryPreparedSegmentReference {
+  return {
+    executionId: normalizeString(row.executionId ?? row.execution_id),
+    segmentId: normalizeString(row.segmentId ?? row.segment_id),
+    revisionId: normalizeString(row.revisionId ?? row.revision_id),
+    blockKind: normalizeString(row.blockKind ?? row.block_kind),
+    rank: normalizeNumber(row.rank),
+    score: normalizeNumber(row.score),
+    headingTrail: normalizeStringArray(row.headingTrail ?? row.heading_trail),
+    sectionPath: normalizeStringArray(row.sectionPath ?? row.section_path),
+  }
+}
+
+function normalizeQueryTechnicalFactReference(row: RawRow): QueryTechnicalFactReference {
+  return {
+    executionId: normalizeString(row.executionId ?? row.execution_id),
+    factId: normalizeString(row.factId ?? row.fact_id),
+    revisionId: normalizeString(row.revisionId ?? row.revision_id),
+    factKind: normalizeString(row.factKind ?? row.fact_kind),
+    canonicalValue: normalizeString(row.canonicalValue ?? row.canonical_value),
+    displayValue: normalizeString(row.displayValue ?? row.display_value),
+    rank: normalizeNumber(row.rank),
+    score: normalizeNumber(row.score),
+  }
+}
+
+function normalizeQueryVerificationState(value: unknown): QueryVerificationState {
+  const normalized = normalizeString(value).trim().toLowerCase()
+  switch (normalized) {
+    case 'verified':
+    case 'partially_supported':
+    case 'conflicting_evidence':
+    case 'insufficient_evidence':
+    case 'failed':
+      return normalized
+    default:
+      return 'not_run'
+  }
+}
+
+function normalizeQueryVerificationWarning(row: RawRow): QueryVerificationWarning {
+  return {
+    code: normalizeString(row.code),
+    message: normalizeString(row.message),
+    relatedSegmentId: normalizeNullableString(row.relatedSegmentId ?? row.related_segment_id),
+    relatedFactId: normalizeNullableString(row.relatedFactId ?? row.related_fact_id),
+  }
+}
+
 function normalizeKnowledgeContextBundle(row: RawRow): KnowledgeContextBundle {
   return {
     key: normalizeString(row.key),
@@ -300,19 +443,13 @@ function normalizeKnowledgeContextBundle(row: RawRow): KnowledgeContextBundle {
     bundleId: normalizeString(row.bundleId ?? row.bundle_id),
     workspaceId: normalizeString(row.workspaceId ?? row.workspace_id),
     libraryId: normalizeString(row.libraryId ?? row.library_id),
-    queryExecutionId: normalizeNullableString(
-      row.queryExecutionId ?? row.query_execution_id,
-    ),
+    queryExecutionId: normalizeNullableString(row.queryExecutionId ?? row.query_execution_id),
     bundleState: normalizeString(row.bundleState ?? row.bundle_state),
     bundleStrategy: normalizeString(row.bundleStrategy ?? row.bundle_strategy),
     requestedMode: normalizeString(row.requestedMode ?? row.requested_mode),
     resolvedMode: normalizeString(row.resolvedMode ?? row.resolved_mode),
-    freshnessSnapshot: normalizeBooleanRecord(
-      row.freshnessSnapshot ?? row.freshness_snapshot,
-    ),
-    candidateSummary: normalizeBooleanRecord(
-      row.candidateSummary ?? row.candidate_summary,
-    ),
+    freshnessSnapshot: normalizeBooleanRecord(row.freshnessSnapshot ?? row.freshness_snapshot),
+    candidateSummary: normalizeBooleanRecord(row.candidateSummary ?? row.candidate_summary),
     assemblyDiagnostics: normalizeBooleanRecord(
       row.assemblyDiagnostics ?? row.assembly_diagnostics,
     ),
@@ -327,9 +464,7 @@ function normalizeKnowledgeRetrievalTrace(row: RawRow): KnowledgeRetrievalTrace 
     traceId: normalizeString(row.traceId ?? row.trace_id),
     workspaceId: normalizeString(row.workspaceId ?? row.workspace_id),
     libraryId: normalizeString(row.libraryId ?? row.library_id),
-    queryExecutionId: normalizeNullableString(
-      row.queryExecutionId ?? row.query_execution_id,
-    ),
+    queryExecutionId: normalizeNullableString(row.queryExecutionId ?? row.query_execution_id),
     bundleId: normalizeString(row.bundleId ?? row.bundle_id),
     traceState: normalizeString(row.traceState ?? row.trace_state),
     retrievalStrategy: normalizeString(row.retrievalStrategy ?? row.retrieval_strategy),
@@ -342,9 +477,7 @@ function normalizeKnowledgeRetrievalTrace(row: RawRow): KnowledgeRetrievalTrace 
   }
 }
 
-function normalizeKnowledgeBundleChunkReference(
-  row: RawRow,
-): KnowledgeBundleChunkReference {
+function normalizeKnowledgeBundleChunkReference(row: RawRow): KnowledgeBundleChunkReference {
   return {
     key: normalizeString(row.key),
     bundleId: normalizeString(row.bundleId ?? row.bundle_id),
@@ -356,9 +489,7 @@ function normalizeKnowledgeBundleChunkReference(
   }
 }
 
-function normalizeKnowledgeBundleEntityReference(
-  row: RawRow,
-): KnowledgeBundleEntityReference {
+function normalizeKnowledgeBundleEntityReference(row: RawRow): KnowledgeBundleEntityReference {
   return {
     key: normalizeString(row.key),
     bundleId: normalizeString(row.bundleId ?? row.bundle_id),
@@ -370,9 +501,7 @@ function normalizeKnowledgeBundleEntityReference(
   }
 }
 
-function normalizeKnowledgeBundleRelationReference(
-  row: RawRow,
-): KnowledgeBundleRelationReference {
+function normalizeKnowledgeBundleRelationReference(row: RawRow): KnowledgeBundleRelationReference {
   return {
     key: normalizeString(row.key),
     bundleId: normalizeString(row.bundleId ?? row.bundle_id),
@@ -384,9 +513,7 @@ function normalizeKnowledgeBundleRelationReference(
   }
 }
 
-function normalizeKnowledgeBundleEvidenceReference(
-  row: RawRow,
-): KnowledgeBundleEvidenceReference {
+function normalizeKnowledgeBundleEvidenceReference(row: RawRow): KnowledgeBundleEvidenceReference {
   return {
     key: normalizeString(row.key),
     bundleId: normalizeString(row.bundleId ?? row.bundle_id),
@@ -472,9 +599,9 @@ async function executeQueryTurnStream(
   }
   const decoder = new TextDecoder()
   let buffer = ''
-  let completedResult: QueryTurnExecutionResult | null = null
+  let completedResult: QueryTurnExecutionResult | undefined
 
-  while (true) {
+  for (;;) {
     const { done, value } = await reader.read()
     if (done) {
       break
@@ -485,7 +612,7 @@ async function executeQueryTurnStream(
     while (frameBoundary >= 0) {
       const frame = buffer.slice(0, frameBoundary)
       buffer = buffer.slice(frameBoundary + 2)
-      await consumeQueryTurnStreamFrame(frame, handlers, (result) => {
+      consumeQueryTurnStreamFrame(frame, handlers, (result) => {
         completedResult = result
       })
       frameBoundary = buffer.indexOf('\n\n')
@@ -497,22 +624,26 @@ async function executeQueryTurnStream(
     buffer += flushed.replace(/\r\n/g, '\n')
   }
   if (buffer.trim()) {
-    await consumeQueryTurnStreamFrame(buffer, handlers, (result) => {
+    consumeQueryTurnStreamFrame(buffer, handlers, (result) => {
       completedResult = result
     })
   }
 
-  if (!completedResult) {
-    throw new ApiClientError('Streaming query turn ended without a completed result', 500, 'internal')
+  if (completedResult === undefined) {
+    throw new ApiClientError(
+      'Streaming query turn ended without a completed result',
+      500,
+      'internal',
+    )
   }
   return completedResult
 }
 
-async function consumeQueryTurnStreamFrame(
+function consumeQueryTurnStreamFrame(
   frame: string,
   handlers: ExecuteQueryTurnStreamHandlers,
   setCompletedResult: (result: QueryTurnExecutionResult) => void,
-): Promise<void> {
+): void {
   if (!frame.trim() || frame.startsWith(':')) {
     return
   }
@@ -548,16 +679,32 @@ async function consumeQueryTurnStreamFrame(
 
   if (eventName === 'completed') {
     setCompletedResult(
-      normalizeQueryTurnExecutionResult(payload as Record<string, unknown> as {
-        contextBundleId?: string | null
-        context_bundle_id?: string | null
-        session: RawRow
-        requestTurn?: RawRow
-        request_turn?: RawRow
-        responseTurn?: RawRow | null
-        response_turn?: RawRow | null
-        execution: RawRow
-      }),
+      normalizeQueryTurnExecutionResult(
+        payload as {
+          contextBundleId?: string | null
+          context_bundle_id?: string | null
+          session: RawRow
+          requestTurn?: RawRow
+          request_turn?: RawRow
+          responseTurn?: RawRow | null
+          response_turn?: RawRow | null
+          execution: RawRow
+          chunkReferences?: RawRow[]
+          chunk_references?: RawRow[]
+          preparedSegmentReferences?: RawRow[]
+          prepared_segment_references?: RawRow[]
+          technicalFactReferences?: RawRow[]
+          technical_fact_references?: RawRow[]
+          entityReferences?: RawRow[]
+          entity_references?: RawRow[]
+          relationReferences?: RawRow[]
+          relation_references?: RawRow[]
+          verificationState?: string | null
+          verification_state?: string | null
+          verificationWarnings?: RawRow[]
+          verification_warnings?: RawRow[]
+        },
+      ),
     )
     return
   }
@@ -580,39 +727,76 @@ function normalizeQueryTurnExecutionResult(response: {
   responseTurn?: RawRow | null
   response_turn?: RawRow | null
   execution: RawRow
+  chunkReferences?: RawRow[]
+  chunk_references?: RawRow[]
+  preparedSegmentReferences?: RawRow[]
+  prepared_segment_references?: RawRow[]
+  technicalFactReferences?: RawRow[]
+  technical_fact_references?: RawRow[]
+  entityReferences?: RawRow[]
+  entity_references?: RawRow[]
+  relationReferences?: RawRow[]
+  relation_references?: RawRow[]
+  verificationState?: string | null
+  verification_state?: string | null
+  verificationWarnings?: RawRow[]
+  verification_warnings?: RawRow[]
 }): QueryTurnExecutionResult {
+  const requestTurnRow = response.requestTurn ?? response.request_turn
+  if (!requestTurnRow) {
+    throw new ApiClientError('Completed query turn payload is missing requestTurn', 500, 'internal')
+  }
+  const responseTurnRow = response.responseTurn ?? response.response_turn
   return {
-    contextBundleId: normalizeString(
-      response.contextBundleId ?? response.context_bundle_id,
-    ),
+    contextBundleId: normalizeString(response.contextBundleId ?? response.context_bundle_id),
     session: normalizeQuerySessionRow(response.session),
-    requestTurn: normalizeQueryTurnRow(
-      (response.requestTurn ?? response.request_turn) as RawRow,
-    ),
-    responseTurn: response.responseTurn || response.response_turn
-      ? normalizeQueryTurnRow(
-          ((response.responseTurn ?? response.response_turn) as RawRow),
-        )
-      : null,
+    requestTurn: normalizeQueryTurnRow(requestTurnRow),
+    responseTurn: responseTurnRow ? normalizeQueryTurnRow(responseTurnRow) : null,
     execution: normalizeQueryExecutionRow(response.execution),
+    chunkReferences: (response.chunkReferences ?? response.chunk_references ?? []).map((row) =>
+      normalizeQueryChunkReference(row),
+    ),
+    preparedSegmentReferences: (
+      response.preparedSegmentReferences ??
+      response.prepared_segment_references ??
+      []
+    ).map((row) => normalizeQueryPreparedSegmentReference(row)),
+    technicalFactReferences: (
+      response.technicalFactReferences ??
+      response.technical_fact_references ??
+      []
+    ).map((row) => normalizeQueryTechnicalFactReference(row)),
+    entityReferences: (response.entityReferences ?? response.entity_references ?? []).map((row) =>
+      normalizeQueryEntityReference(row),
+    ),
+    relationReferences: (response.relationReferences ?? response.relation_references ?? []).map(
+      (row) => normalizeQueryRelationReference(row),
+    ),
+    verificationState: normalizeQueryVerificationState(
+      response.verificationState ?? response.verification_state,
+    ),
+    verificationWarnings: (
+      response.verificationWarnings ??
+      response.verification_warnings ??
+      []
+    ).map((row) => normalizeQueryVerificationWarning(row)),
   }
 }
 
 async function buildQueryTurnClientError(response: Response): Promise<ApiClientError> {
   const contentType = response.headers.get('content-type') ?? ''
   if (contentType.includes('application/json')) {
-    const payload = (await response.json().catch(() => null)) as
-      | {
-          error?: string
-          errorKind?: string | null
-          error_kind?: string | null
-          details?: unknown
-          requestId?: string | null
-          request_id?: string | null
-        }
-      | null
+    const payload = (await response.json().catch(() => null)) as {
+      error?: string
+      errorKind?: string | null
+      error_kind?: string | null
+      details?: unknown
+      requestId?: string | null
+      request_id?: string | null
+    } | null
+    const message = normalizeString(payload?.error ?? response.statusText) || 'Request failed'
     return new ApiClientError(
-      normalizeString(payload?.error ?? response.statusText ?? 'Request failed'),
+      message,
       response.status,
       normalizeNullableString(payload?.errorKind ?? payload?.error_kind),
       payload?.details ?? null,
@@ -636,32 +820,52 @@ export async function fetchQueryExecutionDetail(
       response_turn?: RawRow | null
       chunkReferences?: RawRow[]
       chunk_references?: RawRow[]
+      preparedSegmentReferences?: RawRow[]
+      prepared_segment_references?: RawRow[]
+      technicalFactReferences?: RawRow[]
+      technical_fact_references?: RawRow[]
       entityReferences?: RawRow[]
       entity_references?: RawRow[]
       relationReferences?: RawRow[]
       relation_references?: RawRow[]
+      verificationState?: string | null
+      verification_state?: string | null
+      verificationWarnings?: RawRow[]
+      verification_warnings?: RawRow[]
     }>(`/query/executions/${executionId}`),
   )
+  const requestTurnRow = payload.requestTurn ?? payload.request_turn
+  const responseTurnRow = payload.responseTurn ?? payload.response_turn
   return {
-    contextBundleId: normalizeString(
-      payload.contextBundleId ?? payload.context_bundle_id,
-    ),
+    contextBundleId: normalizeString(payload.contextBundleId ?? payload.context_bundle_id),
     execution: normalizeQueryExecutionRow(payload.execution),
-    requestTurn: payload.requestTurn || payload.request_turn
-      ? normalizeQueryTurnRow((payload.requestTurn ?? payload.request_turn) as RawRow)
-      : null,
-    responseTurn: payload.responseTurn || payload.response_turn
-      ? normalizeQueryTurnRow((payload.responseTurn ?? payload.response_turn) as RawRow)
-      : null,
+    requestTurn: requestTurnRow ? normalizeQueryTurnRow(requestTurnRow) : null,
+    responseTurn: responseTurnRow ? normalizeQueryTurnRow(responseTurnRow) : null,
     chunkReferences: (payload.chunkReferences ?? payload.chunk_references ?? []).map((row) =>
       normalizeQueryChunkReference(row),
     ),
+    preparedSegmentReferences: (
+      payload.preparedSegmentReferences ??
+      payload.prepared_segment_references ??
+      []
+    ).map((row) => normalizeQueryPreparedSegmentReference(row)),
+    technicalFactReferences: (
+      payload.technicalFactReferences ??
+      payload.technical_fact_references ??
+      []
+    ).map((row) => normalizeQueryTechnicalFactReference(row)),
     entityReferences: (payload.entityReferences ?? payload.entity_references ?? []).map((row) =>
       normalizeQueryEntityReference(row),
     ),
-    relationReferences: (
-      payload.relationReferences ?? payload.relation_references ?? []
-    ).map((row) => normalizeQueryRelationReference(row)),
+    relationReferences: (payload.relationReferences ?? payload.relation_references ?? []).map(
+      (row) => normalizeQueryRelationReference(row),
+    ),
+    verificationState: normalizeQueryVerificationState(
+      payload.verificationState ?? payload.verification_state,
+    ),
+    verificationWarnings: (payload.verificationWarnings ?? payload.verification_warnings ?? []).map(
+      (row) => normalizeQueryVerificationWarning(row),
+    ),
   }
 }
 
@@ -691,11 +895,11 @@ export async function fetchKnowledgeContextBundle(
     entityReferences: (payload.entityReferences ?? payload.entity_references ?? []).map((row) =>
       normalizeKnowledgeBundleEntityReference(row),
     ),
-    relationReferences: (
-      payload.relationReferences ?? payload.relation_references ?? []
-    ).map((row) => normalizeKnowledgeBundleRelationReference(row)),
-    evidenceReferences: (
-      payload.evidenceReferences ?? payload.evidence_references ?? []
-    ).map((row) => normalizeKnowledgeBundleEvidenceReference(row)),
+    relationReferences: (payload.relationReferences ?? payload.relation_references ?? []).map(
+      (row) => normalizeKnowledgeBundleRelationReference(row),
+    ),
+    evidenceReferences: (payload.evidenceReferences ?? payload.evidence_references ?? []).map(
+      (row) => normalizeKnowledgeBundleEvidenceReference(row),
+    ),
   }
 }

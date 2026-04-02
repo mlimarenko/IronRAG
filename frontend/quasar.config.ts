@@ -1,10 +1,7 @@
 import { configure } from 'quasar/wrappers'
 
 export default configure(function () {
-  const backendOrigin = (process.env.VITE_BACKEND_URL ?? 'http://127.0.0.1:8095').replace(
-    /\/$/,
-    '',
-  )
+  const backendOrigin = (process.env.VITE_BACKEND_URL ?? 'http://127.0.0.1:8095').replace(/\/$/, '')
 
   return {
     supportTS: true,
@@ -38,12 +35,7 @@ export default configure(function () {
 
         viteConf.build.rollupOptions.output ??= {}
         viteConf.build.rollupOptions.output.manualChunks = {
-          graph: [
-            'sigma',
-            'graphology',
-            '@sigma/node-border',
-            '@sigma/edge-curve',
-          ],
+          graph: ['sigma', 'graphology', '@sigma/node-border', '@sigma/edge-curve'],
         }
       },
     },

@@ -1,3 +1,6 @@
+#[path = "support/web_ingest_support.rs"]
+mod web_ingest_support;
+
 use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
@@ -21,6 +24,7 @@ use rustrag_backend::{
             CreateRevisionCommand, PromoteHeadCommand, UpdateMutationCommand,
             UpdateMutationItemCommand, UploadInlineDocumentCommand,
         },
+        web_ingest_service::CreateWebIngestRunCommand,
     },
 };
 
@@ -647,6 +651,99 @@ async fn canonical_content_lifecycle_inline_upload_admits_background_ingest_job(
     }
     .await;
 
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with canonical extensions"]
+async fn canonical_content_lifecycle_single_page_web_ingest_materializes_only_the_seed_page()
+-> Result<()> {
+    let fixture = ContentLifecycleFixture::create().await?;
+    let server = web_ingest_support::WebTestServer::start().await?;
+
+    let result = async {
+        let seed_url = server.url("/seed");
+        let run = fixture
+            .state
+            .canonical_services
+            .web_ingest
+            .create_run(
+                &fixture.state,
+                CreateWebIngestRunCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    seed_url: seed_url.clone(),
+                    mode: "single_page".to_string(),
+                    boundary_policy: None,
+                    max_depth: None,
+                    max_pages: None,
+                    requested_by_principal_id: None,
+                    request_surface: "test".to_string(),
+                    idempotency_key: None,
+                },
+            )
+            .await
+            .context("failed to submit single-page web ingest run")?;
+
+        assert_eq!(run.mode, "single_page");
+        assert_eq!(run.run_state, "completed");
+
+        let pages = fixture
+            .state
+            .canonical_services
+            .web_ingest
+            .list_pages(&fixture.state, run.run_id)
+            .await
+            .context("failed to list single-page web ingest pages")?;
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].normalized_url, seed_url);
+        assert_eq!(pages[0].candidate_state, "processed");
+        assert!(pages[0].document_id.is_some());
+        assert!(pages[0].result_revision_id.is_some());
+
+        let documents = fixture
+            .state
+            .canonical_services
+            .content
+            .list_documents(&fixture.state, fixture.library_id)
+            .await
+            .context("failed to list documents after single-page web ingest")?;
+        assert_eq!(documents.len(), 1);
+
+        let summary = &documents[0];
+        assert_eq!(summary.document.external_key, server.url("/seed"));
+        assert_eq!(
+            summary.active_revision.as_ref().and_then(|revision| revision.source_uri.as_deref()),
+            Some(server.url("/seed").as_str())
+        );
+        assert_eq!(
+            summary.active_revision.as_ref().map(|revision| revision.content_source_kind.as_str()),
+            Some("web_page")
+        );
+        assert_eq!(
+            summary.web_page_provenance.as_ref().and_then(|value| value.run_id),
+            Some(run.run_id)
+        );
+        assert_eq!(
+            summary.web_page_provenance.as_ref().and_then(|value| value.candidate_id),
+            Some(pages[0].candidate_id)
+        );
+
+        let revisions = fixture
+            .state
+            .canonical_services
+            .content
+            .list_revisions(&fixture.state, summary.document.id)
+            .await
+            .context("failed to list revisions after single-page web ingest")?;
+        assert_eq!(revisions.len(), 1);
+
+        Ok(())
+    }
+    .await;
+
+    server.shutdown().await?;
     fixture.cleanup().await?;
     result
 }

@@ -279,7 +279,7 @@ async fn canonical_billing_rollups_cover_query_and_ingest_executions() -> Result
                     owning_execution_id: fixture.query_execution_id,
                     binding_id: None,
                     provider_kind: "openai".to_string(),
-                    model_name: "gpt-5-mini".to_string(),
+                    model_name: "gpt-5.4-mini".to_string(),
                     call_kind: "query_planning".to_string(),
                     usage_json: serde_json::json!({}),
                 },
@@ -322,7 +322,7 @@ async fn canonical_billing_rollups_cover_query_and_ingest_executions() -> Result
                     owning_execution_id: fixture.query_execution_id,
                     binding_id: None,
                     provider_kind: "openai".to_string(),
-                    model_name: "gpt-5-mini".to_string(),
+                    model_name: "gpt-5.4-mini".to_string(),
                     call_kind: "query_rerank".to_string(),
                     usage_json: serde_json::json!({
                         "input_tokens": 2000,
@@ -478,7 +478,7 @@ async fn inline_ingest_billing_capture_produces_provider_calls_and_rollup() -> R
                     attempt_id: fixture.ingest_attempt_id,
                     binding_id: None,
                     provider_kind: "openai".to_string(),
-                    model_name: "gpt-5-mini".to_string(),
+                    model_name: "gpt-5.4-mini".to_string(),
                     call_kind: "extract_graph".to_string(),
                     usage_json: serde_json::json!({
                         "prompt_tokens": 8000,

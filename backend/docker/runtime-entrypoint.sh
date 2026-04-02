@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-CONTENT_STORAGE_ROOT="${content_storage_root:-/var/lib/rustrag/content-storage}"
+CONTENT_STORAGE_ROOT="${RUSTRAG_CONTENT_STORAGE_ROOT:-/var/lib/rustrag/content-storage}"
 
 if [ "$(id -u)" -eq 0 ]; then
   mkdir -p "$CONTENT_STORAGE_ROOT"

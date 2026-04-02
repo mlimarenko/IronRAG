@@ -4,11 +4,12 @@ use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use reqwest::{Client, StatusCode};
 use serde_json::json;
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
 use rustrag_backend::{
-    app::config::Settings,
-    domains::query::QueryExecution,
+    app::{config::Settings, state::AppState},
+    domains::query::{QueryExecution, QueryVerificationState},
     domains::{audit::AuditEventSubject, ops::OpsAsyncOperation},
     infra::arangodb::{
         bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
@@ -23,9 +24,11 @@ use rustrag_backend::{
         },
         document_store::{
             ArangoDocumentStore, KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeRevisionRow,
+            KnowledgeStructuredBlockRow, KnowledgeStructuredRevisionRow, KnowledgeTechnicalFactRow,
         },
         graph_store::{ArangoGraphStore, NewKnowledgeEntity},
     },
+    infra::repositories::{self, query_repository},
     services::query_service::QueryService,
 };
 
@@ -35,6 +38,52 @@ struct TempArangoDatabase {
     password: String,
     name: String,
     http: Client,
+}
+
+struct TempPostgresDatabase {
+    name: String,
+    admin_url: String,
+    database_url: String,
+}
+
+impl TempPostgresDatabase {
+    async fn create(base_database_url: &str) -> Result<Self> {
+        let admin_url = replace_database_name(base_database_url, "postgres")?;
+        let name = format!("query_grounding_http_{}", Uuid::now_v7().simple());
+        let admin_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin_url)
+            .await
+            .context("failed to connect to postgres admin database")?;
+
+        terminate_database_connections(&admin_pool, &name).await?;
+        sqlx::query(&format!("drop database if exists \"{name}\""))
+            .execute(&admin_pool)
+            .await
+            .with_context(|| format!("failed to drop stale query grounding database {name}"))?;
+        sqlx::query(&format!("create database \"{name}\""))
+            .execute(&admin_pool)
+            .await
+            .with_context(|| format!("failed to create query grounding database {name}"))?;
+        admin_pool.close().await;
+
+        Ok(Self { database_url: replace_database_name(base_database_url, &name)?, admin_url, name })
+    }
+
+    async fn drop(self) -> Result<()> {
+        let admin_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&self.admin_url)
+            .await
+            .context("failed to reconnect postgres admin database for cleanup")?;
+        terminate_database_connections(&admin_pool, &self.name).await?;
+        sqlx::query(&format!("drop database if exists \"{}\"", self.name))
+            .execute(&admin_pool)
+            .await
+            .with_context(|| format!("failed to drop query grounding database {}", self.name))?;
+        admin_pool.close().await;
+        Ok(())
+    }
 }
 
 impl TempArangoDatabase {
@@ -209,13 +258,16 @@ impl QueryGroundingFixture {
                 document_id,
                 revision_id,
                 chunk_index: 0,
+                chunk_kind: Some("paragraph".to_string()),
                 content_text: content_text.to_string(),
                 normalized_text: content_text.to_string(),
                 span_start: Some(0),
                 span_end: Some(i32::try_from(content_text.len()).unwrap_or(i32::MAX)),
                 token_count: Some(3),
+                support_block_ids: Vec::new(),
                 section_path: vec!["grounding".to_string()],
                 heading_trail: vec!["Grounding".to_string()],
+                literal_digest: None,
                 chunk_state: "ready".to_string(),
                 text_generation: Some(1),
                 vector_generation: None,
@@ -227,8 +279,435 @@ impl QueryGroundingFixture {
     }
 }
 
+struct QueryGroundingAppFixture {
+    temp_postgres: TempPostgresDatabase,
+    temp_arango: TempArangoDatabase,
+    state: AppState,
+    workspace_id: Uuid,
+    library_id: Uuid,
+    conversation_id: Uuid,
+}
+
+impl QueryGroundingAppFixture {
+    async fn create() -> Result<Self> {
+        let mut settings =
+            Settings::from_env().context("failed to load settings for query grounding app test")?;
+        let temp_postgres = TempPostgresDatabase::create(&settings.database_url).await?;
+        settings.database_url = temp_postgres.database_url.clone();
+        let temp_arango = TempArangoDatabase::create(&settings).await?;
+        settings.arangodb_database = temp_arango.name.clone();
+
+        let postgres = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&settings.database_url)
+            .await
+            .context("failed to connect to query grounding postgres")?;
+        sqlx::migrate!("./migrations")
+            .run(&postgres)
+            .await
+            .context("failed to apply query grounding migrations")?;
+        postgres.close().await;
+
+        let state = AppState::new(settings.clone()).await?;
+        bootstrap_knowledge_plane(
+            state.arango_client.as_ref(),
+            &ArangoBootstrapOptions {
+                collections: true,
+                views: false,
+                graph: true,
+                vector_indexes: false,
+                vector_dimensions: 3072,
+                vector_index_n_lists: 100,
+                vector_index_default_n_probe: 8,
+                vector_index_training_iterations: 25,
+            },
+        )
+        .await
+        .context("failed to bootstrap query grounding knowledge plane")?;
+
+        let suffix = Uuid::now_v7().simple().to_string();
+        let workspace = repositories::create_workspace(
+            &state.persistence.postgres,
+            &format!("query-grounding-workspace-{suffix}"),
+            "Query Grounding Workspace",
+        )
+        .await
+        .context("failed to create query grounding workspace")?;
+        let library = repositories::create_project(
+            &state.persistence.postgres,
+            workspace.id,
+            &format!("query-grounding-library-{suffix}"),
+            "Query Grounding Library",
+            Some("query grounding regression fixture"),
+        )
+        .await
+        .context("failed to create query grounding library")?;
+        let conversation = query_repository::create_conversation(
+            &state.persistence.postgres,
+            &query_repository::NewQueryConversation {
+                workspace_id: workspace.id,
+                library_id: library.id,
+                created_by_principal_id: None,
+                title: Some("Grounding Regression"),
+                conversation_state: "active",
+            },
+            8,
+        )
+        .await
+        .context("failed to create query grounding conversation")?;
+
+        Ok(Self {
+            temp_postgres,
+            temp_arango,
+            state,
+            workspace_id: workspace.id,
+            library_id: library.id,
+            conversation_id: conversation.id,
+        })
+    }
+
+    async fn cleanup(self) -> Result<()> {
+        self.state.persistence.postgres.close().await;
+        self.temp_postgres.drop().await?;
+        self.temp_arango.drop().await
+    }
+
+    async fn create_execution_detail(
+        &self,
+        query_text: &str,
+        verification_state: &str,
+        verification_warnings: serde_json::Value,
+    ) -> Result<rustrag_backend::domains::query::QueryExecutionDetail> {
+        let request_turn = query_repository::create_turn(
+            &self.state.persistence.postgres,
+            &query_repository::NewQueryTurn {
+                conversation_id: self.conversation_id,
+                turn_kind: "user",
+                author_principal_id: None,
+                content_text: query_text,
+                execution_id: None,
+            },
+        )
+        .await
+        .context("failed to create grounding request turn")?;
+        let execution_id = Uuid::now_v7();
+        let execution = query_repository::create_execution(
+            &self.state.persistence.postgres,
+            &query_repository::NewQueryExecution {
+                execution_id,
+                context_bundle_id: canonical_context_bundle_id(execution_id),
+                workspace_id: self.workspace_id,
+                library_id: self.library_id,
+                conversation_id: self.conversation_id,
+                request_turn_id: Some(request_turn.id),
+                response_turn_id: None,
+                binding_id: None,
+                execution_state: "ready",
+                query_text,
+                failure_code: None,
+            },
+        )
+        .await
+        .context("failed to create grounding execution")?;
+
+        let mut bundle = sample_context_bundle(
+            self.workspace_id,
+            self.library_id,
+            &map_execution_row(&execution),
+        );
+        bundle.bundle_state = "ready".to_string();
+        bundle.verification_state = verification_state.to_string();
+        bundle.verification_warnings = verification_warnings;
+        bundle.assembly_diagnostics = json!({
+            "question": query_text,
+            "status": "ready"
+        });
+        self.state
+            .arango_context_store
+            .upsert_bundle(&bundle)
+            .await
+            .context("failed to persist grounding verification bundle")?;
+
+        QueryService::new()
+            .get_execution(&self.state, execution.id)
+            .await
+            .map_err(|error| anyhow!("failed to load execution detail: {error}"))
+    }
+
+    async fn create_execution_detail_with_canonical_evidence(
+        &self,
+        query_text: &str,
+        verification_state: &str,
+        verification_warnings: serde_json::Value,
+        chunk_ids: Vec<Uuid>,
+        entity_ids: Vec<Uuid>,
+        relation_ids: Vec<Uuid>,
+        structured_blocks: Vec<KnowledgeStructuredBlockRow>,
+        technical_facts: Vec<KnowledgeTechnicalFactRow>,
+    ) -> Result<rustrag_backend::domains::query::QueryExecutionDetail> {
+        let request_turn = query_repository::create_turn(
+            &self.state.persistence.postgres,
+            &query_repository::NewQueryTurn {
+                conversation_id: self.conversation_id,
+                turn_kind: "user",
+                author_principal_id: None,
+                content_text: query_text,
+                execution_id: None,
+            },
+        )
+        .await
+        .context("failed to create grounding request turn with canonical evidence")?;
+        let execution_id = Uuid::now_v7();
+        let execution = query_repository::create_execution(
+            &self.state.persistence.postgres,
+            &query_repository::NewQueryExecution {
+                execution_id,
+                context_bundle_id: canonical_context_bundle_id(execution_id),
+                workspace_id: self.workspace_id,
+                library_id: self.library_id,
+                conversation_id: self.conversation_id,
+                request_turn_id: Some(request_turn.id),
+                response_turn_id: None,
+                binding_id: None,
+                execution_state: "ready",
+                query_text,
+                failure_code: None,
+            },
+        )
+        .await
+        .context("failed to create grounded execution with canonical evidence")?;
+
+        let now = Utc::now();
+        let bundle_id = canonical_context_bundle_id(execution_id);
+        let mut revision_document_ids = std::collections::BTreeMap::<Uuid, Uuid>::new();
+        for block in &structured_blocks {
+            revision_document_ids.insert(block.revision_id, block.document_id);
+        }
+        for fact in &technical_facts {
+            revision_document_ids.insert(fact.revision_id, fact.document_id);
+        }
+
+        let mut document_revision_ids = std::collections::BTreeMap::<Uuid, Uuid>::new();
+        for (revision_id, document_id) in &revision_document_ids {
+            document_revision_ids.entry(*document_id).or_insert(*revision_id);
+        }
+
+        for (document_id, active_revision_id) in document_revision_ids {
+            self.state
+                .arango_document_store
+                .upsert_document(&KnowledgeDocumentRow {
+                    key: document_id.to_string(),
+                    arango_id: None,
+                    arango_rev: None,
+                    document_id,
+                    workspace_id: self.workspace_id,
+                    library_id: self.library_id,
+                    external_key: format!("grounding-detail-{document_id}"),
+                    title: Some("Grounding Detail Document".to_string()),
+                    document_state: "active".to_string(),
+                    active_revision_id: Some(active_revision_id),
+                    readable_revision_id: Some(active_revision_id),
+                    latest_revision_no: Some(1),
+                    created_at: now,
+                    updated_at: now,
+                    deleted_at: None,
+                })
+                .await
+                .context("failed to seed grounding detail document")?;
+        }
+
+        for (revision_id, document_id) in &revision_document_ids {
+            let revision_blocks = structured_blocks
+                .iter()
+                .filter(|block| block.revision_id == *revision_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            let revision_facts = technical_facts
+                .iter()
+                .filter(|fact| fact.revision_id == *revision_id)
+                .cloned()
+                .collect::<Vec<_>>();
+
+            self.state
+                .arango_document_store
+                .upsert_revision(&KnowledgeRevisionRow {
+                    key: revision_id.to_string(),
+                    arango_id: None,
+                    arango_rev: None,
+                    revision_id: *revision_id,
+                    workspace_id: self.workspace_id,
+                    library_id: self.library_id,
+                    document_id: *document_id,
+                    revision_number: 1,
+                    revision_state: "active".to_string(),
+                    revision_kind: "upload".to_string(),
+                    storage_ref: Some(format!("memory://query-grounding/{revision_id}")),
+                    source_uri: Some(format!("memory://query-grounding/source/{revision_id}")),
+                    mime_type: "text/plain".to_string(),
+                    checksum: format!("checksum-{revision_id}"),
+                    title: Some("Grounding Detail Revision".to_string()),
+                    byte_size: 128,
+                    normalized_text: Some(query_text.to_string()),
+                    text_checksum: Some(format!("text-checksum-{revision_id}")),
+                    text_state: "text_readable".to_string(),
+                    vector_state: "ready".to_string(),
+                    graph_state: "graph_ready".to_string(),
+                    text_readable_at: Some(now),
+                    vector_ready_at: Some(now),
+                    graph_ready_at: Some(now),
+                    superseded_by_revision_id: None,
+                    created_at: now,
+                })
+                .await
+                .context("failed to seed grounding detail revision")?;
+            self.state
+                .arango_document_store
+                .upsert_structured_revision(&KnowledgeStructuredRevisionRow {
+                    key: revision_id.to_string(),
+                    arango_id: None,
+                    arango_rev: None,
+                    revision_id: *revision_id,
+                    workspace_id: self.workspace_id,
+                    library_id: self.library_id,
+                    document_id: *document_id,
+                    preparation_state: "prepared".to_string(),
+                    normalization_profile: "canonical".to_string(),
+                    source_format: "pdf".to_string(),
+                    language_code: Some("ru".to_string()),
+                    block_count: i32::try_from(revision_blocks.len()).unwrap_or(i32::MAX),
+                    chunk_count: i32::try_from(chunk_ids.len()).unwrap_or(i32::MAX),
+                    typed_fact_count: i32::try_from(revision_facts.len()).unwrap_or(i32::MAX),
+                    outline_json: json!({
+                        "headings": ["Grounding Detail"]
+                    }),
+                    prepared_at: now,
+                    updated_at: now,
+                })
+                .await
+                .context("failed to seed structured revision for grounding detail")?;
+            self.state
+                .arango_document_store
+                .replace_structured_blocks(*revision_id, &revision_blocks)
+                .await
+                .context("failed to seed structured blocks for grounding detail")?;
+            self.state
+                .arango_document_store
+                .replace_technical_facts(*revision_id, &revision_facts)
+                .await
+                .context("failed to seed technical facts for grounding detail")?;
+        }
+
+        let mut bundle = sample_context_bundle(
+            self.workspace_id,
+            self.library_id,
+            &map_execution_row(&execution),
+        );
+        bundle.bundle_state = "ready".to_string();
+        bundle.verification_state = verification_state.to_string();
+        bundle.verification_warnings = verification_warnings;
+        bundle.selected_fact_ids = technical_facts.iter().map(|fact| fact.fact_id).collect();
+        bundle.candidate_summary = json!({
+            "chunks": chunk_ids.len(),
+            "entities": entity_ids.len(),
+            "relations": relation_ids.len(),
+            "facts": technical_facts.len()
+        });
+        bundle.assembly_diagnostics = json!({
+            "question": query_text,
+            "status": "ready",
+            "grounding_kind": "hybrid"
+        });
+        self.state
+            .arango_context_store
+            .upsert_bundle(&bundle)
+            .await
+            .context("failed to persist grounding canonical evidence bundle")?;
+
+        if !chunk_ids.is_empty() {
+            let chunk_edges = chunk_ids
+                .into_iter()
+                .map(|chunk_id| sample_chunk_edge(bundle_id, chunk_id))
+                .collect::<Vec<_>>();
+            self.state
+                .arango_context_store
+                .replace_bundle_chunk_edges(bundle_id, &chunk_edges)
+                .await
+                .context("failed to persist grounding chunk edges")?;
+        }
+        if !entity_ids.is_empty() {
+            let entity_edges = entity_ids
+                .into_iter()
+                .map(|entity_id| sample_entity_edge(bundle_id, entity_id))
+                .collect::<Vec<_>>();
+            self.state
+                .arango_context_store
+                .replace_bundle_entity_edges(bundle_id, &entity_edges)
+                .await
+                .context("failed to persist grounding entity edges")?;
+        }
+        if !relation_ids.is_empty() {
+            let relation_edges = relation_ids
+                .into_iter()
+                .map(|relation_id| sample_relation_edge(bundle_id, relation_id))
+                .collect::<Vec<_>>();
+            self.state
+                .arango_context_store
+                .replace_bundle_relation_edges(bundle_id, &relation_edges)
+                .await
+                .context("failed to persist grounding relation edges")?;
+        }
+
+        QueryService::new().get_execution(&self.state, execution.id).await.map_err(|error| {
+            anyhow!("failed to load execution detail with canonical evidence: {error}")
+        })
+    }
+}
+
 fn canonical_context_bundle_id(execution_id: Uuid) -> Uuid {
     Uuid::new_v5(&Uuid::NAMESPACE_OID, execution_id.as_bytes())
+}
+
+fn replace_database_name(base_database_url: &str, database_name: &str) -> Result<String> {
+    let mut url = reqwest::Url::parse(base_database_url)
+        .with_context(|| format!("invalid postgres url: {base_database_url}"))?;
+    let path = url.path().trim_matches('/');
+    if path.is_empty() {
+        return Err(anyhow!("postgres url must include a database name"));
+    }
+    url.set_path(database_name);
+    Ok(url.to_string())
+}
+
+async fn terminate_database_connections(admin_pool: &PgPool, database_name: &str) -> Result<()> {
+    sqlx::query(
+        "select pg_terminate_backend(pid)
+         from pg_stat_activity
+         where datname = $1
+           and pid <> pg_backend_pid()",
+    )
+    .bind(database_name)
+    .execute(admin_pool)
+    .await
+    .context("failed to terminate postgres database connections")?;
+    Ok(())
+}
+
+fn map_execution_row(row: &query_repository::QueryExecutionRow) -> QueryExecution {
+    QueryExecution {
+        id: row.id,
+        workspace_id: row.workspace_id,
+        library_id: row.library_id,
+        conversation_id: row.conversation_id,
+        context_bundle_id: row.context_bundle_id,
+        request_turn_id: row.request_turn_id,
+        response_turn_id: row.response_turn_id,
+        binding_id: row.binding_id,
+        execution_state: row.execution_state.clone(),
+        query_text: row.query_text.clone(),
+        failure_code: row.failure_code.clone(),
+        started_at: row.started_at,
+        completed_at: row.completed_at,
+    }
 }
 
 fn sample_query_execution(
@@ -272,6 +751,9 @@ fn sample_context_bundle(
         bundle_strategy: "grounded_answer".to_string(),
         requested_mode: "grounded_answer".to_string(),
         resolved_mode: "grounded_answer".to_string(),
+        selected_fact_ids: Vec::new(),
+        verification_state: "not_run".to_string(),
+        verification_warnings: json!([]),
         freshness_snapshot: json!({
             "active_text_generation": 7,
             "active_vector_generation": 7,
@@ -525,6 +1007,83 @@ fn sample_evidence_reference(
     }
 }
 
+fn sample_structured_block_row(
+    workspace_id: Uuid,
+    library_id: Uuid,
+    document_id: Uuid,
+    revision_id: Uuid,
+    ordinal: i32,
+    block_kind: &str,
+    text: &str,
+    heading_trail: Vec<String>,
+    section_path: Vec<String>,
+) -> KnowledgeStructuredBlockRow {
+    let now = Utc::now();
+    let block_id = Uuid::now_v7();
+    KnowledgeStructuredBlockRow {
+        key: block_id.to_string(),
+        arango_id: None,
+        arango_rev: None,
+        block_id,
+        workspace_id,
+        library_id,
+        document_id,
+        revision_id,
+        ordinal,
+        block_kind: block_kind.to_string(),
+        text: text.to_string(),
+        normalized_text: text.to_string(),
+        heading_trail,
+        section_path,
+        page_number: Some(1),
+        span_start: Some(0),
+        span_end: Some(i32::try_from(text.len()).unwrap_or(i32::MAX)),
+        parent_block_id: None,
+        table_coordinates_json: None,
+        code_language: None,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+fn sample_technical_fact_row(
+    workspace_id: Uuid,
+    library_id: Uuid,
+    document_id: Uuid,
+    revision_id: Uuid,
+    fact_kind: &str,
+    canonical_value: &str,
+    display_value: &str,
+    support_block_ids: Vec<Uuid>,
+    support_chunk_ids: Vec<Uuid>,
+) -> KnowledgeTechnicalFactRow {
+    let now = Utc::now();
+    let fact_id = Uuid::now_v7();
+    KnowledgeTechnicalFactRow {
+        key: fact_id.to_string(),
+        arango_id: None,
+        arango_rev: None,
+        fact_id,
+        workspace_id,
+        library_id,
+        document_id,
+        revision_id,
+        fact_kind: fact_kind.to_string(),
+        canonical_value_text: canonical_value.to_string(),
+        canonical_value_exact: canonical_value.to_string(),
+        canonical_value_json: json!(canonical_value),
+        display_value: display_value.to_string(),
+        qualifiers_json: json!({}),
+        support_block_ids,
+        support_chunk_ids,
+        confidence: Some(0.95),
+        extraction_kind: "parser_first".to_string(),
+        conflict_group_id: None,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
 #[test]
 fn canonical_query_execution_scaffold_uses_execution_keyed_bundle_ids() {
     let _service = QueryService::new();
@@ -589,6 +1148,9 @@ fn typed_bundle_reference_rows_cover_all_grounding_kinds() {
             bundle_strategy: "grounded_answer".to_string(),
             requested_mode: "grounded_answer".to_string(),
             resolved_mode: "grounded_answer".to_string(),
+            selected_fact_ids: Vec::new(),
+            verification_state: "not_run".to_string(),
+            verification_warnings: json!([]),
             freshness_snapshot: json!({
                 "active_text_generation": 7,
                 "active_vector_generation": 7,
@@ -877,6 +1439,9 @@ async fn context_bundle_roundtrip_by_query_execution_persists_trace_and_chunk_re
             .update_bundle_state(
                 bundle.bundle_id,
                 "ready",
+                &[],
+                "not_run",
+                json!([]),
                 json!({
                     "active_text_generation": 7,
                     "active_vector_generation": 7,
@@ -1029,6 +1594,290 @@ async fn entity_neighborhood_filters_out_context_bundle_vertices() -> Result<()>
         assert_eq!(rows[0].vertex_kind, "knowledge_entity");
         assert_eq!(rows[0].vertex_id, entity_id);
         assert_eq!(rows[0].path_length, 0);
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango services"]
+async fn execution_detail_maps_canonical_verification_states_for_grounding_regressions()
+-> Result<()> {
+    let fixture = QueryGroundingAppFixture::create().await?;
+    let result = async {
+        let cases = [
+            (
+                "What is the exact endpoint path for the status call?",
+                "insufficient_evidence",
+                json!([{
+                    "code": "unsupported_literal",
+                    "message": "Literal `/api/status` is not grounded in selected evidence.",
+                    "relatedSegmentId": null,
+                    "relatedFactId": null
+                }]),
+                QueryVerificationState::InsufficientEvidence,
+                Some("unsupported_literal"),
+            ),
+            (
+                "Is there a GraphQL API in this library?",
+                "verified",
+                json!([]),
+                QueryVerificationState::Verified,
+                None,
+            ),
+            (
+                "Which port is canonical for the service?",
+                "conflicting_evidence",
+                json!([{
+                    "code": "conflicting_evidence",
+                    "message": "Selected evidence contains 2 conflicting technical fact group(s).",
+                    "relatedSegmentId": null,
+                    "relatedFactId": null
+                }]),
+                QueryVerificationState::Conflicting,
+                Some("conflicting_evidence"),
+            ),
+            (
+                "Compare the REST and SOAP endpoints across both documents.",
+                "partially_supported",
+                json!([{
+                    "code": "multi_document_skew",
+                    "message": "Only one of two referenced documents supplied canonical endpoint facts.",
+                    "relatedSegmentId": null,
+                    "relatedFactId": null
+                }]),
+                QueryVerificationState::PartiallySupported,
+                Some("multi_document_skew"),
+            ),
+        ];
+
+        for (
+            query_text,
+            verification_state,
+            verification_warnings,
+            expected_state,
+            expected_warning_code,
+        ) in cases
+        {
+            let detail = fixture
+                .create_execution_detail(query_text, verification_state, verification_warnings)
+                .await?;
+            assert_eq!(detail.execution.query_text, query_text);
+            assert_eq!(detail.execution.context_bundle_id, canonical_context_bundle_id(detail.execution.id));
+            assert_eq!(detail.verification_state, expected_state);
+            match expected_warning_code {
+                Some(code) => assert_eq!(
+                    detail.verification_warnings.first().map(|warning| warning.code.as_str()),
+                    Some(code)
+                ),
+                None => assert!(detail.verification_warnings.is_empty()),
+            }
+        }
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango services"]
+async fn execution_detail_surfaces_noisy_layout_segments_and_technical_facts() -> Result<()> {
+    let fixture = QueryGroundingAppFixture::create().await?;
+    let result = async {
+        let document_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        let chunk_id = Uuid::now_v7();
+        let entity_id = Uuid::now_v7();
+        let relation_id = Uuid::now_v7();
+
+        let parameter_block = sample_structured_block_row(
+            fixture.workspace_id,
+            fixture.library_id,
+            document_id,
+            revision_id,
+            0,
+            "table_row",
+            "pageNu mber | pageS ize | withCar ds | number_start ing",
+            vec!["Accounts".to_string(), "Pagination".to_string()],
+            vec!["accounts".to_string(), "pagination".to_string()],
+        );
+        let technical_facts = vec![
+            sample_technical_fact_row(
+                fixture.workspace_id,
+                fixture.library_id,
+                document_id,
+                revision_id,
+                "parameter_name",
+                "pageNumber",
+                "pageNumber",
+                vec![parameter_block.block_id],
+                vec![chunk_id],
+            ),
+            sample_technical_fact_row(
+                fixture.workspace_id,
+                fixture.library_id,
+                document_id,
+                revision_id,
+                "parameter_name",
+                "pageSize",
+                "pageSize",
+                vec![parameter_block.block_id],
+                vec![chunk_id],
+            ),
+            sample_technical_fact_row(
+                fixture.workspace_id,
+                fixture.library_id,
+                document_id,
+                revision_id,
+                "parameter_name",
+                "withCards",
+                "withCards",
+                vec![parameter_block.block_id],
+                vec![chunk_id],
+            ),
+        ];
+
+        let detail = fixture
+            .create_execution_detail_with_canonical_evidence(
+                "Перечисли параметры pageNumber, pageSize и withCards.",
+                "verified",
+                json!([]),
+                vec![chunk_id],
+                vec![entity_id],
+                vec![relation_id],
+                vec![parameter_block.clone()],
+                technical_facts.clone(),
+            )
+            .await?;
+
+        assert_eq!(detail.verification_state, QueryVerificationState::Verified);
+        assert_eq!(detail.prepared_segment_references.len(), 1);
+        assert_eq!(detail.prepared_segment_references[0].segment_id, parameter_block.block_id);
+        assert_eq!(detail.technical_fact_references.len(), 3);
+        assert_eq!(
+            detail
+                .technical_fact_references
+                .iter()
+                .map(|fact| fact.canonical_value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pageNumber", "pageSize", "withCards"]
+        );
+        assert_eq!(detail.chunk_references.len(), 1);
+        assert_eq!(detail.graph_node_references.len(), 1);
+        assert_eq!(detail.graph_edge_references.len(), 1);
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango services"]
+async fn execution_detail_surfaces_multihop_graph_and_multi_document_fact_support() -> Result<()> {
+    let fixture = QueryGroundingAppFixture::create().await?;
+    let result = async {
+        let inventory_document_id = Uuid::now_v7();
+        let inventory_revision_id = Uuid::now_v7();
+        let rest_document_id = Uuid::now_v7();
+        let rest_revision_id = Uuid::now_v7();
+        let inventory_chunk_id = Uuid::now_v7();
+        let rest_chunk_id = Uuid::now_v7();
+        let entity_ids = vec![Uuid::now_v7(), Uuid::now_v7()];
+        let relation_ids = vec![Uuid::now_v7(), Uuid::now_v7()];
+
+        let inventory_block = sample_structured_block_row(
+            fixture.workspace_id,
+            fixture.library_id,
+            inventory_document_id,
+            inventory_revision_id,
+            0,
+            "endpoint_block",
+            "SOAP WSDL http://demo.local:8080/inventory-api/ws/inventory.wsdl",
+            vec!["Inventory API".to_string()],
+            vec!["inventory".to_string(), "wsdl".to_string()],
+        );
+        let rest_block = sample_structured_block_row(
+            fixture.workspace_id,
+            fixture.library_id,
+            rest_document_id,
+            rest_revision_id,
+            0,
+            "endpoint_block",
+            "GET /v1/accounts",
+            vec!["REST API".to_string(), "Accounts".to_string()],
+            vec!["rest".to_string(), "accounts".to_string()],
+        );
+        let technical_facts = vec![
+            sample_technical_fact_row(
+                fixture.workspace_id,
+                fixture.library_id,
+                inventory_document_id,
+                inventory_revision_id,
+                "url",
+                "http://demo.local:8080/inventory-api/ws/inventory.wsdl",
+                "http://demo.local:8080/inventory-api/ws/inventory.wsdl",
+                vec![inventory_block.block_id],
+                vec![inventory_chunk_id],
+            ),
+            sample_technical_fact_row(
+                fixture.workspace_id,
+                fixture.library_id,
+                rest_document_id,
+                rest_revision_id,
+                "endpoint_path",
+                "/v1/accounts",
+                "/v1/accounts",
+                vec![rest_block.block_id],
+                vec![rest_chunk_id],
+            ),
+        ];
+
+        let detail = fixture
+            .create_execution_detail_with_canonical_evidence(
+                "Если агенту нужен WSDL inventory api и список счетов rewards accounts, какие адреса ему нужны?",
+                "verified",
+                json!([]),
+                vec![inventory_chunk_id, rest_chunk_id],
+                entity_ids.clone(),
+                relation_ids.clone(),
+                vec![inventory_block.clone(), rest_block.clone()],
+                technical_facts.clone(),
+            )
+            .await?;
+
+        assert_eq!(detail.verification_state, QueryVerificationState::Verified);
+        assert_eq!(detail.prepared_segment_references.len(), 2);
+        assert_eq!(detail.technical_fact_references.len(), 2);
+        assert_eq!(
+            detail
+                .technical_fact_references
+                .iter()
+                .map(|fact| fact.canonical_value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["http://demo.local:8080/inventory-api/ws/inventory.wsdl", "/v1/accounts"]
+        );
+        assert_eq!(detail.chunk_references.len(), 2);
+        assert_eq!(detail.graph_node_references.len(), entity_ids.len());
+        assert_eq!(detail.graph_edge_references.len(), relation_ids.len());
+        assert_eq!(
+            detail
+                .prepared_segment_references
+                .iter()
+                .map(|segment| segment.revision_id)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            2
+        );
 
         Ok(())
     }

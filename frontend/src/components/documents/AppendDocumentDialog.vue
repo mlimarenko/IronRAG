@@ -61,16 +61,10 @@ function submit(): void {
     </div>
 
     <template #feedback>
-      <p
-        v-if="showValidation"
-        class="rr-document-dialog__error"
-      >
+      <p v-if="showValidation" class="rr-document-dialog__error">
         {{ $t('documents.dialogs.append.validation') }}
       </p>
-      <p
-        v-else-if="props.error"
-        class="rr-document-dialog__error"
-      >
+      <p v-else-if="props.error" class="rr-document-dialog__error">
         {{ props.error }}
       </p>
     </template>

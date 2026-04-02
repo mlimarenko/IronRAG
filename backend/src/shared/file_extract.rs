@@ -3,7 +3,10 @@ use std::{fmt, path::Path};
 use crate::{
     domains::provider_profiles::ProviderModelSelection,
     integrations::llm::LlmGateway,
-    shared::extraction::{self, ExtractionOutput},
+    shared::{
+        extraction::{self, ExtractionOutput, ExtractionSourceMetadata, ExtractionStructureHints},
+        text_render::normalize_for_structured_preparation,
+    },
 };
 use serde::Serialize;
 
@@ -12,14 +15,16 @@ pub const EXTRACTED_CONTENT_PREVIEW_LIMIT: usize = 1_600;
 const EXTRACTION_QUALITY_KEY: &str = "content_quality";
 
 const TEXT_LIKE_EXTENSIONS: &[&str] = &[
-    "txt", "md", "markdown", "csv", "json", "yaml", "yml", "xml", "html", "htm", "log", "rst",
-    "toml", "ini", "cfg", "conf", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "rs", "java", "kt",
-    "go", "sh", "sql", "css", "scss",
+    "txt", "md", "markdown", "csv", "json", "yaml", "yml", "xml", "log", "rst", "toml", "ini",
+    "cfg", "conf", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "rs", "java", "kt", "go", "sh",
+    "sql", "css", "scss",
 ];
+const HTML_EXTENSIONS: &[&str] = &["html", "htm"];
 const IMAGE_EXTENSIONS: &[&str] =
     &["png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "tif", "tiff", "heic", "heif"];
 const DOCX_EXTENSIONS: &[&str] = &["docx"];
 const PPTX_EXTENSIONS: &[&str] = &["pptx"];
+const HTML_MIME_TYPES: &[&str] = &["text/html", "application/xhtml+xml"];
 const TEXT_LIKE_MIME_TYPES: &[&str] = &["application/json", "application/xml", "text/xml"];
 const DOCX_MIME_TYPES: &[&str] =
     &["application/vnd.openxmlformats-officedocument.wordprocessingml.document"];
@@ -117,14 +122,18 @@ pub struct ExtractedContentPreview {
 pub struct FileExtractionPlan {
     pub file_kind: UploadFileKind,
     pub adapter_status: String,
-    pub extracted_text: Option<String>,
+    pub source_text: Option<String>,
+    pub normalized_text: Option<String>,
     pub extraction_error: Option<String>,
     pub extraction_kind: String,
     pub page_count: Option<u32>,
     pub extraction_warnings: Vec<String>,
+    pub source_format_metadata: ExtractionSourceMetadata,
+    pub structure_hints: ExtractionStructureHints,
     pub source_map: serde_json::Value,
     pub provider_kind: Option<String>,
     pub model_name: Option<String>,
+    pub normalization_profile: String,
     pub extraction_version: Option<String>,
     pub ingest_mode: String,
 }
@@ -570,7 +579,7 @@ fn detect_declared_upload_file_kind(
     file_name: Option<&str>,
     mime_type: Option<&str>,
 ) -> Option<UploadFileKind> {
-    let normalized_mime = normalized_upload_mime_type(mime_type);
+    let normalized_mime = normalized_upload_mime_essence(mime_type);
     let extension = normalized_upload_extension(file_name);
 
     if normalized_mime.as_deref() == Some("application/pdf") || extension.as_deref() == Some("pdf")
@@ -595,7 +604,9 @@ fn detect_declared_upload_file_kind(
     if normalized_mime
         .as_deref()
         .is_some_and(|value| value.starts_with("text/") || TEXT_LIKE_MIME_TYPES.contains(&value))
-        || extension.as_deref().is_some_and(|value| TEXT_LIKE_EXTENSIONS.contains(&value))
+        || extension.as_deref().is_some_and(|value| {
+            TEXT_LIKE_EXTENSIONS.contains(&value) || HTML_EXTENSIONS.contains(&value)
+        })
     {
         return Some(UploadFileKind::TextLike);
     }
@@ -615,9 +626,15 @@ fn normalized_upload_mime_type(mime_type: Option<&str>) -> Option<String> {
     mime_type.map(str::trim).filter(|value| !value.is_empty()).map(str::to_ascii_lowercase)
 }
 
+fn normalized_upload_mime_essence(mime_type: Option<&str>) -> Option<String> {
+    normalized_upload_mime_type(mime_type)
+        .and_then(|value| value.split(';').next().map(str::trim).map(str::to_string))
+}
+
 fn is_supported_upload_extension(extension: &str) -> bool {
     extension == "pdf"
         || TEXT_LIKE_EXTENSIONS.contains(&extension)
+        || HTML_EXTENSIONS.contains(&extension)
         || IMAGE_EXTENSIONS.contains(&extension)
         || DOCX_EXTENSIONS.contains(&extension)
         || PPTX_EXTENSIONS.contains(&extension)
@@ -626,6 +643,7 @@ fn is_supported_upload_extension(extension: &str) -> bool {
 fn is_supported_upload_mime_type(mime_type: &str) -> bool {
     mime_type == "application/pdf"
         || mime_type.starts_with("image/")
+        || HTML_MIME_TYPES.contains(&mime_type)
         || TEXT_LIKE_MIME_TYPES.contains(&mime_type)
         || mime_type.starts_with("text/")
         || DOCX_MIME_TYPES.contains(&mime_type)
@@ -636,6 +654,18 @@ fn mime_type_is_generic_binary(mime_type: &str) -> bool {
     GENERIC_BINARY_MIME_TYPES.contains(&mime_type)
 }
 
+fn declared_payload_is_html(file_name: Option<&str>, mime_type: Option<&str>) -> bool {
+    let normalized_mime = normalized_upload_mime_essence(mime_type);
+    let extension = normalized_upload_extension(file_name);
+    normalized_mime.as_deref().is_some_and(|value| HTML_MIME_TYPES.contains(&value))
+        || extension.as_deref().is_some_and(|value| HTML_EXTENSIONS.contains(&value))
+}
+
+fn payload_looks_like_html(file_bytes: &[u8]) -> bool {
+    std::str::from_utf8(file_bytes)
+        .is_ok_and(extraction::html_main_content::payload_looks_like_html_document)
+}
+
 fn declares_unsupported_upload_format(file_name: Option<&str>, mime_type: Option<&str>) -> bool {
     if let Some(extension) = normalized_upload_extension(file_name) {
         if !is_supported_upload_extension(&extension) {
@@ -643,7 +673,7 @@ fn declares_unsupported_upload_format(file_name: Option<&str>, mime_type: Option
         }
     }
 
-    if let Some(mime_type) = normalized_upload_mime_type(mime_type) {
+    if let Some(mime_type) = normalized_upload_mime_essence(mime_type) {
         if !mime_type_is_generic_binary(&mime_type) && !is_supported_upload_mime_type(&mime_type) {
             return true;
         }
@@ -682,7 +712,9 @@ pub fn validate_upload_file_admission(
     match file_kind {
         UploadFileKind::Binary => Err(FileExtractError::UnsupportedBinary),
         UploadFileKind::TextLike => {
-            std::str::from_utf8(file_bytes).map_err(|_| FileExtractError::InvalidUtf8)?;
+            if !declared_payload_is_html(file_name, mime_type) {
+                std::str::from_utf8(file_bytes).map_err(|_| FileExtractError::InvalidUtf8)?;
+            }
             Ok(file_kind)
         }
         UploadFileKind::Pdf
@@ -768,11 +800,21 @@ pub fn build_local_file_extraction_plan(
     let file_kind = detect_upload_file_kind(file_name, mime_type, &file_bytes);
 
     match file_kind {
-        UploadFileKind::TextLike => Ok(build_plan_from_extraction(
-            file_kind,
-            extraction::text_like::extract_text_like(&file_bytes)
-                .map_err(|_| FileExtractError::InvalidUtf8)?,
-        )),
+        UploadFileKind::TextLike => {
+            let output = if declared_payload_is_html(file_name, mime_type)
+                || payload_looks_like_html(&file_bytes)
+            {
+                extraction::html_main_content::extract_html_main_content(&file_bytes, mime_type)
+                    .map_err(|error| FileExtractError::ExtractionFailed {
+                        file_kind,
+                        message: error.to_string(),
+                    })?
+            } else {
+                extraction::text_like::extract_text_like(&file_bytes)
+                    .map_err(|_| FileExtractError::InvalidUtf8)?
+            };
+            Ok(build_plan_from_extraction(file_kind, output))
+        }
         UploadFileKind::Pdf => Ok(build_plan_from_extraction(
             file_kind,
             extraction::pdf::extract_pdf(&file_bytes).map_err(|error| {
@@ -839,6 +881,15 @@ pub async fn build_runtime_file_extraction_plan(
     }
 }
 
+#[must_use]
+pub fn build_inline_text_extraction_plan(text: &str) -> FileExtractionPlan {
+    build_plan_from_extraction(
+        UploadFileKind::TextLike,
+        extraction::text_like::extract_text_like(text.as_bytes())
+            .expect("inline text extraction must accept utf-8 strings"),
+    )
+}
+
 fn build_plan_from_extraction(
     file_kind: UploadFileKind,
     output: ExtractionOutput,
@@ -848,31 +899,42 @@ fn build_plan_from_extraction(
         content_text,
         page_count,
         warnings,
+        source_metadata,
+        structure_hints,
         source_map,
         provider_kind,
         model_name,
     } = output;
-    let normalized = normalize_extracted_content(file_kind, &content_text);
-    let has_content = !normalized.content_text.trim().is_empty();
+    let normalized = normalize_extracted_content(file_kind, &content_text, structure_hints);
+    let has_source_text = !normalized.source_text.trim().is_empty();
+    let has_normalized_text = !normalized.normalized_text.trim().is_empty();
+    let source_format_metadata = ExtractionSourceMetadata {
+        source_format: source_metadata.source_format,
+        page_count: source_metadata.page_count.or(page_count),
+        line_count: i32::try_from(normalized.structure_hints.lines.len()).unwrap_or(i32::MAX),
+    };
     let source_map = with_extraction_quality_markers(
         source_map,
         &normalized,
         warnings.len(),
         provider_kind.as_deref(),
     );
-    let extracted_text = has_content.then_some(normalized.content_text);
 
     FileExtractionPlan {
         file_kind,
         adapter_status: "ready".to_string(),
-        extracted_text,
+        source_text: has_source_text.then_some(normalized.source_text),
+        normalized_text: has_normalized_text.then_some(normalized.normalized_text),
         extraction_error: None,
         extraction_kind,
-        page_count,
+        page_count: source_format_metadata.page_count,
         extraction_warnings: warnings,
+        source_format_metadata,
+        structure_hints: normalized.structure_hints,
         source_map,
         provider_kind,
         model_name,
+        normalization_profile: normalized.normalization_profile,
         extraction_version: Some("runtime_extraction_v1".to_string()),
         ingest_mode: MULTIPART_UPLOAD_MODE.to_string(),
     }
@@ -880,34 +942,45 @@ fn build_plan_from_extraction(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NormalizedExtractedContent {
-    content_text: String,
+    source_text: String,
+    normalized_text: String,
     normalization_status: ExtractionNormalizationStatus,
+    normalization_profile: String,
     ocr_source: Option<String>,
+    structure_hints: ExtractionStructureHints,
 }
 
 fn normalize_extracted_content(
     file_kind: UploadFileKind,
     content_text: &str,
+    structure_hints: ExtractionStructureHints,
 ) -> NormalizedExtractedContent {
-    match file_kind {
-        UploadFileKind::Image => {
-            let normalized_text = normalize_image_ocr_text(content_text);
-            let normalization_status = if normalized_text.trim() == content_text.trim() {
-                ExtractionNormalizationStatus::Verbatim
-            } else {
-                ExtractionNormalizationStatus::Normalized
-            };
-            NormalizedExtractedContent {
-                content_text: normalized_text,
-                normalization_status,
-                ocr_source: Some("vision_llm".to_string()),
-            }
-        }
-        _ => NormalizedExtractedContent {
-            content_text: content_text.to_string(),
-            normalization_status: ExtractionNormalizationStatus::Verbatim,
-            ocr_source: None,
-        },
+    let source_text = match file_kind {
+        UploadFileKind::Image => normalize_image_ocr_text(content_text),
+        _ => content_text.to_string(),
+    };
+    let pre_structuring =
+        normalize_for_structured_preparation(&source_text, Some(&structure_hints));
+    let normalized_text = pre_structuring.normalized_text;
+    let normalization_status = if normalized_text.trim() == content_text.trim() {
+        ExtractionNormalizationStatus::Verbatim
+    } else {
+        ExtractionNormalizationStatus::Normalized
+    };
+    let normalization_profile = if normalization_status == ExtractionNormalizationStatus::Verbatim {
+        "verbatim_v1".to_string()
+    } else if file_kind == UploadFileKind::Image {
+        "image_ocr_pre_structuring_v1".to_string()
+    } else {
+        pre_structuring.normalization_profile
+    };
+    NormalizedExtractedContent {
+        source_text,
+        normalized_text,
+        normalization_status,
+        normalization_profile,
+        ocr_source: (file_kind == UploadFileKind::Image).then_some("vision_llm".to_string()),
+        structure_hints: pre_structuring.structure_hints,
     }
 }
 
@@ -998,6 +1071,7 @@ fn with_extraction_quality_markers(
         EXTRACTION_QUALITY_KEY.to_string(),
         serde_json::json!({
             "normalization_status": normalized.normalization_status.as_str(),
+            "normalization_profile": normalized.normalization_profile,
             "ocr_source": normalized
                 .ocr_source
                 .as_deref()
@@ -1057,9 +1131,7 @@ mod tests {
             Ok(VisionResponse {
                 provider_kind: request.provider_kind,
                 model_name: request.model_name,
-                output_text:
-                    "Below is the extracted text from the image.\n\nTranscription:\nAcme Corp\nBudget 2026"
-                        .to_string(),
+                output_text: "Acme Corp\nBudget 2026".to_string(),
                 usage_json: serde_json::json!({}),
             })
         }
@@ -1161,7 +1233,7 @@ mod tests {
     #[test]
     fn rejects_utf8_payloads_with_unsupported_declared_extension() {
         assert_eq!(
-            detect_upload_file_kind(Some("sheet.xlsx"), None, br#"name,value\nacme,42"#),
+            detect_upload_file_kind(Some("sheet.xlsx"), None, br"name,value\nacme,42"),
             UploadFileKind::Binary
         );
     }
@@ -1172,7 +1244,7 @@ mod tests {
             detect_upload_file_kind(
                 Some("spreadsheet"),
                 Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
-                br#"name,value\nacme,42"#,
+                br"name,value\nacme,42",
             ),
             UploadFileKind::Binary
         );
@@ -1260,7 +1332,30 @@ mod tests {
 
         assert_eq!(plan.file_kind, UploadFileKind::TextLike);
         assert_eq!(plan.extraction_kind, "text_like");
-        assert_eq!(plan.extracted_text.as_deref(), Some(large_text.as_str()));
+        assert_eq!(plan.normalized_text.as_deref(), Some(large_text.as_str()));
+        assert_eq!(plan.source_format_metadata.source_format, "text_like");
+    }
+
+    #[test]
+    fn routes_html_uploads_through_html_main_content_extractor() {
+        let html = r"
+            <html>
+                <head><title>Ingest page</title></head>
+                <body><main><h1>Docs</h1><p>Canonical only.</p></main></body>
+            </html>
+        ";
+
+        let plan = build_file_extraction_plan(
+            Some("index.html"),
+            Some("text/html; charset=utf-8"),
+            html.as_bytes().to_vec(),
+        )
+        .expect("html extraction plan");
+
+        assert_eq!(plan.file_kind, UploadFileKind::TextLike);
+        assert_eq!(plan.extraction_kind, "html_main_content");
+        assert!(plan.normalized_text.as_deref().is_some_and(|text| text.contains("# Docs")));
+        assert_eq!(plan.source_format_metadata.source_format, "html_main_content");
     }
 
     #[test]
@@ -1274,12 +1369,13 @@ mod tests {
 
         assert_eq!(plan.file_kind, UploadFileKind::Pdf);
         assert_eq!(plan.extraction_kind, "pdf_text");
-        assert_eq!(plan.page_count, Some(1));
+        assert_eq!(plan.source_format_metadata.page_count, Some(1));
         assert!(
-            plan.extracted_text
+            plan.normalized_text
                 .as_deref()
                 .is_some_and(|text| text.contains("Quarterly graph report"))
         );
+        assert!(plan.structure_hints.lines.iter().any(|line| line.page_number == Some(1)));
     }
 
     #[test]
@@ -1306,7 +1402,7 @@ mod tests {
         let result = validate_upload_file_admission(
             Some("sheet.xlsx"),
             Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
-            br#"name,value\nacme,42"#,
+            br"name,value\nacme,42",
         );
 
         assert!(matches!(result, Err(FileExtractError::UnsupportedBinary)));
@@ -1316,7 +1412,7 @@ mod tests {
     async fn runtime_plan_uses_vision_provider_for_images() {
         let provider = ProviderModelSelection {
             provider_kind: crate::domains::provider_profiles::SupportedProviderKind::OpenAi,
-            model_name: "gpt-5-mini".to_string(),
+            model_name: "gpt-5.4-mini".to_string(),
         };
 
         let result = build_runtime_file_extraction_plan(
@@ -1334,14 +1430,15 @@ mod tests {
         assert_eq!(result.file_kind, UploadFileKind::Image);
         assert_eq!(result.extraction_kind, "vision_image");
         assert_eq!(result.provider_kind.as_deref(), Some("openai"));
-        assert_eq!(result.model_name.as_deref(), Some("gpt-5-mini"));
-        assert_eq!(result.extracted_text.as_deref(), Some("Acme Corp\nBudget 2026"));
+        assert_eq!(result.model_name.as_deref(), Some("gpt-5.4-mini"));
+        assert_eq!(result.normalized_text.as_deref(), Some("Acme Corp\nBudget 2026"));
+        assert_eq!(result.source_format_metadata.source_format, "image");
         let quality = extraction_quality_from_source_map(
             &result.source_map,
             &result.extraction_kind,
             result.extraction_warnings.len(),
         );
-        assert_eq!(quality.normalization_status, ExtractionNormalizationStatus::Normalized);
+        assert_eq!(quality.normalization_status, ExtractionNormalizationStatus::Verbatim);
         assert_eq!(quality.ocr_source.as_deref(), Some("vision_llm"));
     }
 

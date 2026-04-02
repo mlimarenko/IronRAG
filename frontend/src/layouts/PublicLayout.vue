@@ -10,10 +10,7 @@ const sessionStore = useSessionStore()
     <slot name="hero" />
     <div class="rr-login__panel">
       <div class="rr-login__panel-header">
-        <LocaleSwitcher
-          :locale="sessionStore.locale"
-          @change="sessionStore.setLocale"
-        />
+        <LocaleSwitcher :locale="sessionStore.locale" @change="sessionStore.setLocale" />
       </div>
       <div class="rr-login__panel-body">
         <slot />

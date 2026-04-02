@@ -234,7 +234,7 @@ mod tests {
         let service = ProviderFailureClassificationService::new(1_024);
         let detail = service.classify_failure(
             "openai",
-            "gpt-5-mini",
+            "gpt-5.4-mini",
             "provider request failed: provider=openai status=429 body={}",
             "graph_extract_v3:initial:segments_3:trimmed",
             2_048,
@@ -254,7 +254,7 @@ mod tests {
         let timeout = service.summarize(
             RuntimeProviderFailureClass::UpstreamTimeout,
             Some("openai".to_string()),
-            Some("gpt-5-mini".to_string()),
+            Some("gpt-5.4-mini".to_string()),
             Some("shape".to_string()),
             Some(512),
             Some(1),
@@ -266,7 +266,7 @@ mod tests {
         let retryable_rejection = service.summarize(
             RuntimeProviderFailureClass::UpstreamRejection,
             Some("openai".to_string()),
-            Some("gpt-5-mini".to_string()),
+            Some("gpt-5.4-mini".to_string()),
             Some("shape".to_string()),
             Some(512),
             Some(1),
@@ -278,7 +278,7 @@ mod tests {
         let terminal_rejection = service.summarize(
             RuntimeProviderFailureClass::UpstreamRejection,
             Some("openai".to_string()),
-            Some("gpt-5-mini".to_string()),
+            Some("gpt-5.4-mini".to_string()),
             Some("shape".to_string()),
             Some(512),
             Some(1),
@@ -299,7 +299,7 @@ mod tests {
 
         let timeout = service.classify_failure(
             "openai",
-            "gpt-5-mini",
+            "gpt-5.4-mini",
             "provider request failed: provider=openai status=504 body={}",
             "graph_extract_v3:initial:segments_3:trimmed",
             32_000,
@@ -310,7 +310,7 @@ mod tests {
         );
         let rejection = service.classify_failure(
             "openai",
-            "gpt-5-mini",
+            "gpt-5.4-mini",
             "provider request failed: provider=openai status=429 body={}",
             "graph_extract_v3:initial:segments_1:full",
             4_000,
@@ -321,7 +321,7 @@ mod tests {
         );
         let invalid_output = service.classify_failure(
             "openai",
-            "gpt-5-mini",
+            "gpt-5.4-mini",
             "invalid model output: schema mismatch",
             "graph_extract_v3:provider_retry:segments_1:full",
             4_000,
@@ -333,7 +333,7 @@ mod tests {
         let recovered = service.summarize(
             RuntimeProviderFailureClass::RecoveredAfterRetry,
             Some("openai".to_string()),
-            Some("gpt-5-mini".to_string()),
+            Some("gpt-5.4-mini".to_string()),
             Some("graph_extract_v3:provider_retry:segments_1:full".to_string()),
             Some(4_000),
             Some(1),

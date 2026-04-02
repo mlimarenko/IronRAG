@@ -361,6 +361,7 @@ impl AsRefStr for PricingBillingUnit {
     fn as_ref(&self) -> &'static str {
         match self {
             Self::Per1MInputTokens => "per_1m_input_tokens",
+            Self::Per1MCachedInputTokens => "per_1m_cached_input_tokens",
             Self::Per1MOutputTokens => "per_1m_output_tokens",
             Self::Per1MTokens => "per_1m_tokens",
             Self::FixedPerCall => "fixed_per_call",
@@ -395,6 +396,7 @@ async fn resolve_usage_cost(
     let model_name = model_name.trim().to_string();
     let capability_key = capability_as_str(capability).to_string();
     let billing_unit_key = billing_unit_as_str(billing_unit).to_string();
+    let request_input_tokens = prompt_tokens.or(total_tokens);
 
     let model = ai_repository::get_model_catalog_by_provider_and_name(
         &state.persistence.postgres,
@@ -431,6 +433,8 @@ async fn resolve_usage_cost(
         &billing_unit_key,
         workspace_id,
         observed_at,
+        "default",
+        request_input_tokens,
     )
     .await
     .context("failed to resolve effective ai price catalog entry for usage pricing")?;
@@ -488,7 +492,7 @@ fn estimate_usage_cost_from_price_catalog(
     total_tokens: Option<i32>,
 ) -> (PricingResolutionStatus, Option<Decimal>) {
     match price.billing_unit.as_str() {
-        "per_1m_input_tokens" => {
+        "per_1m_input_tokens" | "per_1m_cached_input_tokens" => {
             let Some(tokens) = prompt_tokens.or(total_tokens) else {
                 return (PricingResolutionStatus::UsageMissing, None);
             };

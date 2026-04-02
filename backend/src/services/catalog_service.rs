@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use tracing::error;
 use uuid::Uuid;
 
 use crate::{
@@ -148,6 +149,49 @@ impl CatalogService {
         Ok(map_workspace_row(row)?)
     }
 
+    pub async fn delete_workspace(
+        &self,
+        state: &AppState,
+        workspace_id: Uuid,
+    ) -> Result<CatalogWorkspace, ApiError> {
+        let workspace = self.get_workspace(state, workspace_id).await?;
+        let stashed_directory =
+            state.content_storage.stash_workspace_storage(workspace.id).await.map_err(
+                |storage_error| {
+                    error!(
+                        workspace_id = %workspace.id,
+                        error = ?storage_error,
+                        "failed to stash workspace storage before delete"
+                    );
+                    ApiError::Internal
+                },
+            )?;
+
+        let rows_affected =
+            match catalog_repository::delete_workspace(&state.persistence.postgres, workspace.id)
+                .await
+            {
+                Ok(rows_affected) => rows_affected,
+                Err(delete_error) => {
+                    restore_stashed_directory(state, stashed_directory.as_ref()).await;
+                    error!(
+                        workspace_id = %workspace.id,
+                        error = ?delete_error,
+                        "failed to delete workspace"
+                    );
+                    return Err(ApiError::Internal);
+                }
+            };
+
+        if rows_affected == 0 {
+            restore_stashed_directory(state, stashed_directory.as_ref()).await;
+            return Err(ApiError::resource_not_found("workspace", workspace.id));
+        }
+
+        purge_stashed_directory(state, stashed_directory.as_ref()).await;
+        Ok(workspace)
+    }
+
     pub async fn list_libraries(
         &self,
         state: &AppState,
@@ -244,6 +288,51 @@ impl CatalogService {
         .ok_or_else(|| ApiError::resource_not_found("library", command.library_id))?;
         let readiness = self.get_library_ingestion_readiness(state, row.id).await?;
         Ok(map_library_row(row, readiness)?)
+    }
+
+    pub async fn delete_library(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+    ) -> Result<CatalogLibrary, ApiError> {
+        let library = self.get_library(state, library_id).await?;
+        let stashed_directory = state
+            .content_storage
+            .stash_library_storage(library.workspace_id, library.id)
+            .await
+            .map_err(|storage_error| {
+                error!(
+                    workspace_id = %library.workspace_id,
+                    library_id = %library.id,
+                    error = ?storage_error,
+                    "failed to stash library storage before delete"
+                );
+                ApiError::Internal
+            })?;
+
+        let rows_affected =
+            match catalog_repository::delete_library(&state.persistence.postgres, library.id).await
+            {
+                Ok(rows_affected) => rows_affected,
+                Err(delete_error) => {
+                    restore_stashed_directory(state, stashed_directory.as_ref()).await;
+                    error!(
+                        workspace_id = %library.workspace_id,
+                        library_id = %library.id,
+                        error = ?delete_error,
+                        "failed to delete library"
+                    );
+                    return Err(ApiError::Internal);
+                }
+            };
+
+        if rows_affected == 0 {
+            restore_stashed_directory(state, stashed_directory.as_ref()).await;
+            return Err(ApiError::resource_not_found("library", library.id));
+        }
+
+        purge_stashed_directory(state, stashed_directory.as_ref()).await;
+        Ok(library)
     }
 
     pub async fn get_library_ingestion_readiness(
@@ -471,5 +560,41 @@ fn map_connector_write_error(error: sqlx::Error) -> ApiError {
             ApiError::BadRequest("connector payload violated catalog constraints".to_string())
         }
         _ => ApiError::Internal,
+    }
+}
+
+async fn restore_stashed_directory(
+    state: &AppState,
+    stashed_directory: Option<&crate::services::content_storage::StashedContentDirectory>,
+) {
+    if let Some(stashed_directory) = stashed_directory {
+        if let Err(restore_error) =
+            state.content_storage.restore_stashed_directory(stashed_directory).await
+        {
+            error!(
+                original_path = %stashed_directory.original_path().display(),
+                stashed_path = %stashed_directory.stashed_path().display(),
+                error = ?restore_error,
+                "failed to restore stashed content directory"
+            );
+        }
+    }
+}
+
+async fn purge_stashed_directory(
+    state: &AppState,
+    stashed_directory: Option<&crate::services::content_storage::StashedContentDirectory>,
+) {
+    if let Some(stashed_directory) = stashed_directory {
+        if let Err(purge_error) =
+            state.content_storage.purge_stashed_directory(stashed_directory).await
+        {
+            error!(
+                original_path = %stashed_directory.original_path().display(),
+                stashed_path = %stashed_directory.stashed_path().display(),
+                error = ?purge_error,
+                "failed to purge stashed content directory"
+            );
+        }
     }
 }

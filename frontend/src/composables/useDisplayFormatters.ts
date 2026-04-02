@@ -2,7 +2,7 @@ import { useI18n } from 'vue-i18n'
 import { inferDocumentFormatTokenFromMime } from 'src/models/ui/documentFormats'
 
 export function useDisplayFormatters() {
-  const { t, te, locale } = useI18n()
+  const i18n = useI18n()
 
   function formatDateTime(value: string | null): string {
     if (!value) {
@@ -12,7 +12,7 @@ export function useDisplayFormatters() {
     if (Number.isNaN(parsed.getTime())) {
       return value
     }
-    return new Intl.DateTimeFormat(locale.value || undefined, {
+    return new Intl.DateTimeFormat(i18n.locale.value || undefined, {
       dateStyle: 'medium',
       timeStyle: 'short',
     }).format(parsed)
@@ -30,7 +30,7 @@ export function useDisplayFormatters() {
     const now = new Date()
     const includeYear = parsed.getFullYear() !== now.getFullYear()
 
-    return new Intl.DateTimeFormat(locale.value || undefined, {
+    return new Intl.DateTimeFormat(i18n.locale.value || undefined, {
       day: 'numeric',
       month: 'short',
       ...(includeYear ? { year: 'numeric' } : {}),
@@ -63,7 +63,7 @@ export function useDisplayFormatters() {
       return fallback
     }
     const key = `${baseKey}.${value}`
-    return te(key) ? t(key) : humanizeToken(value)
+    return i18n.te(key) ? i18n.t(key) : humanizeToken(value)
   }
 
   function graphWarningLabel(value: string | null): string | null {
@@ -78,17 +78,17 @@ export function useDisplayFormatters() {
 
     switch (value) {
       case 'The canonical Arango knowledge graph generation failed.':
-        return t('graph.statusDescriptions.failed')
+        return i18n.t('graph.statusDescriptions.failed')
       case 'The canonical Arango knowledge graph is still building.':
-        return t('graph.statusDescriptions.building')
+        return i18n.t('graph.statusDescriptions.building')
       case 'The canonical Arango knowledge graph is rebuilding after recent changes.':
-        return t('graph.statusDescriptions.rebuilding')
+        return i18n.t('graph.statusDescriptions.rebuilding')
       case 'The canonical Arango knowledge graph is stale.':
-        return t('graph.statusDescriptions.stale')
+        return i18n.t('graph.statusDescriptions.stale')
       case 'Latest revision graph generation failed.':
-        return t('graph.detailWarnings.latestRevisionGraphFailed')
+        return i18n.t('graph.detailWarnings.latestRevisionGraphFailed')
       case 'Document is deleted.':
-        return t('graph.detailWarnings.documentDeleted')
+        return i18n.t('graph.detailWarnings.documentDeleted')
       default:
         if (value.startsWith('Relation contradiction state: ')) {
           const contradictionState = value.replace('Relation contradiction state: ', '').trim()
@@ -101,12 +101,12 @@ export function useDisplayFormatters() {
           ) {
             return null
           }
-          return t('graph.detailWarnings.relationContradictionState', {
+          return i18n.t('graph.detailWarnings.relationContradictionState', {
             value: humanizeToken(contradictionState),
           })
         }
         if (value.startsWith('The canonical Arango knowledge generation is ')) {
-          return t('graph.statusDescriptions.building')
+          return i18n.t('graph.statusDescriptions.building')
         }
         return value
     }
@@ -114,20 +114,20 @@ export function useDisplayFormatters() {
 
   function graphPropertyLabel(value: string): string {
     const mapping: Record<string, string> = {
-      Type: t('graph.propertyLabels.type'),
-      Support: t('graph.propertyLabels.support'),
-      Aliases: t('graph.propertyLabels.aliases'),
-      'Source chunks': t('graph.propertyLabels.sourceChunks'),
-      Assertion: t('graph.propertyLabels.assertion'),
-      'Subject entity': t('graph.propertyLabels.subjectEntity'),
-      'Object entity': t('graph.propertyLabels.objectEntity'),
-      'Freshness generation': t('graph.propertyLabels.freshnessGeneration'),
-      State: t('graph.propertyLabels.state'),
-      'Contradiction state': t('graph.propertyLabels.contradictionState'),
-      'External key': t('graph.propertyLabels.externalKey'),
-      'Active revision': t('graph.propertyLabels.activeRevision'),
-      'Readable revision': t('graph.propertyLabels.readableRevision'),
-      'Latest revision': t('graph.propertyLabels.latestRevision'),
+      Type: i18n.t('graph.propertyLabels.type'),
+      Support: i18n.t('graph.propertyLabels.support'),
+      Aliases: i18n.t('graph.propertyLabels.aliases'),
+      'Source chunks': i18n.t('graph.propertyLabels.sourceChunks'),
+      Assertion: i18n.t('graph.propertyLabels.assertion'),
+      'Subject entity': i18n.t('graph.propertyLabels.subjectEntity'),
+      'Object entity': i18n.t('graph.propertyLabels.objectEntity'),
+      'Freshness generation': i18n.t('graph.propertyLabels.freshnessGeneration'),
+      State: i18n.t('graph.propertyLabels.state'),
+      'Contradiction state': i18n.t('graph.propertyLabels.contradictionState'),
+      'External key': i18n.t('graph.propertyLabels.externalKey'),
+      'Active revision': i18n.t('graph.propertyLabels.activeRevision'),
+      'Readable revision': i18n.t('graph.propertyLabels.readableRevision'),
+      'Latest revision': i18n.t('graph.propertyLabels.latestRevision'),
     }
 
     return mapping[value] ?? value
@@ -140,7 +140,7 @@ export function useDisplayFormatters() {
 
     if (key === 'Type') {
       if (value === 'document' || value === 'entity' || value === 'topic') {
-        return t(`graph.nodeTypes.${value}`)
+        return i18n.t(`graph.nodeTypes.${value}`)
       }
       return humanizeToken(value)
     }
@@ -155,11 +155,25 @@ export function useDisplayFormatters() {
   function statusBadgeLabel(status: string | null): string {
     if (!status) return '—'
     const key = `shared.statusBadge.${status}`
-    return te(key) ? t(key) : humanizeToken(status)
+    return i18n.te(key) ? i18n.t(key) : humanizeToken(status)
   }
 
   function documentStatusLabel(status: string | null): string {
+    if (status === 'ready') {
+      return enumLabel('documents.readinessKinds', 'graph_ready')
+    }
+    if (status === 'ready_no_graph') {
+      return enumLabel('documents.readinessKinds', 'graph_sparse')
+    }
     return enumLabel('documents.statuses', status)
+  }
+
+  function documentReadinessLabel(readiness: string | null): string {
+    return enumLabel('documents.readinessKinds', readiness)
+  }
+
+  function documentGraphCoverageLabel(coverage: string | null): string {
+    return enumLabel('documents.graphCoverageKinds', coverage)
   }
 
   function mutationKindLabel(kind: string | null): string {
@@ -172,12 +186,12 @@ export function useDisplayFormatters() {
     const raw = mime.split('/').pop() ?? mime
     if (!normalized) return raw.toUpperCase()
     const key = `documents.fileFormats.${normalized}`
-    return te(key) ? t(key) : raw.toUpperCase()
+    return i18n.te(key) ? i18n.t(key) : raw.toUpperCase()
   }
 
   function documentMetadataLabel(key: string): string {
     const labelKey = `documents.details.labels.${key}`
-    return te(labelKey) ? t(labelKey) : humanizeToken(key)
+    return i18n.te(labelKey) ? i18n.t(labelKey) : humanizeToken(key)
   }
 
   function uploadFailureLabel(value: string | null): string | null {
@@ -189,15 +203,15 @@ export function useDisplayFormatters() {
       return null
     }
     const key = `documents.uploadReport.rejectionKinds.${normalized}`
-    if (te(key)) {
-      return t(key)
+    if (i18n.te(key)) {
+      return i18n.t(key)
     }
     return /\s/.test(normalized) ? normalized : humanizeToken(normalized)
   }
 
   function inspectorMetadataLabel(key: string): string {
     const metaKey = `documents.details.${key}`
-    return te(metaKey) ? t(metaKey) : humanizeToken(key)
+    return i18n.te(metaKey) ? i18n.t(metaKey) : humanizeToken(key)
   }
 
   function permissionLabel(kind: string | null): string {
@@ -219,21 +233,21 @@ export function useDisplayFormatters() {
   function graphHealthLabel(status: string | null): string {
     if (!status) return '—'
     const key = `graph.healthLabels.${status}`
-    if (te(key)) {
-      return t(key)
+    if (i18n.te(key)) {
+      return i18n.t(key)
     }
     const fallbackKey = `graph.statuses.${status}`
-    return te(fallbackKey) ? t(fallbackKey) : humanizeToken(status)
+    return i18n.te(fallbackKey) ? i18n.t(fallbackKey) : humanizeToken(status)
   }
 
   function graphNodeKindLabel(kind: string | null): string {
     if (!kind) return '—'
     const key = `graph.nodeTypes.${kind}`
-    return te(key) ? t(key) : humanizeToken(kind)
+    return i18n.te(key) ? i18n.t(key) : humanizeToken(kind)
   }
 
   function graphEvidenceLabel(count: number): string {
-    return t('graph.evidenceCount', { count })
+    return i18n.t('graph.evidenceCount', { count })
   }
 
   function auditActionLabel(action: string | null): string {
@@ -246,8 +260,8 @@ export function useDisplayFormatters() {
 
   function priceOriginLabel(setInWorkspace: boolean): string {
     return setInWorkspace
-      ? t('admin.pricing.originWorkspace')
-      : t('admin.pricing.originBaseline')
+      ? i18n.t('admin.pricing.originWorkspace')
+      : i18n.t('admin.pricing.originBaseline')
   }
 
   return {
@@ -257,6 +271,8 @@ export function useDisplayFormatters() {
     bindingPurposeLabel,
     documentStatusLabel,
     documentMetadataLabel,
+    documentGraphCoverageLabel,
+    documentReadinessLabel,
     enumLabel,
     fileFormatLabel,
     formatCompactDateTime,

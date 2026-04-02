@@ -19,7 +19,9 @@ const shellStore = useShellStore()
 const { overview, error, loading, refreshIntervalMs } = storeToRefs(dashboardStore)
 
 let refreshTimer: number | null = null
-const isPageVisible = ref(typeof document === 'undefined' ? true : document.visibilityState === 'visible')
+const isPageVisible = ref(
+  typeof document === 'undefined' ? true : document.visibilityState === 'visible',
+)
 
 function stopPolling() {
   if (refreshTimer !== null) {
@@ -89,6 +91,7 @@ const narrative = computed(() => overview.value?.summaryNarrative ?? t('dashboar
 const heroNarrative = computed(() => {
   const totalDocuments = documentCounts.value?.totalDocuments ?? 0
   const inFlightCount = documentCounts.value?.inFlightDocuments ?? 0
+  const latestDocument = recentDocuments.value[0] ?? null
 
   if (totalDocuments <= 0) {
     return narrative.value
@@ -99,40 +102,91 @@ const heroNarrative = computed(() => {
   }
 
   if (isSettledOverview.value && totalDocuments <= 1 && attentionItems.value.length === 0) {
-    return ''
+    return t('dashboard.narrativeCalm.single')
   }
 
-  return attentionItems.value.length > 0 || inFlightCount > 0 || visibleMetrics.value.length <= 1
-    ? narrative.value
-    : ''
+  if (inFlightCount > 0) {
+    if (latestDocument) {
+      return t('dashboard.narrativeCalm.processingWithLatest', {
+        count: totalDocuments,
+        active: inFlightCount,
+        latest: formatDateTime(latestDocument.uploadedAt),
+      })
+    }
+    return t('dashboard.narrativeCalm.processing', {
+      count: totalDocuments,
+      active: inFlightCount,
+    })
+  }
+
+  if (attentionItems.value.length === 0 && inFlightCount === 0) {
+    if (latestDocument) {
+      return t('dashboard.narrativeCalm.withLatest', {
+        count: totalDocuments,
+        latest: formatDateTime(latestDocument.uploadedAt),
+      })
+    }
+    return t('dashboard.narrativeCalm.totalOnly', { count: totalDocuments })
+  }
+
+  return attentionItems.value.length > 0 || visibleMetrics.value.length <= 1 ? narrative.value : ''
 })
 const isSettledOverview = computed(() => {
   const totalDocuments = documentCounts.value?.totalDocuments ?? 0
   const readyCount = documentCounts.value?.graphReadyDocuments ?? 0
   const inFlightCount = documentCounts.value?.inFlightDocuments ?? 0
 
-  return totalDocuments > 0 && readyCount >= totalDocuments && inFlightCount === 0 && attentionItems.value.length === 0
+  return (
+    totalDocuments > 0 &&
+    readyCount >= totalDocuments &&
+    inFlightCount === 0 &&
+    attentionItems.value.length === 0
+  )
 })
-const showStatusChart = computed(() => Boolean(chartSummary.value) && !isSettledOverview.value)
+const nonZeroChartSegments = computed(
+  () => chartSummary.value?.segments.filter((segment) => segment.value > 0) ?? [],
+)
+const showStatusChart = computed(() => {
+  if (!chartSummary.value || isSettledOverview.value) {
+    return false
+  }
+
+  if (attentionItems.value.length > 0) {
+    return true
+  }
+
+  const activeOrFailed =
+    (documentCounts.value?.inFlightDocuments ?? 0) > 0 ||
+    (documentCounts.value?.failedDocuments ?? 0) > 0
+  if (activeOrFailed) {
+    return true
+  }
+
+  return nonZeroChartSegments.value.length > 1
+})
 const compactStatusChart = computed(
   () => attentionItems.value.length > 0 || recentDocuments.value.length <= 3,
 )
 const showStatsStrip = computed(() => visibleMetrics.value.length > 1)
-const compactRecentDocuments = computed(
-  () => !showStatusChart.value && recentDocuments.value.length > 0 && recentDocuments.value.length <= 3,
-)
+const compactRecentDocuments = computed(() => !showStatusChart.value)
 const showSingleSettledCard = computed(
-  () => !showStatusChart.value && recentDocuments.value.length <= 1,
+  () => !showStatusChart.value && recentDocuments.value.length === 1,
 )
+const useCalmLayout = computed(() => !showEmptyOverview.value && !showStatusChart.value)
+const showEmptyOverview = computed(() => (documentCounts.value?.totalDocuments ?? 0) === 0)
 const heroFacts = computed<DashboardHeroFact[]>(() => {
   const shellContext = shellStore.context
   const facts: DashboardHeroFact[] = []
   const latestDocument = recentDocuments.value[0] ?? null
-  const firstAttention = attentionItems.value[0] ?? null
   const totalDocuments = documentCounts.value?.totalDocuments ?? 0
-  const searchReadyCount = documentCounts.value?.searchReadyDocuments ?? 0
-  const graphReadyCount = documentCounts.value?.graphReadyDocuments ?? 0
-  const graphCatchUpCount = documentCounts.value?.graphCatchUpDocuments ?? 0
+  const readableDocuments = documentCounts.value?.readableDocuments ?? 0
+  const graphSparseDocuments = documentCounts.value?.graphSparseDocuments ?? 0
+  const graphReadyDocuments = documentCounts.value?.graphReadyDocuments ?? 0
+  const inFlightDocuments = documentCounts.value?.inFlightDocuments ?? 0
+
+  if (totalDocuments <= 0) {
+    return facts
+  }
 
   if (shellContext) {
     facts.push({
@@ -145,39 +199,30 @@ const heroFacts = computed<DashboardHeroFact[]>(() => {
   }
 
   facts.push({
-    key: 'latestUpload',
-    label: t('dashboard.heroFacts.latestUpload'),
-    value: latestDocument
-      ? formatDateTime(latestDocument.uploadedAt)
-      : t('dashboard.heroFacts.noUploadsValue'),
-    supportingText: latestDocument?.fileName ?? t('dashboard.heroFacts.noUploadsHint'),
-    tone: latestDocument ? 'default' : 'warning',
+    key: 'documents',
+    label: t('dashboard.heroFacts.documents'),
+    value: String(totalDocuments),
+    supportingText: t('dashboard.heroFacts.documentsGraphSparseHint', {
+      readable: readableDocuments,
+      graphSparse: graphSparseDocuments,
+      graphReady: graphReadyDocuments,
+    }),
+    tone:
+      graphReadyDocuments >= totalDocuments && graphSparseDocuments === 0 && inFlightDocuments === 0
+        ? 'success'
+        : 'default',
   })
 
-  if (totalDocuments > 0) {
+  if (
+    latestDocument &&
+    (!isSettledOverview.value || attentionItems.value.length > 0 || inFlightDocuments > 0)
+  ) {
     facts.push({
-      key: 'documents',
-      label: t('dashboard.heroFacts.documents'),
-      value: String(totalDocuments),
-      supportingText:
-        graphCatchUpCount > 0
-          ? t('dashboard.heroFacts.documentsGraphCatchUpHint', {
-              searchReady: searchReadyCount,
-              graphReady: graphReadyCount,
-              catchUp: graphCatchUpCount,
-            })
-          : t('dashboard.heroFacts.documentsHint'),
-      tone: graphCatchUpCount > 0 ? 'warning' : 'success',
-    })
-  }
-
-  if (!isSettledOverview.value && attentionItems.value.length === 0) {
-    facts.push({
-      key: 'nextCheck',
-      label: t('dashboard.heroFacts.nextCheck'),
-      value: t('dashboard.heroFacts.quietValue'),
-      supportingText: firstAttention?.title ?? t('dashboard.heroFacts.quietHint'),
-      tone: 'success',
+      key: 'latestUpload',
+      label: t('dashboard.heroFacts.latestUpload'),
+      value: formatDateTime(latestDocument.uploadedAt),
+      supportingText: latestDocument.fileName,
+      tone: 'default',
     })
   }
 
@@ -202,45 +247,65 @@ const heroFacts = computed<DashboardHeroFact[]>(() => {
     <div
       v-else
       class="rr-dashboard__layout"
+      :class="{ 'is-empty': showEmptyOverview, 'is-calm': useCalmLayout }"
     >
       <div v-if="error && overview" class="rr-stale-banner" role="alert">
         {{ t('dashboard.staleData', 'Данные могут быть устаревшими') }}
       </div>
 
-      <div
-        class="rr-dashboard__overview"
-        :class="{ 'is-solo': !showStatsStrip, 'is-solo-doc': showSingleSettledCard }"
-      >
-        <DashboardHero
-          :narrative="heroNarrative"
-          :actions="primaryActions"
-          :facts="heroFacts"
-          :refresh-loading="loading"
-          :attention-items="attentionItems"
-          :compact="!showStatsStrip"
-          @refresh="dashboardStore.load(shellStore.context?.activeLibrary.id ?? null)"
-        />
+      <DashboardHero
+        v-if="showEmptyOverview"
+        class="rr-dashboard__hero-standalone"
+        :narrative="heroNarrative"
+        :actions="primaryActions"
+        :facts="heroFacts"
+        :refresh-loading="loading"
+        :attention-items="attentionItems"
+        :compact="false"
+        @refresh="dashboardStore.load(shellStore.context?.activeLibrary.id ?? null)"
+      />
 
-        <DashboardStatsStrip
-          v-if="showStatsStrip"
-          :metrics="metrics"
-        />
-      </div>
+      <template v-else>
+        <div
+          class="rr-dashboard__overview"
+          :class="{
+            'is-solo': !showStatsStrip,
+            'is-solo-doc': showSingleSettledCard,
+            'is-calm': useCalmLayout,
+          }"
+        >
+          <DashboardHero
+            :narrative="heroNarrative"
+            :actions="primaryActions"
+            :facts="heroFacts"
+            :refresh-loading="loading"
+            :attention-items="attentionItems"
+            :compact="true"
+            @refresh="dashboardStore.load(shellStore.context?.activeLibrary.id ?? null)"
+          />
 
-      <div
-        class="rr-dashboard__workbench"
-        :class="{ 'is-settled': !showStatusChart, 'is-solo-doc': showSingleSettledCard }"
-      >
-        <DashboardStatusChartCard
-          v-if="showStatusChart"
-          :summary="chartSummary"
-          :compact="compactStatusChart"
-        />
-        <DashboardRecentDocumentsCard
-          :documents="recentDocuments"
-          :compact="compactRecentDocuments"
-        />
-      </div>
+          <DashboardStatsStrip v-if="showStatsStrip" :metrics="metrics" />
+        </div>
+
+        <div
+          class="rr-dashboard__workbench"
+          :class="{
+            'is-settled': !showStatusChart,
+            'is-solo-doc': showSingleSettledCard,
+            'is-calm': useCalmLayout,
+          }"
+        >
+          <DashboardStatusChartCard
+            v-if="showStatusChart"
+            :summary="chartSummary"
+            :compact="compactStatusChart"
+          />
+          <DashboardRecentDocumentsCard
+            :documents="recentDocuments"
+            :compact="compactRecentDocuments"
+          />
+        </div>
+      </template>
     </div>
   </div>
 </template>

@@ -2,6 +2,8 @@
 name = "rustrag-backend"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+build = "build.rs"
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -55,6 +57,10 @@ tempfile = "3.23.0"
 json5 = "0.4"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff"] }
 png = "0.18.1"
+scraper = "0.24.0"
+encoding_rs = "0.8.35"
+unicode-normalization = "0.1"
+url = "2"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

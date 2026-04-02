@@ -51,6 +51,8 @@ fn read_response_preserves_nullability_for_unreadable_payloads() {
         latest_revision_id: None,
         read_mode: McpReadMode::Excerpt,
         readability_state: McpReadabilityState::Processing,
+        readiness_kind: "processing".to_string(),
+        graph_coverage_kind: "processing".to_string(),
         status_reason: Some("document is still being processed".to_string()),
         content: None,
         slice_start_offset: 0,
@@ -59,6 +61,7 @@ fn read_response_preserves_nullability_for_unreadable_payloads() {
         continuation_token: None,
         has_more: false,
         chunk_references: Vec::new(),
+        technical_fact_references: Vec::new(),
         entity_references: Vec::new(),
         relation_references: Vec::new(),
         evidence_references: Vec::new(),
@@ -118,8 +121,11 @@ fn search_responses_preserve_hit_order_and_nullability_for_unavailable_hits() {
                 excerpt_start_offset: Some(12),
                 excerpt_end_offset: Some(26),
                 readability_state: McpReadabilityState::Readable,
+                readiness_kind: "readable".to_string(),
+                graph_coverage_kind: "graph_ready".to_string(),
                 status_reason: None,
                 chunk_references: Vec::new(),
+                technical_fact_references: Vec::new(),
                 entity_references: Vec::new(),
                 relation_references: Vec::new(),
                 evidence_references: Vec::new(),
@@ -136,10 +142,13 @@ fn search_responses_preserve_hit_order_and_nullability_for_unavailable_hits() {
                 excerpt_start_offset: None,
                 excerpt_end_offset: None,
                 readability_state: McpReadabilityState::Unavailable,
+                readiness_kind: "failed".to_string(),
+                graph_coverage_kind: "failed".to_string(),
                 status_reason: Some(
                     "document finished without normalized extracted text".to_string(),
                 ),
                 chunk_references: Vec::new(),
+                technical_fact_references: Vec::new(),
                 entity_references: Vec::new(),
                 relation_references: Vec::new(),
                 evidence_references: Vec::new(),
@@ -561,6 +570,89 @@ async fn create_tools_allow_omitting_slug_and_advertise_optional_slug_inputs() -
             .execute(&fixture.state.persistence.postgres)
             .await
             .context("failed to delete created workspace from optional-slug contract test")?;
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango services"]
+async fn web_ingest_tools_advertise_recursive_defaults_and_page_listing_contracts()
+-> anyhow::Result<()> {
+    let settings =
+        Settings::from_env().context("failed to load settings for mcp web-ingest contract test")?;
+    let fixture = McpDiscoveryContractFixture::create(settings).await?;
+
+    let result = async {
+        let token =
+            fixture.token(&["documents:read", "documents:write"], "web-ingest-contracts").await?;
+
+        let capabilities = fixture.capabilities(&token).await?;
+        let tools =
+            capabilities["tools"].as_array().context("capabilities tools must be an array")?;
+        assert!(tools.iter().any(|tool| tool == "submit_web_ingest_run"));
+        assert!(tools.iter().any(|tool| tool == "get_web_ingest_run"));
+        assert!(tools.iter().any(|tool| tool == "list_web_ingest_run_pages"));
+        assert!(tools.iter().any(|tool| tool == "cancel_web_ingest_run"));
+
+        let tool_list = fixture.rpc_call(&token, "tools/list", json!({})).await?;
+        let tool_items = tool_list["result"]["tools"]
+            .as_array()
+            .context("tools/list must return a tools array")?;
+
+        let submit_tool = tool_items
+            .iter()
+            .find(|tool| tool["name"] == json!("submit_web_ingest_run"))
+            .context("submit_web_ingest_run tool missing from tools/list")?;
+        assert_eq!(submit_tool["inputSchema"]["required"], json!(["libraryId", "seedUrl", "mode"]));
+        assert_eq!(
+            submit_tool["inputSchema"]["properties"]["mode"]["enum"],
+            json!(["single_page", "recursive_crawl"])
+        );
+        assert_eq!(
+            submit_tool["inputSchema"]["properties"]["boundaryPolicy"]["enum"],
+            json!(["same_host", "allow_external"])
+        );
+        assert!(
+            submit_tool["inputSchema"]["properties"]["maxDepth"]["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("defaults to 3")
+        );
+        assert!(
+            submit_tool["inputSchema"]["properties"]["maxPages"]["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Optional crawl budget")
+        );
+
+        let get_tool = tool_items
+            .iter()
+            .find(|tool| tool["name"] == json!("get_web_ingest_run"))
+            .context("get_web_ingest_run tool missing from tools/list")?;
+        assert_eq!(get_tool["inputSchema"]["required"], json!(["runId"]));
+
+        let pages_tool = tool_items
+            .iter()
+            .find(|tool| tool["name"] == json!("list_web_ingest_run_pages"))
+            .context("list_web_ingest_run_pages tool missing from tools/list")?;
+        assert_eq!(pages_tool["inputSchema"]["required"], json!(["runId"]));
+        assert!(
+            pages_tool["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("candidate pages and outcomes")
+        );
+
+        let cancel_tool = tool_items
+            .iter()
+            .find(|tool| tool["name"] == json!("cancel_web_ingest_run"))
+            .context("cancel_web_ingest_run tool missing from tools/list")?;
+        assert_eq!(cancel_tool["inputSchema"]["required"], json!(["runId"]));
 
         Ok(())
     }

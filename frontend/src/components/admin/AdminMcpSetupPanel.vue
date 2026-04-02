@@ -77,7 +77,10 @@ const recommendedPromptBlock = computed<McpSnippetBlock>(() => ({
   label: t('admin.mcp.recommendedPrompt.snippetLabel'),
   location: t('admin.mcp.recommendedPrompt.location'),
   language: 'text',
-  content: (tm('admin.mcp.recommendedPrompt.lines') as string[]).join('\n'),
+  content: (() => {
+    const lines = tm('admin.mcp.recommendedPrompt.lines')
+    return Array.isArray(lines) ? lines.map((line) => String(line)).join('\n') : ''
+  })(),
 }))
 
 const guides = computed<McpGuide[]>(() => [
@@ -315,6 +318,34 @@ const summary = computed(() => ({
   auth: 'Bearer',
 }))
 
+const contextSummary = computed(
+  () =>
+    `${props.libraryName} · ${summary.value.clients} ${t('admin.mcp.summary.clients').toLowerCase()}`,
+)
+
+const primaryGuideSnippets = computed(() => selectedGuide.value?.snippets.slice(0, 1) ?? [])
+const secondaryGuideSnippets = computed(() => selectedGuide.value?.snippets.slice(1) ?? [])
+const quickstartSnippets = computed(() => {
+  const tokenSnippet = sharedSnippets.value[0] ? [sharedSnippets.value[0]] : []
+  return [...tokenSnippet, ...primaryGuideSnippets.value]
+})
+const quickstartSnippet = computed<McpSnippetBlock | null>(() => {
+  if (quickstartSnippets.value.length === 0) {
+    return null
+  }
+  return {
+    id: `quickstart:${selectedGuide.value.id}`,
+    label: t('admin.mcp.sharedQuickstartTitle'),
+    location: null,
+    language: 'text',
+    content: quickstartSnippets.value.map((block) => block.content).join('\n\n'),
+  }
+})
+const advancedSnippets = computed(() => {
+  const capabilitySnippet = sharedSnippets.value[1] ? [sharedSnippets.value[1]] : []
+  return [...capabilitySnippet, ...secondaryGuideSnippets.value]
+})
+
 async function copySnippet(block: McpSnippetBlock): Promise<void> {
   try {
     await navigator.clipboard.writeText(block.content)
@@ -345,42 +376,12 @@ onBeforeUnmount(() => {
         <header class="rr-admin-workbench__pane-head">
           <div class="rr-admin-workbench__pane-copy">
             <h3>{{ $t('admin.mcp.registryTitle') }}</h3>
+            <p>{{ contextSummary }}</p>
           </div>
-          <button
-            class="rr-button"
-            type="button"
-            @click="emit('createToken')"
-          >
+          <button class="rr-button" type="button" @click="emit('createToken')">
             {{ $t('admin.createToken') }}
           </button>
         </header>
-
-        <div class="rr-admin-workbench__context">
-          <div class="rr-admin-workbench__context-chip">
-            <span>{{ $t('shell.workspace') }}</span>
-            <strong>{{ workspaceName }}</strong>
-          </div>
-          <div class="rr-admin-workbench__context-chip">
-            <span>{{ $t('shell.library') }}</span>
-            <strong>{{ libraryName }}</strong>
-          </div>
-        </div>
-
-        <div class="rr-admin-workbench__summary">
-          <span class="rr-admin-workbench__summary-chip">
-            <strong>{{ summary.clients }}</strong> {{ $t('admin.mcp.summary.clients') }}
-          </span>
-          <span class="rr-admin-workbench__summary-chip">
-            <strong>{{ summary.transport }}</strong> {{ $t('admin.mcp.summary.transport') }}
-          </span>
-          <span class="rr-admin-workbench__summary-chip">
-            <strong>{{ summary.auth }}</strong> {{ $t('admin.mcp.summary.auth') }}
-          </span>
-        </div>
-
-        <p class="rr-admin-workbench__helper">
-          {{ $t('admin.mcp.tokenHint') }}
-        </p>
 
         <div class="rr-admin-workbench__list">
           <button
@@ -406,14 +407,11 @@ onBeforeUnmount(() => {
       </aside>
 
       <section class="rr-admin-workbench__detail">
-        <div
-          v-if="selectedGuide"
-          class="rr-admin-workbench__detail-card"
-        >
+        <div v-if="selectedGuide" class="rr-admin-workbench__detail-card">
           <header class="rr-admin-workbench__detail-head">
             <div class="rr-admin-workbench__pane-copy">
               <h3>{{ selectedGuide.title }}</h3>
-              <p>{{ selectedGuide.note }}</p>
+              <p>{{ selectedGuide.subtitle }}</p>
             </div>
             <a
               class="rr-button rr-button--ghost"
@@ -445,108 +443,107 @@ onBeforeUnmount(() => {
           </dl>
 
           <section class="rr-admin-workbench__detail-section">
-            <h4>{{ $t('admin.mcp.sharedQuickstartTitle') }}</h4>
-
             <article
-              v-for="block in sharedSnippets"
-              :key="block.id"
+              v-if="quickstartSnippet"
               class="rr-admin-mcp__snippet rr-admin-mcp__snippet--shared"
             >
               <header class="rr-admin-mcp__snippet-head">
                 <div class="rr-admin-workbench__pane-copy">
-                  <h5>{{ block.label }}</h5>
+                  <h5>{{ quickstartSnippet.label }}</h5>
                 </div>
                 <button
                   type="button"
                   class="rr-button rr-button--ghost rr-button--tiny"
-                  @click="copySnippet(block)"
+                  @click="copySnippet(quickstartSnippet)"
                 >
                   {{
-                    copiedSnippetId === block.id
+                    copiedSnippetId === quickstartSnippet.id
                       ? $t('admin.mcp.copied')
                       : $t('admin.actions.copy')
                   }}
                 </button>
               </header>
 
-              <pre class="rr-admin-mcp__code"><code>{{ block.content }}</code></pre>
+              <pre class="rr-admin-mcp__code"><code>{{ quickstartSnippet.content }}</code></pre>
             </article>
           </section>
 
-          <section class="rr-admin-workbench__detail-section">
-            <div class="rr-admin-workbench__pane-copy">
-              <h4>{{ $t('admin.mcp.recommendedPrompt.title') }}</h4>
-              <p>{{ $t('admin.mcp.recommendedPrompt.intro') }}</p>
+          <details class="rr-admin-mcp__advanced">
+            <summary>{{ $t('admin.mcp.recommendedFlowTitle') }}</summary>
+
+            <div class="rr-admin-mcp__advanced-body">
+              <section v-if="advancedSnippets.length" class="rr-admin-workbench__detail-section">
+                <article
+                  v-for="block in advancedSnippets"
+                  :key="block.id"
+                  class="rr-admin-mcp__snippet"
+                >
+                  <header class="rr-admin-mcp__snippet-head">
+                    <div class="rr-admin-workbench__pane-copy">
+                      <h5>{{ block.label }}</h5>
+                      <p v-if="block.location">{{ block.location }}</p>
+                    </div>
+                    <button
+                      type="button"
+                      class="rr-button rr-button--ghost rr-button--tiny"
+                      @click="copySnippet(block)"
+                    >
+                      {{
+                        copiedSnippetId === block.id
+                          ? $t('admin.mcp.copied')
+                          : $t('admin.actions.copy')
+                      }}
+                    </button>
+                  </header>
+
+                  <pre class="rr-admin-mcp__code"><code>{{ block.content }}</code></pre>
+                </article>
+              </section>
+
+              <section class="rr-admin-workbench__detail-section">
+                <div class="rr-admin-workbench__pane-copy">
+                  <h4>{{ $t('admin.mcp.recommendedPrompt.title') }}</h4>
+                  <p>{{ $t('admin.mcp.recommendedPrompt.intro') }}</p>
+                </div>
+
+                <article class="rr-admin-mcp__snippet rr-admin-mcp__snippet--shared">
+                  <header class="rr-admin-mcp__snippet-head">
+                    <div class="rr-admin-workbench__pane-copy">
+                      <h5>{{ recommendedPromptBlock.label }}</h5>
+                      <p v-if="recommendedPromptBlock.location">
+                        {{ recommendedPromptBlock.location }}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      class="rr-button rr-button--ghost rr-button--tiny"
+                      @click="copySnippet(recommendedPromptBlock)"
+                    >
+                      {{
+                        copiedSnippetId === recommendedPromptBlock.id
+                          ? $t('admin.mcp.copied')
+                          : $t('admin.actions.copy')
+                      }}
+                    </button>
+                  </header>
+
+                  <pre
+                    class="rr-admin-mcp__code"
+                  ><code>{{ recommendedPromptBlock.content }}</code></pre>
+                </article>
+              </section>
+
+              <section class="rr-admin-workbench__detail-section">
+                <ol class="rr-admin-mcp__steps">
+                  <li v-for="step in selectedGuide.steps" :key="step">
+                    {{ step }}
+                  </li>
+                </ol>
+              </section>
             </div>
+          </details>
 
-            <article class="rr-admin-mcp__snippet rr-admin-mcp__snippet--shared">
-              <header class="rr-admin-mcp__snippet-head">
-                <div class="rr-admin-workbench__pane-copy">
-                  <h5>{{ recommendedPromptBlock.label }}</h5>
-                  <p v-if="recommendedPromptBlock.location">
-                    {{ recommendedPromptBlock.location }}
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  class="rr-button rr-button--ghost rr-button--tiny"
-                  @click="copySnippet(recommendedPromptBlock)"
-                >
-                  {{
-                    copiedSnippetId === recommendedPromptBlock.id
-                      ? $t('admin.mcp.copied')
-                      : $t('admin.actions.copy')
-                  }}
-                </button>
-              </header>
-
-              <pre class="rr-admin-mcp__code"><code>{{ recommendedPromptBlock.content }}</code></pre>
-            </article>
-          </section>
-
-          <section class="rr-admin-workbench__detail-section">
-            <h4>{{ $t('admin.mcp.recommendedFlowTitle') }}</h4>
-            <ol class="rr-admin-mcp__steps">
-              <li
-                v-for="step in selectedGuide.steps"
-                :key="step"
-              >
-                {{ step }}
-              </li>
-            </ol>
-          </section>
-
-          <section class="rr-admin-workbench__detail-section">
-            <h4>{{ $t('admin.mcp.snippetsTitle') }}</h4>
-
-            <article
-              v-for="block in selectedGuide.snippets"
-              :key="block.id"
-              class="rr-admin-mcp__snippet"
-            >
-              <header class="rr-admin-mcp__snippet-head">
-                <div class="rr-admin-workbench__pane-copy">
-                  <h5>{{ block.label }}</h5>
-                  <p v-if="block.location">{{ block.location }}</p>
-                </div>
-                <button
-                  type="button"
-                  class="rr-button rr-button--ghost rr-button--tiny"
-                  @click="copySnippet(block)"
-                >
-                  {{
-                    copiedSnippetId === block.id
-                      ? $t('admin.mcp.copied')
-                      : $t('admin.actions.copy')
-                  }}
-                </button>
-              </header>
-
-              <pre class="rr-admin-mcp__code"><code>{{ block.content }}</code></pre>
-            </article>
-          </section>
-
-          <p class="rr-admin-workbench__feedback">
+          <p class="rr-admin-workbench__feedback rr-admin-workbench__feedback--subtle">
             {{ $t('admin.mcp.originHint', { origin: appOrigin }) }}
           </p>
         </div>
@@ -568,10 +565,10 @@ onBeforeUnmount(() => {
 
 .rr-admin-mcp__snippet {
   display: grid;
-  gap: 0.8rem;
-  padding: 0.95rem;
+  gap: 0.7rem;
+  padding: 0.78rem;
   border: 1px solid rgba(226, 232, 240, 0.86);
-  border-radius: 1rem;
+  border-radius: 0.9rem;
   background: rgba(248, 250, 252, 0.74);
 }
 
@@ -622,23 +619,53 @@ onBeforeUnmount(() => {
   line-height: 1.45;
 }
 
+.rr-admin-workbench--mcp .rr-admin-workbench__list {
+  max-height: min(60vh, 42rem);
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.rr-admin-mcp__advanced {
+  display: grid;
+  gap: 0.8rem;
+  padding: 0.85rem 0.9rem;
+  border: 1px solid rgba(226, 232, 240, 0.86);
+  border-radius: 0.95rem;
+  background: rgba(248, 250, 252, 0.58);
+}
+
+.rr-admin-mcp__advanced summary {
+  cursor: pointer;
+  color: var(--rr-text-primary);
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.rr-admin-mcp__advanced-body {
+  display: grid;
+  gap: 0.85rem;
+  padding-top: 0.35rem;
+}
+
 .rr-admin-mcp__code {
   margin: 0;
-  padding: 0.95rem 1rem;
+  padding: 0.8rem 0.9rem;
   overflow-x: auto;
   border-radius: 0.95rem;
   border: 1px solid rgba(15, 23, 42, 0.08);
   background: #0f172a;
   color: #e2e8f0;
-  font-size: 0.79rem;
-  line-height: 1.6;
+  font-size: 0.76rem;
+  line-height: 1.55;
   font-family:
-    'SFMono-Regular',
-    'SF Mono',
-    'Cascadia Code',
-    'JetBrains Mono',
-    ui-monospace,
-    monospace;
+    'SFMono-Regular', 'SF Mono', 'Cascadia Code', 'JetBrains Mono', ui-monospace, monospace;
+}
+
+.rr-admin-workbench__feedback--subtle {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: 0.76rem;
 }
 
 .rr-admin-mcp__code code {

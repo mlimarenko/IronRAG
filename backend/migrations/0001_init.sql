@@ -1,6 +1,5 @@
--- Canonical RustRAG baseline schema (fresh stack):
--- Postgres (control-plane + operations), Redis (queue/session cache), ArangoDB (knowledge plane).
--- This migration intentionally avoids legacy graph-store bootstrap/repair routines.
+-- RustRAG baseline schema: Postgres (control plane, operations), Redis (queues, session cache),
+-- ArangoDB (knowledge graph, retrieval traces).
 create extension if not exists pgcrypto;
 
 create type catalog_workspace_lifecycle_state as enum ('active', 'archived');
@@ -60,14 +59,15 @@ create type ai_validation_state as enum ('pending', 'succeeded', 'failed');
 create type surface_kind as enum ('ui', 'rest', 'mcp', 'worker', 'bootstrap');
 
 create type content_document_state as enum ('active', 'deleted');
-create type content_source_kind as enum ('upload', 'append', 'replace', 'connector_sync', 'import');
+create type content_source_kind as enum ('upload', 'append', 'replace', 'connector_sync', 'import', 'web_page');
 create type content_mutation_operation_kind as enum (
     'upload',
     'append',
     'replace',
     'reprocess',
     'delete',
-    'connector_sync'
+    'connector_sync',
+    'web_capture'
 );
 create type content_mutation_state as enum (
     'accepted',
@@ -79,14 +79,46 @@ create type content_mutation_state as enum (
 );
 create type content_mutation_item_state as enum ('pending', 'applied', 'failed', 'conflicted', 'skipped');
 
-create type ingest_job_kind as enum ('content_mutation', 'connector_sync', 'reindex', 'reembed', 'graph_refresh');
+create type ingest_job_kind as enum (
+    'content_mutation',
+    'connector_sync',
+    'reindex',
+    'reembed',
+    'graph_refresh',
+    'web_discovery',
+    'web_materialize_page'
+);
 create type ingest_queue_state as enum ('queued', 'leased', 'completed', 'failed', 'canceled');
 create type ingest_attempt_state as enum ('leased', 'running', 'succeeded', 'failed', 'abandoned', 'canceled');
 create type ingest_stage_state as enum ('started', 'completed', 'failed', 'skipped');
 
 create type extract_state as enum ('missing', 'processing', 'ready', 'failed');
+create type web_ingest_mode as enum ('single_page', 'recursive_crawl');
+create type web_boundary_policy as enum ('same_host', 'allow_external');
+create type web_run_state as enum (
+    'accepted',
+    'discovering',
+    'processing',
+    'completed',
+    'completed_partial',
+    'failed',
+    'canceled'
+);
+create type web_candidate_host_classification as enum ('same_host', 'external');
+create type web_candidate_state as enum (
+    'discovered',
+    'eligible',
+    'duplicate',
+    'excluded',
+    'blocked',
+    'queued',
+    'processing',
+    'processed',
+    'failed',
+    'canceled'
+);
 
--- Legacy graph projection types removed: canonical graph truth is in ArangoDB.
+-- Knowledge graph (entities, relations) lives in ArangoDB; enums below are for query, billing, and ops.
 
 create type query_conversation_state as enum ('active', 'archived');
 create type query_turn_kind as enum ('user', 'assistant', 'system', 'tool');
@@ -101,7 +133,11 @@ create type query_execution_state as enum (
 
 create type billing_owning_execution_kind as enum ('ingest_attempt', 'query_execution', 'binding_validation');
 create type billing_call_state as enum ('started', 'completed', 'failed', 'canceled');
-create type billing_unit as enum ('per_1m_input_tokens', 'per_1m_output_tokens');
+create type billing_unit as enum (
+    'per_1m_input_tokens',
+    'per_1m_output_tokens',
+    'per_1m_cached_input_tokens'
+);
 
 create type ops_async_operation_status as enum ('accepted', 'processing', 'ready', 'failed', 'superseded', 'canceled');
 create type ops_degraded_state as enum ('healthy', 'degraded', 'failed', 'rebuilding');
@@ -173,6 +209,9 @@ create table ai_price_catalog (
     id uuid primary key,
     model_catalog_id uuid not null references ai_model_catalog(id) on delete cascade,
     billing_unit billing_unit not null,
+    price_variant_key text not null default 'default',
+    request_input_tokens_min integer,
+    request_input_tokens_max integer,
     unit_price numeric(18,8) not null,
     currency_code text not null,
     effective_from timestamptz not null,
@@ -477,6 +516,51 @@ create table ops_async_operation (
         on delete cascade
 );
 
+create table content_web_ingest_run (
+    id uuid primary key default uuidv7(),
+    mutation_id uuid not null unique references content_mutation(id) on delete cascade,
+    async_operation_id uuid unique references ops_async_operation(id) on delete set null,
+    workspace_id uuid not null references catalog_workspace(id) on delete cascade,
+    library_id uuid not null references catalog_library(id) on delete cascade,
+    mode web_ingest_mode not null,
+    seed_url text not null,
+    normalized_seed_url text not null,
+    boundary_policy web_boundary_policy not null,
+    max_depth integer not null,
+    max_pages integer not null,
+    run_state web_run_state not null default 'accepted',
+    requested_by_principal_id uuid references iam_principal(id) on delete set null,
+    requested_at timestamptz not null default now(),
+    completed_at timestamptz,
+    failure_code text,
+    cancel_requested_at timestamptz,
+    check (max_depth >= 0),
+    check (max_pages >= 1)
+);
+
+create table content_web_discovered_page (
+    id uuid primary key default uuidv7(),
+    run_id uuid not null references content_web_ingest_run(id) on delete cascade,
+    discovered_url text,
+    normalized_url text not null,
+    final_url text,
+    canonical_url text,
+    depth integer not null,
+    referrer_candidate_id uuid references content_web_discovered_page(id) on delete set null,
+    host_classification web_candidate_host_classification not null,
+    candidate_state web_candidate_state not null default 'discovered',
+    classification_reason text,
+    content_type text,
+    http_status integer,
+    discovered_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    document_id uuid references content_document(id) on delete set null,
+    result_revision_id uuid references content_revision(id) on delete set null,
+    mutation_item_id uuid references content_mutation_item(id) on delete set null,
+    snapshot_storage_key text,
+    check (depth >= 0)
+);
+
 create table ingest_job (
     id uuid primary key default uuidv7(),
     workspace_id uuid not null,
@@ -534,6 +618,8 @@ create table extract_content (
     extract_state extract_state not null default 'missing',
     normalized_text text,
     text_checksum text,
+    preparation_state text,
+    preparation_checkpoint_json jsonb not null default '{}'::jsonb,
     warning_count integer not null default 0,
     updated_at timestamptz not null default now()
 );
@@ -576,9 +662,6 @@ create table extract_resume_cursor (
     downgrade_level integer not null default 0,
     updated_at timestamptz not null default now()
 );
-
--- Legacy graph projection tables removed: canonical graph truth is in ArangoDB
--- (knowledge_entity, knowledge_relation, knowledge_evidence, etc.).
 
 create table query_conversation (
     id uuid primary key default uuidv7(),
@@ -640,8 +723,7 @@ create table query_chunk_reference (
     primary key (execution_id, chunk_id)
 );
 
--- Legacy query_graph_node_reference and query_graph_edge_reference removed:
--- graph-grounded query references use ArangoDB knowledge_retrieval_trace.
+-- Graph-grounded retrieval traces: ArangoDB knowledge_retrieval_trace; Postgres stores chunk references above.
 
 create table ops_library_state (
     library_id uuid primary key references catalog_library(id) on delete cascade,
@@ -701,12 +783,37 @@ create unique index idx_iam_api_token_secret_latest_active
     where revoked_at is null;
 
 create unique index idx_ai_price_catalog_system_effective
-    on ai_price_catalog (model_catalog_id, billing_unit, effective_from)
+    on ai_price_catalog (
+        model_catalog_id,
+        billing_unit,
+        price_variant_key,
+        coalesce(request_input_tokens_min, -1),
+        coalesce(request_input_tokens_max, -1),
+        effective_from
+    )
     where catalog_scope = 'system';
 
 create unique index idx_ai_price_catalog_workspace_override_effective
-    on ai_price_catalog (model_catalog_id, billing_unit, workspace_id, effective_from)
+    on ai_price_catalog (
+        model_catalog_id,
+        billing_unit,
+        price_variant_key,
+        coalesce(request_input_tokens_min, -1),
+        coalesce(request_input_tokens_max, -1),
+        workspace_id,
+        effective_from
+    )
     where catalog_scope = 'workspace_override';
+
+create index idx_ai_price_catalog_resolution
+    on ai_price_catalog (
+        model_catalog_id,
+        billing_unit,
+        price_variant_key,
+        request_input_tokens_min,
+        request_input_tokens_max,
+        effective_from desc
+    );
 
 create unique index idx_content_mutation_idempotency
     on content_mutation (requested_by_principal_id, request_surface, idempotency_key)
@@ -737,6 +844,28 @@ create index idx_content_revision_document_created_at
 create index idx_content_mutation_library_state
     on content_mutation (library_id, mutation_state, requested_at desc);
 
+create unique index idx_content_web_discovered_page_run_normalized_url
+    on content_web_discovered_page (run_id, normalized_url);
+
+create index idx_content_web_discovered_page_run_canonical_url
+    on content_web_discovered_page (run_id, canonical_url)
+    where canonical_url is not null;
+
+create index idx_content_web_ingest_run_library_requested
+    on content_web_ingest_run (library_id, requested_at desc);
+
+create index idx_content_web_ingest_run_library_state
+    on content_web_ingest_run (library_id, run_state, requested_at desc);
+
+create index idx_content_web_ingest_run_mutation
+    on content_web_ingest_run (mutation_id);
+
+create index idx_content_web_discovered_page_run_state
+    on content_web_discovered_page (run_id, candidate_state, depth, discovered_at);
+
+create index idx_content_web_discovered_page_document
+    on content_web_discovered_page (document_id);
+
 create index idx_ingest_job_library_queue
     on ingest_job (library_id, queue_state, priority, available_at);
 
@@ -748,8 +877,6 @@ create index idx_ingest_stage_event_attempt_ordinal
 
 create index idx_extract_chunk_result_attempt_state
     on extract_chunk_result (attempt_id, extract_state);
-
--- Legacy graph projection indexes removed (ArangoDB canonical).
 
 create index idx_query_conversation_library_updated_at
     on query_conversation (library_id, updated_at desc);
@@ -820,88 +947,54 @@ insert into ai_model_catalog (
     metadata_json
 )
 values
-    (
-        '00000000-0000-0000-0000-000000000201',
-        '00000000-0000-0000-0000-000000000101',
-        'gpt-5-mini',
-        'chat',
-        'multimodal',
-        null,
-        null,
-        'active',
-        '{"defaultRoles": ["extract_text", "vision"], "seedSource": "provider_catalog"}'::jsonb
-    ),
-    (
-        '00000000-0000-0000-0000-000000000202',
-        '00000000-0000-0000-0000-000000000101',
-        'text-embedding-3-large',
-        'embedding',
-        'text',
-        null,
-        null,
-        'active',
-        '{"defaultRoles": ["embed_chunk"], "seedSource": "provider_catalog"}'::jsonb
-    ),
-    (
-        '00000000-0000-0000-0000-000000000203',
-        '00000000-0000-0000-0000-000000000101',
-        'gpt-5.4',
-        'chat',
-        'multimodal',
-        null,
-        null,
-        'active',
-        '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb
-    ),
-    (
-        '00000000-0000-0000-0000-000000000204',
-        '00000000-0000-0000-0000-000000000102',
-        'deepseek-chat',
-        'chat',
-        'text',
-        null,
-        null,
-        'active',
-        '{"defaultRoles": ["extract_graph"], "seedSource": "provider_catalog"}'::jsonb
-    ),
-    (
-        '00000000-0000-0000-0000-000000000205',
-        '00000000-0000-0000-0000-000000000103',
-        'qwen3-max',
-        'chat',
-        'text',
-        null,
-        null,
-        'active',
-        '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb
-    ),
-    (
-        '00000000-0000-0000-0000-000000000206',
-        '00000000-0000-0000-0000-000000000103',
-        'text-embedding-v4',
-        'embedding',
-        'text',
-        null,
-        null,
-        'active',
-        '{"defaultRoles": ["embed_chunk"], "seedSource": "provider_catalog"}'::jsonb
-    ),
-    (
-        '00000000-0000-0000-0000-000000000207',
-        '00000000-0000-0000-0000-000000000103',
-        'qwen3.5-plus',
-        'chat',
-        'multimodal',
-        null,
-        null,
-        'active',
-        '{"defaultRoles": ["vision"], "seedSource": "provider_catalog"}'::jsonb
-    );
+    ('00000000-0000-0000-0000-000000000201', '00000000-0000-0000-0000-000000000101', 'gpt-5.4-mini', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_graph", "extract_text", "vision", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000202', '00000000-0000-0000-0000-000000000101', 'text-embedding-3-large', 'embedding', 'text', null, null, 'active', '{"defaultRoles": ["embed_chunk"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000203', '00000000-0000-0000-0000-000000000101', 'gpt-5.4', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000204', '00000000-0000-0000-0000-000000000102', 'deepseek-chat', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000205', '00000000-0000-0000-0000-000000000103', 'qwen3-max', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000206', '00000000-0000-0000-0000-000000000103', 'text-embedding-v4', 'embedding', 'text', null, null, 'active', '{"defaultRoles": ["embed_chunk"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000207', '00000000-0000-0000-0000-000000000103', 'qwen3.5-plus', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000208', '00000000-0000-0000-0000-000000000101', 'gpt-5.4-nano', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000209', '00000000-0000-0000-0000-000000000101', 'gpt-5.4-pro', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000210', '00000000-0000-0000-0000-000000000101', 'gpt-5.3-chat-latest', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000211', '00000000-0000-0000-0000-000000000101', 'gpt-5.3-codex', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000212', '00000000-0000-0000-0000-000000000101', 'gpt-4.1', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000213', '00000000-0000-0000-0000-000000000101', 'gpt-4.1-mini', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_text", "vision", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000214', '00000000-0000-0000-0000-000000000101', 'gpt-4.1-nano', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000215', '00000000-0000-0000-0000-000000000101', 'gpt-4o', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_text", "vision", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000216', '00000000-0000-0000-0000-000000000101', 'gpt-4o-mini', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_text", "vision", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000217', '00000000-0000-0000-0000-000000000101', 'o1', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000218', '00000000-0000-0000-0000-000000000101', 'o1-mini', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000219', '00000000-0000-0000-0000-000000000101', 'o3', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000220', '00000000-0000-0000-0000-000000000101', 'o3-mini', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000221', '00000000-0000-0000-0000-000000000101', 'o3-pro', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000222', '00000000-0000-0000-0000-000000000101', 'o4-mini', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_text", "vision", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000223', '00000000-0000-0000-0000-000000000101', 'text-embedding-3-small', 'embedding', 'text', null, null, 'active', '{"defaultRoles": ["embed_chunk"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000224', '00000000-0000-0000-0000-000000000102', 'deepseek-reasoner', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000225', '00000000-0000-0000-0000-000000000103', 'qwen3-max-preview', 'chat', 'text', null, null, 'preview', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000226', '00000000-0000-0000-0000-000000000103', 'qwen-max', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000227', '00000000-0000-0000-0000-000000000103', 'qwen-max-latest', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000228', '00000000-0000-0000-0000-000000000103', 'qwen-plus', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000229', '00000000-0000-0000-0000-000000000103', 'qwen-plus-latest', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000230', '00000000-0000-0000-0000-000000000103', 'qwen-flash', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000231', '00000000-0000-0000-0000-000000000103', 'qwen-vl-max', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_text", "vision"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000232', '00000000-0000-0000-0000-000000000103', 'qwen-vl-max-latest', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_text", "vision"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000233', '00000000-0000-0000-0000-000000000103', 'qwen-vl-plus', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_text", "vision"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000234', '00000000-0000-0000-0000-000000000103', 'qwen-vl-plus-latest', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_text", "vision"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000235', '00000000-0000-0000-0000-000000000103', 'qwen-vl-ocr', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_text", "vision"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000236', '00000000-0000-0000-0000-000000000103', 'qwen-vl-ocr-latest', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_text", "vision"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000237', '00000000-0000-0000-0000-000000000103', 'text-embedding-v3', 'embedding', 'text', null, null, 'active', '{"defaultRoles": ["embed_chunk"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000238', '00000000-0000-0000-0000-000000000103', 'qwen-turbo', 'chat', 'text', null, null, 'deprecated', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000239', '00000000-0000-0000-0000-000000000103', 'qwen-turbo-latest', 'chat', 'text', null, null, 'deprecated', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000240', '00000000-0000-0000-0000-000000000103', 'qwen3.5-flash', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb);
 
 insert into ai_price_catalog (
     id,
     model_catalog_id,
     billing_unit,
+    price_variant_key,
+    request_input_tokens_min,
+    request_input_tokens_max,
     unit_price,
     currency_code,
     effective_from,
@@ -910,135 +1003,121 @@ insert into ai_price_catalog (
     workspace_id
 )
 values
-    (
-        '00000000-0000-0000-0000-000000000301',
-        '00000000-0000-0000-0000-000000000201',
-        'per_1m_input_tokens',
-        0.25,
-        'USD',
-        timestamptz '2026-03-20 00:00:00+00',
-        null,
-        'system',
-        null
-    ),
-    (
-        '00000000-0000-0000-0000-000000000302',
-        '00000000-0000-0000-0000-000000000201',
-        'per_1m_output_tokens',
-        2.00,
-        'USD',
-        timestamptz '2026-03-20 00:00:00+00',
-        null,
-        'system',
-        null
-    ),
-    (
-        '00000000-0000-0000-0000-000000000303',
-        '00000000-0000-0000-0000-000000000202',
-        'per_1m_input_tokens',
-        0.13,
-        'USD',
-        timestamptz '2026-03-20 00:00:00+00',
-        null,
-        'system',
-        null
-    ),
-    (
-        '00000000-0000-0000-0000-000000000304',
-        '00000000-0000-0000-0000-000000000203',
-        'per_1m_input_tokens',
-        2.50,
-        'USD',
-        timestamptz '2026-03-20 00:00:00+00',
-        null,
-        'system',
-        null
-    ),
-    (
-        '00000000-0000-0000-0000-000000000305',
-        '00000000-0000-0000-0000-000000000203',
-        'per_1m_output_tokens',
-        15.00,
-        'USD',
-        timestamptz '2026-03-20 00:00:00+00',
-        null,
-        'system',
-        null
-    ),
-    (
-        '00000000-0000-0000-0000-000000000306',
-        '00000000-0000-0000-0000-000000000204',
-        'per_1m_input_tokens',
-        0.28,
-        'USD',
-        timestamptz '2026-03-20 00:00:00+00',
-        null,
-        'system',
-        null
-    ),
-    (
-        '00000000-0000-0000-0000-000000000307',
-        '00000000-0000-0000-0000-000000000204',
-        'per_1m_output_tokens',
-        0.42,
-        'USD',
-        timestamptz '2026-03-20 00:00:00+00',
-        null,
-        'system',
-        null
-    ),
-    (
-        '00000000-0000-0000-0000-000000000308',
-        '00000000-0000-0000-0000-000000000205',
-        'per_1m_input_tokens',
-        1.20,
-        'USD',
-        timestamptz '2026-03-20 00:00:00+00',
-        null,
-        'system',
-        null
-    ),
-    (
-        '00000000-0000-0000-0000-000000000309',
-        '00000000-0000-0000-0000-000000000205',
-        'per_1m_output_tokens',
-        6.00,
-        'USD',
-        timestamptz '2026-03-20 00:00:00+00',
-        null,
-        'system',
-        null
-    ),
-    (
-        '00000000-0000-0000-0000-000000000310',
-        '00000000-0000-0000-0000-000000000206',
-        'per_1m_input_tokens',
-        0.07,
-        'USD',
-        timestamptz '2026-03-20 00:00:00+00',
-        null,
-        'system',
-        null
-    ),
-    (
-        '00000000-0000-0000-0000-000000000311',
-        '00000000-0000-0000-0000-000000000207',
-        'per_1m_input_tokens',
-        0.40,
-        'USD',
-        timestamptz '2026-03-20 00:00:00+00',
-        null,
-        'system',
-        null
-    ),
-    (
-        '00000000-0000-0000-0000-000000000312',
-        '00000000-0000-0000-0000-000000000207',
-        'per_1m_output_tokens',
-        2.40,
-        'USD',
-        timestamptz '2026-03-20 00:00:00+00',
-        null,
-        'system',
-        null
-    );
+    ('00000000-0000-0000-0000-000000000301', '00000000-0000-0000-0000-000000000201', 'per_1m_input_tokens', 'default', null, null, 0.75, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000302', '00000000-0000-0000-0000-000000000201', 'per_1m_output_tokens', 'default', null, null, 4.50, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000303', '00000000-0000-0000-0000-000000000202', 'per_1m_input_tokens', 'default', null, null, 0.13, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000304', '00000000-0000-0000-0000-000000000203', 'per_1m_input_tokens', 'default', null, null, 2.50, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000305', '00000000-0000-0000-0000-000000000203', 'per_1m_output_tokens', 'default', null, null, 15.00, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000313', '00000000-0000-0000-0000-000000000203', 'per_1m_cached_input_tokens', 'default', null, null, 0.25, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000306', '00000000-0000-0000-0000-000000000204', 'per_1m_input_tokens', 'default', null, null, 0.27, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000307', '00000000-0000-0000-0000-000000000204', 'per_1m_output_tokens', 'default', null, null, 1.10, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000354', '00000000-0000-0000-0000-000000000204', 'per_1m_cached_input_tokens', 'default', null, null, 0.07, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000308', '00000000-0000-0000-0000-000000000205', 'per_1m_input_tokens', 'default', 0, 32000, 0.359, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000309', '00000000-0000-0000-0000-000000000205', 'per_1m_output_tokens', 'default', 0, 32000, 1.434, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000310', '00000000-0000-0000-0000-000000000206', 'per_1m_input_tokens', 'default', null, null, 0.07, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000311', '00000000-0000-0000-0000-000000000207', 'per_1m_input_tokens', 'default', 0, 128000, 0.115, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000312', '00000000-0000-0000-0000-000000000207', 'per_1m_output_tokens', 'default', 0, 128000, 0.688, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000314', '00000000-0000-0000-0000-000000000201', 'per_1m_cached_input_tokens', 'default', null, null, 0.075, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000315', '00000000-0000-0000-0000-000000000208', 'per_1m_input_tokens', 'default', null, null, 0.20, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000316', '00000000-0000-0000-0000-000000000208', 'per_1m_cached_input_tokens', 'default', null, null, 0.02, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000317', '00000000-0000-0000-0000-000000000208', 'per_1m_output_tokens', 'default', null, null, 1.25, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000318', '00000000-0000-0000-0000-000000000209', 'per_1m_input_tokens', 'default', null, null, 30.00, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000319', '00000000-0000-0000-0000-000000000209', 'per_1m_output_tokens', 'default', null, null, 180.00, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000320', '00000000-0000-0000-0000-000000000210', 'per_1m_input_tokens', 'default', null, null, 1.75, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000321', '00000000-0000-0000-0000-000000000210', 'per_1m_cached_input_tokens', 'default', null, null, 0.175, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000322', '00000000-0000-0000-0000-000000000210', 'per_1m_output_tokens', 'default', null, null, 14.00, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000323', '00000000-0000-0000-0000-000000000211', 'per_1m_input_tokens', 'default', null, null, 1.75, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000324', '00000000-0000-0000-0000-000000000211', 'per_1m_cached_input_tokens', 'default', null, null, 0.175, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000325', '00000000-0000-0000-0000-000000000211', 'per_1m_output_tokens', 'default', null, null, 14.00, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000326', '00000000-0000-0000-0000-000000000212', 'per_1m_input_tokens', 'default', null, null, 2.00, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000327', '00000000-0000-0000-0000-000000000212', 'per_1m_cached_input_tokens', 'default', null, null, 0.50, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000328', '00000000-0000-0000-0000-000000000212', 'per_1m_output_tokens', 'default', null, null, 8.00, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000329', '00000000-0000-0000-0000-000000000213', 'per_1m_input_tokens', 'default', null, null, 0.40, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000330', '00000000-0000-0000-0000-000000000213', 'per_1m_cached_input_tokens', 'default', null, null, 0.10, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000331', '00000000-0000-0000-0000-000000000213', 'per_1m_output_tokens', 'default', null, null, 1.60, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000332', '00000000-0000-0000-0000-000000000214', 'per_1m_input_tokens', 'default', null, null, 0.10, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000333', '00000000-0000-0000-0000-000000000214', 'per_1m_cached_input_tokens', 'default', null, null, 0.025, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000334', '00000000-0000-0000-0000-000000000214', 'per_1m_output_tokens', 'default', null, null, 0.40, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000335', '00000000-0000-0000-0000-000000000215', 'per_1m_input_tokens', 'default', null, null, 2.50, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000336', '00000000-0000-0000-0000-000000000215', 'per_1m_cached_input_tokens', 'default', null, null, 1.25, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000337', '00000000-0000-0000-0000-000000000215', 'per_1m_output_tokens', 'default', null, null, 10.00, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000338', '00000000-0000-0000-0000-000000000216', 'per_1m_input_tokens', 'default', null, null, 0.15, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000339', '00000000-0000-0000-0000-000000000216', 'per_1m_cached_input_tokens', 'default', null, null, 0.075, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000340', '00000000-0000-0000-0000-000000000216', 'per_1m_output_tokens', 'default', null, null, 0.60, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000341', '00000000-0000-0000-0000-000000000217', 'per_1m_input_tokens', 'default', null, null, 15.00, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000342', '00000000-0000-0000-0000-000000000217', 'per_1m_output_tokens', 'default', null, null, 60.00, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000343', '00000000-0000-0000-0000-000000000218', 'per_1m_input_tokens', 'default', null, null, 1.10, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000344', '00000000-0000-0000-0000-000000000218', 'per_1m_output_tokens', 'default', null, null, 4.40, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000345', '00000000-0000-0000-0000-000000000219', 'per_1m_input_tokens', 'default', null, null, 2.00, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000346', '00000000-0000-0000-0000-000000000219', 'per_1m_output_tokens', 'default', null, null, 8.00, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000347', '00000000-0000-0000-0000-000000000220', 'per_1m_input_tokens', 'default', null, null, 1.10, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000348', '00000000-0000-0000-0000-000000000220', 'per_1m_output_tokens', 'default', null, null, 4.40, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000349', '00000000-0000-0000-0000-000000000221', 'per_1m_input_tokens', 'default', null, null, 20.00, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000350', '00000000-0000-0000-0000-000000000221', 'per_1m_output_tokens', 'default', null, null, 80.00, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000351', '00000000-0000-0000-0000-000000000222', 'per_1m_input_tokens', 'default', null, null, 1.10, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000352', '00000000-0000-0000-0000-000000000222', 'per_1m_output_tokens', 'default', null, null, 4.40, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000353', '00000000-0000-0000-0000-000000000223', 'per_1m_input_tokens', 'default', null, null, 0.02, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000355', '00000000-0000-0000-0000-000000000224', 'per_1m_input_tokens', 'default', null, null, 0.55, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000356', '00000000-0000-0000-0000-000000000224', 'per_1m_cached_input_tokens', 'default', null, null, 0.14, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000357', '00000000-0000-0000-0000-000000000224', 'per_1m_output_tokens', 'default', null, null, 2.19, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000358', '00000000-0000-0000-0000-000000000205', 'per_1m_input_tokens', 'default', 32001, 128000, 0.574, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000359', '00000000-0000-0000-0000-000000000205', 'per_1m_output_tokens', 'default', 32001, 128000, 2.294, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000360', '00000000-0000-0000-0000-000000000205', 'per_1m_input_tokens', 'default', 128001, 256000, 1.004, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000361', '00000000-0000-0000-0000-000000000205', 'per_1m_output_tokens', 'default', 128001, 256000, 4.014, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000362', '00000000-0000-0000-0000-000000000225', 'per_1m_input_tokens', 'default', 0, 32000, 0.861, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000363', '00000000-0000-0000-0000-000000000225', 'per_1m_output_tokens', 'default', 0, 32000, 3.441, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000364', '00000000-0000-0000-0000-000000000225', 'per_1m_input_tokens', 'default', 32001, 128000, 1.434, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000365', '00000000-0000-0000-0000-000000000225', 'per_1m_output_tokens', 'default', 32001, 128000, 5.735, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000366', '00000000-0000-0000-0000-000000000225', 'per_1m_input_tokens', 'default', 128001, 256000, 2.151, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000367', '00000000-0000-0000-0000-000000000225', 'per_1m_output_tokens', 'default', 128001, 256000, 8.602, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000368', '00000000-0000-0000-0000-000000000226', 'per_1m_input_tokens', 'default', null, null, 0.345, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000369', '00000000-0000-0000-0000-000000000226', 'per_1m_output_tokens', 'default', null, null, 1.377, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000370', '00000000-0000-0000-0000-000000000227', 'per_1m_input_tokens', 'default', null, null, 0.345, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000371', '00000000-0000-0000-0000-000000000227', 'per_1m_output_tokens', 'default', null, null, 1.377, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000372', '00000000-0000-0000-0000-000000000207', 'per_1m_input_tokens', 'default', 128001, 256000, 0.287, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000373', '00000000-0000-0000-0000-000000000207', 'per_1m_output_tokens', 'default', 128001, 256000, 1.720, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000374', '00000000-0000-0000-0000-000000000207', 'per_1m_input_tokens', 'default', 256001, 1000000, 0.573, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000375', '00000000-0000-0000-0000-000000000207', 'per_1m_output_tokens', 'default', 256001, 1000000, 3.440, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000376', '00000000-0000-0000-0000-000000000228', 'per_1m_input_tokens', 'default', 0, 128000, 0.115, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000377', '00000000-0000-0000-0000-000000000228', 'per_1m_output_tokens', 'default', 0, 128000, 0.287, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000378', '00000000-0000-0000-0000-000000000228', 'per_1m_output_tokens', 'thinking', 0, 128000, 1.147, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000379', '00000000-0000-0000-0000-000000000228', 'per_1m_input_tokens', 'default', 128001, 256000, 0.345, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000380', '00000000-0000-0000-0000-000000000228', 'per_1m_output_tokens', 'default', 128001, 256000, 2.868, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000381', '00000000-0000-0000-0000-000000000228', 'per_1m_output_tokens', 'thinking', 128001, 256000, 3.441, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000382', '00000000-0000-0000-0000-000000000228', 'per_1m_input_tokens', 'default', 256001, 1000000, 0.689, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000383', '00000000-0000-0000-0000-000000000228', 'per_1m_output_tokens', 'default', 256001, 1000000, 6.881, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000384', '00000000-0000-0000-0000-000000000228', 'per_1m_output_tokens', 'thinking', 256001, 1000000, 9.175, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000385', '00000000-0000-0000-0000-000000000229', 'per_1m_input_tokens', 'default', 0, 128000, 0.115, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000386', '00000000-0000-0000-0000-000000000229', 'per_1m_output_tokens', 'default', 0, 128000, 0.287, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000387', '00000000-0000-0000-0000-000000000229', 'per_1m_output_tokens', 'thinking', 0, 128000, 1.147, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000388', '00000000-0000-0000-0000-000000000229', 'per_1m_input_tokens', 'default', 128001, 256000, 0.345, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000389', '00000000-0000-0000-0000-000000000229', 'per_1m_output_tokens', 'default', 128001, 256000, 2.868, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000390', '00000000-0000-0000-0000-000000000229', 'per_1m_output_tokens', 'thinking', 128001, 256000, 3.441, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000391', '00000000-0000-0000-0000-000000000229', 'per_1m_input_tokens', 'default', 256001, 1000000, 0.689, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000392', '00000000-0000-0000-0000-000000000229', 'per_1m_output_tokens', 'default', 256001, 1000000, 6.881, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000393', '00000000-0000-0000-0000-000000000229', 'per_1m_output_tokens', 'thinking', 256001, 1000000, 9.175, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000394', '00000000-0000-0000-0000-000000000230', 'per_1m_input_tokens', 'default', 0, 256000, 0.05, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000395', '00000000-0000-0000-0000-000000000230', 'per_1m_output_tokens', 'default', 0, 256000, 0.40, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000396', '00000000-0000-0000-0000-000000000230', 'per_1m_input_tokens', 'default', 256001, 1000000, 0.25, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000397', '00000000-0000-0000-0000-000000000230', 'per_1m_output_tokens', 'default', 256001, 1000000, 2.00, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000398', '00000000-0000-0000-0000-000000000231', 'per_1m_input_tokens', 'default', null, null, 0.23, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000399', '00000000-0000-0000-0000-000000000231', 'per_1m_output_tokens', 'default', null, null, 0.574, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000400', '00000000-0000-0000-0000-000000000232', 'per_1m_input_tokens', 'default', null, null, 0.23, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000401', '00000000-0000-0000-0000-000000000232', 'per_1m_output_tokens', 'default', null, null, 0.574, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000402', '00000000-0000-0000-0000-000000000233', 'per_1m_input_tokens', 'default', null, null, 0.115, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000403', '00000000-0000-0000-0000-000000000233', 'per_1m_output_tokens', 'default', null, null, 0.287, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000404', '00000000-0000-0000-0000-000000000234', 'per_1m_input_tokens', 'default', null, null, 0.115, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000405', '00000000-0000-0000-0000-000000000234', 'per_1m_output_tokens', 'default', null, null, 0.287, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000406', '00000000-0000-0000-0000-000000000235', 'per_1m_input_tokens', 'default', null, null, 0.043, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000407', '00000000-0000-0000-0000-000000000235', 'per_1m_output_tokens', 'default', null, null, 0.072, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000408', '00000000-0000-0000-0000-000000000236', 'per_1m_input_tokens', 'default', null, null, 0.043, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000409', '00000000-0000-0000-0000-000000000236', 'per_1m_output_tokens', 'default', null, null, 0.072, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000410', '00000000-0000-0000-0000-000000000237', 'per_1m_input_tokens', 'default', null, null, 0.07, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000411', '00000000-0000-0000-0000-000000000238', 'per_1m_input_tokens', 'default', null, null, 0.044, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000412', '00000000-0000-0000-0000-000000000238', 'per_1m_output_tokens', 'default', null, null, 0.087, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000413', '00000000-0000-0000-0000-000000000239', 'per_1m_input_tokens', 'default', null, null, 0.044, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000414', '00000000-0000-0000-0000-000000000239', 'per_1m_output_tokens', 'default', null, null, 0.087, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000415', '00000000-0000-0000-0000-000000000240', 'per_1m_input_tokens', 'default', 0, 256000, 0.05, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000416', '00000000-0000-0000-0000-000000000240', 'per_1m_output_tokens', 'default', 0, 256000, 0.40, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000417', '00000000-0000-0000-0000-000000000240', 'per_1m_input_tokens', 'default', 256001, 1000000, 0.25, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null),
+    ('00000000-0000-0000-0000-000000000418', '00000000-0000-0000-0000-000000000240', 'per_1m_output_tokens', 'default', 256001, 1000000, 2.00, 'USD', timestamptz '2026-04-01 00:00:00+00', null, 'system', null);

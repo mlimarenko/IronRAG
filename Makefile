@@ -3,9 +3,10 @@ DOCKER_COMPOSE_FILE ?= docker-compose.yml
 LOCAL_DOCKER_APP_SERVICES ?= backend frontend
 LOCAL_DOCKER_ALL_SERVICES ?= postgres redis arangodb backend frontend
 RUSTRAG_BENCHMARK_BASE_URL ?= http://127.0.0.1:19000/v1
-RUSTRAG_BENCHMARK_SUITE ?= backend/benchmarks/grounded_query/grad_api_suite.json
-RUSTRAG_BENCHMARK_SUITES ?= backend/benchmarks/grounded_query/grad_api_suite.json backend/benchmarks/grounded_query/grad_agent_workflows_suite.json
+RUSTRAG_BENCHMARK_SUITES ?= backend/benchmarks/grounded_query/api_baseline_suite.json backend/benchmarks/grounded_query/workflow_strict_suite.json backend/benchmarks/grounded_query/layout_noise_suite.json backend/benchmarks/grounded_query/graph_multihop_suite.json backend/benchmarks/grounded_query/multiformat_surface_suite.json
 RUSTRAG_BENCHMARK_OUTPUT_DIR ?= tmp-grounded-benchmarks
+RUSTRAG_BENCHMARK_CANONICALIZE_REUSED_LIBRARY ?= 1
+RUSTRAG_BENCHMARK_LIBRARY_NAME ?= Grounded Benchmark Seed
 
 .PHONY: \
 	backend-fmt \
@@ -26,6 +27,9 @@ RUSTRAG_BENCHMARK_OUTPUT_DIR ?= tmp-grounded-benchmarks
 	audit \
 	benchmark-grounded \
 	benchmark-grounded-all \
+	benchmark-grounded-seed \
+	benchmark-grounded-noisy-layout \
+	benchmark-grounded-multihop \
 	docker-local-build \
 	docker-local-rebuild \
 	docker-local-redeploy \
@@ -83,17 +87,39 @@ benchmark-grounded:
 	@test -n "$(RUSTRAG_SESSION_COOKIE)" || (echo "RUSTRAG_SESSION_COOKIE is required" && exit 1)
 	@test -n "$(RUSTRAG_BENCHMARK_WORKSPACE_ID)" || (echo "RUSTRAG_BENCHMARK_WORKSPACE_ID is required" && exit 1)
 	@mkdir -p "$(RUSTRAG_BENCHMARK_OUTPUT_DIR)"
-	@output_file="$(RUSTRAG_BENCHMARK_OUTPUT_DIR)/$$(basename "$(RUSTRAG_BENCHMARK_SUITE)" .json).result.json"; \
-	args="--base-url $(RUSTRAG_BENCHMARK_BASE_URL) --suite $(RUSTRAG_BENCHMARK_SUITE) --workspace-id $(RUSTRAG_BENCHMARK_WORKSPACE_ID) --session-cookie $(RUSTRAG_SESSION_COOKIE) --strict --output $$output_file"; \
+	@args="--base-url $(RUSTRAG_BENCHMARK_BASE_URL) --workspace-id $(RUSTRAG_BENCHMARK_WORKSPACE_ID) --session-cookie $(RUSTRAG_SESSION_COOKIE) --strict --output-dir $(RUSTRAG_BENCHMARK_OUTPUT_DIR)"; \
+	for suite in $(RUSTRAG_BENCHMARK_SUITES); do \
+	  args="$$args --suite $$suite"; \
+	done; \
 	if [ -n "$(RUSTRAG_BENCHMARK_LIBRARY_ID)" ]; then \
 	  args="$$args --library-id $(RUSTRAG_BENCHMARK_LIBRARY_ID) --skip-upload"; \
+	  if [ "$(RUSTRAG_BENCHMARK_CANONICALIZE_REUSED_LIBRARY)" = "1" ]; then \
+	    args="$$args --canonicalize-reused-library"; \
+	  fi; \
 	fi; \
 	python3 backend/benchmarks/grounded_query/run_live_benchmark.py $$args
 
 benchmark-grounded-all:
-	@for suite in $(RUSTRAG_BENCHMARK_SUITES); do \
-	  $(MAKE) benchmark-grounded RUSTRAG_BENCHMARK_SUITE="$$suite"; \
-	done
+	@$(MAKE) benchmark-grounded
+
+benchmark-grounded-seed:
+	@test -n "$(RUSTRAG_SESSION_COOKIE)" || (echo "RUSTRAG_SESSION_COOKIE is required" && exit 1)
+	@test -n "$(RUSTRAG_BENCHMARK_WORKSPACE_ID)" || (echo "RUSTRAG_BENCHMARK_WORKSPACE_ID is required" && exit 1)
+	@mkdir -p "$(RUSTRAG_BENCHMARK_OUTPUT_DIR)"
+	@args="--base-url $(RUSTRAG_BENCHMARK_BASE_URL) --workspace-id $(RUSTRAG_BENCHMARK_WORKSPACE_ID) --session-cookie $(RUSTRAG_SESSION_COOKIE) --library-name $(RUSTRAG_BENCHMARK_LIBRARY_NAME) --upload-only --output-dir $(RUSTRAG_BENCHMARK_OUTPUT_DIR)"; \
+	for suite in $(RUSTRAG_BENCHMARK_SUITES); do \
+	  args="$$args --suite $$suite"; \
+	done; \
+	if [ -n "$(RUSTRAG_BENCHMARK_LIBRARY_ID)" ]; then \
+	  args="$$args --library-id $(RUSTRAG_BENCHMARK_LIBRARY_ID)"; \
+	fi; \
+	python3 backend/benchmarks/grounded_query/run_live_benchmark.py $$args
+
+benchmark-grounded-noisy-layout:
+	@$(MAKE) benchmark-grounded RUSTRAG_BENCHMARK_SUITES="backend/benchmarks/grounded_query/layout_noise_suite.json"
+
+benchmark-grounded-multihop:
+	@$(MAKE) benchmark-grounded RUSTRAG_BENCHMARK_SUITES="backend/benchmarks/grounded_query/graph_multihop_suite.json"
 
 docker-local-build:
 	$(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) build $(LOCAL_DOCKER_APP_SERVICES)

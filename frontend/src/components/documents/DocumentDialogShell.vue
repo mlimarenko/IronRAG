@@ -1,34 +1,51 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 
-const props = withDefaults(defineProps<{
-  open: boolean
-  title: string
-  description: string
-  submitLabel: string
-  loading?: boolean
-  submitDisabled?: boolean
-  tone?: 'default' | 'danger'
-}>(), {
-  loading: false,
-  submitDisabled: false,
-  tone: 'default',
-})
+const props = withDefaults(
+  defineProps<{
+    open: boolean
+    title: string
+    description: string
+    submitLabel: string
+    loading?: boolean
+    submitDisabled?: boolean
+    tone?: 'default' | 'danger'
+  }>(),
+  {
+    loading: false,
+    submitDisabled: false,
+    tone: 'default',
+  },
+)
 
 const emit = defineEmits<{
   close: []
   submit: []
 }>()
 
-const dialogRef = ref<HTMLElement | null>(null)
-const titleId = computed(() => `document-dialog-title-${props.title.toLowerCase().replace(/\s+/g, '-')}`)
+const dialogRef = ref<HTMLDivElement | null>(null)
+const titleId = computed(
+  () => `document-dialog-title-${props.title.toLowerCase().replace(/\s+/g, '-')}`,
+)
+
+function focusFirstInteractiveElement(): void {
+  const focusTarget = dialogRef.value?.querySelector<HTMLElement>(
+    'input, textarea, select, button:not([disabled])',
+  )
+  focusTarget?.focus()
+}
 
 watch(
   () => props.open,
   (isOpen) => {
     if (isOpen) {
       document.body.style.overflow = 'hidden'
-      void nextTick(() => dialogRef.value?.focus())
+      void nextTick(() => {
+        focusFirstInteractiveElement()
+        if (document.activeElement === document.body) {
+          dialogRef.value?.focus()
+        }
+      })
       return
     }
     document.body.style.overflow = ''
@@ -67,11 +84,7 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="rr-dialog__actions">
-        <button
-          class="rr-button rr-button--ghost"
-          type="button"
-          @click="emit('close')"
-        >
+        <button class="rr-button rr-button--ghost" type="button" @click="emit('close')">
           {{ $t('dialogs.cancel') }}
         </button>
         <button

@@ -4,7 +4,9 @@ use anyhow::{Context, Result};
 use roxmltree::Document;
 use zip::ZipArchive;
 
-use crate::shared::extraction::ExtractionOutput;
+use crate::shared::extraction::{
+    ExtractionOutput, ExtractionSourceMetadata, RawExtractionPage, build_text_layout,
+};
 
 pub fn extract_docx(file_bytes: &[u8]) -> Result<ExtractionOutput> {
     let reader = Cursor::new(file_bytes);
@@ -26,11 +28,27 @@ pub fn extract_docx(file_bytes: &[u8]) -> Result<ExtractionOutput> {
         }
     }
 
+    let mut paragraph_lines = Vec::new();
+    for (index, paragraph) in paragraphs.iter().enumerate() {
+        if index > 0 {
+            paragraph_lines.push(String::new());
+        }
+        paragraph_lines.push(paragraph.clone());
+    }
+    let layout =
+        build_text_layout(&[RawExtractionPage { page_number: None, lines: paragraph_lines }]);
+
     Ok(ExtractionOutput {
         extraction_kind: "docx_text".into(),
-        content_text: paragraphs.join("\n\n"),
+        content_text: layout.content_text,
         page_count: None,
         warnings: Vec::new(),
+        source_metadata: ExtractionSourceMetadata {
+            source_format: "docx".to_string(),
+            page_count: None,
+            line_count: i32::try_from(layout.structure_hints.lines.len()).unwrap_or(i32::MAX),
+        },
+        structure_hints: layout.structure_hints,
         source_map: serde_json::json!({
             "paragraph_count": paragraphs.len(),
         }),

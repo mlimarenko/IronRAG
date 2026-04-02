@@ -3,7 +3,8 @@ import { computed } from 'vue'
 import FilterBar from 'src/components/design-system/FilterBar.vue'
 import SearchField from 'src/components/design-system/SearchField.vue'
 import SelectField from 'src/components/design-system/SelectField.vue'
-import type { DocumentDisplayStatus } from 'src/models/ui/documents'
+import WebIngestRunActivityStrip from './WebIngestRunActivityStrip.vue'
+import type { DocumentDisplayStatus, WebIngestRunSummary } from 'src/models/ui/documents'
 
 const props = defineProps<{
   searchQuery: string
@@ -11,14 +12,19 @@ const props = defineProps<{
   visibleCount?: number
   totalCount?: number
   showMeta?: boolean
-  activeQueuedCount?: number
   activeProcessingCount?: number
-  activeReadyNoGraphCount?: number
+  activeReadableCount?: number
+  activeGraphSparseCount?: number
+  activeWebRuns?: WebIngestRunSummary[]
+  recentWebRuns?: WebIngestRunSummary[]
+  webRunActionRunId?: string | null
 }>()
 
 const emit = defineEmits<{
   updateSearch: [value: string]
   updateStatus: [value: DocumentDisplayStatus | '']
+  openWebRun: [runId: string]
+  cancelWebRun: [runId: string]
 }>()
 
 const hasActiveFilter = computed(
@@ -29,12 +35,10 @@ const activeFilterCount = computed(
 )
 
 const metaLabel = computed(() => {
-  if (
-    !props.showMeta ||
-    typeof props.visibleCount !== 'number' ||
-    typeof props.totalCount !== 'number' ||
-    props.visibleCount === props.totalCount
-  ) {
+  if (typeof props.visibleCount !== 'number' || typeof props.totalCount !== 'number') {
+    return null
+  }
+  if (!props.showMeta || props.visibleCount === props.totalCount) {
     return null
   }
   return {
@@ -58,12 +62,18 @@ const visibleCount = computed(() => {
   return 0
 })
 
-const activeQueuedCount = computed(() => props.activeQueuedCount ?? 0)
 const activeProcessingCount = computed(() => props.activeProcessingCount ?? 0)
-const activeReadyNoGraphCount = computed(() => props.activeReadyNoGraphCount ?? 0)
-const activeBacklogCount = computed(() => activeQueuedCount.value + activeProcessingCount.value)
+const activeReadableCount = computed(() => props.activeReadableCount ?? 0)
+const activeGraphSparseCount = computed(() => props.activeGraphSparseCount ?? 0)
+const activeBacklogCount = computed(() => activeProcessingCount.value)
 const showActivityStrip = computed(
-  () => activeBacklogCount.value > 0 || activeReadyNoGraphCount.value > 0,
+  () =>
+    activeBacklogCount.value > 0 ||
+    activeReadableCount.value > 0 ||
+    activeGraphSparseCount.value > 0,
+)
+const showWebRunStrip = computed(
+  () => (props.activeWebRuns?.length ?? 0) > 0 || (props.recentWebRuns?.length ?? 0) > 0,
 )
 </script>
 
@@ -116,7 +126,12 @@ const showActivityStrip = computed(
         {{ $t('documents.workspace.processingStrip.title', { count: activeBacklogCount }) }}
       </strong>
       <strong v-else>
-        {{ $t('documents.workspace.processingStrip.graphCatchUpTitle', { count: activeReadyNoGraphCount }) }}
+        {{
+          $t('documents.workspace.processingStrip.readinessTitle', {
+            readable: activeReadableCount,
+            graphSparse: activeGraphSparseCount,
+          })
+        }}
       </strong>
     </div>
 
@@ -124,14 +139,25 @@ const showActivityStrip = computed(
       <span v-if="activeProcessingCount > 0">
         {{ $t('documents.workspace.processingStrip.processing', { count: activeProcessingCount }) }}
       </span>
-      <span v-if="activeQueuedCount > 0">
-        {{ $t('documents.workspace.processingStrip.queued', { count: activeQueuedCount }) }}
+      <span v-if="activeReadableCount > 0">
+        {{ $t('documents.workspace.processingStrip.readable', { count: activeReadableCount }) }}
       </span>
-      <span v-if="activeReadyNoGraphCount > 0" class="is-graph-catchup">
-        {{ $t('documents.workspace.processingStrip.graphCatchUp', { count: activeReadyNoGraphCount }) }}
+      <span v-if="activeGraphSparseCount > 0" class="is-graph-sparse">
+        {{
+          $t('documents.workspace.processingStrip.graphSparse', { count: activeGraphSparseCount })
+        }}
       </span>
     </div>
   </div>
+
+  <WebIngestRunActivityStrip
+    v-if="showWebRunStrip"
+    :active-runs="props.activeWebRuns ?? []"
+    :recent-runs="props.recentWebRuns ?? []"
+    :canceling-run-id="props.webRunActionRunId"
+    @open-run="emit('openWebRun', $event)"
+    @cancel-run="emit('cancelWebRun', $event)"
+  />
 </template>
 
 <style scoped lang="scss">
@@ -140,31 +166,29 @@ const showActivityStrip = computed(
   top: var(--rr-docs-sticky-top, 4.85rem);
   z-index: 8;
   display: grid;
-  gap: 0.42rem;
-  margin: -0.1rem -0.1rem 0;
-  padding: 0.42rem 0.46rem 0.34rem;
-  border: 1px solid rgba(203, 213, 225, 0.8);
-  border-radius: 18px 18px 0 0;
-  border-bottom-color: rgba(203, 213, 225, 0.88);
-  background: linear-gradient(
-    180deg,
-    rgba(255, 255, 255, 0.985),
-    rgba(248, 250, 252, 0.965) 78%,
-    rgba(255, 255, 255, 0.88)
-  );
-  backdrop-filter: blur(16px);
-  box-shadow:
-    0 10px 18px rgba(15, 23, 42, 0.04),
-    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  align-content: start;
+  gap: 0.16rem;
+  margin: 0;
+  padding: 0.16rem 0.18rem 0.12rem;
+  border: 1px solid rgba(226, 232, 240, 0.88);
+  border-radius: 12px 12px 0 0;
+  border-bottom-color: rgba(203, 213, 225, 0.9);
+  background: rgba(255, 255, 255, 0.96);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 6px 14px rgba(15, 23, 42, 0.025);
 }
 
 .rr-documents-filters :deep(.rr-filter-bar) {
   display: grid;
-  gap: 0.4rem;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.24rem 0.55rem;
+  align-items: center;
 }
 
 .rr-documents-filters :deep(.rr-filter-bar__controls) {
-  gap: 8px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 148px;
+  gap: 6px;
 }
 
 .rr-documents-filters :deep(.rr-filter-bar__search),
@@ -178,14 +202,14 @@ const showActivityStrip = computed(
 }
 
 .rr-documents-filters :deep(.rr-field) {
-  min-height: 2.62rem;
-  border-color: rgba(148, 163, 184, 0.34);
-  background: rgba(255, 255, 255, 0.92);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+  min-height: 2.42rem;
+  border-color: rgba(203, 213, 225, 0.88);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.88);
 }
 
 .rr-documents-filters :deep(.rr-field:hover) {
-  border-color: rgba(99, 102, 241, 0.24);
+  border-color: rgba(99, 102, 241, 0.22);
 }
 
 .rr-documents-filters :deep(.rr-filter-bar__meta) {
@@ -194,12 +218,13 @@ const showActivityStrip = computed(
   justify-content: flex-end;
   gap: 8px;
   min-height: 1.35rem;
+  white-space: nowrap;
 }
 
 .rr-documents-filters__summary {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-height: 1.35rem;
 }
 
@@ -207,23 +232,21 @@ const showActivityStrip = computed(
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 2.05rem;
-  height: 1.58rem;
-  padding: 0 0.48rem;
+  min-width: 1.65rem;
+  height: 1.3rem;
+  padding: 0 0.38rem;
   border-radius: 999px;
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.14), rgba(59, 130, 246, 0.1));
-  color: rgba(55, 48, 163, 0.96);
-  font-size: 0.72rem;
+  background: rgba(79, 70, 229, 0.08);
+  color: rgba(67, 56, 202, 0.96);
+  font-size: 0.68rem;
   font-weight: 700;
-  letter-spacing: 0.01em;
   font-variant-numeric: tabular-nums;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.58);
 }
 
 .rr-documents-filters__caption {
   margin: 0;
   color: var(--rr-text-secondary);
-  font-size: 0.79rem;
+  font-size: 0.72rem;
   font-weight: 500;
   line-height: 1.35;
 }
@@ -233,68 +256,59 @@ const showActivityStrip = computed(
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 0.7rem 1rem;
-  margin-top: 0.42rem;
-  padding: 0.72rem 0.92rem;
-  border: 1px solid rgba(96, 165, 250, 0.22);
-  border-radius: 14px;
-  background:
-    linear-gradient(135deg, rgba(239, 246, 255, 0.96), rgba(245, 248, 255, 0.92)),
-    rgba(255, 255, 255, 0.94);
-  box-shadow:
-    0 10px 22px rgba(37, 99, 235, 0.08),
-    inset 0 1px 0 rgba(255, 255, 255, 0.82);
+  gap: 0.42rem 0.72rem;
+  margin-top: 0.06rem;
+  padding: 0.28rem 0.42rem;
+  border: 1px solid rgba(191, 219, 254, 0.65);
+  border-radius: 10px;
+  background: rgba(248, 250, 252, 0.7);
 }
 
 .rr-documents-filters__activity-main {
   display: inline-flex;
   align-items: center;
-  gap: 0.56rem;
+  gap: 0.5rem;
   min-width: 0;
 }
 
 .rr-documents-filters__activity-main strong {
   color: rgba(30, 64, 175, 0.96);
-  font-size: 0.83rem;
-  font-weight: 800;
-  letter-spacing: -0.01em;
+  font-size: 0.72rem;
+  font-weight: 700;
   line-height: 1.35;
 }
 
 .rr-documents-filters__activity-pulse {
-  position: relative;
   display: inline-flex;
-  width: 0.68rem;
-  height: 0.68rem;
+  width: 0.56rem;
+  height: 0.56rem;
   border-radius: 999px;
   background: linear-gradient(135deg, #2563eb, #4f46e5);
-  box-shadow: 0 0 0 0 rgba(79, 70, 229, 0.28);
+  box-shadow: 0 0 0 0 rgba(79, 70, 229, 0.2);
   animation: rr-documents-filters-pulse 1.8s ease-out infinite;
 }
 
 .rr-documents-filters__activity-breakdown {
   display: inline-flex;
   flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 0.45rem;
+  gap: 0.42rem;
 }
 
 .rr-documents-filters__activity-breakdown span {
   display: inline-flex;
   align-items: center;
-  min-height: 1.85rem;
-  padding: 0 0.7rem;
+  min-height: 1.52rem;
+  padding: 0 0.52rem;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.88);
-  border: 1px solid rgba(148, 163, 184, 0.22);
-  color: rgba(71, 85, 105, 0.92);
-  font-size: 0.74rem;
+  border: 1px solid rgba(203, 213, 225, 0.9);
+  background: rgba(255, 255, 255, 0.9);
+  color: rgba(71, 85, 105, 0.9);
+  font-size: 0.67rem;
   font-weight: 700;
   line-height: 1;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.84);
 }
 
-.rr-documents-filters__activity-breakdown span.is-graph-catchup {
+.rr-documents-filters__activity-breakdown span.is-graph-sparse {
   border-color: rgba(14, 116, 144, 0.18);
   background: rgba(240, 249, 255, 0.92);
   color: rgba(14, 116, 144, 0.96);
@@ -302,11 +316,11 @@ const showActivityStrip = computed(
 
 @keyframes rr-documents-filters-pulse {
   0% {
-    box-shadow: 0 0 0 0 rgba(79, 70, 229, 0.24);
+    box-shadow: 0 0 0 0 rgba(79, 70, 229, 0.2);
   }
 
   70% {
-    box-shadow: 0 0 0 0.48rem rgba(79, 70, 229, 0);
+    box-shadow: 0 0 0 0.38rem rgba(79, 70, 229, 0);
   }
 
   100% {
@@ -314,84 +328,24 @@ const showActivityStrip = computed(
   }
 }
 
-@media (max-width: 920px) {
+@media (min-width: 1800px) {
   .rr-documents-filters {
-    gap: 0.38rem;
-    padding: 0.34rem 0.34rem 0.3rem;
-    border-radius: 16px 16px 0 0;
-    backdrop-filter: blur(12px);
-    box-shadow:
-      0 8px 16px rgba(15, 23, 42, 0.038),
-      inset 0 1px 0 rgba(255, 255, 255, 0.88);
-  }
-
-  .rr-documents-filters :deep(.rr-filter-bar) {
-    gap: 0.36rem;
-  }
-
-  .rr-documents-filters :deep(.rr-filter-bar__controls) {
-    gap: 8px;
-  }
-
-  .rr-documents-filters :deep(.rr-field) {
-    min-height: 2.45rem;
-  }
-
-  .rr-documents-filters :deep(.rr-filter-bar__meta) {
-    gap: 7px;
-  }
-
-  .rr-documents-filters__summary {
-    gap: 7px;
-    min-height: 1.35rem;
-  }
-
-  .rr-documents-filters__count {
-    min-width: 2rem;
-    height: 1.55rem;
-    padding-inline: 0.48rem;
-    font-size: 0.71rem;
-  }
-
-  .rr-documents-filters__caption {
-    font-size: 0.74rem;
-  }
-
-  .rr-documents-filters__activity {
-    gap: 0.6rem 0.8rem;
-    padding: 0.68rem 0.78rem;
-  }
-
-  .rr-documents-filters__activity-main strong {
-    font-size: 0.79rem;
-  }
-
-  .rr-documents-filters__activity-breakdown span {
-    min-height: 1.76rem;
-    padding-inline: 0.64rem;
-    font-size: 0.72rem;
+    padding-inline: 0.5rem;
   }
 }
 
-@media (min-width: 1800px) {
+@media (max-width: 920px) {
   .rr-documents-filters {
-    padding-inline: 0.65rem;
+    padding: 0.22rem 0.24rem 0.2rem;
+    border-radius: 12px 12px 0 0;
   }
 
-  .rr-documents-filters :deep(.rr-filter-bar__controls) {
-    gap: 12px;
-  }
-
-  .rr-documents-filters :deep(.rr-field) {
-    min-height: 2.85rem;
+  .rr-documents-filters__activity {
+    padding: 0.42rem 0.52rem;
   }
 }
 
 @media (max-width: 720px) {
-  .rr-documents-filters {
-    padding-inline: 0;
-  }
-
   .rr-documents-filters :deep(.rr-filter-bar__meta) {
     align-items: flex-start;
     flex-direction: column;
@@ -401,15 +355,11 @@ const showActivityStrip = computed(
     align-items: flex-start;
     justify-content: flex-start;
   }
-
-  .rr-documents-filters__activity-breakdown {
-    justify-content: flex-start;
-  }
 }
 
 @media (max-width: 560px) {
   .rr-documents-filters :deep(.rr-filter-bar) {
-    display: grid;
+    grid-template-columns: 1fr;
     gap: 7px;
   }
 
@@ -426,10 +376,6 @@ const showActivityStrip = computed(
     min-width: 0;
   }
 
-  .rr-documents-filters :deep(.rr-field) {
-    min-height: 2.38rem;
-  }
-
   .rr-documents-filters :deep(.rr-filter-bar__meta) {
     width: 100%;
   }
@@ -437,6 +383,10 @@ const showActivityStrip = computed(
   .rr-documents-filters__summary {
     width: 100%;
     justify-content: flex-start;
+  }
+
+  .rr-documents-filters__activity-main {
+    align-items: flex-start;
   }
 }
 </style>

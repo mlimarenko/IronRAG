@@ -125,6 +125,9 @@ interface RawPriceCatalogEntry {
   id: string
   modelCatalogId: string
   billingUnit: string
+  priceVariantKey: string
+  requestInputTokensMin: number | null
+  requestInputTokensMax: number | null
   unitPrice: string | number
   currencyCode: string
   effectiveFrom: string
@@ -283,12 +286,6 @@ interface RawOpsLibraryWarningWire {
   resolved_at?: string | null
 }
 
-interface RawOpsLibrarySnapshot {
-  state: RawOpsLibraryState
-  knowledgeGenerations: RawKnowledgeGeneration[]
-  warnings: RawOpsLibraryWarning[]
-}
-
 interface RawOpsLibrarySnapshotWire {
   state: RawOpsLibraryStateWire
   knowledgeGenerations?: RawKnowledgeGenerationWire[]
@@ -329,9 +326,7 @@ export function mapGrant(row: RawGrantResponse): AdminGrant {
   }
 }
 
-function mapWorkspaceMembership(
-  row: RawWorkspaceMembershipResponse,
-): AdminWorkspaceMembership {
+function mapWorkspaceMembership(row: RawWorkspaceMembershipResponse): AdminWorkspaceMembership {
   return {
     workspaceId: row.workspaceId,
     principalId: row.principalId,
@@ -352,9 +347,7 @@ function mapPrincipal(item: RawMeResponse): AdminPrincipalSummary {
     displayName: item.user?.displayName ?? null,
     authProviderKind: item.user?.authProviderKind ?? null,
     externalSubject: item.user?.externalSubject ?? null,
-    workspaceMemberships: item.workspaceMemberships.map((row) =>
-      mapWorkspaceMembership(row),
-    ),
+    workspaceMemberships: item.workspaceMemberships.map((row) => mapWorkspaceMembership(row)),
     effectiveGrants: item.effectiveGrants.map((row) => mapGrant(row)),
   }
 }
@@ -387,6 +380,9 @@ export function mapPrice(row: RawPriceCatalogEntry): AdminPriceCatalogEntry {
     id: row.id,
     modelCatalogId: row.modelCatalogId,
     billingUnit: row.billingUnit,
+    priceVariantKey: row.priceVariantKey,
+    requestInputTokensMin: row.requestInputTokensMin,
+    requestInputTokensMax: row.requestInputTokensMax,
     unitPrice: String(row.unitPrice),
     currencyCode: row.currencyCode,
     effectiveFrom: row.effectiveFrom,
@@ -449,9 +445,7 @@ export function mapBinding(row: RawLibraryBinding): AdminLibraryBinding {
   }
 }
 
-function mapAuditSubject(
-  row: RawAuditEventSubject,
-): AdminAuditEventSubject {
+function mapAuditSubject(row: RawAuditEventSubject): AdminAuditEventSubject {
   return {
     auditEventId: row.auditEventId,
     subjectKind: row.subjectKind,
@@ -478,11 +472,14 @@ export function mapAuditEvent(row: RawAuditEvent): AdminAuditEvent {
   }
 }
 
-export function mapOpsLibraryState(row: RawOpsLibraryState | RawOpsLibraryStateWire): AdminOpsLibraryState {
+export function mapOpsLibraryState(
+  row: RawOpsLibraryState | RawOpsLibraryStateWire,
+): AdminOpsLibraryState {
   const libraryId = 'library_id' in row ? row.library_id : null
   const queueDepth = 'queue_depth' in row ? row.queue_depth : null
   const runningAttempts = 'running_attempts' in row ? row.running_attempts : null
-  const readableDocumentCount = 'readable_document_count' in row ? row.readable_document_count : null
+  const readableDocumentCount =
+    'readable_document_count' in row ? row.readable_document_count : null
   const failedDocumentCount = 'failed_document_count' in row ? row.failed_document_count : null
   const degradedState = 'degraded_state' in row ? row.degraded_state : null
   const latestKnowledgeGenerationId =
@@ -497,7 +494,8 @@ export function mapOpsLibraryState(row: RawOpsLibraryState | RawOpsLibraryStateW
     readableDocumentCount: row.readableDocumentCount ?? readableDocumentCount ?? 0,
     failedDocumentCount: row.failedDocumentCount ?? failedDocumentCount ?? 0,
     degradedState: row.degradedState ?? degradedState ?? 'healthy',
-    latestKnowledgeGenerationId: row.latestKnowledgeGenerationId ?? latestKnowledgeGenerationId ?? null,
+    latestKnowledgeGenerationId:
+      row.latestKnowledgeGenerationId ?? latestKnowledgeGenerationId ?? null,
     knowledgeGenerationState: row.knowledgeGenerationState ?? knowledgeGenerationState ?? null,
     lastRecomputedAt: row.lastRecomputedAt ?? lastRecomputedAt ?? '',
   }
@@ -511,8 +509,10 @@ function mapKnowledgeGeneration(
   const libraryId = 'library_id' in row ? row.library_id : null
   const generationState = 'generation_state' in row ? row.generation_state : null
   const activeTextGeneration = 'active_text_generation' in row ? row.active_text_generation : null
-  const activeVectorGeneration = 'active_vector_generation' in row ? row.active_vector_generation : null
-  const activeGraphGeneration = 'active_graph_generation' in row ? row.active_graph_generation : null
+  const activeVectorGeneration =
+    'active_vector_generation' in row ? row.active_vector_generation : null
+  const activeGraphGeneration =
+    'active_graph_generation' in row ? row.active_graph_generation : null
   const degradedState = 'degraded_state' in row ? row.degraded_state : null
   const createdAt = 'created_at' in row ? row.created_at : null
   const updatedAt = 'updated_at' in row ? row.updated_at : null
@@ -559,9 +559,7 @@ export async function fetchAdminPrincipal(): Promise<AdminPrincipalSummary> {
   return mapPrincipal(await unwrap(apiHttp.get<RawMeResponse>('/iam/me')))
 }
 
-export async function fetchAdminApiTokens(
-  workspaceId: string | null,
-): Promise<AdminApiTokenRow[]> {
+export async function fetchAdminApiTokens(workspaceId: string | null): Promise<AdminApiTokenRow[]> {
   const tokens = await unwrap(
     apiHttp.get<RawTokenResponse[]>('/iam/tokens', {
       params: workspaceId ? { workspaceId } : {},
@@ -621,9 +619,7 @@ export async function createAdminGrant(payload: {
   )
 }
 
-export async function fetchAdminModelPresets(
-  workspaceId: string,
-): Promise<AdminModelPreset[]> {
+export async function fetchAdminModelPresets(workspaceId: string): Promise<AdminModelPreset[]> {
   return unwrap(
     apiHttp.get<RawModelPreset[]>('/ai/model-presets', {
       params: { workspaceId },
@@ -731,12 +727,10 @@ export async function updateAdminPrice(
   )
 }
 
-export async function fetchAdminLibraryBindings(
-  libraryId: string,
-): Promise<AdminLibraryBinding[]> {
-  return unwrap(
-    apiHttp.get<RawLibraryBinding[]>(`/ai/libraries/${libraryId}/bindings`),
-  ).then((rows) => rows.map((row) => mapBinding(row)))
+export async function fetchAdminLibraryBindings(libraryId: string): Promise<AdminLibraryBinding[]> {
+  return unwrap(apiHttp.get<RawLibraryBinding[]>(`/ai/libraries/${libraryId}/bindings`)).then(
+    (rows) => rows.map((row) => mapBinding(row)),
+  )
 }
 
 export async function createAdminModelPreset(
@@ -807,11 +801,7 @@ export async function validateAdminLibraryBinding(
   bindingId: string,
 ): Promise<AdminBindingValidation> {
   return mapBindingValidation(
-    await unwrap(
-      apiHttp.post<RawBindingValidation>(
-        `/ai/library-bindings/${bindingId}/validate`,
-      ),
-    ),
+    await unwrap(apiHttp.post<RawBindingValidation>(`/ai/library-bindings/${bindingId}/validate`)),
   )
 }
 
@@ -834,8 +824,8 @@ export async function fetchAdminLibraryOpsState(
   )
   return {
     state: mapOpsLibraryState(payload.state),
-    knowledgeGenerations: (payload.knowledgeGenerations ?? payload.knowledge_generations ?? []).map((row) =>
-      mapKnowledgeGeneration(row),
+    knowledgeGenerations: (payload.knowledgeGenerations ?? payload.knowledge_generations ?? []).map(
+      (row) => mapKnowledgeGeneration(row),
     ),
     warnings: payload.warnings.map((row) => mapOpsLibraryWarning(row)),
   }

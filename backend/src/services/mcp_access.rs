@@ -4,7 +4,10 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::{ai::AiBindingPurpose, catalog::CatalogLibraryIngestionReadiness},
+    domains::{
+        ai::AiBindingPurpose, catalog::CatalogLibraryIngestionReadiness,
+        content::revision_text_state_is_readable,
+    },
     infra::repositories::catalog_repository::{self, CatalogLibraryRow, CatalogWorkspaceRow},
     integrations::llm::EmbeddingRequest,
     interfaces::http::{
@@ -21,7 +24,7 @@ use crate::{
         McpEntityReference, McpEvidenceReference, McpLibraryDescriptor,
         McpLibraryIngestionReadiness, McpReadDocumentRequest, McpReadDocumentResponse,
         McpReadabilityState, McpRelationReference, McpSearchDocumentsRequest,
-        McpSearchDocumentsResponse, McpWorkspaceDescriptor,
+        McpSearchDocumentsResponse, McpTechnicalFactReference, McpWorkspaceDescriptor,
     },
     services::mcp_support::{
         char_slice, encode_continuation_token, normalize_read_request, preview_hit, saturating_rank,
@@ -42,9 +45,12 @@ pub(crate) struct ResolvedDocumentState {
     pub(crate) library: CatalogLibraryRow,
     pub(crate) latest_revision_id: Option<Uuid>,
     pub(crate) readability_state: McpReadabilityState,
+    pub(crate) readiness_kind: String,
+    pub(crate) graph_coverage_kind: String,
     pub(crate) status_reason: Option<String>,
     pub(crate) content: Option<String>,
     pub(crate) chunk_references: Vec<McpChunkReference>,
+    pub(crate) technical_fact_references: Vec<McpTechnicalFactReference>,
     pub(crate) entity_references: Vec<McpEntityReference>,
     pub(crate) relation_references: Vec<McpRelationReference>,
     pub(crate) evidence_references: Vec<McpEvidenceReference>,
@@ -59,6 +65,7 @@ pub(crate) struct McpSearchEmbeddingContext {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct McpRevisionGroundingReferences {
+    pub(crate) technical_fact_references: Vec<McpTechnicalFactReference>,
     pub(crate) entity_references: Vec<McpEntityReference>,
     pub(crate) relation_references: Vec<McpRelationReference>,
     pub(crate) evidence_references: Vec<McpEvidenceReference>,
@@ -370,6 +377,12 @@ pub async fn search_documents(
         library_hits.truncate(limit);
         for accumulator in library_hits {
             let chunk_references = accumulator.clone().into_chunk_references();
+            let content_summary = state
+                .canonical_services
+                .content
+                .get_document(state, accumulator.document_id)
+                .await?;
+            let readiness_summary = content_summary.readiness_summary.ok_or(ApiError::Internal)?;
             let grounding = collect_revision_grounding_references(
                 state,
                 accumulator.readable_revision_id,
@@ -377,6 +390,7 @@ pub async fn search_documents(
                 8,
             )
             .await?;
+            let status_reason = readable_status_reason(&readiness_summary, &grounding);
             hits.push(McpDocumentHit {
                 document_id: accumulator.document_id,
                 logical_document_id: accumulator.document_id,
@@ -388,9 +402,12 @@ pub async fn search_documents(
                 excerpt: accumulator.excerpt,
                 excerpt_start_offset: accumulator.excerpt_start_offset,
                 excerpt_end_offset: accumulator.excerpt_end_offset,
-                readability_state: McpReadabilityState::Readable,
-                status_reason: None,
+                readability_state: readability_state_from_kind(&readiness_summary.readiness_kind),
+                readiness_kind: readiness_summary.readiness_kind.clone(),
+                graph_coverage_kind: readiness_summary.graph_coverage_kind.clone(),
+                status_reason,
                 chunk_references,
+                technical_fact_references: grounding.technical_fact_references,
                 entity_references: grounding.entity_references,
                 relation_references: grounding.relation_references,
                 evidence_references: grounding.evidence_references,
@@ -519,6 +536,8 @@ pub async fn read_document(
             latest_revision_id,
             read_mode: normalized.read_mode,
             readability_state: state_view.readability_state,
+            readiness_kind: state_view.readiness_kind,
+            graph_coverage_kind: state_view.graph_coverage_kind,
             status_reason: state_view.status_reason,
             content: None,
             slice_start_offset: normalized.start_offset,
@@ -527,6 +546,7 @@ pub async fn read_document(
             continuation_token: None,
             has_more: false,
             chunk_references: Vec::new(),
+            technical_fact_references: Vec::new(),
             entity_references: Vec::new(),
             relation_references: Vec::new(),
             evidence_references: Vec::new(),
@@ -558,8 +578,10 @@ pub async fn read_document(
         workspace_id: state_view.library.workspace_id,
         latest_revision_id,
         read_mode: normalized.read_mode,
-        readability_state: McpReadabilityState::Readable,
-        status_reason: None,
+        readability_state: state_view.readability_state,
+        readiness_kind: state_view.readiness_kind,
+        graph_coverage_kind: state_view.graph_coverage_kind,
+        status_reason: state_view.status_reason,
         content: Some(slice),
         slice_start_offset: normalized.start_offset.min(total_content_length),
         slice_end_offset,
@@ -567,6 +589,7 @@ pub async fn read_document(
         continuation_token,
         has_more,
         chunk_references: state_view.chunk_references,
+        technical_fact_references: state_view.technical_fact_references,
         entity_references: state_view.entity_references,
         relation_references: state_view.relation_references,
         evidence_references: state_view.evidence_references,
@@ -594,6 +617,8 @@ pub(crate) async fn resolve_document_state(
     authorize_library_discovery(auth, library.workspace_id, library.id)?;
     let latest_revision_id =
         knowledge_document.readable_revision_id.or(knowledge_document.active_revision_id);
+    let content_summary = state.canonical_services.content.get_document(state, document_id).await?;
+    let readiness_summary = content_summary.readiness_summary.ok_or(ApiError::Internal)?;
     let readable_revision = match latest_revision_id {
         Some(revision_id) => state
             .arango_document_store
@@ -612,16 +637,14 @@ pub(crate) async fn resolve_document_state(
         status_reason,
         content,
         chunk_references,
+        technical_fact_references,
         entity_references,
         relation_references,
         evidence_references,
     ) = match readable_revision {
         Some(revision)
             if revision.normalized_text.as_deref().is_some_and(|text| !text.trim().is_empty())
-                && matches!(
-                    revision.text_state.as_str(),
-                    "readable" | "ready" | "text_readable"
-                ) =>
+                && revision_text_state_is_readable(&revision.text_state) =>
         {
             let chunks = state
                 .arango_document_store
@@ -644,38 +667,43 @@ pub(crate) async fn resolve_document_state(
                 16,
             )
             .await?;
+            let status_reason = readable_status_reason(&readiness_summary, &grounding);
             (
-                McpReadabilityState::Readable,
-                None,
+                readability_state_from_kind(&readiness_summary.readiness_kind),
+                status_reason,
                 revision.normalized_text,
                 chunk_references,
+                grounding.technical_fact_references,
                 grounding.entity_references,
                 grounding.relation_references,
                 grounding.evidence_references,
             )
         }
         Some(revision) if revision.text_state == "failed" => (
-            McpReadabilityState::Failed,
+            readability_state_from_kind(&readiness_summary.readiness_kind),
             Some("latest readable revision extraction failed".to_string()),
             None,
             Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
         ),
         _ if knowledge_document.active_revision_id.is_some() => (
-            McpReadabilityState::Processing,
+            readability_state_from_kind(&readiness_summary.readiness_kind),
             Some("latest revision is still being extracted".to_string()),
             None,
             Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
         ),
         _ => (
-            McpReadabilityState::Unavailable,
+            readability_state_from_kind(&readiness_summary.readiness_kind),
             Some("document has no readable revision yet".to_string()),
             None,
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -688,9 +716,12 @@ pub(crate) async fn resolve_document_state(
         library,
         latest_revision_id,
         readability_state,
+        readiness_kind: readiness_summary.readiness_kind,
+        graph_coverage_kind: readiness_summary.graph_coverage_kind,
         status_reason,
         content,
         chunk_references,
+        technical_fact_references,
         entity_references,
         relation_references,
         evidence_references,
@@ -814,35 +845,18 @@ pub(crate) async fn describe_library(
         auth.has_library_permission(library.workspace_id, library.id, POLICY_MCP_MEMORY_READ);
     let supports_write =
         auth.has_library_permission(library.workspace_id, library.id, POLICY_LIBRARY_WRITE);
-    let documents = state
-        .arango_document_store
-        .list_documents_by_library(library.workspace_id, library.id)
-        .await
-        .map_err(|_| ApiError::Internal)?;
-    let mut document_count = 0usize;
-    let mut readable_document_count = 0usize;
-    let mut processing_document_count = 0usize;
-    for document in documents {
-        if document.document_state == "deleted" || document.deleted_at.is_some() {
-            continue;
-        }
-        document_count += 1;
-        if let Some(readable_revision_id) = document.readable_revision_id
-            && let Some(revision) = state
-                .arango_document_store
-                .get_revision(readable_revision_id)
-                .await
-                .map_err(|_| ApiError::Internal)?
-            && revision.normalized_text.as_deref().is_some_and(|text| !text.trim().is_empty())
-            && matches!(revision.text_state.as_str(), "readable" | "ready" | "text_readable")
-        {
-            readable_document_count += 1;
-            continue;
-        }
-        if document.active_revision_id.is_some() {
-            processing_document_count += 1;
-        }
-    }
+    let coverage = state
+        .canonical_services
+        .knowledge
+        .get_library_knowledge_coverage(state, library.id)
+        .await?;
+    let document_count =
+        usize::try_from(coverage.document_counts_by_readiness.values().copied().sum::<i64>())
+            .unwrap_or(usize::MAX);
+    let readable_document_count = readiness_count(&coverage, "readable")
+        .saturating_add(usize::try_from(coverage.graph_sparse_document_count).unwrap_or(usize::MAX))
+        .saturating_add(usize::try_from(coverage.graph_ready_document_count).unwrap_or(usize::MAX));
+    let processing_document_count = readiness_count(&coverage, "processing");
     let descriptor = McpLibraryDescriptor {
         library_id: library.id,
         workspace_id: library.workspace_id,
@@ -853,9 +867,18 @@ pub(crate) async fn describe_library(
         document_count,
         readable_document_count,
         processing_document_count,
-        failed_document_count: document_count
-            .saturating_sub(readable_document_count)
-            .saturating_sub(processing_document_count),
+        failed_document_count: readiness_count(&coverage, "failed"),
+        document_counts_by_readiness: coverage
+            .document_counts_by_readiness
+            .iter()
+            .map(|(kind, count)| (kind.clone(), usize::try_from(*count).unwrap_or(usize::MAX)))
+            .collect(),
+        graph_ready_document_count: usize::try_from(coverage.graph_ready_document_count)
+            .unwrap_or(usize::MAX),
+        graph_sparse_document_count: usize::try_from(coverage.graph_sparse_document_count)
+            .unwrap_or(usize::MAX),
+        typed_fact_document_count: usize::try_from(coverage.typed_fact_document_count)
+            .unwrap_or(usize::MAX),
         supports_search,
         supports_read: auth.has_document_or_library_read_scope_for_library(
             library.workspace_id,
@@ -963,6 +986,42 @@ pub(crate) async fn collect_revision_grounding_references(
     chunk_ids: &[Uuid],
     limit: usize,
 ) -> Result<McpRevisionGroundingReferences, ApiError> {
+    let technical_facts = state
+        .arango_document_store
+        .list_technical_facts_by_revision(revision_id)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    let mut technical_fact_rows = technical_facts;
+    technical_fact_rows.sort_by(|left, right| {
+        technical_fact_support_score(right, chunk_ids)
+            .cmp(&technical_fact_support_score(left, chunk_ids))
+            .then_with(|| {
+                right.confidence.unwrap_or(0.0).total_cmp(&left.confidence.unwrap_or(0.0))
+            })
+            .then_with(|| left.created_at.cmp(&right.created_at))
+            .then_with(|| left.fact_id.cmp(&right.fact_id))
+    });
+    technical_fact_rows.truncate(limit);
+    let technical_fact_references = technical_fact_rows
+        .into_iter()
+        .enumerate()
+        .map(|(index, fact)| McpTechnicalFactReference {
+            fact_id: fact.fact_id,
+            fact_kind: fact.fact_kind,
+            canonical_value: fact.canonical_value_text,
+            display_value: fact.display_value,
+            rank: saturating_rank(index),
+            score: fact.confidence.unwrap_or(1.0),
+            inclusion_reason: Some(
+                if fact_supports_requested_chunks(&fact.support_chunk_ids, chunk_ids) {
+                    "chunk_supported_fact"
+                } else {
+                    "revision_fact"
+                }
+                .to_string(),
+            ),
+        })
+        .collect::<Vec<_>>();
     let evidence_rows = state
         .arango_graph_store
         .list_evidence_by_revision(revision_id)
@@ -1082,8 +1141,77 @@ pub(crate) async fn collect_revision_grounding_references(
     };
 
     Ok(McpRevisionGroundingReferences {
+        technical_fact_references,
         entity_references,
         relation_references,
         evidence_references,
     })
+}
+
+fn readable_status_reason(
+    readiness_summary: &crate::domains::content::DocumentReadinessSummary,
+    grounding: &McpRevisionGroundingReferences,
+) -> Option<String> {
+    if readiness_summary.readiness_kind == "readable" {
+        return Some(
+            "document text is readable, but canonical preparation and graph extraction are still processing"
+                .to_string(),
+        );
+    }
+    if readiness_summary.graph_coverage_kind == "graph_sparse"
+        && grounding.technical_fact_references.is_empty()
+        && grounding.entity_references.is_empty()
+        && grounding.relation_references.is_empty()
+        && grounding.evidence_references.is_empty()
+    {
+        return Some(
+            "document text is readable, but graph coverage is still sparse for this revision"
+                .to_string(),
+        );
+    }
+    (grounding.technical_fact_references.is_empty()
+        && grounding.entity_references.is_empty()
+        && grounding.relation_references.is_empty()
+        && grounding.evidence_references.is_empty())
+        .then_some(
+            "document text is readable, but canonical technical facts and graph evidence are not available yet"
+                .to_string(),
+        )
+}
+
+fn readability_state_from_kind(readiness_kind: &str) -> McpReadabilityState {
+    match readiness_kind {
+        "failed" => McpReadabilityState::Failed,
+        "processing" => McpReadabilityState::Processing,
+        "readable" | "graph_sparse" | "graph_ready" => McpReadabilityState::Readable,
+        _ => McpReadabilityState::Unavailable,
+    }
+}
+
+fn readiness_count(
+    coverage: &crate::domains::content::LibraryKnowledgeCoverage,
+    readiness_kind: &str,
+) -> usize {
+    coverage
+        .document_counts_by_readiness
+        .get(readiness_kind)
+        .copied()
+        .and_then(|count| usize::try_from(count).ok())
+        .unwrap_or_default()
+}
+
+fn fact_supports_requested_chunks(support_chunk_ids: &[Uuid], chunk_ids: &[Uuid]) -> bool {
+    !support_chunk_ids.is_empty()
+        && support_chunk_ids.iter().any(|support_chunk_id| chunk_ids.contains(support_chunk_id))
+}
+
+fn technical_fact_support_score(
+    fact: &crate::infra::arangodb::document_store::KnowledgeTechnicalFactRow,
+    chunk_ids: &[Uuid],
+) -> (bool, usize, usize) {
+    (
+        fact_supports_requested_chunks(&fact.support_chunk_ids, chunk_ids),
+        fact.support_chunk_ids.len(),
+        fact.support_block_ids.len(),
+    )
 }

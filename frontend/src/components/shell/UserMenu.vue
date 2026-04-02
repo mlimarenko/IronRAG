@@ -29,15 +29,20 @@ const localizedAccessLabel = computed(() => {
   }
 })
 
-function closeMenu() {
+function closeMenu(): void {
   open.value = false
 }
 
-function toggleMenu() {
+function toggleMenu(): void {
   open.value = !open.value
 }
 
-function handlePointerDown(event: Event) {
+function handleLogout(): void {
+  emit('logout')
+  closeMenu()
+}
+
+function handlePointerDown(event: Event): void {
   if (!rootRef.value) {
     return
   }
@@ -46,7 +51,7 @@ function handlePointerDown(event: Event) {
   }
 }
 
-function handleKeydown(event: KeyboardEvent) {
+function handleKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape') {
     closeMenu()
   }
@@ -64,11 +69,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div
-    ref="rootRef"
-    class="rr-user-menu"
-    :class="{ 'is-open': open }"
-  >
+  <div ref="rootRef" class="rr-user-menu" :class="{ 'is-open': open }">
     <button
       class="rr-user-menu__trigger"
       type="button"
@@ -84,11 +85,7 @@ onBeforeUnmount(() => {
       <span class="rr-user-menu__chevron">▾</span>
     </button>
 
-    <div
-      v-if="open"
-      class="rr-user-menu__menu"
-      role="menu"
-    >
+    <div v-if="open" class="rr-user-menu__menu" role="menu">
       <div class="rr-user-menu__identity">
         <span class="rr-user-menu__avatar rr-user-menu__avatar--large">{{ initials }}</span>
         <div class="rr-user-menu__summary rr-user-menu__summary--menu">
@@ -97,12 +94,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <button
-        class="rr-user-menu__action"
-        type="button"
-        role="menuitem"
-        @click="emit('logout'); closeMenu()"
-      >
+      <button class="rr-user-menu__action" type="button" role="menuitem" @click="handleLogout()">
         {{ t('shell.logout') }}
       </button>
     </div>

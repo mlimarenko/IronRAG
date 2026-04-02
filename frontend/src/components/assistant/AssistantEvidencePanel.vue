@@ -1,9 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type {
-  KnowledgeBundleChunkReference,
   KnowledgeBundleEntityReference,
-  KnowledgeBundleEvidenceReference,
   KnowledgeBundleRelationReference,
   KnowledgeContextBundleDetail,
   QueryExecutionDetail,
@@ -11,90 +9,95 @@ import type {
 import { useDisplayFormatters } from 'src/composables/useDisplayFormatters'
 import { useI18n } from 'vue-i18n'
 
-interface ReferenceListItem {
+interface EvidenceCardItem {
   id: string
+  title: string
+  meta: string | null
+  badges: string[]
   rank: number
   score: number
-  label: string
 }
 
-const props = withDefaults(defineProps<{
-  libraryName: string
-  executing: boolean
-  error: string | null
-  execution: QueryExecutionDetail | null
-  bundle: KnowledgeContextBundleDetail | null
-  chunkReferences: KnowledgeBundleChunkReference[]
-  entityReferences: KnowledgeBundleEntityReference[]
-  relationReferences: KnowledgeBundleRelationReference[]
-  evidenceReferences: KnowledgeBundleEvidenceReference[]
-  closable?: boolean
-}>(), {
-  closable: false,
-})
+const props = withDefaults(
+  defineProps<{
+    libraryName: string
+    executing: boolean
+    error: string | null
+    execution: QueryExecutionDetail | null
+    bundle: KnowledgeContextBundleDetail | null
+    closable?: boolean
+  }>(),
+  {
+    closable: false,
+  },
+)
 
-const emit = defineEmits<{
-  (event: 'open-graph'): void
-  (event: 'open-documents'): void
-  (event: 'close'): void
-}>()
+const emit = defineEmits<(event: 'open-graph' | 'open-documents' | 'close') => void>()
 
 const { t } = useI18n()
 const { formatDateTime, shortIdentifier } = useDisplayFormatters()
 
+function humanizeToken(value: string): string {
+  return value.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
 function localizedExecutionState(state: string): string {
   const key = `assistant.evidence.executionStates.${state}`
   const translated = t(key)
-  return translated === key ? state : translated
+  return translated === key ? humanizeToken(state) : translated
 }
 
 function localizedBundleState(state: string): string {
   const key = `assistant.evidence.bundleStates.${state}`
   const translated = t(key)
-  return translated === key ? state : translated
+  return translated === key ? humanizeToken(state) : translated
 }
 
-function referenceIdentifier(id: string): string {
-  if (id.length <= 14) {
-    return id
+function localizedBlockKind(kind: string): string {
+  const key = `assistant.evidence.segmentKinds.${kind}`
+  const translated = t(key)
+  return translated === key ? humanizeToken(kind) : translated
+}
+
+function localizedFactKind(kind: string): string {
+  const key = `assistant.evidence.factKinds.${kind}`
+  const translated = t(key)
+  return translated === key ? humanizeToken(kind) : translated
+}
+
+function localizedInclusionReason(reason: string | null): string | null {
+  if (!reason) {
+    return null
   }
-  return `${id.slice(0, 8)}…${id.slice(-4)}`
+  const key = `assistant.evidence.inclusionReasons.${reason}`
+  const translated = t(key)
+  return translated === key ? humanizeToken(reason) : translated
 }
 
-function referenceLabel(kind: 'chunk' | 'entity' | 'relation' | 'evidence', id: string): string {
-  return t(`assistant.evidence.labels.${kind}`, { id: referenceIdentifier(id) })
+function joinReferencePath(parts: string[]): string | null {
+  const filtered = parts.map((part) => part.trim()).filter(Boolean)
+  return filtered.length > 0 ? filtered.join(' > ') : null
 }
 
-function topReferences<T extends { rank: number; score: number }>(
-  kind: 'chunk' | 'entity' | 'relation' | 'evidence',
+function dedupeRankedItems<T extends { rank: number; score: number }>(
   items: T[],
   resolveId: (item: T) => string,
-): ReferenceListItem[] {
-  const dedupedItems = new Map<string, T>()
+): T[] {
+  const deduped = new Map<string, T>()
   for (const item of items) {
     const id = resolveId(item)
-    const existing = dedupedItems.get(id)
+    const existing = deduped.get(id)
     if (
       !existing ||
       item.rank < existing.rank ||
       (item.rank === existing.rank && item.score > existing.score)
     ) {
-      dedupedItems.set(id, item)
+      deduped.set(id, item)
     }
   }
-
-  return Array.from(dedupedItems.values())
-    .sort((left, right) => left.rank - right.rank || right.score - left.score)
-    .slice(0, 4)
-    .map((item) => {
-      const id = resolveId(item)
-      return {
-        id,
-        rank: item.rank,
-        score: item.score,
-        label: referenceLabel(kind, id),
-      }
-    })
+  return Array.from(deduped.values()).sort(
+    (left, right) => left.rank - right.rank || right.score - left.score,
+  )
 }
 
 const executionSummary = computed(() => {
@@ -112,72 +115,149 @@ const executionSummary = computed(() => {
 })
 
 const executionMetrics = computed(() => {
-  const metrics = [
+  if (!props.execution) {
+    return []
+  }
+  return [
     {
-      key: 'chunks',
-      label: t('assistant.evidence.metrics.chunks'),
-      value: props.chunkReferences.length,
+      key: 'segments',
+      label: t('assistant.evidence.metrics.segments'),
+      value: props.execution.preparedSegmentReferences.length,
+    },
+    {
+      key: 'facts',
+      label: t('assistant.evidence.metrics.facts'),
+      value: props.execution.technicalFactReferences.length,
     },
     {
       key: 'entities',
       label: t('assistant.evidence.metrics.entities'),
-      value: props.entityReferences.length,
+      value: props.execution.entityReferences.length,
     },
     {
       key: 'relations',
       label: t('assistant.evidence.metrics.relations'),
-      value: props.relationReferences.length,
-    },
-    {
-      key: 'evidence',
-      label: t('assistant.evidence.metrics.evidence'),
-      value: props.evidenceReferences.length,
+      value: props.execution.relationReferences.length,
     },
   ]
-  const nonZeroMetrics = metrics.filter((metric) => metric.value > 0)
-  return nonZeroMetrics.length > 0 ? nonZeroMetrics : metrics
 })
 
-const canOpenDocuments = computed(() => props.chunkReferences.length > 0)
-const canOpenGraph = computed(
-  () => props.entityReferences.length > 0 || props.relationReferences.length > 0,
+const canOpenDocuments = computed(() =>
+  Boolean(
+    props.execution &&
+    (props.execution.preparedSegmentReferences.length > 0 ||
+      props.execution.technicalFactReferences.length > 0 ||
+      props.execution.chunkReferences.length > 0),
+  ),
 )
 
-const topChunkReferences = computed(() =>
-  topReferences('chunk', props.chunkReferences, (item) => item.chunkId),
-)
-const topEntityReferences = computed(() =>
-  topReferences('entity', props.entityReferences, (item) => item.entityId),
-)
-const topRelationReferences = computed(() =>
-  topReferences('relation', props.relationReferences, (item) => item.relationId),
-)
-const topEvidenceReferences = computed(() =>
-  topReferences('evidence', props.evidenceReferences, (item) => item.evidenceId),
+const canOpenGraph = computed(() =>
+  Boolean(
+    props.execution &&
+    (props.execution.entityReferences.length > 0 || props.execution.relationReferences.length > 0),
+  ),
 )
 
-const referenceSections = computed(() => [
-  {
-    key: 'chunks',
-    title: t('assistant.evidence.sections.chunks'),
-    items: topChunkReferences.value,
-  },
-  {
-    key: 'entities',
-    title: t('assistant.evidence.sections.entities'),
-    items: topEntityReferences.value,
-  },
-  {
-    key: 'relations',
-    title: t('assistant.evidence.sections.relations'),
-    items: topRelationReferences.value,
-  },
-  {
-    key: 'evidence',
-    title: t('assistant.evidence.sections.evidence'),
-    items: topEvidenceReferences.value,
-  },
-].filter((section) => section.items.length > 0))
+const topPreparedSegments = computed<EvidenceCardItem[]>(() => {
+  if (!props.execution) {
+    return []
+  }
+  return dedupeRankedItems(props.execution.preparedSegmentReferences, (item) => item.segmentId)
+    .slice(0, 6)
+    .map((item) => {
+      const headingPath = joinReferencePath(item.headingTrail)
+      const sectionPath = joinReferencePath(item.sectionPath)
+      return {
+        id: item.segmentId,
+        title: headingPath ?? sectionPath ?? shortIdentifier(item.segmentId, 12),
+        meta: sectionPath && sectionPath !== headingPath ? sectionPath : null,
+        badges: [localizedBlockKind(item.blockKind)],
+        rank: item.rank,
+        score: item.score,
+      }
+    })
+})
+
+const topTechnicalFacts = computed<EvidenceCardItem[]>(() => {
+  if (!props.execution) {
+    return []
+  }
+  return dedupeRankedItems(props.execution.technicalFactReferences, (item) => item.factId)
+    .slice(0, 6)
+    .map((item) => ({
+      id: item.factId,
+      title: item.displayValue,
+      meta: item.canonicalValue !== item.displayValue ? item.canonicalValue : null,
+      badges: [localizedFactKind(item.factKind)],
+      rank: item.rank,
+      score: item.score,
+    }))
+})
+
+function mapGraphReferenceItems<T extends { rank: number; score: number }>(
+  items: T[],
+  resolveId: (item: T) => string,
+  resolveReason: (item: T) => string | null,
+  labelKey: 'entity' | 'relation',
+): EvidenceCardItem[] {
+  return dedupeRankedItems(items, resolveId)
+    .slice(0, 6)
+    .map((item) => {
+      const id = resolveId(item)
+      const reason = localizedInclusionReason(resolveReason(item))
+      return {
+        id,
+        title: t(`assistant.evidence.labels.${labelKey}`, { id: shortIdentifier(id, 12) }),
+        meta: reason,
+        badges: [t(`assistant.evidence.graphKinds.${labelKey}`)],
+        rank: item.rank,
+        score: item.score,
+      }
+    })
+}
+
+const topEntityReferences = computed<EvidenceCardItem[]>(() =>
+  mapGraphReferenceItems<KnowledgeBundleEntityReference>(
+    props.bundle?.entityReferences ?? [],
+    (item) => item.entityId,
+    (item) => item.inclusionReason,
+    'entity',
+  ),
+)
+
+const topRelationReferences = computed<EvidenceCardItem[]>(() =>
+  mapGraphReferenceItems<KnowledgeBundleRelationReference>(
+    props.bundle?.relationReferences ?? [],
+    (item) => item.relationId,
+    (item) => item.inclusionReason,
+    'relation',
+  ),
+)
+
+const referenceSections = computed(() =>
+  [
+    {
+      key: 'segments',
+      title: t('assistant.evidence.sections.segments'),
+      items: topPreparedSegments.value,
+    },
+    {
+      key: 'facts',
+      title: t('assistant.evidence.sections.facts'),
+      items: topTechnicalFacts.value,
+    },
+    {
+      key: 'entities',
+      title: t('assistant.evidence.sections.entities'),
+      items: topEntityReferences.value,
+    },
+    {
+      key: 'relations',
+      title: t('assistant.evidence.sections.relations'),
+      items: topRelationReferences.value,
+    },
+  ].filter((section) => section.items.length > 0),
+)
 </script>
 
 <template>
@@ -218,10 +298,7 @@ const referenceSections = computed(() => [
           <p>{{ error }}</p>
         </div>
 
-        <div
-          v-else-if="!executionSummary"
-          class="rr-assistant-evidence__empty"
-        >
+        <div v-else-if="!executionSummary" class="rr-assistant-evidence__empty">
           <strong>{{ t('assistant.evidence.emptyTitle') }}</strong>
           <p>{{ t('assistant.evidence.emptyBody') }}</p>
           <ul>
@@ -244,10 +321,22 @@ const referenceSections = computed(() => [
               }}
             </strong>
             <div class="rr-assistant-evidence__meta">
-              <span>{{ t('assistant.evidence.executionState', { state: localizedExecutionState(executionSummary.state) }) }}</span>
-              <span>{{ t('assistant.evidence.startedAt', { value: formatDateTime(executionSummary.startedAt) }) }}</span>
+              <span>{{
+                t('assistant.evidence.executionState', {
+                  state: localizedExecutionState(executionSummary.state),
+                })
+              }}</span>
+              <span>{{
+                t('assistant.evidence.startedAt', {
+                  value: formatDateTime(executionSummary.startedAt),
+                })
+              }}</span>
               <span v-if="executionSummary.completedAt">
-                {{ t('assistant.evidence.completedAt', { value: formatDateTime(executionSummary.completedAt) }) }}
+                {{
+                  t('assistant.evidence.completedAt', {
+                    value: formatDateTime(executionSummary.completedAt),
+                  })
+                }}
               </span>
               <span v-if="executionSummary.failureCode">
                 {{ t('assistant.evidence.failureCode', { value: executionSummary.failureCode }) }}
@@ -266,10 +355,7 @@ const referenceSections = computed(() => [
             </div>
           </div>
 
-          <div
-            v-if="bundle"
-            class="rr-assistant-evidence__bundle"
-          >
+          <div v-if="bundle" class="rr-assistant-evidence__bundle">
             <span>{{ t('assistant.evidence.bundleLabel') }}</span>
             <strong>{{ shortIdentifier(bundle.bundle.bundleId, 12) }}</strong>
             <p>{{ localizedBundleState(bundle.bundle.bundleState) }}</p>
@@ -290,11 +376,28 @@ const referenceSections = computed(() => [
                 :key="item.id"
                 class="rr-assistant-evidence__reference"
               >
-                <div>
-                  <strong>{{ item.label }}</strong>
-                  <span>#{{ item.rank }}</span>
+                <div class="rr-assistant-evidence__reference-main">
+                  <div class="rr-assistant-evidence__reference-head">
+                    <strong>{{ item.title }}</strong>
+                    <span>#{{ item.rank }}</span>
+                  </div>
+                  <p v-if="item.meta">{{ item.meta }}</p>
+                  <div
+                    v-if="item.badges.length > 0"
+                    class="rr-assistant-evidence__reference-badges"
+                  >
+                    <span
+                      v-for="badge in item.badges"
+                      :key="badge"
+                      class="rr-assistant-evidence__reference-badge"
+                    >
+                      {{ badge }}
+                    </span>
+                  </div>
                 </div>
-                <span>{{ item.score.toFixed(3) }}</span>
+                <span class="rr-assistant-evidence__reference-score">
+                  {{ item.score.toFixed(3) }}
+                </span>
               </li>
             </ul>
           </div>

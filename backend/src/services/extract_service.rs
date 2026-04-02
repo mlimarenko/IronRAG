@@ -1,18 +1,17 @@
 use chrono::Utc;
-use sha2::{Digest, Sha256};
+use tracing::error;
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
     domains::extract::{
         ExtractChunkResult, ExtractContent, ExtractEdgeCandidate, ExtractNodeCandidate,
-        ExtractResumeCursor,
+        ExtractResumeCursor, StructurePreparationCheckpoint,
     },
-    infra::{
-        arangodb::graph_store::{NewKnowledgeEntityCandidate, NewKnowledgeRelationCandidate},
-        repositories::extract_repository,
-    },
+    domains::runtime_graph::RuntimeNodeType,
+    infra::repositories::extract_repository,
     interfaces::http::router_support::ApiError,
+    services::graph_identity,
 };
 
 #[derive(Debug, Clone)]
@@ -23,6 +22,8 @@ pub struct PersistExtractContentCommand {
     pub normalized_text: Option<String>,
     pub text_checksum: Option<String>,
     pub warning_count: i32,
+    pub preparation_state: Option<String>,
+    pub preparation_checkpoint: Option<StructurePreparationCheckpoint>,
 }
 
 #[derive(Debug, Clone)]
@@ -49,7 +50,9 @@ pub struct NewNodeCandidate {
 pub struct NewEdgeCandidate {
     pub canonical_key: String,
     pub edge_kind: String,
+    pub from_display_label: String,
     pub from_canonical_key: String,
+    pub to_display_label: String,
     pub to_canonical_key: String,
     pub summary: Option<String>,
 }
@@ -92,16 +95,25 @@ impl ExtractService {
                 text_readable_at,
             )
             .await?;
+        let persisted = extract_repository::upsert_extract_content(
+            &state.persistence.postgres,
+            command.revision_id,
+            command.attempt_id,
+            &command.extract_state,
+            command.normalized_text.as_deref(),
+            command.text_checksum.as_deref(),
+            command.warning_count,
+            command.preparation_state.as_deref(),
+            command
+                .preparation_checkpoint
+                .as_ref()
+                .map(|checkpoint| serde_json::to_value(checkpoint).unwrap_or(serde_json::json!({})))
+                .unwrap_or_else(|| serde_json::json!({})),
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?;
         // TODO: Remove extract_content persistence after legacy readers are retired.
-        Ok(ExtractContent {
-            revision_id: command.revision_id,
-            attempt_id: command.attempt_id,
-            extract_state: command.extract_state,
-            normalized_text: command.normalized_text,
-            text_checksum: command.text_checksum,
-            warning_count: command.warning_count,
-            updated_at,
-        })
+        Ok(map_extract_content_row(persisted))
     }
 
     pub async fn get_extract_content(
@@ -115,6 +127,16 @@ impl ExtractService {
             .await
             .map_err(|_| ApiError::Internal)?
             .ok_or_else(|| ApiError::resource_not_found("knowledge_revision", revision_id))?;
+        if let Some(row) = extract_repository::get_extract_content_by_revision_id(
+            &state.persistence.postgres,
+            revision_id,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?
+        {
+            return Ok(map_extract_content_row(row));
+        }
+
         Ok(ExtractContent {
             revision_id,
             attempt_id: None,
@@ -122,6 +144,8 @@ impl ExtractService {
             normalized_text: revision.normalized_text,
             text_checksum: revision.text_checksum,
             warning_count: 0,
+            preparation_state: None,
+            preparation_checkpoint: None,
             updated_at: revision.text_readable_at.unwrap_or(revision.created_at),
         })
     }
@@ -166,14 +190,58 @@ impl ExtractService {
             .map_err(|_| ApiError::Internal)?
         };
 
-        self.persist_arango_extract_candidates(
-            state,
+        let prepared_nodes = prepare_materialized_node_candidates(&command.node_candidates);
+        let prepared_edges =
+            prepare_materialized_edge_candidates(&prepared_nodes, &command.edge_candidates);
+        let node_candidates = prepared_nodes
+            .iter()
+            .map(|candidate| extract_repository::NewExtractNodeCandidate {
+                canonical_key: &candidate.canonical_key,
+                node_kind: &candidate.node_kind,
+                display_label: &candidate.display_label,
+                summary: candidate.summary.as_deref(),
+            })
+            .collect::<Vec<_>>();
+        let edge_candidates = prepared_edges
+            .iter()
+            .map(|candidate| extract_repository::NewExtractEdgeCandidate {
+                canonical_key: &candidate.canonical_key,
+                edge_kind: &candidate.edge_kind,
+                from_canonical_key: &candidate.from_canonical_key,
+                to_canonical_key: &candidate.to_canonical_key,
+                summary: candidate.summary.as_deref(),
+            })
+            .collect::<Vec<_>>();
+        extract_repository::replace_extract_node_candidates(
+            &state.persistence.postgres,
             chunk_result.id,
-            command.chunk_id,
-            &command.node_candidates,
-            &command.edge_candidates,
+            &node_candidates,
         )
-        .await?;
+        .await
+        .map_err(|error| {
+            error!(
+                chunk_result_id = %chunk_result.id,
+                chunk_id = %command.chunk_id,
+                ?error,
+                "failed to replace canonical extract node candidates"
+            );
+            ApiError::Internal
+        })?;
+        extract_repository::replace_extract_edge_candidates(
+            &state.persistence.postgres,
+            chunk_result.id,
+            &edge_candidates,
+        )
+        .await
+        .map_err(|error| {
+            error!(
+                chunk_result_id = %chunk_result.id,
+                chunk_id = %command.chunk_id,
+                ?error,
+                "failed to replace canonical extract edge candidates"
+            );
+            ApiError::Internal
+        })?;
 
         Ok(map_extract_chunk_result_row(chunk_result))
     }
@@ -197,36 +265,28 @@ impl ExtractService {
         state: &AppState,
         chunk_result_id: Uuid,
     ) -> Result<Vec<ExtractNodeCandidate>, ApiError> {
-        let chunk_result = extract_repository::get_extract_chunk_result_by_id(
+        extract_repository::get_extract_chunk_result_by_id(
             &state.persistence.postgres,
             chunk_result_id,
         )
         .await
         .map_err(|_| ApiError::Internal)?
         .ok_or_else(|| ApiError::resource_not_found("extract_chunk_result", chunk_result_id))?;
-        let chunk = state
-            .arango_document_store
-            .get_chunk(chunk_result.chunk_id)
-            .await
-            .map_err(|_| ApiError::Internal)?
-            .ok_or_else(|| {
-                ApiError::resource_not_found("knowledge_chunk", chunk_result.chunk_id)
-            })?;
-        let rows = state
-            .arango_graph_store
-            .list_entity_candidates_by_revision(chunk.revision_id)
-            .await
-            .map_err(|_| ApiError::Internal)?;
+        let rows = extract_repository::list_extract_node_candidates_by_chunk_result(
+            &state.persistence.postgres,
+            chunk_result_id,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?;
         let mut mapped = rows
             .into_iter()
-            .filter(|row| row.chunk_id == Some(chunk.chunk_id))
             .map(|row| ExtractNodeCandidate {
-                id: row.candidate_id,
-                chunk_result_id,
-                canonical_key: row.normalization_key,
-                node_kind: row.candidate_type,
-                display_label: row.candidate_label,
-                summary: None,
+                id: row.id,
+                chunk_result_id: row.chunk_result_id,
+                canonical_key: row.canonical_key,
+                node_kind: row.node_kind,
+                display_label: row.display_label,
+                summary: row.summary,
             })
             .collect::<Vec<_>>();
         mapped.sort_by(|a, b| a.canonical_key.cmp(&b.canonical_key).then_with(|| a.id.cmp(&b.id)));
@@ -238,37 +298,29 @@ impl ExtractService {
         state: &AppState,
         chunk_result_id: Uuid,
     ) -> Result<Vec<ExtractEdgeCandidate>, ApiError> {
-        let chunk_result = extract_repository::get_extract_chunk_result_by_id(
+        extract_repository::get_extract_chunk_result_by_id(
             &state.persistence.postgres,
             chunk_result_id,
         )
         .await
         .map_err(|_| ApiError::Internal)?
         .ok_or_else(|| ApiError::resource_not_found("extract_chunk_result", chunk_result_id))?;
-        let chunk = state
-            .arango_document_store
-            .get_chunk(chunk_result.chunk_id)
-            .await
-            .map_err(|_| ApiError::Internal)?
-            .ok_or_else(|| {
-                ApiError::resource_not_found("knowledge_chunk", chunk_result.chunk_id)
-            })?;
-        let rows = state
-            .arango_graph_store
-            .list_relation_candidates_by_revision(chunk.revision_id)
-            .await
-            .map_err(|_| ApiError::Internal)?;
+        let rows = extract_repository::list_extract_edge_candidates_by_chunk_result(
+            &state.persistence.postgres,
+            chunk_result_id,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?;
         let mut mapped = rows
             .into_iter()
-            .filter(|row| row.chunk_id == Some(chunk.chunk_id))
             .map(|row| ExtractEdgeCandidate {
-                id: row.candidate_id,
-                chunk_result_id,
-                canonical_key: row.normalized_assertion,
-                edge_kind: row.predicate,
-                from_canonical_key: row.subject_candidate_key,
-                to_canonical_key: row.object_candidate_key,
-                summary: None,
+                id: row.id,
+                chunk_result_id: row.chunk_result_id,
+                canonical_key: row.canonical_key,
+                edge_kind: row.edge_kind,
+                from_canonical_key: row.from_canonical_key,
+                to_canonical_key: row.to_canonical_key,
+                summary: row.summary,
             })
             .collect::<Vec<_>>();
         mapped.sort_by(|a, b| a.canonical_key.cmp(&b.canonical_key).then_with(|| a.id.cmp(&b.id)));
@@ -331,93 +383,6 @@ impl ExtractService {
         .map_err(|_| ApiError::Internal)?;
         Ok(map_resume_cursor_row(row))
     }
-
-    async fn persist_arango_extract_candidates(
-        &self,
-        state: &AppState,
-        chunk_result_id: Uuid,
-        chunk_id: Uuid,
-        node_candidates: &[NewNodeCandidate],
-        edge_candidates: &[NewEdgeCandidate],
-    ) -> Result<(), ApiError> {
-        let chunk = state
-            .arango_document_store
-            .get_chunk(chunk_id)
-            .await
-            .map_err(|_| ApiError::Internal)?
-            .ok_or_else(|| ApiError::resource_not_found("knowledge_chunk", chunk_id))?;
-        let knowledge_revision = state
-            .arango_document_store
-            .get_revision(chunk.revision_id)
-            .await
-            .map_err(|_| ApiError::Internal)?
-            .ok_or_else(|| ApiError::resource_not_found("knowledge_revision", chunk.revision_id))?;
-
-        let entity_rows = node_candidates
-            .iter()
-            .map(|candidate| NewKnowledgeEntityCandidate {
-                candidate_id: stable_candidate_id(
-                    "entity",
-                    chunk_result_id,
-                    &candidate.canonical_key,
-                    &candidate.node_kind,
-                ),
-                workspace_id: knowledge_revision.workspace_id,
-                library_id: knowledge_revision.library_id,
-                revision_id: knowledge_revision.revision_id,
-                chunk_id: Some(chunk_id),
-                candidate_label: candidate.display_label.clone(),
-                candidate_type: candidate.node_kind.clone(),
-                normalization_key: candidate.canonical_key.clone(),
-                confidence: None,
-                extraction_method: "extract_chunk_result".to_string(),
-                candidate_state: "active".to_string(),
-                created_at: Some(Utc::now()),
-                updated_at: Some(Utc::now()),
-            })
-            .collect::<Vec<_>>();
-        if !entity_rows.is_empty() {
-            let _ = state
-                .arango_graph_store
-                .upsert_entity_candidates(&entity_rows)
-                .await
-                .map_err(|_| ApiError::Internal)?;
-        }
-
-        let relation_rows = edge_candidates
-            .iter()
-            .map(|candidate| NewKnowledgeRelationCandidate {
-                candidate_id: stable_candidate_id(
-                    "relation",
-                    chunk_result_id,
-                    &candidate.canonical_key,
-                    &candidate.edge_kind,
-                ),
-                workspace_id: knowledge_revision.workspace_id,
-                library_id: knowledge_revision.library_id,
-                revision_id: knowledge_revision.revision_id,
-                chunk_id: Some(chunk_id),
-                subject_candidate_key: candidate.from_canonical_key.clone(),
-                predicate: candidate.edge_kind.clone(),
-                object_candidate_key: candidate.to_canonical_key.clone(),
-                normalized_assertion: candidate.canonical_key.clone(),
-                confidence: None,
-                extraction_method: "extract_chunk_result".to_string(),
-                candidate_state: "active".to_string(),
-                created_at: Some(Utc::now()),
-                updated_at: Some(Utc::now()),
-            })
-            .collect::<Vec<_>>();
-        if !relation_rows.is_empty() {
-            let _ = state
-                .arango_graph_store
-                .upsert_relation_candidates(&relation_rows)
-                .await
-                .map_err(|_| ApiError::Internal)?;
-        }
-
-        Ok(())
-    }
 }
 
 fn map_extract_state_to_text_state(extract_state: &str) -> &str {
@@ -463,19 +428,215 @@ fn map_resume_cursor_row(row: extract_repository::ExtractResumeCursorRow) -> Ext
     }
 }
 
-#[must_use]
-fn stable_candidate_id(
-    kind: &str,
-    chunk_result_id: Uuid,
-    canonical_key: &str,
-    flavor: &str,
-) -> Uuid {
-    let digest = Sha256::digest(
-        format!("extract:{kind}:{chunk_result_id}:{canonical_key}:{flavor}").as_bytes(),
-    );
-    let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&digest[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x50;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    Uuid::from_bytes(bytes)
+fn map_extract_content_row(row: extract_repository::ExtractContentRow) -> ExtractContent {
+    ExtractContent {
+        revision_id: row.revision_id,
+        attempt_id: row.attempt_id,
+        extract_state: row.extract_state,
+        normalized_text: row.normalized_text,
+        text_checksum: row.text_checksum,
+        warning_count: row.warning_count,
+        preparation_state: row.preparation_state,
+        preparation_checkpoint: serde_json::from_value(row.preparation_checkpoint_json).ok(),
+        updated_at: row.updated_at,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreparedMaterializedNodeCandidate {
+    canonical_key: String,
+    node_kind: String,
+    display_label: String,
+    summary: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreparedMaterializedEdgeCandidate {
+    canonical_key: String,
+    edge_kind: String,
+    from_display_label: String,
+    from_canonical_key: String,
+    to_display_label: String,
+    to_canonical_key: String,
+    summary: Option<String>,
+}
+
+fn prepare_materialized_node_candidates(
+    node_candidates: &[NewNodeCandidate],
+) -> Vec<PreparedMaterializedNodeCandidate> {
+    let mut entity_key_index = graph_identity::GraphLabelNodeTypeIndex::new();
+    for candidate in node_candidates {
+        let display_label = candidate.display_label.trim();
+        if display_label.is_empty() {
+            continue;
+        }
+        entity_key_index.insert(display_label, parse_materialized_node_type(&candidate.node_kind));
+    }
+    node_candidates
+        .iter()
+        .filter_map(|candidate| {
+            let display_label = candidate.display_label.trim();
+            if display_label.is_empty() {
+                return None;
+            }
+            let canonical_key = entity_key_index.canonical_node_key_for_label(display_label);
+            let node_type = graph_identity::runtime_node_type_from_key(&canonical_key);
+            Some(PreparedMaterializedNodeCandidate {
+                canonical_key,
+                node_kind: graph_identity::runtime_node_type_slug(&node_type).to_string(),
+                display_label: display_label.to_string(),
+                summary: candidate
+                    .summary
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|summary| !summary.is_empty())
+                    .map(ToOwned::to_owned),
+            })
+        })
+        .collect()
+}
+
+fn prepare_materialized_edge_candidates(
+    node_candidates: &[PreparedMaterializedNodeCandidate],
+    edge_candidates: &[NewEdgeCandidate],
+) -> Vec<PreparedMaterializedEdgeCandidate> {
+    let mut entity_key_index = graph_identity::GraphLabelNodeTypeIndex::new();
+    for candidate in node_candidates {
+        entity_key_index
+            .insert(&candidate.display_label, parse_materialized_node_type(&candidate.node_kind));
+    }
+
+    edge_candidates
+        .iter()
+        .filter_map(|candidate| {
+            let relation_type = candidate.edge_kind.trim().to_ascii_lowercase();
+            if !graph_identity::is_canonical_relation_type(&relation_type) {
+                return None;
+            }
+            let from_display_label = candidate.from_display_label.trim();
+            let to_display_label = candidate.to_display_label.trim();
+            if from_display_label.is_empty() || to_display_label.is_empty() {
+                return None;
+            }
+            let from_canonical_key =
+                entity_key_index.canonical_node_key_for_label(from_display_label);
+            let to_canonical_key = entity_key_index.canonical_node_key_for_label(to_display_label);
+            Some(PreparedMaterializedEdgeCandidate {
+                canonical_key: graph_identity::canonical_edge_key(
+                    &from_canonical_key,
+                    &relation_type,
+                    &to_canonical_key,
+                ),
+                edge_kind: relation_type,
+                from_display_label: from_display_label.to_string(),
+                from_canonical_key,
+                to_display_label: to_display_label.to_string(),
+                to_canonical_key,
+                summary: candidate
+                    .summary
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|summary| !summary.is_empty())
+                    .map(ToOwned::to_owned),
+            })
+        })
+        .collect()
+}
+
+fn parse_materialized_node_type(node_kind: &str) -> RuntimeNodeType {
+    match node_kind.trim().to_ascii_lowercase().as_str() {
+        "topic" => RuntimeNodeType::Topic,
+        "document" => RuntimeNodeType::Document,
+        _ => RuntimeNodeType::Entity,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepare_materialized_node_candidates_recanonicalizes_unicode_labels() {
+        let candidates = vec![NewNodeCandidate {
+            canonical_key: String::new(),
+            node_kind: "entity".to_string(),
+            display_label: "Первый печатный двор".to_string(),
+            summary: None,
+        }];
+
+        let prepared = prepare_materialized_node_candidates(&candidates);
+
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].canonical_key, "entity:первый_печатный_двор");
+        assert_eq!(prepared[0].node_kind, "entity");
+        assert_eq!(prepared[0].display_label, "Первый печатный двор");
+    }
+
+    #[test]
+    fn prepare_materialized_edge_candidates_uses_labels_to_build_canonical_keys() {
+        let nodes = prepare_materialized_node_candidates(&[
+            NewNodeCandidate {
+                canonical_key: String::new(),
+                node_kind: "entity".to_string(),
+                display_label: "Первый печатный двор".to_string(),
+                summary: None,
+            },
+            NewNodeCandidate {
+                canonical_key: String::new(),
+                node_kind: "topic".to_string(),
+                display_label: "Касса".to_string(),
+                summary: None,
+            },
+        ]);
+        let edges = vec![
+            NewEdgeCandidate {
+                canonical_key: String::new(),
+                edge_kind: "mentions".to_string(),
+                from_display_label: "Первый печатный двор".to_string(),
+                from_canonical_key: String::new(),
+                to_display_label: "Касса".to_string(),
+                to_canonical_key: String::new(),
+                summary: None,
+            },
+            NewEdgeCandidate {
+                canonical_key: String::new(),
+                edge_kind: "   ".to_string(),
+                from_display_label: "Первый печатный двор".to_string(),
+                from_canonical_key: String::new(),
+                to_display_label: "Касса".to_string(),
+                to_canonical_key: String::new(),
+                summary: None,
+            },
+        ];
+
+        let prepared = prepare_materialized_edge_candidates(&nodes, &edges);
+
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].canonical_key, "entity:первый_печатный_двор--mentions--topic:касса");
+        assert_eq!(prepared[0].edge_kind, "mentions");
+        assert_eq!(prepared[0].from_canonical_key, "entity:первый_печатный_двор");
+        assert_eq!(prepared[0].to_canonical_key, "topic:касса");
+    }
+
+    #[test]
+    fn prepare_materialized_node_candidates_prefers_entity_for_ambiguous_labels() {
+        let prepared = prepare_materialized_node_candidates(&[
+            NewNodeCandidate {
+                canonical_key: String::new(),
+                node_kind: "topic".to_string(),
+                display_label: "Касса".to_string(),
+                summary: None,
+            },
+            NewNodeCandidate {
+                canonical_key: String::new(),
+                node_kind: "entity".to_string(),
+                display_label: "Касса".to_string(),
+                summary: None,
+            },
+        ]);
+
+        assert_eq!(prepared.len(), 2);
+        assert!(prepared.iter().all(|candidate| candidate.canonical_key == "entity:касса"));
+        assert!(prepared.iter().all(|candidate| candidate.node_kind == "entity"));
+    }
 }

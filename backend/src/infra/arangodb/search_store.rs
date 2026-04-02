@@ -15,6 +15,7 @@ use crate::infra::arangodb::{
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeChunkVectorRow {
+    #[serde(rename = "_key")]
     pub key: String,
     #[serde(rename = "_id", default, skip_serializing_if = "Option::is_none")]
     pub arango_id: Option<String>,
@@ -35,6 +36,7 @@ pub struct KnowledgeChunkVectorRow {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeEntityVectorRow {
+    #[serde(rename = "_key")]
     pub key: String,
     #[serde(rename = "_id", default, skip_serializing_if = "Option::is_none")]
     pub arango_id: Option<String>,
@@ -62,6 +64,36 @@ pub struct KnowledgeChunkSearchRow {
     pub normalized_text: String,
     pub section_path: Vec<String>,
     pub heading_trail: Vec<String>,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeStructuredBlockSearchRow {
+    pub block_id: Uuid,
+    pub document_id: Uuid,
+    pub workspace_id: Uuid,
+    pub library_id: Uuid,
+    pub revision_id: Uuid,
+    pub ordinal: i32,
+    pub block_kind: String,
+    pub text: String,
+    pub normalized_text: String,
+    pub section_path: Vec<String>,
+    pub heading_trail: Vec<String>,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeTechnicalFactSearchRow {
+    pub fact_id: Uuid,
+    pub document_id: Uuid,
+    pub workspace_id: Uuid,
+    pub library_id: Uuid,
+    pub revision_id: Uuid,
+    pub fact_kind: String,
+    pub canonical_value_text: String,
+    pub display_value: String,
+    pub exact_match: bool,
     pub score: f64,
 }
 
@@ -314,6 +346,25 @@ impl ArangoSearchStore {
         decode_optional_single_result(cursor)
     }
 
+    pub async fn delete_entity_vectors_by_library(&self, library_id: Uuid) -> anyhow::Result<()> {
+        let cursor = self
+            .client
+            .query_json(
+                "FOR vector IN @@collection
+                 FILTER vector.library_id == @library_id
+                 REMOVE vector IN @@collection
+                 RETURN OLD._key",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
+                    "library_id": library_id,
+                }),
+            )
+            .await
+            .context("failed to delete knowledge entity vectors by library")?;
+        let _: Vec<String> = decode_many_results(cursor)?;
+        Ok(())
+    }
+
     pub async fn list_entity_vectors_by_entity(
         &self,
         entity_id: Uuid,
@@ -350,6 +401,8 @@ impl ArangoSearchStore {
             .query_json(
                 "FOR doc IN @@view
                  SEARCH doc.library_id == @library_id
+                   AND doc.chunk_id != null
+                   AND doc.chunk_state == 'ready'
                    AND (
                         ANALYZER(doc.normalized_text IN TOKENS(@query, 'text_en'), 'text_en')
                         OR ANALYZER(doc.content_text IN TOKENS(@query, 'text_en'), 'text_en')
@@ -480,6 +533,112 @@ impl ArangoSearchStore {
         });
         merged.truncate(normalized_limit);
         Ok(merged)
+    }
+
+    pub async fn search_structured_blocks(
+        &self,
+        library_id: Uuid,
+        query: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<KnowledgeStructuredBlockSearchRow>> {
+        let cursor = self
+            .client
+            .query_json(
+                "FOR doc IN @@view
+                 SEARCH doc.library_id == @library_id
+                   AND doc.block_id != null
+                   AND (
+                        ANALYZER(doc.normalized_text IN TOKENS(@query, 'text_en'), 'text_en')
+                        OR ANALYZER(doc.text IN TOKENS(@query, 'text_en'), 'text_en')
+                        OR ANALYZER(doc.heading_trail[*] IN TOKENS(@query, 'text_en'), 'text_en')
+                        OR ANALYZER(doc.section_path[*] IN TOKENS(@query, 'text_en'), 'text_en')
+                        OR ANALYZER(doc.normalized_text IN TOKENS(@query, 'text_ru'), 'text_ru')
+                        OR ANALYZER(doc.text IN TOKENS(@query, 'text_ru'), 'text_ru')
+                        OR ANALYZER(doc.heading_trail[*] IN TOKENS(@query, 'text_ru'), 'text_ru')
+                        OR ANALYZER(doc.section_path[*] IN TOKENS(@query, 'text_ru'), 'text_ru')
+                        OR ANALYZER(PHRASE(doc.normalized_text, @query, 'text_en'), 'text_en')
+                        OR ANALYZER(PHRASE(doc.normalized_text, @query, 'text_ru'), 'text_ru')
+                   )
+                 LET score = BM25(doc)
+                 SORT score DESC, doc.revision_id DESC, doc.ordinal ASC, doc.block_id ASC
+                 LIMIT @limit
+                 RETURN {
+                    block_id: doc.block_id,
+                    document_id: doc.document_id,
+                    workspace_id: doc.workspace_id,
+                    library_id: doc.library_id,
+                    revision_id: doc.revision_id,
+                    ordinal: doc.ordinal,
+                    block_kind: doc.block_kind,
+                    text: doc.text,
+                    normalized_text: doc.normalized_text,
+                    section_path: doc.section_path,
+                    heading_trail: doc.heading_trail,
+                    score: score
+                 }",
+                serde_json::json!({
+                    "@view": KNOWLEDGE_SEARCH_VIEW,
+                    "library_id": library_id,
+                    "query": query,
+                    "limit": limit.max(1),
+                }),
+            )
+            .await
+            .context("failed to search structured blocks")?;
+        decode_many_results(cursor)
+    }
+
+    pub async fn search_technical_facts(
+        &self,
+        library_id: Uuid,
+        query: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<KnowledgeTechnicalFactSearchRow>> {
+        let query_exact = query.split_whitespace().collect::<String>();
+        let cursor = self
+            .client
+            .query_json(
+                "FOR doc IN @@view
+                 SEARCH doc.library_id == @library_id
+                   AND doc.fact_id != null
+                   AND (
+                        doc.canonical_value_exact == @query_exact
+                        OR ANALYZER(doc.canonical_value_text IN TOKENS(@query, 'text_en'), 'text_en')
+                        OR ANALYZER(doc.display_value IN TOKENS(@query, 'text_en'), 'text_en')
+                        OR ANALYZER(doc.canonical_value_text IN TOKENS(@query, 'text_ru'), 'text_ru')
+                        OR ANALYZER(doc.display_value IN TOKENS(@query, 'text_ru'), 'text_ru')
+                        OR ANALYZER(PHRASE(doc.canonical_value_text, @query, 'text_en'), 'text_en')
+                        OR ANALYZER(PHRASE(doc.display_value, @query, 'text_en'), 'text_en')
+                        OR ANALYZER(PHRASE(doc.canonical_value_text, @query, 'text_ru'), 'text_ru')
+                        OR ANALYZER(PHRASE(doc.display_value, @query, 'text_ru'), 'text_ru')
+                   )
+                 LET exact_match = doc.canonical_value_exact == @query_exact
+                 LET score = (exact_match ? 1000000 : 0) + BM25(doc)
+                 SORT score DESC, doc.fact_id ASC
+                 LIMIT @limit
+                 RETURN {
+                    fact_id: doc.fact_id,
+                    document_id: doc.document_id,
+                    workspace_id: doc.workspace_id,
+                    library_id: doc.library_id,
+                    revision_id: doc.revision_id,
+                    fact_kind: doc.fact_kind,
+                    canonical_value_text: doc.canonical_value_text,
+                    display_value: doc.display_value,
+                    exact_match: exact_match,
+                    score: score
+                 }",
+                serde_json::json!({
+                    "@view": KNOWLEDGE_SEARCH_VIEW,
+                    "library_id": library_id,
+                    "query": query,
+                    "query_exact": query_exact,
+                    "limit": limit.max(1),
+                }),
+            )
+            .await
+            .context("failed to search technical facts")?;
+        decode_many_results(cursor)
     }
 
     pub async fn search_entities(
@@ -727,21 +886,60 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::lexical_query_terms;
+    use super::{KnowledgeChunkVectorRow, KnowledgeEntityVectorRow, lexical_query_terms};
 
     #[test]
     fn lexical_query_terms_keep_cyrillic_and_deduplicate() {
         assert_eq!(
-            lexical_query_terms(
-                "Кассовый сервер cashserver /system/info endpoint кассовый"
-            ),
+            lexical_query_terms("Сервер checkout-api /system/info endpoint сервер"),
             vec![
-                "кассовый".to_string(),
                 "сервер".to_string(),
-                "cashserver".to_string(),
+                "checkout".to_string(),
+                "api".to_string(),
                 "/system/info".to_string(),
                 "endpoint".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn chunk_vector_row_deserializes_arango_key_field() {
+        let row = serde_json::from_value::<KnowledgeChunkVectorRow>(serde_json::json!({
+            "_key": "chunk-vector",
+            "vector_id": "019d45de-500e-77c3-be35-537bf0954323",
+            "workspace_id": "019d45de-500e-77c3-be35-537bf0954324",
+            "library_id": "019d45de-500e-77c3-be35-537bf0954325",
+            "chunk_id": "019d45de-500e-77c3-be35-537bf0954326",
+            "revision_id": "019d45de-500e-77c3-be35-537bf0954327",
+            "embedding_model_key": "model",
+            "vector_kind": "chunk_embedding",
+            "dimensions": 3,
+            "vector": [0.1, 0.2, 0.3],
+            "freshness_generation": 1,
+            "created_at": "2026-04-01T00:00:00Z"
+        }))
+        .expect("chunk vector row should deserialize");
+
+        assert_eq!(row.key, "chunk-vector");
+    }
+
+    #[test]
+    fn entity_vector_row_deserializes_arango_key_field() {
+        let row = serde_json::from_value::<KnowledgeEntityVectorRow>(serde_json::json!({
+            "_key": "entity-vector",
+            "vector_id": "019d45de-500e-77c3-be35-537bf0954330",
+            "workspace_id": "019d45de-500e-77c3-be35-537bf0954331",
+            "library_id": "019d45de-500e-77c3-be35-537bf0954332",
+            "entity_id": "019d45de-500e-77c3-be35-537bf0954333",
+            "embedding_model_key": "model",
+            "vector_kind": "entity_embedding",
+            "dimensions": 3,
+            "vector": [0.1, 0.2, 0.3],
+            "freshness_generation": 1,
+            "created_at": "2026-04-01T00:00:00Z"
+        }))
+        .expect("entity vector row should deserialize");
+
+        assert_eq!(row.key, "entity-vector");
     }
 }

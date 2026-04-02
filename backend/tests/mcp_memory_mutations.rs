@@ -1,3 +1,6 @@
+#[path = "support/web_ingest_support.rs"]
+mod web_ingest_support;
+
 use anyhow::Context;
 use axum::{
     Router,
@@ -6,6 +9,7 @@ use axum::{
 };
 use base64::Engine as _;
 use http_body_util::BodyExt;
+use reqwest::Url;
 use serde_json::{Value, json};
 use tokio::time::{Duration, sleep};
 use tower::ServiceExt;
@@ -921,6 +925,194 @@ async fn mcp_upload_receipt_status_read_lifecycle_is_stable() -> anyhow::Result<
     }
     .await;
 
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango services"]
+async fn mcp_single_page_web_ingest_submit_and_inspect_run() -> anyhow::Result<()> {
+    let settings = Settings::from_env().context("failed to load settings for mcp mutation test")?;
+    let fixture = McpMutationFixture::create(settings).await?;
+    let server = web_ingest_support::WebTestServer::start().await?;
+
+    let result = async {
+        let token =
+            fixture.bearer_token(&["documents:read", "documents:write"], "mcp-web-ingest").await?;
+
+        let submit = fixture
+            .mcp_tool_call(
+                &token,
+                "submit_web_ingest_run",
+                json!({
+                    "libraryId": fixture.library_id,
+                    "seedUrl": server.url("/seed"),
+                    "mode": "single_page",
+                }),
+            )
+            .await?;
+        assert_eq!(submit["result"]["isError"], json!(false));
+        let receipt = &submit["result"]["structuredContent"];
+        let run_id: Uuid =
+            serde_json::from_value(receipt["runId"].clone()).context("run id missing")?;
+        assert_eq!(receipt["mode"], json!("single_page"));
+        assert_eq!(receipt["runState"], json!("completed"));
+        assert_eq!(receipt["counts"]["discovered"], json!(1));
+        assert_eq!(receipt["counts"]["processed"], json!(1));
+        assert_eq!(receipt["failureCode"], json!(null));
+        assert_eq!(receipt["cancelRequestedAt"], json!(null));
+
+        let run =
+            fixture.mcp_tool_call(&token, "get_web_ingest_run", json!({ "runId": run_id })).await?;
+        assert_eq!(run["result"]["isError"], json!(false));
+        assert_eq!(run["result"]["structuredContent"]["runId"], json!(run_id));
+        assert_eq!(run["result"]["structuredContent"]["mode"], json!("single_page"));
+        assert_eq!(run["result"]["structuredContent"]["seedUrl"], json!(server.url("/seed")));
+        assert_eq!(run["result"]["structuredContent"]["counts"]["discovered"], json!(1));
+        assert_eq!(run["result"]["structuredContent"]["counts"]["processed"], json!(1));
+        assert_eq!(run["result"]["structuredContent"]["counts"]["failed"], json!(0));
+
+        let pages = fixture
+            .mcp_tool_call(&token, "list_web_ingest_run_pages", json!({ "runId": run_id }))
+            .await?;
+        assert_eq!(pages["result"]["isError"], json!(false));
+        let page_items = pages["result"]["structuredContent"]["pages"]
+            .as_array()
+            .context("pages payload missing")?;
+        assert_eq!(page_items.len(), 1);
+        assert_eq!(page_items[0]["normalizedUrl"], json!(server.url("/seed")));
+        assert_eq!(page_items[0]["candidateState"], json!("processed"));
+        assert_eq!(page_items[0]["classificationReason"], json!("seed_accepted"));
+        assert!(page_items[0]["documentId"].is_string());
+        assert!(page_items[0]["resultRevisionId"].is_string());
+
+        let cancel = fixture
+            .mcp_tool_call(&token, "cancel_web_ingest_run", json!({ "runId": run_id }))
+            .await?;
+        assert_eq!(cancel["result"]["isError"], json!(false));
+        assert_eq!(cancel["result"]["structuredContent"]["runId"], json!(run_id));
+        assert_eq!(cancel["result"]["structuredContent"]["mode"], json!("single_page"));
+        assert_eq!(cancel["result"]["structuredContent"]["runState"], json!("completed"));
+        assert_eq!(cancel["result"]["structuredContent"]["counts"]["processed"], json!(1));
+        assert_eq!(cancel["result"]["structuredContent"]["failureCode"], json!(null));
+        assert_eq!(cancel["result"]["structuredContent"]["cancelRequestedAt"], json!(null));
+
+        Ok(())
+    }
+    .await;
+
+    server.shutdown().await?;
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango services"]
+async fn mcp_recursive_web_ingest_defaults_same_host_and_lists_discovered_pages()
+-> anyhow::Result<()> {
+    let settings = Settings::from_env().context("failed to load settings for mcp mutation test")?;
+    let fixture = McpMutationFixture::create(settings).await?;
+    let server = web_ingest_support::WebTestServer::start().await?;
+
+    let result = async {
+        let token = fixture
+            .bearer_token(&["documents:read", "documents:write"], "mcp-web-recursive")
+            .await?;
+        let external_url = server.url("/child").replace("127.0.0.1", "localhost");
+        let seed_url = Url::parse_with_params(
+            &server.url("/recursive/seed"),
+            &[("external", external_url.as_str())],
+        )
+        .context("failed to build recursive seed url")?
+        .to_string();
+
+        let submit = fixture
+            .mcp_tool_call(
+                &token,
+                "submit_web_ingest_run",
+                json!({
+                    "libraryId": fixture.library_id,
+                    "seedUrl": seed_url,
+                    "mode": "recursive_crawl",
+                }),
+            )
+            .await?;
+        assert_eq!(submit["result"]["isError"], json!(false));
+        let receipt = &submit["result"]["structuredContent"];
+        let run_id: Uuid =
+            serde_json::from_value(receipt["runId"].clone()).context("run id missing")?;
+        assert_eq!(receipt["mode"], json!("recursive_crawl"));
+        assert_eq!(receipt["runState"], json!("accepted"));
+        assert_eq!(receipt["counts"]["discovered"], json!(1));
+        assert_eq!(receipt["counts"]["eligible"], json!(1));
+        assert_eq!(receipt["failureCode"], json!(null));
+        assert_eq!(receipt["cancelRequestedAt"], json!(null));
+
+        fixture
+            .state
+            .canonical_services
+            .web_ingest
+            .execute_recursive_discovery_job(&fixture.state, run_id)
+            .await
+            .context("failed to execute recursive discovery job for MCP coverage")?;
+
+        let run =
+            fixture.mcp_tool_call(&token, "get_web_ingest_run", json!({ "runId": run_id })).await?;
+        assert_eq!(run["result"]["isError"], json!(false));
+        let structured = &run["result"]["structuredContent"];
+        assert_eq!(structured["runId"], json!(run_id));
+        assert_eq!(structured["mode"], json!("recursive_crawl"));
+        assert_eq!(structured["boundaryPolicy"], json!("same_host"));
+        assert_eq!(structured["maxDepth"], json!(3));
+        assert_eq!(structured["maxPages"], json!(100));
+        assert_eq!(structured["runState"], json!("processing"));
+        assert!(structured["counts"]["queued"].as_i64().unwrap_or_default() > 0);
+        assert!(structured["counts"]["excluded"].as_i64().unwrap_or_default() >= 1);
+
+        let pages = fixture
+            .mcp_tool_call(&token, "list_web_ingest_run_pages", json!({ "runId": run_id }))
+            .await?;
+        assert_eq!(pages["result"]["isError"], json!(false));
+        let page_items = pages["result"]["structuredContent"]["pages"]
+            .as_array()
+            .context("pages payload missing")?;
+        assert!(page_items.len() >= 4, "expected seed plus recursive discoveries");
+        assert!(page_items.iter().any(|page| {
+            page["normalizedUrl"] == json!(seed_url)
+                && page["candidateState"] == json!("queued")
+                && page["depth"] == json!(0)
+        }));
+        assert!(page_items.iter().any(|page| {
+            page["normalizedUrl"] == json!(server.url("/recursive/first"))
+                && page["candidateState"] == json!("queued")
+                && page["depth"] == json!(1)
+        }));
+        assert!(page_items.iter().any(|page| {
+            page["hostClassification"] == json!("external")
+                && page["candidateState"] == json!("excluded")
+                && page["classificationReason"] == json!("outside_boundary_policy")
+        }));
+
+        let cancel = fixture
+            .mcp_tool_call(&token, "cancel_web_ingest_run", json!({ "runId": run_id }))
+            .await?;
+        assert_eq!(cancel["result"]["isError"], json!(false));
+        assert_eq!(cancel["result"]["structuredContent"]["runId"], json!(run_id));
+        assert_eq!(cancel["result"]["structuredContent"]["runState"], json!("canceled"));
+        assert!(cancel["result"]["structuredContent"]["cancelRequestedAt"].is_string());
+        assert_eq!(cancel["result"]["structuredContent"]["failureCode"], json!(null));
+        assert!(
+            cancel["result"]["structuredContent"]["counts"]["canceled"]
+                .as_i64()
+                .unwrap_or_default()
+                > 0
+        );
+
+        Ok(())
+    }
+    .await;
+
+    server.shutdown().await?;
     fixture.cleanup().await?;
     result
 }

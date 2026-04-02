@@ -143,27 +143,16 @@ onBeforeUnmount(() => {
         <h1>{{ t('swagger.title') }}</h1>
         <p>{{ t('swagger.subtitle') }}</p>
       </div>
-      <a
-        class="rr-swagger-page__raw-link"
-        :href="rawSpecUrl"
-        target="_blank"
-        rel="noreferrer"
-      >
+      <a class="rr-swagger-page__raw-link" :href="rawSpecUrl" target="_blank" rel="noreferrer">
         {{ t('swagger.rawSpec') }}
       </a>
     </header>
 
     <section class="rr-page-card rr-swagger-page__frame">
-      <p
-        v-if="loadError"
-        class="rr-swagger-page__error"
-      >
+      <p v-if="loadError" class="rr-swagger-page__error">
         {{ loadError }}
       </p>
-      <div
-        ref="swaggerRoot"
-        class="rr-swagger-page__ui"
-      />
+      <div ref="swaggerRoot" class="rr-swagger-page__ui" />
     </section>
   </section>
 </template>

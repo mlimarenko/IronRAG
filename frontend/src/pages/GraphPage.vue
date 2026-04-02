@@ -3,9 +3,10 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import FeedbackState from 'src/components/design-system/FeedbackState.vue'
 import GraphCanvas from 'src/components/graph/GraphCanvas.vue'
+import GraphCoverageStateCard from 'src/components/graph/GraphCoverageStateCard.vue'
 import GraphControls from 'src/components/graph/GraphControls.vue'
+import GraphLoadingState from 'src/components/graph/GraphLoadingState.vue'
 import GraphNodeDetailsCard from 'src/components/graph/GraphNodeDetailsCard.vue'
 import { resolveDefaultGraphLayoutMode } from 'src/models/ui/graph'
 import { useGraphStore } from 'src/stores/graph'
@@ -52,26 +53,32 @@ const activeLibraryId = computed(() => shellStore.context?.activeLibrary.id ?? n
 const canvasMode = computed(() => surface.value?.canvasMode ?? 'building')
 const overlay = computed(() => surface.value?.overlay ?? null)
 const inspector = computed(() => surface.value?.inspector ?? null)
+const readinessSummary = computed(() => surface.value?.readinessSummary ?? null)
+const graphCoverage = computed(() => surface.value?.graphCoverage ?? null)
+const readinessCounts = computed(
+  () =>
+    readinessSummary.value?.documentCountsByReadiness ?? {
+      processing: 0,
+      readable: 0,
+      graphSparse: 0,
+      graphReady: 0,
+      failed: 0,
+    },
+)
 const defaultLayoutMode = computed(() =>
   resolveDefaultGraphLayoutMode(surface.value?.nodeCount ?? 0, surface.value?.edgeCount ?? 0),
 )
-const documentCounters = computed(() => surface.value?.documentCounters ?? {
-  queued: 0,
-  processing: 0,
-  ready: 0,
-  readyNoGraph: 0,
-  failed: 0,
-})
-const activeBacklogCount = computed(
-  () => documentCounters.value.queued + documentCounters.value.processing,
+const activeBacklogCount = computed(() => readinessCounts.value.processing)
+const readableBacklogCount = computed(
+  () => readinessCounts.value.readable + readinessCounts.value.graphSparse,
 )
 const trackedDocumentCount = computed(
   () =>
-    documentCounters.value.queued +
-    documentCounters.value.processing +
-    documentCounters.value.ready +
-    documentCounters.value.readyNoGraph +
-    documentCounters.value.failed,
+    readinessCounts.value.processing +
+    readinessCounts.value.readable +
+    readinessCounts.value.graphSparse +
+    readinessCounts.value.graphReady +
+    readinessCounts.value.failed,
 )
 const focusedNodeId = computed(() => inspector.value?.focusedNodeId ?? null)
 const focusedNodeDetail = computed(() => inspector.value?.detail ?? null)
@@ -121,10 +128,9 @@ const overlayState = computed(() => {
     return {
       title: t('graph.failedTitle'),
       description:
-        surface.value.error ??
-        routeWarning.value ??
-        surface.value.warning ??
-        t('graph.failedDescription'),
+        trackedDocumentCount.value > 0
+          ? t('graph.failedProjectionDescription')
+          : t('graph.failedDescription'),
       tone: 'failed',
     }
   }
@@ -133,8 +139,8 @@ const overlayState = computed(() => {
     const description =
       activeBacklogCount.value > 0
         ? t('graph.emptyBuildingDescription')
-        : documentCounters.value.readyNoGraph > 0
-          ? t('graph.emptyCatchUpDescription')
+        : readableBacklogCount.value > 0
+          ? t('graph.emptyGraphSparseDescription')
           : t('graph.emptyDescription')
 
     return {
@@ -146,8 +152,8 @@ const overlayState = computed(() => {
 
   if (canvasMode.value === 'sparse') {
     const description =
-      documentCounters.value.readyNoGraph > 0
-        ? t('graph.sparseCatchUpDescription')
+      readableBacklogCount.value > 0
+        ? t('graph.sparseGraphSparseDescription')
         : activeBacklogCount.value > 0
           ? t('graph.sparseBuildingDescription')
           : t('graph.sparseSettledDescription')
@@ -208,18 +214,14 @@ const overlayDetails = computed(() => {
     }
 
     if (activeBacklogCount.value > 0) {
-      details.push(
-        t('graph.sparseQueueDetail', {
-          queued: documentCounters.value.queued,
-          processing: documentCounters.value.processing,
-        }),
-      )
+      details.push(t('graph.sparseQueueDetail', { processing: readinessCounts.value.processing }))
     }
 
-    if (documentCounters.value.readyNoGraph > 0) {
+    if (readableBacklogCount.value > 0) {
       details.push(
-        t('graph.sparseCatchUpDetail', {
-          count: documentCounters.value.readyNoGraph,
+        t('graph.sparseReadinessDetail', {
+          readable: readinessCounts.value.readable,
+          graphSparse: readinessCounts.value.graphSparse,
         }),
       )
     }
@@ -239,18 +241,14 @@ const overlayDetails = computed(() => {
     }
 
     if (activeBacklogCount.value > 0) {
-      details.push(
-        t('graph.sparseQueueDetail', {
-          queued: documentCounters.value.queued,
-          processing: documentCounters.value.processing,
-        }),
-      )
+      details.push(t('graph.sparseQueueDetail', { processing: readinessCounts.value.processing }))
     }
 
-    if (documentCounters.value.readyNoGraph > 0) {
+    if (readableBacklogCount.value > 0) {
       details.push(
-        t('graph.sparseCatchUpDetail', {
-          count: documentCounters.value.readyNoGraph,
+        t('graph.sparseReadinessDetail', {
+          readable: readinessCounts.value.readable,
+          graphSparse: readinessCounts.value.graphSparse,
         }),
       )
     }
@@ -266,7 +264,54 @@ const overlayDetails = computed(() => {
     return details
   }
 
+  if (overlayState.value.tone === 'failed') {
+    const details = []
+
+    if (trackedDocumentCount.value > 0) {
+      details.push(
+        t('graph.emptyTrackedDocumentsDetail', {
+          count: trackedDocumentCount.value,
+        }),
+      )
+    }
+
+    if (activeBacklogCount.value > 0) {
+      details.push(t('graph.sparseQueueDetail', { processing: readinessCounts.value.processing }))
+    }
+
+    if (readableBacklogCount.value > 0) {
+      details.push(
+        t('graph.sparseReadinessDetail', {
+          readable: readinessCounts.value.readable,
+          graphSparse: readinessCounts.value.graphSparse,
+        }),
+      )
+    }
+
+    const rawError = surface.value.error?.trim() ?? routeWarning.value?.trim() ?? ''
+    if (rawError && rawError.toLowerCase() !== 'internal server error') {
+      details.push(rawError)
+    }
+
+    return details
+  }
+
   return []
+})
+
+const overlayCoverageTone = computed<'loading' | 'empty' | 'sparse' | 'failed' | null>(() => {
+  if (!overlayState.value) {
+    return null
+  }
+  switch (overlayState.value.tone) {
+    case 'loading':
+    case 'empty':
+    case 'sparse':
+    case 'failed':
+      return overlayState.value.tone
+    default:
+      return null
+  }
 })
 
 watch(
@@ -383,6 +428,7 @@ async function reloadSurface() {
           :filter="overlay?.nodeTypeFilter ?? ''"
           :focused-node-id="focusedNodeId"
           :layout-mode="overlay?.activeLayout ?? defaultLayoutMode"
+          :page-visible="isPageVisible"
           :show-filtered-artifacts="overlay?.showFilteredArtifacts ?? false"
           :surface-version="surface?.graphGeneration ?? 0"
           @select-node="focusNode"
@@ -449,16 +495,23 @@ async function reloadSurface() {
       </aside>
 
       <div v-if="overlayState" class="rr-graph-workbench__state" :class="`is-${overlayState.tone}`">
-        <FeedbackState
+        <GraphLoadingState
+          v-if="overlayState.tone === 'loading'"
           :title="overlayState.title"
-          :message="overlayState.description ?? ''"
+          :description="overlayState.description ?? ''"
           :details="overlayDetails"
-          :kind="
-            overlayState.tone === 'failed'
-              ? 'error'
-              : (overlayState.tone as 'loading' | 'empty' | 'sparse')
-          "
-          :action-label="overlayPrimaryAction?.label"
+          :readiness-summary="readinessSummary"
+          :graph-coverage="graphCoverage"
+        />
+        <GraphCoverageStateCard
+          v-else
+          :tone="overlayCoverageTone ?? 'loading'"
+          :title="overlayState.title"
+          :description="overlayState.description ?? ''"
+          :details="overlayDetails"
+          :readiness-summary="readinessSummary"
+          :graph-coverage="graphCoverage"
+          :action-label="overlayPrimaryAction?.label ?? null"
           @action="overlayPrimaryAction?.action()"
         />
       </div>

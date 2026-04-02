@@ -380,10 +380,14 @@ async fn mcp_tool_visibility_tracks_grants_without_legacy_fallbacks() -> Result<
         assert!(read_tools.contains(&"list_libraries".to_string()));
         assert!(read_tools.contains(&"search_documents".to_string()));
         assert!(read_tools.contains(&"read_document".to_string()));
+        assert!(read_tools.contains(&"get_web_ingest_run".to_string()));
+        assert!(read_tools.contains(&"list_web_ingest_run_pages".to_string()));
         assert!(!read_tools.contains(&"create_workspace".to_string()));
         assert!(!read_tools.contains(&"create_library".to_string()));
         assert!(!read_tools.contains(&"upload_documents".to_string()));
         assert!(!read_tools.contains(&"get_mutation_status".to_string()));
+        assert!(!read_tools.contains(&"submit_web_ingest_run".to_string()));
+        assert!(!read_tools.contains(&"cancel_web_ingest_run".to_string()));
 
         let write_tools = fixture.tools_list(&write_token).await?;
         assert!(write_tools.contains(&"list_workspaces".to_string()));
@@ -393,6 +397,10 @@ async fn mcp_tool_visibility_tracks_grants_without_legacy_fallbacks() -> Result<
         assert!(write_tools.contains(&"upload_documents".to_string()));
         assert!(write_tools.contains(&"update_document".to_string()));
         assert!(write_tools.contains(&"get_mutation_status".to_string()));
+        assert!(write_tools.contains(&"submit_web_ingest_run".to_string()));
+        assert!(write_tools.contains(&"get_web_ingest_run".to_string()));
+        assert!(write_tools.contains(&"list_web_ingest_run_pages".to_string()));
+        assert!(write_tools.contains(&"cancel_web_ingest_run".to_string()));
         assert!(!write_tools.contains(&"create_workspace".to_string()));
         assert!(!write_tools.contains(&"create_library".to_string()));
 

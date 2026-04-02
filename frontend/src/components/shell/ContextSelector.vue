@@ -1,24 +1,28 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import type { ComponentPublicInstance } from 'vue'
 import type { LibraryBindingPurpose, LibraryOption, WorkspaceOption } from 'src/models/ui/shell'
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n()
 
-const props = withDefaults(defineProps<{
-  label: string
-  selectedId: string
-  options: (WorkspaceOption | LibraryOption)[]
-  disabled?: boolean
-  placeholder?: string
-  canCreate?: boolean
-  createLabel?: string
-  canDelete?: boolean
-  compact?: boolean
-}>(), {
-  compact: false,
-  canDelete: false,
-})
+const props = withDefaults(
+  defineProps<{
+    label: string
+    selectedId: string
+    options: (WorkspaceOption | LibraryOption)[]
+    disabled?: boolean
+    placeholder?: string
+    canCreate?: boolean
+    createLabel?: string
+    canDelete?: boolean
+    compact?: boolean
+  }>(),
+  {
+    compact: false,
+    canDelete: false,
+  },
+)
 
 const emit = defineEmits<{
   change: [value: string]
@@ -32,13 +36,13 @@ const open = ref(false)
 const activeIndex = ref(-1)
 const optionRefs = ref<Array<HTMLButtonElement | null>>([])
 
+type TemplateRefElement = Element | ComponentPublicInstance | null
+
 const selectedOption = computed(
   () => props.options.find((option) => option.id === props.selectedId) ?? null,
 )
 
-const displayValue = computed(
-  () => selectedOption.value?.name ?? props.placeholder ?? props.label,
-)
+const displayValue = computed(() => selectedOption.value?.name ?? props.placeholder ?? props.label)
 
 function isLibraryOption(option: WorkspaceOption | LibraryOption): option is LibraryOption {
   return 'ingestionReadiness' in option
@@ -110,6 +114,16 @@ function toggleMenu() {
 function selectOption(id: string) {
   emit('change', id)
   closeMenu({ restoreFocus: true })
+}
+
+function handleDelete(option: WorkspaceOption | LibraryOption) {
+  emit('delete', option)
+  closeMenu()
+}
+
+function handleCreate() {
+  emit('create')
+  closeMenu()
 }
 
 function handlePointerDown(event: Event) {
@@ -208,6 +222,14 @@ function setOptionRef(element: HTMLButtonElement | null, index: number) {
   optionRefs.value[index] = element
 }
 
+function isButtonElement(element: TemplateRefElement): element is HTMLButtonElement {
+  return element instanceof Element && element.tagName === 'BUTTON'
+}
+
+function registerOptionRef(element: TemplateRefElement, index: number): void {
+  setOptionRef(isButtonElement(element) ? element : null, index)
+}
+
 watch(open, (isOpen) => {
   if (!isOpen) {
     optionRefs.value = []
@@ -267,13 +289,9 @@ onBeforeUnmount(() => {
       :aria-label="label"
       @keydown="handleMenuKeydown"
     >
-      <div
-        v-for="(option, index) in options"
-        :key="option.id"
-        class="rr-selector__option-row"
-      >
+      <div v-for="(option, index) in options" :key="option.id" class="rr-selector__option-row">
         <button
-          :ref="(element) => setOptionRef(element as HTMLButtonElement | null, index)"
+          :ref="(element) => registerOptionRef(element, index)"
           class="rr-selector__option"
           :class="{ 'is-active': option.id === selectedId }"
           type="button"
@@ -291,40 +309,25 @@ onBeforeUnmount(() => {
               {{ ingestionStatusLabel(option) }}
             </span>
           </span>
-          <span
-            v-if="option.id === selectedId"
-            class="rr-selector__tick"
-          >
-            ✓
-          </span>
+          <span v-if="option.id === selectedId" class="rr-selector__tick"> ✓ </span>
         </button>
         <button
           v-if="canDelete"
           class="rr-selector__delete-btn"
           type="button"
           :title="'Delete ' + option.name"
-          @click.stop="emit('delete', option); closeMenu()"
+          @click.stop="handleDelete(option)"
         >
           ✕
         </button>
       </div>
 
-      <p
-        v-if="!options.length"
-        class="rr-selector__empty"
-      >
+      <p v-if="!options.length" class="rr-selector__empty">
         {{ placeholder ?? label }}
       </p>
 
-      <div
-        v-if="canCreate"
-        class="rr-selector__footer"
-      >
-        <button
-          class="rr-selector__create"
-          type="button"
-          @click="emit('create'); closeMenu()"
-        >
+      <div v-if="canCreate" class="rr-selector__footer">
+        <button class="rr-selector__create" type="button" @click="handleCreate()">
           {{ createLabel ?? label }}
         </button>
       </div>

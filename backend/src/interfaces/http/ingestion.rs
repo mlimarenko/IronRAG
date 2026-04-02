@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
+    domains::content::revision_text_state_is_readable,
     domains::ingest::{IngestAttempt, IngestJob, IngestStageEvent},
     domains::ops::OpsAsyncOperation,
     interfaces::http::{
@@ -227,7 +228,7 @@ async fn build_readiness_response(
         text_state = Some(revision.text_state.clone());
         vector_state = Some(revision.vector_state.clone());
         graph_state = Some(revision.graph_state.clone());
-        text_ready = matches!(revision.text_state.as_str(), "readable" | "ready" | "text_readable");
+        text_ready = revision_text_state_is_readable(&revision.text_state);
         vector_ready = matches!(revision.vector_state.as_str(), "ready");
         graph_ready = matches!(revision.graph_state.as_str(), "ready");
         superseded_by_revision_id = revision.superseded_by_revision_id;

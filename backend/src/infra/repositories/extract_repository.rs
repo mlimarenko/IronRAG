@@ -10,6 +10,8 @@ pub struct ExtractContentRow {
     pub normalized_text: Option<String>,
     pub text_checksum: Option<String>,
     pub warning_count: i32,
+    pub preparation_state: Option<String>,
+    pub preparation_checkpoint_json: serde_json::Value,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -84,6 +86,8 @@ pub async fn get_extract_content_by_revision_id(
             normalized_text,
             text_checksum,
             warning_count,
+            preparation_state,
+            preparation_checkpoint_json,
             updated_at
          from extract_content
          where revision_id = $1",
@@ -105,6 +109,8 @@ pub async fn list_extract_content_by_attempt(
             normalized_text,
             text_checksum,
             warning_count,
+            preparation_state,
+            preparation_checkpoint_json,
             updated_at
          from extract_content
          where attempt_id = $1
@@ -123,6 +129,8 @@ pub async fn upsert_extract_content(
     normalized_text: Option<&str>,
     text_checksum: Option<&str>,
     warning_count: i32,
+    preparation_state: Option<&str>,
+    preparation_checkpoint_json: serde_json::Value,
 ) -> Result<ExtractContentRow, sqlx::Error> {
     sqlx::query_as::<_, ExtractContentRow>(
         "insert into extract_content (
@@ -132,15 +140,19 @@ pub async fn upsert_extract_content(
             normalized_text,
             text_checksum,
             warning_count,
+            preparation_state,
+            preparation_checkpoint_json,
             updated_at
         )
-        values ($1, $2, $3::extract_state, $4, $5, $6, now())
+        values ($1, $2, $3::extract_state, $4, $5, $6, $7, $8, now())
         on conflict (revision_id)
         do update set attempt_id = excluded.attempt_id,
                       extract_state = excluded.extract_state,
                       normalized_text = excluded.normalized_text,
                       text_checksum = excluded.text_checksum,
                       warning_count = excluded.warning_count,
+                      preparation_state = excluded.preparation_state,
+                      preparation_checkpoint_json = excluded.preparation_checkpoint_json,
                       updated_at = now()
         returning
             revision_id,
@@ -149,6 +161,8 @@ pub async fn upsert_extract_content(
             normalized_text,
             text_checksum,
             warning_count,
+            preparation_state,
+            preparation_checkpoint_json,
             updated_at",
     )
     .bind(revision_id)
@@ -157,6 +171,8 @@ pub async fn upsert_extract_content(
     .bind(normalized_text)
     .bind(text_checksum)
     .bind(warning_count)
+    .bind(preparation_state)
+    .bind(preparation_checkpoint_json)
     .fetch_one(postgres)
     .await
 }
@@ -227,6 +243,35 @@ pub async fn list_extract_chunk_results_by_attempt(
          order by started_at asc, id asc",
     )
     .bind(attempt_id)
+    .fetch_all(postgres)
+    .await
+}
+
+pub async fn list_ready_extract_chunk_results_by_revision(
+    postgres: &PgPool,
+    revision_id: Uuid,
+) -> Result<Vec<ExtractChunkResultRow>, sqlx::Error> {
+    sqlx::query_as::<_, ExtractChunkResultRow>(
+        "select distinct on (result.chunk_id)
+            result.id,
+            result.chunk_id,
+            result.attempt_id,
+            result.extract_state::text as extract_state,
+            result.provider_call_id,
+            result.started_at,
+            result.finished_at,
+            result.failure_code
+         from extract_chunk_result result
+         join content_chunk chunk on chunk.id = result.chunk_id
+         where chunk.revision_id = $1
+           and result.extract_state = 'ready'::extract_state
+         order by
+            result.chunk_id asc,
+            coalesce(result.finished_at, result.started_at) desc,
+            result.started_at desc,
+            result.id desc",
+    )
+    .bind(revision_id)
     .fetch_all(postgres)
     .await
 }

@@ -13,6 +13,10 @@ use crate::{
     },
     infra::repositories::{audit_repository, iam_repository},
     interfaces::http::router_support::ApiError,
+    services::ai_catalog_service::{
+        ApplyBootstrapAiSetupCommand, BootstrapAiBindingInput, BootstrapAiCredentialInput,
+        BootstrapAiSetupDescriptor,
+    },
     shared::auth_tokens::{
         hash_api_token, hash_session_secret, mint_plaintext_api_token,
         mint_plaintext_session_secret, preview_api_token,
@@ -43,6 +47,13 @@ pub struct BootstrapClaimOutcome {
 #[derive(Debug, Clone)]
 pub struct BootstrapStatusOutcome {
     pub setup_required: bool,
+    pub ai_setup: Option<BootstrapAiSetupDescriptor>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BootstrapSetupAiCommand {
+    pub credentials: Vec<BootstrapAiCredentialInput>,
+    pub binding_selections: Vec<BootstrapAiBindingInput>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +61,7 @@ pub struct BootstrapSetupCommand {
     pub login: String,
     pub display_name: Option<String>,
     pub password: String,
+    pub ai_setup: Option<BootstrapSetupAiCommand>,
     pub ttl_hours: u64,
     pub request_id: String,
 }
@@ -178,6 +190,24 @@ impl IamService {
             ApiError::bootstrap_already_claimed("bootstrap claim has already been completed")
         })?;
 
+        let catalog = match bootstrap::ensure_default_catalog_workspace_and_library(
+            state,
+            claimed.principal_id,
+        )
+        .await
+        {
+            Ok(catalog) => catalog,
+            Err(error) => {
+                rollback_failed_bootstrap_principal(state, claimed.principal_id).await;
+                return Err(error);
+            }
+        };
+        if let Err(error) =
+            bootstrap::apply_configured_default_catalog_ai_setup(state, &catalog).await
+        {
+            rollback_failed_bootstrap_principal(state, claimed.principal_id).await;
+            return Err(error);
+        }
         audit_repository::append_bootstrap_claim_event(
             &state.persistence.postgres,
             claimed.principal_id,
@@ -193,8 +223,6 @@ impl IamService {
             warn!(?error, principal_id = %claimed.principal_id, "failed to append bootstrap audit event");
             ApiError::Internal
         })?;
-        bootstrap::ensure_default_catalog_workspace_and_library(state, claimed.principal_id)
-            .await?;
 
         Ok(BootstrapClaimOutcome {
             principal_id: claimed.principal_id,
@@ -214,7 +242,12 @@ impl IamService {
                 .await
                 .map_err(|_| ApiError::Internal)?;
         let setup_required = active_users == 0 && !state.settings.has_explicit_ui_bootstrap_admin();
-        Ok(BootstrapStatusOutcome { setup_required })
+        let ai_setup = if setup_required {
+            Some(state.canonical_services.ai_catalog.describe_bootstrap_ai_setup(state).await?)
+        } else {
+            None
+        };
+        Ok(BootstrapStatusOutcome { setup_required, ai_setup })
     }
 
     pub async fn setup_bootstrap_admin(
@@ -233,6 +266,17 @@ impl IamService {
             return Err(ApiError::bootstrap_already_claimed(
                 "bootstrap setup has already been completed",
             ));
+        }
+        if let Some(ai_setup) = command.ai_setup.as_ref() {
+            state
+                .canonical_services
+                .ai_catalog
+                .validate_bootstrap_ai_setup_inputs(
+                    state,
+                    &ai_setup.credentials,
+                    &ai_setup.binding_selections,
+                )
+                .await?;
         }
 
         let login = normalize_bootstrap_login(&command.login)?;
@@ -266,23 +310,59 @@ impl IamService {
             ApiError::bootstrap_already_claimed("bootstrap setup has already been completed")
         })?;
 
-        audit_repository::append_bootstrap_claim_event(
-            &state.persistence.postgres,
-            claimed.principal_id,
-            &command.request_id,
-            "Bootstrap administrator configured",
-            &format!(
-                "Interactive bootstrap setup created principal {} for {}",
-                claimed.principal_id, claimed.login
-            ),
-        )
-        .await
-        .map_err(|error| {
-            warn!(?error, principal_id = %claimed.principal_id, "failed to append bootstrap setup audit event");
-            ApiError::Internal
-        })?;
-        bootstrap::ensure_default_catalog_workspace_and_library(state, claimed.principal_id)
-            .await?;
+        let provision_result = async {
+            let catalog_bootstrap =
+                bootstrap::ensure_default_catalog_workspace_and_library(state, claimed.principal_id)
+                    .await?;
+            if let Some(ai_setup) = command.ai_setup {
+                state
+                    .canonical_services
+                    .ai_catalog
+                    .apply_bootstrap_ai_setup(
+                        state,
+                        ApplyBootstrapAiSetupCommand {
+                            workspace_id: catalog_bootstrap.workspace_id,
+                            library_id: catalog_bootstrap.library_id,
+                            credentials: ai_setup.credentials,
+                            binding_selections: ai_setup.binding_selections,
+                            updated_by_principal_id: None,
+                        },
+                    )
+                    .await?;
+            } else if !bootstrap::apply_configured_default_catalog_ai_setup(
+                state,
+                &catalog_bootstrap,
+            )
+            .await?
+            {
+                return Err(ApiError::BadRequest(
+                    "bootstrap ai setup payload is required when no bootstrap AI environment configuration is present"
+                        .into(),
+                ));
+            }
+
+            audit_repository::append_bootstrap_claim_event(
+                &state.persistence.postgres,
+                claimed.principal_id,
+                &command.request_id,
+                "Bootstrap administrator configured",
+                &format!(
+                    "Interactive bootstrap setup created principal {} for {}",
+                    claimed.principal_id, claimed.login
+                ),
+            )
+            .await
+            .map_err(|error| {
+                warn!(?error, principal_id = %claimed.principal_id, "failed to append bootstrap setup audit event");
+                ApiError::Internal
+            })?;
+            Ok::<(), ApiError>(())
+        }
+        .await;
+        if let Err(error) = provision_result {
+            rollback_failed_bootstrap_principal(state, claimed.principal_id).await;
+            return Err(error);
+        }
 
         issue_session_for_user(
             state,
@@ -502,6 +582,53 @@ impl IamService {
             .map_err(|_| ApiError::Internal)?
             .ok_or_else(|| ApiError::resource_not_found("grant", grant_id))?;
         Ok(map_grant(row)?)
+    }
+}
+
+async fn rollback_failed_bootstrap_principal(state: &AppState, principal_id: Uuid) {
+    let rollback = async {
+        sqlx::query("delete from iam_workspace_membership where principal_id = $1")
+            .bind(principal_id)
+            .execute(&state.persistence.postgres)
+            .await?;
+        sqlx::query("delete from iam_grant where principal_id = $1 or granted_by_principal_id = $1")
+            .bind(principal_id)
+            .execute(&state.persistence.postgres)
+            .await?;
+        sqlx::query("delete from iam_session where principal_id = $1")
+            .bind(principal_id)
+            .execute(&state.persistence.postgres)
+            .await?;
+        sqlx::query(
+            "delete from iam_api_token_secret where token_principal_id in (
+                select principal_id from iam_api_token where principal_id = $1 or issued_by_principal_id = $1
+            )",
+        )
+        .bind(principal_id)
+        .execute(&state.persistence.postgres)
+        .await?;
+        sqlx::query("delete from iam_api_token where principal_id = $1 or issued_by_principal_id = $1")
+            .bind(principal_id)
+            .execute(&state.persistence.postgres)
+            .await?;
+        sqlx::query("delete from iam_user where principal_id = $1")
+            .bind(principal_id)
+            .execute(&state.persistence.postgres)
+            .await?;
+        sqlx::query("delete from iam_principal where id = $1")
+            .bind(principal_id)
+            .execute(&state.persistence.postgres)
+            .await?;
+        Ok::<(), sqlx::Error>(())
+    }
+    .await;
+
+    if let Err(error) = rollback {
+        warn!(
+            ?error,
+            principal_id = %principal_id,
+            "failed to roll back incomplete bootstrap principal",
+        );
     }
 }
 

@@ -215,8 +215,7 @@ function createGraphVisualContext(
     const prioritizedNeighbors = sortNodesByWeight(
       nodes.filter((node) => focusedNeighborIds.has(node.id)),
       resolvedDegreeMap,
-    )
-      .slice(0, neighborLabelLimit)
+    ).slice(0, neighborLabelLimit)
 
     prioritizedNeighbors.forEach((node) => labelNodeIds.add(node.id))
   }
@@ -278,18 +277,16 @@ function resolveEdgeVisualAttributes(
   edge: GraphEdge,
   context: GraphVisualContext,
 ): GraphCanvasEdgeAttributes {
-  const baseSize =
-    edge.filteredArtifact
-      ? Math.max(1.1, edgeSize(edge) * 0.72)
-      : context.denseGraph
-        ? Math.max(0.72, edgeSize(edge) * 0.74)
-        : edgeSize(edge)
-  const baseColor =
-    edge.filteredArtifact
-      ? FILTERED_EDGE_COLOR
-      : context.denseGraph
-        ? DENSE_EDGE_COLOR
-        : EDGE_COLOR
+  const baseSize = edge.filteredArtifact
+    ? Math.max(1.1, edgeSize(edge) * 0.72)
+    : context.denseGraph
+      ? Math.max(0.72, edgeSize(edge) * 0.74)
+      : edgeSize(edge)
+  const baseColor = edge.filteredArtifact
+    ? FILTERED_EDGE_COLOR
+    : context.denseGraph
+      ? DENSE_EDGE_COLOR
+      : EDGE_COLOR
   const focusEdge = context.focusedEdgeIds.has(edge.id)
   const size = focusEdge ? Math.max(2.4, baseSize * 1.9) : baseSize
   const color = focusEdge ? FOCUS_EDGE_COLOR : baseColor
@@ -336,8 +333,7 @@ function assignPackedSet(
   nodeIds.forEach((nodeId, index) => {
     const localIndex = index + 1
     const angleJitter = (hashToUnit(`${nodeId}:${jitterKey}:angle`) - 0.5) * 0.72
-    const radiusJitter =
-      (hashToUnit(`${nodeId}:${jitterKey}:radius`) - 0.5) * radiusStep * 0.92
+    const radiusJitter = (hashToUnit(`${nodeId}:${jitterKey}:radius`) - 0.5) * radiusStep * 0.92
     const driftX = (hashToUnit(`${nodeId}:${jitterKey}:drift:x`) - 0.5) * radiusStep * 0.96
     const driftY = (hashToUnit(`${nodeId}:${jitterKey}:drift:y`) - 0.5) * radiusStep * 0.78
     const radius = radiusBase + Math.sqrt(localIndex) * radiusStep + radiusJitter
@@ -385,9 +381,7 @@ function assignLeafFanSet(
     const positionInRing = index % ringCapacity
     const itemsInRing = Math.min(ringCapacity, leafNodeIds.length - ringIndex * ringCapacity)
     const angleOffset =
-      itemsInRing <= 1
-        ? 0
-        : ((positionInRing / Math.max(1, itemsInRing - 1)) - 0.5) * arcSpread
+      itemsInRing <= 1 ? 0 : (positionInRing / Math.max(1, itemsInRing - 1) - 0.5) * arcSpread
     const angleJitter = (hashToUnit(`${nodeId}:${jitterKey}:angle`) - 0.5) * 0.16
     const radiusJitter = (hashToUnit(`${nodeId}:${jitterKey}:radius`) - 0.5) * radiusStep * 0.28
     const driftX = (hashToUnit(`${nodeId}:${jitterKey}:drift:x`) - 0.5) * radiusStep * 0.3
@@ -502,7 +496,10 @@ function buildSeededClusterEntries(
 
   return [...clusters.entries()].sort(
     (left, right) =>
-      right[1].reduce((total, node) => total + node.supportCount + (degreeMap.get(node.id) ?? 0), 0) -
+      right[1].reduce(
+        (total, node) => total + node.supportCount + (degreeMap.get(node.id) ?? 0),
+        0,
+      ) -
       left[1].reduce((total, node) => total + node.supportCount + (degreeMap.get(node.id) ?? 0), 0),
   )
 }
@@ -520,10 +517,7 @@ function resolveClusterAnchorCount(clusterSize: number): number {
   return Math.min(8, Math.max(4, Math.round(Math.sqrt(clusterSize) / 2.18)))
 }
 
-function selectClusterAnchorNodes(
-  orderedCluster: GraphNode[],
-  clusterId: string,
-): GraphNode[] {
+function selectClusterAnchorNodes(orderedCluster: GraphNode[], clusterId: string): GraphNode[] {
   if (!orderedCluster.length) {
     return []
   }
@@ -532,15 +526,17 @@ function selectClusterAnchorNodes(
     resolveClusterAnchorCount(orderedCluster.length),
     orderedCluster.length,
   )
-  const seedNode =
-    orderedCluster.find((node) => node.id === clusterId) ?? orderedCluster[0]
+  const seedNode = orderedCluster.find((node) => node.id === clusterId) ?? orderedCluster[0]
 
   if (desiredAnchorCount === 1) {
     return [seedNode]
   }
 
   const anchorPool = [seedNode, ...orderedCluster.filter((node) => node.id !== seedNode.id)]
-  const selectionWindow = Math.min(anchorPool.length, Math.max(desiredAnchorCount * 6, desiredAnchorCount))
+  const selectionWindow = Math.min(
+    anchorPool.length,
+    Math.max(desiredAnchorCount * 6, desiredAnchorCount),
+  )
   const anchors: GraphNode[] = []
   const selectedIds = new Set<string>()
 
@@ -629,7 +625,9 @@ function assignClusterConstellation(
   anchorIds.forEach((anchorId) => anchorLoads.set(anchorId, 0))
   const targetAnchorLoad = Math.max(
     8,
-    Math.ceil(Math.max(0, orderedCluster.length - anchorIds.length) / Math.max(1, anchorIds.length)),
+    Math.ceil(
+      Math.max(0, orderedCluster.length - anchorIds.length) / Math.max(1, anchorIds.length),
+    ),
   )
 
   orderedCluster
@@ -695,17 +693,12 @@ function assignClusterConstellation(
 
     parentLeafGroups.forEach((leafIds, parentId) => {
       const fallbackAngle =
-        clusterIndex * 0.24 +
-        index * 0.37 +
-        (hashToUnit(`${parentId}:leaf-fallback`) - 0.5) * 0.62
-      const parentAttributes =
-        graph.hasNode(parentId)
-          ? graph.getNodeAttributes(parentId)
-          : { x: anchorCenter.x, y: anchorCenter.y }
+        clusterIndex * 0.24 + index * 0.37 + (hashToUnit(`${parentId}:leaf-fallback`) - 0.5) * 0.62
+      const parentAttributes = graph.hasNode(parentId)
+        ? graph.getNodeAttributes(parentId)
+        : { x: anchorCenter.x, y: anchorCenter.y }
       const reference =
-        parentId === anchorId
-          ? clusterCenter
-          : { x: anchorCenter.x, y: anchorCenter.y }
+        parentId === anchorId ? clusterCenter : { x: anchorCenter.x, y: anchorCenter.y }
 
       assignLeafFanSet(
         graph,
@@ -727,7 +720,8 @@ function archipelagoCenters(count: number): { x: number; y: number }[] {
   let ringIndex = 0
 
   while (placed < count) {
-    const ringCapacity = ringIndex === 0 ? Math.min(6, count) : Math.min(count - placed, 8 + ringIndex * 4)
+    const ringCapacity =
+      ringIndex === 0 ? Math.min(6, count) : Math.min(count - placed, 8 + ringIndex * 4)
     const radius = 1.18 + ringIndex * 0.82
     for (let index = 0; index < ringCapacity; index += 1) {
       const angle = (index / Math.max(1, ringCapacity)) * Math.PI * 2 + ringIndex * 0.34
@@ -753,19 +747,17 @@ function assignClusterLayout(
   const adjacency = buildAdjacencyMap(nodes, edges)
   const centerRadiusBase = clusterEntries.length > 12 ? 1.24 : 1.12
   const centerRadiusStep = clusterEntries.length > 12 ? 1.36 : 1.24
-  const centers = clusterCenters(clusterEntries.length, centerRadiusBase, centerRadiusStep, 1.84, 1.32)
+  const centers = clusterCenters(
+    clusterEntries.length,
+    centerRadiusBase,
+    centerRadiusStep,
+    1.84,
+    1.32,
+  )
 
   clusterEntries.forEach(([clusterId, clusterNodes], index) => {
     const center = centers[index] ?? { x: 0, y: 0 }
-    assignClusterConstellation(
-      graph,
-      clusterId,
-      clusterNodes,
-      center,
-      index,
-      degreeMap,
-      adjacency,
-    )
+    assignClusterConstellation(graph, clusterId, clusterNodes, center, index, degreeMap, adjacency)
   })
 }
 
@@ -1134,11 +1126,7 @@ export function createGraphModel(
     if (!graph.hasNode(edge.source) || !graph.hasNode(edge.target)) {
       continue
     }
-    graph.addEdge(
-      edge.source,
-      edge.target,
-      resolveEdgeVisualAttributes(edge, visualContext),
-    )
+    graph.addEdge(edge.source, edge.target, resolveEdgeVisualAttributes(edge, visualContext))
   }
 
   if (options?.applyLayout !== false) {

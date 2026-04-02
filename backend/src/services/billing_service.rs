@@ -1,5 +1,6 @@
 use chrono::Utc;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -317,6 +318,10 @@ impl BillingService {
         .await
         .map_err(|_| ApiError::Internal)?;
 
+        let request_input_tokens =
+            parse_usage_quantity(&command.usage_json, &["prompt_tokens", "input_tokens"])
+                .and_then(decimal_to_i32);
+        let price_variant_key = extract_price_variant_key(&command.usage_json);
         let usages = extract_token_usage_rows(provider_call.id, &command.usage_json);
         for usage in usages {
             let usage_row = billing_repository::create_usage(&state.persistence.postgres, &usage)
@@ -328,6 +333,8 @@ impl BillingService {
                 &usage_row.billing_unit,
                 Some(command.workspace_id),
                 usage_row.observed_at,
+                &price_variant_key,
+                request_input_tokens,
             )
             .await
             .map_err(|_| ApiError::Internal)?
@@ -493,6 +500,15 @@ fn extract_token_usage_rows(
             observed_at: Some(Utc::now()),
         });
     }
+    if let Some(quantity) = parse_cached_input_quantity(usage_json) {
+        rows.push(billing_repository::NewBillingUsage {
+            provider_call_id,
+            usage_kind: "cached_input_tokens",
+            billing_unit: "per_1m_cached_input_tokens",
+            quantity,
+            observed_at: Some(Utc::now()),
+        });
+    }
     rows
 }
 
@@ -507,6 +523,37 @@ fn parse_usage_quantity(usage_json: &Value, keys: &[&str]) -> Option<Decimal> {
             _ => None,
         })
         .filter(|value| *value > Decimal::ZERO)
+}
+
+fn parse_cached_input_quantity(usage_json: &Value) -> Option<Decimal> {
+    parse_usage_quantity(
+        usage_json,
+        &["cached_input_tokens", "cache_read_input_tokens", "input_cached_tokens"],
+    )
+    .or_else(|| {
+        usage_json
+            .get("prompt_tokens_details")
+            .and_then(|details| parse_usage_quantity(details, &["cached_tokens"]))
+    })
+    .or_else(|| {
+        usage_json
+            .get("input_tokens_details")
+            .and_then(|details| parse_usage_quantity(details, &["cached_tokens"]))
+    })
+}
+
+fn decimal_to_i32(value: Decimal) -> Option<i32> {
+    value.round().to_i32()
+}
+
+fn extract_price_variant_key(usage_json: &Value) -> String {
+    usage_json
+        .get("price_variant_key")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("default")
+        .to_string()
 }
 
 fn map_provider_call_row(

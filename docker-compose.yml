@@ -1,12 +1,65 @@
+x-rustrag-runtime-env: &rustrag-runtime-env
+  RUSTRAG_BIND_ADDR: 0.0.0.0:8080
+  RUSTRAG_ENVIRONMENT: ${RUSTRAG_ENVIRONMENT:-local-compose}
+  RUSTRAG_DATABASE_URL: postgres://${RUSTRAG_POSTGRES_USER:-postgres}:${RUSTRAG_POSTGRES_PASSWORD:-postgres}@postgres:5432/${RUSTRAG_POSTGRES_DB:-rustrag}
+  RUSTRAG_DATABASE_MAX_CONNECTIONS: ${RUSTRAG_DATABASE_MAX_CONNECTIONS:-20}
+  RUSTRAG_REDIS_URL: ${RUSTRAG_REDIS_URL:-redis://redis:6379}
+  RUSTRAG_ARANGODB_URL: ${RUSTRAG_ARANGODB_URL:-http://arangodb:8529}
+  RUSTRAG_ARANGODB_DATABASE: ${RUSTRAG_ARANGODB_DATABASE:-rustrag}
+  RUSTRAG_ARANGODB_USERNAME: ${RUSTRAG_ARANGODB_USERNAME:-root}
+  RUSTRAG_ARANGODB_PASSWORD: ${RUSTRAG_ARANGODB_PASSWORD:-rustrag-dev}
+  RUSTRAG_ARANGODB_REQUEST_TIMEOUT_SECONDS: ${RUSTRAG_ARANGODB_REQUEST_TIMEOUT_SECONDS:-15}
+  RUSTRAG_LOG_FILTER: ${RUSTRAG_LOG_FILTER:-info}
+  RUSTRAG_FRONTEND_ORIGIN: ${RUSTRAG_FRONTEND_ORIGIN:-http://127.0.0.1:19000,http://localhost:19000,http://127.0.0.1:9000,http://localhost:9000,http://127.0.0.1:3000,http://localhost:3000}
+  RUSTRAG_BOOTSTRAP_TOKEN: ${RUSTRAG_BOOTSTRAP_TOKEN:-bootstrap-local}
+  RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN:-}
+  RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD:-}
+  RUSTRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN:-}
+  RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_PROVIDER_KIND: ${RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_PROVIDER_KIND:-deepseek}
+  RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_MODEL_NAME: ${RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_MODEL_NAME:-deepseek-chat}
+  RUSTRAG_UI_BOOTSTRAP_EMBED_CHUNK_PROVIDER_KIND: ${RUSTRAG_UI_BOOTSTRAP_EMBED_CHUNK_PROVIDER_KIND:-openai}
+  RUSTRAG_UI_BOOTSTRAP_EMBED_CHUNK_MODEL_NAME: ${RUSTRAG_UI_BOOTSTRAP_EMBED_CHUNK_MODEL_NAME:-text-embedding-3-large}
+  RUSTRAG_UI_BOOTSTRAP_QUERY_ANSWER_PROVIDER_KIND: ${RUSTRAG_UI_BOOTSTRAP_QUERY_ANSWER_PROVIDER_KIND:-openai}
+  RUSTRAG_UI_BOOTSTRAP_QUERY_ANSWER_MODEL_NAME: ${RUSTRAG_UI_BOOTSTRAP_QUERY_ANSWER_MODEL_NAME:-gpt-5.4}
+  RUSTRAG_UI_BOOTSTRAP_VISION_PROVIDER_KIND: ${RUSTRAG_UI_BOOTSTRAP_VISION_PROVIDER_KIND:-openai}
+  RUSTRAG_UI_BOOTSTRAP_VISION_MODEL_NAME: ${RUSTRAG_UI_BOOTSTRAP_VISION_MODEL_NAME:-gpt-5.4-mini}
+  RUSTRAG_OPENAI_API_KEY: ${RUSTRAG_OPENAI_API_KEY:-}
+  RUSTRAG_DEEPSEEK_API_KEY: ${RUSTRAG_DEEPSEEK_API_KEY:-}
+  RUSTRAG_QWEN_API_KEY: ${RUSTRAG_QWEN_API_KEY:-}
+  RUSTRAG_CONTENT_STORAGE_ROOT: /var/lib/rustrag/content-storage
+  RUST_BACKTRACE: full
+
+x-rustrag-backend-env: &rustrag-backend-env
+  <<: *rustrag-runtime-env
+  RUSTRAG_SERVICE_ROLE: api
+  RUSTRAG_SERVICE_NAME: rustrag-backend
+  RUSTRAG_ARANGODB_BOOTSTRAP_COLLECTIONS: ${RUSTRAG_ARANGODB_BOOTSTRAP_COLLECTIONS:-true}
+  RUSTRAG_ARANGODB_BOOTSTRAP_VIEWS: ${RUSTRAG_ARANGODB_BOOTSTRAP_VIEWS:-true}
+  RUSTRAG_ARANGODB_BOOTSTRAP_GRAPH: ${RUSTRAG_ARANGODB_BOOTSTRAP_GRAPH:-true}
+  RUSTRAG_ARANGODB_BOOTSTRAP_VECTOR_INDEXES: ${RUSTRAG_ARANGODB_BOOTSTRAP_VECTOR_INDEXES:-true}
+
+x-rustrag-worker-env: &rustrag-worker-env
+  <<: *rustrag-runtime-env
+  RUSTRAG_SERVICE_ROLE: worker
+  RUSTRAG_SERVICE_NAME: rustrag-worker
+  RUSTRAG_ARANGODB_BOOTSTRAP_COLLECTIONS: false
+  RUSTRAG_ARANGODB_BOOTSTRAP_VIEWS: false
+  RUSTRAG_ARANGODB_BOOTSTRAP_GRAPH: false
+  RUSTRAG_ARANGODB_BOOTSTRAP_VECTOR_INDEXES: false
+
 services:
   postgres:
     image: postgres:18-alpine
     environment:
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_USER: postgres
-      POSTGRES_DB: rustrag
+      POSTGRES_PASSWORD: ${RUSTRAG_POSTGRES_PASSWORD:-postgres}
+      POSTGRES_USER: ${RUSTRAG_POSTGRES_USER:-postgres}
+      POSTGRES_DB: ${RUSTRAG_POSTGRES_DB:-rustrag}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d rustrag"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${RUSTRAG_POSTGRES_USER:-postgres} -d ${RUSTRAG_POSTGRES_DB:-rustrag}",
+        ]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -25,7 +78,7 @@ services:
   arangodb:
     image: arangodb:3.12.4
     environment:
-      ARANGO_ROOT_PASSWORD: rustrag-dev
+      ARANGO_ROOT_PASSWORD: ${RUSTRAG_ARANGODB_PASSWORD:-rustrag-dev}
     command:
       - arangod
       - --server.authentication=true
@@ -60,30 +113,7 @@ services:
         condition: service_healthy
       arangodb:
         condition: service_healthy
-    environment:
-      bind_addr: 0.0.0.0:8080
-      service_role: api
-      service_name: rustrag-backend
-      environment: local-compose
-      database_url: postgres://postgres:postgres@postgres:5432/rustrag
-      database_max_connections: 20
-      redis_url: redis://redis:6379
-      arangodb_url: http://arangodb:8529
-      arangodb_database: rustrag
-      arangodb_username: root
-      arangodb_password: rustrag-dev
-      arangodb_request_timeout_seconds: 15
-      arangodb_bootstrap_collections: true
-      arangodb_bootstrap_views: true
-      arangodb_bootstrap_graph: true
-      log_filter: info
-      frontend_origin: http://127.0.0.1:19000,http://localhost:19000,http://127.0.0.1:9000,http://localhost:9000,http://127.0.0.1:3000,http://localhost:3000
-      bootstrap_token: ${RUSTRAG_BOOTSTRAP_TOKEN:-bootstrap-local}
-      ui_bootstrap_admin_login: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN:-}
-      ui_bootstrap_admin_password: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD:-}
-      ui_bootstrap_admin_api_token: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN:-}
-      content_storage_root: /var/lib/rustrag/content-storage
-      RUST_BACKTRACE: full
+    environment: *rustrag-backend-env
     expose:
       - "8080"
     volumes:
@@ -116,30 +146,9 @@ services:
         condition: service_healthy
       arangodb:
         condition: service_healthy
-    environment:
-      service_role: worker
-      bind_addr: 0.0.0.0:8080
-      service_name: rustrag-worker
-      environment: local-compose
-      database_url: postgres://postgres:postgres@postgres:5432/rustrag
-      database_max_connections: 20
-      redis_url: redis://redis:6379
-      arangodb_url: http://arangodb:8529
-      arangodb_database: rustrag
-      arangodb_username: root
-      arangodb_password: rustrag-dev
-      arangodb_request_timeout_seconds: 15
-      arangodb_bootstrap_collections: true
-      arangodb_bootstrap_views: true
-      arangodb_bootstrap_graph: true
-      log_filter: info
-      frontend_origin: http://127.0.0.1:19000,http://localhost:19000,http://127.0.0.1:9000,http://localhost:9000,http://127.0.0.1:3000,http://localhost:3000
-      bootstrap_token: ${RUSTRAG_BOOTSTRAP_TOKEN:-bootstrap-local}
-      ui_bootstrap_admin_login: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN:-}
-      ui_bootstrap_admin_password: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD:-}
-      ui_bootstrap_admin_api_token: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN:-}
-      content_storage_root: /var/lib/rustrag/content-storage
-      RUST_BACKTRACE: full
+      backend:
+        condition: service_healthy
+    environment: *rustrag-worker-env
     volumes:
       - content_storage_data:/var/lib/rustrag/content-storage
     healthcheck:

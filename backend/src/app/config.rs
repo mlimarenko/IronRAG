@@ -2,6 +2,9 @@ use serde::Deserialize;
 
 const DEFAULT_UI_BOOTSTRAP_ADMIN_EMAIL_DOMAIN: &str = "rustrag.local";
 const DEFAULT_UI_BOOTSTRAP_ADMIN_NAME: &str = "Admin";
+const BOOTSTRAP_PROVIDER_ENV_OPENAI: &str = "RUSTRAG_OPENAI_API_KEY";
+const BOOTSTRAP_PROVIDER_ENV_DEEPSEEK: &str = "RUSTRAG_DEEPSEEK_API_KEY";
+const BOOTSTRAP_PROVIDER_ENV_QWEN: &str = "RUSTRAG_QWEN_API_KEY";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UiBootstrapAdmin {
@@ -10,6 +13,25 @@ pub struct UiBootstrapAdmin {
     pub display_name: String,
     pub password: String,
     pub api_token: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UiBootstrapAiSetup {
+    pub provider_secrets: Vec<UiBootstrapAiProviderSecret>,
+    pub binding_defaults: Vec<UiBootstrapAiBindingDefault>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UiBootstrapAiProviderSecret {
+    pub provider_kind: String,
+    pub api_key: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UiBootstrapAiBindingDefault {
+    pub binding_purpose: String,
+    pub provider_kind: Option<String>,
+    pub model_name: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,6 +102,9 @@ pub struct Settings {
     pub destructive_fresh_bootstrap_required: bool,
     pub destructive_allow_legacy_startup_side_effects: bool,
     pub frontend_origin: String,
+    /// When set, OpenAPI/Swagger uses this value as the only `servers` URL (API origin without a
+    /// duplicate `/v1`; paths in the contract already start with `/v1/`). Env: `RUSTRAG_OPENAPI_PUBLIC_ORIGIN`.
+    pub openapi_public_origin: Option<String>,
     pub ui_session_secret: String,
     pub ui_default_locale: String,
     pub ui_bootstrap_admin_login: Option<String>,
@@ -87,12 +112,23 @@ pub struct Settings {
     pub ui_bootstrap_admin_name: Option<String>,
     pub ui_bootstrap_admin_password: Option<String>,
     pub ui_bootstrap_admin_api_token: Option<String>,
+    pub ui_bootstrap_extract_graph_provider_kind: Option<String>,
+    pub ui_bootstrap_extract_graph_model_name: Option<String>,
+    pub ui_bootstrap_embed_chunk_provider_kind: Option<String>,
+    pub ui_bootstrap_embed_chunk_model_name: Option<String>,
+    pub ui_bootstrap_query_answer_provider_kind: Option<String>,
+    pub ui_bootstrap_query_answer_model_name: Option<String>,
+    pub ui_bootstrap_vision_provider_kind: Option<String>,
+    pub ui_bootstrap_vision_model_name: Option<String>,
     pub ui_session_ttl_hours: u64,
     pub upload_max_size_mb: u64,
     pub content_storage_root: String,
     pub ingestion_worker_concurrency: usize,
     pub ingestion_worker_lease_seconds: u64,
     pub ingestion_worker_heartbeat_interval_seconds: u64,
+    pub web_ingest_http_timeout_seconds: u64,
+    pub web_ingest_max_redirects: usize,
+    pub web_ingest_user_agent: String,
     pub llm_http_timeout_seconds: u64,
     pub llm_transport_retry_attempts: usize,
     pub llm_transport_retry_base_delay_ms: u64,
@@ -122,79 +158,17 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// Loads application settings from environment variables with defaults.
+    /// Loads application settings from canonical `RUSTRAG_*` environment variables with defaults.
     ///
     /// # Errors
     /// Returns a [`config::ConfigError`] if configuration defaults cannot be built
     /// or environment values fail deserialization.
     pub fn from_env() -> Result<Self, config::ConfigError> {
-        let cfg = config::Config::builder()
-            .set_default("bind_addr", "0.0.0.0:8080")?
-            .set_default("service_role", "all")?
-            .set_default("service_name", "rustrag-backend")?
-            .set_default("environment", "local")?
-            .set_default("database_url", "postgres://postgres:postgres@127.0.0.1:5432/rustrag")?
-            .set_default("database_max_connections", 20)?
-            .set_default("redis_url", "redis://127.0.0.1:6379")?
-            .set_default("arangodb_url", "http://127.0.0.1:8529")?
-            .set_default("arangodb_database", "rustrag")?
-            .set_default("arangodb_username", "root")?
-            .set_default("arangodb_password", "rustrag-dev")?
-            .set_default("arangodb_request_timeout_seconds", 15)?
-            .set_default("arangodb_bootstrap_collections", true)?
-            .set_default("arangodb_bootstrap_views", true)?
-            .set_default("arangodb_bootstrap_graph", true)?
-            .set_default("arangodb_bootstrap_vector_indexes", true)?
-            .set_default("arangodb_vector_dimensions", 3072)?
-            .set_default("arangodb_vector_index_n_lists", 100)?
-            .set_default("arangodb_vector_index_default_n_probe", 8)?
-            .set_default("arangodb_vector_index_training_iterations", 25)?
-            .set_default("log_filter", "info")?
-            .set_default("bootstrap_claim_enabled", true)?
-            .set_default("legacy_ui_bootstrap_enabled", true)?
-            .set_default("legacy_bootstrap_token_endpoint_enabled", true)?
-            .set_default("destructive_fresh_bootstrap_required", false)?
-            .set_default("destructive_allow_legacy_startup_side_effects", true)?
-            .set_default(
-                "frontend_origin",
-                "http://127.0.0.1:19000,http://localhost:19000,http://127.0.0.1:9000,http://localhost:9000,http://127.0.0.1:3000,http://localhost:3000",
-            )?
-            .set_default("ui_session_secret", "local-ui-session-secret")?
-            .set_default("ui_default_locale", "ru")?
-            .set_default("ui_session_ttl_hours", 720)?
-            .set_default("upload_max_size_mb", 50)?
-            .set_default("content_storage_root", "/var/lib/rustrag/content-storage")?
-            .set_default("ingestion_worker_concurrency", 4)?
-            .set_default("ingestion_worker_lease_seconds", 300)?
-            .set_default("ingestion_worker_heartbeat_interval_seconds", 15)?
-            .set_default("llm_http_timeout_seconds", 120)?
-            .set_default("llm_transport_retry_attempts", 3)?
-            .set_default("llm_transport_retry_base_delay_ms", 250)?
-            .set_default("query_intent_cache_ttl_hours", 24)?
-            .set_default("query_intent_cache_max_entries_per_library", 500)?
-            .set_default("query_rerank_enabled", true)?
-            .set_default("query_rerank_candidate_limit", 24)?
-            .set_default("query_balanced_context_enabled", true)?
-            .set_default("runtime_graph_extract_recovery_enabled", true)?
-            .set_default("runtime_graph_extract_recovery_max_attempts", 2)?
-            .set_default("runtime_graph_extract_resume_downgrade_level_one_after_replays", 3)?
-            .set_default("runtime_graph_extract_resume_downgrade_level_two_after_replays", 5)?
-            .set_default("runtime_graph_summary_refresh_batch_size", 64)?
-            .set_default("runtime_graph_targeted_reconciliation_enabled", true)?
-            .set_default("runtime_graph_targeted_reconciliation_max_targets", 128)?
-            .set_default("runtime_document_activity_freshness_seconds", 45)?
-            .set_default("runtime_document_stalled_after_seconds", 180)?
-            .set_default("runtime_graph_filter_empty_relations", true)?
-            .set_default("runtime_graph_filter_degenerate_self_loops", true)?
-            .set_default("runtime_graph_convergence_warning_backlog_threshold", 1)?
-            .set_default("mcp_memory_default_read_window_chars", 12_000)?
-            .set_default("mcp_memory_max_read_window_chars", 50_000)?
-            .set_default("mcp_memory_default_search_limit", 10)?
-            .set_default("mcp_memory_max_search_limit", 25)?
-            .set_default("mcp_memory_idempotency_retention_hours", 72)?
-            .set_default("mcp_memory_audit_enabled", true)?
-            .add_source(config::Environment::default().separator("__"))
+        let cfg = settings_config_builder()?
             .add_source(config::Environment::with_prefix("RUSTRAG").separator("__"))
+            .add_source(
+                config::Environment::with_prefix("RUSTRAG").prefix_separator("_").separator("__"),
+            )
             .build()?;
 
         let mut settings: Self = cfg.try_deserialize()?;
@@ -314,6 +288,55 @@ impl Settings {
     }
 
     #[must_use]
+    pub fn resolved_ui_bootstrap_ai_setup(&self) -> Option<UiBootstrapAiSetup> {
+        let provider_secrets = [
+            ("openai", resolved_bootstrap_provider_api_key(BOOTSTRAP_PROVIDER_ENV_OPENAI)),
+            ("deepseek", resolved_bootstrap_provider_api_key(BOOTSTRAP_PROVIDER_ENV_DEEPSEEK)),
+            ("qwen", resolved_bootstrap_provider_api_key(BOOTSTRAP_PROVIDER_ENV_QWEN)),
+        ]
+        .into_iter()
+        .filter_map(|(provider_kind, api_key)| {
+            api_key.map(|api_key| UiBootstrapAiProviderSecret {
+                provider_kind: provider_kind.to_string(),
+                api_key,
+            })
+        })
+        .collect::<Vec<_>>();
+
+        let binding_defaults = [
+            resolved_ui_bootstrap_ai_binding_default(
+                "extract_graph",
+                self.ui_bootstrap_extract_graph_provider_kind.as_deref(),
+                self.ui_bootstrap_extract_graph_model_name.as_deref(),
+            ),
+            resolved_ui_bootstrap_ai_binding_default(
+                "embed_chunk",
+                self.ui_bootstrap_embed_chunk_provider_kind.as_deref(),
+                self.ui_bootstrap_embed_chunk_model_name.as_deref(),
+            ),
+            resolved_ui_bootstrap_ai_binding_default(
+                "query_answer",
+                self.ui_bootstrap_query_answer_provider_kind.as_deref(),
+                self.ui_bootstrap_query_answer_model_name.as_deref(),
+            ),
+            resolved_ui_bootstrap_ai_binding_default(
+                "vision",
+                self.ui_bootstrap_vision_provider_kind.as_deref(),
+                self.ui_bootstrap_vision_model_name.as_deref(),
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+
+        if provider_secrets.is_empty() && binding_defaults.is_empty() {
+            None
+        } else {
+            Some(UiBootstrapAiSetup { provider_secrets, binding_defaults })
+        }
+    }
+
+    #[must_use]
     pub fn has_explicit_ui_bootstrap_admin(&self) -> bool {
         self.resolved_ui_bootstrap_admin().is_some()
     }
@@ -327,6 +350,78 @@ impl Settings {
     pub fn runs_ingestion_workers(&self) -> bool {
         matches!(self.service_role.as_str(), "all" | "worker")
     }
+}
+
+fn settings_config_builder()
+-> Result<config::ConfigBuilder<config::builder::DefaultState>, config::ConfigError> {
+    config::Config::builder()
+        .set_default("bind_addr", "0.0.0.0:8080")?
+        .set_default("service_role", "all")?
+        .set_default("service_name", "rustrag-backend")?
+        .set_default("environment", "local")?
+        .set_default("database_url", "postgres://postgres:postgres@127.0.0.1:5432/rustrag")?
+        .set_default("database_max_connections", 20)?
+        .set_default("redis_url", "redis://127.0.0.1:6379")?
+        .set_default("arangodb_url", "http://127.0.0.1:8529")?
+        .set_default("arangodb_database", "rustrag")?
+        .set_default("arangodb_username", "root")?
+        .set_default("arangodb_password", "rustrag-dev")?
+        .set_default("arangodb_request_timeout_seconds", 15)?
+        .set_default("arangodb_bootstrap_collections", true)?
+        .set_default("arangodb_bootstrap_views", true)?
+        .set_default("arangodb_bootstrap_graph", true)?
+        .set_default("arangodb_bootstrap_vector_indexes", true)?
+        .set_default("arangodb_vector_dimensions", 3072)?
+        .set_default("arangodb_vector_index_n_lists", 100)?
+        .set_default("arangodb_vector_index_default_n_probe", 8)?
+        .set_default("arangodb_vector_index_training_iterations", 25)?
+        .set_default("log_filter", "info")?
+        .set_default("bootstrap_claim_enabled", true)?
+        .set_default("legacy_ui_bootstrap_enabled", true)?
+        .set_default("legacy_bootstrap_token_endpoint_enabled", true)?
+        .set_default("destructive_fresh_bootstrap_required", false)?
+        .set_default("destructive_allow_legacy_startup_side_effects", true)?
+        .set_default(
+            "frontend_origin",
+            "http://127.0.0.1:19000,http://localhost:19000,http://127.0.0.1:9000,http://localhost:9000,http://127.0.0.1:3000,http://localhost:3000",
+        )?
+        .set_default("ui_session_secret", "local-ui-session-secret")?
+        .set_default("ui_default_locale", "ru")?
+        .set_default("ui_session_ttl_hours", 720)?
+        .set_default("upload_max_size_mb", 50)?
+        .set_default("content_storage_root", "/var/lib/rustrag/content-storage")?
+        .set_default("ingestion_worker_concurrency", 4)?
+        .set_default("ingestion_worker_lease_seconds", 300)?
+        .set_default("ingestion_worker_heartbeat_interval_seconds", 15)?
+        .set_default("web_ingest_http_timeout_seconds", 20)?
+        .set_default("web_ingest_max_redirects", 10)?
+        .set_default("web_ingest_user_agent", "RustRAG-WebIngest/0.1")?
+        .set_default("llm_http_timeout_seconds", 120)?
+        .set_default("llm_transport_retry_attempts", 3)?
+        .set_default("llm_transport_retry_base_delay_ms", 250)?
+        .set_default("query_intent_cache_ttl_hours", 24)?
+        .set_default("query_intent_cache_max_entries_per_library", 500)?
+        .set_default("query_rerank_enabled", true)?
+        .set_default("query_rerank_candidate_limit", 24)?
+        .set_default("query_balanced_context_enabled", true)?
+        .set_default("runtime_graph_extract_recovery_enabled", true)?
+        .set_default("runtime_graph_extract_recovery_max_attempts", 2)?
+        .set_default("runtime_graph_extract_resume_downgrade_level_one_after_replays", 3)?
+        .set_default("runtime_graph_extract_resume_downgrade_level_two_after_replays", 5)?
+        .set_default("runtime_graph_summary_refresh_batch_size", 64)?
+        .set_default("runtime_graph_targeted_reconciliation_enabled", true)?
+        .set_default("runtime_graph_targeted_reconciliation_max_targets", 128)?
+        .set_default("runtime_document_activity_freshness_seconds", 45)?
+        .set_default("runtime_document_stalled_after_seconds", 180)?
+        .set_default("runtime_graph_filter_empty_relations", true)?
+        .set_default("runtime_graph_filter_degenerate_self_loops", true)?
+        .set_default("runtime_graph_convergence_warning_backlog_threshold", 1)?
+        .set_default("mcp_memory_default_read_window_chars", 12_000)?
+        .set_default("mcp_memory_max_read_window_chars", 50_000)?
+        .set_default("mcp_memory_default_search_limit", 10)?
+        .set_default("mcp_memory_max_search_limit", 25)?
+        .set_default("mcp_memory_idempotency_retention_hours", 72)?
+        .set_default("mcp_memory_audit_enabled", true)
 }
 
 fn validate_service_role(settings: &Settings) -> Result<(), String> {
@@ -348,6 +443,34 @@ fn validate_service_name(settings: &Settings) -> Result<(), String> {
         return Err("service_name must contain only ASCII letters, digits, '.', '_' or '-'".into());
     }
     Ok(())
+}
+
+fn resolved_bootstrap_provider_api_key(env_name: &str) -> Option<String> {
+    std::env::var(env_name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn resolved_ui_bootstrap_ai_binding_default(
+    binding_purpose: &str,
+    provider_kind: Option<&str>,
+    model_name: Option<&str>,
+) -> Option<UiBootstrapAiBindingDefault> {
+    let provider_kind =
+        provider_kind.map(str::trim).filter(|value| !value.is_empty()).map(str::to_ascii_lowercase);
+    let model_name = model_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(std::string::ToString::to_string);
+    if provider_kind.is_none() && model_name.is_none() {
+        return None;
+    }
+    Some(UiBootstrapAiBindingDefault {
+        binding_purpose: binding_purpose.to_string(),
+        provider_kind,
+        model_name,
+    })
 }
 
 fn validate_arangodb_settings(settings: &Settings) -> Result<(), String> {
@@ -412,6 +535,7 @@ fn validate_mcp_memory_settings(settings: &Settings) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use config::Map;
 
     fn sample_settings() -> Settings {
         Settings {
@@ -443,6 +567,7 @@ mod tests {
             destructive_fresh_bootstrap_required: false,
             destructive_allow_legacy_startup_side_effects: true,
             frontend_origin: "http://127.0.0.1:19000,http://localhost:19000,http://127.0.0.1:9000,http://localhost:9000,http://127.0.0.1:3000,http://localhost:3000".into(),
+            openapi_public_origin: None,
             ui_session_secret: "local-ui-session-secret".into(),
             ui_default_locale: "ru".into(),
             ui_bootstrap_admin_login: None,
@@ -450,9 +575,20 @@ mod tests {
             ui_bootstrap_admin_name: None,
             ui_bootstrap_admin_password: None,
             ui_bootstrap_admin_api_token: None,
+            ui_bootstrap_extract_graph_provider_kind: None,
+            ui_bootstrap_extract_graph_model_name: None,
+            ui_bootstrap_embed_chunk_provider_kind: None,
+            ui_bootstrap_embed_chunk_model_name: None,
+            ui_bootstrap_query_answer_provider_kind: None,
+            ui_bootstrap_query_answer_model_name: None,
+            ui_bootstrap_vision_provider_kind: None,
+            ui_bootstrap_vision_model_name: None,
             ui_session_ttl_hours: 720,
             upload_max_size_mb: 50,
             content_storage_root: "/var/lib/rustrag/content-storage".into(),
+            web_ingest_http_timeout_seconds: 20,
+            web_ingest_max_redirects: 10,
+            web_ingest_user_agent: "RustRAG-WebIngest/0.1".into(),
             ingestion_worker_concurrency: 4,
             ingestion_worker_lease_seconds: 300,
             ingestion_worker_heartbeat_interval_seconds: 15,
@@ -483,6 +619,30 @@ mod tests {
             mcp_memory_idempotency_retention_hours: 72,
             mcp_memory_audit_enabled: true,
         }
+    }
+
+    fn settings_from_env_entries(entries: &[(&str, &str)]) -> Settings {
+        let mut env = Map::new();
+        for (key, value) in entries {
+            env.insert((*key).to_string(), (*value).to_string());
+        }
+        let cfg = settings_config_builder()
+            .expect("defaults should build")
+            .add_source(
+                config::Environment::with_prefix("RUSTRAG")
+                    .prefix_separator("_")
+                    .separator("__")
+                    .source(Some(env)),
+            )
+            .build()
+            .expect("config should build");
+        let mut settings: Settings = cfg.try_deserialize().expect("settings should deserialize");
+        settings.service_role = settings.service_role.trim().to_ascii_lowercase();
+        validate_service_role(&settings).expect("role should validate");
+        validate_service_name(&settings).expect("service name should validate");
+        validate_arangodb_settings(&settings).expect("arangodb settings should validate");
+        validate_mcp_memory_settings(&settings).expect("mcp settings should validate");
+        settings
     }
 
     #[test]
@@ -521,6 +681,19 @@ mod tests {
         let settings = Settings::from_env().expect("settings should load with defaults");
 
         assert_eq!(settings.database_url, "postgres://postgres:postgres@127.0.0.1:5432/rustrag");
+    }
+
+    #[test]
+    fn canonical_prefixed_flat_variables_override_defaults() {
+        let settings = settings_from_env_entries(&[
+            ("RUSTRAG_DATABASE_URL", "postgres://postgres:postgres@postgres:5432/rustrag"),
+            ("RUSTRAG_SERVICE_ROLE", "API"),
+            ("RUSTRAG_LOG_FILTER", "debug"),
+        ]);
+
+        assert_eq!(settings.database_url, "postgres://postgres:postgres@postgres:5432/rustrag");
+        assert_eq!(settings.service_role, "api");
+        assert_eq!(settings.log_filter, "debug");
     }
 
     #[test]
@@ -576,6 +749,55 @@ mod tests {
                 password: "secret".into(),
                 api_token: None,
             })
+        );
+    }
+
+    #[test]
+    fn resolved_ui_bootstrap_ai_is_absent_without_provider_credentials() {
+        let settings = sample_settings();
+
+        assert_eq!(settings.resolved_ui_bootstrap_ai_setup(), None);
+    }
+
+    #[test]
+    fn resolved_ui_bootstrap_ai_exposes_binding_defaults_without_provider_credentials() {
+        let mut settings = sample_settings();
+        settings.ui_bootstrap_extract_graph_provider_kind = Some(" deepseek ".into());
+        settings.ui_bootstrap_extract_graph_model_name = Some(" deepseek-chat ".into());
+        settings.ui_bootstrap_embed_chunk_provider_kind = Some(" openai ".into());
+        settings.ui_bootstrap_embed_chunk_model_name = Some(" text-embedding-3-large ".into());
+        settings.ui_bootstrap_query_answer_provider_kind = Some(" openai ".into());
+        settings.ui_bootstrap_query_answer_model_name = Some(" gpt-5.4 ".into());
+        settings.ui_bootstrap_vision_provider_kind = Some(" openai ".into());
+        settings.ui_bootstrap_vision_model_name = Some(" gpt-5.4-mini ".into());
+
+        assert_eq!(
+            settings.resolved_ui_bootstrap_ai_setup(),
+            Some(UiBootstrapAiSetup {
+                provider_secrets: vec![],
+                binding_defaults: vec![
+                    UiBootstrapAiBindingDefault {
+                        binding_purpose: "extract_graph".into(),
+                        provider_kind: Some("deepseek".into()),
+                        model_name: Some("deepseek-chat".into()),
+                    },
+                    UiBootstrapAiBindingDefault {
+                        binding_purpose: "embed_chunk".into(),
+                        provider_kind: Some("openai".into()),
+                        model_name: Some("text-embedding-3-large".into()),
+                    },
+                    UiBootstrapAiBindingDefault {
+                        binding_purpose: "query_answer".into(),
+                        provider_kind: Some("openai".into()),
+                        model_name: Some("gpt-5.4".into()),
+                    },
+                    UiBootstrapAiBindingDefault {
+                        binding_purpose: "vision".into(),
+                        provider_kind: Some("openai".into()),
+                        model_name: Some("gpt-5.4-mini".into()),
+                    },
+                ],
+            }),
         );
     }
 

@@ -115,7 +115,7 @@ const overviewStats = computed(() => {
   if (relatedEdgeCount.value > 0) {
     stats.push({
       key: 'relations',
-      label: t('graph.relatedEdges'),
+      label: t('graph.graphRelations'),
       value: String(relatedEdgeCount.value),
     })
   }
@@ -123,7 +123,7 @@ const overviewStats = computed(() => {
   if (evidenceCount.value > 0) {
     stats.push({
       key: 'evidence',
-      label: t('graph.evidence'),
+      label: t('graph.preparedEvidence'),
       value: String(evidenceCount.value),
     })
   }
@@ -496,7 +496,7 @@ const navigationSections = computed(() => {
     sections.push({
       key: 'edges',
       kind: 'edges',
-      title: t('graph.relatedEdges'),
+      title: t('graph.graphRelations'),
       items: visibleLinks.value,
     })
   }
@@ -605,7 +605,7 @@ function buildEvidenceMetaParts(item: GraphEvidence): string[] {
             {{ graphNodeKindLabel(props.detail.nodeType) }}
           </span>
           <span v-if="props.detail.relationCount > 0" class="nc__badge nc__badge--metric">
-            {{ $t('graph.relationCount', { count: props.detail.relationCount }) }}
+            {{ $t('graph.graphRelationCount', { count: props.detail.relationCount }) }}
           </span>
           <span
             v-if="props.detail.convergenceStatus && props.detail.convergenceStatus !== 'current'"
@@ -677,7 +677,7 @@ function buildEvidenceMetaParts(item: GraphEvidence): string[] {
 
         <section v-if="visibleEvidence.length" class="nc__section">
           <div class="nc__section-head">
-            <h4 class="nc__section-title">{{ $t('graph.inspector.evidencePreview') }}</h4>
+            <h4 class="nc__section-title">{{ $t('graph.inspector.preparedEvidence') }}</h4>
             <span v-if="showEvidenceCaption" class="nc__section-caption">
               {{ graphEvidenceLabel(evidenceCount) }}
             </span>
