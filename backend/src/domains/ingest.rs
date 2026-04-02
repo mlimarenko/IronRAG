@@ -50,3 +50,93 @@ pub struct IngestStageEvent {
     pub details_json: serde_json::Value,
     pub recorded_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebIngestRunReceipt {
+    pub run_id: Uuid,
+    pub library_id: Uuid,
+    pub mode: String,
+    pub run_state: String,
+    pub async_operation_id: Option<Uuid>,
+    pub counts: WebRunCounts,
+    pub failure_code: Option<String>,
+    pub cancel_requested_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebRunCounts {
+    pub discovered: i64,
+    pub eligible: i64,
+    pub processed: i64,
+    pub queued: i64,
+    pub processing: i64,
+    pub duplicates: i64,
+    pub excluded: i64,
+    pub blocked: i64,
+    pub failed: i64,
+    pub canceled: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebIngestRunSummary {
+    pub run_id: Uuid,
+    pub library_id: Uuid,
+    pub mode: String,
+    pub boundary_policy: String,
+    pub max_depth: i32,
+    pub max_pages: i32,
+    pub run_state: String,
+    pub seed_url: String,
+    pub counts: WebRunCounts,
+    pub last_activity_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebIngestRun {
+    pub run_id: Uuid,
+    pub mutation_id: Uuid,
+    pub async_operation_id: Option<Uuid>,
+    pub workspace_id: Uuid,
+    pub library_id: Uuid,
+    pub mode: String,
+    pub seed_url: String,
+    pub normalized_seed_url: String,
+    pub boundary_policy: String,
+    pub max_depth: i32,
+    pub max_pages: i32,
+    pub run_state: String,
+    pub requested_by_principal_id: Option<Uuid>,
+    pub requested_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub failure_code: Option<String>,
+    pub cancel_requested_at: Option<DateTime<Utc>>,
+    pub counts: WebRunCounts,
+    pub last_activity_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebDiscoveredPage {
+    pub candidate_id: Uuid,
+    pub run_id: Uuid,
+    pub discovered_url: Option<String>,
+    pub normalized_url: String,
+    pub final_url: Option<String>,
+    pub canonical_url: Option<String>,
+    pub depth: i32,
+    pub referrer_candidate_id: Option<Uuid>,
+    pub host_classification: String,
+    pub candidate_state: String,
+    pub classification_reason: Option<String>,
+    pub content_type: Option<String>,
+    pub http_status: Option<i32>,
+    pub discovered_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub document_id: Option<Uuid>,
+    pub result_revision_id: Option<Uuid>,
+    pub mutation_item_id: Option<Uuid>,
+}

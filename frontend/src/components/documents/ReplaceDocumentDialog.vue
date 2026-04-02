@@ -26,7 +26,9 @@ const selectedFile = ref<File | null>(null)
 const touched = ref(false)
 const acceptString = computed(() => buildDocumentUploadAcceptString(props.acceptedFormats))
 const acceptedFormatsLabel = computed(() =>
-  formatAcceptedDocumentFormats(props.acceptedFormats, (format) => t(`documents.fileFormats.${format}`)),
+  formatAcceptedDocumentFormats(props.acceptedFormats, (format) =>
+    t(`documents.fileFormats.${format}`),
+  ),
 )
 
 const validationError = computed(() => {
@@ -83,40 +85,23 @@ function submit(): void {
   >
     <div class="rr-field">
       <label for="replace-document-file">{{ $t('documents.dialogs.replace.fileLabel') }}</label>
-      <input
-        id="replace-document-file"
-        type="file"
-        :accept="acceptString"
-        @change="onFileChange"
-      >
+      <input id="replace-document-file" type="file" :accept="acceptString" @change="onFileChange" />
     </div>
 
     <template #feedback>
       <p class="rr-document-dialog__hint">
         {{ $t('documents.dialogs.replace.acceptedFormats', { formats: acceptedFormatsLabel }) }}
       </p>
-      <p
-        v-if="selectedFile"
-        class="rr-document-dialog__hint"
-      >
+      <p v-if="selectedFile" class="rr-document-dialog__hint">
         {{ $t('documents.dialogs.replace.selectedFile', { name: selectedFile.name }) }}
       </p>
-      <p
-        v-if="validationError === 'required'"
-        class="rr-document-dialog__error"
-      >
+      <p v-if="validationError === 'required'" class="rr-document-dialog__error">
         {{ $t('documents.dialogs.replace.validationRequired') }}
       </p>
-      <p
-        v-if="validationError === 'type'"
-        class="rr-document-dialog__error"
-      >
+      <p v-if="validationError === 'type'" class="rr-document-dialog__error">
         {{ $t('documents.dialogs.replace.validationType') }}
       </p>
-      <p
-        v-else-if="props.error"
-        class="rr-document-dialog__error"
-      >
+      <p v-else-if="props.error" class="rr-document-dialog__error">
         {{ props.error }}
       </p>
     </template>

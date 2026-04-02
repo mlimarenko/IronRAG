@@ -167,6 +167,9 @@ pub struct PriceCatalogEntryResponse {
     pub id: Uuid,
     pub model_catalog_id: Uuid,
     pub billing_unit: String,
+    pub price_variant_key: String,
+    pub request_input_tokens_min: Option<i32>,
+    pub request_input_tokens_max: Option<i32>,
     pub unit_price: rust_decimal::Decimal,
     pub currency_code: String,
     pub effective_from: chrono::DateTime<chrono::Utc>,
@@ -357,6 +360,11 @@ async fn create_credential(
             },
         )
         .await?;
+    state
+        .canonical_services
+        .ai_catalog
+        .ensure_workspace_runtime_profiles(&state, entry.workspace_id, Some(auth.principal_id))
+        .await?;
     record_ai_audit_event(
         &state,
         &auth,
@@ -402,6 +410,11 @@ async fn update_credential(
                 credential_state: payload.credential_state,
             },
         )
+        .await?;
+    state
+        .canonical_services
+        .ai_catalog
+        .ensure_workspace_runtime_profiles(&state, entry.workspace_id, Some(auth.principal_id))
         .await?;
     record_ai_audit_event(
         &state,
@@ -886,6 +899,9 @@ fn map_price(entry: PriceCatalogEntry) -> PriceCatalogEntryResponse {
         id: entry.id,
         model_catalog_id: entry.model_catalog_id,
         billing_unit: entry.billing_unit,
+        price_variant_key: entry.price_variant_key,
+        request_input_tokens_min: entry.request_input_tokens_min,
+        request_input_tokens_max: entry.request_input_tokens_max,
         unit_price: entry.unit_price,
         currency_code: entry.currency_code,
         effective_from: entry.effective_from,

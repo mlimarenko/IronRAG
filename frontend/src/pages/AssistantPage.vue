@@ -5,13 +5,20 @@ import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import FeedbackState from 'src/components/design-system/FeedbackState.vue'
 import AssistantEvidencePanel from 'src/components/assistant/AssistantEvidencePanel.vue'
+import AssistantVerificationBanner from 'src/components/assistant/AssistantVerificationBanner.vue'
 import AssistantMarkdownContent from 'src/components/assistant/AssistantMarkdownContent.vue'
 import { useDisplayFormatters } from 'src/composables/useDisplayFormatters'
 import {
   DOCUMENT_UPLOAD_FORMAT_TOKENS,
   buildDocumentUploadAcceptString,
+  isAcceptedDocumentUpload,
 } from 'src/models/ui/documentFormats'
-import { uploadDocuments } from 'src/services/api/documents'
+import type { LibraryGraphCoverageSummary, LibraryReadinessSummary } from 'src/models/ui/documents'
+import {
+  resolveLibraryKnowledgeSummaryProjection,
+  uploadDocuments,
+  type LibraryKnowledgeSummaryResponse,
+} from 'src/services/api/documents'
 import type {
   ExecuteQueryTurnPayload,
   QuerySession,
@@ -19,6 +26,7 @@ import type {
   QueryTurnStreamStage,
   QueryTurn,
 } from 'src/services/api/query'
+import { isExactTechnicalQuery } from 'src/services/api/query'
 import { useQueryStore } from 'src/stores/query'
 import { useShellStore } from 'src/stores/shell'
 
@@ -38,6 +46,10 @@ interface RenderedChatMessage {
 
 type AssistantProgressStage = 'retrieving' | 'grounding' | 'answering'
 
+function buildComposerFileKey(file: File): string {
+  return [file.name, String(file.size), String(file.lastModified)].join(':')
+}
+
 const MAX_LIBRARY_CHAT_SESSIONS = 5
 
 const queryStore = useQueryStore()
@@ -52,16 +64,16 @@ const {
   activeSession,
   error,
   executingTurn,
-  groundedChunkReferences,
-  groundedEntityReferences,
-  groundedEvidenceReferences,
-  groundedRelationReferences,
   loadingExecution,
   loadingSession,
   loadingSessions,
   sessions,
+  verificationState,
+  verificationWarnings,
 } = storeToRefs(queryStore)
 const { activeLibrary, activeWorkspace } = storeToRefs(shellStore)
+const initialCompactAssistantLayout =
+  typeof window !== 'undefined' ? window.innerWidth <= 1080 : false
 
 const transientNotice = ref<string | null>(null)
 const syncingLibrary = ref(false)
@@ -75,11 +87,13 @@ const pendingUserMessage = ref<string | null>(null)
 const pendingAssistantStage = ref<AssistantProgressStage>('retrieving')
 const retainedSession = ref<QuerySessionDetail | null>(null)
 const conversationPinnedToBottom = ref(true)
-const showEvidencePanel = ref(false)
-const showSessionRail = ref(true)
-const compactAssistantLayout = ref(false)
+const showEvidencePanel = ref(!initialCompactAssistantLayout)
+const showSessionRail = ref(!initialCompactAssistantLayout)
+const compactAssistantLayout = ref(initialCompactAssistantLayout)
 const streamedAssistantText = ref('')
 const assistantResponseStreaming = ref(false)
+const libraryReadinessSummary = ref<LibraryReadinessSummary | null>(null)
+const libraryGraphCoverage = ref<LibraryGraphCoverageSummary | null>(null)
 let syncToken = 0
 
 const sessionQueryId = computed(() =>
@@ -104,32 +118,23 @@ const loadingState = computed(
   () =>
     loadingSessions.value || loadingSession.value || loadingExecution.value || syncingLibrary.value,
 )
-const atSessionCapacity = computed(
-  () => sessions.value.length >= MAX_LIBRARY_CHAT_SESSIONS,
-)
+const atSessionCapacity = computed(() => sessions.value.length >= MAX_LIBRARY_CHAT_SESSIONS)
 const sessionCapacityLabel = computed(
-  () => `${sessions.value.length}/${MAX_LIBRARY_CHAT_SESSIONS}`,
+  () => `${String(sessions.value.length)}/${String(MAX_LIBRARY_CHAT_SESSIONS)}`,
 )
-const toolbarHint = computed(() => (atSessionCapacity.value ? t('assistant.toolbar.rollover') : null))
+const toolbarHint = computed(() =>
+  atSessionCapacity.value ? t('assistant.toolbar.rollover') : null,
+)
 const composerDisabled = computed(
   () =>
-    !assistantReady.value ||
-    syncingLibrary.value ||
-    loadingSession.value ||
-    executingTurn.value,
+    !assistantReady.value || syncingLibrary.value || loadingSession.value || executingTurn.value,
 )
-const sessionTransitioning = computed(
-  () => syncingLibrary.value || loadingSession.value,
-)
+const sessionTransitioning = computed(() => syncingLibrary.value || loadingSession.value)
 const sessionsToggleLabel = computed(() =>
-  showSessionRail.value
-    ? t('assistant.actions.hideSessions')
-    : t('assistant.actions.showSessions'),
+  showSessionRail.value ? t('assistant.actions.hideSessions') : t('assistant.actions.showSessions'),
 )
 const contextToggleLabel = computed(() =>
-  showEvidencePanel.value
-    ? t('assistant.actions.hideContext')
-    : t('assistant.actions.showContext'),
+  showEvidencePanel.value ? t('assistant.actions.hideContext') : t('assistant.actions.showContext'),
 )
 const showSessionSearch = computed(() => sessions.value.length >= 4)
 const starterPrompts = computed(() => [
@@ -173,6 +178,104 @@ const activeSessionMeta = computed(() => {
   return `${libraryName} · ${formatCompactDateTime(activeThreadSession.value.session.updatedAt)}`
 })
 
+const assistantSubtitle = computed(() => {
+  if (!activeLibrary.value) {
+    return t('assistant.states.noLibraryBody')
+  }
+
+  return t('assistant.subtitle', {
+    library: activeLibrary.value.name,
+  })
+})
+
+const assistantSummaryCards = computed(() => {
+  const cards: {
+    key: string
+    label: string
+    value: string
+    tone: 'library' | 'session' | 'processing' | 'settling' | 'graph' | 'facts'
+  }[] = []
+
+  if (activeLibrary.value) {
+    cards.push({
+      key: 'library',
+      label: t('assistant.summary.library'),
+      value: activeLibrary.value.name,
+      tone: 'library',
+    })
+  }
+
+  if (sessions.value.length > 0) {
+    cards.push({
+      key: 'sessions',
+      label: t('assistant.summary.sessions'),
+      value: String(sessions.value.length),
+      tone: 'session',
+    })
+  }
+
+  const counts = libraryReadinessSummary.value?.documentCountsByReadiness
+  if (counts && counts.processing > 0) {
+    cards.push({
+      key: 'processing',
+      label: t('assistant.summary.processing'),
+      value: String(counts.processing),
+      tone: 'processing',
+    })
+  }
+
+  if (counts && counts.readable + counts.graphSparse > 0) {
+    cards.push({
+      key: 'settling',
+      label: t('assistant.summary.settling'),
+      value: String(counts.readable + counts.graphSparse),
+      tone: 'settling',
+    })
+  }
+
+  if (counts && counts.graphReady > 0) {
+    cards.push({
+      key: 'graphReady',
+      label: t('assistant.summary.graphReady'),
+      value: String(counts.graphReady),
+      tone: 'graph',
+    })
+  }
+
+  const factCoverage = libraryGraphCoverage.value?.typedFactDocumentCount ?? 0
+  if (factCoverage > 0) {
+    cards.push({
+      key: 'typedFacts',
+      label: t('assistant.summary.typedFacts'),
+      value: String(factCoverage),
+      tone: 'facts',
+    })
+  }
+
+  return cards.slice(0, 5)
+})
+
+const showContextSummary = computed(
+  () => assistantSummaryCards.value.length > 0 && showEvidencePanel.value,
+)
+
+const showContextSignals = computed(
+  () =>
+    showEvidencePanel.value &&
+    (showVerificationBanner.value || Boolean(libraryReadinessWarning.value)),
+)
+
+const contextIndicatorCount = computed(() => {
+  let count = 0
+  if (showVerificationBanner.value) {
+    count += 1
+  }
+  if (libraryReadinessWarning.value) {
+    count += 1
+  }
+  return count
+})
+
 const emptyConversation = computed(
   () =>
     !loadingState.value &&
@@ -182,9 +285,7 @@ const emptyConversation = computed(
     !executingTurn.value,
 )
 
-const pendingAssistantLabel = computed(() =>
-  t(`assistant.progress.${pendingAssistantStage.value}`),
-)
+const pendingAssistantLabel = computed(() => t(`assistant.progress.${pendingAssistantStage.value}`))
 
 const pendingAssistantSteps = computed(() => {
   const stages: AssistantProgressStage[] = ['retrieving', 'grounding', 'answering']
@@ -192,12 +293,7 @@ const pendingAssistantSteps = computed(() => {
   return stages.map((stage, index) => ({
     key: stage,
     label: t(`assistant.progress.${stage}`),
-    state:
-      index < activeIndex
-        ? 'complete'
-        : index === activeIndex
-          ? 'active'
-          : 'idle',
+    state: index < activeIndex ? 'complete' : index === activeIndex ? 'active' : 'idle',
   }))
 })
 
@@ -260,6 +356,47 @@ const chatNotice = computed<AssistantNotice | null>(() => {
   return null
 })
 
+const showVerificationBanner = computed(() =>
+  Boolean(
+    activeExecution.value &&
+    (verificationState.value !== 'not_run' || verificationWarnings.value.length > 0),
+  ),
+)
+
+const exactTechnicalPrompt = computed(
+  () =>
+    activeExecution.value?.execution.queryText ?? pendingUserMessage.value ?? composerText.value,
+)
+
+const libraryReadinessWarning = computed(() => {
+  if (!activeExecution.value || !libraryReadinessSummary.value) {
+    return null
+  }
+
+  if (!isExactTechnicalQuery(exactTechnicalPrompt.value)) {
+    return null
+  }
+
+  const counts = libraryReadinessSummary.value.documentCountsByReadiness
+  if (counts.readable + counts.graphSparse <= 0) {
+    return null
+  }
+
+  return {
+    title: t('assistant.readinessWarning.title'),
+    body: t('assistant.readinessWarning.body', {
+      readable: counts.readable,
+      graphSparse: counts.graphSparse,
+    }),
+    factHint:
+      (libraryGraphCoverage.value?.typedFactDocumentCount ?? 0) > 0
+        ? t('assistant.readinessWarning.factHint', {
+            count: libraryGraphCoverage.value?.typedFactDocumentCount ?? 0,
+          })
+        : null,
+  }
+})
+
 function isWeakSessionTitle(value: string | null): boolean {
   const normalized = value?.trim() ?? ''
   if (!normalized) {
@@ -315,13 +452,10 @@ function messageTimeLabel(turn: QueryTurn | RenderedChatMessage): string {
 }
 
 function composeSessionPreview(session: QuerySession): string {
+  const activeThread = activeThreadSession.value
   const title =
-    session.id === activeThreadSession.value?.session.id
-      ? resolveSessionTitle(
-          session,
-          activeThreadSession.value?.turns ?? [],
-          pendingUserMessage.value,
-        )
+    session.id === activeThread?.session.id
+      ? resolveSessionTitle(session, activeThread.turns, pendingUserMessage.value)
       : resolveSessionTitle(session)
   return title.length > 74 ? `${title.slice(0, 74)}…` : title
 }
@@ -340,7 +474,7 @@ function syncComposerHeight(): void {
     return
   }
   textarea.style.height = 'auto'
-  textarea.style.height = `${Math.min(textarea.scrollHeight, 220)}px`
+  textarea.style.height = `${String(Math.min(textarea.scrollHeight, 220))}px`
 }
 
 function isConversationNearBottom(element: HTMLElement, threshold = 96): boolean {
@@ -424,6 +558,8 @@ watch(activeLibraryId, (nextLibraryId, previousLibraryId) => {
   if (nextLibraryId !== previousLibraryId) {
     retainedSession.value = null
     stopAssistantResponseStream()
+    libraryReadinessSummary.value = null
+    libraryGraphCoverage.value = null
   }
 })
 
@@ -433,8 +569,14 @@ watch(composerText, () => {
 
 function syncAssistantViewportState(): void {
   const viewportWidth = window.innerWidth
-  compactAssistantLayout.value = viewportWidth <= 1080
-  showSessionRail.value = viewportWidth > 1080
+  const nextCompactLayout = viewportWidth <= 1080
+  const layoutChanged = nextCompactLayout !== compactAssistantLayout.value
+  compactAssistantLayout.value = nextCompactLayout
+  showSessionRail.value = !nextCompactLayout
+
+  if (layoutChanged) {
+    showEvidencePanel.value = !nextCompactLayout
+  }
 }
 
 onMounted(() => {
@@ -459,6 +601,33 @@ async function syncLatestExecution(): Promise<void> {
     return
   }
   await queryStore.loadExecution(latestExecutionId)
+  if (activeLibraryId.value) {
+    await syncLibraryReadiness(activeLibraryId.value)
+  }
+}
+
+async function syncLibraryReadiness(libraryId: string): Promise<void> {
+  const fallbackSummary: LibraryKnowledgeSummaryResponse | null =
+    libraryReadinessSummary.value && libraryGraphCoverage.value
+      ? {
+          libraryId,
+          readinessSummary: libraryReadinessSummary.value,
+          graphCoverage: libraryGraphCoverage.value,
+          latestGeneration: null,
+        }
+      : null
+  const summaryProjection = await resolveLibraryKnowledgeSummaryProjection(
+    libraryId,
+    fallbackSummary,
+  )
+  if (activeLibraryId.value !== libraryId) {
+    return
+  }
+  libraryReadinessSummary.value = summaryProjection.summary?.readinessSummary ?? null
+  libraryGraphCoverage.value = summaryProjection.summary?.graphCoverage ?? null
+  if (summaryProjection.warning) {
+    transientNotice.value ??= t('assistant.notices.summaryUnavailable')
+  }
 }
 
 async function replaceSessionQuery(sessionId: string): Promise<void> {
@@ -482,8 +651,8 @@ async function ensureActiveSession(): Promise<string> {
     return currentSessionId
   }
 
-  const firstSession = sessions.value[0] ?? null
-  if (firstSession) {
+  const firstSession = sessions.value.at(0)
+  if (firstSession !== undefined) {
     await queryStore.loadSession(firstSession.id)
     await replaceSessionQuery(firstSession.id)
     return firstSession.id
@@ -527,6 +696,7 @@ async function syncAssistantLibrary(libraryId: string): Promise<void> {
   queryStore.reset()
 
   try {
+    await syncLibraryReadiness(libraryId)
     await queryStore.loadSessions(libraryId)
     if (token !== syncToken) {
       return
@@ -534,8 +704,7 @@ async function syncAssistantLibrary(libraryId: string): Promise<void> {
 
     const targetSessionId =
       sessions.value.find((session) => session.id === sessionQueryId.value)?.id ??
-      sessions.value[0]?.id ??
-      null
+      sessions.value[0]?.id
 
     if (targetSessionId) {
       await queryStore.loadSession(targetSessionId)
@@ -628,6 +797,9 @@ async function uploadComposerFiles(files: File[]): Promise<number> {
     return 0
   }
   const result = await uploadDocuments(files)
+  if (activeLibraryId.value) {
+    await syncLibraryReadiness(activeLibraryId.value)
+  }
   return result.acceptedRows.length
 }
 
@@ -642,19 +814,85 @@ function handleComposerFiles(event: Event): void {
     return
   }
 
-  const knownFiles = new Map(
-    composerFiles.value.map((file) => [
-      `${file.name}:${file.size}:${file.lastModified}`,
-      file,
-    ]),
-  )
-  for (const file of nextFiles) {
-    knownFiles.set(`${file.name}:${file.size}:${file.lastModified}`, file)
-  }
-  composerFiles.value = Array.from(knownFiles.values())
+  mergeComposerFiles(nextFiles)
 
   if (input) {
     input.value = ''
+  }
+}
+
+function mergeComposerFiles(nextFiles: File[]): void {
+  const knownFiles = new Map(composerFiles.value.map((file) => [buildComposerFileKey(file), file]))
+  for (const file of nextFiles) {
+    knownFiles.set(buildComposerFileKey(file), file)
+  }
+  composerFiles.value = Array.from(knownFiles.values())
+}
+
+function inferClipboardFileExtension(mimeType: string): string {
+  const normalized = mimeType.trim().toLowerCase()
+  switch (normalized) {
+    case 'image/jpeg':
+      return 'jpg'
+    case 'image/png':
+      return 'png'
+    case 'image/gif':
+      return 'gif'
+    case 'image/webp':
+      return 'webp'
+    case 'image/bmp':
+      return 'bmp'
+    case 'image/tiff':
+      return 'tiff'
+    case 'image/svg+xml':
+      return 'svg'
+    case 'image/heic':
+      return 'heic'
+    case 'image/heif':
+      return 'heif'
+    default:
+      return normalized.split('/')[1]?.replace('+xml', '') || 'png'
+  }
+}
+
+function normalizeClipboardFile(file: File, index: number): File {
+  if (file.name.trim().length > 0) {
+    return file
+  }
+  const mimeType = file.type || 'image/png'
+  const extension = inferClipboardFileExtension(mimeType)
+  return new File([file], `clipboard-image-${Date.now()}-${index + 1}.${extension}`, {
+    type: mimeType,
+    lastModified: Date.now(),
+  })
+}
+
+function extractPastedImageFiles(event: ClipboardEvent): File[] {
+  const items = Array.from(event.clipboardData?.items ?? [])
+  return items
+    .filter((item) => item.kind === 'file')
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => file instanceof File)
+    .map((file, index) => normalizeClipboardFile(file, index))
+    .filter((file) => isAcceptedDocumentUpload(file, ['images']))
+}
+
+function handleComposerPaste(event: ClipboardEvent): void {
+  if (composerDisabled.value) {
+    return
+  }
+
+  const pastedFiles = extractPastedImageFiles(event)
+  if (pastedFiles.length === 0) {
+    return
+  }
+
+  mergeComposerFiles(pastedFiles)
+  transientNotice.value = t('assistant.notices.imagesPasted', { count: pastedFiles.length })
+
+  const plainText = event.clipboardData?.getData('text/plain')?.trim() ?? ''
+  if (plainText.length === 0) {
+    event.preventDefault()
   }
 }
 
@@ -750,7 +988,7 @@ async function sendPrompt(): Promise<void> {
     }
     focusComposer()
     await scrollConversationToBottom('smooth')
-  } catch (sendError) {
+  } catch {
     pendingUserMessage.value = null
     stopAssistantProgress()
     stopAssistantResponseStream()
@@ -765,10 +1003,10 @@ function openDocuments(): void {
 }
 
 function openGraph(): void {
-  const firstEntityReference = groundedEntityReferences.value[0]
+  const firstEntityReference = activeExecution.value?.entityReferences[0]
   void router.push(
     firstEntityReference
-      ? { path: '/graph', query: { node: firstEntityReference.entityId } }
+      ? { path: '/graph', query: { node: firstEntityReference.nodeId } }
       : '/graph',
   )
 }
@@ -789,7 +1027,9 @@ function retryAssistant(): void {
   <div class="rr-assistant-page">
     <div class="rr-assistant-page__header">
       <div class="rr-assistant-page__copy">
+        <span class="rr-assistant-page__eyebrow">{{ t('assistant.eyebrow') }}</span>
         <h1>{{ t('assistant.title') }}</h1>
+        <p>{{ assistantSubtitle }}</p>
       </div>
     </div>
 
@@ -875,21 +1115,15 @@ function retryAssistant(): void {
               </button>
             </div>
 
-            <label
-              v-if="showSessionSearch"
-              class="rr-field rr-assistant-chat__search"
-            >
+            <label v-if="showSessionSearch" class="rr-field rr-assistant-chat__search">
               <input
                 v-model="sessionSearch"
                 type="search"
                 :placeholder="t('assistant.chat.search')"
-              >
+              />
             </label>
 
-            <div
-              v-if="filteredSessions.length > 0"
-              class="rr-assistant-chat__session-list"
-            >
+            <div v-if="filteredSessions.length > 0" class="rr-assistant-chat__session-list">
               <button
                 v-for="session in filteredSessions"
                 :key="session.id"
@@ -906,10 +1140,7 @@ function retryAssistant(): void {
               </button>
             </div>
 
-            <div
-              v-else
-              class="rr-assistant-chat__rail-empty"
-            >
+            <div v-else class="rr-assistant-chat__rail-empty">
               <strong>{{ t('assistant.chat.searchEmptyTitle') }}</strong>
               <p>{{ t('assistant.chat.searchEmptyBody') }}</p>
             </div>
@@ -945,7 +1176,8 @@ function retryAssistant(): void {
                     :title="contextToggleLabel"
                     @click="toggleEvidencePanel"
                   >
-                    {{ t('assistant.actions.context') }}
+                    <span>{{ t('assistant.actions.context') }}</span>
+                    <em v-if="contextIndicatorCount > 0">{{ contextIndicatorCount }}</em>
                   </button>
                 </div>
               </div>
@@ -964,10 +1196,7 @@ function retryAssistant(): void {
               class="rr-assistant-chat__thread-body"
               @scroll="handleConversationScroll"
             >
-              <div
-              v-if="emptyConversation"
-                class="rr-assistant-chat__empty"
-              >
+              <div v-if="emptyConversation" class="rr-assistant-chat__empty">
                 <strong>{{ t('assistant.chat.emptyConversationTitle') }}</strong>
                 <p>{{ t('assistant.chat.emptyConversationBody') }}</p>
                 <div class="rr-assistant-chat__starter-list">
@@ -983,10 +1212,7 @@ function retryAssistant(): void {
                 </div>
               </div>
 
-              <div
-                v-else
-                class="rr-assistant-chat__message-list"
-              >
+              <div v-else class="rr-assistant-chat__message-list">
                 <article
                   v-for="message in renderedMessages"
                   :key="message.id"
@@ -994,7 +1220,9 @@ function retryAssistant(): void {
                   :class="`rr-assistant-chat__message--${message.author}`"
                 >
                   <div class="rr-assistant-chat__message-meta">
-                    <strong>{{ message.author === 'assistant' ? 'RustRAG AI' : viewerUserName }}</strong>
+                    <strong>{{
+                      message.author === 'assistant' ? 'RustRAG AI' : viewerUserName
+                    }}</strong>
                     <span>{{ messageTimeLabel(message) }}</span>
                   </div>
 
@@ -1059,10 +1287,7 @@ function retryAssistant(): void {
 
             <div class="rr-assistant-chat__composer">
               <div class="rr-assistant-chat__composer-inner">
-                <div
-                  v-if="composerFiles.length > 0"
-                  class="rr-assistant-chat__composer-files"
-                >
+                <div v-if="composerFiles.length > 0" class="rr-assistant-chat__composer-files">
                   <button
                     v-for="(file, index) in composerFiles"
                     :key="`${file.name}-${file.size}-${file.lastModified}`"
@@ -1104,6 +1329,7 @@ function retryAssistant(): void {
                     rows="1"
                     @input="syncComposerHeight"
                     @keydown="handleComposerKeydown"
+                    @paste="handleComposerPaste"
                   />
 
                   <input
@@ -1113,12 +1339,14 @@ function retryAssistant(): void {
                     multiple
                     :accept="acceptedFiles"
                     @change="handleComposerFiles"
-                  >
+                  />
 
                   <button
                     type="button"
                     class="rr-assistant-chat__composer-send"
-                    :disabled="composerDisabled || (!composerText.trim() && composerFiles.length === 0)"
+                    :disabled="
+                      composerDisabled || (!composerText.trim() && composerFiles.length === 0)
+                    "
                     :aria-label="t('assistant.actions.send')"
                     :title="t('assistant.actions.send')"
                     @click="sendPrompt"
@@ -1161,16 +1389,46 @@ function retryAssistant(): void {
         class="rr-assistant-page__context-shell"
         :class="{ 'rr-assistant-page__context-shell--overlay': compactAssistantLayout }"
       >
+        <div v-if="showContextSummary" class="rr-assistant-page__context-summary">
+          <article
+            v-for="card in assistantSummaryCards"
+            :key="card.key"
+            class="rr-assistant-page__summary-card"
+            :class="`rr-assistant-page__summary-card--${card.tone}`"
+          >
+            <span>{{ card.label }}</span>
+            <strong>{{ card.value }}</strong>
+          </article>
+        </div>
+
+        <div v-if="showContextSignals" class="rr-assistant-page__context-signals">
+          <AssistantVerificationBanner
+            v-if="showVerificationBanner"
+            compact
+            :state="verificationState"
+            :warnings="verificationWarnings"
+          />
+
+          <section
+            v-if="libraryReadinessWarning"
+            class="rr-assistant-readiness-warning rr-assistant-readiness-warning--dense"
+          >
+            <div class="rr-assistant-readiness-warning__copy">
+              <span>{{ libraryReadinessWarning.title }}</span>
+              <strong>{{ libraryReadinessWarning.body }}</strong>
+              <p v-if="libraryReadinessWarning.factHint">
+                {{ libraryReadinessWarning.factHint }}
+              </p>
+            </div>
+          </section>
+        </div>
+
         <AssistantEvidencePanel
           :library-name="activeLibrary?.name ?? '—'"
           :executing="executingTurn || assistantResponseStreaming"
           :error="error"
           :execution="activeExecution"
           :bundle="activeBundle"
-          :chunk-references="groundedChunkReferences"
-          :entity-references="groundedEntityReferences"
-          :relation-references="groundedRelationReferences"
-          :evidence-references="groundedEvidenceReferences"
           :closable="compactAssistantLayout"
           @open-documents="openDocuments"
           @open-graph="openGraph"

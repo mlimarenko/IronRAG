@@ -1,7 +1,6 @@
 import type {
   GraphCanonicalSummary,
   GraphConvergenceStatus,
-  GraphDocumentPipelineCounters,
   GraphDiagnostics,
   GraphEdge,
   GraphEvidence,
@@ -15,10 +14,27 @@ import type {
 } from 'src/models/ui/graph'
 import { resolveDefaultGraphLayoutMode } from 'src/models/ui/graph'
 import type { DashboardAttentionItem } from 'src/models/ui/dashboard'
+import type {
+  DocumentsSurfaceResponse,
+  LibraryGraphCoverageSummary,
+  LibraryReadinessSummary,
+} from 'src/models/ui/documents'
 import { i18n } from 'src/lib/i18n'
 import { useShellStore } from 'src/stores/shell'
-import { fetchDocumentSummaryCounters } from './documents'
+import {
+  buildEmptyLibraryKnowledgeSummary,
+  resolveLibraryKnowledgeSummaryProjection,
+} from './documents'
 import { ApiClientError, apiHttp, unwrap } from './http'
+import {
+  normalizeWireNullableNumber,
+  normalizeWireNullableString,
+  normalizeWireNumber,
+  normalizeWireString,
+  normalizeWireStringArray,
+  readWireValue,
+  type WireRecord,
+} from './wire'
 
 interface RawKnowledgeDocumentRow {
   key: string
@@ -172,7 +188,7 @@ interface RawKnowledgeDocumentDetailResponse {
 
 interface RawKnowledgeEntityDetailResponse {
   entity: RawKnowledgeEntityRow
-  mentionEdges: Array<{
+  mentionEdges: {
     key: string
     entityId: string
     chunkId: string
@@ -180,9 +196,9 @@ interface RawKnowledgeEntityDetailResponse {
     score: number | null
     inclusionReason: string | null
     createdAt: string
-  }>
+  }[]
   mentionedChunks: RawKnowledgeChunkRow[]
-  supportingEvidenceEdges: Array<{
+  supportingEvidenceEdges: {
     key: string
     evidenceId: string
     entityId: string
@@ -190,13 +206,13 @@ interface RawKnowledgeEntityDetailResponse {
     score: number | null
     inclusionReason: string | null
     createdAt: string
-  }>
+  }[]
   supportingEvidence: RawKnowledgeEvidenceRow[]
 }
 
 interface RawKnowledgeRelationDetailResponse {
   relation: RawKnowledgeRelationRow
-  supportingEvidenceEdges: Array<{
+  supportingEvidenceEdges: {
     key: string
     evidenceId: string
     relationId: string
@@ -204,7 +220,7 @@ interface RawKnowledgeRelationDetailResponse {
     score: number | null
     inclusionReason: string | null
     createdAt: string
-  }>
+  }[]
   supportingEvidence: RawKnowledgeEvidenceRow[]
 }
 
@@ -229,220 +245,247 @@ export interface GraphSurfaceHeartbeat {
   graphGeneration: number
   graphGenerationState: string | null
   lastBuiltAt: string | null
-  documentCounters: GraphDocumentPipelineCounters
+  readinessSummary: LibraryReadinessSummary | null
+  graphCoverage: LibraryGraphCoverageSummary | null
   warning: string | null
 }
 
-type RawRow = Record<string, unknown>
-
-function emptyDocumentCounters(): GraphDocumentPipelineCounters {
-  return {
-    queued: 0,
-    processing: 0,
-    ready: 0,
-    readyNoGraph: 0,
-    failed: 0,
-  }
+function emptyReadinessSummary(libraryId = ''): LibraryReadinessSummary {
+  return buildEmptyLibraryKnowledgeSummary(libraryId).readinessSummary
 }
 
-function normalizeKnowledgeDocumentRow(row: RawRow): RawKnowledgeDocumentRow {
-  return {
-    key: String(row.key ?? row._key ?? ''),
-    arangoId: (row.arangoId ?? row._id ?? null) as string | null,
-    arangoRev: (row.arangoRev ?? row._rev ?? null) as string | null,
-    documentId: String(row.documentId ?? row.document_id ?? ''),
-    workspaceId: String(row.workspaceId ?? row.workspace_id ?? ''),
-    libraryId: String(row.libraryId ?? row.library_id ?? ''),
-    externalKey: String(row.externalKey ?? row.external_key ?? ''),
-    title: (row.title ?? null) as string | null,
-    documentState: String(row.documentState ?? row.document_state ?? ''),
-    activeRevisionId: (row.activeRevisionId ?? row.active_revision_id ?? null) as string | null,
-    readableRevisionId: (row.readableRevisionId ?? row.readable_revision_id ?? null) as
-      | string
-      | null,
-    latestRevisionNo: (row.latestRevisionNo ?? row.latest_revision_no ?? null) as number | null,
-    createdAt: String(row.createdAt ?? row.created_at ?? ''),
-    updatedAt: String(row.updatedAt ?? row.updated_at ?? ''),
-    deletedAt: (row.deletedAt ?? row.deleted_at ?? null) as string | null,
-  }
+function emptyGraphCoverage(libraryId = ''): LibraryGraphCoverageSummary {
+  return buildEmptyLibraryKnowledgeSummary(libraryId).graphCoverage
 }
 
-function normalizeKnowledgeRevisionRow(row: RawRow): RawKnowledgeRevisionRow {
+function normalizeKnowledgeDocumentRow(row: WireRecord): RawKnowledgeDocumentRow {
   return {
-    key: String(row.key ?? row._key ?? ''),
-    arangoId: (row.arangoId ?? row._id ?? null) as string | null,
-    arangoRev: (row.arangoRev ?? row._rev ?? null) as string | null,
-    revisionId: String(row.revisionId ?? row.revision_id ?? ''),
-    workspaceId: String(row.workspaceId ?? row.workspace_id ?? ''),
-    libraryId: String(row.libraryId ?? row.library_id ?? ''),
-    documentId: String(row.documentId ?? row.document_id ?? ''),
-    revisionNumber: Number(row.revisionNumber ?? row.revision_number ?? 0),
-    revisionState: String(row.revisionState ?? row.revision_state ?? ''),
-    revisionKind: String(row.revisionKind ?? row.revision_kind ?? ''),
-    storageRef: (row.storageRef ?? row.storage_ref ?? null) as string | null,
-    mimeType: String(row.mimeType ?? row.mime_type ?? ''),
-    checksum: String(row.checksum ?? ''),
-    title: (row.title ?? null) as string | null,
-    byteSize: Number(row.byteSize ?? row.byte_size ?? 0),
-    normalizedText: (row.normalizedText ?? row.normalized_text ?? null) as string | null,
-    textChecksum: (row.textChecksum ?? row.text_checksum ?? null) as string | null,
-    textState: String(row.textState ?? row.text_state ?? ''),
-    vectorState: String(row.vectorState ?? row.vector_state ?? ''),
-    graphState: String(row.graphState ?? row.graph_state ?? ''),
-    textReadableAt: (row.textReadableAt ?? row.text_readable_at ?? null) as string | null,
-    vectorReadyAt: (row.vectorReadyAt ?? row.vector_ready_at ?? null) as string | null,
-    graphReadyAt: (row.graphReadyAt ?? row.graph_ready_at ?? null) as string | null,
-    supersededByRevisionId: (row.supersededByRevisionId ??
-      row.superseded_by_revision_id ??
-      null) as string | null,
-    createdAt: String(row.createdAt ?? row.created_at ?? ''),
-  }
-}
-
-function normalizeKnowledgeChunkRow(row: RawRow): RawKnowledgeChunkRow {
-  return {
-    key: String(row.key ?? row._key ?? ''),
-    arangoId: (row.arangoId ?? row._id ?? null) as string | null,
-    arangoRev: (row.arangoRev ?? row._rev ?? null) as string | null,
-    chunkId: String(row.chunkId ?? row.chunk_id ?? ''),
-    workspaceId: String(row.workspaceId ?? row.workspace_id ?? ''),
-    libraryId: String(row.libraryId ?? row.library_id ?? ''),
-    documentId: String(row.documentId ?? row.document_id ?? ''),
-    revisionId: String(row.revisionId ?? row.revision_id ?? ''),
-    chunkIndex: Number(row.chunkIndex ?? row.chunk_index ?? 0),
-    contentText: String(row.contentText ?? row.content_text ?? ''),
-    normalizedText: String(row.normalizedText ?? row.normalized_text ?? ''),
-    spanStart: (row.spanStart ?? row.span_start ?? null) as number | null,
-    spanEnd: (row.spanEnd ?? row.span_end ?? null) as number | null,
-    tokenCount: (row.tokenCount ?? row.token_count ?? null) as number | null,
-    sectionPath: (row.sectionPath ?? row.section_path ?? []) as string[],
-    headingTrail: (row.headingTrail ?? row.heading_trail ?? []) as string[],
-    chunkState: String(row.chunkState ?? row.chunk_state ?? ''),
-    textGeneration: (row.textGeneration ?? row.text_generation ?? null) as number | null,
-    vectorGeneration: (row.vectorGeneration ?? row.vector_generation ?? null) as number | null,
-  }
-}
-
-function normalizeKnowledgeGenerationRow(row: RawRow): RawKnowledgeLibraryGenerationRow {
-  const degradedState = String(
-    row.degradedState ?? row.degraded_state ?? row.generationState ?? row.generation_state ?? '',
-  )
-  const updatedAt = String(
-    row.updatedAt ??
-      row.updated_at ??
-      row.completedAt ??
-      row.completed_at ??
-      row.createdAt ??
-      row.created_at ??
-      '',
-  )
-
-  return {
-    key: String(row.key ?? row._key ?? ''),
-    arangoId: (row.arangoId ?? row._id ?? null) as string | null,
-    arangoRev: (row.arangoRev ?? row._rev ?? null) as string | null,
-    generationId: String(row.generationId ?? row.generation_id ?? row.id ?? ''),
-    workspaceId: String(row.workspaceId ?? row.workspace_id ?? ''),
-    libraryId: String(row.libraryId ?? row.library_id ?? ''),
-    activeTextGeneration: Number(
-      row.activeTextGeneration ??
-        row.active_text_generation ??
-        (degradedState === 'text_readable' ? 1 : 0),
+    key: normalizeWireString(readWireValue(row, 'key', '_key')),
+    arangoId: normalizeWireNullableString(readWireValue(row, 'arangoId', '_id')),
+    arangoRev: normalizeWireNullableString(readWireValue(row, 'arangoRev', '_rev')),
+    documentId: normalizeWireString(readWireValue(row, 'documentId', 'document_id')),
+    workspaceId: normalizeWireString(readWireValue(row, 'workspaceId', 'workspace_id')),
+    libraryId: normalizeWireString(readWireValue(row, 'libraryId', 'library_id')),
+    externalKey: normalizeWireString(readWireValue(row, 'externalKey', 'external_key')),
+    title: normalizeWireNullableString(readWireValue(row, 'title')),
+    documentState: normalizeWireString(readWireValue(row, 'documentState', 'document_state')),
+    activeRevisionId: normalizeWireNullableString(
+      readWireValue(row, 'activeRevisionId', 'active_revision_id'),
     ),
-    activeVectorGeneration: Number(
-      row.activeVectorGeneration ??
-        row.active_vector_generation ??
-        (degradedState === 'vector_ready' ? 1 : 0),
+    readableRevisionId: normalizeWireNullableString(
+      readWireValue(row, 'readableRevisionId', 'readable_revision_id'),
     ),
-    activeGraphGeneration: Number(
-      row.activeGraphGeneration ??
-        row.active_graph_generation ??
-        (degradedState === 'graph_ready' || degradedState === 'ready' ? 1 : 0),
+    latestRevisionNo: normalizeWireNullableNumber(
+      readWireValue(row, 'latestRevisionNo', 'latest_revision_no'),
+    ),
+    createdAt: normalizeWireString(readWireValue(row, 'createdAt', 'created_at')),
+    updatedAt: normalizeWireString(readWireValue(row, 'updatedAt', 'updated_at')),
+    deletedAt: normalizeWireNullableString(readWireValue(row, 'deletedAt', 'deleted_at')),
+  }
+}
+
+function normalizeKnowledgeRevisionRow(row: WireRecord): RawKnowledgeRevisionRow {
+  return {
+    key: normalizeWireString(readWireValue(row, 'key', '_key')),
+    arangoId: normalizeWireNullableString(readWireValue(row, 'arangoId', '_id')),
+    arangoRev: normalizeWireNullableString(readWireValue(row, 'arangoRev', '_rev')),
+    revisionId: normalizeWireString(readWireValue(row, 'revisionId', 'revision_id')),
+    workspaceId: normalizeWireString(readWireValue(row, 'workspaceId', 'workspace_id')),
+    libraryId: normalizeWireString(readWireValue(row, 'libraryId', 'library_id')),
+    documentId: normalizeWireString(readWireValue(row, 'documentId', 'document_id')),
+    revisionNumber: normalizeWireNumber(readWireValue(row, 'revisionNumber', 'revision_number')),
+    revisionState: normalizeWireString(readWireValue(row, 'revisionState', 'revision_state')),
+    revisionKind: normalizeWireString(readWireValue(row, 'revisionKind', 'revision_kind')),
+    storageRef: normalizeWireNullableString(readWireValue(row, 'storageRef', 'storage_ref')),
+    mimeType: normalizeWireString(readWireValue(row, 'mimeType', 'mime_type')),
+    checksum: normalizeWireString(readWireValue(row, 'checksum')),
+    title: normalizeWireNullableString(readWireValue(row, 'title')),
+    byteSize: normalizeWireNumber(readWireValue(row, 'byteSize', 'byte_size')),
+    normalizedText: normalizeWireNullableString(
+      readWireValue(row, 'normalizedText', 'normalized_text'),
+    ),
+    textChecksum: normalizeWireNullableString(readWireValue(row, 'textChecksum', 'text_checksum')),
+    textState: normalizeWireString(readWireValue(row, 'textState', 'text_state')),
+    vectorState: normalizeWireString(readWireValue(row, 'vectorState', 'vector_state')),
+    graphState: normalizeWireString(readWireValue(row, 'graphState', 'graph_state')),
+    textReadableAt: normalizeWireNullableString(
+      readWireValue(row, 'textReadableAt', 'text_readable_at'),
+    ),
+    vectorReadyAt: normalizeWireNullableString(
+      readWireValue(row, 'vectorReadyAt', 'vector_ready_at'),
+    ),
+    graphReadyAt: normalizeWireNullableString(readWireValue(row, 'graphReadyAt', 'graph_ready_at')),
+    supersededByRevisionId: normalizeWireNullableString(
+      readWireValue(row, 'supersededByRevisionId', 'superseded_by_revision_id'),
+    ),
+    createdAt: normalizeWireString(readWireValue(row, 'createdAt', 'created_at')),
+  }
+}
+
+function normalizeKnowledgeChunkRow(row: WireRecord): RawKnowledgeChunkRow {
+  return {
+    key: normalizeWireString(readWireValue(row, 'key', '_key')),
+    arangoId: normalizeWireNullableString(readWireValue(row, 'arangoId', '_id')),
+    arangoRev: normalizeWireNullableString(readWireValue(row, 'arangoRev', '_rev')),
+    chunkId: normalizeWireString(readWireValue(row, 'chunkId', 'chunk_id')),
+    workspaceId: normalizeWireString(readWireValue(row, 'workspaceId', 'workspace_id')),
+    libraryId: normalizeWireString(readWireValue(row, 'libraryId', 'library_id')),
+    documentId: normalizeWireString(readWireValue(row, 'documentId', 'document_id')),
+    revisionId: normalizeWireString(readWireValue(row, 'revisionId', 'revision_id')),
+    chunkIndex: normalizeWireNumber(readWireValue(row, 'chunkIndex', 'chunk_index')),
+    contentText: normalizeWireString(readWireValue(row, 'contentText', 'content_text')),
+    normalizedText: normalizeWireString(readWireValue(row, 'normalizedText', 'normalized_text')),
+    spanStart: normalizeWireNullableNumber(readWireValue(row, 'spanStart', 'span_start')),
+    spanEnd: normalizeWireNullableNumber(readWireValue(row, 'spanEnd', 'span_end')),
+    tokenCount: normalizeWireNullableNumber(readWireValue(row, 'tokenCount', 'token_count')),
+    sectionPath: normalizeWireStringArray(readWireValue(row, 'sectionPath', 'section_path')),
+    headingTrail: normalizeWireStringArray(readWireValue(row, 'headingTrail', 'heading_trail')),
+    chunkState: normalizeWireString(readWireValue(row, 'chunkState', 'chunk_state')),
+    textGeneration: normalizeWireNullableNumber(
+      readWireValue(row, 'textGeneration', 'text_generation'),
+    ),
+    vectorGeneration: normalizeWireNullableNumber(
+      readWireValue(row, 'vectorGeneration', 'vector_generation'),
+    ),
+  }
+}
+
+function normalizeKnowledgeGenerationRow(row: WireRecord): RawKnowledgeLibraryGenerationRow {
+  const degradedState = normalizeWireString(
+    readWireValue(row, 'degradedState', 'degraded_state', 'generationState', 'generation_state'),
+  )
+  const updatedAt = normalizeWireString(
+    readWireValue(
+      row,
+      'updatedAt',
+      'updated_at',
+      'completedAt',
+      'completed_at',
+      'createdAt',
+      'created_at',
+    ),
+  )
+
+  return {
+    key: normalizeWireString(readWireValue(row, 'key', '_key')),
+    arangoId: normalizeWireNullableString(readWireValue(row, 'arangoId', '_id')),
+    arangoRev: normalizeWireNullableString(readWireValue(row, 'arangoRev', '_rev')),
+    generationId: normalizeWireString(readWireValue(row, 'generationId', 'generation_id', 'id')),
+    workspaceId: normalizeWireString(readWireValue(row, 'workspaceId', 'workspace_id')),
+    libraryId: normalizeWireString(readWireValue(row, 'libraryId', 'library_id')),
+    activeTextGeneration: normalizeWireNumber(
+      readWireValue(row, 'activeTextGeneration', 'active_text_generation'),
+      degradedState === 'text_readable' ? 1 : 0,
+    ),
+    activeVectorGeneration: normalizeWireNumber(
+      readWireValue(row, 'activeVectorGeneration', 'active_vector_generation'),
+      degradedState === 'vector_ready' ? 1 : 0,
+    ),
+    activeGraphGeneration: normalizeWireNumber(
+      readWireValue(row, 'activeGraphGeneration', 'active_graph_generation'),
+      degradedState === 'graph_ready' || degradedState === 'ready' ? 1 : 0,
     ),
     degradedState,
     updatedAt,
   }
 }
 
-function normalizeKnowledgeEntityRow(row: RawRow): RawKnowledgeEntityRow {
+function normalizeKnowledgeEntityRow(row: WireRecord): RawKnowledgeEntityRow {
   return {
-    key: String(row.key ?? row._key ?? ''),
-    arangoId: (row.arangoId ?? row._id ?? null) as string | null,
-    arangoRev: (row.arangoRev ?? row._rev ?? null) as string | null,
-    entityId: String(row.entityId ?? row.entity_id ?? ''),
-    workspaceId: String(row.workspaceId ?? row.workspace_id ?? ''),
-    libraryId: String(row.libraryId ?? row.library_id ?? ''),
-    canonicalLabel: String(row.canonicalLabel ?? row.canonical_label ?? ''),
-    aliases: (row.aliases ?? []) as string[],
-    entityType: String(row.entityType ?? row.entity_type ?? ''),
-    summary: (row.summary ?? null) as string | null,
-    confidence: (row.confidence ?? null) as number | null,
-    supportCount: Number(row.supportCount ?? row.support_count ?? 0),
-    freshnessGeneration: Number(row.freshnessGeneration ?? row.freshness_generation ?? 0),
-    entityState: String(row.entityState ?? row.entity_state ?? ''),
-    createdAt: String(row.createdAt ?? row.created_at ?? ''),
-    updatedAt: String(row.updatedAt ?? row.updated_at ?? ''),
+    key: normalizeWireString(readWireValue(row, 'key', '_key')),
+    arangoId: normalizeWireNullableString(readWireValue(row, 'arangoId', '_id')),
+    arangoRev: normalizeWireNullableString(readWireValue(row, 'arangoRev', '_rev')),
+    entityId: normalizeWireString(readWireValue(row, 'entityId', 'entity_id')),
+    workspaceId: normalizeWireString(readWireValue(row, 'workspaceId', 'workspace_id')),
+    libraryId: normalizeWireString(readWireValue(row, 'libraryId', 'library_id')),
+    canonicalLabel: normalizeWireString(readWireValue(row, 'canonicalLabel', 'canonical_label')),
+    aliases: normalizeWireStringArray(readWireValue(row, 'aliases')),
+    entityType: normalizeWireString(readWireValue(row, 'entityType', 'entity_type')),
+    summary: normalizeWireNullableString(readWireValue(row, 'summary')),
+    confidence: normalizeWireNullableNumber(readWireValue(row, 'confidence')),
+    supportCount: normalizeWireNumber(readWireValue(row, 'supportCount', 'support_count')),
+    freshnessGeneration: normalizeWireNumber(
+      readWireValue(row, 'freshnessGeneration', 'freshness_generation'),
+    ),
+    entityState: normalizeWireString(readWireValue(row, 'entityState', 'entity_state')),
+    createdAt: normalizeWireString(readWireValue(row, 'createdAt', 'created_at')),
+    updatedAt: normalizeWireString(readWireValue(row, 'updatedAt', 'updated_at')),
   }
 }
 
-function normalizeKnowledgeRelationRow(row: RawRow): RawKnowledgeRelationRow {
+function normalizeKnowledgeRelationRow(row: WireRecord): RawKnowledgeRelationRow {
   return {
-    key: String(row.key ?? row._key ?? ''),
-    arangoId: (row.arangoId ?? row._id ?? null) as string | null,
-    arangoRev: (row.arangoRev ?? row._rev ?? null) as string | null,
-    relationId: String(row.relationId ?? row.relation_id ?? ''),
-    workspaceId: String(row.workspaceId ?? row.workspace_id ?? ''),
-    libraryId: String(row.libraryId ?? row.library_id ?? ''),
-    predicate: String(row.predicate ?? ''),
-    normalizedAssertion: String(row.normalizedAssertion ?? row.normalized_assertion ?? ''),
-    confidence: (row.confidence ?? null) as number | null,
-    supportCount: Number(row.supportCount ?? row.support_count ?? 0),
-    contradictionState: String(row.contradictionState ?? row.contradiction_state ?? ''),
-    freshnessGeneration: Number(row.freshnessGeneration ?? row.freshness_generation ?? 0),
-    relationState: String(row.relationState ?? row.relation_state ?? ''),
-    subjectEntityId: (row.subjectEntityId ?? row.subject_entity_id ?? null) as string | null,
-    objectEntityId: (row.objectEntityId ?? row.object_entity_id ?? null) as string | null,
-    createdAt: String(row.createdAt ?? row.created_at ?? ''),
-    updatedAt: String(row.updatedAt ?? row.updated_at ?? ''),
+    key: normalizeWireString(readWireValue(row, 'key', '_key')),
+    arangoId: normalizeWireNullableString(readWireValue(row, 'arangoId', '_id')),
+    arangoRev: normalizeWireNullableString(readWireValue(row, 'arangoRev', '_rev')),
+    relationId: normalizeWireString(readWireValue(row, 'relationId', 'relation_id')),
+    workspaceId: normalizeWireString(readWireValue(row, 'workspaceId', 'workspace_id')),
+    libraryId: normalizeWireString(readWireValue(row, 'libraryId', 'library_id')),
+    predicate: normalizeWireString(readWireValue(row, 'predicate')),
+    normalizedAssertion: normalizeWireString(
+      readWireValue(row, 'normalizedAssertion', 'normalized_assertion'),
+    ),
+    confidence: normalizeWireNullableNumber(readWireValue(row, 'confidence')),
+    supportCount: normalizeWireNumber(readWireValue(row, 'supportCount', 'support_count')),
+    contradictionState: normalizeWireString(
+      readWireValue(row, 'contradictionState', 'contradiction_state'),
+    ),
+    freshnessGeneration: normalizeWireNumber(
+      readWireValue(row, 'freshnessGeneration', 'freshness_generation'),
+    ),
+    relationState: normalizeWireString(readWireValue(row, 'relationState', 'relation_state')),
+    subjectEntityId: normalizeWireNullableString(
+      readWireValue(row, 'subjectEntityId', 'subject_entity_id'),
+    ),
+    objectEntityId: normalizeWireNullableString(
+      readWireValue(row, 'objectEntityId', 'object_entity_id'),
+    ),
+    createdAt: normalizeWireString(readWireValue(row, 'createdAt', 'created_at')),
+    updatedAt: normalizeWireString(readWireValue(row, 'updatedAt', 'updated_at')),
   }
 }
 
-function normalizeKnowledgeEvidenceRow(row: RawRow): RawKnowledgeEvidenceRow {
+function normalizeKnowledgeEvidenceRow(row: WireRecord): RawKnowledgeEvidenceRow {
   return {
-    key: String(row.key ?? row._key ?? ''),
-    arangoId: (row.arangoId ?? row._id ?? null) as string | null,
-    arangoRev: (row.arangoRev ?? row._rev ?? null) as string | null,
-    evidenceId: String(row.evidenceId ?? row.evidence_id ?? ''),
-    workspaceId: String(row.workspaceId ?? row.workspace_id ?? ''),
-    libraryId: String(row.libraryId ?? row.library_id ?? ''),
-    documentId: String(row.documentId ?? row.document_id ?? ''),
-    revisionId: String(row.revisionId ?? row.revision_id ?? ''),
-    chunkId: (row.chunkId ?? row.chunk_id ?? null) as string | null,
-    spanStart: (row.spanStart ?? row.span_start ?? null) as number | null,
-    spanEnd: (row.spanEnd ?? row.span_end ?? null) as number | null,
-    excerpt: String(row.excerpt ?? ''),
-    supportKind: String(row.supportKind ?? row.support_kind ?? ''),
-    extractionMethod: String(row.extractionMethod ?? row.extraction_method ?? ''),
-    confidence: (row.confidence ?? null) as number | null,
-    evidenceState: String(row.evidenceState ?? row.evidence_state ?? ''),
-    freshnessGeneration: Number(row.freshnessGeneration ?? row.freshness_generation ?? 0),
-    createdAt: String(row.createdAt ?? row.created_at ?? ''),
-    updatedAt: String(row.updatedAt ?? row.updated_at ?? ''),
+    key: normalizeWireString(readWireValue(row, 'key', '_key')),
+    arangoId: normalizeWireNullableString(readWireValue(row, 'arangoId', '_id')),
+    arangoRev: normalizeWireNullableString(readWireValue(row, 'arangoRev', '_rev')),
+    evidenceId: normalizeWireString(readWireValue(row, 'evidenceId', 'evidence_id')),
+    workspaceId: normalizeWireString(readWireValue(row, 'workspaceId', 'workspace_id')),
+    libraryId: normalizeWireString(readWireValue(row, 'libraryId', 'library_id')),
+    documentId: normalizeWireString(readWireValue(row, 'documentId', 'document_id')),
+    revisionId: normalizeWireString(readWireValue(row, 'revisionId', 'revision_id')),
+    chunkId: normalizeWireNullableString(readWireValue(row, 'chunkId', 'chunk_id')),
+    spanStart: normalizeWireNullableNumber(readWireValue(row, 'spanStart', 'span_start')),
+    spanEnd: normalizeWireNullableNumber(readWireValue(row, 'spanEnd', 'span_end')),
+    excerpt: normalizeWireString(readWireValue(row, 'excerpt')),
+    supportKind: normalizeWireString(readWireValue(row, 'supportKind', 'support_kind')),
+    extractionMethod: normalizeWireString(
+      readWireValue(row, 'extractionMethod', 'extraction_method'),
+    ),
+    confidence: normalizeWireNullableNumber(readWireValue(row, 'confidence')),
+    evidenceState: normalizeWireString(readWireValue(row, 'evidenceState', 'evidence_state')),
+    freshnessGeneration: normalizeWireNumber(
+      readWireValue(row, 'freshnessGeneration', 'freshness_generation'),
+    ),
+    createdAt: normalizeWireString(readWireValue(row, 'createdAt', 'created_at')),
+    updatedAt: normalizeWireString(readWireValue(row, 'updatedAt', 'updated_at')),
   }
 }
 
-function normalizeKnowledgeDocumentGraphLinkRow(row: RawRow): RawKnowledgeDocumentGraphLinkRow {
+function normalizeKnowledgeDocumentGraphLinkRow(row: WireRecord): RawKnowledgeDocumentGraphLinkRow {
   return {
-    documentId: String(row.documentId ?? row.document_id ?? ''),
-    targetNodeId: String(row.targetNodeId ?? row.target_node_id ?? ''),
-    targetNodeType: String(row.targetNodeType ?? row.target_node_type ?? 'entity') as GraphNodeType,
-    relationType: String(row.relationType ?? row.relation_type ?? 'supports'),
-    supportCount: Number(row.supportCount ?? row.support_count ?? 0),
+    documentId: normalizeWireString(readWireValue(row, 'documentId', 'document_id')),
+    targetNodeId: normalizeWireString(readWireValue(row, 'targetNodeId', 'target_node_id')),
+    targetNodeType: resolveNodeType(
+      normalizeWireString(readWireValue(row, 'targetNodeType', 'target_node_type'), 'entity'),
+    ),
+    relationType: normalizeWireString(
+      readWireValue(row, 'relationType', 'relation_type'),
+      'supports',
+    ),
+    supportCount: normalizeWireNumber(readWireValue(row, 'supportCount', 'support_count')),
   }
-}
-
-function resolveActiveLibraryId(): string | null {
-  return useShellStore().context?.activeLibrary.id ?? null
 }
 
 function resolveNodeType(kind: string): GraphNodeType {
@@ -457,6 +500,10 @@ function resolveNodeType(kind: string): GraphNodeType {
     return 'topic'
   }
   return 'entity'
+}
+
+function resolveActiveLibraryId(): string | null {
+  return useShellStore().context?.activeLibrary.id ?? null
 }
 
 function buildLegend(nodes: GraphNode[], edgeCount: number): GraphLegendItem[] {
@@ -494,7 +541,8 @@ function buildEmptySurface(): GraphSurfaceResponse {
     hiddenNodeCount: 0,
     filteredArtifactCount: 0,
     lastBuiltAt: null,
-    documentCounters: emptyDocumentCounters(),
+    readinessSummary: emptyReadinessSummary(),
+    graphCoverage: emptyGraphCoverage(),
     overlay: {
       searchQuery: '',
       searchHits: [],
@@ -601,7 +649,9 @@ function buildSurface(
   rawNodes: GraphNode[],
   rawEdges: GraphEdge[] = [],
   hiddenNodeCount = 0,
-  documentCounters: GraphDocumentPipelineCounters = emptyDocumentCounters(),
+  readinessSummary: LibraryReadinessSummary | null = emptyReadinessSummary(),
+  graphCoverage: LibraryGraphCoverageSummary | null = emptyGraphCoverage(),
+  warningOverride: string | null = null,
 ): GraphSurfaceResponse {
   const relationNodeCount = rawNodes.filter((node) => node.nodeType === 'topic').length
   const graphStatus = mapGraphStatus(generation, rawNodes.length, relationNodeCount)
@@ -640,7 +690,8 @@ function buildSurface(
     hiddenNodeCount,
     filteredArtifactCount,
     lastBuiltAt: generation?.updatedAt ?? null,
-    documentCounters,
+    readinessSummary,
+    graphCoverage,
     overlay: {
       searchQuery: '',
       searchHits: [],
@@ -660,7 +711,7 @@ function buildSurface(
       error: null,
       detail: null,
     },
-    warning: projectionWarning(graphStatus, generationState),
+    warning: warningOverride ?? projectionWarning(graphStatus, generationState),
     nodes: rawNodes,
     edges: rawEdges,
     legend: buildLegend(rawNodes, rawEdges.length),
@@ -689,14 +740,6 @@ function findEntityNode(nodes: GraphNode[], entityId: string): GraphNode | null 
   return (
     nodes.find((node) => node.id === entityId) ??
     nodes.find((node) => node.canonicalKey === `entity:${entityId}`) ??
-    null
-  )
-}
-
-function findRelationNode(nodes: GraphNode[], relationId: string): GraphNode | null {
-  return (
-    nodes.find((node) => node.id === relationId) ??
-    nodes.find((node) => node.canonicalKey === `relation:${relationId}`) ??
     null
   )
 }
@@ -1084,9 +1127,9 @@ function buildDocumentSummary(
   }
 
   const text =
-    latestRevision?.title ??
+    (latestRevision?.title && latestRevision.title.length > 0 ? latestRevision.title : null) ??
     latestRevision?.normalizedText?.slice(0, 220) ??
-    latestRevisionChunks[0]?.contentText.slice(0, 220) ??
+    latestRevisionChunks.at(0)?.contentText.slice(0, 220) ??
     'Document revision'
   const state =
     latestRevision?.graphState ?? latestRevision?.vectorState ?? latestRevision?.textState
@@ -1114,7 +1157,7 @@ function mapDocumentEvidence(
     pageRef:
       chunk.sectionPath.length > 0
         ? chunk.sectionPath.join(' / ')
-        : `chunk ${chunk.chunkIndex + 1}`,
+        : `chunk ${String(chunk.chunkIndex + 1)}`,
     evidenceText: chunk.contentText,
     confidenceScore: null,
     createdAt: document.updatedAt,
@@ -1124,7 +1167,7 @@ function mapDocumentEvidence(
 
 function mapEntityDetail(
   entity: RawKnowledgeEntityRow,
-  mentionEdges: Array<{ chunkId: string }>,
+  mentionEdges: { chunkId: string }[],
   mentionedChunks: RawKnowledgeChunkRow[],
   supportingEvidence: RawKnowledgeEvidenceRow[],
   nodes: GraphNode[],
@@ -1357,10 +1400,10 @@ async function fetchKnowledgeGraphTopology(
   try {
     const topology = await unwrap(
       apiHttp.get<{
-        documents: RawRow[]
-        entities: RawRow[]
-        relations: RawRow[]
-        documentLinks: RawRow[]
+        documents: WireRecord[]
+        entities: WireRecord[]
+        relations: WireRecord[]
+        documentLinks: WireRecord[]
       }>(`/knowledge/libraries/${libraryId}/graph-topology`),
     )
 
@@ -1383,22 +1426,6 @@ async function fetchKnowledgeGraphTopology(
   }
 }
 
-async function fetchKnowledgeGenerations(
-  libraryId: string,
-): Promise<RawKnowledgeLibraryGenerationRow[]> {
-  try {
-    const rows = await unwrap(
-      apiHttp.get<RawRow[]>(`/knowledge/libraries/${libraryId}/generations`),
-    )
-    return rows.map(normalizeKnowledgeGenerationRow)
-  } catch (error) {
-    if (error instanceof ApiClientError && error.statusCode === 404) {
-      return []
-    }
-    throw error
-  }
-}
-
 async function fetchKnowledgeDocumentDetail(
   libraryId: string,
   documentId: string,
@@ -1409,15 +1436,15 @@ async function fetchKnowledgeDocumentDetail(
     ),
   )
   return {
-    document: normalizeKnowledgeDocumentRow(detail.document as unknown as RawRow),
+    document: normalizeKnowledgeDocumentRow(detail.document as unknown as WireRecord),
     revisions: detail.revisions.map((row) =>
-      normalizeKnowledgeRevisionRow(row as unknown as RawRow),
+      normalizeKnowledgeRevisionRow(row as unknown as WireRecord),
     ),
     latestRevision: detail.latestRevision
-      ? normalizeKnowledgeRevisionRow(detail.latestRevision as unknown as RawRow)
+      ? normalizeKnowledgeRevisionRow(detail.latestRevision as unknown as WireRecord)
       : null,
     latestRevisionChunks: detail.latestRevisionChunks.map((row) =>
-      normalizeKnowledgeChunkRow(row as unknown as RawRow),
+      normalizeKnowledgeChunkRow(row as unknown as WireRecord),
     ),
   }
 }
@@ -1432,14 +1459,14 @@ async function fetchKnowledgeEntityDetail(
     ),
   )
   return {
-    entity: normalizeKnowledgeEntityRow(detail.entity as unknown as RawRow),
+    entity: normalizeKnowledgeEntityRow(detail.entity as unknown as WireRecord),
     mentionEdges: detail.mentionEdges,
     mentionedChunks: detail.mentionedChunks.map((row) =>
-      normalizeKnowledgeChunkRow(row as unknown as RawRow),
+      normalizeKnowledgeChunkRow(row as unknown as WireRecord),
     ),
     supportingEvidenceEdges: detail.supportingEvidenceEdges,
     supportingEvidence: detail.supportingEvidence.map((row) =>
-      normalizeKnowledgeEvidenceRow(row as unknown as RawRow),
+      normalizeKnowledgeEvidenceRow(row as unknown as WireRecord),
     ),
   }
 }
@@ -1454,10 +1481,10 @@ async function fetchKnowledgeRelationDetail(
     ),
   )
   return {
-    relation: normalizeKnowledgeRelationRow(detail.relation as unknown as RawRow),
+    relation: normalizeKnowledgeRelationRow(detail.relation as unknown as WireRecord),
     supportingEvidenceEdges: detail.supportingEvidenceEdges,
     supportingEvidence: detail.supportingEvidence.map((row) =>
-      normalizeKnowledgeEvidenceRow(row as unknown as RawRow),
+      normalizeKnowledgeEvidenceRow(row as unknown as WireRecord),
     ),
   }
 }
@@ -1467,27 +1494,39 @@ export async function fetchGraphSurface(libraryId: string): Promise<GraphSurface
     return buildEmptySurface()
   }
 
-  const [topology, generations, documentCounters] = await Promise.all([
+  const [topology, knowledgeSummaryProjection] = await Promise.all([
     fetchKnowledgeGraphTopology(libraryId),
-    fetchKnowledgeGenerations(libraryId),
-    fetchDocumentSummaryCounters(libraryId).catch(() => emptyDocumentCounters()),
+    resolveLibraryKnowledgeSummaryProjection(libraryId),
   ])
 
+  const knowledgeSummary =
+    knowledgeSummaryProjection.summary ?? buildEmptyLibraryKnowledgeSummary(libraryId)
   const { documents, entities, relations, documentLinks } = topology
   const nodes = [
     ...documents.map(mapDocumentRow),
     ...entities.map(mapEntityRow),
     ...relations.map(mapRelationRow),
   ]
-  const latestGeneration = generations[0] ?? null
+  const latestGeneration = knowledgeSummary?.latestGeneration
+    ? normalizeKnowledgeGenerationRow(knowledgeSummary.latestGeneration)
+    : null
   const edges = buildGraphEdges(relations, documentLinks, nodes)
-  return buildSurface(latestGeneration, nodes, edges, 0, documentCounters)
+  return buildSurface(
+    latestGeneration,
+    nodes,
+    edges,
+    0,
+    knowledgeSummary?.readinessSummary ?? emptyReadinessSummary(libraryId),
+    knowledgeSummary?.graphCoverage ?? emptyGraphCoverage(libraryId),
+    knowledgeSummaryProjection.warning,
+  )
 }
 
 export async function fetchGraphSurfaceHeartbeat(
   libraryId: string,
   nodeCount: number,
   relationCount: number,
+  fallback: GraphSurfaceHeartbeat | null = null,
 ): Promise<GraphSurfaceHeartbeat> {
   if (!libraryId) {
     const surface = buildEmptySurface()
@@ -1497,16 +1536,24 @@ export async function fetchGraphSurfaceHeartbeat(
       graphGeneration: surface.graphGeneration,
       graphGenerationState: surface.graphGenerationState ?? null,
       lastBuiltAt: surface.lastBuiltAt,
-      documentCounters: surface.documentCounters,
+      readinessSummary: surface.readinessSummary,
+      graphCoverage: surface.graphCoverage,
       warning: surface.warning,
     }
   }
 
-  const [generations, documentCounters] = await Promise.all([
-    fetchKnowledgeGenerations(libraryId),
-    fetchDocumentSummaryCounters(libraryId).catch(() => emptyDocumentCounters()),
-  ])
-  const latestGeneration = generations[0] ?? null
+  const knowledgeSummaryProjection = await resolveLibraryKnowledgeSummaryProjection(libraryId)
+  if (knowledgeSummaryProjection.warning && fallback) {
+    return {
+      ...fallback,
+      warning: knowledgeSummaryProjection.warning,
+    }
+  }
+  const knowledgeSummary =
+    knowledgeSummaryProjection.summary ?? buildEmptyLibraryKnowledgeSummary(libraryId)
+  const latestGeneration = knowledgeSummary.latestGeneration
+    ? normalizeKnowledgeGenerationRow(knowledgeSummary.latestGeneration)
+    : null
   const graphStatus = mapGraphStatus(latestGeneration, nodeCount, relationCount)
   const graphGenerationState = latestGeneration?.degradedState ?? null
 
@@ -1516,9 +1563,34 @@ export async function fetchGraphSurfaceHeartbeat(
     graphGeneration: graphGenerationOf(latestGeneration),
     graphGenerationState,
     lastBuiltAt: latestGeneration?.updatedAt ?? null,
-    documentCounters,
-    warning: projectionWarning(graphStatus, graphGenerationState),
+    readinessSummary: knowledgeSummary.readinessSummary,
+    graphCoverage: knowledgeSummary.graphCoverage,
+    warning:
+      knowledgeSummaryProjection.warning ?? projectionWarning(graphStatus, graphGenerationState),
   }
+}
+
+export async function fetchDashboardGraphDiagnostics(
+  documentsSurface: DocumentsSurfaceResponse,
+  libraryId?: string | null,
+): Promise<GraphDiagnostics> {
+  const resolvedLibraryId = libraryId ?? resolveActiveLibraryId()
+  if (!resolvedLibraryId) {
+    return buildGraphDiagnostics(buildEmptySurface())
+  }
+
+  const knowledgeSummaryProjection =
+    await resolveLibraryKnowledgeSummaryProjection(resolvedLibraryId)
+  const knowledgeSummary =
+    knowledgeSummaryProjection.summary ?? buildEmptyLibraryKnowledgeSummary(resolvedLibraryId)
+  const latestGeneration = knowledgeSummary?.latestGeneration
+    ? normalizeKnowledgeGenerationRow(knowledgeSummary.latestGeneration)
+    : null
+  return buildDashboardGraphDiagnostics(
+    documentsSurface,
+    latestGeneration,
+    knowledgeSummaryProjection.warning,
+  )
 }
 
 export async function fetchGraphDiagnostics(libraryId?: string): Promise<GraphDiagnostics> {
@@ -1531,9 +1603,81 @@ export async function fetchGraphDiagnostics(libraryId?: string): Promise<GraphDi
   return buildGraphDiagnostics(surface)
 }
 
+function buildDashboardGraphDiagnostics(
+  documentsSurface: DocumentsSurfaceResponse,
+  generation: RawKnowledgeLibraryGenerationRow | null,
+  summaryWarning: string | null = null,
+): GraphDiagnostics {
+  const readiness =
+    documentsSurface.readinessSummary?.documentCountsByReadiness ??
+    emptyReadinessSummary().documentCountsByReadiness
+  const generationState = generation?.degradedState ?? null
+  const graphStatus =
+    generationState?.trim().toLowerCase() === 'rebuilding'
+      ? 'rebuilding'
+      : generationState?.trim().toLowerCase() === 'stale'
+        ? 'stale'
+        : generationState?.trim().toLowerCase() === 'failed' &&
+            documentsSurface.graphStatus !== 'empty'
+          ? 'failed'
+          : documentsSurface.graphStatus
+  const warning =
+    summaryWarning ??
+    projectionWarning(graphStatus, generationState) ??
+    documentsSurface.graphWarning
+  const blockers =
+    graphStatus === 'failed'
+      ? ['The canonical Arango knowledge generation failed.']
+      : graphStatus === 'building' || graphStatus === 'partial'
+        ? ['The canonical Arango knowledge graph is still building.']
+        : graphStatus === 'rebuilding'
+          ? ['The canonical Arango knowledge graph is rebuilding after recent changes.']
+          : graphStatus === 'stale'
+            ? ['The canonical Arango knowledge graph is stale.']
+            : []
+
+  return {
+    graphStatus,
+    reconciliationStatus: graphStatus === 'failed' ? 'failed' : 'current',
+    convergenceStatus: mapConvergenceStatus(graphStatus, generationState),
+    graphGeneration: graphGenerationOf(generation),
+    nodeCount: 0,
+    edgeCount: 0,
+    graphFreshness:
+      graphStatus === 'failed'
+        ? 'failed'
+        : graphStatus === 'stale'
+          ? 'stale'
+          : graphStatus === 'rebuilding'
+            ? 'refreshing'
+            : graphStatus === 'building' || graphStatus === 'partial'
+              ? 'lagging'
+              : 'fresh',
+    rebuildBacklogCount: documentsSurface.rebuildBacklogCount,
+    graphSparseCount: readiness.readable + readiness.graphSparse,
+    pendingUpdateCount: 0,
+    pendingDeleteCount: 0,
+    activeMutationScope: null,
+    filteredArtifactCount: 0,
+    filteredEmptyRelationCount: 0,
+    filteredDegenerateLoopCount: 0,
+    provenanceCoveragePercent: null,
+    lastBuiltAt: generation?.updatedAt ?? documentsSurface.graphCoverage?.updatedAt ?? null,
+    lastErrorMessage: graphStatus === 'failed' ? warning : null,
+    lastMutationWarning: null,
+    activeProvenanceOnly: false,
+    blockers,
+    warning,
+    graphBackend: 'canonical_arango',
+  }
+}
+
 function buildGraphDiagnostics(surface: GraphSurfaceResponse): GraphDiagnostics {
   const graphStatus = surface.graphStatus
   const warning = surface.warning
+  const readiness =
+    surface.readinessSummary?.documentCountsByReadiness ??
+    emptyReadinessSummary().documentCountsByReadiness
   const blockers =
     graphStatus === 'failed'
       ? ['The canonical Arango knowledge generation failed.']
@@ -1562,8 +1706,8 @@ function buildGraphDiagnostics(surface: GraphSurfaceResponse): GraphDiagnostics 
             : graphStatus === 'building' || graphStatus === 'partial'
               ? 'lagging'
               : 'fresh',
-    rebuildBacklogCount: surface.documentCounters.queued + surface.documentCounters.processing,
-    readyNoGraphCount: surface.documentCounters.readyNoGraph,
+    rebuildBacklogCount: readiness.processing,
+    graphSparseCount: readiness.readable + readiness.graphSparse,
     pendingUpdateCount: 0,
     pendingDeleteCount: 0,
     activeMutationScope: null,

@@ -17,6 +17,7 @@ pub enum PricingCapability {
 #[serde(rename_all = "snake_case")]
 pub enum PricingBillingUnit {
     Per1MInputTokens,
+    Per1MCachedInputTokens,
     Per1MOutputTokens,
     Per1MTokens,
     FixedPerCall,

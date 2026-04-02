@@ -10,12 +10,16 @@ use crate::{
         ai::AiBindingPurpose,
         content::ContentDocumentSummary,
         provider_profiles::{EffectiveProviderProfile, ProviderModelSelection},
-        query::{GroupedReferenceKind, RuntimeQueryMode},
+        query::{
+            GroupedReferenceKind, QueryVerificationState, QueryVerificationWarning,
+            RuntimeQueryMode,
+        },
     },
     infra::{
         arangodb::{
             document_store::{
                 KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeLibraryGenerationRow,
+                KnowledgeStructuredBlockRow, KnowledgeTechnicalFactRow,
             },
             graph_store::{GraphViewData, GraphViewEdgeWrite, GraphViewNodeWrite},
         },
@@ -24,7 +28,9 @@ use crate::{
     },
     integrations::llm::{ChatRequest, EmbeddingRequest},
     services::{
-        query_planner::{RuntimeQueryPlan, build_query_plan},
+        query_planner::{
+            QueryIntentProfile, RuntimeQueryPlan, UnsupportedCapabilityIntent, build_query_plan,
+        },
         query_support::{
             GroupedReferenceCandidate, IntentResolutionRequest, RerankCandidate, RerankOutcome,
             RerankRequest, context_assembly_stub, group_visible_references,
@@ -34,6 +40,8 @@ use crate::{
     },
     shared::text_render::repair_technical_layout_noise,
 };
+
+const MAX_CANONICAL_ANSWER_TECHNICAL_FACTS: usize = 24;
 
 #[derive(Debug, Clone, serde::Serialize)]
 struct RuntimeMatchedEntity {
@@ -92,6 +100,7 @@ struct QueryExecutionEnrichment {
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeStructuredQueryResult {
     pub(crate) planned_mode: RuntimeQueryMode,
+    intent_profile: QueryIntentProfile,
     context_text: String,
     technical_literals_text: Option<String>,
     technical_literal_chunks: Vec<RuntimeMatchedChunk>,
@@ -104,6 +113,14 @@ pub(crate) struct RuntimeAnswerQueryResult {
     pub(crate) answer: String,
     pub(crate) provider: ProviderModelSelection,
     pub(crate) usage_json: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+struct CanonicalAnswerEvidence {
+    bundle: Option<crate::infra::arangodb::context_store::KnowledgeContextBundleRow>,
+    chunk_rows: Vec<KnowledgeChunkRow>,
+    structured_blocks: Vec<KnowledgeStructuredBlockRow>,
+    technical_facts: Vec<KnowledgeTechnicalFactRow>,
 }
 
 #[derive(Debug, Clone)]
@@ -187,7 +204,11 @@ async fn execute_structured_query(
     )
     .await?;
     let plan = build_query_plan(question, Some(mode), Some(top_k), Some(&planning));
-    let technical_literal_intent = detect_technical_literal_intent(question);
+    let technical_literal_intent = if plan.intent_profile.exact_literal_technical {
+        detect_technical_literal_intent(question)
+    } else {
+        TechnicalLiteralIntent::default()
+    };
     let question_embedding = embed_question(state, library_id, &provider_profile, question).await?;
     let graph_index = load_graph_index(state, library_id).await?;
     let document_index = load_document_index(state, library_id).await?;
@@ -197,10 +218,7 @@ async fn execute_structured_query(
         state.retrieval_intelligence.rerank_enabled,
         state.retrieval_intelligence.rerank_candidate_limit,
     )
-    .max(technical_literal_candidate_limit(
-        technical_literal_intent,
-        plan.top_k,
-    ));
+    .max(technical_literal_candidate_limit(technical_literal_intent, plan.top_k));
 
     let mut bundle = match plan.planned_mode {
         RuntimeQueryMode::Document => {
@@ -372,6 +390,7 @@ async fn execute_structured_query(
 
     Ok(RuntimeStructuredQueryResult {
         planned_mode: plan.planned_mode,
+        intent_profile: plan.intent_profile,
         context_text,
         technical_literals_text,
         technical_literal_chunks,
@@ -426,7 +445,9 @@ pub(crate) async fn generate_answer_query(
     state: &AppState,
     library_id: Uuid,
     execution_id: Uuid,
-    question: &str,
+    effective_question: &str,
+    user_question: &str,
+    conversation_history: Option<&str>,
     system_prompt: Option<String>,
     prepared: PreparedAnswerQueryResult,
     on_delta: Option<&mut (dyn FnMut(String) + Send)>,
@@ -436,30 +457,42 @@ pub(crate) async fn generate_answer_query(
         state,
         library_id,
         execution_id,
-        question,
+        effective_question,
         &prepared.structured.technical_literal_chunks,
     )
     .await?;
-    let answer = if prepared.answer_context.trim().is_empty() {
+    let canonical_evidence = load_canonical_answer_evidence(state, execution_id).await?;
+    let canonical_answer_context = build_canonical_answer_context(
+        effective_question,
+        &prepared.structured,
+        &canonical_evidence,
+        &canonical_answer_chunks,
+        &prepared.answer_context,
+    );
+    let (answer, provider, usage_json) = if canonical_answer_context.trim().is_empty() {
         let answer = "No grounded evidence is available in the active library yet.".to_string();
         if let Some(on_delta) = on_delta {
             on_delta(answer.clone());
         }
-        answer
-    } else if let Some(answer) =
-        build_deterministic_technical_answer(question, &canonical_answer_chunks)
+        (answer, provider_profile.answer.clone(), serde_json::json!({}))
+    } else if let Some(answer) = build_unsupported_capability_answer(
+        &prepared.structured.intent_profile,
+        effective_question,
+        &canonical_answer_chunks,
+    )
+    .or_else(|| build_deterministic_grounded_answer(effective_question, &canonical_answer_chunks))
     {
         if let Some(on_delta) = on_delta {
             on_delta(answer.clone());
         }
-        return Ok(RuntimeAnswerQueryResult {
+        (
             answer,
-            provider: provider_profile.answer,
-            usage_json: serde_json::json!({
+            provider_profile.answer.clone(),
+            serde_json::json!({
                 "deterministic": true,
-                "reason": "multi_document_endpoint_answer",
+                "reason": "canonical_deterministic_answer",
             }),
-        });
+        )
     } else {
         let answer_binding = state
             .canonical_services
@@ -472,13 +505,19 @@ pub(crate) async fn generate_answer_query(
         let request = ChatRequest {
             provider_kind: answer_binding.provider_kind.clone(),
             model_name: answer_binding.model_name.clone(),
-            prompt: build_answer_prompt(question, &prepared.answer_context, None),
+            prompt: build_answer_prompt(
+                user_question,
+                &canonical_answer_context,
+                conversation_history,
+                None,
+            ),
             api_key_override: Some(answer_binding.api_key),
             base_url_override: answer_binding.provider_base_url,
             system_prompt: system_prompt.or(answer_binding.system_prompt),
             temperature: answer_binding.temperature,
             top_p: answer_binding.top_p,
             max_output_tokens_override: answer_binding.max_output_tokens_override,
+            response_format_json: None,
             extra_parameters_json: answer_binding.extra_parameters_json,
         };
         let response = match on_delta {
@@ -486,21 +525,24 @@ pub(crate) async fn generate_answer_query(
             None => state.llm_gateway.generate(request).await,
         }
         .context("failed to generate grounded answer")?;
-        return Ok(RuntimeAnswerQueryResult {
-            answer: response.output_text.trim().to_string(),
-            provider: ProviderModelSelection {
+        (
+            response.output_text.trim().to_string(),
+            ProviderModelSelection {
                 provider_kind: answer_binding.provider_kind.parse().unwrap_or_default(),
                 model_name: answer_binding.model_name,
             },
-            usage_json: response.usage_json,
-        });
+            response.usage_json,
+        )
     };
+    let verification = verify_answer_against_canonical_evidence(
+        &answer,
+        &prepared.structured.intent_profile,
+        &canonical_evidence,
+        &canonical_answer_chunks,
+    );
+    persist_query_verification(state, execution_id, &verification, &canonical_evidence).await?;
 
-    Ok(RuntimeAnswerQueryResult {
-        answer,
-        provider: provider_profile.answer,
-        usage_json: serde_json::json!({}),
-    })
+    Ok(RuntimeAnswerQueryResult { answer, provider, usage_json })
 }
 
 async fn load_canonical_answer_chunks(
@@ -514,7 +556,9 @@ async fn load_canonical_answer_chunks(
         .arango_context_store
         .get_bundle_reference_set_by_query_execution(execution_id)
         .await
-        .with_context(|| format!("failed to load context bundle references for query execution {execution_id}"))?
+        .with_context(|| {
+            format!("failed to load context bundle references for query execution {execution_id}")
+        })?
     else {
         return Ok(fallback_chunks.to_vec());
     };
@@ -547,11 +591,437 @@ async fn load_canonical_answer_chunks(
         return Ok(fallback_chunks.to_vec());
     }
 
-    Ok(merge_chunks(
-        context_chunks,
-        fallback_chunks.to_vec(),
-        fallback_chunks.len().max(64),
-    ))
+    Ok(merge_chunks(context_chunks, fallback_chunks.to_vec(), fallback_chunks.len().max(64)))
+}
+
+async fn load_canonical_answer_evidence(
+    state: &AppState,
+    execution_id: Uuid,
+) -> anyhow::Result<CanonicalAnswerEvidence> {
+    let Some(bundle_refs) = state
+        .arango_context_store
+        .get_bundle_reference_set_by_query_execution(execution_id)
+        .await
+        .with_context(|| {
+            format!("failed to load context bundle for answer evidence {execution_id}")
+        })?
+    else {
+        return Ok(CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        });
+    };
+
+    let chunk_ids =
+        bundle_refs.chunk_references.iter().map(|reference| reference.chunk_id).collect::<Vec<_>>();
+    let evidence_rows = state
+        .arango_graph_store
+        .list_evidence_by_ids(
+            &bundle_refs
+                .evidence_references
+                .iter()
+                .map(|reference| reference.evidence_id)
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .context("failed to load evidence rows for canonical answer context")?;
+    let chunk_rows = state
+        .arango_document_store
+        .list_chunks_by_ids(&chunk_ids)
+        .await
+        .context("failed to load chunks for canonical answer context")?;
+    let chunk_supported_facts =
+        state.arango_document_store.list_technical_facts_by_chunk_ids(&chunk_ids).await.context(
+            "failed to load chunk-supported technical facts for canonical answer context",
+        )?;
+    let mut fact_ids = selected_fact_ids_for_canonical_evidence(
+        &bundle_refs.bundle.selected_fact_ids,
+        &evidence_rows,
+        &chunk_supported_facts,
+    );
+    for evidence in &evidence_rows {
+        if let Some(fact_id) = evidence.fact_id
+            && !fact_ids.contains(&fact_id)
+            && fact_ids.len() < MAX_CANONICAL_ANSWER_TECHNICAL_FACTS
+        {
+            fact_ids.push(fact_id);
+        }
+    }
+    let mut technical_facts = state
+        .arango_document_store
+        .list_technical_facts_by_ids(&fact_ids)
+        .await
+        .context("failed to load technical facts for canonical answer context")?;
+    let mut seen_fact_ids = technical_facts.iter().map(|fact| fact.fact_id).collect::<HashSet<_>>();
+    for fact in chunk_supported_facts {
+        if fact_ids.contains(&fact.fact_id) && seen_fact_ids.insert(fact.fact_id) {
+            technical_facts.push(fact);
+        }
+    }
+    technical_facts.sort_by(|left, right| {
+        left.fact_kind.cmp(&right.fact_kind).then_with(|| left.fact_id.cmp(&right.fact_id))
+    });
+    let mut block_ids =
+        evidence_rows.iter().filter_map(|evidence| evidence.block_id).collect::<Vec<_>>();
+    for chunk in &chunk_rows {
+        for block_id in &chunk.support_block_ids {
+            if !block_ids.contains(block_id) {
+                block_ids.push(*block_id);
+            }
+        }
+    }
+    for fact in &technical_facts {
+        for block_id in &fact.support_block_ids {
+            if !block_ids.contains(block_id) {
+                block_ids.push(*block_id);
+            }
+        }
+    }
+    let structured_blocks = state
+        .arango_document_store
+        .list_structured_blocks_by_ids(&block_ids)
+        .await
+        .context("failed to load structured blocks for canonical answer context")?;
+    Ok(CanonicalAnswerEvidence {
+        bundle: Some(bundle_refs.bundle),
+        chunk_rows,
+        structured_blocks,
+        technical_facts,
+    })
+}
+
+fn selected_fact_ids_for_canonical_evidence(
+    selected_fact_ids: &[Uuid],
+    evidence_rows: &[crate::infra::arangodb::graph_store::KnowledgeEvidenceRow],
+    chunk_supported_facts: &[KnowledgeTechnicalFactRow],
+) -> Vec<Uuid> {
+    let mut fact_ids = selected_fact_ids.to_vec();
+    for evidence in evidence_rows {
+        let Some(fact_id) = evidence.fact_id else {
+            continue;
+        };
+        if fact_ids.len() >= MAX_CANONICAL_ANSWER_TECHNICAL_FACTS {
+            break;
+        }
+        if !fact_ids.contains(&fact_id) {
+            fact_ids.push(fact_id);
+        }
+    }
+    if fact_ids.is_empty() {
+        for fact in chunk_supported_facts {
+            if fact_ids.len() >= MAX_CANONICAL_ANSWER_TECHNICAL_FACTS {
+                break;
+            }
+            if !fact_ids.contains(&fact.fact_id) {
+                fact_ids.push(fact.fact_id);
+            }
+        }
+    }
+    fact_ids.truncate(MAX_CANONICAL_ANSWER_TECHNICAL_FACTS);
+    fact_ids
+}
+
+fn build_canonical_answer_context(
+    question: &str,
+    structured: &RuntimeStructuredQueryResult,
+    evidence: &CanonicalAnswerEvidence,
+    canonical_answer_chunks: &[RuntimeMatchedChunk],
+    fallback_context: &str,
+) -> String {
+    let focused_document_id = focused_answer_document_id(question, canonical_answer_chunks);
+    let focused_document_label = focused_document_id.and_then(|document_id| {
+        canonical_answer_chunks
+            .iter()
+            .find(|chunk| chunk.document_id == document_id)
+            .map(|chunk| chunk.document_label.clone())
+    });
+    let filtered_technical_facts = focused_document_id.map_or_else(
+        || evidence.technical_facts.clone(),
+        |document_id| {
+            evidence
+                .technical_facts
+                .iter()
+                .filter(|fact| fact.document_id == document_id)
+                .cloned()
+                .collect::<Vec<_>>()
+        },
+    );
+    let filtered_structured_blocks = focused_document_id.map_or_else(
+        || evidence.structured_blocks.clone(),
+        |document_id| {
+            evidence
+                .structured_blocks
+                .iter()
+                .filter(|block| block.document_id == document_id)
+                .cloned()
+                .collect::<Vec<_>>()
+        },
+    );
+    let filtered_chunks = focused_document_id.map_or_else(
+        || canonical_answer_chunks.to_vec(),
+        |document_id| {
+            canonical_answer_chunks
+                .iter()
+                .filter(|chunk| chunk.document_id == document_id)
+                .cloned()
+                .collect::<Vec<_>>()
+        },
+    );
+    let mut sections = Vec::<String>::new();
+
+    if let Some(technical_literals_text) = structured.technical_literals_text.as_deref()
+        && !technical_literals_text.trim().is_empty()
+    {
+        sections.push(technical_literals_text.trim().to_string());
+    }
+
+    if let Some(document_label) = focused_document_label.as_deref() {
+        sections.push(format!("Focused grounded document\n- {document_label}"));
+    }
+
+    let technical_fact_section = render_canonical_technical_fact_section(&filtered_technical_facts);
+    if !technical_fact_section.is_empty() {
+        sections.push(technical_fact_section);
+    }
+
+    let prepared_segment_section = render_prepared_segment_section(&filtered_structured_blocks);
+    if !prepared_segment_section.is_empty() {
+        sections.push(prepared_segment_section);
+    }
+
+    let chunk_section = render_canonical_chunk_section(question, &filtered_chunks);
+    if !chunk_section.is_empty() {
+        sections.push(chunk_section);
+    }
+
+    if sections.is_empty() {
+        return fallback_context.trim().to_string();
+    }
+
+    if let Some(bundle) = evidence.bundle.as_ref() {
+        sections.insert(
+            0,
+            format!(
+                "Canonical query bundle\n- Strategy: {}\n- Requested mode: {}\n- Resolved mode: {}",
+                bundle.bundle_strategy, bundle.requested_mode, bundle.resolved_mode
+            ),
+        );
+    }
+
+    sections.join("\n\n")
+}
+
+fn focused_answer_document_id(question: &str, chunks: &[RuntimeMatchedChunk]) -> Option<Uuid> {
+    if chunks.is_empty() || question_requests_multi_document_scope(question) {
+        return None;
+    }
+
+    #[derive(Debug, Clone)]
+    struct DocumentFocusScore {
+        document_id: Uuid,
+        document_label: String,
+        score_sum: f32,
+        chunk_count: usize,
+        first_rank: usize,
+        label_keyword_hits: usize,
+    }
+
+    let question_keywords = crate::services::query_planner::extract_keywords(question);
+    let mut per_document = HashMap::<Uuid, DocumentFocusScore>::new();
+    for (rank, chunk) in chunks.iter().enumerate() {
+        let lowered_label = chunk.document_label.to_lowercase();
+        let entry = per_document.entry(chunk.document_id).or_insert_with(|| DocumentFocusScore {
+            document_id: chunk.document_id,
+            document_label: chunk.document_label.clone(),
+            score_sum: 0.0,
+            chunk_count: 0,
+            first_rank: rank,
+            label_keyword_hits: question_keywords
+                .iter()
+                .filter(|keyword| lowered_label.contains(keyword.as_str()))
+                .count(),
+        });
+        entry.score_sum += score_value(chunk.score);
+        entry.chunk_count += 1;
+        entry.first_rank = entry.first_rank.min(rank);
+    }
+
+    let mut ranked = per_document.into_values().collect::<Vec<_>>();
+    if ranked.is_empty() {
+        return None;
+    }
+    ranked.sort_by(|left, right| {
+        right
+            .score_sum
+            .total_cmp(&left.score_sum)
+            .then_with(|| right.chunk_count.cmp(&left.chunk_count))
+            .then_with(|| right.label_keyword_hits.cmp(&left.label_keyword_hits))
+            .then_with(|| left.first_rank.cmp(&right.first_rank))
+            .then_with(|| left.document_label.cmp(&right.document_label))
+    });
+
+    if ranked.len() == 1 {
+        return Some(ranked[0].document_id);
+    }
+
+    let top = &ranked[0];
+    let second = &ranked[1];
+    let has_explicit_single_source_anchor = question_mentions_single_source_anchor(question);
+    let materially_higher_score = top.score_sum >= second.score_sum * 1.2;
+    let materially_more_chunks = top.chunk_count >= second.chunk_count + 1;
+    let stronger_label_match = top.label_keyword_hits > second.label_keyword_hits;
+
+    if has_explicit_single_source_anchor
+        || materially_higher_score
+        || materially_more_chunks
+        || stronger_label_match
+    {
+        Some(top.document_id)
+    } else {
+        None
+    }
+}
+
+fn question_requests_multi_document_scope(question: &str) -> bool {
+    let lowered = question.to_lowercase();
+    [
+        "compare",
+        "contrast",
+        "versus",
+        " vs ",
+        "between",
+        "across documents",
+        "across articles",
+        "combine documents",
+        "combine articles",
+        "multiple documents",
+        "multiple articles",
+        "several documents",
+        "several articles",
+        "both documents",
+        "both articles",
+        "different documents",
+        "different articles",
+        "сравни",
+        "сравните",
+        "между документ",
+        "между стать",
+        "нескольких документ",
+        "нескольких стать",
+        "разных документ",
+        "разных стать",
+        "оба документ",
+        "обе стать",
+        "обоих документ",
+        "обеих стать",
+        "отдельно",
+        "separately",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker))
+}
+
+fn question_mentions_single_source_anchor(question: &str) -> bool {
+    let lowered = question.to_lowercase();
+    [
+        "according to",
+        "in the article",
+        "in this article",
+        "in the document",
+        "this article",
+        "this document",
+        "the article",
+        "the document",
+        "в статье",
+        "в этом документе",
+        "в документе",
+        "эта статья",
+        "этот документ",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker))
+}
+
+fn render_canonical_technical_fact_section(facts: &[KnowledgeTechnicalFactRow]) -> String {
+    if facts.is_empty() {
+        return String::new();
+    }
+    let mut lines = Vec::<String>::new();
+    for fact in facts.iter().take(24) {
+        let qualifiers = serde_json::from_value::<
+            Vec<crate::shared::technical_facts::TechnicalFactQualifier>,
+        >(fact.qualifiers_json.clone())
+        .unwrap_or_default();
+        let qualifier_suffix = if qualifiers.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " ({})",
+                qualifiers
+                    .iter()
+                    .map(|qualifier| format!("{}={}", qualifier.key, qualifier.value))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        lines.push(format!("- {}: `{}`{}", fact.fact_kind, fact.display_value, qualifier_suffix));
+    }
+    format!("Technical facts\n{}", lines.join("\n"))
+}
+
+fn render_prepared_segment_section(blocks: &[KnowledgeStructuredBlockRow]) -> String {
+    if blocks.is_empty() {
+        return String::new();
+    }
+    let mut lines = Vec::<String>::new();
+    for block in blocks.iter().take(16) {
+        let label = if block.heading_trail.is_empty() {
+            block.block_kind.clone()
+        } else {
+            format!("{} > {}", block.block_kind, block.heading_trail.join(" > "))
+        };
+        let excerpt = excerpt_for(&repair_technical_layout_noise(&block.normalized_text), 420);
+        lines.push(format!("- {}: {}", label, excerpt));
+    }
+    format!("Prepared segments\n{}", lines.join("\n"))
+}
+
+fn render_canonical_chunk_section(question: &str, chunks: &[RuntimeMatchedChunk]) -> String {
+    if chunks.is_empty() {
+        return String::new();
+    }
+    let question_keywords = technical_literal_focus_keywords(question);
+    let pagination_requested = question_mentions_pagination(question);
+    let mut selected = select_document_balanced_chunks(
+        question,
+        chunks,
+        &question_keywords,
+        pagination_requested,
+        8,
+        2,
+    )
+    .into_iter()
+    .cloned()
+    .collect::<Vec<_>>();
+    if selected.is_empty() {
+        selected = chunks.iter().take(8).cloned().collect();
+    }
+    let question_keywords = crate::services::query_planner::extract_keywords(question);
+    let lines = selected
+        .iter()
+        .map(|chunk| {
+            let excerpt = focused_excerpt_for(&chunk.source_text, &question_keywords, 560);
+            let excerpt = if excerpt.trim().is_empty() {
+                excerpt_for(&chunk.source_text, 560)
+            } else {
+                excerpt
+            };
+            format!("- {}: {}", chunk.document_label, excerpt)
+        })
+        .collect::<Vec<_>>();
+    format!("Selected chunk excerpts\n{}", lines.join("\n"))
 }
 
 async fn embed_question(
@@ -899,11 +1369,8 @@ fn technical_literal_candidate_limit(intent: TechnicalLiteralIntent, top_k: usiz
         return top_k;
     }
 
-    let multiplier = if intent.wants_paths || intent.wants_urls || intent.wants_methods {
-        4
-    } else {
-        3
-    };
+    let multiplier =
+        if intent.wants_paths || intent.wants_urls || intent.wants_methods { 4 } else { 3 };
     top_k.saturating_mul(multiplier).clamp(top_k, 64)
 }
 
@@ -920,7 +1387,7 @@ fn build_lexical_queries(question: &str, plan: &RuntimeQueryPlan) -> Vec<String>
     };
 
     push_query(request_safe_query(plan));
-    if detect_technical_literal_intent(question).any() {
+    if plan.intent_profile.exact_literal_technical {
         push_query(question.trim().to_string());
         for segment in technical_literal_focus_keyword_segments(question) {
             push_query(segment.join(" "));
@@ -1344,11 +1811,28 @@ fn assemble_bounded_context(
     if sections.is_empty() { String::new() } else { format!("Context\n{}", sections.join("\n")) }
 }
 
-fn build_answer_prompt(question: &str, context_text: &str, system_prompt: Option<&str>) -> String {
+fn build_answer_prompt(
+    question: &str,
+    context_text: &str,
+    conversation_history: Option<&str>,
+    system_prompt: Option<&str>,
+) -> String {
     let instruction = system_prompt
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("You are answering a grounded knowledge-base question.");
+    let conversation_history_section = conversation_history
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map_or_else(String::new, |history| {
+            format!(
+                "Use the recent conversation history to resolve short follow-up messages, confirmations, pronouns, and ellipsis.\n\
+When the latest user message depends on prior turns, continue the same task instead of treating it as a brand-new unrelated request.\n\
+\nRecent conversation:\n{}\n\
+\n",
+                history
+            )
+        });
     format!(
         "{}\n\
 Treat the active library as the primary source of truth and exhaust the provided library context before concluding that information is missing.\n\
@@ -1358,13 +1842,18 @@ For questions about the latest documents, document inventory, readiness, counts,
 Combine metadata, grounded excerpts, and graph references before deciding that the answer is unavailable.\n\
 Present the answer directly. Do not narrate the retrieval process and do not mention chunks, internal search steps, the library context, or source document names unless the user explicitly asks for sources, evidence, or document names.\n\
 Start with the answer itself, not with preambles like “in the documents”, “in the library”, or “in the available materials”.\n\
-Prefer wording like “The loyalty program works as ...” over wording like “The materials describe ...” or “The library contains ...”.\n\
+Prefer domain-language wording like “The API uses ...”, “The system stores ...”, or “The article names ...” over wording like “The materials describe ...” or “The library contains ...”.\n\
 Only name specific document titles when the question itself asks for titles, recent documents, or sources.\n\
 Do not ask the user to upload, resend, or provide more documents unless the active library context is genuinely insufficient after using all provided evidence.\n\
 If the answer is still incomplete, give the best grounded partial answer and briefly state which facts are still missing from the active library.\n\
 When the library lacks enough information, describe the missing facts or subject area, not a “missing document” and not a request to send more files.\n\
 Do not suggest uploads or resends unless the user explicitly asks how to improve or extend the library.\n\
 Answer in the same language as the question.\n\
+When the question clearly targets one article, one document, or one named subject, answer from the single most directly matching grounded document first.\n\
+Do not import examples, use cases, lists, or entities from neighboring documents unless the question explicitly asks you to compare or combine multiple documents.\n\
+When the user asks for one example or one use case from a specific document, choose an example grounded in that same document.\n\
+When the user asks for one example, one use case, or one named item besides an explicitly excluded item from a grounded list, choose a different grounded item from that same list and prefer the next distinct item after the excluded one when the list order is available.\n\
+When the user asks for examples across categories joined by “and”, include grounded representatives from each requested category when they appear in the same grounded document.\n\
 When the context includes a library summary, trust those summary counts and readiness facts over individual chunk snippets for totals and overall status.\n\
 When the context includes an Exact technical literals section, treat those literals as the highest-priority grounding for URLs, paths, parameter names, methods, ports, and status codes.\n\
 Prefer exact literals extracted from documents over paraphrased graph summaries when both are present.\n\
@@ -1377,9 +1866,10 @@ Do not normalize, rename, translate, repair, shorten, or expand technical litera
 Do not combine parts from different snippets into a synthetic URL, endpoint, path, or rule.\n\
 If a literal does not appear verbatim in Context, do not invent it; state that the exact value is not grounded in the active library.\n\
 If nearby snippets describe different examples or operations, answer only from the snippet that directly matches the user's condition and ignore unrelated adjacent error payloads or examples.\n\
-\nContext:\n{}\n\
+\n{}\nContext:\n{}\n\
 \nQuestion: {}",
         instruction,
+        conversation_history_section,
         context_text,
         question.trim()
     )
@@ -1412,10 +1902,7 @@ struct TechnicalLiteralDocumentGroup {
 
 impl TechnicalLiteralDocumentGroup {
     fn new(document_label: String) -> Self {
-        Self {
-            document_label,
-            ..Self::default()
-        }
+        Self { document_label, ..Self::default() }
     }
 
     fn has_any(&self) -> bool {
@@ -1440,21 +1927,12 @@ impl TechnicalLiteralIntent {
 
 fn detect_technical_literal_intent(question: &str) -> TechnicalLiteralIntent {
     let lowered = question.to_lowercase();
-    let wants_urls = [
-        "url",
-        "wsdl",
-        "адрес",
-        "ссылка",
-        "endpoint",
-        "эндпоинт",
-        "префикс",
-        "базовый url",
-    ]
-    .iter()
-    .any(|needle| lowered.contains(needle));
-    let wants_prefixes = ["префикс", "base url", "базовый url"]
-        .iter()
-        .any(|needle| lowered.contains(needle));
+    let wants_urls =
+        ["url", "wsdl", "адрес", "ссылка", "endpoint", "эндпоинт", "префикс", "базовый url"]
+            .iter()
+            .any(|needle| lowered.contains(needle));
+    let wants_prefixes =
+        ["префикс", "base url", "базовый url"].iter().any(|needle| lowered.contains(needle));
     let wants_paths = wants_urls
         || ["path", "путь", "маршрут", "endpoint", "эндпоинт"]
             .iter()
@@ -1478,7 +1956,8 @@ fn detect_technical_literal_intent(question: &str) -> TechnicalLiteralIntent {
 
 fn trim_literal_token(token: &str) -> &str {
     token.trim_matches(|ch: char| {
-        ch.is_whitespace() || matches!(ch, ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\'')
+        ch.is_whitespace()
+            || matches!(ch, ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\'')
     })
 }
 
@@ -1494,11 +1973,17 @@ fn technical_literal_focus_keywords(question: &str) -> Vec<String> {
         "какому",
         "endpoint",
         "url",
+        "port",
+        "порт",
         "path",
         "путь",
         "пути",
         "метод",
         "method",
+        "использует",
+        "используют",
+        "used",
+        "uses",
         "возвращает",
         "получить",
         "нужно",
@@ -1533,17 +2018,14 @@ fn technical_keyword_stem(keyword: &str) -> Option<String> {
 
 fn technical_keyword_present(lowered_text: &str, keyword: &str) -> bool {
     lowered_text.contains(keyword)
-        || technical_keyword_stem(keyword)
-            .is_some_and(|stem| lowered_text.contains(stem.as_str()))
+        || technical_keyword_stem(keyword).is_some_and(|stem| lowered_text.contains(stem.as_str()))
 }
 
 fn technical_keyword_weight(lowered_text: &str, keyword: &str) -> usize {
     if lowered_text.contains(keyword) {
         return keyword.chars().count().min(24);
     }
-    if technical_keyword_stem(keyword)
-        .is_some_and(|stem| lowered_text.contains(stem.as_str()))
-    {
+    if technical_keyword_stem(keyword).is_some_and(|stem| lowered_text.contains(stem.as_str())) {
         return 4;
     }
     0
@@ -1551,32 +2033,37 @@ fn technical_keyword_weight(lowered_text: &str, keyword: &str) -> usize {
 
 fn question_mentions_pagination(question: &str) -> bool {
     let lowered = question.to_lowercase();
-    [
-        "bypage",
-        "page",
-        "pagesize",
-        "pagenumber",
-        "пейдж",
-        "постранич",
-        "страниц",
-        "пагинац",
-    ]
-    .iter()
-    .any(|marker| lowered.contains(marker))
+    ["bypage", "page", "pagesize", "pagenumber", "пейдж", "постранич", "страниц", "пагинац"]
+        .iter()
+        .any(|marker| lowered.contains(marker))
 }
 
-fn technical_literal_focus_keyword_segments(question: &str) -> Vec<Vec<String>> {
-    let normalized = question
+fn question_mentions_protocol(question: &str) -> bool {
+    let lowered = question.to_lowercase();
+    lowered.contains("protocol") || lowered.contains("протокол")
+}
+
+fn technical_literal_focus_segments_text(question: &str) -> Vec<String> {
+    question
         .to_lowercase()
         .replace(" и отдельно ", " | ")
         .replace(" отдельно ", " | ")
+        .replace(" and then ", " | ")
+        .replace(" then ", " | ")
+        .replace(" and ", " | ")
         .replace(';', "|")
-        .replace(',', "|");
-    let segments = normalized
+        .replace(',', "|")
         .split('|')
         .map(str::trim)
         .filter(|segment| !segment.is_empty())
-        .map(technical_literal_focus_keywords)
+        .map(str::to_string)
+        .collect::<Vec<_>>()
+}
+
+fn technical_literal_focus_keyword_segments(question: &str) -> Vec<Vec<String>> {
+    let segments = technical_literal_focus_segments_text(question)
+        .into_iter()
+        .map(|segment| technical_literal_focus_keywords(&segment))
         .filter(|keywords| !keywords.is_empty())
         .collect::<Vec<_>>();
     if segments.is_empty() {
@@ -1630,11 +2117,7 @@ fn document_local_focus_keywords(
         .filter(|keyword| technical_keyword_present(&document_text, keyword))
         .cloned()
         .collect::<Vec<_>>();
-    if local_keywords.is_empty() {
-        question_keywords.to_vec()
-    } else {
-        local_keywords
-    }
+    if local_keywords.is_empty() { question_keywords.to_vec() } else { local_keywords }
 }
 
 fn technical_chunk_selection_score(
@@ -1652,14 +2135,9 @@ fn technical_chunk_selection_score(
             (technical_keyword_weight(&lowered, keyword) as isize) * priority
         })
         .sum::<isize>();
-    let has_pagination_marker = [
-        "bypage",
-        "pagesize",
-        "pagenumber",
-        "number_starting",
-    ]
-    .iter()
-    .any(|marker| lowered.contains(marker));
+    let has_pagination_marker = ["bypage", "pagesize", "pagenumber", "number_starting"]
+        .iter()
+        .any(|marker| lowered.contains(marker));
     if has_pagination_marker {
         score += if pagination_requested { 12 } else { -40 };
     }
@@ -1681,10 +2159,7 @@ fn select_document_balanced_chunks<'a>(
         if !per_document_chunks.contains_key(&chunk.document_id) {
             ordered_document_ids.push(chunk.document_id);
         }
-        per_document_chunks
-            .entry(chunk.document_id)
-            .or_default()
-            .push(chunk);
+        per_document_chunks.entry(chunk.document_id).or_default().push(chunk);
     }
 
     for document_chunks in per_document_chunks.values_mut() {
@@ -1724,7 +2199,12 @@ fn select_document_balanced_chunks<'a>(
     selected
 }
 
-fn push_unique_limited(target: &mut Vec<String>, seen: &mut HashSet<String>, value: String, limit: usize) {
+fn push_unique_limited(
+    target: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+    value: String,
+    limit: usize,
+) {
     if value.is_empty() || target.len() >= limit {
         return;
     }
@@ -1737,14 +2217,13 @@ fn extract_url_literals(text: &str, limit: usize) -> Vec<String> {
     let mut urls = Vec::new();
     let mut seen = HashSet::new();
     for token in text.split_whitespace() {
-        let cleaned = trim_literal_token(token)
-            .trim_end_matches(|ch: char| matches!(ch, '.' | ':' | ';'));
-        let trailing_open_placeholder = cleaned
-            .rfind('<')
-            .is_some_and(|left_index| cleaned.rfind('>').is_none_or(|right_index| left_index > right_index));
-        let has_unbalanced_angle_brackets =
-            (cleaned.contains('<') && !cleaned.contains('>'))
-                || (cleaned.contains('>') && !cleaned.contains('<'));
+        let cleaned =
+            trim_literal_token(token).trim_end_matches(|ch: char| matches!(ch, '.' | ':' | ';'));
+        let trailing_open_placeholder = cleaned.rfind('<').is_some_and(|left_index| {
+            cleaned.rfind('>').is_none_or(|right_index| left_index > right_index)
+        });
+        let has_unbalanced_angle_brackets = (cleaned.contains('<') && !cleaned.contains('>'))
+            || (cleaned.contains('>') && !cleaned.contains('<'));
         if cleaned.starts_with("http://") || cleaned.starts_with("https://") {
             if !has_unbalanced_angle_brackets && !trailing_open_placeholder {
                 push_unique_limited(&mut urls, &mut seen, cleaned.to_string(), limit);
@@ -1768,7 +2247,8 @@ fn derive_path_literals_from_url(url: &str) -> Vec<String> {
     }
 
     let mut paths = vec![path.to_string()];
-    let segments = path.trim_matches('/').split('/').filter(|segment| !segment.is_empty()).collect::<Vec<_>>();
+    let segments =
+        path.trim_matches('/').split('/').filter(|segment| !segment.is_empty()).collect::<Vec<_>>();
     if segments.len() >= 2 {
         paths.push(format!("/{}/{}/", segments[0], segments[1]));
     }
@@ -1783,8 +2263,8 @@ fn extract_explicit_path_literals(text: &str, limit: usize) -> Vec<String> {
     let mut seen = HashSet::new();
 
     for token in text.split_whitespace() {
-        let cleaned = trim_literal_token(token)
-            .trim_end_matches(|ch: char| matches!(ch, '.' | ':' | ';'));
+        let cleaned =
+            trim_literal_token(token).trim_end_matches(|ch: char| matches!(ch, '.' | ':' | ';'));
         if cleaned.starts_with('/') && cleaned.matches('/').count() >= 1 {
             push_unique_limited(&mut paths, &mut seen, cleaned.to_string(), limit);
         }
@@ -1843,7 +2323,8 @@ fn extract_http_methods(text: &str, limit: usize) -> Vec<String> {
     let mut seen = HashSet::new();
 
     for token in text.split_whitespace() {
-        let cleaned = trim_literal_token(token).trim_end_matches(|ch: char| matches!(ch, '.' | ':' | ';'));
+        let cleaned =
+            trim_literal_token(token).trim_end_matches(|ch: char| matches!(ch, '.' | ':' | ';'));
         if matches!(cleaned, "GET" | "POST" | "PUT" | "PATCH" | "DELETE") {
             push_unique_limited(&mut methods, &mut seen, cleaned.to_string(), limit);
         }
@@ -1877,7 +2358,8 @@ fn extract_parameter_literals(text: &str, limit: usize) -> Vec<String> {
     let mut seen = HashSet::new();
 
     for token in text.split_whitespace() {
-        let cleaned = trim_literal_token(token).trim_end_matches(|ch: char| matches!(ch, '.' | ':' | ';'));
+        let cleaned =
+            trim_literal_token(token).trim_end_matches(|ch: char| matches!(ch, '.' | ':' | ';'));
         if looks_like_parameter_identifier(cleaned) {
             push_unique_limited(&mut parameters, &mut seen, cleaned.to_string(), limit);
         }
@@ -1911,16 +2393,15 @@ fn collect_technical_literal_groups(
             .iter()
             .position(|group| group.document_label == chunk.document_label)
             .unwrap_or_else(|| {
-                groups.push(TechnicalLiteralDocumentGroup::new(
-                    chunk.document_label.clone(),
-                ));
+                groups.push(TechnicalLiteralDocumentGroup::new(chunk.document_label.clone()));
                 groups.len() - 1
             });
         let group = &mut groups[group_index];
         if group.matched_excerpt.is_none() && !chunk.excerpt.trim().is_empty() {
             group.matched_excerpt = Some(chunk.excerpt.trim().to_string());
         }
-        let focused_source_text = focused_excerpt_for(&chunk.source_text, &literal_focus_keywords, 900);
+        let focused_source_text =
+            focused_excerpt_for(&chunk.source_text, &literal_focus_keywords, 900);
         let literal_source_text = if focused_source_text.trim().is_empty() {
             chunk.source_text.as_str()
         } else {
@@ -1944,22 +2425,12 @@ fn collect_technical_literal_groups(
         }
         if intent.wants_methods {
             for value in extract_http_methods(literal_source_text, 5) {
-                push_unique_limited(
-                    &mut group.methods,
-                    &mut group.method_seen,
-                    value,
-                    5,
-                );
+                push_unique_limited(&mut group.methods, &mut group.method_seen, value, 5);
             }
         }
         if intent.wants_parameters {
             for value in extract_parameter_literals(literal_source_text, 8) {
-                push_unique_limited(
-                    &mut group.parameters,
-                    &mut group.parameter_seen,
-                    value,
-                    8,
-                );
+                push_unique_limited(&mut group.parameters, &mut group.parameter_seen, value, 8);
             }
         }
     }
@@ -1983,17 +2454,14 @@ fn render_exact_technical_literals_section(
         if !group.urls.is_empty() {
             lines.push(format!(
                 "  URLs: {}",
-                group.urls
-                    .iter()
-                    .map(|value| format!("`{value}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                group.urls.iter().map(|value| format!("`{value}`")).collect::<Vec<_>>().join(", ")
             ));
         }
         if !group.prefixes.is_empty() {
             lines.push(format!(
                 "  Prefixes: {}",
-                group.prefixes
+                group
+                    .prefixes
                     .iter()
                     .map(|value| format!("`{value}`"))
                     .collect::<Vec<_>>()
@@ -2003,17 +2471,14 @@ fn render_exact_technical_literals_section(
         if !group.paths.is_empty() {
             lines.push(format!(
                 "  Paths: {}",
-                group.paths
-                    .iter()
-                    .map(|value| format!("`{value}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                group.paths.iter().map(|value| format!("`{value}`")).collect::<Vec<_>>().join(", ")
             ));
         }
         if !group.methods.is_empty() {
             lines.push(format!(
                 "  HTTP methods: {}",
-                group.methods
+                group
+                    .methods
                     .iter()
                     .map(|value| format!("`{value}`"))
                     .collect::<Vec<_>>()
@@ -2023,7 +2488,8 @@ fn render_exact_technical_literals_section(
         if !group.parameters.is_empty() {
             lines.push(format!(
                 "  Parameters: {}",
-                group.parameters
+                group
+                    .parameters
                     .iter()
                     .map(|value| format!("`{value}`"))
                     .collect::<Vec<_>>()
@@ -2049,14 +2515,7 @@ fn build_exact_technical_literals_section(
 }
 
 fn infer_endpoint_subject_label(group: &TechnicalLiteralDocumentGroup) -> String {
-    let lowered = group.document_label.to_lowercase();
-    if lowered.contains("cashserver") || lowered.contains("касс") {
-        return "кассового сервера".to_string();
-    }
-    if lowered.contains("бонус") || lowered.contains("acc") {
-        return "бонусного сервера".to_string();
-    }
-    group.document_label.clone()
+    concise_document_subject_label(&group.document_label)
 }
 
 fn build_deterministic_technical_answer(
@@ -2064,11 +2523,582 @@ fn build_deterministic_technical_answer(
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
     build_graphql_absence_answer(question, chunks)
-        .or_else(|| build_wsdl_protocol_answer(question, chunks))
-        .or_else(|| build_cash_prefix_endpoint_answer(question, chunks))
-        .or_else(|| build_pagination_parameters_answer(question, chunks))
-        .or_else(|| build_compare_protocols_answer(question, chunks))
+        .or_else(|| build_port_and_protocol_answer(question, chunks))
+        .or_else(|| build_port_answer(question, chunks))
         .or_else(|| build_multi_document_endpoint_answer_from_chunks(question, chunks))
+}
+
+fn build_deterministic_grounded_answer(
+    question: &str,
+    chunks: &[RuntimeMatchedChunk],
+) -> Option<String> {
+    build_multi_document_role_answer(question, chunks)
+        .or_else(|| build_deterministic_technical_answer(question, chunks))
+}
+
+fn build_multi_document_role_answer(
+    question: &str,
+    chunks: &[RuntimeMatchedChunk],
+) -> Option<String> {
+    let clauses = extract_multi_document_role_clauses(question);
+    if clauses.len() < 2 || chunks.is_empty() {
+        return None;
+    }
+
+    let mut ordered_document_ids = Vec::<Uuid>::new();
+    let mut per_document_chunks = HashMap::<Uuid, Vec<&RuntimeMatchedChunk>>::new();
+    for chunk in chunks {
+        if !per_document_chunks.contains_key(&chunk.document_id) {
+            ordered_document_ids.push(chunk.document_id);
+        }
+        per_document_chunks.entry(chunk.document_id).or_default().push(chunk);
+    }
+    if per_document_chunks.len() < 2 {
+        return None;
+    }
+
+    #[derive(Debug, Clone)]
+    struct DocumentRoleCandidate {
+        document_id: Uuid,
+        subject_label: String,
+        corpus_text: String,
+        rank: usize,
+    }
+
+    #[derive(Debug, Clone)]
+    struct RoleClause {
+        display_text: String,
+        keywords: Vec<String>,
+    }
+
+    let role_clauses = clauses
+        .into_iter()
+        .map(|display_text| RoleClause {
+            keywords: crate::services::query_planner::extract_keywords(&display_text),
+            display_text,
+        })
+        .filter(|clause| !clause.keywords.is_empty())
+        .take(2)
+        .collect::<Vec<_>>();
+    if role_clauses.len() < 2 {
+        return None;
+    }
+
+    let documents = ordered_document_ids
+        .iter()
+        .enumerate()
+        .filter_map(|(rank, document_id)| {
+            let document_chunks = per_document_chunks.get(document_id)?;
+            let subject_label = canonical_document_subject_label(document_chunks);
+            let corpus_text = document_chunks
+                .iter()
+                .map(|chunk| format!("{} {}", chunk.excerpt, chunk.source_text))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Some(DocumentRoleCandidate {
+                document_id: *document_id,
+                subject_label,
+                corpus_text,
+                rank,
+            })
+        })
+        .collect::<Vec<_>>();
+    if documents.len() < 2 {
+        return None;
+    }
+
+    let score_clause = |clause: &RoleClause, document: &DocumentRoleCandidate| -> usize {
+        let lowered =
+            format!("{}\n{}", document.subject_label, document.corpus_text).to_lowercase();
+        clause
+            .keywords
+            .iter()
+            .map(|keyword| technical_keyword_weight(&lowered, keyword))
+            .sum::<usize>()
+    };
+
+    let mut best_pair = None::<(usize, usize, usize)>;
+    let mut best_total_score = 0usize;
+    for (left_index, left_document) in documents.iter().enumerate() {
+        let left_score = score_clause(&role_clauses[0], left_document);
+        if left_score == 0 {
+            continue;
+        }
+        for (right_index, right_document) in documents.iter().enumerate() {
+            if left_document.document_id == right_document.document_id {
+                continue;
+            }
+            let right_score = score_clause(&role_clauses[1], right_document);
+            if right_score == 0 {
+                continue;
+            }
+            let total_score = left_score + right_score;
+            let replace = match best_pair {
+                None => true,
+                Some((best_left_index, best_right_index, _)) => {
+                    let best_left = &documents[best_left_index];
+                    let best_right = &documents[best_right_index];
+                    total_score > best_total_score
+                        || (total_score == best_total_score
+                            && (left_document.rank, right_document.rank)
+                                < (best_left.rank, best_right.rank))
+                }
+            };
+            if replace {
+                best_total_score = total_score;
+                best_pair = Some((left_index, right_index, total_score));
+            }
+        }
+    }
+
+    let (left_index, right_index, _) = best_pair?;
+    let left_document = &documents[left_index];
+    let right_document = &documents[right_index];
+    let lowered = question.to_lowercase();
+    if lowered.contains("which two technologies")
+        || lowered.contains("which two items")
+        || lowered.contains("какие две технологии")
+        || lowered.contains("какие два")
+    {
+        return Some(format!(
+            "The two technologies are {} and {}.",
+            left_document.subject_label, right_document.subject_label
+        ));
+    }
+
+    Some(format!(
+        "{} is {}. {} is {}.",
+        left_document.subject_label,
+        render_role_description(&role_clauses[0].display_text),
+        right_document.subject_label,
+        render_role_description(&role_clauses[1].display_text)
+    ))
+}
+
+fn extract_multi_document_role_clauses(question: &str) -> Vec<String> {
+    let trimmed = question.trim().trim_end_matches('?');
+    let lowered = trimmed.to_lowercase();
+
+    for marker in [
+        ", and which item is ",
+        ", and which technology is ",
+        ", and which model family is ",
+        ", and which language is ",
+        " and which item is ",
+        " and which technology is ",
+        " and which model family is ",
+        " and which language is ",
+    ] {
+        if let Some(index) = lowered.find(marker) {
+            let left = normalize_multi_document_role_clause(&trimmed[..index]);
+            let right = normalize_multi_document_role_clause(&trimmed[(index + marker.len())..]);
+            if !left.is_empty() && !right.is_empty() {
+                return vec![left, right];
+            }
+        }
+    }
+
+    for prefix in ["if a system needs ", "if a product needs ", "if a team needs "] {
+        if lowered.starts_with(prefix) {
+            let mut body = trimmed[prefix.len()..].trim().to_string();
+            for suffix in [
+                ", which two technologies from this corpus fit those roles",
+                ", which two technologies from this corpus should it combine",
+                ", which two items from this corpus fit those roles",
+                ", which two technologies fit those roles",
+                ", which two technologies should it combine",
+            ] {
+                if body.to_lowercase().ends_with(suffix) {
+                    let keep = body.len().saturating_sub(suffix.len());
+                    body.truncate(keep);
+                    body = body.trim().trim_end_matches(',').to_string();
+                    break;
+                }
+            }
+            for marker in [" and also ", " plus ", " and "] {
+                if let Some(index) = body.to_lowercase().find(marker) {
+                    let left = normalize_multi_document_role_clause(&body[..index]);
+                    let right =
+                        normalize_multi_document_role_clause(&body[(index + marker.len())..]);
+                    if !left.is_empty() && !right.is_empty() {
+                        return vec![left, right];
+                    }
+                }
+            }
+        }
+    }
+
+    Vec::new()
+}
+
+fn normalize_multi_document_role_clause(clause: &str) -> String {
+    let trimmed = clause.trim().trim_matches(',').trim_end_matches('?').trim();
+    let lowered = trimmed.to_lowercase();
+    for prefix in [
+        "which item in this corpus is ",
+        "which item is ",
+        "which technology in this corpus is ",
+        "which technology is ",
+        "which model family is ",
+        "which language is ",
+        "if a system needs ",
+        "if a product needs ",
+        "if a team needs ",
+    ] {
+        if lowered.starts_with(prefix) {
+            return trimmed[prefix.len()..].trim().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+fn render_role_description(clause: &str) -> String {
+    let trimmed = clause.trim().trim_end_matches('?');
+    let lowered = trimmed.to_lowercase();
+    if lowered.starts_with("a ")
+        || lowered.starts_with("an ")
+        || lowered.starts_with("the ")
+        || lowered.starts_with("programming ")
+        || lowered.starts_with("model ")
+    {
+        trimmed.to_string()
+    } else {
+        format!("the role of {trimmed}")
+    }
+}
+
+fn canonical_document_subject_label(document_chunks: &[&RuntimeMatchedChunk]) -> String {
+    for chunk in document_chunks {
+        for line in chunk.source_text.lines() {
+            let candidate = line.trim().trim_start_matches('#').trim();
+            if candidate.is_empty()
+                || candidate.starts_with("Source:")
+                || candidate.starts_with("Source type:")
+                || candidate.starts_with("http://")
+                || candidate.starts_with("https://")
+                || candidate.starts_with('/')
+                || matches!(candidate, "GET" | "POST" | "PUT" | "PATCH" | "DELETE")
+            {
+                continue;
+            }
+            return candidate.to_string();
+        }
+    }
+    concise_document_subject_label(&document_chunks[0].document_label)
+}
+
+fn build_unsupported_capability_answer(
+    intent_profile: &QueryIntentProfile,
+    question: &str,
+    chunks: &[RuntimeMatchedChunk],
+) -> Option<String> {
+    match intent_profile.unsupported_capability {
+        Some(UnsupportedCapabilityIntent::GraphQlApi) => {
+            build_graphql_absence_answer(question, chunks)
+        }
+        None => None,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeAnswerVerification {
+    state: QueryVerificationState,
+    warnings: Vec<QueryVerificationWarning>,
+}
+
+fn verify_answer_against_canonical_evidence(
+    answer: &str,
+    intent_profile: &QueryIntentProfile,
+    evidence: &CanonicalAnswerEvidence,
+    chunks: &[RuntimeMatchedChunk],
+) -> RuntimeAnswerVerification {
+    if answer.trim().is_empty() {
+        return RuntimeAnswerVerification {
+            state: QueryVerificationState::Failed,
+            warnings: vec![QueryVerificationWarning {
+                code: "empty_answer".to_string(),
+                message: "Answer generation returned empty output.".to_string(),
+                related_segment_id: None,
+                related_fact_id: None,
+            }],
+        };
+    }
+
+    let backticked_literals = extract_backticked_literals(answer);
+    let normalized_corpus = build_verification_corpus(evidence, chunks);
+    let mut warnings = Vec::<QueryVerificationWarning>::new();
+    for literal in &backticked_literals {
+        let normalized_literal = normalize_verification_literal(literal);
+        if normalized_literal.is_empty() {
+            continue;
+        }
+        if !literal_is_supported_by_canonical_corpus(literal, &normalized_corpus) {
+            warnings.push(QueryVerificationWarning {
+                code: "unsupported_literal".to_string(),
+                message: format!("Literal `{literal}` is not grounded in selected evidence."),
+                related_segment_id: None,
+                related_fact_id: None,
+            });
+        }
+    }
+
+    let has_unsupported_literals =
+        warnings.iter().any(|warning| warning.code == "unsupported_literal");
+    let has_grounded_backticked_literals =
+        !backticked_literals.is_empty() && !has_unsupported_literals;
+    let should_check_conflicting_evidence = intent_profile.exact_literal_technical
+        && intent_profile.unsupported_capability.is_none()
+        && !has_grounded_backticked_literals;
+    let conflicting_groups = if should_check_conflicting_evidence {
+        collect_conflicting_fact_groups(&evidence.technical_facts)
+    } else {
+        HashMap::new()
+    };
+    if !conflicting_groups.is_empty() {
+        warnings.push(QueryVerificationWarning {
+            code: "conflicting_evidence".to_string(),
+            message: format!(
+                "Selected evidence contains {} conflicting technical fact group(s).",
+                conflicting_groups.len()
+            ),
+            related_segment_id: None,
+            related_fact_id: None,
+        });
+    }
+
+    let lower_answer = answer.to_ascii_lowercase();
+    let insufficient = lower_answer.contains("no grounded evidence")
+        || lower_answer.contains("exact value is not grounded")
+        || lower_answer.contains("не подтвержден в выбранных доказательствах");
+    let has_conflicting_evidence =
+        warnings.iter().any(|warning| warning.code == "conflicting_evidence");
+    let state = if insufficient || has_unsupported_literals {
+        QueryVerificationState::InsufficientEvidence
+    } else if has_conflicting_evidence {
+        QueryVerificationState::Conflicting
+    } else {
+        QueryVerificationState::Verified
+    };
+
+    RuntimeAnswerVerification { state, warnings }
+}
+
+fn extract_backticked_literals(answer: &str) -> Vec<String> {
+    let mut literals = Vec::new();
+    let mut seen = HashSet::new();
+    for literal in answer
+        .split('`')
+        .enumerate()
+        .filter_map(|(index, segment)| (index % 2 == 1).then(|| segment.trim().to_string()))
+        .filter(|segment| !segment.is_empty())
+    {
+        if seen.insert(literal.clone()) {
+            literals.push(literal);
+        }
+    }
+    literals
+}
+
+fn build_verification_corpus(
+    evidence: &CanonicalAnswerEvidence,
+    chunks: &[RuntimeMatchedChunk],
+) -> Vec<String> {
+    let mut corpus = Vec::<String>::new();
+    for fact in &evidence.technical_facts {
+        corpus.push(normalize_verification_literal(&fact.display_value));
+        corpus.push(normalize_verification_literal(&fact.canonical_value_text));
+        if let Ok(qualifiers) = serde_json::from_value::<
+            Vec<crate::shared::technical_facts::TechnicalFactQualifier>,
+        >(fact.qualifiers_json.clone())
+        {
+            for qualifier in qualifiers {
+                corpus.push(normalize_verification_literal(&qualifier.key));
+                corpus.push(normalize_verification_literal(&qualifier.value));
+            }
+        }
+    }
+    for block in &evidence.structured_blocks {
+        corpus.push(normalize_verification_literal(&block.text));
+        corpus.push(normalize_verification_literal(&block.normalized_text));
+    }
+    for chunk in &evidence.chunk_rows {
+        corpus.push(normalize_verification_literal(&chunk.content_text));
+        corpus.push(normalize_verification_literal(&chunk.normalized_text));
+    }
+    for chunk in chunks {
+        corpus.push(normalize_verification_literal(&chunk.source_text));
+        corpus.push(normalize_verification_literal(&chunk.excerpt));
+    }
+    corpus.retain(|value| !value.is_empty());
+    corpus
+}
+
+fn literal_is_supported_by_canonical_corpus(literal: &str, corpus: &[String]) -> bool {
+    let normalized_literal = normalize_verification_literal(literal);
+    if normalized_literal.is_empty() {
+        return true;
+    }
+    if corpus.iter().any(|candidate| candidate.contains(&normalized_literal)) {
+        return true;
+    }
+    let Some((method, path)) = split_http_literal(literal) else {
+        return false;
+    };
+    let normalized_method = normalize_verification_literal(method);
+    let normalized_path = normalize_verification_literal(path);
+    !normalized_method.is_empty()
+        && !normalized_path.is_empty()
+        && corpus.iter().any(|candidate| candidate.contains(&normalized_method))
+        && corpus.iter().any(|candidate| candidate.contains(&normalized_path))
+}
+
+fn normalize_verification_literal(value: &str) -> String {
+    value.chars().filter(|ch| !ch.is_whitespace()).flat_map(char::to_lowercase).collect()
+}
+
+fn split_http_literal(literal: &str) -> Option<(&str, &str)> {
+    let trimmed = literal.trim();
+    for method in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] {
+        let Some(rest) = trimmed.strip_prefix(method) else {
+            continue;
+        };
+        let path = rest.trim();
+        if path.starts_with('/') || path.starts_with("http://") || path.starts_with("https://") {
+            return Some((method, path));
+        }
+    }
+    None
+}
+
+fn collect_conflicting_fact_groups(
+    facts: &[KnowledgeTechnicalFactRow],
+) -> HashMap<String, BTreeSet<String>> {
+    let mut groups = HashMap::<String, BTreeSet<String>>::new();
+    for fact in facts {
+        let Some(group_id) = fact.conflict_group_id.as_ref() else {
+            continue;
+        };
+        groups.entry(group_id.clone()).or_default().insert(fact.canonical_value_text.clone());
+    }
+    groups.into_iter().filter(|(_, values)| values.len() > 1).collect()
+}
+
+async fn persist_query_verification(
+    state: &AppState,
+    execution_id: Uuid,
+    verification: &RuntimeAnswerVerification,
+    canonical_evidence: &CanonicalAnswerEvidence,
+) -> anyhow::Result<()> {
+    let Some(bundle) =
+        state.arango_context_store.get_bundle_by_query_execution(execution_id).await.with_context(
+            || format!("failed to load context bundle for verification {execution_id}"),
+        )?
+    else {
+        return Ok(());
+    };
+    let warnings_json = serde_json::to_value(&verification.warnings)
+        .context("failed to serialize verification warnings")?;
+    let candidate_summary =
+        enrich_query_candidate_summary(bundle.candidate_summary.clone(), canonical_evidence);
+    let assembly_diagnostics = enrich_query_assembly_diagnostics(
+        bundle.assembly_diagnostics.clone(),
+        verification,
+        &candidate_summary,
+    );
+    let _ = state
+        .arango_context_store
+        .update_bundle_state(
+            bundle.bundle_id,
+            &bundle.bundle_state,
+            &bundle.selected_fact_ids,
+            verification_state_label(verification.state),
+            warnings_json,
+            bundle.freshness_snapshot,
+            candidate_summary,
+            assembly_diagnostics,
+        )
+        .await
+        .context("failed to persist query verification state")?;
+    Ok(())
+}
+
+fn verification_state_label(state: QueryVerificationState) -> &'static str {
+    match state {
+        QueryVerificationState::Verified => "verified",
+        QueryVerificationState::PartiallySupported => "partially_supported",
+        QueryVerificationState::Conflicting => "conflicting_evidence",
+        QueryVerificationState::InsufficientEvidence => "insufficient_evidence",
+        QueryVerificationState::Failed => "failed",
+        QueryVerificationState::NotRun => "not_run",
+    }
+}
+
+fn enrich_query_candidate_summary(
+    candidate_summary: serde_json::Value,
+    canonical_evidence: &CanonicalAnswerEvidence,
+) -> serde_json::Value {
+    let mut summary = candidate_summary;
+    let Some(object) = summary.as_object_mut() else {
+        return summary;
+    };
+    object.insert(
+        "finalPreparedSegmentReferences".to_string(),
+        serde_json::json!(canonical_evidence.structured_blocks.len()),
+    );
+    object.insert(
+        "finalTechnicalFactReferences".to_string(),
+        serde_json::json!(canonical_evidence.technical_facts.len()),
+    );
+    object.insert(
+        "finalChunkReferences".to_string(),
+        serde_json::json!(canonical_evidence.chunk_rows.len()),
+    );
+    summary
+}
+
+fn enrich_query_assembly_diagnostics(
+    assembly_diagnostics: serde_json::Value,
+    verification: &RuntimeAnswerVerification,
+    candidate_summary: &serde_json::Value,
+) -> serde_json::Value {
+    let mut diagnostics = assembly_diagnostics;
+    let Some(object) = diagnostics.as_object_mut() else {
+        return diagnostics;
+    };
+    object.insert(
+        "verificationState".to_string(),
+        serde_json::Value::String(verification_state_label(verification.state).to_string()),
+    );
+    object.insert(
+        "verificationWarnings".to_string(),
+        serde_json::to_value(&verification.warnings).unwrap_or_else(|_| serde_json::json!([])),
+    );
+    object.insert(
+        "graphParticipation".to_string(),
+        serde_json::json!({
+            "entityReferenceCount": json_count(candidate_summary, "finalEntityReferences"),
+            "relationReferenceCount": json_count(candidate_summary, "finalRelationReferences"),
+            "graphBacked": json_count(candidate_summary, "finalEntityReferences") > 0
+                || json_count(candidate_summary, "finalRelationReferences") > 0,
+        }),
+    );
+    object.insert(
+        "structuredEvidence".to_string(),
+        serde_json::json!({
+            "preparedSegmentReferenceCount": json_count(candidate_summary, "finalPreparedSegmentReferences"),
+            "technicalFactReferenceCount": json_count(candidate_summary, "finalTechnicalFactReferences"),
+            "chunkReferenceCount": json_count(candidate_summary, "finalChunkReferences"),
+        }),
+    );
+    diagnostics
+}
+
+fn json_count(value: &serde_json::Value, key: &str) -> usize {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .unwrap_or_default()
 }
 
 fn build_graphql_absence_answer(question: &str, chunks: &[RuntimeMatchedChunk]) -> Option<String> {
@@ -2076,203 +3106,359 @@ fn build_graphql_absence_answer(question: &str, chunks: &[RuntimeMatchedChunk]) 
     if !lowered.contains("graphql") {
         return None;
     }
-    let has_graphql = chunks.iter().any(|chunk| chunk.source_text.to_lowercase().contains("graphql"));
-    (!has_graphql).then_some(
-        "В библиотеке нет описания GraphQL API или GraphQL endpoint.".to_string(),
-    )
+    let has_graphql =
+        chunks.iter().any(|chunk| chunk.source_text.to_lowercase().contains("graphql"));
+    (!has_graphql)
+        .then_some("В библиотеке нет описания GraphQL API или GraphQL endpoint.".to_string())
 }
 
-fn build_wsdl_protocol_answer(question: &str, chunks: &[RuntimeMatchedChunk]) -> Option<String> {
+fn question_mentions_port(question: &str) -> bool {
     let lowered = question.to_lowercase();
-    if !lowered.contains("wsdl") || !lowered.contains("протокол") {
-        return None;
-    }
-    let loyalty_chunks = collect_chunks_by_document_role(chunks, |label| {
-        label.contains("lmsoap") || label.contains("loyalty")
-    });
-    let wsdl_url = extract_urls_from_chunks(&loyalty_chunks)
-        .into_iter()
-        .find(|url| url.to_lowercase().ends_with(".wsdl"))?;
-    let protocol = extract_protocols_from_chunks(&loyalty_chunks).into_iter().next()?;
-    Some(format!(
-        "Для Loyalty API используется протокол `{protocol}`.\n\nURL для получения WSDL: `{wsdl_url}`."
-    ))
+    lowered.contains("port") || lowered.contains("порт")
 }
 
-fn build_cash_prefix_endpoint_answer(
-    question: &str,
-    chunks: &[RuntimeMatchedChunk],
-) -> Option<String> {
-    let lowered = question.to_lowercase();
-    if !(lowered.contains("префикс") && (lowered.contains("endpoint") || lowered.contains("эндпоинт")))
-    {
-        return None;
-    }
-    if !(lowered.contains("кассов") || lowered.contains("cashserver")) {
-        return None;
-    }
-    let cash_chunks = collect_chunks_by_document_role(chunks, |label| {
-        label.contains("cashserver") || label.contains("касс")
-    });
-    if cash_chunks.is_empty() {
-        return None;
-    }
-    let prefix = extract_prefixes_from_chunks(&cash_chunks)
-        .into_iter()
-        .find(|value| value.contains("CSrest/rest"))
-        .or_else(|| select_shortest_literal(extract_prefixes_from_chunks(&cash_chunks)))?;
-    let endpoint =
-        build_multi_document_endpoint_answer_from_chunks(question, &owned_runtime_chunks(&cash_chunks))
-            .and_then(|answer| extract_backticked_literal(&answer, "/system/info"))
-            .unwrap_or_else(|| "/system/info".to_string());
-    Some(format!(
-        "Префикс REST-интерфейса кассового сервера: `{prefix}`.\n\nEndpoint текущей информации о сервере: `GET {endpoint}`."
-    ))
-}
+fn extract_port_literals(text: &str, limit: usize) -> Vec<String> {
+    let mut values = Vec::<String>::new();
+    let mut seen = HashSet::<String>::new();
 
-fn build_pagination_parameters_answer(
-    question: &str,
-    chunks: &[RuntimeMatchedChunk],
-) -> Option<String> {
-    let lowered = question.to_lowercase();
-    if !question_mentions_pagination(question) || !lowered.contains("счет") {
-        return None;
-    }
-    let bonus_chunks = collect_chunks_by_document_role(chunks, |label| {
-        label.contains("бонус") || label.contains("bonus")
-    });
-    if bonus_chunks.is_empty() {
-        return None;
-    }
-    let supported = extract_parameters_from_chunks(&bonus_chunks)
-        .into_iter()
-        .filter(|value| {
-            matches!(
-                value.as_str(),
-                "pageNumber" | "pageSize" | "withCards" | "number_starting" | "withBonusSum"
-            )
-        })
-        .collect::<Vec<_>>();
-    if supported.is_empty() {
-        return None;
-    }
-    Some(format!(
-        "Получение списка счетов с бонусного сервера поддерживает параметры пейджинации и фильтрации: {}.",
-        supported
-            .into_iter()
-            .map(|value| format!("`{value}`"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    ))
-}
-
-fn build_compare_protocols_answer(
-    question: &str,
-    chunks: &[RuntimeMatchedChunk],
-) -> Option<String> {
-    let lowered = question.to_lowercase();
-    if !lowered.contains("сравни")
-        || !lowered.contains("протокол")
-        || !lowered.contains("loyalty")
-        || !lowered.contains("бонус")
-    {
-        return None;
-    }
-    let loyalty_chunks = collect_chunks_by_document_role(chunks, |label| {
-        label.contains("lmsoap") || label.contains("loyalty")
-    });
-    let bonus_chunks = collect_chunks_by_document_role(chunks, |label| {
-        label.contains("бонус") || label.contains("bonus")
-    });
-    if loyalty_chunks.is_empty() || bonus_chunks.is_empty() {
-        return None;
-    }
-    let loyalty_protocol = extract_protocols_from_chunks(&loyalty_chunks).into_iter().next()?;
-    let bonus_protocol = extract_protocols_from_chunks(&bonus_chunks).into_iter().next()?;
-    let loyalty_base = extract_prefixes_from_chunks(&loyalty_chunks)
-        .into_iter()
-        .find(|value| value.contains("loyalty-api/ws"))
-        .or_else(|| select_shortest_literal(extract_prefixes_from_chunks(&loyalty_chunks)))?;
-    let bonus_base = extract_prefixes_from_chunks(&bonus_chunks)
-        .into_iter()
-        .find(|value| value.contains("ACC/rest"))
-        .or_else(|| select_shortest_literal(extract_prefixes_from_chunks(&bonus_chunks)))?;
-    Some(format!(
-        "Loyalty API: протокол `{loyalty_protocol}`, базовый URL/префикс `{loyalty_base}`.\n\nREST API Бонусного Сервера: протокол `{bonus_protocol}`, базовый URL/префикс `{bonus_base}`."
-    ))
-}
-
-fn collect_chunks_by_document_role<'a>(
-    chunks: &'a [RuntimeMatchedChunk],
-    predicate: impl Fn(&str) -> bool,
-) -> Vec<&'a RuntimeMatchedChunk> {
-    chunks
-        .iter()
-        .filter(|chunk| predicate(&chunk.document_label.to_lowercase()))
-        .collect::<Vec<_>>()
-}
-
-fn extract_protocols_from_chunks(chunks: &[&RuntimeMatchedChunk]) -> Vec<String> {
-    let mut protocols = Vec::new();
-    let mut seen = HashSet::new();
-    for chunk in chunks {
-        for value in extract_protocol_literals(&chunk.source_text, 4) {
-            push_unique_limited(&mut protocols, &mut seen, value, 4);
+    for url in extract_url_literals(text, limit) {
+        let Some((_, remainder)) = url.split_once("://") else {
+            continue;
+        };
+        let authority = remainder.split('/').next().unwrap_or_default();
+        let Some((_, port)) = authority.rsplit_once(':') else {
+            continue;
+        };
+        let port = port.trim();
+        if (2..=5).contains(&port.len())
+            && port.chars().all(|character| character.is_ascii_digit())
+            && seen.insert(port.to_string())
+        {
+            values.push(port.to_string());
+            if values.len() >= limit {
+                return values;
+            }
         }
     }
-    protocols
-}
 
-fn extract_urls_from_chunks(chunks: &[&RuntimeMatchedChunk]) -> Vec<String> {
-    let mut urls = Vec::new();
-    let mut seen = HashSet::new();
-    for chunk in chunks {
-        for value in extract_url_literals(&chunk.source_text, 8) {
-            push_unique_limited(&mut urls, &mut seen, value, 8);
+    let cleaned = text.replace('\n', " ");
+    for separator in [":", "="] {
+        for keyword in ["port", "tcp_port", "udp_port", "порт"] {
+            let pattern = format!("{keyword}{separator}");
+            for fragment in cleaned.match_indices(&pattern) {
+                let value_start = fragment.0 + pattern.len();
+                let suffix = cleaned[value_start..].trim_start();
+                let digits = suffix
+                    .chars()
+                    .take_while(|character| character.is_ascii_digit())
+                    .collect::<String>();
+                if (2..=5).contains(&digits.len()) && seen.insert(digits.clone()) {
+                    values.push(digits);
+                    if values.len() >= limit {
+                        return values;
+                    }
+                }
+            }
         }
     }
-    urls
-}
 
-fn extract_prefixes_from_chunks(chunks: &[&RuntimeMatchedChunk]) -> Vec<String> {
-    let mut prefixes = Vec::new();
-    let mut seen = HashSet::new();
-    for chunk in chunks {
-        for value in extract_prefix_literals(&chunk.source_text, 8) {
-            push_unique_limited(&mut prefixes, &mut seen, value, 8);
+    let tokens = cleaned.split_whitespace().collect::<Vec<_>>();
+    for window in tokens.windows(2) {
+        let keyword = trim_literal_token(window[0]).trim_matches(':');
+        let value = trim_literal_token(window[1]).trim_matches(':');
+        if ["port", "tcp_port", "udp_port", "порт"]
+            .iter()
+            .any(|candidate| keyword.eq_ignore_ascii_case(candidate))
+            && (2..=5).contains(&value.len())
+            && value.chars().all(|character| character.is_ascii_digit())
+            && seen.insert(value.to_string())
+        {
+            values.push(value.to_string());
+            if values.len() >= limit {
+                return values;
+            }
         }
     }
-    prefixes
-}
 
-fn extract_parameters_from_chunks(chunks: &[&RuntimeMatchedChunk]) -> Vec<String> {
-    let mut parameters = Vec::new();
-    let mut seen = HashSet::new();
-    for chunk in chunks {
-        for value in extract_parameter_literals(&chunk.source_text, 16) {
-            push_unique_limited(&mut parameters, &mut seen, value, 16);
-        }
-    }
-    parameters
-}
-
-fn select_shortest_literal(values: Vec<String>) -> Option<String> {
     values
+}
+
+fn concise_document_subject_label(document_label: &str) -> String {
+    document_label
+        .split(" - ")
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(document_label)
+        .to_string()
+}
+
+fn build_port_and_protocol_answer(
+    question: &str,
+    chunks: &[RuntimeMatchedChunk],
+) -> Option<String> {
+    if !question_mentions_port(question)
+        || !question_mentions_protocol(question)
+        || chunks.is_empty()
+    {
+        return None;
+    }
+
+    let question_keywords = technical_literal_focus_keywords(question);
+    let focus_segments = technical_literal_focus_segments_text(question)
         .into_iter()
-        .filter(|value| !value.contains('<'))
-        .min_by_key(|value| value.len())
+        .map(|segment| {
+            let keywords = technical_literal_focus_keywords(&segment);
+            (segment, keywords)
+        })
+        .filter(|(_, keywords)| !keywords.is_empty())
+        .collect::<Vec<_>>();
+    if focus_segments.len() < 2 {
+        return None;
+    }
+
+    let mut ordered_document_ids = Vec::<Uuid>::new();
+    let mut per_document_chunks = HashMap::<Uuid, Vec<&RuntimeMatchedChunk>>::new();
+    for chunk in chunks {
+        if !per_document_chunks.contains_key(&chunk.document_id) {
+            ordered_document_ids.push(chunk.document_id);
+        }
+        per_document_chunks.entry(chunk.document_id).or_default().push(chunk);
+    }
+
+    let select_segment_document = |segment_keywords: &[String]| -> Option<Uuid> {
+        ordered_document_ids
+            .iter()
+            .filter_map(|document_id| {
+                let document_chunks = per_document_chunks.get(document_id)?;
+                let best_chunk_score = document_chunks
+                    .iter()
+                    .map(|chunk| {
+                        technical_chunk_selection_score(
+                            &format!("{} {}", chunk.excerpt, chunk.source_text),
+                            segment_keywords,
+                            false,
+                        )
+                    })
+                    .max()
+                    .unwrap_or_default();
+                (best_chunk_score > 0).then_some((best_chunk_score, *document_id))
+            })
+            .max_by(|left, right| {
+                left.0.cmp(&right.0).then_with(|| {
+                    let left_index = ordered_document_ids
+                        .iter()
+                        .position(|document_id| document_id == &left.1)
+                        .unwrap_or(usize::MAX);
+                    let right_index = ordered_document_ids
+                        .iter()
+                        .position(|document_id| document_id == &right.1)
+                        .unwrap_or(usize::MAX);
+                    right_index.cmp(&left_index)
+                })
+            })
+            .map(|(_, document_id)| document_id)
+    };
+
+    let mut port_line = None;
+    let mut protocol_line = None;
+
+    for (segment_text, segment_keywords) in focus_segments {
+        let Some(document_id) = select_segment_document(&segment_keywords) else {
+            continue;
+        };
+        let Some(document_chunks) = per_document_chunks.get(&document_id) else {
+            continue;
+        };
+        let local_keywords =
+            document_local_focus_keywords(question, document_chunks, &question_keywords);
+        let mut ranked_chunks = document_chunks.clone();
+        ranked_chunks.sort_by(|left, right| {
+            let left_match = technical_chunk_selection_score(
+                &format!("{} {}", left.excerpt, left.source_text),
+                &local_keywords,
+                false,
+            );
+            let right_match = technical_chunk_selection_score(
+                &format!("{} {}", right.excerpt, right.source_text),
+                &local_keywords,
+                false,
+            );
+            right_match
+                .cmp(&left_match)
+                .then_with(|| score_value(right.score).total_cmp(&score_value(left.score)))
+        });
+
+        let subject = concise_document_subject_label(&document_chunks[0].document_label);
+        let mut ports = Vec::<String>::new();
+        let mut protocols = Vec::<String>::new();
+        let mut seen_ports = HashSet::<String>::new();
+        let mut seen_protocols = HashSet::<String>::new();
+        for chunk in ranked_chunks.iter().take(4) {
+            let focused = focused_excerpt_for(&chunk.source_text, &local_keywords, 900);
+            let literal_source = if focused.trim().is_empty() {
+                chunk.source_text.as_str()
+            } else {
+                focused.as_str()
+            };
+            if question_mentions_port(&segment_text) {
+                for port in extract_port_literals(literal_source, 2) {
+                    if seen_ports.insert(port.clone()) {
+                        ports.push(port);
+                    }
+                }
+            }
+            if question_mentions_protocol(&segment_text) {
+                for protocol in extract_protocol_literals(literal_source, 2) {
+                    if seen_protocols.insert(protocol.clone()) {
+                        protocols.push(protocol);
+                    }
+                }
+            }
+        }
+
+        if port_line.is_none() && !ports.is_empty() {
+            port_line = Some(format!("{subject}: port `{}`", ports[0]));
+        }
+        if protocol_line.is_none() && !protocols.is_empty() {
+            protocol_line = Some(format!("{subject}: protocol `{}`", protocols[0]));
+        }
+    }
+
+    match (port_line, protocol_line) {
+        (Some(port), Some(protocol)) => Some(format!("{port}. {protocol}.")),
+        _ => None,
+    }
 }
 
-fn owned_runtime_chunks(chunks: &[&RuntimeMatchedChunk]) -> Vec<RuntimeMatchedChunk> {
-    chunks.iter().map(|chunk| (*chunk).clone()).collect()
-}
+fn build_port_answer(question: &str, chunks: &[RuntimeMatchedChunk]) -> Option<String> {
+    if !question_mentions_port(question)
+        || question_mentions_protocol(question)
+        || technical_literal_focus_keyword_segments(question).len() > 1
+        || chunks.is_empty()
+    {
+        return None;
+    }
 
-fn extract_backticked_literal(answer: &str, needle: &str) -> Option<String> {
-    answer
-        .lines()
-        .flat_map(|line| line.split('`'))
-        .find(|segment| segment.contains(needle))
-        .map(ToString::to_string)
+    let question_keywords = technical_literal_focus_keywords(question);
+    let focus_segments = technical_literal_focus_keyword_segments(question);
+    let mut ordered_document_ids = Vec::<Uuid>::new();
+    let mut per_document_chunks = HashMap::<Uuid, Vec<&RuntimeMatchedChunk>>::new();
+    for chunk in chunks {
+        if !per_document_chunks.contains_key(&chunk.document_id) {
+            ordered_document_ids.push(chunk.document_id);
+        }
+        per_document_chunks.entry(chunk.document_id).or_default().push(chunk);
+    }
+
+    let scoped_document_ids = if focus_segments.is_empty() {
+        ordered_document_ids.clone()
+    } else {
+        let mut selected = Vec::new();
+        let mut seen = HashSet::new();
+        for segment_keywords in &focus_segments {
+            let best_document = ordered_document_ids
+                .iter()
+                .filter_map(|document_id| {
+                    let document_chunks = per_document_chunks.get(document_id)?;
+                    let best_chunk_score = document_chunks
+                        .iter()
+                        .map(|chunk| {
+                            technical_chunk_selection_score(
+                                &format!("{} {}", chunk.excerpt, chunk.source_text),
+                                &segment_keywords,
+                                false,
+                            )
+                        })
+                        .max()
+                        .unwrap_or_default();
+                    (best_chunk_score > 0).then_some((best_chunk_score, *document_id))
+                })
+                .max_by(|left, right| {
+                    left.0.cmp(&right.0).then_with(|| {
+                        let left_index = ordered_document_ids
+                            .iter()
+                            .position(|document_id| document_id == &left.1)
+                            .unwrap_or(usize::MAX);
+                        let right_index = ordered_document_ids
+                            .iter()
+                            .position(|document_id| document_id == &right.1)
+                            .unwrap_or(usize::MAX);
+                        right_index.cmp(&left_index)
+                    })
+                });
+            if let Some((_, document_id)) = best_document
+                && seen.insert(document_id)
+            {
+                selected.push(document_id);
+            }
+        }
+        if selected.is_empty() { ordered_document_ids.clone() } else { selected }
+    };
+
+    for document_id in scoped_document_ids {
+        let Some(document_chunks) = per_document_chunks.get(&document_id) else {
+            continue;
+        };
+        let local_keywords =
+            document_local_focus_keywords(question, document_chunks, &question_keywords);
+        let mut ranked_chunks = document_chunks.clone();
+        ranked_chunks.sort_by(|left, right| {
+            let left_match = technical_chunk_selection_score(
+                &format!("{} {}", left.excerpt, left.source_text),
+                &local_keywords,
+                false,
+            );
+            let right_match = technical_chunk_selection_score(
+                &format!("{} {}", right.excerpt, right.source_text),
+                &local_keywords,
+                false,
+            );
+            right_match
+                .cmp(&left_match)
+                .then_with(|| score_value(right.score).total_cmp(&score_value(left.score)))
+        });
+
+        let mut ports = Vec::<String>::new();
+        let mut seen = HashSet::<String>::new();
+        for chunk in ranked_chunks.iter().take(4) {
+            let focused = focused_excerpt_for(&chunk.source_text, &local_keywords, 900);
+            let literal_source = if focused.trim().is_empty() {
+                chunk.source_text.as_str()
+            } else {
+                focused.as_str()
+            };
+            for port in extract_port_literals(literal_source, 4) {
+                if seen.insert(port.clone()) {
+                    ports.push(port);
+                }
+            }
+        }
+
+        let subject = concise_document_subject_label(&document_chunks[0].document_label);
+        if ports.is_empty() {
+            if !focus_segments.is_empty() {
+                return Some(format!(
+                    "Точный порт для {subject} не подтвержден в выбранных доказательствах."
+                ));
+            }
+            continue;
+        }
+        if ports.len() == 1 {
+            return Some(format!(
+                "Для {subject} в активной библиотеке найден порт `{}`.",
+                ports[0]
+            ));
+        }
+
+        let rendered_ports =
+            ports.iter().map(|port| format!("`{port}`")).collect::<Vec<_>>().join(", ");
+        return Some(format!(
+            "Для {subject} в активной библиотеке найдены порты {rendered_ports}."
+        ));
+    }
+
+    None
 }
 
 fn build_multi_document_endpoint_answer_from_chunks(
@@ -2283,7 +3469,8 @@ fn build_multi_document_endpoint_answer_from_chunks(
     if !(lowered.contains("endpoint") || lowered.contains("эндпоинт")) {
         return None;
     }
-    if lowered.contains("сравн") || lowered.contains("протокол") || lowered.contains("порт") {
+    if lowered.contains("сравн") || lowered.contains("протокол") || lowered.contains("порт")
+    {
         return None;
     }
 
@@ -2337,19 +3524,17 @@ fn build_multi_document_endpoint_answer_from_chunks(
                     (score > 0).then_some((score, *document_id))
                 })
                 .max_by(|left, right| {
-                    left.0
-                        .cmp(&right.0)
-                        .then_with(|| {
-                            let left_index = ordered_document_ids
-                                .iter()
-                                .position(|document_id| document_id == &left.1)
-                                .unwrap_or(usize::MAX);
-                            let right_index = ordered_document_ids
-                                .iter()
-                                .position(|document_id| document_id == &right.1)
-                                .unwrap_or(usize::MAX);
-                            right_index.cmp(&left_index)
-                        })
+                    left.0.cmp(&right.0).then_with(|| {
+                        let left_index = ordered_document_ids
+                            .iter()
+                            .position(|document_id| document_id == &left.1)
+                            .unwrap_or(usize::MAX);
+                        let right_index = ordered_document_ids
+                            .iter()
+                            .position(|document_id| document_id == &right.1)
+                            .unwrap_or(usize::MAX);
+                        right_index.cmp(&left_index)
+                    })
                 });
             if let Some((_, document_id)) = best_document {
                 if seen.insert(document_id) {
@@ -2357,11 +3542,7 @@ fn build_multi_document_endpoint_answer_from_chunks(
                 }
             }
         }
-        if selected.is_empty() {
-            ordered_document_ids.clone()
-        } else {
-            selected
-        }
+        if selected.is_empty() { ordered_document_ids.clone() } else { selected }
     };
 
     let mut lines = Vec::new();
@@ -2369,7 +3550,8 @@ fn build_multi_document_endpoint_answer_from_chunks(
         let Some(document_chunks) = per_document_chunks.get(&document_id) else {
             continue;
         };
-        let local_keywords = document_local_focus_keywords(question, document_chunks, &question_keywords);
+        let local_keywords =
+            document_local_focus_keywords(question, document_chunks, &question_keywords);
         let mut ranked_chunks = document_chunks.clone();
         ranked_chunks.sort_by(|left, right| {
             let left_match = technical_chunk_selection_score(
@@ -2859,6 +4041,99 @@ async fn load_retrieved_document_preview(
     Some(excerpt_for(&combined, 240))
 }
 
+#[cfg(test)]
+fn sample_chunk_row(chunk_id: Uuid, document_id: Uuid, revision_id: Uuid) -> KnowledgeChunkRow {
+    KnowledgeChunkRow {
+        key: chunk_id.to_string(),
+        arango_id: None,
+        arango_rev: None,
+        chunk_id,
+        workspace_id: Uuid::now_v7(),
+        library_id: Uuid::now_v7(),
+        document_id,
+        revision_id,
+        chunk_index: 0,
+        chunk_kind: Some("paragraph".to_string()),
+        content_text: "chunk".to_string(),
+        normalized_text: "chunk".to_string(),
+        span_start: Some(0),
+        span_end: Some(5),
+        token_count: Some(1),
+        support_block_ids: Vec::new(),
+        section_path: vec!["root".to_string()],
+        heading_trail: vec!["Root".to_string()],
+        literal_digest: None,
+        chunk_state: "ready".to_string(),
+        text_generation: Some(1),
+        vector_generation: Some(1),
+    }
+}
+
+#[cfg(test)]
+fn sample_structured_block_row(
+    block_id: Uuid,
+    document_id: Uuid,
+    revision_id: Uuid,
+) -> KnowledgeStructuredBlockRow {
+    let now = chrono::Utc::now();
+    KnowledgeStructuredBlockRow {
+        key: block_id.to_string(),
+        arango_id: None,
+        arango_rev: None,
+        block_id,
+        workspace_id: Uuid::now_v7(),
+        library_id: Uuid::now_v7(),
+        document_id,
+        revision_id,
+        ordinal: 0,
+        block_kind: "paragraph".to_string(),
+        text: "segment".to_string(),
+        normalized_text: "segment".to_string(),
+        heading_trail: vec!["Root".to_string()],
+        section_path: vec!["root".to_string()],
+        page_number: Some(1),
+        span_start: Some(0),
+        span_end: Some(7),
+        parent_block_id: None,
+        table_coordinates_json: None,
+        code_language: None,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+#[cfg(test)]
+fn sample_technical_fact_row(
+    fact_id: Uuid,
+    document_id: Uuid,
+    revision_id: Uuid,
+) -> KnowledgeTechnicalFactRow {
+    let now = chrono::Utc::now();
+    KnowledgeTechnicalFactRow {
+        key: fact_id.to_string(),
+        arango_id: None,
+        arango_rev: None,
+        fact_id,
+        workspace_id: Uuid::now_v7(),
+        library_id: Uuid::now_v7(),
+        document_id,
+        revision_id,
+        fact_kind: "endpoint_path".to_string(),
+        canonical_value_text: "/health".to_string(),
+        canonical_value_exact: "/health".to_string(),
+        canonical_value_json: serde_json::json!("/health"),
+        display_value: "/health".to_string(),
+        qualifiers_json: serde_json::json!({}),
+        support_block_ids: Vec::new(),
+        support_chunk_ids: Vec::new(),
+        confidence: Some(0.95),
+        extraction_kind: "parser_first".to_string(),
+        conflict_group_id: None,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
 fn request_safe_query(plan: &RuntimeQueryPlan) -> String {
     if !plan.low_level_keywords.is_empty() {
         let combined =
@@ -3084,6 +4359,9 @@ fn focused_excerpt_for(content: &str, keywords: &[String], max_chars: usize) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    use crate::infra::arangodb::graph_store::KnowledgeEvidenceRow;
 
     #[test]
     fn build_references_keeps_chunk_node_edge_order_and_ranks() {
@@ -3201,6 +4479,7 @@ mod tests {
             "What documents mention RustRAG?",
             "Library summary\n- Documents in library: 12\n\nRecent documents\n- 2026-03-30T22:15:00Z — spec.md (text/markdown; pipeline ready; graph ready)",
             None,
+            None,
         );
         assert!(prompt.contains("Treat the active library as the primary source of truth"));
         assert!(prompt.contains("exhaust the provided library context"));
@@ -3213,8 +4492,24 @@ mod tests {
         assert!(prompt.contains("grouped by document"));
         assert!(prompt.contains("matched excerpt"));
         assert!(prompt.contains("Do not combine parts from different snippets"));
+        assert!(prompt.contains("prefer the next distinct item after the excluded one"));
         assert!(prompt.contains("Question: What documents mention RustRAG?"));
         assert!(prompt.contains("Documents in library: 12"));
+    }
+
+    #[test]
+    fn build_answer_prompt_includes_recent_conversation_history() {
+        let prompt = build_answer_prompt(
+            "давай",
+            "Context\n[dummy] step-by-step instructions",
+            Some("User: как в далионе перемещение сделать\nAssistant: Могу расписать пошагово."),
+            None,
+        );
+
+        assert!(prompt.contains("Use the recent conversation history"));
+        assert!(prompt.contains("Recent conversation:"));
+        assert!(prompt.contains("Assistant: Могу расписать пошагово."));
+        assert!(prompt.contains("Question: давай"));
     }
 
     #[test]
@@ -3249,7 +4544,7 @@ Trailing details";
                 excerpt: "Получение списка счетов по страницам.".to_string(),
                 score: Some(0.9),
                 source_text: repair_technical_layout_noise(
-                    "http\n://localhost:8080/ACC/rest/v1/accounts\n/bypage\npageNu\nmber\npageSize\nwithCar\nds\nnumber\n_starting",
+                    "http\n://demo.local:8080/rewards-api/rest/v1/accounts\n/bypage\npageNu\nmber\npageSize\nwithCar\nds\nnumber\n_starting",
                 ),
             }],
         )
@@ -3257,10 +4552,10 @@ Trailing details";
 
         assert!(section.contains("Document: `api.pdf`"));
         assert!(section.contains("Matched excerpt: Получение списка счетов по страницам."));
-        assert!(section.contains("`http://localhost:8080/ACC/rest/v1/accounts/bypage`"));
+        assert!(section.contains("`http://demo.local:8080/rewards-api/rest/v1/accounts/bypage`"));
         assert!(
             section.contains("`/v1/accounts/bypage`")
-                || section.contains("`/ACC/rest/v1/accounts/bypage`")
+                || section.contains("`/rewards-api/rest/v1/accounts/bypage`")
         );
         assert!(section.contains("`pageNumber`"));
         assert!(section.contains("`pageSize`"));
@@ -3271,122 +4566,289 @@ Trailing details";
     #[test]
     fn build_exact_technical_literals_section_groups_literals_by_document() {
         let section = build_exact_technical_literals_section(
-            "Если агенту нужно получить текущую информацию о кассовом сервере и отдельно список счетов бонусного сервера, какие два endpoint'а ему нужны?",
+            "Если агенту нужно получить текущий статус checkout server и отдельно список счетов rewards service, какие два endpoint'а ему нужны?",
             &[
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
                     document_id: Uuid::now_v7(),
-                    document_label: "CASHSERVER.pdf".to_string(),
-                    excerpt: "Для получения текущей информации о КС надо выполнить запрос GET на URL /system/info.".to_string(),
+                    document_label: "checkout_server_reference.pdf".to_string(),
+                    excerpt: "Для получения текущего статуса checkout server надо выполнить запрос GET на URL /system/info.".to_string(),
                     score: Some(0.9),
                     source_text: repair_technical_layout_noise(
-                        "http://localhost:8080/CSrest/rest/system/info\nGET\n/system/info",
+                        "http://demo.local:8080/checkout-api/rest/system/info\nGET\n/system/info",
                     ),
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
                     document_id: Uuid::now_v7(),
-                    document_label: "BONUS.pdf".to_string(),
-                    excerpt: "GET /v1/accounts возвращает список счетов бонусного сервера.".to_string(),
+                    document_label: "rewards_service_reference.pdf".to_string(),
+                    excerpt: "GET /v1/accounts возвращает список счетов rewards service.".to_string(),
                     score: Some(0.8),
                     source_text: repair_technical_layout_noise(
-                        "http://localhost:8080/ACC/rest/v1/version\n/v1/accounts\nGET",
+                        "http://demo.local:8080/rewards-api/rest/v1/version\n/v1/accounts\nGET",
                     ),
                 },
             ],
         )
         .unwrap_or_default();
 
-        let cash_index = section.find("Document: `CASHSERVER.pdf`").unwrap_or(usize::MAX);
-        let bonus_index = section.find("Document: `BONUS.pdf`").unwrap_or(usize::MAX);
+        let checkout_index =
+            section.find("Document: `checkout_server_reference.pdf`").unwrap_or(usize::MAX);
+        let rewards_index =
+            section.find("Document: `rewards_service_reference.pdf`").unwrap_or(usize::MAX);
         let system_info_index = section.find("`/system/info`").unwrap_or(usize::MAX);
         let accounts_index = section.find("`/v1/accounts`").unwrap_or(usize::MAX);
 
-        assert!(cash_index < bonus_index);
-        assert!(cash_index < system_info_index);
-        assert!(bonus_index < accounts_index);
-        assert!(section.contains("текущей информации о КС"));
-        assert!(section.contains("список счетов бонусного сервера"));
+        assert!(checkout_index < rewards_index);
+        assert!(checkout_index < system_info_index);
+        assert!(rewards_index < accounts_index);
+        assert!(section.contains("текущего статуса checkout server"));
+        assert!(section.contains("список счетов rewards service"));
     }
 
     #[test]
     fn build_exact_technical_literals_section_prefers_question_matched_window_per_document() {
         let section = build_exact_technical_literals_section(
-            "Какой endpoint возвращает список счетов бонусного сервера?",
+            "Какой endpoint возвращает список счетов rewards service?",
             &[RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
                 document_id: Uuid::now_v7(),
-                document_label: "BONUS.pdf".to_string(),
-                excerpt: "GET /v1/accounts возвращает список счетов бонусного сервера.".to_string(),
+                document_label: "rewards_service_reference.pdf".to_string(),
+                excerpt: "GET /v1/accounts возвращает список счетов rewards service.".to_string(),
                 score: Some(0.9),
                 source_text: repair_technical_layout_noise(
-                    "http://localhost:8080/ACC/rest/v1/version\nGET\nВерсия бонусного сервера\n/v1/accounts\nGET\nПолучить список счетов бонусного сервера.",
+                    "http://demo.local:8080/rewards-api/rest/v1/version\nGET\nВерсия rewards service\n/v1/accounts\nGET\nПолучить список счетов rewards service.",
                 ),
             }],
         )
         .unwrap_or_default();
 
         assert!(section.contains("`/v1/accounts`"));
-        assert!(!section.contains("`/ACC/rest/v1/version`"));
+        assert!(!section.contains("`/rewards-api/rest/v1/version`"));
     }
 
     #[test]
     fn build_exact_technical_literals_section_balances_documents_before_second_same_doc_chunk() {
-        let bonus_document_id = Uuid::now_v7();
-        let cash_document_id = Uuid::now_v7();
+        let rewards_document_id = Uuid::now_v7();
+        let checkout_document_id = Uuid::now_v7();
         let section = build_exact_technical_literals_section(
-            "Если агенту нужно получить текущую информацию о кассовом сервере и отдельно список счетов бонусного сервера, какие два endpoint'а ему нужны?",
+            "Если агенту нужно получить текущий статус checkout server и отдельно список счетов rewards service, какие два endpoint'а ему нужны?",
             &[
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
-                    document_id: bonus_document_id,
-                    document_label: "BONUS.pdf".to_string(),
-                    excerpt: "GET /v1/accounts возвращает список счетов бонусного сервера.".to_string(),
+                    document_id: rewards_document_id,
+                    document_label: "rewards_service_reference.pdf".to_string(),
+                    excerpt: "GET /v1/accounts возвращает список счетов rewards service.".to_string(),
                     score: Some(0.99),
-                    source_text: repair_technical_layout_noise("/v1/accounts\nGET\nПолучить список счетов бонусного сервера."),
+                    source_text: repair_technical_layout_noise("/v1/accounts\nGET\nПолучить список счетов rewards service."),
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
-                    document_id: bonus_document_id,
-                    document_label: "BONUS.pdf".to_string(),
-                    excerpt: "GET /v1/cards/bypage возвращает список карт бонусного сервера.".to_string(),
+                    document_id: rewards_document_id,
+                    document_label: "rewards_service_reference.pdf".to_string(),
+                    excerpt: "GET /v1/cards/bypage возвращает список карт rewards service.".to_string(),
                     score: Some(0.98),
-                    source_text: repair_technical_layout_noise("/v1/cards/bypage\nGET\nПолучить список карт бонусного сервера."),
+                    source_text: repair_technical_layout_noise("/v1/cards/bypage\nGET\nПолучить список карт rewards service."),
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
-                    document_id: bonus_document_id,
-                    document_label: "BONUS.pdf".to_string(),
+                    document_id: rewards_document_id,
+                    document_label: "rewards_service_reference.pdf".to_string(),
                     excerpt: "GET /v1/cards возвращает список карт.".to_string(),
                     score: Some(0.97),
                     source_text: repair_technical_layout_noise("/v1/cards\nGET\nПолучить список карт."),
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
-                    document_id: cash_document_id,
-                    document_label: "CASHSERVER.pdf".to_string(),
-                    excerpt: "Для получения текущей информации о КС надо выполнить запрос GET на URL /system/info.".to_string(),
+                    document_id: checkout_document_id,
+                    document_label: "checkout_server_reference.pdf".to_string(),
+                    excerpt: "Для получения текущего статуса checkout server надо выполнить запрос GET на URL /system/info.".to_string(),
                     score: Some(0.6),
-                    source_text: repair_technical_layout_noise("http://localhost:8080/CSrest/rest/system/info\nGET\n/system/info"),
+                    source_text: repair_technical_layout_noise("http://demo.local:8080/checkout-api/rest/system/info\nGET\n/system/info"),
                 },
             ],
         )
         .unwrap_or_default();
 
-        assert!(section.contains("Document: `CASHSERVER.pdf`"));
+        assert!(section.contains("Document: `checkout_server_reference.pdf`"));
         assert!(section.contains("`/system/info`"), "{section}");
+    }
+
+    #[test]
+    fn build_port_answer_returns_insufficient_when_focused_document_has_no_grounded_port() {
+        let control_document_id = Uuid::now_v7();
+        let telegram_document_id = Uuid::now_v7();
+
+        let answer = build_port_answer(
+            "Какой порт использует Acme Control Center?",
+            &[
+                RuntimeMatchedChunk {
+                    chunk_id: Uuid::now_v7(),
+                    document_id: control_document_id,
+                    document_label: "Acme Control Center - Example".to_string(),
+                    excerpt: "Acme Control Center — программное обеспечение для управления конфигурацией объектов управления.".to_string(),
+                    score: Some(0.95),
+                    source_text: repair_technical_layout_noise(
+                        "Acme Control Center\nОписание\nAcme Control Center — программное обеспечение для управления конфигурацией объектов управления.",
+                    ),
+                },
+                RuntimeMatchedChunk {
+                    chunk_id: Uuid::now_v7(),
+                    document_id: telegram_document_id,
+                    document_label: "Acme Telegram Bot - Example".to_string(),
+                    excerpt: "Для интеграции используется localhost:2026.".to_string(),
+                    score: Some(0.91),
+                    source_text: repair_technical_layout_noise(
+                        "Acme Telegram Bot\nНастройки\nport: 2026\nlocalhost:2026",
+                    ),
+                },
+            ],
+        )
+        .unwrap_or_default();
+
+        assert!(answer.contains("Acme Control Center"));
+        assert!(answer.contains("не подтвержден"));
+        assert!(!answer.contains("2026"));
+    }
+
+    #[test]
+    fn technical_literal_focus_keyword_segments_splits_english_multi_clause_questions() {
+        let segments = technical_literal_focus_keyword_segments(
+            "What is the default port for the Rewards Accounts REST API, and which protocol does the Customer Profile API use?",
+        );
+
+        assert!(segments.len() >= 2);
+        assert!(segments.iter().any(|segment| segment.iter().any(|keyword| keyword == "rewards")));
+        assert!(segments.iter().any(|segment| segment.iter().any(|keyword| keyword == "profile")));
+    }
+
+    #[test]
+    fn build_port_answer_skips_port_plus_protocol_questions() {
+        let rewards_document_id = Uuid::now_v7();
+        let loyalty_document_id = Uuid::now_v7();
+
+        let answer = build_port_answer(
+            "What is the default port for the Rewards Accounts REST API, and which protocol does the Customer Profile API use?",
+            &[
+                RuntimeMatchedChunk {
+                    chunk_id: Uuid::now_v7(),
+                    document_id: rewards_document_id,
+                    document_label: "rewards_accounts_rest_reference.md".to_string(),
+                    excerpt: "Default port: 8081".to_string(),
+                    score: Some(0.99),
+                    source_text: repair_technical_layout_noise(
+                        "Rewards Accounts REST API Reference\nDefault port: 8081\nProtocol: REST over HTTP",
+                    ),
+                },
+                RuntimeMatchedChunk {
+                    chunk_id: Uuid::now_v7(),
+                    document_id: loyalty_document_id,
+                    document_label: "customer_profile_soap_reference.md".to_string(),
+                    excerpt: "Protocol: SOAP over HTTP".to_string(),
+                    score: Some(0.98),
+                    source_text: repair_technical_layout_noise(
+                        "Customer Profile SOAP API Reference\nProtocol: SOAP over HTTP",
+                    ),
+                },
+            ],
+        );
+
+        assert!(answer.is_none());
+    }
+
+    #[test]
+    fn build_port_and_protocol_answer_handles_english_multi_document_question() {
+        let rewards_document_id = Uuid::now_v7();
+        let loyalty_document_id = Uuid::now_v7();
+
+        let answer = build_port_and_protocol_answer(
+            "What is the default port for the Rewards Accounts REST API, and which protocol does the Customer Profile API use?",
+            &[
+                RuntimeMatchedChunk {
+                    chunk_id: Uuid::now_v7(),
+                    document_id: rewards_document_id,
+                    document_label: "rewards_accounts_rest_reference.md".to_string(),
+                    excerpt: "Default port: 8081".to_string(),
+                    score: Some(0.99),
+                    source_text: repair_technical_layout_noise(
+                        "Rewards Accounts REST API Reference\nDefault port: 8081\nBase REST URL: http://demo.local:8081/rewards-api/rest",
+                    ),
+                },
+                RuntimeMatchedChunk {
+                    chunk_id: Uuid::now_v7(),
+                    document_id: loyalty_document_id,
+                    document_label: "customer_profile_soap_reference.md".to_string(),
+                    excerpt: "Protocol: SOAP over HTTP".to_string(),
+                    score: Some(0.98),
+                    source_text: repair_technical_layout_noise(
+                        "Customer Profile SOAP API Reference\nProtocol: SOAP over HTTP\nWSDL URL: http://demo.local:8080/customer-profile/ws/customer-profile.wsdl",
+                    ),
+                },
+            ],
+        )
+        .unwrap_or_default();
+
+        assert!(answer.contains("8081"), "{answer}");
+        assert!(answer.contains("SOAP"), "{answer}");
+    }
+
+    #[test]
+    fn build_multi_document_endpoint_answer_handles_english_checkout_rewards_question() {
+        let checkout_document_id = Uuid::now_v7();
+        let rewards_document_id = Uuid::now_v7();
+
+        let answer = build_multi_document_endpoint_answer_from_chunks(
+            "If an agent needs the current Checkout Server status and then the Rewards Accounts list, which two endpoints should it call?",
+            &[
+                RuntimeMatchedChunk {
+                    chunk_id: Uuid::now_v7(),
+                    document_id: rewards_document_id,
+                    document_label: "rewards_accounts_rest_reference.md".to_string(),
+                    excerpt: "List accounts: GET /v1/accounts".to_string(),
+                    score: Some(0.95),
+                    source_text: repair_technical_layout_noise(
+                        "Rewards Accounts REST API Reference\nList accounts: GET /v1/accounts\nList cards: GET /v1/cards",
+                    ),
+                },
+                RuntimeMatchedChunk {
+                    chunk_id: Uuid::now_v7(),
+                    document_id: checkout_document_id,
+                    document_label: "checkout_server_rest_reference.md".to_string(),
+                    excerpt: "Health check: GET /health".to_string(),
+                    score: Some(0.96),
+                    source_text: repair_technical_layout_noise(
+                        "Checkout Server REST API Reference\nHealth check: GET /health",
+                    ),
+                },
+                RuntimeMatchedChunk {
+                    chunk_id: Uuid::now_v7(),
+                    document_id: checkout_document_id,
+                    document_label: "checkout_server_rest_reference.md".to_string(),
+                    excerpt: "Current server information: GET /system/info".to_string(),
+                    score: Some(0.94),
+                    source_text: repair_technical_layout_noise(
+                        "Checkout Server REST API Reference\nCurrent server information: GET /system/info\n/system/info returns the current checkout server status and runtime metadata.",
+                    ),
+                },
+            ],
+        )
+        .unwrap_or_default();
+
+        assert!(answer.contains("/system/info"), "{answer}");
+        assert!(answer.contains("/v1/accounts"), "{answer}");
+        assert!(!answer.contains("/health"), "{answer}");
     }
 
     #[test]
     fn build_exact_technical_literals_section_picks_best_matching_chunk_within_document() {
         let cash_document_id = Uuid::now_v7();
         let section = build_exact_technical_literals_section(
-            "Какой endpoint возвращает текущую информацию о кассовом сервере?",
+            "Какой endpoint возвращает текущий статус checkout server?",
             &[
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
                     document_id: cash_document_id,
-                    document_label: "CASHSERVER.pdf".to_string(),
+                    document_label: "checkout_server_reference.pdf".to_string(),
                     excerpt: "GET /cashes возвращает список касс.".to_string(),
                     score: Some(0.95),
                     source_text: repair_technical_layout_noise("/cashes\nGET\nПолучить список касс."),
@@ -3394,10 +4856,10 @@ Trailing details";
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
                     document_id: cash_document_id,
-                    document_label: "CASHSERVER.pdf".to_string(),
-                    excerpt: "Для получения текущей информации о КС надо выполнить запрос GET на URL /system/info.".to_string(),
+                    document_label: "checkout_server_reference.pdf".to_string(),
+                    excerpt: "Для получения текущего статуса checkout server надо выполнить запрос GET на URL /system/info.".to_string(),
                     score: Some(0.7),
-                    source_text: repair_technical_layout_noise("http://localhost:8080/CSrest/rest/system/info\nGET\n/system/info"),
+                    source_text: repair_technical_layout_noise("http://demo.local:8080/checkout-api/rest/system/info\nGET\n/system/info"),
                 },
             ],
         )
@@ -3408,56 +4870,58 @@ Trailing details";
     }
 
     #[test]
-    fn build_exact_technical_literals_section_prefers_document_local_clause_in_multi_doc_question() {
-        let cash_document_id = Uuid::now_v7();
-        let bonus_document_id = Uuid::now_v7();
-        let cashes = RuntimeMatchedChunk {
+    fn build_exact_technical_literals_section_prefers_document_local_clause_in_multi_doc_question()
+    {
+        let checkout_document_id = Uuid::now_v7();
+        let rewards_document_id = Uuid::now_v7();
+        let checkout_list = RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
-            document_id: cash_document_id,
-            document_label: "CASHSERVER.pdf".to_string(),
+            document_id: checkout_document_id,
+            document_label: "checkout_server_reference.pdf".to_string(),
             excerpt: "GET /cashes возвращает список касс.".to_string(),
             score: Some(0.95),
             source_text: repair_technical_layout_noise("/cashes\nGET\nПолучить список касс."),
         };
-        let system_info = RuntimeMatchedChunk {
+        let checkout_system_info = RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
-            document_id: cash_document_id,
-            document_label: "CASHSERVER.pdf".to_string(),
-            excerpt: "Для получения текущей информации о КС надо выполнить запрос GET на URL /system/info.".to_string(),
+            document_id: checkout_document_id,
+            document_label: "checkout_server_reference.pdf".to_string(),
+            excerpt: "Для получения текущего статуса checkout server надо выполнить запрос GET на URL /system/info.".to_string(),
             score: Some(0.7),
             source_text: repair_technical_layout_noise(
-                "http://localhost:8080/CSrest/rest/system/info\nGET\n/system/info",
+                "http://demo.local:8080/checkout-api/rest/system/info\nGET\n/system/info",
             ),
         };
-        let bonus_bypage = RuntimeMatchedChunk {
+        let rewards_bypage = RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
-            document_id: bonus_document_id,
-            document_label: "BONUS.pdf".to_string(),
-            excerpt:
-                "GET /v1/accounts/bypage возвращает список счетов с пагинацией."
-                    .to_string(),
+            document_id: rewards_document_id,
+            document_label: "rewards_service_reference.pdf".to_string(),
+            excerpt: "GET /v1/accounts/bypage возвращает список счетов с пагинацией.".to_string(),
             score: Some(0.95),
             source_text: repair_technical_layout_noise(
-                "/v1/accounts/bypage\nGET\npageNumber\npageSize\nПолучить список счетов с бонусного сервера.",
+                "/v1/accounts/bypage\nGET\npageNumber\npageSize\nПолучить список счетов rewards service.",
             ),
         };
-        let bonus_accounts = RuntimeMatchedChunk {
+        let rewards_accounts = RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
-            document_id: bonus_document_id,
-            document_label: "BONUS.pdf".to_string(),
-            excerpt: "GET /v1/accounts возвращает список счетов без параметров пейджинации.".to_string(),
+            document_id: rewards_document_id,
+            document_label: "rewards_service_reference.pdf".to_string(),
+            excerpt: "GET /v1/accounts возвращает список счетов без параметров пейджинации."
+                .to_string(),
             score: Some(0.7),
-            source_text: repair_technical_layout_noise("/v1/accounts\nGET\nПолучить список счетов с бонусного сервера."),
+            source_text: repair_technical_layout_noise(
+                "/v1/accounts\nGET\nПолучить список счетов rewards service.",
+            ),
         };
-        let question = "Если агенту нужно получить текущую информацию о кассовом сервере и отдельно список счетов бонусного сервера, какие два endpoint'а ему нужны?";
+        let question = "Если агенту нужно получить текущий статус checkout server и отдельно список счетов rewards service, какие два endpoint'а ему нужны?";
         let section = build_exact_technical_literals_section(
             question,
-            &[cashes, system_info, bonus_bypage, bonus_accounts],
+            &[checkout_list, checkout_system_info, rewards_bypage, rewards_accounts],
         )
         .unwrap_or_default();
 
-        assert!(section.contains("Document: `CASHSERVER.pdf`"));
-        assert!(section.contains("Document: `BONUS.pdf`"));
+        assert!(section.contains("Document: `checkout_server_reference.pdf`"));
+        assert!(section.contains("Document: `rewards_service_reference.pdf`"));
         assert!(section.contains("`/system/info`"));
         assert!(!section.contains("`/cashes`"));
         assert!(section.contains("`/v1/accounts`"));
@@ -3465,85 +4929,86 @@ Trailing details";
     }
 
     #[test]
-    fn build_exact_technical_literals_section_prefers_cash_current_info_clause_over_generic_cash_list() {
-        let cash_document_id = Uuid::now_v7();
-        let bonus_document_id = Uuid::now_v7();
-        let cash_clients = RuntimeMatchedChunk {
+    fn build_exact_technical_literals_section_prefers_cash_current_info_clause_over_generic_cash_list()
+     {
+        let checkout_document_id = Uuid::now_v7();
+        let rewards_document_id = Uuid::now_v7();
+        let checkout_clients = RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
-            document_id: cash_document_id,
-            document_label: "CASHSERVER.pdf".to_string(),
-            excerpt: "GET /CSrest/rest/dictionaries/clients возвращает список клиентов с кассового сервера.".to_string(),
+            document_id: checkout_document_id,
+            document_label: "checkout_server_reference.pdf".to_string(),
+            excerpt: "GET /checkout-api/rest/dictionaries/clients возвращает список клиентов checkout server.".to_string(),
             score: Some(0.92),
             source_text: repair_technical_layout_noise(
-                "GET\nhttp://localhost:8080/CSrest/rest/dictionaries/clients\nПолучение списка клиентов с кассового сервера.",
+                "GET\nhttp://demo.local:8080/checkout-api/rest/dictionaries/clients\nПолучение списка клиентов checkout server.",
             ),
         };
-        let cash_system_info = RuntimeMatchedChunk {
+        let checkout_system_info = RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
-            document_id: cash_document_id,
-            document_label: "CASHSERVER.pdf".to_string(),
-            excerpt: "Для получения текущей информации о КС надо выполнить запрос GET на URL /system/info.".to_string(),
+            document_id: checkout_document_id,
+            document_label: "checkout_server_reference.pdf".to_string(),
+            excerpt: "Для получения текущего статуса checkout server надо выполнить запрос GET на URL /system/info.".to_string(),
             score: Some(0.71),
             source_text: repair_technical_layout_noise(
-                "http://localhost:8080/CSrest/rest/system/info\nGET\n/system/info\nДля получения текущей информации о КС.",
+                "http://demo.local:8080/checkout-api/rest/system/info\nGET\n/system/info\nДля получения текущего статуса checkout server.",
             ),
         };
-        let bonus_accounts = RuntimeMatchedChunk {
+        let rewards_accounts = RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
-            document_id: bonus_document_id,
-            document_label: "BONUS.pdf".to_string(),
-            excerpt: "GET /v1/accounts возвращает список счетов бонусного сервера.".to_string(),
+            document_id: rewards_document_id,
+            document_label: "rewards_service_reference.pdf".to_string(),
+            excerpt: "GET /v1/accounts возвращает список счетов rewards service.".to_string(),
             score: Some(0.94),
             source_text: repair_technical_layout_noise(
-                "/v1/accounts\nGET\nПолучить список счетов бонусного сервера.",
+                "/v1/accounts\nGET\nПолучить список счетов rewards service.",
             ),
         };
         let section = build_exact_technical_literals_section(
-            "Если агенту нужно получить текущую информацию о кассовом сервере и отдельно список счетов бонусного сервера, какие два endpoint'а ему нужны?",
-            &[bonus_accounts, cash_clients, cash_system_info],
+            "Если агенту нужно получить текущий статус checkout server и отдельно список счетов rewards service, какие два endpoint'а ему нужны?",
+            &[rewards_accounts, checkout_clients, checkout_system_info],
         )
         .unwrap_or_default();
 
         assert!(section.contains("`/system/info`"));
-        assert!(!section.contains("`/CSrest/rest/dictionaries/clients`"));
+        assert!(!section.contains("`/checkout-api/rest/dictionaries/clients`"));
         assert!(section.contains("`/v1/accounts`"));
     }
 
     #[test]
     fn build_multi_document_endpoint_answer_from_chunks_prefers_current_info_for_cash_document() {
-        let cash_document_id = Uuid::now_v7();
-        let bonus_document_id = Uuid::now_v7();
+        let checkout_document_id = Uuid::now_v7();
+        let rewards_document_id = Uuid::now_v7();
         let answer = build_multi_document_endpoint_answer_from_chunks(
-            "Если агенту нужно получить текущую информацию о кассовом сервере и отдельно список счетов бонусного сервера, какие два endpoint'а ему нужны?",
+            "Если агенту нужно получить текущий статус checkout server и отдельно список счетов rewards service, какие два endpoint'а ему нужны?",
             &[
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
-                    document_id: bonus_document_id,
-                    document_label: "REST API Бонусного Сервера.pdf".to_string(),
-                    excerpt: "GET /v1/accounts возвращает список счетов бонусного сервера.".to_string(),
+                    document_id: rewards_document_id,
+                    document_label: "rewards_service_reference.pdf".to_string(),
+                    excerpt: "GET /v1/accounts возвращает список счетов rewards service.".to_string(),
                     score: Some(0.94),
                     source_text: repair_technical_layout_noise(
-                        "/v1/accounts\nGET\nПолучить список счетов бонусного сервера.",
+                        "/v1/accounts\nGET\nПолучить список счетов rewards service.",
                     ),
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
-                    document_id: cash_document_id,
-                    document_label: "CASHSERVER-7340100-090322-1436-1626.pdf".to_string(),
-                    excerpt: "GET /CSrest/rest/dictionaries/cardChanged возвращает историю изменений карт с кассового сервера.".to_string(),
+                    document_id: checkout_document_id,
+                    document_label: "checkout_server_reference.pdf".to_string(),
+                    excerpt: "GET /checkout-api/rest/dictionaries/cardChanged возвращает историю изменений карт checkout server.".to_string(),
                     score: Some(0.96),
                     source_text: repair_technical_layout_noise(
-                        "GET\nhttp://localhost:8080/CSrest/rest/dictionaries/cardChanged\nПолучить историю изменений карт с кассового сервера.",
+                        "GET\nhttp://demo.local:8080/checkout-api/rest/dictionaries/cardChanged\nПолучить историю изменений карт checkout server.",
                     ),
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
-                    document_id: cash_document_id,
-                    document_label: "CASHSERVER-7340100-090322-1436-1626.pdf".to_string(),
-                    excerpt: "Для получения текущей информации о КС надо выполнить запрос GET на URL /system/info.".to_string(),
+                    document_id: checkout_document_id,
+                    document_label: "checkout_server_reference.pdf".to_string(),
+                    excerpt: "Для получения текущего статуса checkout server надо выполнить запрос GET на URL /system/info.".to_string(),
                     score: Some(0.71),
                     source_text: repair_technical_layout_noise(
-                        "Публичное API для работы с КС.\nhttp://localhost:8080/CSrest/rest/system/info\nGET\n/system/info\nДля получения текущей информации о КС.",
+                        "Публичное API checkout server.\nhttp://demo.local:8080/checkout-api/rest/system/info\nGET\n/system/info\nДля получения текущего статуса checkout server.",
                     ),
                 },
             ],
@@ -3556,51 +5021,52 @@ Trailing details";
     }
 
     #[test]
-    fn build_multi_document_endpoint_answer_from_chunks_handles_live_cashserver_chunk_layout() {
-        let cash_document_id = Uuid::now_v7();
-        let bonus_document_id = Uuid::now_v7();
+    fn build_multi_document_endpoint_answer_from_chunks_handles_live_checkout_server_chunk_layout()
+    {
+        let checkout_document_id = Uuid::now_v7();
+        let rewards_document_id = Uuid::now_v7();
         let wsdl_document_id = Uuid::now_v7();
         let answer = build_multi_document_endpoint_answer_from_chunks(
-            "Если агенту нужно получить текущую информацию о кассовом сервере и отдельно список счетов бонусного сервера, какие два endpoint'а ему нужны?",
+            "Если агенту нужно получить текущий статус checkout server и отдельно список счетов rewards service, какие два endpoint'а ему нужны?",
             &[
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
-                    document_id: bonus_document_id,
-                    document_label: "REST API Бонусного Сервера.pdf".to_string(),
-                    excerpt: "GET /v1/accounts возвращает список счетов бонусного сервера.".to_string(),
+                    document_id: rewards_document_id,
+                    document_label: "rewards_service_reference.pdf".to_string(),
+                    excerpt: "GET /v1/accounts возвращает список счетов rewards service.".to_string(),
                     score: Some(69858.0),
                     source_text: repair_technical_layout_noise(
-                        "/v1/accounts\nGET\nПолучить список счетов бонусного сервера.",
+                        "/v1/accounts\nGET\nПолучить список счетов rewards service.",
                     ),
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
-                    document_id: cash_document_id,
-                    document_label: "CASHSERVER-7340100-090322-1436-1626.pdf".to_string(),
-                    excerpt: "Получить историю изменений карт с кассового сервера.".to_string(),
+                    document_id: checkout_document_id,
+                    document_label: "checkout_server_reference.pdf".to_string(),
+                    excerpt: "Получить историю изменений карт checkout server.".to_string(),
                     score: Some(70000.0),
                     source_text: repair_technical_layout_noise(
-                        "GET\nhttp://localhost:8080/CSrest/rest/dictionaries/cardChanged\nПолучить историю изменений карт с кассового сервера.",
+                        "GET\nhttp://demo.local:8080/checkout-api/rest/dictionaries/cardChanged\nПолучить историю изменений карт checkout server.",
                     ),
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
-                    document_id: cash_document_id,
-                    document_label: "CASHSERVER-7340100-090322-1436-1626.pdf".to_string(),
-                    excerpt: "Публичное API для работы с КС. Кассовый сервер предоставляет rest-интерфейс для работы внешних сервисов и приложений.".to_string(),
+                    document_id: checkout_document_id,
+                    document_label: "checkout_server_reference.pdf".to_string(),
+                    excerpt: "Публичное API checkout server. Checkout server предоставляет REST-интерфейс для внешних сервисов и приложений.".to_string(),
                     score: Some(65000.0),
                     source_text: repair_technical_layout_noise(
-                        "Публичное API для работы с КС (REST)\nКассовый сервер предоставляет rest-интерфейс для работы внешних сервисов и приложений. Запросы осуществляются через http-протокол, данные \nпередаются json-сериализованными. Префикс для rest-интерфейса КС:\n, например \n http://<host>:<port>/CSrest/rest/<остальная часть запроса>\nhttp://localhost:8080/CSrest/rest/system/info\nДля получения текущей информации о КС надо выполнить запрос типа \nGET\n на URL\n /system/info\nРезультат:\nНазвание \nполя\nТип\nОписание\nПримечания\nversion\nстрока\nверсия кассового сервера\nbuildNumber\nчисло\nномер сборки\nbuildDate\nстрока\nдата сборки\nversionREst\nчисло\nверсия REST\ndictThreadPoolS\nize\nчисло\nкол-во одновременно выполняемых задач на генерацию \nсправочников\nsaleThreadPoolS\nize\nчисло\nкол-во одновременно выполняемых задач на загрузку \nпродаж\nexchangeThread\nPoolSize\nчисло\nкол-во одновременно выполняемых задач по \nвзаимодействию с кассой\nsalerunThreadP\noolSize\nчисло\nкол-во одновременно выполняемых задач по \nинициализации выгрузки продаж на кассе\nsalesLoadModes\nмассив\nБД для загрузки продаж\nДанные получаются из файла /opt/virgo/repository/usr/cashserver-sales. properties параметра \nsales.",
+                        "Checkout Server REST API\nCheckout server предоставляет REST-интерфейс для внешних сервисов и приложений. Запросы осуществляются через http-протокол, данные передаются json-сериализованными. Префикс для REST-интерфейса checkout server: http://<host>:<port>/checkout-api/rest/<request>\nhttp://demo.local:8080/checkout-api/rest/system/info\nДля получения текущего статуса checkout server надо выполнить запрос типа GET на URL /system/info.\nResult fields include version, buildNumber and buildDate.",
                     ),
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
                     document_id: wsdl_document_id,
-                    document_label: "drpo-LMSOAPAPI-281221-1424-3422.pdf".to_string(),
-                    excerpt: "WSDL сервиса бонусного сервера доступен по префиксу /loyalty-api/ws/.".to_string(),
+                    document_label: "customer_profile_service_reference.pdf".to_string(),
+                    excerpt: "WSDL customer profile service доступен по префиксу /customer-profile/ws/.".to_string(),
                     score: Some(65000.0),
                     source_text: repair_technical_layout_noise(
-                        "Получить WSDL можно через http://localhost:8080/loyalty-api/ws/loyalty.wsdl. Базовый префикс /loyalty-api/ws/.",
+                        "Получить WSDL можно через http://demo.local:8080/customer-profile/ws/customer-profile.wsdl. Базовый префикс /customer-profile/ws/.",
                     ),
                 },
             ],
@@ -3610,7 +5076,7 @@ Trailing details";
         assert!(answer.contains("`GET /v1/accounts`"));
         assert!(answer.contains("`GET /system/info`"));
         assert!(!answer.contains("cardChanged"));
-        assert!(!answer.contains("/loyalty-api/ws/"));
+        assert!(!answer.contains("/customer-profile/ws/"));
     }
 
     #[test]
@@ -3639,7 +5105,7 @@ Trailing details";
             &summary,
             &recent_documents,
             &retrieved_documents,
-            Some("Exact technical literals\n- URLs: `http://localhost:8080/wsdl`"),
+            Some("Exact technical literals\n- URLs: `http://demo.local:8080/wsdl`"),
             "Context\n[document] spec.md: RustRAG",
         );
 
@@ -3653,7 +5119,9 @@ Trailing details";
         assert!(context.contains("2026-03-30T22:15:00+00:00 — spec.md"));
         assert!(context.contains("Preview: RustRAG stores graph knowledge."));
         assert!(context.contains("Retrieved document briefs"));
-        assert!(context.contains("Exact technical literals\n- URLs: `http://localhost:8080/wsdl`"));
+        assert!(
+            context.contains("Exact technical literals\n- URLs: `http://demo.local:8080/wsdl`")
+        );
     }
 
     #[test]
@@ -3661,6 +5129,7 @@ Trailing details";
         let plan = RuntimeQueryPlan {
             requested_mode: RuntimeQueryMode::Hybrid,
             planned_mode: RuntimeQueryMode::Hybrid,
+            intent_profile: QueryIntentProfile::default(),
             keywords: vec!["rustrag".to_string(), "graph".to_string()],
             high_level_keywords: vec!["rustrag".to_string()],
             low_level_keywords: vec!["graph".to_string()],
@@ -3748,6 +5217,554 @@ Trailing details";
     }
 
     #[test]
+    fn enrich_query_candidate_summary_overwrites_canonical_reference_counts() {
+        let enriched = enrich_query_candidate_summary(
+            serde_json::json!({
+                "finalChunkReferences": 1,
+                "finalEntityReferences": 3,
+                "finalRelationReferences": 2
+            }),
+            &CanonicalAnswerEvidence {
+                bundle: None,
+                chunk_rows: vec![
+                    sample_chunk_row(Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7()),
+                    sample_chunk_row(Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7()),
+                ],
+                structured_blocks: vec![sample_structured_block_row(
+                    Uuid::now_v7(),
+                    Uuid::now_v7(),
+                    Uuid::now_v7(),
+                )],
+                technical_facts: vec![
+                    sample_technical_fact_row(Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7()),
+                    sample_technical_fact_row(Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7()),
+                ],
+            },
+        );
+
+        assert_eq!(enriched["finalChunkReferences"], serde_json::json!(2));
+        assert_eq!(enriched["finalPreparedSegmentReferences"], serde_json::json!(1));
+        assert_eq!(enriched["finalTechnicalFactReferences"], serde_json::json!(2));
+        assert_eq!(enriched["finalEntityReferences"], serde_json::json!(3));
+    }
+
+    #[test]
+    fn enrich_query_assembly_diagnostics_emits_verification_and_graph_participation() {
+        let diagnostics = enrich_query_assembly_diagnostics(
+            serde_json::json!({
+                "bundleId": Uuid::nil(),
+            }),
+            &RuntimeAnswerVerification {
+                state: QueryVerificationState::Verified,
+                warnings: vec![QueryVerificationWarning {
+                    code: "grounded".to_string(),
+                    message: "Answer is grounded.".to_string(),
+                    related_segment_id: None,
+                    related_fact_id: None,
+                }],
+            },
+            &serde_json::json!({
+                "finalChunkReferences": 2,
+                "finalPreparedSegmentReferences": 4,
+                "finalTechnicalFactReferences": 3,
+                "finalEntityReferences": 5,
+                "finalRelationReferences": 2
+            }),
+        );
+
+        assert_eq!(diagnostics["verificationState"], "verified");
+        assert_eq!(diagnostics["verificationWarnings"][0]["code"], "grounded");
+        assert_eq!(diagnostics["graphParticipation"]["entityReferenceCount"], 5);
+        assert_eq!(diagnostics["graphParticipation"]["relationReferenceCount"], 2);
+        assert_eq!(diagnostics["graphParticipation"]["graphBacked"], true);
+        assert_eq!(diagnostics["structuredEvidence"]["preparedSegmentReferenceCount"], 4);
+        assert_eq!(diagnostics["structuredEvidence"]["technicalFactReferenceCount"], 3);
+        assert_eq!(diagnostics["structuredEvidence"]["chunkReferenceCount"], 2);
+    }
+
+    #[test]
+    fn selected_fact_ids_for_canonical_evidence_stays_bounded() {
+        let selected_fact_id = Uuid::now_v7();
+        let evidence_fact_id = Uuid::now_v7();
+        let evidence_rows = vec![KnowledgeEvidenceRow {
+            key: Uuid::now_v7().to_string(),
+            arango_id: None,
+            arango_rev: None,
+            evidence_id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            document_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_id: None,
+            block_id: Some(Uuid::now_v7()),
+            fact_id: Some(evidence_fact_id),
+            span_start: None,
+            span_end: None,
+            quote_text: "GET /system/info".to_string(),
+            literal_spans_json: json!([]),
+            evidence_kind: "relation_fact_support".to_string(),
+            extraction_method: "graph_extract".to_string(),
+            confidence: Some(0.9),
+            evidence_state: "active".to_string(),
+            freshness_generation: 1,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }];
+        let chunk_supported_facts = (0..40)
+            .map(|_| sample_technical_fact_row(Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7()))
+            .collect::<Vec<_>>();
+
+        let fact_ids = selected_fact_ids_for_canonical_evidence(
+            &[selected_fact_id],
+            &evidence_rows,
+            &chunk_supported_facts,
+        );
+        assert_eq!(fact_ids.len(), 2);
+        assert_eq!(fact_ids[0], selected_fact_id);
+        assert_eq!(fact_ids[1], evidence_fact_id);
+    }
+
+    #[test]
+    fn focused_answer_document_id_prefers_dominant_single_document() {
+        let primary_document_id = Uuid::now_v7();
+        let secondary_document_id = Uuid::now_v7();
+        let chunks = vec![
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: primary_document_id,
+                document_label: "vector_database_wikipedia.md".to_string(),
+                excerpt:
+                    "Vector databases typically implement approximate nearest neighbor algorithms."
+                        .to_string(),
+                score: Some(1.0),
+                source_text:
+                    "Vector databases typically implement approximate nearest neighbor algorithms."
+                        .to_string(),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: primary_document_id,
+                document_label: "vector_database_wikipedia.md".to_string(),
+                excerpt: "Use-cases include multi-modal search and recommendation engines."
+                    .to_string(),
+                score: Some(0.8),
+                source_text: "Use-cases include multi-modal search and recommendation engines."
+                    .to_string(),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: secondary_document_id,
+                document_label: "large_language_model_wikipedia.md".to_string(),
+                excerpt: "LLMs generate, summarize, translate, and reason over text.".to_string(),
+                score: Some(0.25),
+                source_text: "LLMs generate, summarize, translate, and reason over text."
+                    .to_string(),
+            },
+        ];
+
+        assert_eq!(
+            focused_answer_document_id(
+                "Which algorithms do vector databases typically implement, and name one use case mentioned besides semantic search.",
+                &chunks,
+            ),
+            Some(primary_document_id)
+        );
+    }
+
+    #[test]
+    fn build_canonical_answer_context_limits_sections_to_focused_document() {
+        let focused_document_id = Uuid::now_v7();
+        let other_document_id = Uuid::now_v7();
+        let focused_revision_id = Uuid::now_v7();
+        let other_revision_id = Uuid::now_v7();
+
+        let context = build_canonical_answer_context(
+            "Which search engines and assistants or services are named as examples in the knowledge graph article?",
+            &RuntimeStructuredQueryResult {
+                planned_mode: RuntimeQueryMode::Hybrid,
+                intent_profile: QueryIntentProfile::default(),
+                context_text: String::new(),
+                technical_literals_text: None,
+                technical_literal_chunks: Vec::new(),
+                debug_json: serde_json::json!({}),
+                retrieved_documents: Vec::new(),
+            },
+            &CanonicalAnswerEvidence {
+                bundle: None,
+                chunk_rows: Vec::new(),
+                structured_blocks: vec![
+                    KnowledgeStructuredBlockRow {
+                        normalized_text:
+                            "Google, Bing, Yahoo, WolframAlpha, Siri, and Alexa are named."
+                                .to_string(),
+                        text: "Google, Bing, Yahoo, WolframAlpha, Siri, and Alexa are named."
+                            .to_string(),
+                        heading_trail: vec!["Examples".to_string()],
+                        ..sample_structured_block_row(
+                            Uuid::now_v7(),
+                            focused_document_id,
+                            focused_revision_id,
+                        )
+                    },
+                    KnowledgeStructuredBlockRow {
+                        normalized_text:
+                            "LLMs generate, summarize, translate, and reason over text.".to_string(),
+                        text: "LLMs generate, summarize, translate, and reason over text."
+                            .to_string(),
+                        heading_trail: vec!["Capabilities".to_string()],
+                        ..sample_structured_block_row(
+                            Uuid::now_v7(),
+                            other_document_id,
+                            other_revision_id,
+                        )
+                    },
+                ],
+                technical_facts: vec![
+                    KnowledgeTechnicalFactRow {
+                        display_value: "Google".to_string(),
+                        canonical_value_text: "Google".to_string(),
+                        canonical_value_exact: "Google".to_string(),
+                        canonical_value_json: serde_json::json!("Google"),
+                        fact_kind: "example".to_string(),
+                        ..sample_technical_fact_row(
+                            Uuid::now_v7(),
+                            focused_document_id,
+                            focused_revision_id,
+                        )
+                    },
+                    KnowledgeTechnicalFactRow {
+                        display_value: "translate".to_string(),
+                        canonical_value_text: "translate".to_string(),
+                        canonical_value_exact: "translate".to_string(),
+                        canonical_value_json: serde_json::json!("translate"),
+                        fact_kind: "capability".to_string(),
+                        ..sample_technical_fact_row(
+                            Uuid::now_v7(),
+                            other_document_id,
+                            other_revision_id,
+                        )
+                    },
+                ],
+            },
+            &[
+                RuntimeMatchedChunk {
+                    chunk_id: Uuid::now_v7(),
+                    document_id: focused_document_id,
+                    document_label: "knowledge_graph_wikipedia.md".to_string(),
+                    excerpt: "Google, Bing, Yahoo, WolframAlpha, Siri, and Alexa are named."
+                        .to_string(),
+                    score: Some(1.0),
+                    source_text: "Google, Bing, Yahoo, WolframAlpha, Siri, and Alexa are named."
+                        .to_string(),
+                },
+                RuntimeMatchedChunk {
+                    chunk_id: Uuid::now_v7(),
+                    document_id: other_document_id,
+                    document_label: "large_language_model_wikipedia.md".to_string(),
+                    excerpt: "LLMs generate, summarize, translate, and reason over text."
+                        .to_string(),
+                    score: Some(0.2),
+                    source_text: "LLMs generate, summarize, translate, and reason over text."
+                        .to_string(),
+                },
+            ],
+            "",
+        );
+
+        assert!(context.contains("Focused grounded document\n- knowledge_graph_wikipedia.md"));
+        assert!(context.contains("Google, Bing, Yahoo, WolframAlpha, Siri, and Alexa"));
+        assert!(!context.contains("LLMs generate, summarize, translate, and reason over text."));
+        assert!(!context.contains("capability: `translate`"));
+    }
+
+    #[test]
+    fn render_canonical_chunk_section_uses_longer_question_focused_source_excerpt() {
+        let document_id = Uuid::now_v7();
+        let section = render_canonical_chunk_section(
+            "Which search engines and assistants or services are named as examples in the knowledge graph article?",
+            &[RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id,
+                document_label: "knowledge_graph_wikipedia.md".to_string(),
+                excerpt: "Google, Bing, and Yahoo are named as examples.".to_string(),
+                score: Some(1.0),
+                source_text: "Knowledge graphs are used by search engines such as Google, Bing, and Yahoo; knowledge engines and question-answering services such as WolframAlpha, Apple's Siri, and Amazon Alexa."
+                    .to_string(),
+            }],
+        );
+
+        assert!(section.contains("Google, Bing, and Yahoo"));
+        assert!(section.contains("WolframAlpha"));
+        assert!(section.contains("Siri"));
+        assert!(section.contains("Alexa"));
+    }
+
+    #[test]
+    fn build_multi_document_role_answer_selects_distinct_corpus_technologies() {
+        let vector_document_id = Uuid::now_v7();
+        let llm_document_id = Uuid::now_v7();
+        let answer = build_multi_document_role_answer(
+            "If a system needs semantic similarity search over embeddings and also text generation or reasoning, which two technologies from this corpus fit those roles?",
+            &[
+                RuntimeMatchedChunk {
+                    chunk_id: Uuid::now_v7(),
+                    document_id: vector_document_id,
+                    document_label: "vector_database_wikipedia.md".to_string(),
+                    excerpt: "Vector databases typically implement approximate nearest neighbor algorithms."
+                        .to_string(),
+                    score: Some(0.9),
+                    source_text: "Vector database\n\nA vector database stores and retrieves embeddings of data in vector space. Use-cases include semantic search and retrieval-augmented generation."
+                        .to_string(),
+                },
+                RuntimeMatchedChunk {
+                    chunk_id: Uuid::now_v7(),
+                    document_id: llm_document_id,
+                    document_label: "large_language_model_wikipedia.md".to_string(),
+                    excerpt:
+                        "LLMs are designed for natural language processing tasks, especially language generation."
+                            .to_string(),
+                    score: Some(0.85),
+                    source_text: "Large language model\n\nLLMs are designed for natural language processing tasks, especially language generation. They generate, summarize, translate, and reason over text."
+                        .to_string(),
+                },
+            ],
+        )
+        .expect("expected deterministic multi-document role answer");
+
+        assert!(answer.contains("Vector database"));
+        assert!(answer.contains("Large language model"));
+        assert!(!answer.contains("RAG"));
+    }
+
+    #[test]
+    fn build_multi_document_role_answer_distinguishes_rust_and_llm_roles() {
+        let rust_document_id = Uuid::now_v7();
+        let llm_document_id = Uuid::now_v7();
+        let answer = build_multi_document_role_answer(
+            "Which item in this corpus is a programming language focused on memory safety, and which item is a model family used for natural language processing?",
+            &[
+                RuntimeMatchedChunk {
+                    chunk_id: Uuid::now_v7(),
+                    document_id: llm_document_id,
+                    document_label: "large_language_model_wikipedia.md".to_string(),
+                    excerpt: "A large language model is designed for natural language processing tasks."
+                        .to_string(),
+                    score: Some(0.9),
+                    source_text: "Large language model\n\nA large language model is designed for natural language processing tasks."
+                        .to_string(),
+                },
+                RuntimeMatchedChunk {
+                    chunk_id: Uuid::now_v7(),
+                    document_id: rust_document_id,
+                    document_label: "rust_programming_language_wikipedia.md".to_string(),
+                    excerpt: "Rust is a general-purpose programming language with an emphasis on memory safety."
+                        .to_string(),
+                    score: Some(0.88),
+                    source_text: "Rust (programming language)\n\nRust is a general-purpose programming language with an emphasis on memory safety."
+                        .to_string(),
+                },
+            ],
+        )
+        .expect("expected deterministic distinction answer");
+
+        assert!(answer.contains("Rust"));
+        assert!(answer.contains("Large language model"));
+        assert!(!answer.contains("does not contain"));
+    }
+
+    #[test]
+    fn verify_answer_accepts_method_path_literal_when_method_and_path_are_grounded() {
+        let verification = verify_answer_against_canonical_evidence(
+            "Нужен endpoint `GET /system/info`.",
+            &QueryIntentProfile {
+                exact_literal_technical: true,
+                ..QueryIntentProfile::default()
+            },
+            &CanonicalAnswerEvidence {
+                bundle: None,
+                chunk_rows: vec![KnowledgeChunkRow {
+                    key: Uuid::now_v7().to_string(),
+                    arango_id: None,
+                    arango_rev: None,
+                    chunk_id: Uuid::now_v7(),
+                    workspace_id: Uuid::now_v7(),
+                    library_id: Uuid::now_v7(),
+                    document_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
+                    chunk_kind: Some("paragraph".to_string()),
+                    content_text: "Для получения текущего статуса checkout server надо выполнить запрос типа GET на URL /system/info".to_string(),
+                    normalized_text: "Для получения текущего статуса checkout server надо выполнить запрос типа GET на URL /system/info".to_string(),
+                    span_start: Some(0),
+                    span_end: Some(80),
+                    token_count: Some(12),
+                    support_block_ids: vec![],
+                    section_path: vec![],
+                    heading_trail: vec![],
+                    literal_digest: None,
+                    chunk_state: "active".to_string(),
+                    text_generation: Some(1),
+                    vector_generation: Some(1),
+                }],
+                structured_blocks: Vec::new(),
+                technical_facts: Vec::new(),
+            },
+            &[],
+        );
+
+        assert_eq!(verification.state, QueryVerificationState::Verified);
+        assert!(verification.warnings.is_empty());
+    }
+
+    #[test]
+    fn verify_answer_ignores_background_conflicts_when_grounded_literals_are_explicit() {
+        let document_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        let conflict_group_id = format!("url:{}", Uuid::now_v7());
+        let verification = verify_answer_against_canonical_evidence(
+            "Use `http://demo.local:8080/customer-profile/ws/customer-profile.wsdl`.",
+            &QueryIntentProfile { exact_literal_technical: true, ..QueryIntentProfile::default() },
+            &CanonicalAnswerEvidence {
+                bundle: None,
+                chunk_rows: Vec::new(),
+                structured_blocks: Vec::new(),
+                technical_facts: vec![
+                    KnowledgeTechnicalFactRow {
+                        canonical_value_text: "http://demo.local:8080/customer-profile/ws/"
+                            .to_string(),
+                        canonical_value_exact: "http://demo.local:8080/customer-profile/ws/"
+                            .to_string(),
+                        canonical_value_json: serde_json::json!(
+                            "http://demo.local:8080/customer-profile/ws/"
+                        ),
+                        display_value: "http://demo.local:8080/customer-profile/ws/".to_string(),
+                        conflict_group_id: Some(conflict_group_id.clone()),
+                        fact_kind: "url".to_string(),
+                        ..sample_technical_fact_row(Uuid::now_v7(), document_id, revision_id)
+                    },
+                    KnowledgeTechnicalFactRow {
+                        canonical_value_text:
+                            "http://demo.local:8080/customer-profile/ws/customer-profile.wsdl"
+                                .to_string(),
+                        canonical_value_exact:
+                            "http://demo.local:8080/customer-profile/ws/customer-profile.wsdl"
+                                .to_string(),
+                        canonical_value_json: serde_json::json!(
+                            "http://demo.local:8080/customer-profile/ws/customer-profile.wsdl"
+                        ),
+                        display_value:
+                            "http://demo.local:8080/customer-profile/ws/customer-profile.wsdl"
+                                .to_string(),
+                        conflict_group_id: Some(conflict_group_id),
+                        fact_kind: "url".to_string(),
+                        ..sample_technical_fact_row(Uuid::now_v7(), document_id, revision_id)
+                    },
+                ],
+            },
+            &[],
+        );
+
+        assert_eq!(verification.state, QueryVerificationState::Verified);
+        assert!(verification.warnings.iter().all(|warning| warning.code != "conflicting_evidence"));
+    }
+
+    #[test]
+    fn verify_unsupported_capability_answer_skips_unrelated_conflict_warnings() {
+        let document_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        let conflict_group_id = format!("url:{}", Uuid::now_v7());
+        let verification = verify_answer_against_canonical_evidence(
+            "No, this library does not describe any GraphQL API or GraphQL endpoint.",
+            &QueryIntentProfile {
+                exact_literal_technical: true,
+                unsupported_capability: Some(UnsupportedCapabilityIntent::GraphQlApi),
+                ..QueryIntentProfile::default()
+            },
+            &CanonicalAnswerEvidence {
+                bundle: None,
+                chunk_rows: Vec::new(),
+                structured_blocks: Vec::new(),
+                technical_facts: vec![
+                    KnowledgeTechnicalFactRow {
+                        canonical_value_text: "http://demo.local:8080/customer-profile/ws/"
+                            .to_string(),
+                        canonical_value_exact: "http://demo.local:8080/customer-profile/ws/"
+                            .to_string(),
+                        canonical_value_json: serde_json::json!(
+                            "http://demo.local:8080/customer-profile/ws/"
+                        ),
+                        display_value: "http://demo.local:8080/customer-profile/ws/".to_string(),
+                        conflict_group_id: Some(conflict_group_id.clone()),
+                        fact_kind: "url".to_string(),
+                        ..sample_technical_fact_row(Uuid::now_v7(), document_id, revision_id)
+                    },
+                    KnowledgeTechnicalFactRow {
+                        canonical_value_text:
+                            "http://demo.local:8080/customer-profile/ws/customer-profile.wsdl"
+                                .to_string(),
+                        canonical_value_exact:
+                            "http://demo.local:8080/customer-profile/ws/customer-profile.wsdl"
+                                .to_string(),
+                        canonical_value_json: serde_json::json!(
+                            "http://demo.local:8080/customer-profile/ws/customer-profile.wsdl"
+                        ),
+                        display_value:
+                            "http://demo.local:8080/customer-profile/ws/customer-profile.wsdl"
+                                .to_string(),
+                        conflict_group_id: Some(conflict_group_id),
+                        fact_kind: "url".to_string(),
+                        ..sample_technical_fact_row(Uuid::now_v7(), document_id, revision_id)
+                    },
+                ],
+            },
+            &[],
+        );
+
+        assert_eq!(verification.state, QueryVerificationState::Verified);
+        assert!(verification.warnings.is_empty());
+    }
+
+    #[test]
+    fn verify_answer_marks_conflicting_when_exact_literal_question_stays_ambiguous() {
+        let document_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        let conflict_group_id = format!("url:{}", Uuid::now_v7());
+        let verification = verify_answer_against_canonical_evidence(
+            "The exact endpoint is described in the selected evidence.",
+            &QueryIntentProfile { exact_literal_technical: true, ..QueryIntentProfile::default() },
+            &CanonicalAnswerEvidence {
+                bundle: None,
+                chunk_rows: Vec::new(),
+                structured_blocks: Vec::new(),
+                technical_facts: vec![
+                    KnowledgeTechnicalFactRow {
+                        canonical_value_text: "/system/info".to_string(),
+                        canonical_value_exact: "/system/info".to_string(),
+                        canonical_value_json: serde_json::json!("/system/info"),
+                        display_value: "/system/info".to_string(),
+                        conflict_group_id: Some(conflict_group_id.clone()),
+                        fact_kind: "endpoint_path".to_string(),
+                        ..sample_technical_fact_row(Uuid::now_v7(), document_id, revision_id)
+                    },
+                    KnowledgeTechnicalFactRow {
+                        canonical_value_text: "/system/status".to_string(),
+                        canonical_value_exact: "/system/status".to_string(),
+                        canonical_value_json: serde_json::json!("/system/status"),
+                        display_value: "/system/status".to_string(),
+                        conflict_group_id: Some(conflict_group_id),
+                        fact_kind: "endpoint_path".to_string(),
+                        ..sample_technical_fact_row(Uuid::now_v7(), document_id, revision_id)
+                    },
+                ],
+            },
+            &[],
+        );
+
+        assert_eq!(verification.state, QueryVerificationState::Conflicting);
+        assert!(verification.warnings.iter().any(|warning| warning.code == "conflicting_evidence"));
+    }
+
+    #[test]
     fn expanded_candidate_limit_prefers_deeper_combined_mode_search() {
         assert_eq!(expanded_candidate_limit(RuntimeQueryMode::Hybrid, 8, true, 24), 24);
         assert_eq!(expanded_candidate_limit(RuntimeQueryMode::Mix, 10, true, 24), 30);
@@ -3785,30 +5802,33 @@ Trailing details";
         let plan = RuntimeQueryPlan {
             requested_mode: RuntimeQueryMode::Mix,
             planned_mode: RuntimeQueryMode::Mix,
+            intent_profile: QueryIntentProfile {
+                exact_literal_technical: true,
+                ..Default::default()
+            },
             keywords: vec![
                 "program".to_string(),
-                "loyalty".to_string(),
+                "profile".to_string(),
                 "discount".to_string(),
                 "tier".to_string(),
             ],
-            high_level_keywords: vec!["program".to_string(), "loyalty".to_string()],
+            high_level_keywords: vec!["program".to_string(), "profile".to_string()],
             low_level_keywords: vec!["discount".to_string(), "tier".to_string()],
             top_k: 48,
             context_budget_chars: 22_000,
         };
 
-        let question =
-            "Если агенту нужно получить текущую информацию о кассовом сервере и отдельно список счетов бонусного сервера, какие два endpoint'а ему нужны?";
+        let question = "Если агенту нужно получить текущий статус checkout server и отдельно список счетов rewards service, какие два endpoint'а ему нужны?";
         let queries = build_lexical_queries(question, &plan);
 
-        assert_eq!(queries[0], "program loyalty discount tier");
+        assert_eq!(queries[0], "program profile discount tier");
         assert!(queries.contains(&question.to_string()));
-        assert!(queries.contains(&"текущую информацию кассовом сервере".to_string()));
-        assert!(queries.contains(&"список счетов бонусного сервера".to_string()));
-        assert!(queries.contains(&"program loyalty".to_string()));
+        assert!(queries.contains(&"текущий статус checkout server".to_string()));
+        assert!(queries.contains(&"список счетов rewards service".to_string()));
+        assert!(queries.contains(&"program profile".to_string()));
         assert!(queries.contains(&"discount tier".to_string()));
         assert!(queries.contains(&"program".to_string()));
-        assert!(queries.contains(&"loyalty".to_string()));
+        assert!(queries.contains(&"profile".to_string()));
     }
 
     #[test]

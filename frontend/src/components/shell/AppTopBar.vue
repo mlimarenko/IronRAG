@@ -45,10 +45,7 @@ async function logout() {
         <AppNavTabs />
       </div>
 
-      <div
-        v-if="currentUser"
-        class="rr-shellbar__controls"
-      >
+      <div v-if="currentUser" class="rr-shellbar__controls">
         <div class="rr-shellbar__context">
           <ContextSelector
             class="rr-shellbar__selector rr-shellbar__selector--workspace"
@@ -73,7 +70,9 @@ async function logout() {
             :options="libraries"
             compact
             :disabled="!activeWorkspace || !libraries.length"
-            :placeholder="activeWorkspace ? $t('shell.noLibraries') : $t('shell.selectWorkspaceFirst')"
+            :placeholder="
+              activeWorkspace ? $t('shell.noLibraries') : $t('shell.selectWorkspaceFirst')
+            "
             :can-create="canCreateLibrary"
             :create-label="$t('shell.createLibrary')"
             :can-delete="canCreateLibrary"
@@ -84,10 +83,7 @@ async function logout() {
         </div>
 
         <div class="rr-shellbar__account">
-          <LocaleSwitcher
-            :locale="sessionStore.locale"
-            @change="shellStore.switchLocale"
-          />
+          <LocaleSwitcher :locale="sessionStore.locale" @change="shellStore.switchLocale" />
           <UserMenu
             :initials="currentUser.initials"
             :display-name="currentUser.displayName"

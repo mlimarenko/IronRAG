@@ -27,7 +27,7 @@ use rustrag_backend::{
         },
         document_store::{
             ArangoDocumentStore, KnowledgeChunkRow, KnowledgeDocumentRow,
-            KnowledgeLibraryGenerationRow, KnowledgeRevisionRow,
+            KnowledgeLibraryGenerationRow, KnowledgeRevisionRow, KnowledgeTechnicalFactRow,
         },
         graph_store::{ArangoGraphStore, NewKnowledgeEntity, NewKnowledgeEvidence},
         search_store::{ArangoSearchStore, KnowledgeChunkVectorRow, KnowledgeEntityVectorRow},
@@ -321,10 +321,12 @@ struct KnowledgeSearchHttpFixture {
     temp_arango: TempArangoDatabase,
     state: AppState,
     token: String,
+    workspace_id: Uuid,
     library_id: Uuid,
     document_id: Uuid,
     revision_id: Uuid,
     chunk_id: Uuid,
+    fact_id: Uuid,
     entity_id: Uuid,
     relation_id: Uuid,
 }
@@ -442,6 +444,7 @@ impl KnowledgeSearchHttpFixture {
         let document_id = Uuid::now_v7();
         let revision_id = Uuid::now_v7();
         let chunk_id = Uuid::now_v7();
+        let fact_id = Uuid::now_v7();
         let entity_id = Uuid::now_v7();
         let relation_id = Uuid::now_v7();
         let evidence_id = Uuid::now_v7();
@@ -458,6 +461,7 @@ impl KnowledgeSearchHttpFixture {
                 workspace_id: workspace.id,
                 library_id: library.id,
                 external_key: "search-document".to_string(),
+                title: Some("Search Document".to_string()),
                 document_state: "active".to_string(),
                 active_revision_id: Some(revision_id),
                 readable_revision_id: Some(revision_id),
@@ -517,14 +521,50 @@ impl KnowledgeSearchHttpFixture {
                 span_start: Some(0),
                 span_end: Some(20),
                 token_count: Some(3),
+                chunk_kind: Some("paragraph".to_string()),
+                support_block_ids: Vec::new(),
                 section_path: vec!["intro".to_string()],
                 heading_trail: vec!["Intro".to_string()],
+                literal_digest: None,
                 chunk_state: "ready".to_string(),
                 text_generation: Some(1),
                 vector_generation: Some(1),
             })
             .await
             .context("failed to insert knowledge search chunk")?;
+        state
+            .arango_document_store
+            .replace_technical_facts(
+                revision_id,
+                &[KnowledgeTechnicalFactRow {
+                    key: fact_id.to_string(),
+                    arango_id: None,
+                    arango_rev: None,
+                    fact_id,
+                    workspace_id: workspace.id,
+                    library_id: library.id,
+                    document_id,
+                    revision_id,
+                    fact_kind: "endpoint_path".to_string(),
+                    canonical_value_text: "/orion/status".to_string(),
+                    canonical_value_exact: "/orion/status".to_string(),
+                    canonical_value_json: json!({
+                        "value_type": "text",
+                        "value": "/orion/status"
+                    }),
+                    display_value: "/orion/status".to_string(),
+                    qualifiers_json: json!([]),
+                    support_block_ids: Vec::new(),
+                    support_chunk_ids: vec![chunk_id],
+                    confidence: Some(0.98),
+                    extraction_kind: "fixture_seed".to_string(),
+                    conflict_group_id: None,
+                    created_at: now,
+                    updated_at: now,
+                }],
+            )
+            .await
+            .context("failed to insert knowledge search technical fact")?;
         state
             .arango_document_store
             .upsert_library_generation(&KnowledgeLibraryGenerationRow {
@@ -670,10 +710,13 @@ impl KnowledgeSearchHttpFixture {
                     document_id,
                     revision_id,
                     chunk_id: Some(chunk_id),
+                    block_id: None,
+                    fact_id: Some(fact_id),
                     span_start: Some(0),
                     span_end: Some(20),
-                    excerpt: "orion lexical anchor".to_string(),
-                    support_kind: "chunk".to_string(),
+                    quote_text: "orion lexical anchor".to_string(),
+                    literal_spans_json: serde_json::json!([]),
+                    evidence_kind: "chunk_quote".to_string(),
                     extraction_method: "seed".to_string(),
                     confidence: Some(0.99),
                     evidence_state: "active".to_string(),
@@ -684,6 +727,7 @@ impl KnowledgeSearchHttpFixture {
                 Some(revision_id),
                 Some(entity_id),
                 Some(relation_id),
+                None,
             )
             .await
             .context("failed to insert knowledge search evidence")?;
@@ -693,10 +737,12 @@ impl KnowledgeSearchHttpFixture {
             temp_arango,
             state,
             token,
+            workspace_id: workspace.id,
             library_id: library.id,
             document_id,
             revision_id,
             chunk_id,
+            fact_id,
             entity_id,
             relation_id,
         })
@@ -736,6 +782,34 @@ impl KnowledgeSearchHttpFixture {
             .context("failed to read knowledge search response body")?
             .to_bytes();
         serde_json::from_slice::<Value>(&body).context("failed to decode knowledge search json")
+    }
+
+    async fn wait_for_query_evidence_top_fact(
+        &self,
+        query: &str,
+        expected_fact_id: Uuid,
+    ) -> Result<rustrag_backend::services::search_service::QueryEvidenceSearchResult> {
+        let deadline = Instant::now() + SEARCH_WAIT_TIMEOUT;
+        loop {
+            let result = SearchService::new()
+                .search_query_evidence(&self.state, self.library_id, query, 5)
+                .await
+                .with_context(|| {
+                    format!("failed to search query evidence for technical fact query {query}")
+                })?;
+            if result.technical_fact_hits.first().map(|row| row.fact_id) == Some(expected_fact_id) {
+                return Ok(result);
+            }
+            if Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "timed out waiting for top technical fact {} for query {}; last observed {:?}",
+                    expected_fact_id,
+                    query,
+                    result.technical_fact_hits.first().map(|row| row.fact_id)
+                ));
+            }
+            sleep(SEARCH_POLL_INTERVAL).await;
+        }
     }
 }
 
@@ -830,6 +904,7 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
                 workspace_id,
                 library_id: target_library_id,
                 external_key: "lexical-target".to_string(),
+                title: Some("Target".to_string()),
                 document_state: "active".to_string(),
                 active_revision_id: Some(target_revision_id),
                 readable_revision_id: Some(target_revision_id),
@@ -889,8 +964,11 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
                 span_start: Some(0),
                 span_end: Some(20),
                 token_count: Some(3),
+                chunk_kind: Some("paragraph".to_string()),
+                support_block_ids: Vec::new(),
                 section_path: vec!["intro".to_string()],
                 heading_trail: vec!["Intro".to_string()],
+                literal_digest: None,
                 chunk_state: "ready".to_string(),
                 text_generation: Some(1),
                 vector_generation: None,
@@ -908,6 +986,7 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
                 workspace_id,
                 library_id: distractor_library_id,
                 external_key: "lexical-distractor".to_string(),
+                title: Some("Distractor".to_string()),
                 document_state: "active".to_string(),
                 active_revision_id: Some(distractor_revision_id),
                 readable_revision_id: Some(distractor_revision_id),
@@ -967,8 +1046,11 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
                 span_start: Some(0),
                 span_end: Some(20),
                 token_count: Some(3),
+                chunk_kind: Some("paragraph".to_string()),
+                support_block_ids: Vec::new(),
                 section_path: vec!["intro".to_string()],
                 heading_trail: vec!["Intro".to_string()],
+                literal_digest: None,
                 chunk_state: "ready".to_string(),
                 text_generation: Some(1),
                 vector_generation: None,
@@ -980,6 +1062,17 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
             .wait_for_chunk_hits(target_library_id, "orion lexical anchor", &[target_chunk_id])
             .await?;
         assert_eq!(hits, vec![target_chunk_id]);
+        let structured_chunks = fixture
+            .document_store
+            .list_chunks_by_revision(target_revision_id)
+            .await
+            .context("failed to reload structured chunks for ancestry assertion")?;
+        let target_chunk = structured_chunks
+            .into_iter()
+            .find(|chunk| chunk.chunk_id == target_chunk_id)
+            .ok_or_else(|| anyhow!("target chunk vanished before ancestry assertion"))?;
+        assert_eq!(target_chunk.section_path, vec!["intro".to_string()]);
+        assert_eq!(target_chunk.heading_trail, vec!["Intro".to_string()]);
         Ok(())
     }
     .await;
@@ -1012,6 +1105,7 @@ async fn chunk_and_entity_vectors_roundtrip_with_generation_order() -> Result<()
                 workspace_id,
                 library_id,
                 external_key: "vector-doc".to_string(),
+                title: Some("Vector Doc".to_string()),
                 document_state: "active".to_string(),
                 active_revision_id: Some(revision_id),
                 readable_revision_id: Some(revision_id),
@@ -1071,8 +1165,11 @@ async fn chunk_and_entity_vectors_roundtrip_with_generation_order() -> Result<()
                 span_start: Some(0),
                 span_end: Some(20),
                 token_count: Some(3),
+                chunk_kind: Some("paragraph".to_string()),
+                support_block_ids: Vec::new(),
                 section_path: vec!["intro".to_string()],
                 heading_trail: vec!["Intro".to_string()],
+                literal_digest: None,
                 chunk_state: "ready".to_string(),
                 text_generation: Some(1),
                 vector_generation: Some(1),
@@ -1245,6 +1342,7 @@ async fn revision_replacement_updates_readiness_generation_and_chunk_search_surf
                 workspace_id,
                 library_id,
                 external_key: "replacement-doc".to_string(),
+                title: Some("Replacement Doc".to_string()),
                 document_state: "active".to_string(),
                 active_revision_id: Some(revision_one_id),
                 readable_revision_id: Some(revision_one_id),
@@ -1304,8 +1402,11 @@ async fn revision_replacement_updates_readiness_generation_and_chunk_search_surf
                 span_start: Some(0),
                 span_end: Some(24),
                 token_count: Some(3),
+                chunk_kind: Some("paragraph".to_string()),
+                support_block_ids: Vec::new(),
                 section_path: vec!["revision-one".to_string()],
                 heading_trail: vec!["Revision One".to_string()],
+                literal_digest: None,
                 chunk_state: "ready".to_string(),
                 text_generation: Some(1),
                 vector_generation: None,
@@ -1404,8 +1505,11 @@ async fn revision_replacement_updates_readiness_generation_and_chunk_search_surf
                 span_start: Some(0),
                 span_end: Some(19),
                 token_count: Some(3),
+                chunk_kind: Some("paragraph".to_string()),
+                support_block_ids: Vec::new(),
                 section_path: vec!["revision-two".to_string()],
                 heading_trail: vec!["Revision Two".to_string()],
+                literal_digest: None,
                 chunk_state: "ready".to_string(),
                 text_generation: Some(2),
                 vector_generation: Some(2),
@@ -1420,6 +1524,7 @@ async fn revision_replacement_updates_readiness_generation_and_chunk_search_surf
                 Some(revision_two_id),
                 Some(revision_two_id),
                 Some(2),
+                None,
                 None,
             )
             .await
@@ -1520,9 +1625,19 @@ async fn search_documents_endpoint_returns_hybrid_knowledge_payload() -> Result<
         assert_eq!(document_hit["provenanceSummary"]["supportingEvidenceCount"], json!(1));
         assert_eq!(document_hit["provenanceSummary"]["lexicalChunkCount"], json!(1));
         assert_eq!(document_hit["provenanceSummary"]["vectorChunkCount"], json!(1));
+        assert_eq!(document_hit["technicalFactSummary"]["typedFactCount"], json!(1));
+        assert_eq!(
+            document_hit["technicalFactSummary"]["factKindCounts"]["endpoint_path"],
+            json!(1)
+        );
+        assert_eq!(document_hit["graphEvidenceSummary"]["evidenceCount"], json!(1));
+        assert_eq!(document_hit["graphEvidenceSummary"]["factBackedCount"], json!(1));
         assert_eq!(document_hit["chunkHits"].as_array().map_or(0, Vec::len), 1);
         assert_eq!(document_hit["vectorChunkHits"].as_array().map_or(0, Vec::len), 1);
         assert_eq!(document_hit["evidenceSamples"].as_array().map_or(0, Vec::len), 1);
+        assert_eq!(document_hit["technicalFactSamples"].as_array().map_or(0, Vec::len), 1);
+        assert_eq!(document_hit["technicalFactSamples"][0]["factId"], json!(fixture.fact_id));
+        assert_eq!(document_hit["technicalFactSamples"][0]["displayValue"], json!("/orion/status"));
 
         let entity_hits = body["entityHits"].as_array().context("entityHits must be an array")?;
         assert_eq!(entity_hits.len(), 1);
@@ -1577,9 +1692,235 @@ async fn search_documents_endpoint_falls_back_to_lexical_when_vector_collections
         assert_eq!(document_hits.len(), 1);
         assert_eq!(document_hits[0]["document"]["documentId"], json!(fixture.document_id));
         assert_eq!(document_hits[0]["chunkHits"].as_array().map_or(0, Vec::len), 1);
+        assert_eq!(document_hits[0]["technicalFactSummary"]["typedFactCount"], json!(1));
+        assert_eq!(document_hits[0]["technicalFactSamples"].as_array().map_or(0, Vec::len), 1);
         assert_eq!(document_hits[0]["vectorChunkHits"].as_array().map_or(0, Vec::len), 0);
         assert_eq!(body["vectorChunkHits"].as_array().map_or(0, Vec::len), 0);
         assert_eq!(body["vectorEntityHits"].as_array().map_or(0, Vec::len), 0);
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango services"]
+async fn lexical_chunk_search_ignores_non_chunk_documents_in_shared_search_view() -> Result<()> {
+    let fixture = KnowledgeSearchHttpFixture::create().await?;
+
+    let result = async {
+        let deadline = Instant::now() + SEARCH_WAIT_TIMEOUT;
+        loop {
+            let hits = fixture
+                .state
+                .arango_search_store
+                .search_chunks(fixture.library_id, "/orion/status", 8)
+                .await
+                .context("failed to run lexical chunk search against shared search view")?;
+            let chunk_ids = hits.iter().map(|row| row.chunk_id).collect::<BTreeSet<_>>();
+            if chunk_ids == BTreeSet::from([fixture.chunk_id]) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "timed out waiting for lexical chunk search to return only the canonical chunk {}; last observed {:?}",
+                    fixture.chunk_id,
+                    chunk_ids
+                ));
+            }
+            sleep(SEARCH_POLL_INTERVAL).await;
+        }
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango services"]
+async fn search_query_evidence_ranks_typed_facts_for_url_endpoint_method_and_parameter_questions()
+-> Result<()> {
+    let fixture = KnowledgeSearchHttpFixture::create().await?;
+
+    let result = async {
+        let url_fact_id = Uuid::now_v7();
+        let method_fact_id = Uuid::now_v7();
+        let parameter_fact_id = Uuid::now_v7();
+        let distractor_parameter_fact_id = Uuid::now_v7();
+        let now = Utc::now();
+
+        fixture
+            .state
+            .arango_document_store
+            .replace_technical_facts(
+                fixture.revision_id,
+                &[
+                    KnowledgeTechnicalFactRow {
+                        key: fixture.fact_id.to_string(),
+                        arango_id: None,
+                        arango_rev: None,
+                        fact_id: fixture.fact_id,
+                        workspace_id: fixture.workspace_id,
+                        library_id: fixture.library_id,
+                        document_id: fixture.document_id,
+                        revision_id: fixture.revision_id,
+                        fact_kind: "endpoint_path".to_string(),
+                        canonical_value_text: "/orion/status".to_string(),
+                        canonical_value_exact: "/orion/status".to_string(),
+                        canonical_value_json: json!({ "value_type": "text", "value": "/orion/status" }),
+                        display_value: "/orion/status".to_string(),
+                        qualifiers_json: json!([]),
+                        support_block_ids: Vec::new(),
+                        support_chunk_ids: vec![fixture.chunk_id],
+                        confidence: Some(0.98),
+                        extraction_kind: "fixture_seed".to_string(),
+                        conflict_group_id: None,
+                        created_at: now,
+                        updated_at: now,
+                    },
+                    KnowledgeTechnicalFactRow {
+                        key: url_fact_id.to_string(),
+                        arango_id: None,
+                        arango_rev: None,
+                        fact_id: url_fact_id,
+                        workspace_id: fixture.workspace_id,
+                        library_id: fixture.library_id,
+                        document_id: fixture.document_id,
+                        revision_id: fixture.revision_id,
+                        fact_kind: "url".to_string(),
+                        canonical_value_text: "https://api.example.com/orion/status".to_string(),
+                        canonical_value_exact: "https://api.example.com/orion/status".to_string(),
+                        canonical_value_json: json!({
+                            "value_type": "text",
+                            "value": "https://api.example.com/orion/status"
+                        }),
+                        display_value: "https://api.example.com/orion/status".to_string(),
+                        qualifiers_json: json!([]),
+                        support_block_ids: Vec::new(),
+                        support_chunk_ids: vec![fixture.chunk_id],
+                        confidence: Some(0.97),
+                        extraction_kind: "fixture_seed".to_string(),
+                        conflict_group_id: None,
+                        created_at: now,
+                        updated_at: now,
+                    },
+                    KnowledgeTechnicalFactRow {
+                        key: method_fact_id.to_string(),
+                        arango_id: None,
+                        arango_rev: None,
+                        fact_id: method_fact_id,
+                        workspace_id: fixture.workspace_id,
+                        library_id: fixture.library_id,
+                        document_id: fixture.document_id,
+                        revision_id: fixture.revision_id,
+                        fact_kind: "http_method".to_string(),
+                        canonical_value_text: "GET".to_string(),
+                        canonical_value_exact: "GET".to_string(),
+                        canonical_value_json: json!({ "value_type": "text", "value": "GET" }),
+                        display_value: "GET".to_string(),
+                        qualifiers_json: json!([]),
+                        support_block_ids: Vec::new(),
+                        support_chunk_ids: vec![fixture.chunk_id],
+                        confidence: Some(0.96),
+                        extraction_kind: "fixture_seed".to_string(),
+                        conflict_group_id: None,
+                        created_at: now,
+                        updated_at: now,
+                    },
+                    KnowledgeTechnicalFactRow {
+                        key: parameter_fact_id.to_string(),
+                        arango_id: None,
+                        arango_rev: None,
+                        fact_id: parameter_fact_id,
+                        workspace_id: fixture.workspace_id,
+                        library_id: fixture.library_id,
+                        document_id: fixture.document_id,
+                        revision_id: fixture.revision_id,
+                        fact_kind: "parameter_name".to_string(),
+                        canonical_value_text: "pageNumber".to_string(),
+                        canonical_value_exact: "pageNumber".to_string(),
+                        canonical_value_json: json!({ "value_type": "text", "value": "pageNumber" }),
+                        display_value: "pageNumber".to_string(),
+                        qualifiers_json: json!([]),
+                        support_block_ids: Vec::new(),
+                        support_chunk_ids: vec![fixture.chunk_id],
+                        confidence: Some(0.95),
+                        extraction_kind: "fixture_seed".to_string(),
+                        conflict_group_id: None,
+                        created_at: now,
+                        updated_at: now,
+                    },
+                    KnowledgeTechnicalFactRow {
+                        key: distractor_parameter_fact_id.to_string(),
+                        arango_id: None,
+                        arango_rev: None,
+                        fact_id: distractor_parameter_fact_id,
+                        workspace_id: fixture.workspace_id,
+                        library_id: fixture.library_id,
+                        document_id: fixture.document_id,
+                        revision_id: fixture.revision_id,
+                        fact_kind: "parameter_name".to_string(),
+                        canonical_value_text: "pageSize".to_string(),
+                        canonical_value_exact: "pageSize".to_string(),
+                        canonical_value_json: json!({ "value_type": "text", "value": "pageSize" }),
+                        display_value: "pageSize".to_string(),
+                        qualifiers_json: json!([]),
+                        support_block_ids: Vec::new(),
+                        support_chunk_ids: vec![fixture.chunk_id],
+                        confidence: Some(0.94),
+                        extraction_kind: "fixture_seed".to_string(),
+                        conflict_group_id: None,
+                        created_at: now,
+                        updated_at: now,
+                    },
+                ],
+            )
+            .await
+            .context("failed to reseed canonical technical facts for ranking regression")?;
+
+        let endpoint_result = fixture
+            .wait_for_query_evidence_top_fact("/orion/status", fixture.fact_id)
+            .await?;
+        assert!(endpoint_result.exact_literal_bias);
+        assert_eq!(endpoint_result.technical_fact_hits[0].fact_id, fixture.fact_id);
+        assert_eq!(endpoint_result.technical_fact_hits[0].fact_kind, "endpoint_path");
+        assert!(endpoint_result.technical_fact_hits[0].exact_match);
+
+        let url_result = fixture
+            .wait_for_query_evidence_top_fact(
+                "https://api.example.com/orion/status",
+                url_fact_id,
+            )
+            .await?;
+        assert!(url_result.exact_literal_bias);
+        assert_eq!(url_result.technical_fact_hits[0].fact_id, url_fact_id);
+        assert_eq!(url_result.technical_fact_hits[0].fact_kind, "url");
+        assert!(url_result.technical_fact_hits[0].exact_match);
+
+        let method_result = fixture
+            .wait_for_query_evidence_top_fact("HTTP method GET", method_fact_id)
+            .await?;
+        assert!(method_result.exact_literal_bias);
+        assert_eq!(method_result.technical_fact_hits[0].fact_id, method_fact_id);
+        assert_eq!(method_result.technical_fact_hits[0].fact_kind, "http_method");
+
+        let parameter_result = fixture
+            .wait_for_query_evidence_top_fact("query parameter pageNumber", parameter_fact_id)
+            .await?;
+        assert!(parameter_result.exact_literal_bias);
+        assert_eq!(parameter_result.technical_fact_hits[0].fact_id, parameter_fact_id);
+        assert_eq!(parameter_result.technical_fact_hits[0].fact_kind, "parameter_name");
+        let distractor_position = parameter_result
+            .technical_fact_hits
+            .iter()
+            .position(|row| row.fact_id == distractor_parameter_fact_id);
+        if let Some(position) = distractor_position {
+            assert!(position > 0);
+        }
+
         Ok(())
     }
     .await;

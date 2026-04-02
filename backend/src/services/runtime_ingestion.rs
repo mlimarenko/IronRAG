@@ -24,7 +24,10 @@ use crate::{
     },
     integrations::llm::{EmbeddingBatchRequest, EmbeddingBatchResponse},
     services::search_service::ChunkEmbeddingWrite,
-    shared::file_extract::{UploadFileKind, extraction_quality_from_source_map},
+    shared::{
+        file_extract::{UploadFileKind, extraction_quality_from_source_map},
+        json_coercion::from_value_or_default,
+    },
 };
 
 const EMBEDDING_BATCH_SIZE: usize = 16;
@@ -428,8 +431,8 @@ fn persisted_extracted_content_from_plan(
     persisted_extracted_content(
         Some(plan.file_kind),
         &plan.extraction_kind,
-        plan.extracted_text.clone(),
-        plan.page_count.and_then(|value| i32::try_from(value).ok()),
+        plan.normalized_text.clone(),
+        plan.source_format_metadata.page_count.and_then(|value| i32::try_from(value).ok()),
         plan.extraction_warnings.clone(),
         plan.source_map.clone(),
         plan.provider_kind.clone(),
@@ -874,8 +877,8 @@ pub async fn embed_runtime_graph_edges(
 }
 
 fn build_graph_node_embedding_input(node: &RuntimeGraphNodeRow) -> String {
-    let aliases =
-        serde_json::from_value::<Vec<String>>(node.aliases_json.clone()).unwrap_or_default();
+    let aliases: Vec<String> =
+        from_value_or_default("runtime_graph_node.aliases_json", node.aliases_json.clone());
     let alias_text = aliases
         .into_iter()
         .filter(|alias| alias.trim() != node.label.trim())
@@ -919,7 +922,7 @@ mod tests {
         let profile = EffectiveProviderProfile {
             indexing: ProviderModelSelection {
                 provider_kind: SupportedProviderKind::OpenAi,
-                model_name: "gpt-5-mini".to_string(),
+                model_name: "gpt-5.4-mini".to_string(),
             },
             embedding: ProviderModelSelection {
                 provider_kind: SupportedProviderKind::DeepSeek,
@@ -931,7 +934,7 @@ mod tests {
             },
             vision: ProviderModelSelection {
                 provider_kind: SupportedProviderKind::OpenAi,
-                model_name: "gpt-5-mini".to_string(),
+                model_name: "gpt-5.4-mini".to_string(),
             },
         };
 
@@ -964,11 +967,21 @@ mod tests {
         let plan = FileExtractionPlan {
             file_kind: UploadFileKind::Image,
             adapter_status: "ready".to_string(),
-            extracted_text: Some("Acme Corp\nBudget 2026".to_string()),
+            source_text: Some("Acme Corp\nBudget 2026".to_string()),
+            normalized_text: Some("Acme Corp\nBudget 2026".to_string()),
             extraction_error: None,
             extraction_kind: "vision_image".to_string(),
             page_count: Some(1),
             extraction_warnings: vec!["Low contrast OCR".to_string()],
+            source_format_metadata: crate::shared::extraction::ExtractionSourceMetadata {
+                source_format: "image".to_string(),
+                page_count: Some(1),
+                line_count: 2,
+            },
+            structure_hints: crate::shared::extraction::build_text_layout_from_content(
+                "Acme Corp\nBudget 2026",
+            )
+            .structure_hints,
             source_map: json!({
                 "mime_type": "image/png",
                 "content_quality": {
@@ -978,7 +991,8 @@ mod tests {
                 },
             }),
             provider_kind: Some("openai".to_string()),
-            model_name: Some("gpt-5-mini".to_string()),
+            model_name: Some("gpt-5.4-mini".to_string()),
+            normalization_profile: "image_ocr_pre_structuring_v1".to_string(),
             extraction_version: Some("runtime_extraction_v1".to_string()),
             ingest_mode: "runtime_upload".to_string(),
         };

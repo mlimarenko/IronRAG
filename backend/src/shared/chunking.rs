@@ -1,164 +1,169 @@
+use sha2::{Digest, Sha256};
+
+use crate::shared::structured_document::{
+    StructuredBlockData, StructuredBlockKind, StructuredChunkWindow,
+};
+
 #[derive(Debug, Clone, Copy)]
-pub struct ChunkingProfile {
+pub struct StructuredChunkingProfile {
     pub max_chars: usize,
-    pub overlap_chars: usize,
 }
 
-impl Default for ChunkingProfile {
+impl Default for StructuredChunkingProfile {
     fn default() -> Self {
-        Self { max_chars: 1200, overlap_chars: 120 }
+        Self { max_chars: 1_600 }
     }
 }
 
 #[must_use]
-pub fn split_text_into_chunks(text: &str, max_chars: usize) -> Vec<String> {
-    split_text_into_chunks_with_profile(text, ChunkingProfile { max_chars, overlap_chars: 0 })
-}
+pub fn build_structured_chunk_windows(
+    blocks: &[StructuredBlockData],
+    profile: StructuredChunkingProfile,
+) -> Vec<StructuredChunkWindow> {
+    let mut chunks = Vec::<StructuredChunkWindow>::new();
+    let mut window_start = 0_usize;
+    let mut current_char_count = 0_usize;
 
-#[must_use]
-pub fn split_text_into_chunks_with_profile(text: &str, profile: ChunkingProfile) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-
-    for raw_block in text.split("\n\n") {
-        let block = raw_block.trim();
-        if block.is_empty() {
-            continue;
-        }
-
-        if current.is_empty() {
-            if char_count(block) <= profile.max_chars {
-                current.push_str(block);
-            } else {
-                split_long_block(block, profile.max_chars, &mut chunks);
-            }
-            continue;
-        }
-
-        if char_count(&current) + 2 + char_count(block) <= profile.max_chars {
-            current.push_str("\n\n");
-            current.push_str(block);
+    for (index, block) in blocks.iter().enumerate() {
+        let block_len = chunk_block_len(block);
+        let projected = if current_char_count == 0 {
+            block_len
         } else {
-            push_chunk_with_overlap(&mut chunks, &current, profile.overlap_chars);
-            current = String::new();
-            if char_count(block) <= profile.max_chars {
-                current.push_str(block);
-            } else {
-                split_long_block(block, profile.max_chars, &mut chunks);
-            }
+            current_char_count.saturating_add(2).saturating_add(block_len)
+        };
+
+        if window_start < index && projected > profile.max_chars {
+            push_structured_chunk_window(&mut chunks, &blocks[window_start..index]);
+            window_start = index;
+            current_char_count = block_len;
+            continue;
+        }
+
+        if window_start == index {
+            current_char_count = block_len;
+        } else {
+            current_char_count = projected;
         }
     }
 
-    if !current.is_empty() {
-        push_chunk_with_overlap(&mut chunks, &current, 0);
+    if window_start < blocks.len() {
+        push_structured_chunk_window(&mut chunks, &blocks[window_start..]);
     }
 
     chunks
-}
-
-fn push_chunk_with_overlap(out: &mut Vec<String>, chunk: &str, overlap_chars: usize) {
-    if chunk.trim().is_empty() {
-        return;
-    }
-
-    out.push(chunk.to_string());
-
-    if overlap_chars == 0 {
-        return;
-    }
-
-    let overlap = trailing_chars(chunk, overlap_chars);
-    if !overlap.is_empty() {
-        out.push(overlap);
-    }
-}
-
-fn trailing_chars(input: &str, max_chars: usize) -> String {
-    let mut chars = input.chars().rev().take(max_chars).collect::<Vec<_>>();
-    chars.reverse();
-    chars.into_iter().collect()
 }
 
 fn char_count(input: &str) -> usize {
     input.chars().count()
 }
 
-fn split_at_char_count(input: &str, max_chars: usize) -> (&str, &str) {
-    if max_chars == 0 {
-        return ("", input);
+fn push_structured_chunk_window(
+    out: &mut Vec<StructuredChunkWindow>,
+    blocks: &[StructuredBlockData],
+) {
+    if blocks.is_empty() {
+        return;
     }
 
-    let split_idx = input.char_indices().nth(max_chars).map_or(input.len(), |(idx, _)| idx);
-    input.split_at(split_idx)
+    let content_text =
+        blocks.iter().map(|block| block.text.trim()).collect::<Vec<_>>().join("\n\n");
+    let normalized_text =
+        blocks.iter().map(|block| block.normalized_text.trim()).collect::<Vec<_>>().join("\n\n");
+    let literal_digest = format!("sha256:{:x}", Sha256::digest(normalized_text.as_bytes()));
+    let support_block_ids = blocks.iter().map(|block| block.block_id).collect::<Vec<_>>();
+    let heading_trail = blocks
+        .iter()
+        .rev()
+        .find(|block| !block.heading_trail.is_empty())
+        .map(|block| block.heading_trail.clone())
+        .unwrap_or_default();
+    let section_path = blocks
+        .iter()
+        .rev()
+        .find(|block| !block.section_path.is_empty())
+        .map(|block| block.section_path.clone())
+        .unwrap_or_default();
+    let token_count = i32::try_from(normalized_text.split_whitespace().count()).ok();
+
+    out.push(StructuredChunkWindow {
+        chunk_index: i32::try_from(out.len()).unwrap_or(i32::MAX),
+        chunk_kind: dominant_chunk_kind(blocks),
+        support_block_ids,
+        content_text,
+        normalized_text,
+        heading_trail,
+        section_path,
+        token_count,
+        literal_digest: Some(literal_digest),
+    });
 }
 
-fn split_long_block(block: &str, max_chars: usize, out: &mut Vec<String>) {
-    let mut current = String::new();
-    for sentence in block.split_terminator(['.', '!', '?']) {
-        let sentence = sentence.trim();
-        if sentence.is_empty() {
-            continue;
-        }
-        let sentence = format!("{}. ", sentence.trim_end_matches(['.', '!', '?']));
-        if char_count(&current) + char_count(&sentence) <= max_chars {
-            current.push_str(&sentence);
-        } else {
-            if !current.trim().is_empty() {
-                out.push(current.trim().to_string());
-            }
-            if char_count(&sentence) > max_chars {
-                let mut rest = sentence.as_str();
-                while char_count(rest) > max_chars {
-                    let (head, tail) = split_at_char_count(rest, max_chars);
-                    out.push(head.trim().to_string());
-                    rest = tail;
-                }
-                current = rest.to_string();
-            } else {
-                current = sentence;
-            }
-        }
-    }
-    if !current.trim().is_empty() {
-        out.push(current.trim().to_string());
-    }
+fn dominant_chunk_kind(blocks: &[StructuredBlockData]) -> StructuredBlockKind {
+    blocks
+        .iter()
+        .find_map(|block| match block.block_kind {
+            StructuredBlockKind::EndpointBlock
+            | StructuredBlockKind::CodeBlock
+            | StructuredBlockKind::Table
+            | StructuredBlockKind::TableRow => Some(block.block_kind),
+            _ => None,
+        })
+        .unwrap_or_else(|| blocks[0].block_kind)
+}
+
+fn chunk_block_len(block: &StructuredBlockData) -> usize {
+    char_count(block.normalized_text.trim())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ChunkingProfile, char_count, split_text_into_chunks_with_profile};
+    use uuid::Uuid;
+
+    use super::{StructuredChunkingProfile, build_structured_chunk_windows};
+    use crate::shared::structured_document::{StructuredBlockData, StructuredBlockKind};
 
     #[test]
-    fn splits_cyrillic_text_without_utf8_boundary_panic() {
-        let text = "Это длинный русский текст без латиницы, который должен разбиваться безопасно. "
-            .repeat(60);
+    fn builds_structured_chunk_windows_from_semantic_blocks() {
+        let blocks = vec![
+            StructuredBlockData {
+                block_id: Uuid::now_v7(),
+                ordinal: 0,
+                block_kind: StructuredBlockKind::Heading,
+                text: "API".to_string(),
+                normalized_text: "API".to_string(),
+                heading_trail: vec!["API".to_string()],
+                section_path: vec!["api".to_string()],
+                page_number: None,
+                source_span: None,
+                parent_block_id: None,
+                table_coordinates: None,
+                code_language: None,
+            },
+            StructuredBlockData {
+                block_id: Uuid::now_v7(),
+                ordinal: 1,
+                block_kind: StructuredBlockKind::EndpointBlock,
+                text: "GET /v1/accounts".to_string(),
+                normalized_text: "GET /v1/accounts".to_string(),
+                heading_trail: vec!["API".to_string()],
+                section_path: vec!["api".to_string()],
+                page_number: None,
+                source_span: None,
+                parent_block_id: None,
+                table_coordinates: None,
+                code_language: None,
+            },
+        ];
 
-        let chunks = split_text_into_chunks_with_profile(
-            &text,
-            ChunkingProfile { max_chars: 120, overlap_chars: 0 },
-        );
+        let chunks =
+            build_structured_chunk_windows(&blocks, StructuredChunkingProfile { max_chars: 80 });
 
-        assert!(!chunks.is_empty());
-        assert!(chunks.iter().all(|chunk| char_count(chunk) <= 120));
-        assert!(chunks.iter().all(|chunk| !chunk.trim().is_empty()));
-    }
-
-    #[test]
-    fn respects_multibyte_boundaries_in_single_long_sentence() {
-        let text = format!("{}!", "я".repeat(245));
-
-        let chunks = split_text_into_chunks_with_profile(
-            &text,
-            ChunkingProfile { max_chars: 100, overlap_chars: 0 },
-        );
-
-        assert_eq!(chunks.len(), 3);
-        assert!(chunks.iter().all(|chunk| char_count(chunk) <= 100));
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].chunk_kind, StructuredBlockKind::EndpointBlock);
+        assert_eq!(chunks[0].support_block_ids.len(), 2);
+        assert_eq!(chunks[0].heading_trail, vec!["API".to_string()]);
         assert!(
-            chunks
-                .iter()
-                .all(|chunk| chunk.chars().all(|ch| ch == 'я' || matches!(ch, '.' | '!' | ' ')))
+            chunks[0].literal_digest.as_deref().is_some_and(|value| value.starts_with("sha256:"))
         );
-        assert!(chunks.iter().map(|chunk| char_count(chunk)).sum::<usize>() >= 245);
     }
 }

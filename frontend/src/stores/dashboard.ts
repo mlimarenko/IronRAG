@@ -10,7 +10,10 @@ import type {
 import type { DocumentsSurfaceResponse } from 'src/models/ui/documents'
 import type { GraphDiagnostics, GraphStatus } from 'src/models/ui/graph'
 import { fetchDocumentsSurface, mapDashboardRecentDocuments } from 'src/services/api/documents'
-import { fetchGraphDiagnostics, mapGraphDiagnosticsForDashboard } from 'src/services/api/graph'
+import {
+  fetchDashboardGraphDiagnostics,
+  mapGraphDiagnosticsForDashboard,
+} from 'src/services/api/graph'
 
 interface DashboardState {
   activeLibraryId: string | null
@@ -53,19 +56,19 @@ function buildStatusChartSummary(
       {
         key: 'graphReady',
         label: i18n.global.t('dashboard.chart.graphReady'),
-        value: counters.ready,
+        value: counters.graphReady,
         color: 'var(--rr-success-text)',
       },
       {
-        key: 'graphCatchUp',
-        label: i18n.global.t('dashboard.chart.graphCatchUp'),
-        value: counters.readyNoGraph,
+        key: 'graphSparse',
+        label: i18n.global.t('dashboard.chart.graphSparse'),
+        value: counters.readable + counters.graphSparse,
         color: '#0891b2',
       },
       {
         key: 'processing',
         label: i18n.global.t('dashboard.chart.processing'),
-        value: counters.processing + counters.queued,
+        value: counters.processing,
         color: '#eab308',
       },
       {
@@ -84,11 +87,11 @@ function buildOverviewSurface(
 ): DashboardOverviewSurface {
   const { t } = i18n.global
   const totalDocuments = documentsSurface.rows.length
-  const inFlightCount = documentsSurface.counters.processing + documentsSurface.counters.queued
+  const inFlightCount = documentsSurface.counters.processing
   const failedCount = documentsSurface.counters.failed
-  const graphReadyCount = documentsSurface.counters.ready
-  const graphCatchUpCount = documentsSurface.counters.readyNoGraph
-  const searchReadyCount = graphReadyCount + graphCatchUpCount
+  const readableCount = documentsSurface.counters.readable
+  const graphSparseCount = documentsSurface.counters.graphSparse
+  const graphReadyCount = documentsSurface.counters.graphReady
   const degradedWarnings = (documentsSurface.diagnostics.warnings ?? []).filter(
     (warning) => warning.isDegraded,
   )
@@ -96,7 +99,7 @@ function buildOverviewSurface(
   const attentionCount =
     failedCount +
     degradedWarnings.length +
-    Number(graphCatchUpCount > 0) +
+    Number(readableCount + graphSparseCount > 0) +
     Number(Boolean(graphSummary.attentionItem))
 
   const metrics: DashboardMetric[] = [
@@ -145,7 +148,8 @@ function buildOverviewSurface(
       failed: failedCount,
       inFlight: inFlightCount,
       graphReady: graphReadyCount,
-      graphCatchUp: graphCatchUpCount,
+      readable: readableCount,
+      graphSparse: graphSparseCount,
       graph: graphSummary.statusLabel,
     })
   } else if (totalDocuments > 0 && inFlightCount > 0) {
@@ -153,14 +157,16 @@ function buildOverviewSurface(
       total: totalDocuments,
       inFlight: inFlightCount,
       graphReady: graphReadyCount,
-      graphCatchUp: graphCatchUpCount,
+      readable: readableCount,
+      graphSparse: graphSparseCount,
       graph: graphSummary.statusLabel,
     })
   } else if (totalDocuments > 0) {
     summaryNarrative = t('dashboard.narrative.settled', {
       total: totalDocuments,
       graphReady: graphReadyCount,
-      searchReady: searchReadyCount,
+      readable: readableCount,
+      graphSparse: graphSparseCount,
       graph: graphSummary.statusLabel,
     })
   }
@@ -186,16 +192,17 @@ function buildOverviewSurface(
       actionLabel: t('dashboard.attentionItems.warningsAction'),
     })
   }
-  if (graphCatchUpCount > 0) {
+  if (readableCount + graphSparseCount > 0) {
     attentionItems.push({
-      id: 'graph-catchup',
+      id: 'graph-sparse',
       severity: inFlightCount > 0 ? 'info' : 'warning',
-      title: t('dashboard.attentionItems.graphCatchUpTitle'),
-      message: t('dashboard.attentionItems.graphCatchUpMessage', {
-        count: graphCatchUpCount,
+      title: t('dashboard.attentionItems.graphSparseTitle'),
+      message: t('dashboard.attentionItems.graphSparseMessage', {
+        readable: readableCount,
+        graphSparse: graphSparseCount,
       }),
       targetRoute: '/documents',
-      actionLabel: t('dashboard.attentionItems.graphCatchUpAction'),
+      actionLabel: t('dashboard.attentionItems.graphSparseAction'),
     })
   }
   if (graphSummary.attentionItem) {
@@ -208,10 +215,12 @@ function buildOverviewSurface(
       totalDocuments,
       inFlightDocuments: inFlightCount,
       failedDocuments: failedCount,
-      searchReadyDocuments: searchReadyCount,
+      readableDocuments: readableCount,
+      graphSparseDocuments: graphSparseCount,
       graphReadyDocuments: graphReadyCount,
-      graphCatchUpDocuments: graphCatchUpCount,
     },
+    readinessSummary: documentsSurface.readinessSummary,
+    graphCoverage: documentsSurface.graphCoverage,
     metrics,
     attentionItems,
     recentDocuments: mapDashboardRecentDocuments(documentsSurface.rows),
@@ -244,7 +253,8 @@ export const useDashboardStore = defineStore('dashboard', {
         return
       }
 
-      const shouldShowLoading = !options?.preserveUi || !this.overview || this.activeLibraryId !== libraryId
+      const shouldShowLoading =
+        !options?.preserveUi || !this.overview || this.activeLibraryId !== libraryId
 
       this.activeLibraryId = libraryId
 
@@ -256,16 +266,13 @@ export const useDashboardStore = defineStore('dashboard', {
       const requestId = ++this.loadRequestId
 
       try {
-        const [documentsSurface, graphDiagnostics] = await Promise.all([
-          fetchDocumentsSurface(),
-          fetchGraphDiagnostics(libraryId),
-        ])
+        const documentsSurface = await fetchDocumentsSurface()
+        const graphDiagnostics = await fetchDashboardGraphDiagnostics(documentsSurface, libraryId)
         if (this.loadRequestId !== requestId || this.activeLibraryId !== libraryId) {
           return
         }
         this.overview = buildOverviewSurface(documentsSurface, graphDiagnostics)
-        const hasDocumentWork =
-          documentsSurface.counters.queued > 0 || documentsSurface.counters.processing > 0
+        const hasDocumentWork = documentsSurface.counters.processing > 0
         this.refreshIntervalMs =
           hasDocumentWork || isGraphActive(graphDiagnostics.graphStatus)
             ? ACTIVE_REFRESH_INTERVAL_MS

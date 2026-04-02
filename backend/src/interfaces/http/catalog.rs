@@ -1,7 +1,8 @@
 use axum::{
     Json, Router,
     extract::{Path, State},
-    routing::get,
+    http::StatusCode,
+    routing::{delete, get},
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -72,11 +73,12 @@ pub struct CreateCatalogLibraryRequest {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/catalog/workspaces", get(list_workspaces).post(create_workspace))
-        .route("/catalog/workspaces/{workspace_id}", get(get_workspace))
+        .route("/catalog/workspaces/{workspace_id}", get(get_workspace).delete(delete_workspace))
         .route(
             "/catalog/workspaces/{workspace_id}/libraries",
             get(list_libraries).post(create_library),
         )
+        .route("/catalog/workspaces/{workspace_id}/libraries/{library_id}", delete(delete_library))
         .route("/catalog/libraries/{library_id}", get(get_library))
 }
 
@@ -160,6 +162,50 @@ async fn create_workspace(
     Ok(Json(map_workspace(workspace)))
 }
 
+async fn delete_workspace(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    if !auth.is_system_admin {
+        record_catalog_audit_event(
+            &state,
+            &auth,
+            request_id.map(|value| value.0.0),
+            "catalog.workspace.delete",
+            "rejected",
+            Some("workspace delete denied".to_string()),
+            Some(format!("principal {} was denied workspace deletion", auth.principal_id)),
+            Vec::new(),
+        )
+        .await;
+        return Err(ApiError::Unauthorized);
+    }
+
+    let workspace = state.canonical_services.catalog.delete_workspace(&state, workspace_id).await?;
+
+    record_catalog_audit_event(
+        &state,
+        &auth,
+        request_id.map(|value| value.0.0),
+        "catalog.workspace.delete",
+        "succeeded",
+        Some(format!("workspace {} deleted", workspace.display_name)),
+        Some(format!("principal {} deleted workspace {}", auth.principal_id, workspace.id)),
+        vec![AppendAuditEventSubjectCommand {
+            subject_kind: "workspace".to_string(),
+            subject_id: workspace.id,
+            workspace_id: Some(workspace.id),
+            library_id: None,
+            document_id: None,
+        }],
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn list_libraries(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -224,6 +270,45 @@ async fn create_library(
     .await;
 
     Ok(Json(map_library(library)))
+}
+
+async fn delete_library(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Path((workspace_id, library_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    load_workspace_and_authorize(&auth, &state, workspace_id, POLICY_WORKSPACE_ADMIN).await?;
+    let library = state.canonical_services.catalog.get_library(&state, library_id).await?;
+    if library.workspace_id != workspace_id {
+        return Err(ApiError::resource_not_found("library", library_id));
+    }
+
+    let deleted_library =
+        state.canonical_services.catalog.delete_library(&state, library_id).await?;
+
+    record_catalog_audit_event(
+        &state,
+        &auth,
+        request_id.map(|value| value.0.0),
+        "catalog.library.delete",
+        "succeeded",
+        Some(format!("library {} deleted", deleted_library.display_name)),
+        Some(format!(
+            "principal {} deleted library {} in workspace {}",
+            auth.principal_id, deleted_library.id, deleted_library.workspace_id
+        )),
+        vec![AppendAuditEventSubjectCommand {
+            subject_kind: "library".to_string(),
+            subject_id: deleted_library.id,
+            workspace_id: Some(deleted_library.workspace_id),
+            library_id: Some(deleted_library.id),
+            document_id: None,
+        }],
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn get_library(

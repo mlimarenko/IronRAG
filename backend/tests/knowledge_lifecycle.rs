@@ -307,6 +307,7 @@ async fn write_chunk(
                 document_id,
                 revision_id,
                 chunk_index,
+                chunk_kind: None,
                 content_text: text.to_string(),
                 normalized_text: text.to_string(),
                 span_start: None,
@@ -314,8 +315,10 @@ async fn write_chunk(
                 token_count: Some(
                     i32::try_from(text.split_whitespace().count()).unwrap_or(i32::MAX),
                 ),
+                support_block_ids: Vec::new(),
                 section_path: Vec::new(),
                 heading_trail: Vec::new(),
+                literal_digest: None,
                 chunk_state: "ready".to_string(),
                 text_generation: Some(1),
                 vector_generation: Some(1),
@@ -348,6 +351,7 @@ async fn canonical_knowledge_lifecycle_persists_document_shell_revisions_pointer
                     workspace_id: fixture.workspace_id,
                     library_id: fixture.library_id,
                     external_key: external_key.clone(),
+                    title: Some("Knowledge Lifecycle Document".to_string()),
                     document_state: "active".to_string(),
                 },
             )
@@ -472,6 +476,7 @@ async fn canonical_knowledge_lifecycle_handles_append_replace_and_delete_without
                     workspace_id: fixture.workspace_id,
                     library_id: fixture.library_id,
                     external_key: format!("knowledge-mutation-doc-{}", document_id.simple()),
+                    title: Some("Knowledge Mutation Document".to_string()),
                     document_state: "active".to_string(),
                 },
             )
@@ -690,6 +695,7 @@ async fn knowledge_readiness_coherence_keeps_readable_pointer_until_new_revision
                     workspace_id: fixture.workspace_id,
                     library_id: fixture.library_id,
                     external_key: format!("readiness-doc-{}", document_id.simple()),
+                    title: Some("Readiness Coherence Document".to_string()),
                     document_state: "active".to_string(),
                 },
             )

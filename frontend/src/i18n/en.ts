@@ -9,11 +9,68 @@ const en = {
     setup: {
       title: 'Set up the first administrator',
       subtitle:
-        'This deployment does not have an administrator yet. Create the first admin login and password to finish the initial setup.',
+        'This deployment does not have an administrator yet. Create the first admin login and password, then choose the canonical AI bindings for the starter library.',
       displayName: 'Display name',
       displayNamePlaceholder: 'Administrator',
-      hint: 'You can configure provider credentials, grants, and additional API tokens after the first sign-in.',
-      submit: 'Create administrator',
+      hint: 'After the first sign-in you can still adjust these providers, models, and credentials in Admin without repeating bootstrap.',
+      submit: 'Create administrator and finish setup',
+      sections: {
+        admin: 'Administrator',
+      },
+      ai: {
+        title: 'AI bootstrap',
+        subtitle:
+          'Choose models for the canonical runtime purposes and enter API keys only for providers that are not already configured by env.',
+        provider: 'Provider',
+        model: 'Model',
+        credentialsTitle: 'Provider credentials',
+        credentialsSubtitle:
+          'Tokens are requested only for selected providers that do not already have a server-side env secret.',
+        apiKey: 'API key',
+        apiKeyPlaceholder: 'sk-...',
+        bindings: {
+          configured: 'Defaulted from env',
+          unavailable: 'No compatible model is available in the catalog for this purpose yet.',
+          extract_graph: {
+            label: 'Graph extraction',
+            description:
+              'Model used for entity/relation extraction and the canonical graph build path.',
+          },
+          embed_chunk: {
+            label: 'Chunk embeddings',
+            description: 'Embedding model for chunk retrieval and library search.',
+          },
+          query_answer: {
+            label: 'Answer generation',
+            description: 'Model that drafts the grounded answer from the selected evidence.',
+          },
+          vision: {
+            label: 'Vision',
+            description: 'Model used for images and the multimodal extraction path.',
+          },
+        },
+        providers: {
+          source: {
+            env: 'env key',
+            manual: 'needs key',
+          },
+          envHint: 'This provider already has an API key configured on the server via env.',
+          manualHint: 'This provider still needs an API key below before bootstrap can finish.',
+          sourceFromEnv: 'A server-side env secret is already available for this provider.',
+          sourceNeedsInput: 'An API key is required to finish bootstrap for this provider.',
+          envConfigured: 'Bootstrap will use the server-side env secret for this provider.',
+          noneSelected:
+            'The current binding selection does not require additional credential inputs.',
+        },
+        validation: {
+          catalogUnavailable:
+            'The bootstrap AI catalog is not ready yet. Check provider/model catalog availability and refresh the page.',
+          passwordTooShort: 'The administrator password must be at least 8 characters long.',
+          completeBindings: 'Choose both a provider and a model for every bootstrap purpose.',
+          completeCredentials:
+            'Enter an API key for every selected provider that is not configured through env.',
+        },
+      },
     },
     heroTitle: 'Turn documents into a knowledge graph',
     heroBody:
@@ -33,6 +90,7 @@ const en = {
     assistant: 'AI',
     swagger: 'Swagger',
     admin: 'Admin',
+    navigation: 'Navigation',
     access: {
       admin: 'Admin access',
       write: 'Write access',
@@ -68,6 +126,14 @@ const en = {
     title: 'Knowledge base chat',
     subtitle:
       'Ask questions about the active library {library} and attach new files directly inside the conversation when needed.',
+    summary: {
+      library: 'Library',
+      sessions: 'Sessions',
+      processing: 'In flight',
+      settling: 'Settling',
+      graphReady: 'Graph ready',
+      typedFacts: 'Typed facts',
+    },
     you: 'You',
     sessionFallback: 'Session · {createdAt}',
     roomMessage:
@@ -107,6 +173,10 @@ const en = {
       newSession: 'A new library-scoped chat session is open.',
       sessionRolledOver:
         'A new library-scoped chat session is open. The oldest session in this library was replaced.',
+      summaryUnavailable:
+        'Library readiness and graph coverage could not be refreshed right now. Showing the last known state.',
+      imagesPasted:
+        '{count} image(s) pasted from the clipboard. They will upload into the active library after you send the message.',
       filesUploadedWithQuestion:
         '{count} file(s) uploaded. If processing is still running, the current answer may not include them yet.',
       filesUploadedOnly:
@@ -121,6 +191,51 @@ const en = {
       grounding: 'Grounding graph and evidence',
       answering: 'Drafting the answer',
     },
+    verification: {
+      eyebrow: 'Answer verification',
+      unsupportedTitle: 'The requested capability is not grounded in this library',
+      unsupportedBody:
+        'The assistant could not verify the requested technical literal or capability from the selected evidence. Review the warnings before relying on the answer.',
+      detailsToggle: 'Show warning details',
+      codes: {
+        unsupported_literal: 'Literal not grounded',
+      },
+      messages: {
+        literalNotGrounded: 'Literal `{literal}` was not found in the selected evidence.',
+      },
+      states: {
+        not_run: {
+          title: 'Verification has not started',
+          body: 'The latest answer did not reach the verification pass yet.',
+        },
+        verified: {
+          title: 'Answer verified against canonical evidence',
+          body: 'The answer matches the selected prepared segments and technical facts for this query.',
+        },
+        partially_supported: {
+          title: 'Answer is only partially supported',
+          body: 'Some parts of the answer are grounded, but parts of the requested detail remain weaker than the selected evidence.',
+        },
+        conflicting_evidence: {
+          title: 'Selected evidence conflicts',
+          body: 'The current evidence bundle contains conflicting technical facts, so the answer should be treated as unresolved until the conflict is reviewed.',
+        },
+        insufficient_evidence: {
+          title: 'Grounded evidence is insufficient',
+          body: 'The library has related material, but the selected evidence does not support a complete answer to this question yet.',
+        },
+        failed: {
+          title: 'Answer verification failed',
+          body: 'The answer could not be verified against the canonical evidence bundle. Review the warning list before relying on it.',
+        },
+      },
+    },
+    readinessWarning: {
+      title: 'Library coverage is still settling',
+      body: 'This is an exact technical question, but {readable} readable and {graphSparse} graph-sparse document(s) have not converged to stable graph coverage yet.',
+      factHint:
+        '{count} document(s) already expose typed facts; prefer those literals over inferred wording.',
+    },
     starters: {
       summary: 'Give me a short summary of the library and its current state.',
       risks: 'Show the main risks and what currently needs attention in this library.',
@@ -133,7 +248,7 @@ const en = {
       messageDeleted: 'Message deleted',
       messagesEmpty: 'Start the first grounded conversation',
       conversationStarted: 'Conversation started',
-      typeMessage: 'Ask something about the library',
+      typeMessage: 'Ask about the library or paste an image',
       search: 'Search sessions',
       searchEmptyTitle: 'No sessions found',
       searchEmptyBody: 'Try clearing the search or start a new session.',
@@ -178,22 +293,54 @@ const en = {
         assembling: 'assembling',
       },
       metrics: {
-        chunks: 'Chunk refs',
+        segments: 'Prepared segments',
+        facts: 'Technical facts',
         entities: 'Entity refs',
         relations: 'Relation refs',
-        evidence: 'Evidence refs',
       },
       sections: {
-        chunks: 'Top chunk refs',
+        segments: 'Prepared segments',
+        facts: 'Exact technical facts',
         entities: 'Top entity refs',
         relations: 'Top relation refs',
-        evidence: 'Top evidence refs',
+      },
+      segmentKinds: {
+        heading: 'Heading',
+        paragraph: 'Paragraph',
+        list_item: 'List item',
+        table: 'Table',
+        table_row: 'Table row',
+        code_block: 'Code block',
+        endpoint_block: 'Endpoint block',
+        quote_block: 'Quote',
+        metadata_block: 'Metadata',
+      },
+      factKinds: {
+        url: 'URL',
+        endpoint_path: 'Endpoint path',
+        http_method: 'HTTP method',
+        parameter_name: 'Parameter',
+        port: 'Port',
+        status_code: 'Status code',
+        protocol: 'Protocol',
+        identifier: 'Identifier',
+      },
+      graphKinds: {
+        entity: 'Graph entity',
+        relation: 'Graph relation',
+      },
+      inclusionReasons: {
+        bundle_selected_fact: 'Selected fact support',
+        technical_fact_support: 'Fact-backed graph support',
+        graph_traversal: 'Graph traversal',
+        graph_neighborhood: 'Graph neighborhood',
+        lexical_entity: 'Lexical entity hit',
+        lexical_relation: 'Lexical relation hit',
       },
       labels: {
         chunk: 'Chunk {id}',
         entity: 'Entity {id}',
         relation: 'Relation {id}',
-        evidence: 'Evidence {id}',
       },
     },
   },
@@ -216,8 +363,8 @@ const en = {
       noUploadsHint: 'Upload the first files to start the overview.',
       documents: 'Documents',
       documentsHint: 'All files are ready for search and graph.',
-      documentsGraphCatchUpHint:
-        '{searchReady} ready for search, {graphReady} already visible in graph, {catchUp} still catching up.',
+      documentsGraphSparseHint:
+        '{readable} readable, {graphSparse} still sparse in graph, {graphReady} already confirmed in graph.',
       nextCheck: 'Next check',
       reviewValue: '{count} item(s) need review',
       reviewHint: 'Start with the active warnings.',
@@ -241,9 +388,20 @@ const en = {
     },
     narrative: {
       empty: 'Upload files to start the library overview.',
-      attention: '{failed} failed, {inFlight} in flight, {graphReady} in graph, graph {graph}.',
-      active: '{total} documents, {inFlight} still processing, {graphReady} in graph, graph {graph}.',
-      settled: '{total} documents, {searchReady} search-ready, {graphReady} in graph, graph {graph}.',
+      attention:
+        '{failed} failed, {inFlight} in flight, {readable} readable, {graphSparse} graph-sparse, {graphReady} in graph, graph {graph}.',
+      active:
+        '{total} documents, {inFlight} still processing, {readable} readable, {graphSparse} graph-sparse, {graphReady} in graph, graph {graph}.',
+      settled:
+        '{total} documents, {readable} readable, {graphSparse} graph-sparse, {graphReady} in graph, graph {graph}.',
+    },
+    narrativeCalm: {
+      single: 'There is one document in the library. Open documents or jump to the graph.',
+      totalOnly: '{count} document(s) are in the library.',
+      withLatest: '{count} document(s) are in the library. Latest upload: {latest}.',
+      processing: '{count} document(s) are in the library, {active} still processing.',
+      processingWithLatest:
+        '{count} document(s) are in the library, {active} still processing. Latest upload: {latest}.',
     },
     graphStatus: {
       ready: 'ready',
@@ -272,10 +430,10 @@ const en = {
       warningsTitle: 'Warnings',
       warningsMessage: '{count} warning(s) — some documents processed with limitations.',
       warningsAction: 'Details',
-      graphCatchUpTitle: 'Graph is still catching up',
-      graphCatchUpMessage:
-        '{count} document(s) are already searchable but are not yet confirmed in the graph surface.',
-      graphCatchUpAction: 'Open documents',
+      graphSparseTitle: 'Graph coverage is still sparse',
+      graphSparseMessage:
+        '{readable} readable and {graphSparse} graph-sparse document(s) still need stronger graph coverage.',
+      graphSparseAction: 'Open documents',
       graphTitle: 'Knowledge graph',
       graphMessage: 'Graph is {status} — data will update shortly.',
       graphAction: 'Open graph',
@@ -292,17 +450,17 @@ const en = {
     chart: {
       eyebrow: 'Library status',
       title: 'Status mix',
-      subtitle: 'In graph vs search-only vs in flight vs failed.',
+      subtitle: 'Graph-ready vs readable vs graph-sparse vs in flight vs failed.',
       total: 'Total documents',
       empty: 'No status data yet.',
       graphReady: 'In graph',
-      graphCatchUp: 'Search only',
+      graphSparse: 'Readable or graph-sparse',
       processing: 'In flight',
       failed: 'Failed',
       summaryAllReady: 'All {count} documents are ready.',
       summarySingleStatus: '{count} document(s) are {status}.',
       summaryMixed:
-        '{graphReady} in graph, {graphCatchUp} search-only, {processing} in flight, {failed} failed.',
+        '{graphReady} in graph, {graphSparse} readable or graph-sparse, {processing} in flight, {failed} failed.',
     },
   },
   dialogs: {
@@ -342,6 +500,7 @@ const en = {
       contextEmpty: 'No documents yet.',
       loadingDescription: 'Loading the document list.',
       visibleDocuments: '{count} visible documents',
+      tableSummary: '{count} row(s) in view',
       filteredDocuments: 'Showing {visible} of {total}',
       filtersApplied: '{count} active filters',
       liveWorkActive: 'Uploads and processing continue in the background.',
@@ -355,7 +514,8 @@ const en = {
         avgCost: 'Avg cost',
         documents: 'Documents',
         inFlight: 'In flight',
-        readyNoGraph: 'Graph catch-up',
+        readable: 'Readable',
+        graphSparse: 'Graph sparse',
       },
       table: {
         name: 'Name',
@@ -369,17 +529,25 @@ const en = {
         title: 'In progress: {count}',
         queued: 'Queued: {count}',
         processing: 'Processing: {count}',
-        graphCatchUpTitle: 'Graph catch-up: {count}',
-        graphCatchUp: 'Search-ready without graph: {count}',
+        readinessTitle: 'Coverage still settling: {readable} readable, {graphSparse} graph-sparse',
+        readable: 'Readable text only: {count}',
+        graphSparse: 'Graph sparse: {count}',
+        webRunTitle: 'Web runs active: {count}',
+        webRuns: '{count} web run(s) · {pages} page(s) still queued or processing',
       },
       rowState: {
         queuedEyebrow: 'Queued',
         processingEyebrow: 'Processing now',
-        graphCatchUpEyebrow: 'Search already ready',
+        readableEyebrow: 'Readable text ready',
+        graphSparseEyebrow: 'Graph still sparse',
         queuedDetail: 'Waiting for capacity and will continue automatically.',
         processingDetail: 'Canonical ingestion is running and updates automatically.',
-        readyNoGraphDetail: 'Text is ready; graph coverage is still catching up.',
+        readableDetail:
+          'Readable text is ready, but graph extraction is still building durable links.',
+        graphSparseDetail:
+          'Readable text and some graph facts exist, but graph coverage is still sparse.',
         failedDetail: 'Processing stopped. Open the document to review details.',
+        failedGenericDetail: 'Open the document to see the exact cause and the next operator step.',
         progressLabel: '{percent}% complete',
         lastActivity: 'Updated {time}',
       },
@@ -389,6 +557,12 @@ const en = {
         'Select a document on the left to read the extracted text, review status, and act in place.',
       noMatchTitle: 'No documents match',
       noMatchDescription: 'Clear search or status filters to see more files.',
+      bindingNotice: {
+        title: 'This library is missing an extract_graph binding',
+        message:
+          'Documents can settle at readable text but stop once graph extraction starts. Open Admin and assign an active AI binding for extract_graph.',
+        action: 'Open Admin',
+      },
       activeBacklog: '{count} document(s) are still active.',
       liveSpend: 'Visible in-flight spend: {cost}.',
       primary: {
@@ -545,14 +719,14 @@ const en = {
       queued: 'Queued',
       processing: 'Processing',
       ready: 'Ready',
-      ready_no_graph: 'Search ready',
+      ready_no_graph: 'Readable text ready',
       failed: 'Failed',
     },
     statuses: {
       queued: 'Queued',
       processing: 'Processing',
       ready: 'Ready',
-      ready_no_graph: 'Search ready',
+      ready_no_graph: 'Readable text ready',
       failed: 'Failed',
     },
     accounting: {
@@ -642,6 +816,8 @@ const en = {
     },
     actions: {
       upload: 'Upload files',
+      addLink: 'Add link',
+      addLinkWithCount: 'Add link · {count} active',
       clearFilters: 'Clear filters',
       details: 'View details',
       append: 'Append text',
@@ -671,7 +847,7 @@ const en = {
       reconciling:
         'Document ingestion is mostly done, but {count} graph follow-up task(s) still need to converge before the library is current.',
       readyNoGraph:
-        '{count} processed document(s) still have no admitted graph evidence, so the library is not fully converged yet.',
+        '{count} processed document(s) are readable, but graph coverage is still too sparse to treat the library as fully converged.',
       ready:
         'The active library has no visible backlog. Document and graph surfaces are in their steady state.',
     },
@@ -699,16 +875,270 @@ const en = {
         warning:
           'This permanently removes the document and its current extracted state from the active library. This action cannot be undone.',
       },
+      addLink: {
+        title: 'Add website link',
+        description:
+          'Submit a URL into the active library. By default only the exact page is captured and processed.',
+        urlLabel: 'URL',
+        urlPlaceholder: 'https://example.com/article',
+        modeLabel: 'Capture mode',
+        singlePageTitle: 'Single page only',
+        singlePageDescription:
+          'The canonical default is one URL in, one page processed, one document revision produced.',
+        recursiveDisabledTitle: 'Recursive crawl is not available yet',
+        recursiveDisabledDescription:
+          'The recursive crawl path is not enabled in this UI yet. Submit the exact page URL for now.',
+        boundaryPolicyLabel: 'Link boundary',
+        boundaryPolicies: {
+          same_host: 'Only this host',
+          allow_external: 'Allow external links',
+        },
+        maxDepthLabel: 'Max depth',
+        maxPagesLabel: 'Max pages',
+        modes: {
+          single_page: 'Single page',
+          recursive_crawl: 'Recursive crawl',
+        },
+        modeDescriptions: {
+          single_page: 'Keep scope fixed to the submitted URL and process only that page.',
+          recursive_crawl:
+            'Broaden scope intentionally: discover links, freeze scope, then queue every eligible page as its own document result.',
+        },
+        immutableSettingsTitle: 'Immutable run settings preview',
+        immutableSettingsDescription:
+          'These settings are frozen once the run is accepted, so broader traversal must be selected explicitly before submit.',
+        notUsed: 'Not used in single-page mode',
+        validationRequired: 'Enter a URL before submitting.',
+        validationInvalid: 'Enter a valid http:// or https:// URL.',
+        validationLibrary: 'Select an active library before submitting a link.',
+      },
+    },
+    webRuns: {
+      inspector: {
+        eyebrow: 'Web run',
+        title: 'Web ingest run',
+        subtitle:
+          'Discovery closes scope first, then queued pages materialize from frozen snapshots.',
+        loading: 'Loading web run details.',
+      },
+      actions: {
+        cancel: 'Cancel run',
+      },
+      fields: {
+        mode: 'Mode',
+        boundary: 'Boundary',
+        maxDepth: 'Max depth',
+        maxPages: 'Page budget',
+        requestedAt: 'Requested at',
+        cancelRequestedAt: 'Cancel requested at',
+        completedAt: 'Completed at',
+        failureCode: 'Failure code',
+      },
+      activity: {
+        titleActive: '{count} active web run(s)',
+        titleRecent: 'Recent web runs',
+        subtitle: 'Open one run for candidate truth, result links, and partial completion details.',
+        pagesCoverage: 'Scope coverage: {processed} of {discovered} page(s)',
+        pagesInFlight: '{count} page(s) still queued or processing',
+        pagesProcessed: '{count} processed page(s)',
+        canceling: 'Canceling…',
+        cancelRequestedAt:
+          'Cancellation accepted at {value}. In-flight work is settling to final truth.',
+      },
+      modes: {
+        single_page: 'Single page',
+        recursive_crawl: 'Recursive crawl',
+      },
+      boundaries: {
+        same_host: 'Same host only',
+        allow_external: 'Allow external links',
+      },
+      states: {
+        accepted: 'Accepted',
+        discovering: 'Discovering',
+        processing: 'Processing',
+        completed: 'Completed',
+        completed_partial: 'Completed partially',
+        failed: 'Failed',
+        canceled: 'Canceled',
+      },
+      counts: {
+        discovered: 'Discovered',
+        eligible: 'Eligible',
+        processed: 'Processed',
+        queued: 'Queued',
+        processing: 'Processing',
+        duplicates: 'Duplicates',
+        excluded: 'Excluded',
+        blocked: 'Blocked',
+        failed: 'Failed',
+        canceled: 'Canceled',
+      },
+      candidateStates: {
+        discovered: 'Discovered',
+        eligible: 'Eligible',
+        duplicate: 'Duplicate',
+        excluded: 'Excluded',
+        blocked: 'Blocked',
+        queued: 'Queued',
+        processing: 'Processing',
+        processed: 'Processed',
+        failed: 'Failed',
+        canceled: 'Canceled',
+      },
+      hosts: {
+        same_host: 'Same host',
+        external: 'External',
+      },
+      reasons: {
+        seed_accepted: 'Seed accepted',
+        duplicate_canonical_url: 'Duplicate canonical URL',
+        outside_boundary_policy: 'Outside boundary policy',
+        exceeded_max_depth: 'Exceeded max depth',
+        exceeded_max_pages: 'Exceeded page budget',
+        unsupported_scheme: 'Unsupported scheme',
+        invalid_url: 'Invalid URL',
+        inaccessible: 'Inaccessible',
+        unsupported_content: 'Unsupported content',
+        cancel_requested: 'Canceled by operator',
+      },
+      failureCodes: {
+        inaccessible: 'Remote page was inaccessible',
+        invalid_url: 'Resolved URL was invalid',
+        unsupported_content: 'Fetched payload is unsupported',
+        web_discovery_failed: 'Recursive discovery worker failed before scope was fully closed',
+        web_snapshot_persist_failed: 'Snapshot persistence failed',
+        web_snapshot_missing: 'Stored snapshot reference is missing',
+        web_snapshot_missing_final_url: 'Stored snapshot is missing final URL identity',
+        web_snapshot_unavailable: 'Stored snapshot could not be loaded',
+        web_capture_materialization_failed: 'Canonical web capture materialization failed',
+        recursive_crawl_failed: 'Recursive crawl finished with no successful materialization',
+      },
+      pages: {
+        title: 'Discovered pages',
+        empty: 'No discovered pages are visible for this run yet.',
+        openDocument: 'Open document',
+        columns: {
+          page: 'Page',
+          state: 'State',
+          depth: 'Depth',
+          host: 'Host',
+          referrer: 'Referrer',
+          reason: 'Reason',
+          result: 'Result',
+        },
+      },
     },
     details: {
       title: 'Document details',
       close: 'Close',
       empty: 'Select a document to inspect it here.',
+      failureTitle: 'What stopped this document',
+      failureSupersededTitle: 'Previous run stopped',
+      failureCanonicalMutationApplied:
+        'This older run was stopped because the document was already reprocessed by the canonical worker.',
+      failureGeneric:
+        'Canonical ingestion stopped with an error. Open the attempt details below for the exact stage.',
+      failureNeedsGraphBinding:
+        'This library does not have an active extract_graph model binding, so the document stopped when graph extraction started.',
+      failureNeedsGraphBindingAction:
+        'Open Admin, assign an active extract_graph binding for this library, then retry the document.',
       keyInfo: 'Key info',
       latestChange: 'Latest change',
+      webSourceUri: 'Source URL',
+      webSourceKind: 'Source kind',
+      webCanonicalUrl: 'Canonical URL',
+      webRunId: 'Web run id',
+      webCandidateId: 'Candidate id',
+      webCandidateState: 'Candidate state',
+      webCandidateReason: 'Candidate reason',
+      webRunActions: 'Originating run',
+      openWebRun: 'Open web run',
       notReadableYet: 'No readable text is available yet.',
       showMore: 'Show more',
       showLess: 'Show less',
+      showMoreCount: 'Show {count} more of {total}',
+      notAvailable: 'Not available',
+      noStage: 'No active stage recorded yet',
+      noPreparationSummary:
+        'No prepared structure is available yet for the current readable revision.',
+      noPreparedSegments: 'Prepared segments are not available for this revision yet.',
+      noTechnicalFacts: 'Typed technical facts have not been extracted for this revision yet.',
+      preparationStatus: 'Preparation status',
+      preparationState: 'Preparation state',
+      preparedSegments: 'Prepared segments',
+      preparedSegmentsCount: 'Segments',
+      technicalFacts: 'Technical facts',
+      technicalFactsCount: 'Facts',
+      typedFactCoverage: 'Typed fact coverage',
+      typedFactCoverageValue: '{percent}%',
+      lastProcessingStage: 'Last stage',
+      sourceFormat: 'Source format',
+      normalizationProfile: 'Normalization profile',
+      updatedAt: 'Updated',
+      pageChip: 'Page {page}',
+      offsetsChip: 'Offsets {start}–{end}',
+      supportChunksChip: 'Chunks {count}',
+      codeLanguageChip: 'Code {language}',
+      tableCellChip: 'Table {row}:{column}',
+      supportSegments: 'Supporting segments',
+      conflictMarker: 'Conflict',
+      confidenceValue: 'Confidence {percent}%',
+      occurrenceCount: '{count} hit(s)',
+      readinessKinds: {
+        processing: 'Still preparing',
+        readable: 'Readable text available',
+        graph_sparse: 'Graph sparse',
+        graph_ready: 'Graph ready',
+        failed: 'Preparation failed',
+      },
+      graphCoverageKinds: {
+        processing: 'Graph still building',
+        graph_sparse: 'No durable graph links',
+        graph_ready: 'Graph links confirmed',
+        failed: 'Graph preparation failed',
+      },
+      preparationStates: {
+        pending: 'Pending',
+        building: 'Building',
+        prepared: 'Prepared',
+        failed: 'Failed',
+        started: 'Started',
+        completed: 'Completed',
+      },
+      segmentKinds: {
+        heading: 'Heading',
+        paragraph: 'Paragraph',
+        list_item: 'List item',
+        table: 'Table',
+        table_row: 'Table row',
+        code_block: 'Code block',
+        endpoint_block: 'Endpoint',
+        quote_block: 'Quote',
+        metadata_block: 'Metadata',
+      },
+      factKinds: {
+        url: 'URL',
+        endpoint_path: 'Endpoint path',
+        http_method: 'HTTP method',
+        port: 'Port',
+        parameter_name: 'Parameter',
+        status_code: 'Status code',
+        protocol: 'Protocol',
+        auth_rule: 'Auth rule',
+        identifier: 'Identifier',
+      },
+      extractionKinds: {
+        parser_first: 'Parser-first',
+      },
+      sourceFormats: {
+        pdf: 'PDF',
+        text_like: 'Text document',
+        html_main_content: 'HTML main content',
+        docx: 'DOCX',
+        pptx: 'PPTX',
+        image: 'Image',
+      },
       labels: {
         uploaded: 'Uploaded',
         status: 'Status',
@@ -798,7 +1228,7 @@ const en = {
       summary: {
         ready: 'Document processed into {count} chunks and is graph-ready.',
         readyNoGraph:
-          'Document processed into {count} chunks, but no graph evidence was linked yet.',
+          'Document processed into {count} chunks and readable text is ready, but graph coverage is still sparse.',
         failed: 'Processing failed and may need another attempt.',
         processing: 'Document is being processed right now.',
         queued: 'Document is waiting in the processing queue.',
@@ -1129,6 +1559,8 @@ const en = {
     emptyDescription: 'Upload documents to generate the first nodes and links.',
     emptyBuildingDescription:
       'Documents are already uploaded, but the pipeline is still processing them before the first graph nodes and links appear.',
+    emptyGraphSparseDescription:
+      'Readable documents already exist, but graph coverage is still too sparse to admit stable nodes and relations on the canvas.',
     emptyCatchUpDescription:
       'Documents are already searchable, but the graph is still catching up and has not exposed nodes yet.',
     emptyTrackedDocumentsDetail: 'Documents currently in the library: {count}.',
@@ -1136,16 +1568,22 @@ const en = {
     sparseDescription: 'Add more documents or wait for extraction to finish.',
     sparseBuildingDescription:
       'Document nodes are already admitted, but entity and relation extraction is still running.',
+    sparseGraphSparseDescription:
+      'Readable text and some graph facts already exist, but graph coverage is still sparse and should not be treated as complete.',
     sparseCatchUpDescription:
       'Some documents are already searchable, but the graph is still catching up before all links appear.',
     sparseSettledDescription:
       'Documents are already in the graph, but no stable entities or relations have been extracted yet.',
     sparseDocumentsDetail: 'Documents currently on the graph: {count}.',
-    sparseQueueDetail: '{queued} queued, {processing} processing.',
+    sparseQueueDetail: '{processing} document(s) still processing.',
+    sparseReadinessDetail:
+      '{readable} readable and {graphSparse} graph-sparse document(s) still need stronger graph coverage.',
     sparseCatchUpDetail: 'Graph is still catching up for {count} search-ready document(s).',
     sparseGenerationDetail: 'Current graph extraction state: {state}.',
     failedTitle: 'Graph update failed',
     failedDescription: 'The latest graph update did not complete successfully.',
+    failedProjectionDescription:
+      'Graph coverage is already computed for this library, but the canvas projection could not be loaded right now. Try reloading the graph.',
     search: 'Search the graph…',
     searchNodes: 'Search nodes',
     searchClear: 'Clear search',
@@ -1177,9 +1615,19 @@ const en = {
     inspector: {
       whyItMatters: 'Why it matters',
       graphState: 'Graph state',
-      evidencePreview: 'Evidence preview',
+      preparedEvidence: 'Prepared evidence',
       jumpTo: 'Jump to related nodes',
       metadata: 'Metadata',
+    },
+    coverageCard: {
+      eyebrow: 'Graph coverage',
+      processing: '{count} processing',
+      readable: '{count} readable',
+      graphSparse: '{count} graph-sparse',
+      graphReady: '{count} graph-ready',
+      failed: '{count} failed',
+      typedFacts: '{count} document(s) expose typed facts',
+      confirmed: '{count} document(s) already have confirmed graph coverage',
     },
     hud: {
       state: 'State',
@@ -1205,13 +1653,13 @@ const en = {
     relatedDocuments: 'Related documents',
     relatedDocumentsCount: '{count} related documents',
     connectedNodes: 'Connected nodes',
-    relatedEdges: 'Related edges',
-    evidence: 'Evidence',
-    evidenceCount: '{count} supporting evidence fragment(s)',
+    graphRelations: 'Graph relations',
+    preparedEvidence: 'Prepared evidence',
+    evidenceCount: '{count} prepared evidence fragment(s)',
     rebuildBacklog: '{count} document(s) are still queued or rebuilding graph coverage.',
-    readyNoGraph: '{count} processed document(s) still have no graph evidence.',
+    readyNoGraph: '{count} processed document(s) are still graph-sparse.',
     toolbarBacklog: '{count} in backlog',
-    toolbarReadyNoGraph: '{count} without graph',
+    toolbarReadyNoGraph: '{count} graph-sparse',
     toolbarFilteredArtifacts: '{count} filtered',
     artifacts: 'Artifacts',
     artifactsHidden: 'Hidden',
@@ -1260,6 +1708,7 @@ const en = {
     focusLabel: '{label}',
     clearFocus: 'Clear',
     relationCount: '{count} relations',
+    graphRelationCount: '{count} graph relations',
     inspectorError: 'Load error',
     inspectorErrorHint: 'Could not load node details',
     selectNodeHint: 'Select a node to inspect its links and documents.',
@@ -1468,6 +1917,7 @@ const en = {
       },
       billingUnits: {
         per_1m_input_tokens: 'Per 1M input tokens',
+        per_1m_cached_input_tokens: 'Per 1M cached input tokens',
         per_1m_output_tokens: 'Per 1M output tokens',
       },
     },
@@ -1569,7 +2019,7 @@ const en = {
           'Do not narrate the retrieval process, document reads, or chunk references unless the user explicitly asks for sources or evidence.',
           'In the final answer, do not say “I found in the documents”, “I read documents”, or “the library contains a document” unless the user explicitly asks for sources; just present the conclusion and the facts.',
           'Start with the answer itself instead of preambles like “in the library”, “in the documents”, or “in the available materials”.',
-          'Prefer wording like “The loyalty program works as ...” instead of “The materials describe ...” or “The library contains ...”.',
+          'Prefer domain-language wording like “The API uses ...”, “The system stores ...”, or “The article names ...” instead of “The materials describe ...” or “The library contains ...”.',
           'Do not ask the user to resend or upload a document until you have exhausted search_documents and read_document against the currently available library.',
           'If the library is still insufficient, give the best partial answer you can and describe the missing facts or subject matter rather than saying which document is missing.',
           'When you need to create memory or update existing memory, use upload_documents or update_document and then poll get_mutation_status until the mutation reaches a terminal state.',
@@ -1875,6 +2325,8 @@ const en = {
       openSection: 'Open section',
       updateBinding: 'Update task',
       createBinding: 'Set task',
+      presetRequiredForTaskHint:
+        'Select a credential, then create a model profile (left: Model profiles) for a catalog model that supports this task.',
       unconfiguredTask: 'This task is not configured yet.',
       unsetState: 'Not set',
       edit: 'Edit',
@@ -1955,6 +2407,9 @@ const en = {
         current: 'Workspace prices',
         providers: 'Providers',
       },
+      providers: {
+        all: 'All providers',
+      },
       priceSources: {
         default: 'Catalog default',
         set: 'Current price',
@@ -1970,6 +2425,7 @@ const en = {
       },
       billingUnits: {
         per_1m_input_tokens: 'Per 1M input tokens',
+        per_1m_cached_input_tokens: 'Per 1M cached input tokens',
         per_1m_output_tokens: 'Per 1M output tokens',
       },
     },

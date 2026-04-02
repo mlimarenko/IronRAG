@@ -8,7 +8,9 @@ use png::{
 
 use crate::{
     integrations::llm::{LlmGateway, VisionRequest},
-    shared::extraction::ExtractionOutput,
+    shared::extraction::{
+        ExtractionOutput, ExtractionSourceMetadata, build_text_layout_from_content,
+    },
 };
 
 pub async fn extract_image_with_provider(
@@ -31,7 +33,7 @@ pub async fn extract_image_with_provider(
         .vision_extract(VisionRequest {
             provider_kind: provider_kind.to_string(),
             model_name: model_name.to_string(),
-            prompt: "Return only the text visible in this image as plain text. Do not add headings, explanations, summaries, entity lists, markdown, or quotes. If no readable text is visible, return an empty string."
+            prompt: "Return only the text visible in this image as plain UTF-8 text, one logical flow with newlines where line breaks are visible. Do not add headings, explanations, summaries, entity lists, markdown fences, or wrapping quotes. If no readable text is visible, return an empty string."
                 .to_string(),
             image_bytes: request_image_bytes,
             mime_type: request_mime_type.clone(),
@@ -45,11 +47,19 @@ pub async fn extract_image_with_provider(
         })
         .await?;
 
+    let layout = build_text_layout_from_content(&response.output_text);
+
     Ok(ExtractionOutput {
         extraction_kind: "vision_image".into(),
-        content_text: response.output_text,
+        content_text: layout.content_text,
         page_count: Some(1),
         warnings,
+        source_metadata: ExtractionSourceMetadata {
+            source_format: "image".to_string(),
+            page_count: Some(1),
+            line_count: i32::try_from(layout.structure_hints.lines.len()).unwrap_or(i32::MAX),
+        },
+        structure_hints: layout.structure_hints,
         source_map: serde_json::json!({
             "mime_type": request_mime_type,
         }),
@@ -87,8 +97,9 @@ fn prepare_vision_image_payload(
         ));
     }
 
-    // Normalize to opaque RGB so providers receive a consistent payload shape.
-    let image = DynamicImage::ImageRgb8(image.to_rgb8());
+    // Normalize to opaque RGB on a white matte so transparent assets do not become
+    // black canvases when alpha is discarded before provider extraction.
+    let image = DynamicImage::ImageRgb8(flatten_to_white_rgb8(&image));
     let mut cursor = Cursor::new(Vec::new());
     image
         .write_to(&mut cursor, ImageFormat::Png)
@@ -113,6 +124,24 @@ fn load_normalizable_image(file_bytes: &[u8], mime_type: &str) -> Result<Dynamic
     }
 
     image::load_from_memory(file_bytes).context("failed to decode image bytes with generic decoder")
+}
+
+fn flatten_to_white_rgb8(image: &DynamicImage) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+    let rgba = image.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let mut rgb = ImageBuffer::<Rgb<u8>, Vec<u8>>::new(width, height);
+
+    for (x, y, pixel) in rgba.enumerate_pixels() {
+        let alpha = f32::from(pixel[3]) / 255.0;
+        let composite = |channel: u8| -> u8 {
+            let source = f32::from(channel);
+            let white = 255.0;
+            ((source * alpha) + (white * (1.0 - alpha))).round() as u8
+        };
+        rgb.put_pixel(x, y, Rgb([composite(pixel[0]), composite(pixel[1]), composite(pixel[2])]));
+    }
+
+    rgb
 }
 
 fn decode_png_ignoring_checksums(file_bytes: &[u8]) -> Result<DynamicImage> {
@@ -187,6 +216,13 @@ mod tests {
             .expect("decode tiny png fixture")
     }
 
+    fn transparent_black_png_bytes() -> Vec<u8> {
+        let image = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(2, 2, Rgba([0, 0, 0, 0])));
+        let mut cursor = Cursor::new(Vec::new());
+        image.write_to(&mut cursor, ImageFormat::Png).expect("encode transparent png fixture");
+        cursor.into_inner()
+    }
+
     #[async_trait]
     impl LlmGateway for FakeGateway {
         async fn generate(&self, _request: ChatRequest) -> Result<ChatResponse> {
@@ -219,7 +255,7 @@ mod tests {
         let output = extract_image_with_provider(
             &FakeGateway,
             "openai",
-            "gpt-5-mini",
+            "gpt-5.4-mini",
             "test-key",
             None,
             "image/png",
@@ -231,7 +267,7 @@ mod tests {
         assert_eq!(output.extraction_kind, "vision_image");
         assert_eq!(output.page_count, Some(1));
         assert_eq!(output.provider_kind.as_deref(), Some("openai"));
-        assert_eq!(output.model_name.as_deref(), Some("gpt-5-mini"));
+        assert_eq!(output.model_name.as_deref(), Some("gpt-5.4-mini"));
         assert!(output.content_text.contains("diagram text"));
     }
 
@@ -240,7 +276,7 @@ mod tests {
         let output = extract_image_with_provider(
             &FakeGateway,
             "openai",
-            "gpt-5-mini",
+            "gpt-5.4-mini",
             "test-key",
             None,
             "image/webp",
@@ -272,5 +308,19 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("upscaled image from 1x1 to 64x64"))
         );
+    }
+
+    #[test]
+    fn transparent_images_are_matted_to_white_before_alpha_drop() {
+        let payload = prepare_vision_image_payload(&transparent_black_png_bytes(), "image/png")
+            .expect("normalize transparent png");
+
+        let decoded = image::load_from_memory(&payload.image_bytes)
+            .expect("decode transparent normalized payload")
+            .to_rgb8();
+
+        for pixel in decoded.pixels() {
+            assert_eq!(pixel.0, [255, 255, 255]);
+        }
     }
 }

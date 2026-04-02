@@ -44,21 +44,11 @@ async function handleAction(item: DashboardAttentionItem) {
       </div>
     </header>
 
-    <ul
-      v-if="props.items.length"
-      class="rr-dashboard-attention__list"
-    >
-      <li
-        v-for="item in props.items"
-        :key="item.id"
-        class="rr-dashboard-attention__item"
-      >
+    <ul v-if="props.items.length" class="rr-dashboard-attention__list">
+      <li v-for="item in props.items" :key="item.id" class="rr-dashboard-attention__item">
         <div class="rr-dashboard-attention__copy">
           <div class="rr-dashboard-attention__meta">
-            <StatusBadge
-              :kind="badgeKind(item.severity)"
-              :label="severityLabel(item.severity)"
-            />
+            <StatusBadge :kind="badgeKind(item.severity)" :label="severityLabel(item.severity)" />
             <strong>{{ item.title }}</strong>
           </div>
           <p>{{ item.message }}</p>
@@ -73,10 +63,7 @@ async function handleAction(item: DashboardAttentionItem) {
         </button>
       </li>
     </ul>
-    <p
-      v-else
-      class="rr-dashboard-card__empty"
-    >
+    <p v-else class="rr-dashboard-card__empty">
       {{ t('dashboard.attention.empty') }}
     </p>
   </SurfacePanel>

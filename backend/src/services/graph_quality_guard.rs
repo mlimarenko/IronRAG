@@ -2,20 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     domains::runtime_graph::RuntimeGraphArtifactFilterReason,
-    infra::arangodb::graph_store::GraphViewData,
+    infra::arangodb::graph_store::GraphViewData, services::graph_identity,
 };
 
-const LOW_VALUE_RELATION_TYPES: &[&str] = &[
-    "relation",
-    "relationship",
-    "related",
-    "related_to",
-    "linked",
-    "linked_to",
-    "connection",
-    "connected",
-    "connected_to",
-];
 const EXPLICIT_SELF_LOOP_RELATION_TYPES: &[&str] =
     &["alias_of", "aliases", "equivalent_to", "same_as", "self_reference", "self_refers_to"];
 
@@ -39,16 +28,7 @@ impl GraphQualityGuardService {
 
     #[must_use]
     pub fn normalized_relation_type(&self, relation_type: &str) -> String {
-        relation_type
-            .trim()
-            .to_ascii_lowercase()
-            .chars()
-            .map(|char| if char.is_ascii_alphanumeric() { char } else { '_' })
-            .collect::<String>()
-            .split('_')
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join("_")
+        graph_identity::normalize_relation_type(relation_type)
     }
 
     #[must_use]
@@ -92,17 +72,33 @@ impl GraphQualityGuardService {
         to_node_key: &str,
         relation_type: &str,
     ) -> Option<RuntimeGraphArtifactFilterReason> {
-        let normalized_relation_type = self.normalized_relation_type(relation_type);
-        if self.filter_empty_relations && normalized_relation_type.is_empty() {
+        let trimmed = relation_type.trim();
+        if self.filter_empty_relations && trimmed.is_empty() {
             return Some(RuntimeGraphArtifactFilterReason::EmptyRelation);
         }
-        if self.is_low_value_relation_type(&normalized_relation_type) {
+        let raw_slug = graph_identity::normalize_graph_identity_component(trimmed);
+        let normalized_relation_type = graph_identity::normalize_relation_type(relation_type);
+
+        if self.filter_degenerate_self_loops
+            && !from_node_key.trim().is_empty()
+            && from_node_key == to_node_key
+            && self.is_explicit_self_loop_slug_or_normalized(
+                raw_slug.as_str(),
+                normalized_relation_type.as_str(),
+            )
+        {
+            return None;
+        }
+
+        if graph_identity::is_noise_relation_type(&raw_slug) {
             return Some(RuntimeGraphArtifactFilterReason::LowValueArtifact);
+        }
+        if self.filter_empty_relations && normalized_relation_type.is_empty() {
+            return Some(RuntimeGraphArtifactFilterReason::EmptyRelation);
         }
         if self.filter_degenerate_self_loops
             && !from_node_key.trim().is_empty()
             && from_node_key == to_node_key
-            && !self.is_explicit_self_loop_relation(&normalized_relation_type)
         {
             return Some(RuntimeGraphArtifactFilterReason::DegenerateSelfLoop);
         }
@@ -120,15 +116,10 @@ impl GraphQualityGuardService {
     }
 
     #[must_use]
-    fn is_low_value_relation_type(&self, normalized_relation_type: &str) -> bool {
-        LOW_VALUE_RELATION_TYPES.contains(&normalized_relation_type)
-    }
-
-    #[must_use]
-    fn is_explicit_self_loop_relation(&self, normalized_relation_type: &str) -> bool {
-        EXPLICIT_SELF_LOOP_RELATION_TYPES.contains(&normalized_relation_type)
-            || normalized_relation_type.starts_with("self_")
-            || normalized_relation_type.ends_with("_self")
+    fn is_explicit_self_loop_slug_or_normalized(&self, raw_slug: &str, normalized: &str) -> bool {
+        EXPLICIT_SELF_LOOP_RELATION_TYPES.iter().any(|&known| known == raw_slug)
+            || (!normalized.is_empty()
+                && (normalized.starts_with("self_") || normalized.ends_with("_self")))
     }
 }
 

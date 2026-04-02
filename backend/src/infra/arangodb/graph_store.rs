@@ -9,15 +9,17 @@ use uuid::Uuid;
 use crate::infra::arangodb::{
     client::ArangoClient,
     collections::{
-        KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE,
-        KNOWLEDGE_DOCUMENT_COLLECTION, KNOWLEDGE_DOCUMENT_REVISION_EDGE,
-        KNOWLEDGE_ENTITY_CANDIDATE_COLLECTION, KNOWLEDGE_ENTITY_COLLECTION,
-        KNOWLEDGE_EVIDENCE_COLLECTION, KNOWLEDGE_EVIDENCE_SOURCE_EDGE,
+        KNOWLEDGE_BUNDLE_ENTITY_EDGE, KNOWLEDGE_BUNDLE_EVIDENCE_EDGE,
+        KNOWLEDGE_BUNDLE_RELATION_EDGE, KNOWLEDGE_CHUNK_COLLECTION,
+        KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE, KNOWLEDGE_DOCUMENT_COLLECTION,
+        KNOWLEDGE_DOCUMENT_REVISION_EDGE, KNOWLEDGE_ENTITY_CANDIDATE_COLLECTION,
+        KNOWLEDGE_ENTITY_COLLECTION, KNOWLEDGE_EVIDENCE_COLLECTION, KNOWLEDGE_EVIDENCE_SOURCE_EDGE,
         KNOWLEDGE_EVIDENCE_SUPPORTS_ENTITY_EDGE, KNOWLEDGE_EVIDENCE_SUPPORTS_RELATION_EDGE,
-        KNOWLEDGE_GRAPH_NAME, KNOWLEDGE_RELATION_CANDIDATE_COLLECTION,
-        KNOWLEDGE_RELATION_COLLECTION, KNOWLEDGE_RELATION_OBJECT_EDGE,
-        KNOWLEDGE_RELATION_SUBJECT_EDGE, KNOWLEDGE_REVISION_CHUNK_EDGE,
-        KNOWLEDGE_REVISION_COLLECTION,
+        KNOWLEDGE_FACT_EVIDENCE_EDGE, KNOWLEDGE_GRAPH_NAME,
+        KNOWLEDGE_RELATION_CANDIDATE_COLLECTION, KNOWLEDGE_RELATION_COLLECTION,
+        KNOWLEDGE_RELATION_OBJECT_EDGE, KNOWLEDGE_RELATION_SUBJECT_EDGE,
+        KNOWLEDGE_REVISION_CHUNK_EDGE, KNOWLEDGE_REVISION_COLLECTION,
+        KNOWLEDGE_TECHNICAL_FACT_COLLECTION,
     },
     document_store::{KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeRevisionRow},
 };
@@ -139,8 +141,12 @@ pub struct KnowledgeRelationCandidateRow {
     pub library_id: Uuid,
     pub revision_id: Uuid,
     pub chunk_id: Option<Uuid>,
+    #[serde(default)]
+    pub subject_label: String,
     pub subject_candidate_key: String,
     pub predicate: String,
+    #[serde(default)]
+    pub object_label: String,
     pub object_candidate_key: String,
     pub normalized_assertion: String,
     pub confidence: Option<f64>,
@@ -208,11 +214,20 @@ pub struct KnowledgeEvidenceRow {
     pub library_id: Uuid,
     pub document_id: Uuid,
     pub revision_id: Uuid,
+    #[serde(default)]
     pub chunk_id: Option<Uuid>,
+    #[serde(default)]
+    pub block_id: Option<Uuid>,
+    #[serde(default)]
+    pub fact_id: Option<Uuid>,
     pub span_start: Option<i32>,
     pub span_end: Option<i32>,
-    pub excerpt: String,
-    pub support_kind: String,
+    #[serde(default)]
+    pub quote_text: String,
+    #[serde(default)]
+    pub literal_spans_json: serde_json::Value,
+    #[serde(default)]
+    pub evidence_kind: String,
     pub extraction_method: String,
     pub confidence: Option<f64>,
     pub evidence_state: String,
@@ -287,8 +302,10 @@ pub struct NewKnowledgeRelationCandidate {
     pub library_id: Uuid,
     pub revision_id: Uuid,
     pub chunk_id: Option<Uuid>,
+    pub subject_label: String,
     pub subject_candidate_key: String,
     pub predicate: String,
+    pub object_label: String,
     pub object_candidate_key: String,
     pub normalized_assertion: String,
     pub confidence: Option<f64>,
@@ -339,10 +356,13 @@ pub struct NewKnowledgeEvidence {
     pub document_id: Uuid,
     pub revision_id: Uuid,
     pub chunk_id: Option<Uuid>,
+    pub block_id: Option<Uuid>,
+    pub fact_id: Option<Uuid>,
     pub span_start: Option<i32>,
     pub span_end: Option<i32>,
-    pub excerpt: String,
-    pub support_kind: String,
+    pub quote_text: String,
+    pub literal_spans_json: serde_json::Value,
+    pub evidence_kind: String,
     pub extraction_method: String,
     pub confidence: Option<f64>,
     pub evidence_state: String,
@@ -357,6 +377,8 @@ pub struct ArangoGraphStore {
 }
 
 impl ArangoGraphStore {
+    const LIBRARY_RESET_BATCH_SIZE: usize = 512;
+
     #[must_use]
     pub fn new(client: Arc<ArangoClient>) -> Self {
         Self { client }
@@ -427,69 +449,88 @@ impl ArangoGraphStore {
         library_id: Uuid,
     ) -> anyhow::Result<Vec<KnowledgeDocumentGraphLinkRow>> {
         let query = format!(
-            "LET rows = UNION(
-               FOR edge IN {mention_edge_collection}
-                 LET chunk = DOCUMENT(edge._from)
-                 LET entity = DOCUMENT(edge._to)
-                 FILTER chunk != null
-                   AND entity != null
-                   AND chunk.library_id == @library_id
-                   AND entity.library_id == @library_id
+            "FOR document IN {document_collection}
+               FILTER document.library_id == @library_id
+                 AND document.deleted_at == null
+               LET revision_id = document.active_revision_id != null
+                 ? document.active_revision_id
+                 : document.readable_revision_id
+               FILTER revision_id != null
+               LET revision_vertex_id = CONCAT(@revision_collection, '/', revision_id)
+               LET mention_rows = (
+                 FOR chunk IN OUTBOUND revision_vertex_id {revision_chunk_edge_collection}
+                   FILTER chunk.library_id == @library_id
+                   FOR entity, edge IN OUTBOUND chunk._id {mention_edge_collection}
+                     FILTER entity != null
+                       AND entity.library_id == @library_id
+                     COLLECT target_node_id = entity.entity_id
+                     AGGREGATE mention_count = COUNT(1)
+                     RETURN {{
+                        document_id: document.document_id,
+                        target_node_id,
+                        target_node_type: \"entity\",
+                        mention_count,
+                        support_count: 0
+                     }}
+               )
+               LET evidence_rows = (
+                 FOR evidence IN INBOUND revision_vertex_id {evidence_source_edge_collection}
+                   FILTER evidence != null
+                     AND evidence.library_id == @library_id
+                   LET entity_rows = (
+                     FOR entity, edge IN OUTBOUND evidence._id {evidence_support_entity_edge_collection}
+                       FILTER entity != null
+                         AND entity.library_id == @library_id
+                       COLLECT target_node_id = entity.entity_id
+                       AGGREGATE support_count = COUNT(1)
+                       RETURN {{
+                          document_id: document.document_id,
+                          target_node_id,
+                          target_node_type: \"entity\",
+                          mention_count: 0,
+                          support_count
+                       }}
+                   )
+                   LET relation_rows = (
+                     FOR relation, edge IN OUTBOUND evidence._id {evidence_support_relation_edge_collection}
+                       FILTER relation != null
+                         AND relation.library_id == @library_id
+                       COLLECT target_node_id = relation.relation_id
+                       AGGREGATE support_count = COUNT(1)
+                       RETURN {{
+                          document_id: document.document_id,
+                          target_node_id,
+                          target_node_type: \"topic\",
+                          mention_count: 0,
+                          support_count
+                       }}
+                   )
+                   RETURN UNION(entity_rows, relation_rows)
+               )
+               LET rows = APPEND(mention_rows, FLATTEN(evidence_rows))
+               FOR row IN rows
+                 COLLECT
+                   document_id = row.document_id,
+                   target_node_id = row.target_node_id,
+                   target_node_type = row.target_node_type
+                 AGGREGATE
+                   mention_count = SUM(row.mention_count),
+                   support_count = SUM(row.support_count)
+                 LET total_support_count = mention_count + support_count
+                 FILTER total_support_count > 0
+                 LET relation_type =
+                   target_node_type == \"entity\" && mention_count > 0 ? \"mentions\" : \"supports\"
+                 SORT total_support_count DESC, document_id ASC, target_node_type ASC, target_node_id ASC
                  RETURN {{
-                    document_id: chunk.document_id,
-                    target_node_id: entity.entity_id,
-                    target_node_type: \"entity\",
-                    mention_count: 1,
-                    support_count: 0
-                 }},
-               FOR edge IN {evidence_support_entity_edge_collection}
-                 LET evidence = DOCUMENT(edge._from)
-                 LET entity = DOCUMENT(edge._to)
-                 FILTER evidence != null
-                   AND entity != null
-                   AND evidence.library_id == @library_id
-                   AND entity.library_id == @library_id
-                 RETURN {{
-                    document_id: evidence.document_id,
-                    target_node_id: entity.entity_id,
-                    target_node_type: \"entity\",
-                    mention_count: 0,
-                    support_count: 1
-                 }},
-               FOR edge IN {evidence_support_relation_edge_collection}
-                 LET evidence = DOCUMENT(edge._from)
-                 LET relation = DOCUMENT(edge._to)
-                 FILTER evidence != null
-                   AND relation != null
-                   AND evidence.library_id == @library_id
-                   AND relation.library_id == @library_id
-                 RETURN {{
-                    document_id: evidence.document_id,
-                    target_node_id: relation.relation_id,
-                    target_node_type: \"topic\",
-                    mention_count: 0,
-                    support_count: 1
-                 }}
-             )
-             FOR row IN rows
-               COLLECT
-                 document_id = row.document_id,
-                 target_node_id = row.target_node_id,
-                 target_node_type = row.target_node_type
-               AGGREGATE
-                 mention_count = SUM(row.mention_count),
-                 support_count = SUM(row.support_count)
-               LET total_support_count = mention_count + support_count
-               LET relation_type =
-                 target_node_type == \"entity\" && mention_count > 0 ? \"mentions\" : \"supports\"
-               SORT total_support_count DESC, document_id ASC, target_node_type ASC, target_node_id ASC
-               RETURN {{
-                  document_id,
-                  target_node_id,
-                  target_node_type,
-                  relation_type,
-                  support_count: total_support_count
-               }}",
+                    document_id,
+                    target_node_id,
+                    target_node_type,
+                    relation_type,
+                    support_count: total_support_count
+                 }}",
+            document_collection = KNOWLEDGE_DOCUMENT_COLLECTION,
+            revision_chunk_edge_collection = KNOWLEDGE_REVISION_CHUNK_EDGE,
+            evidence_source_edge_collection = KNOWLEDGE_EVIDENCE_SOURCE_EDGE,
             mention_edge_collection = KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE,
             evidence_support_entity_edge_collection = KNOWLEDGE_EVIDENCE_SUPPORTS_ENTITY_EDGE,
             evidence_support_relation_edge_collection = KNOWLEDGE_EVIDENCE_SUPPORTS_RELATION_EDGE,
@@ -500,6 +541,7 @@ impl ArangoGraphStore {
                 &query,
                 serde_json::json!({
                     "library_id": library_id,
+                    "revision_collection": KNOWLEDGE_REVISION_COLLECTION,
                 }),
             )
             .await
@@ -756,8 +798,10 @@ impl ArangoGraphStore {
                     "library_id": input.library_id,
                     "revision_id": input.revision_id,
                     "chunk_id": input.chunk_id,
+                    "subject_label": input.subject_label,
                     "subject_candidate_key": input.subject_candidate_key,
                     "predicate": input.predicate,
+                    "object_label": input.object_label,
                     "object_candidate_key": input.object_candidate_key,
                     "normalized_assertion": input.normalized_assertion,
                     "confidence": input.confidence,
@@ -779,8 +823,10 @@ impl ArangoGraphStore {
                     library_id: row.library_id,
                     revision_id: row.revision_id,
                     chunk_id: row.chunk_id,
+                    subject_label: row.subject_label,
                     subject_candidate_key: row.subject_candidate_key,
                     predicate: row.predicate,
+                    object_label: row.object_label,
                     object_candidate_key: row.object_candidate_key,
                     normalized_assertion: row.normalized_assertion,
                     confidence: row.confidence,
@@ -794,8 +840,10 @@ impl ArangoGraphStore {
                     library_id: row.library_id,
                     revision_id: row.revision_id,
                     chunk_id: row.chunk_id,
+                    subject_label: row.subject_label,
                     subject_candidate_key: row.subject_candidate_key,
                     predicate: row.predicate,
+                    object_label: row.object_label,
                     object_candidate_key: row.object_candidate_key,
                     normalized_assertion: row.normalized_assertion,
                     confidence: row.confidence,
@@ -821,6 +869,7 @@ impl ArangoGraphStore {
         source_revision_id: Option<Uuid>,
         supporting_entity_id: Option<Uuid>,
         supporting_relation_id: Option<Uuid>,
+        supporting_fact_id: Option<Uuid>,
     ) -> anyhow::Result<KnowledgeEvidenceRow> {
         let evidence = self.upsert_evidence(input).await?;
         if let Some(source_revision_id) = source_revision_id {
@@ -845,6 +894,10 @@ impl ArangoGraphStore {
                 None,
             )
             .await?;
+        }
+        if let Some(supporting_fact_id) = supporting_fact_id {
+            self.upsert_fact_supports_evidence_edge(supporting_fact_id, evidence.evidence_id)
+                .await?;
         }
         Ok(evidence)
     }
@@ -931,6 +984,112 @@ impl ArangoGraphStore {
             .await
             .context("failed to delete knowledge relation candidates by library")?;
         decode_many_results(cursor)
+    }
+
+    pub async fn reset_library_materialized_graph(&self, library_id: Uuid) -> anyhow::Result<()> {
+        self.delete_edges_by_library_reference(
+            KNOWLEDGE_DOCUMENT_REVISION_EDGE,
+            "_to",
+            library_id,
+            "failed to delete document-revision edges for library graph reset",
+        )
+        .await?;
+        self.delete_edges_by_library_reference(
+            KNOWLEDGE_REVISION_CHUNK_EDGE,
+            "_from",
+            library_id,
+            "failed to delete revision-chunk edges for library graph reset",
+        )
+        .await?;
+        self.delete_edges_by_library_reference(
+            KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE,
+            "_to",
+            library_id,
+            "failed to delete chunk mention edges for library graph reset",
+        )
+        .await?;
+        self.delete_edges_by_library_reference(
+            KNOWLEDGE_RELATION_SUBJECT_EDGE,
+            "_from",
+            library_id,
+            "failed to delete relation subject edges for library graph reset",
+        )
+        .await?;
+        self.delete_edges_by_library_reference(
+            KNOWLEDGE_RELATION_OBJECT_EDGE,
+            "_from",
+            library_id,
+            "failed to delete relation object edges for library graph reset",
+        )
+        .await?;
+        self.delete_edges_by_library_reference(
+            KNOWLEDGE_EVIDENCE_SOURCE_EDGE,
+            "_from",
+            library_id,
+            "failed to delete evidence source edges for library graph reset",
+        )
+        .await?;
+        self.delete_edges_by_library_reference(
+            KNOWLEDGE_EVIDENCE_SUPPORTS_ENTITY_EDGE,
+            "_from",
+            library_id,
+            "failed to delete evidence-entity edges for library graph reset",
+        )
+        .await?;
+        self.delete_edges_by_library_reference(
+            KNOWLEDGE_EVIDENCE_SUPPORTS_RELATION_EDGE,
+            "_from",
+            library_id,
+            "failed to delete evidence-relation edges for library graph reset",
+        )
+        .await?;
+        self.delete_edges_by_library_reference(
+            KNOWLEDGE_FACT_EVIDENCE_EDGE,
+            "_to",
+            library_id,
+            "failed to delete fact-evidence edges for library graph reset",
+        )
+        .await?;
+        self.delete_edges_by_library_reference(
+            KNOWLEDGE_BUNDLE_ENTITY_EDGE,
+            "_to",
+            library_id,
+            "failed to delete bundle-entity edges for library graph reset",
+        )
+        .await?;
+        self.delete_edges_by_library_reference(
+            KNOWLEDGE_BUNDLE_RELATION_EDGE,
+            "_to",
+            library_id,
+            "failed to delete bundle-relation edges for library graph reset",
+        )
+        .await?;
+        self.delete_edges_by_library_reference(
+            KNOWLEDGE_BUNDLE_EVIDENCE_EDGE,
+            "_to",
+            library_id,
+            "failed to delete bundle-evidence edges for library graph reset",
+        )
+        .await?;
+        self.delete_collection_documents_by_library(
+            KNOWLEDGE_EVIDENCE_COLLECTION,
+            library_id,
+            "failed to delete evidence rows for library graph reset",
+        )
+        .await?;
+        self.delete_collection_documents_by_library(
+            KNOWLEDGE_RELATION_COLLECTION,
+            library_id,
+            "failed to delete relation rows for library graph reset",
+        )
+        .await?;
+        self.delete_collection_documents_by_library(
+            KNOWLEDGE_ENTITY_COLLECTION,
+            library_id,
+            "failed to delete entity rows for library graph reset",
+        )
+        .await?;
+        Ok(())
     }
 
     pub async fn upsert_entity(
@@ -1241,10 +1400,13 @@ impl ArangoGraphStore {
                     document_id: @document_id,
                     revision_id: @revision_id,
                     chunk_id: @chunk_id,
+                    block_id: @block_id,
+                    fact_id: @fact_id,
                     span_start: @span_start,
                     span_end: @span_end,
-                    excerpt: @excerpt,
-                    support_kind: @support_kind,
+                    quote_text: @quote_text,
+                    literal_spans_json: @literal_spans_json,
+                    evidence_kind: @evidence_kind,
                     extraction_method: @extraction_method,
                     confidence: @confidence,
                     evidence_state: @evidence_state,
@@ -1258,10 +1420,13 @@ impl ArangoGraphStore {
                     document_id: @document_id,
                     revision_id: @revision_id,
                     chunk_id: @chunk_id,
+                    block_id: @block_id,
+                    fact_id: @fact_id,
                     span_start: @span_start,
                     span_end: @span_end,
-                    excerpt: @excerpt,
-                    support_kind: @support_kind,
+                    quote_text: @quote_text,
+                    literal_spans_json: @literal_spans_json,
+                    evidence_kind: @evidence_kind,
                     extraction_method: @extraction_method,
                     confidence: @confidence,
                     evidence_state: @evidence_state,
@@ -1279,10 +1444,13 @@ impl ArangoGraphStore {
                     "document_id": input.document_id,
                     "revision_id": input.revision_id,
                     "chunk_id": input.chunk_id,
+                    "block_id": input.block_id,
+                    "fact_id": input.fact_id,
                     "span_start": input.span_start,
                     "span_end": input.span_end,
-                    "excerpt": input.excerpt,
-                    "support_kind": input.support_kind,
+                    "quote_text": input.quote_text,
+                    "literal_spans_json": input.literal_spans_json,
+                    "evidence_kind": input.evidence_kind,
                     "extraction_method": input.extraction_method,
                     "confidence": input.confidence,
                     "evidence_state": input.evidence_state,
@@ -1315,6 +1483,30 @@ impl ArangoGraphStore {
             .await
             .context("failed to get knowledge evidence")?;
         decode_optional_single_result(cursor)
+    }
+
+    pub async fn list_evidence_by_ids(
+        &self,
+        evidence_ids: &[Uuid],
+    ) -> anyhow::Result<Vec<KnowledgeEvidenceRow>> {
+        if evidence_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let cursor = self
+            .client
+            .query_json(
+                "FOR evidence IN @@collection
+                 FILTER evidence.evidence_id IN @evidence_ids
+                 SORT evidence.created_at ASC, evidence.evidence_id ASC
+                 RETURN evidence",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_EVIDENCE_COLLECTION,
+                    "evidence_ids": evidence_ids,
+                }),
+            )
+            .await
+            .context("failed to list knowledge evidence by ids")?;
+        decode_many_results(cursor)
     }
 
     pub async fn list_evidence_by_revision(
@@ -1580,29 +1772,9 @@ impl ArangoGraphStore {
         revision_id: Uuid,
         chunk_ids: &[Uuid],
     ) -> anyhow::Result<()> {
-        if chunk_ids.is_empty() {
-            return Ok(());
+        for chunk_id in chunk_ids {
+            self.upsert_revision_chunk_edge(revision_id, *chunk_id).await?;
         }
-
-        self.client
-            .query_json(
-                "FOR chunk_id IN @chunk_ids
-                 INSERT {
-                    _from: @from_id,
-                    _to: CONCAT(@to_collection, '/', chunk_id),
-                    created_at: @created_at
-                 } INTO @@collection
-                 RETURN NEW._id",
-                serde_json::json!({
-                    "@collection": KNOWLEDGE_REVISION_CHUNK_EDGE,
-                    "from_id": format!("{}/{}", KNOWLEDGE_REVISION_COLLECTION, revision_id),
-                    "to_collection": KNOWLEDGE_CHUNK_COLLECTION,
-                    "chunk_ids": chunk_ids,
-                    "created_at": Utc::now(),
-                }),
-            )
-            .await
-            .with_context(|| "failed to insert revision chunk edges".to_string())?;
         Ok(())
     }
 
@@ -1742,6 +1914,22 @@ impl ArangoGraphStore {
         .await
     }
 
+    pub async fn upsert_fact_supports_evidence_edge(
+        &self,
+        fact_id: Uuid,
+        evidence_id: Uuid,
+    ) -> anyhow::Result<()> {
+        self.insert_edge(
+            KNOWLEDGE_FACT_EVIDENCE_EDGE,
+            KNOWLEDGE_TECHNICAL_FACT_COLLECTION,
+            fact_id,
+            KNOWLEDGE_EVIDENCE_COLLECTION,
+            evidence_id,
+            serde_json::json!({}),
+        )
+        .await
+    }
+
     async fn insert_edge(
         &self,
         collection: &str,
@@ -1752,10 +1940,12 @@ impl ArangoGraphStore {
         extra_fields: serde_json::Value,
     ) -> anyhow::Result<()> {
         let mut payload = serde_json::json!({
+            "_key": canonical_edge_key(from_id, to_id),
             "@collection": collection,
             "_from": format!("{}/{}", from_collection, from_id),
             "_to": format!("{}/{}", to_collection, to_id),
             "created_at": Utc::now(),
+            "updated_at": Utc::now(),
         });
         if let (Some(target), Some(source)) = (payload.as_object_mut(), extra_fields.as_object()) {
             for (key, value) in source {
@@ -1767,7 +1957,11 @@ impl ArangoGraphStore {
 
         self.client
             .query_json(
-                "INSERT @payload INTO @@collection RETURN NEW",
+                "UPSERT { _key: @payload._key }
+                 INSERT @payload
+                 UPDATE MERGE(@payload, { created_at: OLD.created_at })
+                 IN @@collection
+                 RETURN NEW",
                 serde_json::json!({
                     "@collection": collection,
                     "payload": payload,
@@ -1775,6 +1969,98 @@ impl ArangoGraphStore {
             )
             .await
             .with_context(|| format!("failed to insert edge into {collection}"))?;
+        Ok(())
+    }
+
+    async fn delete_collection_documents_by_library(
+        &self,
+        collection: &str,
+        library_id: Uuid,
+        error_context: &str,
+    ) -> anyhow::Result<()> {
+        loop {
+            let cursor = self
+                .client
+                .query_json(
+                    "FOR doc IN @@collection
+                     FILTER doc.library_id == @library_id
+                     LIMIT @limit
+                     RETURN doc._key",
+                    serde_json::json!({
+                        "@collection": collection,
+                        "library_id": library_id,
+                        "limit": Self::LIBRARY_RESET_BATCH_SIZE,
+                    }),
+                )
+                .await
+                .with_context(|| error_context.to_string())?;
+            let keys: Vec<String> = decode_many_results(cursor)?;
+            if keys.is_empty() {
+                break;
+            }
+
+            self.client
+                .query_json(
+                    "FOR key IN @keys
+                     REMOVE { _key: key } IN @@collection
+                     OPTIONS { ignoreErrors: true }",
+                    serde_json::json!({
+                        "@collection": collection,
+                        "keys": keys,
+                    }),
+                )
+                .await
+                .with_context(|| error_context.to_string())?;
+        }
+        Ok(())
+    }
+
+    async fn delete_edges_by_library_reference(
+        &self,
+        collection: &str,
+        vertex_field: &str,
+        library_id: Uuid,
+        error_context: &str,
+    ) -> anyhow::Result<()> {
+        loop {
+            let query = format!(
+                "FOR edge IN @@collection
+                 LET vertex = DOCUMENT(edge.{vertex_field})
+                 FILTER vertex != null
+                   AND vertex.library_id == @library_id
+                 LIMIT @limit
+                 RETURN edge._key"
+            );
+            let cursor = self
+                .client
+                .query_json(
+                    &query,
+                    serde_json::json!({
+                        "@collection": collection,
+                        "library_id": library_id,
+                        "limit": Self::LIBRARY_RESET_BATCH_SIZE,
+                    }),
+                )
+                .await
+                .with_context(|| error_context.to_string())?;
+            let keys: Vec<String> = decode_many_results(cursor)?;
+            if keys.is_empty() {
+                break;
+            }
+
+            self.client
+                .query_json(
+                    "FOR key IN @keys
+                     REMOVE { _key: key } IN @@collection
+                     OPTIONS { ignoreErrors: true }",
+                    serde_json::json!({
+                        "@collection": collection,
+                        "keys": keys,
+                    }),
+                )
+                .await
+                .with_context(|| error_context.to_string())?;
+        }
         Ok(())
     }
 
@@ -1871,6 +2157,10 @@ impl ArangoGraphStore {
             .collect::<Vec<_>>();
         Ok(GraphViewData { nodes, edges })
     }
+}
+
+fn canonical_edge_key(from_id: Uuid, to_id: Uuid) -> String {
+    format!("{from_id}:{to_id}")
 }
 
 fn decode_single_result<T>(cursor: serde_json::Value) -> anyhow::Result<T>

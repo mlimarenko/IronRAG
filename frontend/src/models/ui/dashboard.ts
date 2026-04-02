@@ -1,4 +1,9 @@
-import type { DocumentStatus } from './documents'
+import type {
+  DocumentPreparationReadinessKind,
+  DocumentStatus,
+  LibraryGraphCoverageSummary,
+  LibraryReadinessSummary,
+} from './documents'
 
 export interface DashboardMetric {
   key: string
@@ -50,6 +55,8 @@ export interface DashboardChartSegment {
 export interface DashboardOverviewSurface {
   summaryNarrative: string
   documentCounts: DashboardDocumentCounts
+  readinessSummary: LibraryReadinessSummary | null
+  graphCoverage: LibraryGraphCoverageSummary | null
   metrics: DashboardMetric[]
   attentionItems: DashboardAttentionItem[]
   recentDocuments: DashboardRecentDocument[]
@@ -61,9 +68,14 @@ export interface DashboardDocumentCounts {
   totalDocuments: number
   inFlightDocuments: number
   failedDocuments: number
-  searchReadyDocuments: number
+  readableDocuments: number
+  graphSparseDocuments: number
   graphReadyDocuments: number
-  graphCatchUpDocuments: number
+}
+
+export interface DashboardReadinessAttention {
+  kind: DocumentPreparationReadinessKind
+  count: number
 }
 
 export interface DashboardPrimaryAction {
@@ -83,15 +95,17 @@ export function resolveDashboardVisibleMetrics(metrics: DashboardMetric[]): Dash
   const attentionCount = Number(metricMap.get('attention')?.value ?? 0)
   const fullySettled =
     documentCount > 0 && readyCount >= documentCount && inFlightCount === 0 && attentionCount === 0
+  const sourceMetrics = metrics.filter((metric) => Number(metric.value) > 0)
 
-  return metrics
-    .slice(0, 4)
+  return (sourceMetrics.length > 0 ? sourceMetrics : metrics)
+    .slice(0, 3)
     .filter(
       (metric) =>
         !(
           (metric.key === 'inFlight' && inFlightCount === 0) ||
           (metric.key === 'attention' && attentionCount === 0) ||
-          ((metric.key === 'ready' || metric.key === 'graphReady') && fullySettled)
+          ((metric.key === 'ready' || metric.key === 'graphReady') && fullySettled) ||
+          (metric.key === 'documents' && documentCount === 0)
         ),
     )
 }

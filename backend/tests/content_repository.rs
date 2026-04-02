@@ -303,6 +303,156 @@ async fn content_repository_persists_logical_document_revision_head_and_chunks()
 
 #[tokio::test]
 #[ignore = "requires local postgres service"]
+async fn content_repository_keeps_one_logical_document_per_canonical_url_inside_library()
+-> anyhow::Result<()> {
+    let settings =
+        Settings::from_env().context("failed to load settings for content repository test")?;
+    let pool = connect_postgres(&settings).await?;
+    let fixture = ContentRepositoryFixture::create(&pool).await?;
+
+    let result = async {
+        let canonical_url = "https://docs.example.test/reference/accounts".to_string();
+        let document = content_repository::create_document(
+            &pool,
+            &NewContentDocument {
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                external_key: &canonical_url,
+                document_state: "active",
+                created_by_principal_id: Some(fixture.principal_id),
+            },
+        )
+        .await
+        .context("failed to create canonical web document")?;
+
+        let first_revision = content_repository::create_revision(
+            &pool,
+            &NewContentRevision {
+                document_id: document.id,
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                revision_number: 1,
+                parent_revision_id: None,
+                content_source_kind: "web_page",
+                checksum: "sha256:web-rev-1",
+                mime_type: "text/markdown",
+                byte_size: 256,
+                title: Some("Accounts Reference"),
+                language_code: Some("en"),
+                source_uri: Some(&canonical_url),
+                storage_key: Some("web/accounts-rev-1"),
+                created_by_principal_id: Some(fixture.principal_id),
+            },
+        )
+        .await
+        .context("failed to create first canonical web revision")?;
+        let second_revision = content_repository::create_revision(
+            &pool,
+            &NewContentRevision {
+                document_id: document.id,
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                revision_number: 2,
+                parent_revision_id: Some(first_revision.id),
+                content_source_kind: "web_page",
+                checksum: "sha256:web-rev-2",
+                mime_type: "text/markdown",
+                byte_size: 384,
+                title: Some("Accounts Reference"),
+                language_code: Some("en"),
+                source_uri: Some(&canonical_url),
+                storage_key: Some("web/accounts-rev-2"),
+                created_by_principal_id: Some(fixture.principal_id),
+            },
+        )
+        .await
+        .context("failed to create second canonical web revision")?;
+
+        let fetched = content_repository::get_document_by_external_key(
+            &pool,
+            fixture.library_id,
+            &canonical_url,
+        )
+        .await
+        .context("failed to fetch document by canonical url")?
+        .context("missing canonical web document")?;
+        assert_eq!(fetched.id, document.id);
+
+        let revisions = content_repository::list_revisions_by_document(&pool, document.id)
+            .await
+            .context("failed to list revisions for canonical web document")?;
+        assert_eq!(revisions.len(), 2);
+        assert_eq!(revisions[0].id, second_revision.id);
+        assert_eq!(revisions[1].id, first_revision.id);
+
+        let duplicate_error = content_repository::create_document(
+            &pool,
+            &NewContentDocument {
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                external_key: &canonical_url,
+                document_state: "active",
+                created_by_principal_id: Some(fixture.principal_id),
+            },
+        )
+        .await
+        .expect_err("same canonical url must stay one logical document per library");
+        assert!(
+            duplicate_error
+                .as_database_error()
+                .is_some_and(sqlx::error::DatabaseError::is_unique_violation),
+            "expected unique violation, got {duplicate_error:?}"
+        );
+
+        let secondary_library_id = sqlx::query_scalar::<_, Uuid>(
+            "insert into catalog_library (
+                id,
+                workspace_id,
+                slug,
+                display_name,
+                description,
+                lifecycle_state,
+                created_by_principal_id,
+                created_at,
+                updated_at
+            )
+            values ($1, $2, $3, $4, $5, 'active', $6, now(), now())
+            returning id",
+        )
+        .bind(Uuid::now_v7())
+        .bind(fixture.workspace_id)
+        .bind(format!("content-library-secondary-{}", Uuid::now_v7().simple()))
+        .bind("Content Repository Secondary Library")
+        .bind("secondary canonical web document scope")
+        .bind(fixture.principal_id)
+        .fetch_one(&pool)
+        .await
+        .context("failed to create secondary library")?;
+
+        let secondary_document = content_repository::create_document(
+            &pool,
+            &NewContentDocument {
+                workspace_id: fixture.workspace_id,
+                library_id: secondary_library_id,
+                external_key: &canonical_url,
+                document_state: "active",
+                created_by_principal_id: Some(fixture.principal_id),
+            },
+        )
+        .await
+        .context("failed to create canonical web document in secondary library")?;
+        assert_ne!(secondary_document.id, document.id);
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup(&pool).await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
 async fn content_repository_tracks_mutation_idempotency_and_items() -> anyhow::Result<()> {
     let settings =
         Settings::from_env().context("failed to load settings for content repository test")?;

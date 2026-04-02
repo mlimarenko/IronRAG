@@ -18,9 +18,10 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::query::{
-        QueryChunkReference, QueryConversation, QueryConversationDetail, QueryExecution,
-        QueryExecutionDetail, QueryGraphEdgeReference, QueryGraphNodeReference, QueryTurn,
-        QueryTurnStreamStage,
+        PreparedSegmentReference, QueryChunkReference, QueryConversation, QueryConversationDetail,
+        QueryExecution, QueryExecutionDetail, QueryGraphEdgeReference, QueryGraphNodeReference,
+        QueryTurn, QueryTurnStreamStage, QueryVerificationState, QueryVerificationWarning,
+        TechnicalFactReference,
     },
     interfaces::http::{
         auth::AuthContext,
@@ -76,8 +77,12 @@ struct QueryExecutionDetailResponse {
     request_turn: Option<QueryTurn>,
     response_turn: Option<QueryTurn>,
     chunk_references: Vec<QueryChunkReference>,
+    prepared_segment_references: Vec<PreparedSegmentReference>,
+    technical_fact_references: Vec<TechnicalFactReference>,
     entity_references: Vec<QueryGraphNodeReference>,
     relation_references: Vec<QueryGraphEdgeReference>,
+    verification_state: QueryVerificationState,
+    verification_warnings: Vec<QueryVerificationWarning>,
 }
 
 #[derive(Debug, Serialize)]
@@ -88,6 +93,13 @@ struct QuerySessionTurnExecutionResponse {
     request_turn: QueryTurn,
     response_turn: Option<QueryTurn>,
     execution: QueryExecution,
+    chunk_references: Vec<QueryChunkReference>,
+    prepared_segment_references: Vec<PreparedSegmentReference>,
+    technical_fact_references: Vec<TechnicalFactReference>,
+    entity_references: Vec<QueryGraphNodeReference>,
+    relation_references: Vec<QueryGraphEdgeReference>,
+    verification_state: QueryVerificationState,
+    verification_warnings: Vec<QueryVerificationWarning>,
 }
 
 #[derive(Debug, Serialize)]
@@ -250,8 +262,12 @@ fn map_execution_detail(detail: QueryExecutionDetail) -> QueryExecutionDetailRes
         request_turn: detail.request_turn,
         response_turn: detail.response_turn,
         chunk_references: detail.chunk_references,
+        prepared_segment_references: detail.prepared_segment_references,
+        technical_fact_references: detail.technical_fact_references,
         entity_references: detail.graph_node_references,
         relation_references: detail.graph_edge_references,
+        verification_state: detail.verification_state,
+        verification_warnings: detail.verification_warnings,
     }
 }
 
@@ -270,6 +286,13 @@ fn map_turn_execution_response(
         request_turn: outcome.request_turn,
         response_turn: outcome.response_turn,
         execution: outcome.execution,
+        chunk_references: outcome.chunk_references,
+        prepared_segment_references: outcome.prepared_segment_references,
+        technical_fact_references: outcome.technical_fact_references,
+        entity_references: outcome.graph_node_references,
+        relation_references: outcome.graph_edge_references,
+        verification_state: outcome.verification_state,
+        verification_warnings: outcome.verification_warnings,
     }
 }
 

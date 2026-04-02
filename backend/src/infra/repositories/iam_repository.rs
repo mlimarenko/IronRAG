@@ -88,6 +88,7 @@ pub struct AuthenticatedApiTokenRow {
     pub token_prefix: String,
     pub token_status: String,
     pub expires_at: Option<DateTime<Utc>>,
+    pub last_used_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -359,17 +360,20 @@ pub async fn revoke_session(
     .await
 }
 
-pub async fn touch_session(
+pub async fn touch_session_if_stale(
     postgres: &PgPool,
     session_id: Uuid,
+    stale_before: DateTime<Utc>,
 ) -> Result<Option<IamSessionRow>, sqlx::Error> {
     sqlx::query_as::<_, IamSessionRow>(
         "update iam_session
          set last_seen_at = now()
          where id = $1
+           and last_seen_at <= $2
          returning id, principal_id, session_secret_hash, issued_at, expires_at, revoked_at, last_seen_at",
     )
     .bind(session_id)
+    .bind(stale_before)
     .fetch_optional(postgres)
     .await
 }
@@ -450,11 +454,12 @@ pub async fn find_active_api_token_by_secret_hash(
             principal.principal_kind::text as principal_kind,
             principal.status::text as principal_status,
             principal.parent_principal_id,
-            token.workspace_id,
-            token.label,
-            token.token_prefix,
-            token.status::text as token_status,
-            token.expires_at
+                token.workspace_id,
+                token.label,
+                token.token_prefix,
+                token.status::text as token_status,
+                token.expires_at,
+                token.last_used_at
          from iam_api_token_secret secret
          join iam_api_token token
            on token.principal_id = secret.token_principal_id
@@ -592,17 +597,19 @@ pub async fn revoke_api_token(
     .await
 }
 
-pub async fn touch_api_token(
+pub async fn touch_api_token_if_stale(
     postgres: &PgPool,
     principal_id: Uuid,
+    stale_before: DateTime<Utc>,
 ) -> Result<Option<IamApiTokenRow>, sqlx::Error> {
     sqlx::query_as::<_, IamApiTokenRow>(
         "update iam_api_token
-         set last_used_at = now()
-         where principal_id = $1
-         returning
-            principal_id,
-            workspace_id,
+          set last_used_at = now()
+          where principal_id = $1
+           and (last_used_at is null or last_used_at <= $2)
+          returning
+             principal_id,
+             workspace_id,
             label,
             token_prefix,
             status::text as status,
@@ -612,6 +619,7 @@ pub async fn touch_api_token(
             last_used_at",
     )
     .bind(principal_id)
+    .bind(stale_before)
     .fetch_optional(postgres)
     .await
 }

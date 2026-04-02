@@ -15,6 +15,7 @@ use crate::{
         repositories::{self, RuntimeGraphSnapshotRow},
     },
     services::graph_summary::GraphSummaryRefreshRequest,
+    shared::json_coercion::from_value_or_default,
 };
 
 #[derive(Debug, Clone)]
@@ -170,7 +171,10 @@ pub async fn project_canonical_graph(
             node_type: node.node_type.clone(),
             support_count: node.support_count,
             summary: node.summary.clone(),
-            aliases: serde_json::from_value(node.aliases_json.clone()).unwrap_or_default(),
+            aliases: from_value_or_default(
+                "runtime_graph_node.aliases_json",
+                node.aliases_json.clone(),
+            ),
             metadata_json: node.metadata_json.clone(),
         })
         .collect::<Vec<_>>();
@@ -318,7 +322,10 @@ async fn project_targeted_canonical_graph(
             node_type: node.node_type.clone(),
             support_count: node.support_count,
             summary: node.summary.clone(),
-            aliases: serde_json::from_value(node.aliases_json.clone()).unwrap_or_default(),
+            aliases: from_value_or_default(
+                "runtime_graph_node.aliases_json",
+                node.aliases_json.clone(),
+            ),
             metadata_json: node.metadata_json.clone(),
         })
         .collect::<Vec<_>>();

@@ -106,6 +106,9 @@ export interface AdminPriceCatalogEntry {
   id: string
   modelCatalogId: string
   billingUnit: string
+  priceVariantKey: string
+  requestInputTokensMin: number | null
+  requestInputTokensMax: number | null
   unitPrice: string
   currencyCode: string
   effectiveFrom: string

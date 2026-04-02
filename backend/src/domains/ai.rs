@@ -3,7 +3,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum AiBindingPurpose {
     ExtractText,
@@ -40,6 +40,9 @@ pub struct PriceCatalogEntry {
     pub id: Uuid,
     pub model_catalog_id: Uuid,
     pub billing_unit: String,
+    pub price_variant_key: String,
+    pub request_input_tokens_min: Option<i32>,
+    pub request_input_tokens_max: Option<i32>,
     pub unit_price: Decimal,
     pub currency_code: String,
     pub effective_from: DateTime<Utc>,

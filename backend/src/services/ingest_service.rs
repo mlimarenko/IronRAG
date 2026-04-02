@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -5,13 +7,34 @@ use crate::{
     app::state::AppState,
     domains::ingest::{IngestAttempt, IngestJob, IngestStageEvent},
     domains::ops::OpsAsyncOperation,
-    infra::repositories::ingest_repository::{
-        self, NewIngestAttempt, NewIngestJob, NewIngestStageEvent, UpdateIngestAttempt,
-        UpdateIngestJob,
+    infra::repositories::{
+        ingest_repository::{
+            self, NewIngestAttempt, NewIngestJob, NewIngestStageEvent, UpdateIngestAttempt,
+            UpdateIngestJob,
+        },
+        ops_repository,
     },
     interfaces::http::router_support::ApiError,
     services::ops_service::UpdateAsyncOperationCommand,
 };
+
+pub const INGEST_STAGE_EXTRACT_CONTENT: &str = "extract_content";
+pub const INGEST_STAGE_PREPARE_STRUCTURE: &str = "prepare_structure";
+pub const INGEST_STAGE_CHUNK_CONTENT: &str = "chunk_content";
+pub const INGEST_STAGE_EMBED_CHUNK: &str = "embed_chunk";
+pub const INGEST_STAGE_EXTRACT_TECHNICAL_FACTS: &str = "extract_technical_facts";
+pub const INGEST_STAGE_EXTRACT_GRAPH: &str = "extract_graph";
+pub const INGEST_STAGE_VERIFY_QUERY_ANSWER: &str = "verify_query_answer";
+pub const INGEST_STAGE_FINALIZING: &str = "finalizing";
+pub const INGEST_STAGE_WEB_DISCOVERY: &str = "web_discovery";
+pub const INGEST_STAGE_WEB_MATERIALIZE_PAGE: &str = "web_materialize_page";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalIngestStageMetadata {
+    pub stage_name: &'static str,
+    pub stage_rank: i32,
+    pub lifecycle_kind: &'static str,
+}
 
 #[derive(Debug, Clone)]
 pub struct AdmitIngestJobCommand {
@@ -112,11 +135,7 @@ impl IngestService {
         library_id: Option<Uuid>,
     ) -> Result<Vec<IngestJobHandle>, ApiError> {
         let jobs = self.list_jobs(state, workspace_id, library_id).await?;
-        let mut handles = Vec::with_capacity(jobs.len());
-        for job in jobs {
-            handles.push(self.build_job_handle(state, job).await?);
-        }
-        Ok(handles)
+        self.build_job_handles(state, jobs).await
     }
 
     pub async fn list_job_handles_by_mutation_ids(
@@ -134,11 +153,8 @@ impl IngestService {
         )
         .await
         .map_err(|_| ApiError::Internal)?;
-        let mut handles = Vec::with_capacity(rows.len());
-        for row in rows {
-            handles.push(self.build_job_handle(state, map_job_row(row)).await?);
-        }
-        Ok(handles)
+        let jobs = rows.into_iter().map(map_job_row).collect();
+        self.build_job_handles(state, jobs).await
     }
 
     pub async fn get_job(&self, state: &AppState, job_id: Uuid) -> Result<IngestJob, ApiError> {
@@ -224,11 +240,8 @@ impl IngestService {
         )
         .await
         .map_err(|_| ApiError::Internal)?;
-        let mut handles = Vec::with_capacity(rows.len());
-        for row in rows {
-            handles.push(self.build_job_handle(state, map_job_row(row)).await?);
-        }
-        Ok(handles)
+        let jobs = rows.into_iter().map(map_job_row).collect();
+        self.build_job_handles(state, jobs).await
     }
 
     pub async fn admit_job(
@@ -321,6 +334,7 @@ impl IngestService {
         state: &AppState,
         command: LeaseAttemptCommand,
     ) -> Result<IngestAttempt, ApiError> {
+        let current_stage = normalize_optional_stage(command.current_stage.clone())?;
         let job =
             ingest_repository::get_ingest_job_by_id(&state.persistence.postgres, command.job_id)
                 .await
@@ -343,7 +357,7 @@ impl IngestService {
                 lease_token: command.lease_token,
                 knowledge_generation_id: command.knowledge_generation_id,
                 attempt_state: "leased".to_string(),
-                current_stage: command.current_stage,
+                current_stage,
                 started_at: None,
                 heartbeat_at: Some(Utc::now()),
                 finished_at: None,
@@ -386,6 +400,7 @@ impl IngestService {
         state: &AppState,
         command: HeartbeatAttemptCommand,
     ) -> Result<IngestAttempt, ApiError> {
+        let current_stage = normalize_optional_stage(command.current_stage.clone())?;
         let existing = ingest_repository::get_ingest_attempt_by_id(
             &state.persistence.postgres,
             command.attempt_id,
@@ -404,7 +419,7 @@ impl IngestService {
                     .knowledge_generation_id
                     .or(existing.knowledge_generation_id),
                 attempt_state: existing.attempt_state,
-                current_stage: command.current_stage.or(existing.current_stage),
+                current_stage: current_stage.or(existing.current_stage),
                 heartbeat_at: Some(Utc::now()),
                 finished_at: existing.finished_at,
                 failure_class: existing.failure_class,
@@ -423,6 +438,7 @@ impl IngestService {
         state: &AppState,
         command: FinalizeAttemptCommand,
     ) -> Result<IngestAttempt, ApiError> {
+        let current_stage = normalize_optional_stage(command.current_stage.clone())?;
         let failure_code = command.failure_code.clone();
         let attempt = ingest_repository::get_ingest_attempt_by_id(
             &state.persistence.postgres,
@@ -441,7 +457,7 @@ impl IngestService {
                     .knowledge_generation_id
                     .or(attempt.knowledge_generation_id),
                 attempt_state: command.attempt_state.clone(),
-                current_stage: command.current_stage,
+                current_stage,
                 heartbeat_at: Some(Utc::now()),
                 finished_at: Some(Utc::now()),
                 failure_class: command.failure_class,
@@ -551,7 +567,7 @@ impl IngestService {
         state: &AppState,
         command: RecordStageEventCommand,
     ) -> Result<IngestStageEvent, ApiError> {
-        let stage_name = command.stage_name.clone();
+        let stage_name = normalize_stage_name(&command.stage_name)?;
         let attempt = ingest_repository::get_ingest_attempt_by_id(
             &state.persistence.postgres,
             command.attempt_id,
@@ -569,7 +585,7 @@ impl IngestService {
             &state.persistence.postgres,
             &NewIngestStageEvent {
                 attempt_id: command.attempt_id,
-                stage_name,
+                stage_name: stage_name.clone(),
                 stage_state: command.stage_state,
                 ordinal: i32::try_from(existing_events.len()).unwrap_or(i32::MAX) + 1,
                 message: command.message,
@@ -587,7 +603,7 @@ impl IngestService {
                 lease_token: attempt.lease_token,
                 knowledge_generation_id: attempt.knowledge_generation_id,
                 attempt_state: attempt.attempt_state,
-                current_stage: Some(command.stage_name),
+                current_stage: Some(stage_name.clone()),
                 heartbeat_at: Some(Utc::now()),
                 finished_at: attempt.finished_at,
                 failure_class: attempt.failure_class,
@@ -634,6 +650,173 @@ impl IngestService {
         };
         Ok(IngestJobHandle { job, latest_attempt, async_operation })
     }
+
+    async fn build_job_handles(
+        &self,
+        state: &AppState,
+        jobs: Vec<IngestJob>,
+    ) -> Result<Vec<IngestJobHandle>, ApiError> {
+        if jobs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let job_ids = jobs.iter().map(|job| job.id).collect::<Vec<_>>();
+        let async_operation_ids =
+            jobs.iter().filter_map(|job| job.async_operation_id).collect::<Vec<_>>();
+
+        let latest_attempts_by_job_id = ingest_repository::list_latest_ingest_attempts_by_job_ids(
+            &state.persistence.postgres,
+            &job_ids,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .into_iter()
+        .map(|row| (row.job_id, map_attempt_row(row)))
+        .collect::<HashMap<_, _>>();
+
+        let async_operations_by_id = ops_repository::list_async_operations_by_ids(
+            &state.persistence.postgres,
+            &async_operation_ids,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .into_iter()
+        .map(|row| (row.id, map_async_operation_row(row)))
+        .collect::<HashMap<_, _>>();
+
+        Ok(jobs
+            .into_iter()
+            .map(|job| IngestJobHandle {
+                latest_attempt: latest_attempts_by_job_id.get(&job.id).cloned(),
+                async_operation: job
+                    .async_operation_id
+                    .and_then(|operation_id| async_operations_by_id.get(&operation_id).cloned()),
+                job,
+            })
+            .collect())
+    }
+}
+
+#[must_use]
+pub fn canonical_ingest_stage_metadata(stage_name: &str) -> Option<CanonicalIngestStageMetadata> {
+    match stage_name {
+        INGEST_STAGE_EXTRACT_CONTENT => Some(CanonicalIngestStageMetadata {
+            stage_name: INGEST_STAGE_EXTRACT_CONTENT,
+            stage_rank: 10,
+            lifecycle_kind: "preparation",
+        }),
+        INGEST_STAGE_PREPARE_STRUCTURE => Some(CanonicalIngestStageMetadata {
+            stage_name: INGEST_STAGE_PREPARE_STRUCTURE,
+            stage_rank: 20,
+            lifecycle_kind: "preparation",
+        }),
+        INGEST_STAGE_CHUNK_CONTENT => Some(CanonicalIngestStageMetadata {
+            stage_name: INGEST_STAGE_CHUNK_CONTENT,
+            stage_rank: 30,
+            lifecycle_kind: "preparation",
+        }),
+        INGEST_STAGE_EMBED_CHUNK => Some(CanonicalIngestStageMetadata {
+            stage_name: INGEST_STAGE_EMBED_CHUNK,
+            stage_rank: 40,
+            lifecycle_kind: "embedding",
+        }),
+        INGEST_STAGE_EXTRACT_TECHNICAL_FACTS => Some(CanonicalIngestStageMetadata {
+            stage_name: INGEST_STAGE_EXTRACT_TECHNICAL_FACTS,
+            stage_rank: 50,
+            lifecycle_kind: "grounding",
+        }),
+        INGEST_STAGE_EXTRACT_GRAPH => Some(CanonicalIngestStageMetadata {
+            stage_name: INGEST_STAGE_EXTRACT_GRAPH,
+            stage_rank: 60,
+            lifecycle_kind: "graph",
+        }),
+        INGEST_STAGE_VERIFY_QUERY_ANSWER => Some(CanonicalIngestStageMetadata {
+            stage_name: INGEST_STAGE_VERIFY_QUERY_ANSWER,
+            stage_rank: 70,
+            lifecycle_kind: "query",
+        }),
+        INGEST_STAGE_FINALIZING => Some(CanonicalIngestStageMetadata {
+            stage_name: INGEST_STAGE_FINALIZING,
+            stage_rank: 80,
+            lifecycle_kind: "finalization",
+        }),
+        INGEST_STAGE_WEB_DISCOVERY => Some(CanonicalIngestStageMetadata {
+            stage_name: INGEST_STAGE_WEB_DISCOVERY,
+            stage_rank: 15,
+            lifecycle_kind: "web_discovery",
+        }),
+        INGEST_STAGE_WEB_MATERIALIZE_PAGE => Some(CanonicalIngestStageMetadata {
+            stage_name: INGEST_STAGE_WEB_MATERIALIZE_PAGE,
+            stage_rank: 25,
+            lifecycle_kind: "web_materialization",
+        }),
+        _ => None,
+    }
+}
+
+fn normalize_optional_stage(stage_name: Option<String>) -> Result<Option<String>, ApiError> {
+    stage_name.map(|value| normalize_stage_name(&value)).transpose()
+}
+
+fn normalize_stage_name(stage_name: &str) -> Result<String, ApiError> {
+    let normalized = stage_name.trim().to_ascii_lowercase();
+    canonical_ingest_stage_metadata(&normalized)
+        .map(|metadata| metadata.stage_name.to_string())
+        .ok_or_else(|| {
+            ApiError::BadRequest(format!("unsupported canonical ingest stage: {stage_name}"))
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        INGEST_STAGE_EXTRACT_TECHNICAL_FACTS, INGEST_STAGE_PREPARE_STRUCTURE,
+        INGEST_STAGE_WEB_DISCOVERY, INGEST_STAGE_WEB_MATERIALIZE_PAGE,
+        canonical_ingest_stage_metadata, normalize_stage_name,
+    };
+
+    #[test]
+    fn normalizes_and_accepts_new_canonical_stage_names() {
+        assert_eq!(
+            normalize_stage_name("  Prepare_Structure ")
+                .expect("prepare_structure should normalize"),
+            INGEST_STAGE_PREPARE_STRUCTURE
+        );
+        assert_eq!(
+            normalize_stage_name("extract_technical_facts")
+                .expect("extract_technical_facts should be canonical"),
+            INGEST_STAGE_EXTRACT_TECHNICAL_FACTS
+        );
+        assert_eq!(
+            normalize_stage_name("WEB_DISCOVERY").expect("web_discovery should normalize"),
+            INGEST_STAGE_WEB_DISCOVERY
+        );
+        assert_eq!(
+            normalize_stage_name("web_materialize_page")
+                .expect("web_materialize_page should be canonical"),
+            INGEST_STAGE_WEB_MATERIALIZE_PAGE
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_stage_names() {
+        let error =
+            normalize_stage_name("legacy_stage").expect_err("legacy stage must be rejected");
+        assert_eq!(error.kind(), "bad_request");
+    }
+
+    #[test]
+    fn exposes_ranked_stage_metadata() {
+        let metadata = canonical_ingest_stage_metadata(INGEST_STAGE_EXTRACT_TECHNICAL_FACTS)
+            .expect("metadata should exist");
+        assert_eq!(metadata.lifecycle_kind, "grounding");
+        assert_eq!(metadata.stage_rank, 50);
+
+        let web_metadata = canonical_ingest_stage_metadata(INGEST_STAGE_WEB_DISCOVERY)
+            .expect("metadata should exist");
+        assert_eq!(web_metadata.lifecycle_kind, "web_discovery");
+        assert_eq!(web_metadata.stage_rank, 15);
+    }
 }
 
 fn map_job_row(row: ingest_repository::IngestJobRow) -> IngestJob {
@@ -672,6 +855,22 @@ fn map_attempt_row(row: ingest_repository::IngestAttemptRow) -> IngestAttempt {
         failure_class: row.failure_class,
         failure_code: row.failure_code,
         retryable: row.retryable,
+    }
+}
+
+fn map_async_operation_row(row: ops_repository::OpsAsyncOperationRow) -> OpsAsyncOperation {
+    OpsAsyncOperation {
+        id: row.id,
+        workspace_id: row.workspace_id,
+        library_id: row.library_id,
+        operation_kind: row.operation_kind,
+        status: row.status,
+        surface_kind: Some(row.surface_kind),
+        subject_kind: Some(row.subject_kind),
+        subject_id: row.subject_id,
+        failure_code: row.failure_code,
+        created_at: row.created_at,
+        completed_at: row.completed_at,
     }
 }
 

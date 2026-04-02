@@ -17,6 +17,8 @@ use crate::{
     shared::auth_tokens,
 };
 
+const AUTH_ACTIVITY_REFRESH_INTERVAL_SECS: i64 = 30;
+
 #[derive(Clone, Debug)]
 pub struct AuthGrant {
     pub id: Uuid,
@@ -309,6 +311,19 @@ pub fn build_session_cookie_value(session_id: Uuid, secret: &str) -> String {
 
 pub fn parse_session_cookie_value(raw: &str) -> Option<(Uuid, String)> {
     auth_tokens::parse_session_cookie_value(raw)
+}
+
+fn auth_activity_refresh_due(
+    last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    match last_seen_at {
+        Some(last_seen_at) => {
+            now.signed_duration_since(last_seen_at).num_seconds()
+                >= AUTH_ACTIVITY_REFRESH_INTERVAL_SECS
+        }
+        None => true,
+    }
 }
 
 fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -794,6 +809,7 @@ fn collect_permission_kinds(grants: &[iam_repository::ResolvedIamGrantScopeRow])
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     fn workspace_token(workspace_id: Option<Uuid>) -> AuthContext {
         let visible_workspace_ids =
@@ -1058,6 +1074,29 @@ mod tests {
 
         assert!(authorize_token_creation(&auth, Some(workspace_id)).is_ok());
     }
+
+    #[test]
+    fn auth_activity_refresh_is_skipped_inside_refresh_window() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().expect("valid timestamp");
+        let last_seen_at = now - chrono::Duration::seconds(29);
+
+        assert!(!auth_activity_refresh_due(Some(last_seen_at), now));
+    }
+
+    #[test]
+    fn auth_activity_refresh_is_due_at_threshold() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().expect("valid timestamp");
+        let last_seen_at = now - chrono::Duration::seconds(AUTH_ACTIVITY_REFRESH_INTERVAL_SECS);
+
+        assert!(auth_activity_refresh_due(Some(last_seen_at), now));
+    }
+
+    #[test]
+    fn auth_activity_refresh_is_due_when_timestamp_missing() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().expect("valid timestamp");
+
+        assert!(auth_activity_refresh_due(None, now));
+    }
 }
 
 impl FromRequestParts<AppState> for AuthContext {
@@ -1086,12 +1125,28 @@ impl FromRequestParts<AppState> for AuthContext {
                 .map_err(|_| ApiError::Internal)?
                 .ok_or(ApiError::Unauthorized)?;
 
-                iam_repository::touch_api_token(
-                    &state.persistence.postgres,
-                    token_row.principal_id,
-                )
-                .await
-                .map_err(|_| ApiError::Internal)?;
+                let now = Utc::now();
+                if auth_activity_refresh_due(token_row.last_used_at, now) {
+                    let postgres = state.persistence.postgres.clone();
+                    let stale_before =
+                        now - chrono::Duration::seconds(AUTH_ACTIVITY_REFRESH_INTERVAL_SECS);
+                    let principal_id = token_row.principal_id;
+                    tokio::spawn(async move {
+                        if let Err(error) = iam_repository::touch_api_token_if_stale(
+                            &postgres,
+                            principal_id,
+                            stale_before,
+                        )
+                        .await
+                        {
+                            warn!(
+                                %principal_id,
+                                ?error,
+                                "failed to refresh iam api token last_used_at",
+                            );
+                        }
+                    });
+                }
 
                 return build_auth_context_for_principal(
                     &state,
@@ -1119,9 +1174,24 @@ impl FromRequestParts<AppState> for AuthContext {
             if session_row.session_secret_hash != hash_session_secret(&session_secret) {
                 return Err(ApiError::Unauthorized);
             }
-            iam_repository::touch_session(&state.persistence.postgres, session_id)
-                .await
-                .map_err(|_| ApiError::Internal)?;
+            let now = Utc::now();
+            if auth_activity_refresh_due(Some(session_row.last_seen_at), now) {
+                let postgres = state.persistence.postgres.clone();
+                let stale_before =
+                    now - chrono::Duration::seconds(AUTH_ACTIVITY_REFRESH_INTERVAL_SECS);
+                tokio::spawn(async move {
+                    if let Err(error) =
+                        iam_repository::touch_session_if_stale(&postgres, session_id, stale_before)
+                            .await
+                    {
+                        warn!(
+                            %session_id,
+                            ?error,
+                            "failed to refresh iam session last_seen_at",
+                        );
+                    }
+                });
+            }
 
             build_auth_context_for_principal(
                 &state,

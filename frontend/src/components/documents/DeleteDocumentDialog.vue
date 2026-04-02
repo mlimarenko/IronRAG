@@ -16,9 +16,7 @@ const emit = defineEmits<{
 
 const confirmInput = ref('')
 
-const canSubmit = computed(
-  () => confirmInput.value.trim() === (props.documentName ?? ''),
-)
+const canSubmit = computed(() => confirmInput.value.trim() === (props.documentName ?? ''))
 
 watch(
   () => props.open,
@@ -63,13 +61,10 @@ function submit(): void {
         type="text"
         autocomplete="off"
         @keydown.enter="submit"
-      >
+      />
     </div>
 
-    <p
-      v-if="props.error"
-      class="rr-document-dialog__error"
-    >
+    <p v-if="props.error" class="rr-document-dialog__error">
       {{ props.error }}
     </p>
   </DocumentDialogShell>

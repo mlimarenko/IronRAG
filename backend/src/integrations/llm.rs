@@ -19,6 +19,7 @@ pub struct ChatRequest {
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
     pub max_output_tokens_override: Option<i32>,
+    pub response_format_json: Option<serde_json::Value>,
     pub extra_parameters_json: serde_json::Value,
 }
 
@@ -152,6 +153,8 @@ struct OpenAiCompatibleChatCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<serde_json::Value>,
@@ -186,6 +189,7 @@ impl UnifiedGateway {
         temperature: Option<f64>,
         top_p: Option<f64>,
         max_output_tokens: Option<i32>,
+        response_format_json: Option<&serde_json::Value>,
         extra_parameters_json: &serde_json::Value,
     ) -> Result<(String, serde_json::Value)> {
         let request_body = serialize_openai_compatible_chat_request(
@@ -195,6 +199,7 @@ impl UnifiedGateway {
             temperature,
             top_p,
             max_output_tokens,
+            response_format_json,
             extra_parameters_json,
             false,
         )?;
@@ -296,6 +301,7 @@ impl UnifiedGateway {
         temperature: Option<f64>,
         top_p: Option<f64>,
         max_output_tokens: Option<i32>,
+        response_format_json: Option<&serde_json::Value>,
         extra_parameters_json: &serde_json::Value,
         on_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<(String, serde_json::Value)> {
@@ -306,6 +312,7 @@ impl UnifiedGateway {
             temperature,
             top_p,
             max_output_tokens,
+            response_format_json,
             extra_parameters_json,
             true,
         )?;
@@ -542,6 +549,7 @@ impl LlmGateway for UnifiedGateway {
                 request.temperature,
                 request.top_p,
                 request.max_output_tokens_override,
+                request.response_format_json.as_ref(),
                 &request.extra_parameters_json,
             )
             .await?;
@@ -577,6 +585,7 @@ impl LlmGateway for UnifiedGateway {
                 request.temperature,
                 request.top_p,
                 request.max_output_tokens_override,
+                request.response_format_json.as_ref(),
                 &request.extra_parameters_json,
                 on_delta,
             )
@@ -749,6 +758,7 @@ impl LlmGateway for UnifiedGateway {
                 request.temperature,
                 request.top_p,
                 request.max_output_tokens_override,
+                None,
                 &request.extra_parameters_json,
             )
             .await?;
@@ -863,6 +873,7 @@ fn serialize_openai_compatible_chat_request(
     temperature: Option<f64>,
     top_p: Option<f64>,
     max_output_tokens: Option<i32>,
+    response_format_json: Option<&serde_json::Value>,
     extra_parameters_json: &serde_json::Value,
     stream: bool,
 ) -> Result<Vec<u8>> {
@@ -881,6 +892,7 @@ fn serialize_openai_compatible_chat_request(
         temperature,
         top_p,
         max_output_tokens,
+        response_format: response_format_json.cloned(),
         stream: stream.then_some(true),
         stream_options: stream.then(|| serde_json::json!({ "include_usage": true })),
         extra_parameters_json: extra_parameters_json.clone(),
@@ -976,6 +988,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &serde_json::json!({}),
             false,
         )
@@ -991,6 +1004,41 @@ mod tests {
                 .and_then(|item| item.get("content"))
                 .and_then(serde_json::Value::as_str),
             Some("hello"),
+        );
+    }
+
+    #[test]
+    fn serializes_response_format_when_schema_is_requested() {
+        let body = serialize_openai_compatible_chat_request(
+            "gpt-5.4-mini",
+            vec![OpenAiCompatibleMessage {
+                role: "user".to_string(),
+                content: OpenAiCompatibleMessageContent::Text("hello".to_string()),
+            }],
+            None,
+            None,
+            None,
+            None,
+            Some(&serde_json::json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "graph_extraction",
+                    "strict": true,
+                    "schema": {"type": "object"}
+                }
+            })),
+            &serde_json::json!({}),
+            false,
+        )
+        .expect("request body should serialize");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("serialized body should stay valid json");
+        assert_eq!(
+            value
+                .get("response_format")
+                .and_then(|item| item.get("type"))
+                .and_then(serde_json::Value::as_str),
+            Some("json_schema"),
         );
     }
 

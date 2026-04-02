@@ -201,6 +201,33 @@ pub async fn get_document_by_id(
     .await
 }
 
+pub async fn get_document_by_external_key(
+    postgres: &PgPool,
+    library_id: Uuid,
+    external_key: &str,
+) -> Result<Option<ContentDocumentRow>, sqlx::Error> {
+    sqlx::query_as::<_, ContentDocumentRow>(
+        "select
+            id,
+            workspace_id,
+            library_id,
+            external_key,
+            document_state::text as document_state,
+            created_by_principal_id,
+            created_at,
+            deleted_at
+         from content_document
+         where library_id = $1
+           and external_key = $2
+         order by created_at desc, id desc
+         limit 1",
+    )
+    .bind(library_id)
+    .bind(external_key)
+    .fetch_optional(postgres)
+    .await
+}
+
 pub async fn create_document(
     postgres: &PgPool,
     new_document: &NewContentDocument<'_>,

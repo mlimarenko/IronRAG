@@ -49,7 +49,12 @@ type EditableAssignmentForm = {
 type SettingsSection = 'providers' | 'credentials' | 'modelPresets' | 'assignments'
 type LibraryTaskPurpose = 'extract_graph' | 'embed_chunk' | 'query_answer' | 'vision'
 
-const LIBRARY_TASKS: LibraryTaskPurpose[] = ['extract_graph', 'embed_chunk', 'query_answer', 'vision']
+const LIBRARY_TASKS: LibraryTaskPurpose[] = [
+  'extract_graph',
+  'embed_chunk',
+  'query_answer',
+  'vision',
+]
 
 const props = defineProps<{
   settings: AdminAiConsoleState
@@ -69,7 +74,8 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
-const { bindingPurposeLabel, enumLabel, formatDateTime, providerStateLabel } = useDisplayFormatters()
+const { bindingPurposeLabel, enumLabel, formatDateTime, providerStateLabel } =
+  useDisplayFormatters()
 
 const searchQuery = ref('')
 const railSection = ref<SettingsSection>('assignments')
@@ -122,7 +128,11 @@ watch(
     if (!settings.models.some((model) => model.id === presetForm.modelCatalogId)) {
       presetForm.modelCatalogId = settings.models[0]?.id ?? ''
     }
-    if (!settings.credentials.some((credential) => credential.id === assignmentForm.providerCredentialId)) {
+    if (
+      !settings.credentials.some(
+        (credential) => credential.id === assignmentForm.providerCredentialId,
+      )
+    ) {
       assignmentForm.providerCredentialId = settings.credentials[0]?.id ?? ''
     }
     if (!settings.modelPresets.some((preset) => preset.id === assignmentForm.modelPresetId)) {
@@ -152,9 +162,7 @@ const providerMap = computed(
   () => new Map(props.settings.providers.map((provider) => [provider.id, provider])),
 )
 
-const modelMap = computed(
-  () => new Map(props.settings.models.map((model) => [model.id, model])),
-)
+const modelMap = computed(() => new Map(props.settings.models.map((model) => [model.id, model])))
 
 const presetMap = computed(
   () => new Map(props.settings.modelPresets.map((preset) => [preset.id, preset])),
@@ -200,7 +208,7 @@ const presetRows = computed(() =>
   props.settings.modelPresets
     .map((preset) => {
       const model = modelMap.value.get(preset.modelCatalogId) ?? null
-      const provider = model ? providerMap.value.get(model.providerCatalogId) ?? null : null
+      const provider = model ? (providerMap.value.get(model.providerCatalogId) ?? null) : null
       return { ...preset, model, provider }
     })
     .sort((left, right) => left.presetName.localeCompare(right.presetName)),
@@ -211,11 +219,11 @@ const assignmentRows = computed(() =>
     const credential =
       props.settings.credentials.find((item) => item.id === binding.providerCredentialId) ?? null
     const preset = presetMap.value.get(binding.modelPresetId) ?? null
-    const model = preset ? modelMap.value.get(preset.modelCatalogId) ?? null : null
+    const model = preset ? (modelMap.value.get(preset.modelCatalogId) ?? null) : null
     const provider = credential
-      ? providerMap.value.get(credential.providerCatalogId) ?? null
+      ? (providerMap.value.get(credential.providerCatalogId) ?? null)
       : model
-        ? providerMap.value.get(model.providerCatalogId) ?? null
+        ? (providerMap.value.get(model.providerCatalogId) ?? null)
         : null
     return {
       ...binding,
@@ -241,20 +249,28 @@ function modelSupportsBindingPurpose(modelCatalogId: string, purpose: LibraryTas
 
 const purposeCompatiblePresetOptions = computed(() =>
   props.settings.modelPresets.filter((preset) =>
-    modelSupportsBindingPurpose(preset.modelCatalogId, assignmentForm.bindingPurpose as LibraryTaskPurpose),
+    modelSupportsBindingPurpose(
+      preset.modelCatalogId,
+      assignmentForm.bindingPurpose as LibraryTaskPurpose,
+    ),
   ),
 )
 
-const assignmentCredentialOptions = computed(() => {
-  const compatibleProviderIds = new Set(
-    purposeCompatiblePresetOptions.value
-      .map((preset) => modelMap.value.get(preset.modelCatalogId)?.providerCatalogId ?? null)
-      .filter((providerCatalogId): providerCatalogId is string => providerCatalogId !== null),
-  )
-  return props.settings.credentials.filter((credential) =>
-    compatibleProviderIds.has(credential.providerCatalogId),
+/** Providers that expose at least one catalog model allowed for the selected library task. */
+const providerIdsSupportingAssignmentPurpose = computed(() => {
+  const purpose = assignmentForm.bindingPurpose as LibraryTaskPurpose
+  return new Set(
+    props.settings.models
+      .filter((model) => model.allowedBindingPurposes.includes(purpose))
+      .map((model) => model.providerCatalogId),
   )
 })
+
+const assignmentCredentialOptions = computed(() =>
+  props.settings.credentials.filter((credential) =>
+    providerIdsSupportingAssignmentPurpose.value.has(credential.providerCatalogId),
+  ),
+)
 
 const assignmentPresetOptions = computed(() => {
   const selectedCredential = assignmentCredentialOptions.value.find(
@@ -282,8 +298,8 @@ const activeValidation = computed(() => {
     return null
   }
   return (
-    assignmentRows.value.find((binding) => binding.id === assignmentForm.bindingId)?.latestValidation ??
-    null
+    assignmentRows.value.find((binding) => binding.id === assignmentForm.bindingId)
+      ?.latestValidation ?? null
   )
 })
 
@@ -365,7 +381,8 @@ const railSections = computed(() => [
 ])
 
 const activeRailSectionMeta = computed(
-  () => railSections.value.find((section) => section.id === railSection.value) ?? railSections.value[0],
+  () =>
+    railSections.value.find((section) => section.id === railSection.value) ?? railSections.value[0],
 )
 
 const activeRailSelectionKeys = computed(() => selectionKeysForSection(railSection.value))
@@ -374,8 +391,12 @@ const selectedProvider = computed(() => {
   if (editingSection.value !== 'providers') {
     return null
   }
-  const providerId = selectionKey.value?.startsWith('provider:') ? selectionKey.value.slice(9) : null
-  return providerId ? providerRows.value.find((provider) => provider.id === providerId) ?? null : null
+  const providerId = selectionKey.value?.startsWith('provider:')
+    ? selectionKey.value.slice(9)
+    : null
+  return providerId
+    ? (providerRows.value.find((provider) => provider.id === providerId) ?? null)
+    : null
 })
 
 const selectedProviderModels = computed(() => {
@@ -395,7 +416,7 @@ const selectedCredential = computed(() => {
     ? selectionKey.value.slice(11)
     : null
   return credentialId
-    ? credentialRows.value.find((credential) => credential.id === credentialId) ?? null
+    ? (credentialRows.value.find((credential) => credential.id === credentialId) ?? null)
     : null
 })
 
@@ -404,7 +425,7 @@ const selectedPreset = computed(() => {
     return null
   }
   const presetId = selectionKey.value?.startsWith('preset:') ? selectionKey.value.slice(7) : null
-  return presetId ? presetRows.value.find((preset) => preset.id === presetId) ?? null : null
+  return presetId ? (presetRows.value.find((preset) => preset.id === presetId) ?? null) : null
 })
 
 const selectedTask = computed(() => {
@@ -460,7 +481,11 @@ watch(
       }
       return
     }
-    if (editingSection.value !== railSection.value || !selectionKey.value || !keys.includes(selectionKey.value)) {
+    if (
+      editingSection.value !== railSection.value ||
+      !selectionKey.value ||
+      !keys.includes(selectionKey.value)
+    ) {
       activateSelection(keys[0])
     }
   },
@@ -517,7 +542,10 @@ function presetSelectionKey(presetId: string): string {
   return `preset:${presetId}`
 }
 
-function taskSelectionKey(task: { purpose: LibraryTaskPurpose; binding: AdminLibraryBinding | null }): string {
+function taskSelectionKey(task: {
+  purpose: LibraryTaskPurpose
+  binding: AdminLibraryBinding | null
+}): string {
   return task.binding ? `binding:${task.binding.id}` : `binding-purpose:${task.purpose}`
 }
 
@@ -592,7 +620,9 @@ function activateSelection(key: string): void {
       openNewCredential()
       return
     }
-    const credential = props.settings.credentials.find((item) => credentialSelectionKey(item.id) === key)
+    const credential = props.settings.credentials.find(
+      (item) => credentialSelectionKey(item.id) === key,
+    )
     if (credential) {
       selectCredential(credential)
     }
@@ -856,7 +886,14 @@ watch(
         <header class="rr-admin-workbench__pane-head">
           <div class="rr-admin-workbench__pane-copy">
             <h3>{{ $t('admin.aiCatalog.title') }}</h3>
-            <p>{{ $t('admin.aiCatalog.workspaceSubtitle', { workspace: settings.workspaceName, library: settings.libraryName }) }}</p>
+            <p>
+              {{
+                $t('admin.aiCatalog.workspaceSubtitle', {
+                  workspace: settings.workspaceName,
+                  library: settings.libraryName,
+                })
+              }}
+            </p>
           </div>
         </header>
 
@@ -935,15 +972,15 @@ watch(
               :key="provider.id"
               type="button"
               class="rr-admin-workbench__row"
-              :class="{ 'rr-admin-workbench__row--active': selectionKey === providerSelectionKey(provider.id) }"
+              :class="{
+                'rr-admin-workbench__row--active':
+                  selectionKey === providerSelectionKey(provider.id),
+              }"
               @click="selectProvider(provider)"
             >
               <div class="rr-admin-workbench__row-head">
                 <strong>{{ provider.displayName }}</strong>
-                <span
-                  class="rr-status-pill"
-                  :class="providerStatusClass(provider.lifecycleState)"
-                >
+                <span class="rr-status-pill" :class="providerStatusClass(provider.lifecycleState)">
                   {{ providerStateLabel(provider.lifecycleState) }}
                 </span>
               </div>
@@ -951,7 +988,12 @@ watch(
                 {{ enumLabel('admin.aiCatalog.apiStyles', provider.apiStyle) }}
               </span>
               <div class="rr-admin-workbench__row-meta">
-                <span>{{ t('admin.aiCatalog.providerSummary', { models: provider.modelCount, credentials: provider.credentialCount }) }}</span>
+                <span>{{
+                  t('admin.aiCatalog.providerSummary', {
+                    models: provider.modelCount,
+                    credentials: provider.credentialCount,
+                  })
+                }}</span>
               </div>
             </button>
           </div>
@@ -965,7 +1007,10 @@ watch(
               :key="credential.id"
               type="button"
               class="rr-admin-workbench__row"
-              :class="{ 'rr-admin-workbench__row--active': selectionKey === credentialSelectionKey(credential.id) }"
+              :class="{
+                'rr-admin-workbench__row--active':
+                  selectionKey === credentialSelectionKey(credential.id),
+              }"
               @click="selectCredential(credential)"
             >
               <div class="rr-admin-workbench__row-head">
@@ -996,7 +1041,9 @@ watch(
               :key="preset.id"
               type="button"
               class="rr-admin-workbench__row"
-              :class="{ 'rr-admin-workbench__row--active': selectionKey === presetSelectionKey(preset.id) }"
+              :class="{
+                'rr-admin-workbench__row--active': selectionKey === presetSelectionKey(preset.id),
+              }"
               @click="selectPreset(preset)"
             >
               <div class="rr-admin-workbench__row-head">
@@ -1023,14 +1070,18 @@ watch(
               :key="task.purpose"
               type="button"
               class="rr-admin-workbench__row"
-              :class="{ 'rr-admin-workbench__row--active': selectionKey === taskSelectionKey(task) }"
+              :class="{
+                'rr-admin-workbench__row--active': selectionKey === taskSelectionKey(task),
+              }"
               @click="selectAssignment(task.purpose)"
             >
               <div class="rr-admin-workbench__row-head">
                 <strong>{{ bindingPurposeLabel(task.purpose) }}</strong>
                 <span
                   class="rr-status-pill"
-                  :class="task.binding ? providerStatusClass(task.binding.bindingState) : 'is-muted'"
+                  :class="
+                    task.binding ? providerStatusClass(task.binding.bindingState) : 'is-muted'
+                  "
                 >
                   {{
                     task.binding
@@ -1049,10 +1100,7 @@ watch(
             </button>
           </div>
 
-          <p
-            v-else
-            class="rr-admin-workbench__state"
-          >
+          <p v-else class="rr-admin-workbench__state">
             {{
               searchQuery
                 ? $t('shared.feedbackState.noResults')
@@ -1108,10 +1156,7 @@ watch(
           <section class="rr-admin-workbench__detail-section">
             <h4>{{ $t('admin.headers.models') }}</h4>
             <ul class="rr-admin-ai-workbench__model-list">
-              <li
-                v-for="model in selectedProviderModels"
-                :key="model.id"
-              >
+              <li v-for="model in selectedProviderModels" :key="model.id">
                 <strong>{{ model.modelName }}</strong>
                 <span>{{ model.capabilityKind }}</span>
               </li>
@@ -1126,20 +1171,13 @@ watch(
             >
               {{ $t('admin.aiCatalog.createCredential') }}
             </button>
-            <button
-              class="rr-button"
-              type="button"
-              @click="openNewPreset(selectedProvider.id)"
-            >
+            <button class="rr-button" type="button" @click="openNewPreset(selectedProvider.id)">
               {{ $t('admin.aiCatalog.createPreset') }}
             </button>
           </div>
         </div>
 
-        <div
-          v-else-if="editingSection === 'credentials'"
-          class="rr-admin-workbench__detail-card"
-        >
+        <div v-else-if="editingSection === 'credentials'" class="rr-admin-workbench__detail-card">
           <header class="rr-admin-workbench__detail-head">
             <div class="rr-admin-workbench__pane-copy">
               <h3>
@@ -1152,23 +1190,24 @@ watch(
               <p>
                 {{
                   selectedCredential?.provider?.displayName ??
-                    $t('admin.aiCatalog.credentialsSubtitle')
+                  $t('admin.aiCatalog.credentialsSubtitle')
                 }}
               </p>
             </div>
           </header>
 
-          <dl
-            v-if="selectedCredential"
-            class="rr-admin-workbench__detail-grid"
-          >
+          <dl v-if="selectedCredential" class="rr-admin-workbench__detail-grid">
             <div>
               <dt>{{ $t('admin.headers.provider') }}</dt>
               <dd>{{ selectedCredential.provider?.displayName ?? '—' }}</dd>
             </div>
             <div>
               <dt>{{ $t('admin.headers.state') }}</dt>
-              <dd>{{ enumLabel('admin.aiCatalog.credentialStates', selectedCredential.credentialState) }}</dd>
+              <dd>
+                {{
+                  enumLabel('admin.aiCatalog.credentialStates', selectedCredential.credentialState)
+                }}
+              </dd>
             </div>
             <div>
               <dt>{{ $t('admin.headers.updated') }}</dt>
@@ -1203,10 +1242,7 @@ watch(
 
             <label class="rr-admin-ai-workbench__field rr-admin-ai-workbench__field--wide">
               <span>{{ $t('admin.headers.label') }}</span>
-              <input
-                v-model="credentialForm.label"
-                type="text"
-              >
+              <input v-model="credentialForm.label" type="text" />
             </label>
 
             <label class="rr-admin-ai-workbench__field rr-admin-ai-workbench__field--wide">
@@ -1219,28 +1255,27 @@ watch(
                     ? $t('admin.aiCatalog.apiKeyKeepExistingPlaceholder')
                     : $t('admin.aiCatalog.apiKeyPlaceholder')
                 "
-              >
+              />
             </label>
 
-            <label
-              v-if="credentialForm.credentialId"
-              class="rr-admin-ai-workbench__field"
-            >
+            <label v-if="credentialForm.credentialId" class="rr-admin-ai-workbench__field">
               <span>{{ $t('admin.headers.state') }}</span>
               <select v-model="credentialForm.credentialState">
-                <option value="active">{{ enumLabel('admin.aiCatalog.credentialStates', 'active') }}</option>
-                <option value="invalid">{{ enumLabel('admin.aiCatalog.credentialStates', 'invalid') }}</option>
-                <option value="revoked">{{ enumLabel('admin.aiCatalog.credentialStates', 'revoked') }}</option>
+                <option value="active">
+                  {{ enumLabel('admin.aiCatalog.credentialStates', 'active') }}
+                </option>
+                <option value="invalid">
+                  {{ enumLabel('admin.aiCatalog.credentialStates', 'invalid') }}
+                </option>
+                <option value="revoked">
+                  {{ enumLabel('admin.aiCatalog.credentialStates', 'revoked') }}
+                </option>
               </select>
             </label>
           </div>
 
           <div class="rr-admin-workbench__detail-actions">
-            <button
-              class="rr-button rr-button--ghost"
-              type="button"
-              @click="openNewCredential()"
-            >
+            <button class="rr-button rr-button--ghost" type="button" @click="openNewCredential()">
               {{ $t('admin.aiCatalog.createCredential') }}
             </button>
             <button
@@ -1258,10 +1293,7 @@ watch(
           </div>
         </div>
 
-        <div
-          v-else-if="editingSection === 'modelPresets'"
-          class="rr-admin-workbench__detail-card"
-        >
+        <div v-else-if="editingSection === 'modelPresets'" class="rr-admin-workbench__detail-card">
           <header class="rr-admin-workbench__detail-head">
             <div class="rr-admin-workbench__pane-copy">
               <h3>
@@ -1281,10 +1313,7 @@ watch(
             </div>
           </header>
 
-          <dl
-            v-if="selectedPreset"
-            class="rr-admin-workbench__detail-grid"
-          >
+          <dl v-if="selectedPreset" class="rr-admin-workbench__detail-grid">
             <div>
               <dt>{{ $t('admin.headers.provider') }}</dt>
               <dd>{{ selectedPreset.provider?.displayName ?? '—' }}</dd>
@@ -1307,11 +1336,7 @@ watch(
             <label class="rr-admin-ai-workbench__field rr-admin-ai-workbench__field--wide">
               <span>{{ $t('admin.headers.model') }}</span>
               <select v-model="presetForm.modelCatalogId">
-                <option
-                  v-for="model in settings.models"
-                  :key="model.id"
-                  :value="model.id"
-                >
+                <option v-for="model in settings.models" :key="model.id" :value="model.id">
                   {{ modelDescriptor(model.id) }}
                 </option>
               </select>
@@ -1319,10 +1344,7 @@ watch(
 
             <label class="rr-admin-ai-workbench__field rr-admin-ai-workbench__field--wide">
               <span>{{ $t('admin.headers.preset') }}</span>
-              <input
-                v-model="presetForm.presetName"
-                type="text"
-              >
+              <input v-model="presetForm.presetName" type="text" />
             </label>
 
             <label class="rr-admin-ai-workbench__field rr-admin-ai-workbench__field--wide">
@@ -1332,38 +1354,22 @@ watch(
 
             <label class="rr-admin-ai-workbench__field">
               <span>{{ $t('admin.aiCatalog.temperature') }}</span>
-              <input
-                v-model="presetForm.temperature"
-                type="number"
-                step="0.1"
-              >
+              <input v-model="presetForm.temperature" type="number" step="0.1" />
             </label>
 
             <label class="rr-admin-ai-workbench__field">
               <span>{{ $t('admin.aiCatalog.topP') }}</span>
-              <input
-                v-model="presetForm.topP"
-                type="number"
-                step="0.1"
-              >
+              <input v-model="presetForm.topP" type="number" step="0.1" />
             </label>
 
             <label class="rr-admin-ai-workbench__field">
               <span>{{ $t('admin.aiCatalog.maxOutputTokens') }}</span>
-              <input
-                v-model="presetForm.maxOutputTokensOverride"
-                type="number"
-                min="1"
-              >
+              <input v-model="presetForm.maxOutputTokensOverride" type="number" min="1" />
             </label>
           </div>
 
           <div class="rr-admin-workbench__detail-actions">
-            <button
-              class="rr-button rr-button--ghost"
-              type="button"
-              @click="openNewPreset()"
-            >
+            <button class="rr-button rr-button--ghost" type="button" @click="openNewPreset()">
               {{ $t('admin.aiCatalog.createPreset') }}
             </button>
             <button
@@ -1392,7 +1398,11 @@ watch(
             </div>
             <span
               class="rr-status-pill"
-              :class="selectedTask.binding ? providerStatusClass(selectedTask.binding.bindingState) : 'is-muted'"
+              :class="
+                selectedTask.binding
+                  ? providerStatusClass(selectedTask.binding.bindingState)
+                  : 'is-muted'
+              "
             >
               {{
                 selectedTask.binding
@@ -1434,12 +1444,20 @@ watch(
                 >
                   {{
                     `${credential.label} · ${
-                      providerMap.get(credential.providerCatalogId)?.displayName ?? credential.providerCatalogId
+                      providerMap.get(credential.providerCatalogId)?.displayName ??
+                      credential.providerCatalogId
                     }`
                   }}
                 </option>
               </select>
             </label>
+
+            <p
+              v-if="assignmentCredentialOptions.length > 0 && assignmentPresetOptions.length === 0"
+              class="rr-admin-ai-workbench__field--wide rr-admin-ai-workbench__assignment-hint"
+            >
+              {{ $t('admin.aiCatalog.presetRequiredForTaskHint') }}
+            </p>
 
             <label class="rr-admin-ai-workbench__field rr-admin-ai-workbench__field--wide">
               <span>{{ $t('admin.headers.preset') }}</span>
@@ -1454,24 +1472,26 @@ watch(
               </select>
             </label>
 
-            <label
-              v-if="assignmentForm.bindingId"
-              class="rr-admin-ai-workbench__field"
-            >
+            <label v-if="assignmentForm.bindingId" class="rr-admin-ai-workbench__field">
               <span>{{ $t('admin.headers.state') }}</span>
               <select v-model="assignmentForm.bindingState">
-                <option value="active">{{ enumLabel('admin.aiCatalog.bindingStates', 'active') }}</option>
-                <option value="invalid">{{ enumLabel('admin.aiCatalog.bindingStates', 'invalid') }}</option>
-                <option value="disabled">{{ enumLabel('admin.aiCatalog.bindingStates', 'disabled') }}</option>
+                <option value="active">
+                  {{ enumLabel('admin.aiCatalog.bindingStates', 'active') }}
+                </option>
+                <option value="invalid">
+                  {{ enumLabel('admin.aiCatalog.bindingStates', 'invalid') }}
+                </option>
+                <option value="disabled">
+                  {{ enumLabel('admin.aiCatalog.bindingStates', 'disabled') }}
+                </option>
               </select>
             </label>
           </div>
 
-          <div
-            v-if="activeValidation"
-            class="rr-admin-ai-workbench__validation"
-          >
-            <strong>{{ enumLabel('admin.aiCatalog.validationStates', activeValidation.validationState) }}</strong>
+          <div v-if="activeValidation" class="rr-admin-ai-workbench__validation">
+            <strong>{{
+              enumLabel('admin.aiCatalog.validationStates', activeValidation.validationState)
+            }}</strong>
             <span>{{ formatDateTime(activeValidation.checkedAt) }}</span>
             <span v-if="activeValidation.failureCode">{{ activeValidation.failureCode }}</span>
             <p v-if="activeValidation.message">{{ activeValidation.message }}</p>
@@ -1506,10 +1526,7 @@ watch(
           </div>
         </div>
 
-        <div
-          v-else
-          class="rr-admin-workbench__state rr-admin-workbench__state--detail"
-        >
+        <div v-else class="rr-admin-workbench__state rr-admin-workbench__state--detail">
           {{ $t('admin.aiCatalog.editorPromptDescription') }}
         </div>
       </section>
@@ -1711,6 +1728,13 @@ watch(
   color: var(--rr-text-primary);
   font-size: 0.88rem;
   line-height: 1.4;
+}
+
+.rr-admin-ai-workbench__assignment-hint {
+  margin: 0;
+  color: var(--rr-text-secondary);
+  font-size: 0.82rem;
+  line-height: 1.45;
 }
 
 @media (max-width: 900px) {

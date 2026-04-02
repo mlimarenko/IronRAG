@@ -1105,6 +1105,10 @@ async fn mcp_tools_list_hides_unauthorized_mutation_and_admin_tools() -> Result<
         assert!(!names.contains(&"upload_documents".to_string()));
         assert!(!names.contains(&"update_document".to_string()));
         assert!(!names.contains(&"get_mutation_status".to_string()));
+        assert!(!names.contains(&"submit_web_ingest_run".to_string()));
+        assert!(!names.contains(&"get_web_ingest_run".to_string()));
+        assert!(!names.contains(&"list_web_ingest_run_pages".to_string()));
+        assert!(!names.contains(&"cancel_web_ingest_run".to_string()));
         assert!(!names.contains(&"list_audit_events".to_string()));
 
         Ok(())
@@ -1174,6 +1178,10 @@ async fn mcp_tools_list_respects_system_workspace_library_and_document_grants() 
         assert!(system_tools.contains(&"upload_documents".to_string()));
         assert!(system_tools.contains(&"update_document".to_string()));
         assert!(system_tools.contains(&"get_mutation_status".to_string()));
+        assert!(system_tools.contains(&"submit_web_ingest_run".to_string()));
+        assert!(system_tools.contains(&"get_web_ingest_run".to_string()));
+        assert!(system_tools.contains(&"list_web_ingest_run_pages".to_string()));
+        assert!(system_tools.contains(&"cancel_web_ingest_run".to_string()));
 
         let workspace_tools = tool_names(&fixture.mcp_tools_list(&workspace_admin).await?)?;
         assert!(!workspace_tools.contains(&"create_workspace".to_string()));
@@ -1183,6 +1191,10 @@ async fn mcp_tools_list_respects_system_workspace_library_and_document_grants() 
         assert!(workspace_tools.contains(&"upload_documents".to_string()));
         assert!(workspace_tools.contains(&"update_document".to_string()));
         assert!(workspace_tools.contains(&"get_mutation_status".to_string()));
+        assert!(workspace_tools.contains(&"submit_web_ingest_run".to_string()));
+        assert!(workspace_tools.contains(&"get_web_ingest_run".to_string()));
+        assert!(workspace_tools.contains(&"list_web_ingest_run_pages".to_string()));
+        assert!(workspace_tools.contains(&"cancel_web_ingest_run".to_string()));
 
         let library_tools = tool_names(&fixture.mcp_tools_list(&library_writer).await?)?;
         assert!(!library_tools.contains(&"create_workspace".to_string()));
@@ -1192,6 +1204,10 @@ async fn mcp_tools_list_respects_system_workspace_library_and_document_grants() 
         assert!(library_tools.contains(&"upload_documents".to_string()));
         assert!(library_tools.contains(&"update_document".to_string()));
         assert!(library_tools.contains(&"get_mutation_status".to_string()));
+        assert!(library_tools.contains(&"submit_web_ingest_run".to_string()));
+        assert!(library_tools.contains(&"get_web_ingest_run".to_string()));
+        assert!(library_tools.contains(&"list_web_ingest_run_pages".to_string()));
+        assert!(library_tools.contains(&"cancel_web_ingest_run".to_string()));
 
         let document_tools = tool_names(&fixture.mcp_tools_list(&document_writer).await?)?;
         assert!(!document_tools.contains(&"create_workspace".to_string()));
@@ -1201,6 +1217,10 @@ async fn mcp_tools_list_respects_system_workspace_library_and_document_grants() 
         assert!(!document_tools.contains(&"upload_documents".to_string()));
         assert!(document_tools.contains(&"update_document".to_string()));
         assert!(document_tools.contains(&"get_mutation_status".to_string()));
+        assert!(!document_tools.contains(&"submit_web_ingest_run".to_string()));
+        assert!(!document_tools.contains(&"get_web_ingest_run".to_string()));
+        assert!(!document_tools.contains(&"list_web_ingest_run_pages".to_string()));
+        assert!(!document_tools.contains(&"cancel_web_ingest_run".to_string()));
         assert!(!document_tools.contains(&"list_audit_events".to_string()));
 
         Ok(())

@@ -8,9 +8,5 @@ defineProps<{
 </script>
 
 <template>
-  <FeedbackState
-    :title="title"
-    :message="description"
-    kind="empty"
-  />
+  <FeedbackState :title="title" :message="description" kind="empty" />
 </template>

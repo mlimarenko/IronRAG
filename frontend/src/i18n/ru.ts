@@ -9,11 +9,67 @@ const ru = {
     setup: {
       title: 'Настройка первого администратора',
       subtitle:
-        'В этом развёртывании ещё нет администратора. Создайте первый логин и пароль администратора, чтобы завершить начальную настройку.',
+        'В этом развёртывании ещё нет администратора. Создайте первый логин и пароль, а затем выберите канонические AI-модели для стартовой библиотеки.',
       displayName: 'Отображаемое имя',
       displayNamePlaceholder: 'Администратор',
-      hint: 'После первого входа можно настроить креды провайдеров, grants и дополнительные API token.',
-      submit: 'Создать администратора',
+      hint: 'После первого входа эти провайдеры, модели и токены можно изменить в админке без повторной начальной настройки.',
+      submit: 'Создать администратора и завершить настройку',
+      sections: {
+        admin: 'Администратор',
+      },
+      ai: {
+        title: 'AI-настройка',
+        subtitle:
+          'Выберите модели для канонических runtime-задач и добавьте API key только для тех провайдеров, которые не заданы через env.',
+        provider: 'Провайдер',
+        model: 'Модель',
+        credentialsTitle: 'Токены провайдеров',
+        credentialsSubtitle:
+          'Токены запрашиваются только для выбранных провайдеров без серверной env-конфигурации.',
+        apiKey: 'API key',
+        apiKeyPlaceholder: 'sk-...',
+        bindings: {
+          configured: 'По умолчанию из env',
+          unavailable: 'В каталоге пока нет совместимой модели для этой runtime-задачи.',
+          extract_graph: {
+            label: 'Извлечение графа',
+            description:
+              'Модель для извлечения сущностей и связей и канонического построения графа.',
+          },
+          embed_chunk: {
+            label: 'Векторизация чанков',
+            description: 'Модель эмбеддингов для поиска по чанкам и retrieval в библиотеке.',
+          },
+          query_answer: {
+            label: 'Формирование ответа',
+            description: 'Модель, которая формулирует grounded-ответ по выбранным доказательствам.',
+          },
+          vision: {
+            label: 'Зрение',
+            description: 'Модель для изображений и мультимодального extraction-path.',
+          },
+        },
+        providers: {
+          source: {
+            env: 'ключ из env',
+            manual: 'нужен ключ',
+          },
+          envHint: 'Для этого провайдера сервер уже получил API key из env.',
+          manualHint: 'Для этого провайдера нужно ввести API key ниже.',
+          sourceFromEnv: 'Секрет уже задан через env сервера.',
+          sourceNeedsInput: 'Для завершения начальной настройки нужен API key.',
+          envConfigured: 'Во время начальной настройки будет использован server-side env secret.',
+          noneSelected: 'Выбранные bindings пока не требуют отдельных полей для токенов.',
+        },
+        validation: {
+          catalogUnavailable:
+            'Каталог AI bootstrap ещё не готов. Проверьте доступность каталога провайдеров и моделей и обновите страницу.',
+          passwordTooShort: 'Пароль администратора должен быть не короче 8 символов.',
+          completeBindings: 'Для каждой runtime-задачи нужно выбрать провайдера и модель.',
+          completeCredentials:
+            'Введите API key для каждого выбранного провайдера, который не настроен через env.',
+        },
+      },
     },
     heroTitle: 'Превратите документы в граф знаний',
     heroBody:
@@ -33,6 +89,7 @@ const ru = {
     assistant: 'ИИ',
     swagger: 'Swagger',
     admin: 'Админ',
+    navigation: 'Навигация',
     access: {
       admin: 'Доступ администратора',
       write: 'Доступ на запись',
@@ -68,6 +125,14 @@ const ru = {
     title: 'Тестовый чат с базой знаний',
     subtitle:
       'Задавайте вопросы по активной библиотеке {library} и при необходимости прикрепляйте новые файлы прямо в диалог.',
+    summary: {
+      library: 'Библиотека',
+      sessions: 'Сессии',
+      processing: 'В работе',
+      settling: 'Сходится',
+      graphReady: 'Граф готов',
+      typedFacts: 'Typed facts',
+    },
     you: 'Вы',
     sessionFallback: 'Сессия · {createdAt}',
     roomMessage:
@@ -106,6 +171,10 @@ const ru = {
       newSession: 'Открыта новая chat-сессия для активной библиотеки.',
       sessionRolledOver:
         'Открыта новая chat-сессия. Самая старая сессия этой библиотеки была заменена.',
+      summaryUnavailable:
+        'Не удалось обновить готовность библиотеки и graph coverage. Показываю последнее известное состояние.',
+      imagesPasted:
+        'Из буфера добавлено изображений: {count}. После отправки они загрузятся в активную библиотеку.',
       filesUploadedWithQuestion:
         'Загружено файлов: {count}. Если они ещё не готовы, текущий ответ может не учитывать их полностью.',
       filesUploadedOnly:
@@ -120,6 +189,51 @@ const ru = {
       grounding: 'Связываю граф и доказательства',
       answering: 'Формулирую ответ',
     },
+    verification: {
+      eyebrow: 'Проверка ответа',
+      unsupportedTitle: 'Запрошенная возможность не подтверждена в этой библиотеке',
+      unsupportedBody:
+        'Ассистент не смог подтвердить запрошенный технический литерал или возможность по выбранным доказательствам. Перед тем как опираться на ответ, проверьте предупреждения.',
+      detailsToggle: 'Показать детали предупреждений',
+      codes: {
+        unsupported_literal: 'Литерал не подтверждён',
+      },
+      messages: {
+        literalNotGrounded: 'Литерал `{literal}` не найден в выбранных доказательствах.',
+      },
+      states: {
+        not_run: {
+          title: 'Проверка ещё не запускалась',
+          body: 'Последний ответ пока не дошёл до стадии верификации.',
+        },
+        verified: {
+          title: 'Ответ подтверждён каноническими доказательствами',
+          body: 'Ответ совпадает с выбранными подготовленными сегментами и техническими фактами для этого вопроса.',
+        },
+        partially_supported: {
+          title: 'Ответ подтверждён только частично',
+          body: 'Часть ответа grounded, но часть запрошенных деталей всё ещё слабее, чем выбранные доказательства.',
+        },
+        conflicting_evidence: {
+          title: 'Выбранные доказательства конфликтуют',
+          body: 'В текущем наборе доказательств есть конфликтующие технические факты, поэтому ответ пока нельзя считать разрешённым.',
+        },
+        insufficient_evidence: {
+          title: 'Grounded-доказательств недостаточно',
+          body: 'В библиотеке есть связанный материал, но выбранных доказательств пока недостаточно для полного ответа на этот вопрос.',
+        },
+        failed: {
+          title: 'Проверка ответа завершилась неуспешно',
+          body: 'Ответ не удалось подтвердить относительно канонического набора доказательств. Перед использованием проверьте предупреждения.',
+        },
+      },
+    },
+    readinessWarning: {
+      title: 'Покрытие библиотеки ещё сходится',
+      body: 'Это точный технический вопрос, но {readable} читаемых и {graphSparse} graph-sparse документ(ов) ещё не сошлись до устойчивого графового покрытия.',
+      factHint:
+        'У {count} документ(ов) уже есть typed facts; опирайтесь на эти литералы, а не на переформулированный ответ.',
+    },
     starters: {
       summary: 'Сделай короткую сводку по библиотеке и её текущему состоянию.',
       risks: 'Покажи главные риски и что сейчас требует внимания в библиотеке.',
@@ -132,7 +246,7 @@ const ru = {
       messageDeleted: 'Сообщение удалено',
       messagesEmpty: 'Начните первый диалог по базе знаний',
       conversationStarted: 'Сессия началась',
-      typeMessage: 'Спросите что-нибудь по библиотеке',
+      typeMessage: 'Спросите что-нибудь по библиотеке или вставьте изображение',
       search: 'Поиск сессий',
       searchEmptyTitle: 'Сессии не найдены',
       searchEmptyBody: 'Попробуйте очистить поиск или создать новую сессию.',
@@ -177,22 +291,54 @@ const ru = {
         assembling: 'собирается',
       },
       metrics: {
-        chunks: 'Чанки',
+        segments: 'Подготовленные сегменты',
+        facts: 'Технические факты',
         entities: 'Сущности',
         relations: 'Связи',
-        evidence: 'Доказательства',
       },
       sections: {
-        chunks: 'Топ чанков',
+        segments: 'Подготовленные сегменты',
+        facts: 'Точные технические факты',
         entities: 'Топ сущностей',
         relations: 'Топ связей',
-        evidence: 'Топ доказательств',
+      },
+      segmentKinds: {
+        heading: 'Заголовок',
+        paragraph: 'Абзац',
+        list_item: 'Пункт списка',
+        table: 'Таблица',
+        table_row: 'Строка таблицы',
+        code_block: 'Блок кода',
+        endpoint_block: 'Endpoint-блок',
+        quote_block: 'Цитата',
+        metadata_block: 'Метаданные',
+      },
+      factKinds: {
+        url: 'URL',
+        endpoint_path: 'Путь endpoint',
+        http_method: 'HTTP-метод',
+        parameter_name: 'Параметр',
+        port: 'Порт',
+        status_code: 'Код статуса',
+        protocol: 'Протокол',
+        identifier: 'Идентификатор',
+      },
+      graphKinds: {
+        entity: 'Сущность графа',
+        relation: 'Связь графа',
+      },
+      inclusionReasons: {
+        bundle_selected_fact: 'Выбранный факт',
+        technical_fact_support: 'Опора на технический факт',
+        graph_traversal: 'Переход по графу',
+        graph_neighborhood: 'Соседство графа',
+        lexical_entity: 'Лексическое совпадение сущности',
+        lexical_relation: 'Лексическое совпадение связи',
       },
       labels: {
         chunk: 'Чанк {id}',
         entity: 'Сущность {id}',
         relation: 'Связь {id}',
-        evidence: 'Доказательство {id}',
       },
     },
   },
@@ -215,8 +361,8 @@ const ru = {
       noUploadsHint: 'Загрузите первые файлы, чтобы запустить обзор.',
       documents: 'Документы',
       documentsHint: 'Все файлы доступны для поиска и графа.',
-      documentsGraphCatchUpHint:
-        'Для поиска готовы {searchReady}, в графе уже {graphReady}, ещё догоняет {catchUp}.',
+      documentsGraphSparseHint:
+        'Читаемых {readable}, graph-sparse {graphSparse}, в графе уже подтверждено {graphReady}.',
       nextCheck: 'Следующая проверка',
       reviewValue: '{count} пункт(ов) внимания',
       reviewHint: 'Сначала проверьте активные предупреждения.',
@@ -240,9 +386,20 @@ const ru = {
     },
     narrative: {
       empty: 'Загрузите файлы, чтобы появился обзор библиотеки.',
-      attention: 'Ошибок {failed}, в работе {inFlight}, в графе {graphReady}, граф {graph}.',
-      active: 'Документов {total}, в работе {inFlight}, в графе {graphReady}, граф {graph}.',
-      settled: 'Документов {total}, для поиска готово {searchReady}, в графе {graphReady}, граф {graph}.',
+      attention:
+        'Ошибок {failed}, в работе {inFlight}, читаемых {readable}, graph-sparse {graphSparse}, в графе {graphReady}, граф {graph}.',
+      active:
+        'Документов {total}, в работе {inFlight}, читаемых {readable}, graph-sparse {graphSparse}, в графе {graphReady}, граф {graph}.',
+      settled:
+        'Документов {total}, читаемых {readable}, graph-sparse {graphSparse}, в графе {graphReady}, граф {graph}.',
+    },
+    narrativeCalm: {
+      single: 'В библиотеке один документ. Можно открыть документы или перейти к графу.',
+      totalOnly: 'В библиотеке {count} документ(ов).',
+      withLatest: 'В библиотеке {count} документ(ов). Последняя загрузка: {latest}.',
+      processing: 'В библиотеке {count} документ(ов), сейчас обрабатывается {active}.',
+      processingWithLatest:
+        'В библиотеке {count} документ(ов), сейчас обрабатывается {active}. Последняя загрузка: {latest}.',
     },
     graphStatus: {
       ready: 'готов',
@@ -271,10 +428,10 @@ const ru = {
       warningsTitle: 'Предупреждения',
       warningsMessage: '{count} предупрежден(ий) — некоторые документы обработаны с ограничениями.',
       warningsAction: 'Подробнее',
-      graphCatchUpTitle: 'Граф ещё догоняет документы',
-      graphCatchUpMessage:
-        '{count} документ(ов) уже доступны для поиска, но ещё не подтверждены в графовой поверхности.',
-      graphCatchUpAction: 'Открыть документы',
+      graphSparseTitle: 'Графовое покрытие ещё редкое',
+      graphSparseMessage:
+        'Читаемых документов {readable}, graph-sparse документов {graphSparse}; графу ещё нужна более сильная связность.',
+      graphSparseAction: 'Открыть документы',
       graphTitle: 'Граф знаний',
       graphMessage: 'Граф {status} — это нормально, данные скоро обновятся.',
       graphAction: 'Открыть граф',
@@ -291,17 +448,17 @@ const ru = {
     chart: {
       eyebrow: 'Статус библиотеки',
       title: 'Срез статусов',
-      subtitle: 'В графе, только в поиске, в работе и с ошибками.',
+      subtitle: 'Граф готов, читаемо, graph-sparse, в работе и с ошибками.',
       total: 'Всего документов',
       empty: 'Нет данных по статусам.',
       graphReady: 'В графе',
-      graphCatchUp: 'Поиск без графа',
+      graphSparse: 'Читаемо или graph-sparse',
       processing: 'В работе',
       failed: 'Ошибки',
       summaryAllReady: 'Все {count} документов готовы.',
       summarySingleStatus: '{count} документ(ов) сейчас в статусе «{status}».',
       summaryMixed:
-        'В графе {graphReady}, только в поиске {graphCatchUp}, в работе {processing}, с ошибкой {failed}.',
+        'В графе {graphReady}, читаемо или graph-sparse {graphSparse}, в работе {processing}, с ошибкой {failed}.',
     },
   },
   dialogs: {
@@ -341,6 +498,7 @@ const ru = {
       contextEmpty: 'Добавьте первые файлы, чтобы начать работу с библиотекой.',
       loadingDescription: 'Загружаем список документов.',
       visibleDocuments: 'Документов в библиотеке: {count}',
+      tableSummary: 'В таблице {count}',
       filteredDocuments: 'Показано {visible} из {total}',
       filtersApplied: 'Активных фильтров: {count}',
       liveWorkActive: 'Загрузка и обработка продолжаются в фоне.',
@@ -354,7 +512,8 @@ const ru = {
         avgCost: 'Средняя цена',
         documents: 'Документы',
         inFlight: 'В работе',
-        readyNoGraph: 'Граф догоняет',
+        readable: 'Читаемо',
+        graphSparse: 'Graph-sparse',
       },
       table: {
         name: 'Название',
@@ -368,17 +527,24 @@ const ru = {
         title: 'В обработке: {count}',
         queued: 'В очереди: {count}',
         processing: 'Обрабатывается: {count}',
-        graphCatchUpTitle: 'Граф ещё догоняет: {count}',
-        graphCatchUp: 'Поиск готов, без графа: {count}',
+        readinessTitle: 'Покрытие ещё сходится: читаемых {readable}, graph-sparse {graphSparse}',
+        readable: 'Только читаемый текст: {count}',
+        graphSparse: 'Graph-sparse: {count}',
+        webRunTitle: 'Активных web-запусков: {count}',
+        webRuns: '{count} web-запуск(ов) · ещё в очереди или обработке {pages} стр.',
       },
       rowState: {
         queuedEyebrow: 'Ожидает запуска',
         processingEyebrow: 'Идёт обработка',
-        graphCatchUpEyebrow: 'Поиск уже готов',
+        readableEyebrow: 'Читаемый текст готов',
+        graphSparseEyebrow: 'Граф ещё редкий',
         queuedDetail: 'Ждёт свободный слот и продолжит автоматически.',
         processingDetail: 'Идёт канонический ingest, статус обновится сам.',
-        readyNoGraphDetail: 'Текст уже готов, граф ещё догоняет документ.',
+        readableDetail: 'Читаемый текст уже готов, но граф ещё строит устойчивые связи.',
+        graphSparseDetail:
+          'Читаемый текст и часть графовых фактов уже есть, но покрытие графа ещё редкое.',
         failedDetail: 'Обработка остановилась. Откройте документ, чтобы посмотреть детали.',
+        failedGenericDetail: 'Откройте документ, чтобы увидеть точную причину и следующий шаг.',
         progressLabel: 'Прогресс {percent}%',
         lastActivity: 'Обновлено {time}',
       },
@@ -388,6 +554,12 @@ const ru = {
         'Выберите документ слева, чтобы прочитать текст, посмотреть статус и выполнить действия по месту.',
       noMatchTitle: 'Документы не найдены',
       noMatchDescription: 'Снимите поиск или статусный фильтр, чтобы увидеть больше файлов.',
+      bindingNotice: {
+        title: 'Для этой библиотеки не назначен extract_graph',
+        message:
+          'Документы могут стабильно доходить только до читаемого текста и останавливаться на этапе построения графа. Откройте Admin и назначьте активный AI binding для extract_graph.',
+        action: 'Открыть Admin',
+      },
       activeBacklog: 'В работе ещё {count} документ(ов).',
       liveSpend: 'Видимые расходы в полёте: {cost}.',
       primary: {
@@ -544,14 +716,14 @@ const ru = {
       queued: 'В очереди',
       processing: 'Обработка',
       ready: 'Готово',
-      ready_no_graph: 'Поиск готов',
+      ready_no_graph: 'Читаемый текст готов',
       failed: 'Ошибка',
     },
     statuses: {
       queued: 'В очереди',
       processing: 'Обработка',
       ready: 'Готово',
-      ready_no_graph: 'Поиск готов',
+      ready_no_graph: 'Читаемый текст готов',
       failed: 'Ошибка',
     },
     accounting: {
@@ -641,6 +813,8 @@ const ru = {
     },
     actions: {
       upload: 'Загрузить файлы',
+      addLink: 'Добавить ссылку',
+      addLinkWithCount: 'Добавить ссылку · активных {count}',
       clearFilters: 'Сбросить фильтры',
       details: 'Детали',
       append: 'Дополнить текст',
@@ -698,16 +872,270 @@ const ru = {
         warning:
           'Документ и его текущее извлечённое состояние будут удалены из активной библиотеки навсегда. Это действие нельзя отменить.',
       },
+      addLink: {
+        title: 'Добавить ссылку на сайт',
+        description:
+          'Отправьте URL в активную библиотеку. По умолчанию система забирает и обрабатывает только конкретную страницу.',
+        urlLabel: 'URL',
+        urlPlaceholder: 'https://example.com/article',
+        modeLabel: 'Режим сбора',
+        singlePageTitle: 'Только одна страница',
+        singlePageDescription:
+          'Канонический дефолт: одна ссылка на входе, одна обработанная страница, одна ревизия документа на выходе.',
+        recursiveDisabledTitle: 'Рекурсивный обход пока недоступен',
+        recursiveDisabledDescription:
+          'Путь recursive crawl в этом UI пока не включён. Сейчас отправляйте точный URL нужной страницы.',
+        boundaryPolicyLabel: 'Граница обхода',
+        boundaryPolicies: {
+          same_host: 'Только этот хост',
+          allow_external: 'Разрешить внешние ссылки',
+        },
+        maxDepthLabel: 'Максимальная глубина',
+        maxPagesLabel: 'Максимум страниц',
+        modes: {
+          single_page: 'Одна страница',
+          recursive_crawl: 'Рекурсивный обход',
+        },
+        modeDescriptions: {
+          single_page:
+            'Оставить scope фиксированным на присланном URL и обработать только эту страницу.',
+          recursive_crawl:
+            'Осознанно расширить scope: собрать ссылки, зафиксировать границы обхода и потом поставить каждую допустимую страницу в отдельную обработку.',
+        },
+        immutableSettingsTitle: 'Preview неизменяемых настроек запуска',
+        immutableSettingsDescription:
+          'После принятия запуска эти параметры фиксируются, поэтому более широкий обход нужно выбрать явно до отправки.',
+        notUsed: 'Не используется в режиме одной страницы',
+        validationRequired: 'Перед отправкой укажите URL.',
+        validationInvalid: 'Укажите корректный URL с http:// или https://.',
+        validationLibrary: 'Перед добавлением ссылки выберите активную библиотеку.',
+      },
+    },
+    webRuns: {
+      inspector: {
+        eyebrow: 'Web-запуск',
+        title: 'Запуск web-ingest',
+        subtitle:
+          'Сначала система закрывает scope discovery, затем ставит найденные страницы в очередь и материализует их из зафиксированных snapshot.',
+        loading: 'Загружаем детали web-запуска.',
+      },
+      actions: {
+        cancel: 'Отменить запуск',
+      },
+      fields: {
+        mode: 'Режим',
+        boundary: 'Граница',
+        maxDepth: 'Макс. глубина',
+        maxPages: 'Бюджет страниц',
+        requestedAt: 'Запрошено',
+        cancelRequestedAt: 'Запрошена отмена',
+        completedAt: 'Завершено',
+        failureCode: 'Код сбоя',
+      },
+      activity: {
+        titleActive: 'Активных web-запусков: {count}',
+        titleRecent: 'Последние web-запуски',
+        subtitle:
+          'Откройте запуск, чтобы увидеть truth по кандидатам, result links и частичное завершение.',
+        pagesCoverage: 'Охват scope: {processed} из {discovered} стр.',
+        pagesInFlight: 'Ещё в очереди или обработке: {count} стр.',
+        pagesProcessed: 'Уже обработано: {count} стр.',
+        canceling: 'Отменяем…',
+        cancelRequestedAt:
+          'Отмена принята в {value}. Запущенная работа сейчас доходит до финального truth-состояния.',
+      },
+      modes: {
+        single_page: 'Одна страница',
+        recursive_crawl: 'Рекурсивный обход',
+      },
+      boundaries: {
+        same_host: 'Только тот же хост',
+        allow_external: 'Разрешить внешние ссылки',
+      },
+      states: {
+        accepted: 'Принят',
+        discovering: 'Идёт discovery',
+        processing: 'Идёт обработка',
+        completed: 'Завершён',
+        completed_partial: 'Завершён частично',
+        failed: 'Ошибка',
+        canceled: 'Отменён',
+      },
+      counts: {
+        discovered: 'Найдено',
+        eligible: 'Допущено',
+        processed: 'Обработано',
+        queued: 'В очереди',
+        processing: 'В работе',
+        duplicates: 'Дубликаты',
+        excluded: 'Исключено',
+        blocked: 'Заблокировано',
+        failed: 'Ошибки',
+        canceled: 'Отменено',
+      },
+      candidateStates: {
+        discovered: 'Найдено',
+        eligible: 'Допущено',
+        duplicate: 'Дубликат',
+        excluded: 'Исключено',
+        blocked: 'Заблокировано',
+        queued: 'В очереди',
+        processing: 'В работе',
+        processed: 'Обработано',
+        failed: 'Ошибка',
+        canceled: 'Отменено',
+      },
+      hosts: {
+        same_host: 'Тот же хост',
+        external: 'Внешний',
+      },
+      reasons: {
+        seed_accepted: 'Seed принят',
+        duplicate_canonical_url: 'Дубликат canonical URL',
+        outside_boundary_policy: 'Вне заданной границы',
+        exceeded_max_depth: 'Превышена глубина',
+        exceeded_max_pages: 'Превышен бюджет страниц',
+        unsupported_scheme: 'Неподдерживаемая схема',
+        invalid_url: 'Неверный URL',
+        inaccessible: 'Страница недоступна',
+        unsupported_content: 'Неподдерживаемый контент',
+        cancel_requested: 'Отменено оператором',
+      },
+      failureCodes: {
+        inaccessible: 'Удалённая страница недоступна',
+        invalid_url: 'После разрешения получился неверный URL',
+        unsupported_content: 'Полученный payload не поддерживается',
+        web_discovery_failed: 'Worker discovery завершился ошибкой до полного закрытия scope',
+        web_snapshot_persist_failed: 'Не удалось сохранить snapshot страницы',
+        web_snapshot_missing: 'Потеряна ссылка на сохранённый snapshot',
+        web_snapshot_missing_final_url: 'У snapshot нет финальной URL-идентичности',
+        web_snapshot_unavailable: 'Не удалось загрузить сохранённый snapshot',
+        web_capture_materialization_failed: 'Не удалось материализовать canonical web capture',
+        recursive_crawl_failed: 'Рекурсивный обход завершился без успешной материализации',
+      },
+      pages: {
+        title: 'Найденные страницы',
+        empty: 'Для этого запуска пока нет видимых найденных страниц.',
+        openDocument: 'Открыть документ',
+        columns: {
+          page: 'Страница',
+          state: 'Состояние',
+          depth: 'Глубина',
+          host: 'Хост',
+          referrer: 'Откуда найдена',
+          reason: 'Причина',
+          result: 'Результат',
+        },
+      },
     },
     details: {
       title: 'Детали документа',
       close: 'Закрыть',
       empty: 'Выберите документ, чтобы открыть его здесь.',
+      failureTitle: 'Что именно остановило обработку',
+      failureSupersededTitle: 'Предыдущий запуск остановлен',
+      failureCanonicalMutationApplied:
+        'Документ уже был переобработан каноническим воркером, поэтому этот старый запуск остановлен.',
+      failureGeneric: 'Канонический ingest остановился с ошибкой. Откройте детали попытки ниже.',
+      failureNeedsGraphBinding:
+        'Для этой библиотеки не настроена активная модель extract_graph, поэтому документ остановился на этапе построения графа.',
+      failureNeedsGraphBindingAction:
+        'Откройте Админ и назначьте для библиотеки активную binding-модель extract_graph, затем повторите обработку.',
       keyInfo: 'Основные данные',
       latestChange: 'Последнее изменение',
+      webSourceUri: 'Исходный URL',
+      webSourceKind: 'Тип источника',
+      webCanonicalUrl: 'Канонический URL',
+      webRunId: 'ID web-запуска',
+      webCandidateId: 'ID кандидата',
+      webCandidateState: 'Состояние кандидата',
+      webCandidateReason: 'Причина кандидата',
+      webRunActions: 'Исходный запуск',
+      openWebRun: 'Открыть web-запуск',
       notReadableYet: 'Читаемый текст пока недоступен.',
       showMore: 'Показать больше',
       showLess: 'Скрыть',
+      showMoreCount: 'Показать ещё {count} из {total}',
+      notAvailable: 'Нет данных',
+      noStage: 'Этап ещё не зафиксирован',
+      noPreparationSummary: 'Подготовленная структура для текущей читаемой ревизии ещё не собрана.',
+      noPreparedSegments: 'Подготовленные сегменты пока недоступны для этой ревизии.',
+      noTechnicalFacts: 'Типизированные технические факты для этой ревизии пока не извлечены.',
+      preparationStatus: 'Статус подготовки',
+      preparationState: 'Состояние подготовки',
+      preparedSegments: 'Подготовленные сегменты',
+      preparedSegmentsCount: 'Сегменты',
+      technicalFacts: 'Технические факты',
+      technicalFactsCount: 'Факты',
+      typedFactCoverage: 'Покрытие typed facts',
+      typedFactCoverageValue: '{percent}%',
+      lastProcessingStage: 'Последний этап',
+      sourceFormat: 'Формат источника',
+      normalizationProfile: 'Профиль нормализации',
+      updatedAt: 'Обновлено',
+      pageChip: 'Стр. {page}',
+      offsetsChip: 'Смещения {start}–{end}',
+      supportChunksChip: 'Чанки {count}',
+      codeLanguageChip: 'Код {language}',
+      tableCellChip: 'Таблица {row}:{column}',
+      supportSegments: 'Опорные сегменты',
+      conflictMarker: 'Конфликт',
+      confidenceValue: 'Уверенность {percent}%',
+      occurrenceCount: '{count} вхожд.',
+      readinessKinds: {
+        processing: 'Ещё готовится',
+        readable: 'Текст уже читаем',
+        graph_sparse: 'Граф редкий',
+        graph_ready: 'Граф готов',
+        failed: 'Подготовка завершилась ошибкой',
+      },
+      graphCoverageKinds: {
+        processing: 'Граф ещё строится',
+        graph_sparse: 'Нет устойчивых связей',
+        graph_ready: 'Связи подтверждены',
+        failed: 'Графовая подготовка упала',
+      },
+      preparationStates: {
+        pending: 'Ожидает подготовки',
+        building: 'Собирается',
+        prepared: 'Подготовлено',
+        failed: 'Ошибка подготовки',
+        started: 'Запущено',
+        completed: 'Завершено',
+      },
+      segmentKinds: {
+        heading: 'Заголовок',
+        paragraph: 'Параграф',
+        list_item: 'Список',
+        table: 'Таблица',
+        table_row: 'Строка таблицы',
+        code_block: 'Код',
+        endpoint_block: 'Endpoint',
+        quote_block: 'Цитата',
+        metadata_block: 'Метаданные',
+      },
+      factKinds: {
+        url: 'URL',
+        endpoint_path: 'Путь endpoint',
+        http_method: 'HTTP-метод',
+        port: 'Порт',
+        parameter_name: 'Параметр',
+        status_code: 'Статус-код',
+        protocol: 'Протокол',
+        auth_rule: 'Правило авторизации',
+        identifier: 'Идентификатор',
+      },
+      extractionKinds: {
+        parser_first: 'Parser-first',
+      },
+      sourceFormats: {
+        pdf: 'PDF',
+        text_like: 'Текстовый документ',
+        html_main_content: 'HTML main content',
+        docx: 'DOCX',
+        pptx: 'PPTX',
+        image: 'Изображение',
+      },
       labels: {
         uploaded: 'Загружен',
         status: 'Статус',
@@ -1129,6 +1557,8 @@ const ru = {
     emptyDescription: 'Загрузите документы, чтобы появились первые узлы и связи.',
     emptyBuildingDescription:
       'Документы уже загружены, но пайплайн ещё обрабатывает их перед появлением первых узлов и связей.',
+    emptyGraphSparseDescription:
+      'Читаемые документы уже есть, но графовое покрытие пока слишком редкое, чтобы на canvas появились устойчивые узлы и связи.',
     emptyCatchUpDescription:
       'Документы уже доступны для поиска, но граф ещё не догнал их и пока не показал узлы.',
     emptyTrackedDocumentsDetail: 'Документов в библиотеке сейчас: {count}.',
@@ -1136,16 +1566,22 @@ const ru = {
     sparseDescription: 'Добавьте документы или дождитесь завершения извлечения.',
     sparseBuildingDescription:
       'Документные узлы уже появились, но извлечение сущностей и связей ещё идёт.',
+    sparseGraphSparseDescription:
+      'Читаемый текст и часть графовых фактов уже есть, но покрытие графа ещё редкое и не должно считаться полным.',
     sparseCatchUpDescription:
       'Часть документов уже доступна для поиска, но граф ещё догоняет и не показал все связи.',
     sparseSettledDescription:
       'Документы уже попали в граф, но по ним пока не выделились устойчивые сущности и связи.',
     sparseDocumentsDetail: 'Документов в графе сейчас: {count}.',
-    sparseQueueDetail: 'В очереди {queued}, в обработке {processing}.',
+    sparseQueueDetail: 'Ещё обрабатывается документ(ов): {processing}.',
+    sparseReadinessDetail:
+      'Читаемых документов {readable}, graph-sparse документов {graphSparse}; графовое покрытие ещё нужно усилить.',
     sparseCatchUpDetail: 'Граф ещё догоняет {count} документ(ов), уже готовых для поиска.',
     sparseGenerationDetail: 'Текущее состояние извлечения графа: {state}.',
     failedTitle: 'Обновление графа не удалось',
     failedDescription: 'Последнее обновление графа завершилось неуспешно.',
+    failedProjectionDescription:
+      'Покрытие графа в библиотеке уже посчитано, но canvas-проекция сейчас не загрузилась. Попробуйте повторить загрузку графа.',
     search: 'Поиск по графу…',
     searchNodes: 'Искать узлы',
     searchClear: 'Очистить поиск',
@@ -1177,9 +1613,19 @@ const ru = {
     inspector: {
       whyItMatters: 'Почему узел важен',
       graphState: 'Состояние графа',
-      evidencePreview: 'Подтверждающие фрагменты',
+      preparedEvidence: 'Подготовленные доказательства',
       jumpTo: 'Связанные переходы',
       metadata: 'Метаданные',
+    },
+    coverageCard: {
+      eyebrow: 'Покрытие графа',
+      processing: 'В обработке: {count}',
+      readable: 'Читаемо: {count}',
+      graphSparse: 'Graph-sparse: {count}',
+      graphReady: 'Граф готов: {count}',
+      failed: 'С ошибкой: {count}',
+      typedFacts: 'У {count} документ(ов) уже есть typed facts',
+      confirmed: 'У {count} документ(ов) графовое покрытие уже подтверждено',
     },
     hud: {
       state: 'Состояние',
@@ -1205,13 +1651,13 @@ const ru = {
     relatedDocuments: 'Связанные документы',
     relatedDocumentsCount: '{count} связанных документ(ов)',
     connectedNodes: 'Связанные узлы',
-    relatedEdges: 'Связанные связи',
-    evidence: 'Доказательства',
-    evidenceCount: '{count} подтверждающих фрагмент(ов)',
+    graphRelations: 'Графовые связи',
+    preparedEvidence: 'Подготовленные доказательства',
+    evidenceCount: '{count} подготовленных доказательств',
     rebuildBacklog: '{count} документ(ов) ещё в очереди или перестраивают покрытие графа.',
-    readyNoGraph: 'У {count} обработанных документов пока нет графовых связей.',
+    readyNoGraph: 'У {count} обработанных документов покрытие графа всё ещё редкое.',
     toolbarBacklog: '{count} в backlog',
-    toolbarReadyNoGraph: '{count} без графа',
+    toolbarReadyNoGraph: '{count} graph-sparse',
     toolbarFilteredArtifacts: '{count} отфильтровано',
     artifacts: 'Артефакты',
     artifactsHidden: 'Скрыты',
@@ -1244,7 +1690,7 @@ const ru = {
     propertyLabels: {
       type: 'Тип',
       support: 'Упоминаний',
-      aliases: 'Синонимы',
+      aliases: 'Алиасы',
       sourceChunks: 'Чанки',
       assertion: 'Утверждение',
       subjectEntity: 'Субъект',
@@ -1260,6 +1706,7 @@ const ru = {
     focusLabel: '{label}',
     clearFocus: 'Сбросить',
     relationCount: '{count} связей',
+    graphRelationCount: '{count} графовых связей',
     inspectorError: 'Ошибка загрузки',
     inspectorErrorHint: 'Не удалось загрузить детали узла',
     selectNodeHint: 'Выберите узел, чтобы посмотреть связи и документы.',
@@ -1472,6 +1919,7 @@ const ru = {
       },
       billingUnits: {
         per_1m_input_tokens: 'За 1 млн входных токенов',
+        per_1m_cached_input_tokens: 'За 1 млн кэшированных входных токенов',
         per_1m_output_tokens: 'За 1 млн выходных токенов',
       },
     },
@@ -1882,6 +2330,8 @@ const ru = {
       openSection: 'Открыть раздел',
       updateBinding: 'Обновить задачу',
       createBinding: 'Задать задачу',
+      presetRequiredForTaskHint:
+        'Выберите креденшл, затем в разделе слева «Профили моделей» создайте пресет для модели каталога, которая допускает эту задачу.',
       unconfiguredTask: 'Задача ещё не настроена.',
       unsetState: 'Не задано',
       edit: 'Изменить',
@@ -1961,6 +2411,9 @@ const ru = {
         current: 'Цены пространства',
         providers: 'Провайдеры',
       },
+      providers: {
+        all: 'Все провайдеры',
+      },
       priceSources: {
         default: 'Каталожная цена',
         set: 'Текущая цена',
@@ -1976,6 +2429,7 @@ const ru = {
       },
       billingUnits: {
         per_1m_input_tokens: 'За 1 млн входных токенов',
+        per_1m_cached_input_tokens: 'За 1 млн кэшированных входных токенов',
         per_1m_output_tokens: 'За 1 млн выходных токенов',
       },
     },

@@ -1,3 +1,7 @@
+use crate::shared::extraction::{
+    ExtractionLineHint, ExtractionStructureHints, build_text_layout_from_content,
+};
+
 fn first_token(text: &str) -> Option<&str> {
     text.split_whitespace().next()
 }
@@ -29,8 +33,9 @@ fn is_ascii_fragment_split(left: &str, right: &str) -> bool {
         return false;
     };
 
-    let left_joinable =
-        left_last.is_ascii_lowercase() || left_last.is_ascii_digit() || matches!(left_last, '_' | '/' | ':' | '.');
+    let left_joinable = left_last.is_ascii_lowercase()
+        || left_last.is_ascii_digit()
+        || matches!(left_last, '_' | '/' | ':' | '.');
     let right_joinable =
         right_first.is_ascii_lowercase() || right_first.is_ascii_digit() || right_first == '_';
     if !left_joinable || !right_joinable {
@@ -53,7 +58,8 @@ fn is_ascii_fragment_split(left: &str, right: &str) -> bool {
         || (left_all_lower_or_digits && left.len() <= 4)
         || left_tail_since_uppercase <= 3;
     let right_fragment_like = right.starts_with('_')
-        || (right.len() <= 5 && right.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit()))
+        || (right.len() <= 5
+            && right.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit()))
         || (right.len() <= 8
             && right.chars().next().is_some_and(|ch| ch.is_ascii_lowercase())
             && right.chars().skip(1).any(|ch| ch.is_ascii_uppercase()));
@@ -74,32 +80,94 @@ fn should_join_without_separator(previous: &str, current: &str) -> bool {
         || is_ascii_fragment_split(left, right)
 }
 
-#[must_use]
-pub fn repair_technical_layout_noise(content: &str) -> String {
-    let mut repaired_lines = Vec::<String>::new();
+#[derive(Debug, Clone)]
+pub struct PreStructuringNormalization {
+    pub normalized_text: String,
+    pub normalization_profile: String,
+    pub structure_hints: ExtractionStructureHints,
+}
 
-    for raw_line in content.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() {
+#[must_use]
+pub fn normalize_for_structured_preparation(
+    content: &str,
+    structure_hints: Option<&ExtractionStructureHints>,
+) -> PreStructuringNormalization {
+    let source_hints = structure_hints
+        .cloned()
+        .unwrap_or_else(|| build_text_layout_from_content(content).structure_hints);
+    let mut repaired_lines = Vec::<ExtractionLineHint>::new();
+    let mut joined_line_count = 0_usize;
+
+    for line in source_hints.lines {
+        let mut current = line;
+        let trimmed_text = current.text.trim().to_string();
+        current.text = if trimmed_text.is_empty() {
+            String::new()
+        } else {
+            current.text.trim_end().to_string()
+        };
+
+        if trimmed_text.is_empty() {
+            repaired_lines.push(current);
             continue;
         }
 
         if let Some(previous) = repaired_lines.last_mut() {
-            if should_join_without_separator(previous, line) {
-                previous.push_str(line);
+            let same_page = previous.page_number == current.page_number;
+            if same_page && should_join_without_separator(previous.text.trim(), current.text.trim())
+            {
+                previous.text.push_str(current.text.trim());
+                previous.source_ordinals.extend(current.source_ordinals);
+                previous.source_ordinals.sort_unstable();
+                previous.source_ordinals.dedup();
+                previous.signals.extend(current.signals);
+                previous.signals.sort_unstable_by_key(|signal| *signal as u8);
+                previous.signals.dedup();
+                joined_line_count = joined_line_count.saturating_add(1);
                 continue;
             }
         }
 
-        repaired_lines.push(line.to_string());
+        repaired_lines.push(current);
     }
 
-    repaired_lines.join("\n")
+    let mut normalized_text = String::new();
+    let mut offset = 0_i32;
+    for (index, line) in repaired_lines.iter_mut().enumerate() {
+        if index > 0 {
+            normalized_text.push('\n');
+            offset = offset.saturating_add(1);
+        }
+        let start_offset = offset;
+        normalized_text.push_str(&line.text);
+        offset =
+            offset.saturating_add(i32::try_from(line.text.chars().count()).unwrap_or(i32::MAX));
+        line.ordinal = i32::try_from(index).unwrap_or(i32::MAX);
+        line.start_offset = Some(start_offset);
+        line.end_offset = Some(offset);
+    }
+
+    PreStructuringNormalization {
+        normalized_text,
+        normalization_profile: if joined_line_count == 0 {
+            "pre_structuring_verbatim_v1".to_string()
+        } else {
+            "pre_structuring_layout_repair_v1".to_string()
+        },
+        structure_hints: ExtractionStructureHints { lines: repaired_lines },
+    }
+}
+
+#[must_use]
+pub fn repair_technical_layout_noise(content: &str) -> String {
+    normalize_for_structured_preparation(content, None).normalized_text
 }
 
 #[cfg(test)]
 mod tests {
-    use super::repair_technical_layout_noise;
+    use crate::shared::extraction::{ExtractionLineHint, ExtractionStructureHints};
+
+    use super::{normalize_for_structured_preparation, repair_technical_layout_noise};
 
     #[test]
     fn repair_technical_layout_noise_joins_ascii_identifier_fragments() {
@@ -117,10 +185,10 @@ mod tests {
     #[test]
     fn repair_technical_layout_noise_joins_protocol_and_paths() {
         let repaired = repair_technical_layout_noise(
-            "http\n://localhost:8080/ACC/rest/v1/accounts\n/bypage\n/system/info",
+            "http\n://demo.local:8080/rewards-api/rest/v1/accounts\n/bypage\n/system/info",
         );
 
-        assert!(repaired.contains("http://localhost:8080/ACC/rest/v1/accounts/bypage"));
+        assert!(repaired.contains("http://demo.local:8080/rewards-api/rest/v1/accounts/bypage"));
         assert!(repaired.contains("/system/info"));
     }
 
@@ -129,5 +197,58 @@ mod tests {
         let repaired = repair_technical_layout_noise("REST\nAPI\nGET");
 
         assert_eq!(repaired, "REST\nAPI\nGET");
+    }
+
+    #[test]
+    fn normalize_for_structured_preparation_preserves_page_boundaries() {
+        let normalized = normalize_for_structured_preparation(
+            "",
+            Some(&ExtractionStructureHints {
+                lines: vec![
+                    ExtractionLineHint {
+                        ordinal: 0,
+                        source_ordinals: vec![0],
+                        page_number: Some(1),
+                        text: "pageNu".to_string(),
+                        start_offset: None,
+                        end_offset: None,
+                        signals: Vec::new(),
+                    },
+                    ExtractionLineHint {
+                        ordinal: 1,
+                        source_ordinals: vec![1],
+                        page_number: Some(1),
+                        text: "mber".to_string(),
+                        start_offset: None,
+                        end_offset: None,
+                        signals: Vec::new(),
+                    },
+                    ExtractionLineHint {
+                        ordinal: 2,
+                        source_ordinals: vec![2],
+                        page_number: Some(2),
+                        text: "withCar".to_string(),
+                        start_offset: None,
+                        end_offset: None,
+                        signals: Vec::new(),
+                    },
+                    ExtractionLineHint {
+                        ordinal: 3,
+                        source_ordinals: vec![3],
+                        page_number: Some(2),
+                        text: "ds".to_string(),
+                        start_offset: None,
+                        end_offset: None,
+                        signals: Vec::new(),
+                    },
+                ],
+            }),
+        );
+
+        assert_eq!(normalized.normalized_text, "pageNumber\nwithCards");
+        assert_eq!(normalized.structure_hints.lines[0].page_number, Some(1));
+        assert_eq!(normalized.structure_hints.lines[1].page_number, Some(2));
+        assert_eq!(normalized.structure_hints.lines[0].source_ordinals, vec![0, 1]);
+        assert_eq!(normalized.structure_hints.lines[1].source_ordinals, vec![2, 3]);
     }
 }

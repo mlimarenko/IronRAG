@@ -4,6 +4,7 @@ use axum::{
         Path, Query, State,
         multipart::{Field, Multipart},
     },
+    http::StatusCode,
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -15,7 +16,10 @@ use crate::{
     domains::content::{
         ContentDocument, ContentDocumentHead, ContentDocumentPipelineState, ContentDocumentSummary,
         ContentMutation, ContentMutationItem, ContentRevision, ContentRevisionReadiness,
+        DocumentReadinessSummary, WebPageProvenance,
     },
+    domains::ingest::{WebDiscoveredPage, WebIngestRun, WebIngestRunReceipt, WebIngestRunSummary},
+    domains::knowledge::{PreparedSegmentDetail, StructuredDocumentRevision, TypedTechnicalFact},
     interfaces::http::{
         auth::AuthContext,
         authorization::{
@@ -29,6 +33,7 @@ use crate::{
         ContentMutationAdmission, CreateDocumentAdmission, ReplaceInlineMutationCommand,
         RevisionAdmissionMetadata, UploadInlineDocumentCommand,
     },
+    services::web_ingest_service::CreateWebIngestRunCommand,
     shared::file_extract::{UploadAdmissionError, classify_multipart_file_body_error},
 };
 
@@ -49,6 +54,13 @@ pub struct ListMutationsQuery {
 #[serde(rename_all = "camelCase")]
 pub struct ChunksQuery {
     pub document_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedDataQuery {
+    pub offset: Option<usize>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,6 +111,24 @@ pub struct ReprocessDocumentRequest {
     pub idempotency_key: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListWebIngestRunsQuery {
+    pub library_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateWebIngestRunRequest {
+    pub library_id: Uuid,
+    pub seed_url: String,
+    pub mode: String,
+    pub boundary_policy: Option<String>,
+    pub max_depth: Option<i32>,
+    pub max_pages: Option<i32>,
+    pub idempotency_key: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContentDocumentDetailResponse {
@@ -107,6 +137,16 @@ pub struct ContentDocumentDetailResponse {
     pub head: Option<ContentDocumentHead>,
     pub active_revision: Option<ContentRevision>,
     pub readiness: Option<ContentRevisionReadiness>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_summary: Option<DocumentReadinessSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prepared_revision: Option<StructuredDocumentRevision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prepared_segment_count: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub technical_fact_count: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_page_provenance: Option<WebPageProvenance>,
     pub pipeline: ContentDocumentPipelineState,
 }
 
@@ -139,19 +179,143 @@ pub struct ChunkSummary {
     pub token_count: Option<i32>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedSegmentsPageResponse {
+    pub document_id: Uuid,
+    pub revision_id: Option<Uuid>,
+    pub total: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub items: Vec<PreparedSegmentDetail>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TechnicalFactsPageResponse {
+    pub document_id: Uuid,
+    pub revision_id: Option<Uuid>,
+    pub total: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub items: Vec<TypedTechnicalFact>,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/chunks", get(list_chunks))
+        .route("/content/web-runs", get(list_web_ingest_runs).post(create_web_ingest_run))
+        .route("/content/web-runs/{run_id}", get(get_web_ingest_run))
+        .route("/content/web-runs/{run_id}/pages", get(list_web_ingest_run_pages))
+        .route("/content/web-runs/{run_id}/cancel", post(cancel_web_ingest_run))
         .route("/content/documents", get(list_documents).post(create_document))
         .route("/content/documents/upload", axum::routing::post(upload_document))
         .route("/content/documents/{document_id}", get(get_document).delete(delete_document))
         .route("/content/documents/{document_id}/append", axum::routing::post(append_document))
         .route("/content/documents/{document_id}/replace", axum::routing::post(replace_document))
         .route("/content/documents/{document_id}/head", get(get_document_head))
+        .route(
+            "/content/documents/{document_id}/prepared-segments",
+            get(get_document_prepared_segments),
+        )
+        .route(
+            "/content/documents/{document_id}/technical-facts",
+            get(get_document_technical_facts),
+        )
         .route("/content/documents/{document_id}/reprocess", post(reprocess_document))
         .route("/content/documents/{document_id}/revisions", get(list_revisions))
         .route("/content/mutations", get(list_mutations).post(create_mutation))
         .route("/content/mutations/{mutation_id}", get(get_mutation))
+}
+
+async fn create_web_ingest_run(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Json(request): Json<CreateWebIngestRunRequest>,
+) -> Result<(StatusCode, Json<WebIngestRunReceipt>), ApiError> {
+    let library =
+        load_library_and_authorize(&auth, &state, request.library_id, POLICY_LIBRARY_WRITE).await?;
+    let run = state
+        .canonical_services
+        .web_ingest
+        .create_run(
+            &state,
+            CreateWebIngestRunCommand {
+                workspace_id: library.workspace_id,
+                library_id: library.id,
+                seed_url: request.seed_url,
+                mode: request.mode,
+                boundary_policy: request.boundary_policy,
+                max_depth: request.max_depth,
+                max_pages: request.max_pages,
+                requested_by_principal_id: Some(auth.principal_id),
+                request_surface: "rest".to_string(),
+                idempotency_key: request.idempotency_key,
+            },
+        )
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(WebIngestRunReceipt {
+            run_id: run.run_id,
+            library_id: run.library_id,
+            mode: run.mode,
+            run_state: run.run_state,
+            async_operation_id: run.async_operation_id,
+            counts: run.counts,
+            failure_code: run.failure_code,
+            cancel_requested_at: run.cancel_requested_at,
+        }),
+    ))
+}
+
+async fn list_web_ingest_runs(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Query(query): Query<ListWebIngestRunsQuery>,
+) -> Result<Json<Vec<WebIngestRunSummary>>, ApiError> {
+    let library_id = query
+        .library_id
+        .ok_or_else(|| ApiError::BadRequest("libraryId is required".to_string()))?;
+    let library =
+        load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_READ).await?;
+    let runs = state.canonical_services.web_ingest.list_runs(&state, library.id).await?;
+    Ok(Json(runs))
+}
+
+async fn get_web_ingest_run(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(run_id): Path<Uuid>,
+) -> Result<Json<WebIngestRun>, ApiError> {
+    let run = state.canonical_services.web_ingest.get_run(&state, run_id).await?;
+    let _library =
+        load_library_and_authorize(&auth, &state, run.library_id, POLICY_LIBRARY_READ).await?;
+    Ok(Json(run))
+}
+
+async fn list_web_ingest_run_pages(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(run_id): Path<Uuid>,
+) -> Result<Json<Vec<WebDiscoveredPage>>, ApiError> {
+    let run = state.canonical_services.web_ingest.get_run(&state, run_id).await?;
+    let _library =
+        load_library_and_authorize(&auth, &state, run.library_id, POLICY_LIBRARY_READ).await?;
+    let pages = state.canonical_services.web_ingest.list_pages(&state, run_id).await?;
+    Ok(Json(pages))
+}
+
+async fn cancel_web_ingest_run(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(run_id): Path<Uuid>,
+) -> Result<(StatusCode, Json<WebIngestRunReceipt>), ApiError> {
+    let run = state.canonical_services.web_ingest.get_run(&state, run_id).await?;
+    let _library =
+        load_library_and_authorize(&auth, &state, run.library_id, POLICY_LIBRARY_WRITE).await?;
+    let receipt = state.canonical_services.web_ingest.cancel_run(&state, run_id).await?;
+    Ok((StatusCode::ACCEPTED, Json(receipt)))
 }
 
 async fn list_documents(
@@ -307,6 +471,60 @@ async fn get_document_head(
         .await?;
     let head = state.canonical_services.content.get_document_head(&state, document_id).await?;
     head.map(Json).ok_or_else(|| ApiError::resource_not_found("document_head", document_id))
+}
+
+async fn get_document_prepared_segments(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(document_id): Path<Uuid>,
+    Query(query): Query<PreparedDataQuery>,
+) -> Result<Json<PreparedSegmentsPageResponse>, ApiError> {
+    let _ = load_content_document_and_authorize(&auth, &state, document_id, POLICY_DOCUMENTS_READ)
+        .await?;
+    let revision_id = resolve_readable_revision_id(&state, document_id).await?;
+    let (offset, limit) = normalize_page_window(query.offset, query.limit);
+    let items = match revision_id {
+        Some(revision_id) => {
+            state.canonical_services.content.list_prepared_segments(&state, revision_id).await?
+        }
+        None => Vec::new(),
+    };
+    let total = items.len();
+    Ok(Json(PreparedSegmentsPageResponse {
+        document_id,
+        revision_id,
+        total,
+        offset,
+        limit,
+        items: paginate_items(items, offset, limit),
+    }))
+}
+
+async fn get_document_technical_facts(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(document_id): Path<Uuid>,
+    Query(query): Query<PreparedDataQuery>,
+) -> Result<Json<TechnicalFactsPageResponse>, ApiError> {
+    let _ = load_content_document_and_authorize(&auth, &state, document_id, POLICY_DOCUMENTS_READ)
+        .await?;
+    let revision_id = resolve_readable_revision_id(&state, document_id).await?;
+    let (offset, limit) = normalize_page_window(query.offset, query.limit);
+    let items = match revision_id {
+        Some(revision_id) => {
+            state.canonical_services.content.list_technical_facts(&state, revision_id).await?
+        }
+        None => Vec::new(),
+    };
+    let total = items.len();
+    Ok(Json(TechnicalFactsPageResponse {
+        document_id,
+        revision_id,
+        total,
+        offset,
+        limit,
+        items: paginate_items(items, offset, limit),
+    }))
 }
 
 async fn delete_document(
@@ -497,6 +715,10 @@ async fn get_mutation(
 }
 
 fn map_document_summary(summary: ContentDocumentSummary) -> ContentDocumentDetailResponse {
+    let prepared_segment_count =
+        summary.prepared_revision.as_ref().map(|revision| revision.block_count);
+    let technical_fact_count =
+        summary.prepared_revision.as_ref().map(|revision| revision.typed_fact_count);
     let file_name = summary
         .active_revision
         .as_ref()
@@ -508,6 +730,11 @@ fn map_document_summary(summary: ContentDocumentSummary) -> ContentDocumentDetai
         head: summary.head,
         active_revision: summary.active_revision,
         readiness: summary.readiness,
+        readiness_summary: summary.readiness_summary,
+        prepared_revision: summary.prepared_revision,
+        prepared_segment_count,
+        technical_fact_count,
+        web_page_provenance: summary.web_page_provenance,
         pipeline: summary.pipeline,
     }
 }
@@ -798,6 +1025,24 @@ fn map_mutation_admission(admission: ContentMutationAdmission) -> ContentMutatio
         job_id: admission.job_id,
         async_operation_id: admission.async_operation_id,
     }
+}
+
+async fn resolve_readable_revision_id(
+    state: &AppState,
+    document_id: Uuid,
+) -> Result<Option<Uuid>, ApiError> {
+    let head = state.canonical_services.content.get_document_head(state, document_id).await?;
+    Ok(head.and_then(|row| row.readable_revision_id.or(row.active_revision_id)))
+}
+
+fn normalize_page_window(offset: Option<usize>, limit: Option<usize>) -> (usize, usize) {
+    let offset = offset.unwrap_or(0);
+    let limit = limit.unwrap_or(100).clamp(1, 500);
+    (offset, limit)
+}
+
+fn paginate_items<T>(items: Vec<T>, offset: usize, limit: usize) -> Vec<T> {
+    items.into_iter().skip(offset).take(limit).collect()
 }
 
 #[cfg(test)]

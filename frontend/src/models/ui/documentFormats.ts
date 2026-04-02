@@ -2,8 +2,31 @@ export const DOCUMENT_UPLOAD_FORMAT_TOKENS = ['pdf', 'docx', 'pptx', 'txt', 'md'
 
 export type DocumentUploadFormatToken = (typeof DOCUMENT_UPLOAD_FORMAT_TOKENS)[number]
 
-const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'tif', 'tiff', 'heic', 'heif']
-const TEXT_EXTENSIONS = ['md', 'markdown', 'txt', 'text', 'log', 'csv', 'json', 'yaml', 'yml', 'xml']
+const IMAGE_EXTENSIONS = [
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'webp',
+  'bmp',
+  'svg',
+  'tif',
+  'tiff',
+  'heic',
+  'heif',
+]
+const TEXT_EXTENSIONS = [
+  'md',
+  'markdown',
+  'txt',
+  'text',
+  'log',
+  'csv',
+  'json',
+  'yaml',
+  'yml',
+  'xml',
+]
 
 export function normalizeDocumentUploadFormats(formats: string[]): DocumentUploadFormatToken[] {
   const normalized = formats
@@ -22,9 +45,15 @@ export function buildDocumentUploadAcceptString(formats: string[]): string {
         case 'pdf':
           return ['.pdf', 'application/pdf']
         case 'docx':
-          return ['.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document']
+          return [
+            '.docx',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          ]
         case 'pptx':
-          return ['.pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation']
+          return [
+            '.pptx',
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+          ]
         case 'txt':
           return ['.txt', 'text/plain']
         case 'md':

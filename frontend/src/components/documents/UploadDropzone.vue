@@ -6,12 +6,19 @@ import {
   formatAcceptedDocumentFormats,
 } from 'src/models/ui/documentFormats'
 
-const props = defineProps<{
-  acceptedFormats: string[]
-  maxSizeMb: number
-  loading: boolean
-  hasDocuments?: boolean
-}>()
+const props = withDefaults(
+  defineProps<{
+    acceptedFormats: string[]
+    maxSizeMb: number
+    loading: boolean
+    variant?: 'inline' | 'panel'
+    showMeta?: boolean
+  }>(),
+  {
+    variant: 'inline',
+    showMeta: true,
+  },
+)
 
 const emit = defineEmits<{
   select: [files: File[]]
@@ -21,8 +28,11 @@ const { t } = useI18n()
 const inputRef = ref<HTMLInputElement | null>(null)
 const isDragging = ref(false)
 const acceptString = computed(() => buildDocumentUploadAcceptString(props.acceptedFormats))
+const isInline = computed(() => props.variant === 'inline')
 const acceptedFormatsLabel = computed(() =>
-  formatAcceptedDocumentFormats(props.acceptedFormats, (format) => t(`documents.fileFormats.${format}`)),
+  formatAcceptedDocumentFormats(props.acceptedFormats, (format) =>
+    t(`documents.fileFormats.${format}`),
+  ),
 )
 const compactFormatsLabel = computed(() => {
   const formats = acceptedFormatsLabel.value.split(', ').filter(Boolean)
@@ -31,13 +41,14 @@ const compactFormatsLabel = computed(() => {
   const prefix = visibleFormats.join(', ')
   return hiddenCount > 0 ? `${prefix} +${hiddenCount}` : prefix
 })
-const metaLabel = computed(() =>
-  props.hasDocuments
+const metaLabel = computed(() => {
+  if (isInline.value && !props.showMeta) {
+    return ''
+  }
+  return isInline.value
     ? compactFormatsLabel.value
-    : `${acceptedFormatsLabel.value} · ${t('documents.maxSize', {
-        size: props.maxSizeMb,
-      })}`,
-)
+    : `${acceptedFormatsLabel.value} · ${t('documents.maxSize', { size: props.maxSizeMb })}`
+})
 
 function openPicker() {
   inputRef.value?.click()
@@ -63,16 +74,17 @@ function emitFiles(fileList: FileList | null) {
   }
   emit('select', Array.from(fileList))
 }
-
-defineExpose({
-  openPicker,
-})
 </script>
 
 <template>
   <div
     class="rr-upload-dropzone"
-    :class="{ 'is-loading': props.loading, 'is-compact': props.hasDocuments, 'is-dragging': isDragging }"
+    :class="{
+      'is-loading': props.loading,
+      'is-inline': isInline,
+      'is-panel': !isInline,
+      'is-dragging': isDragging,
+    }"
     @dragover.prevent
     @dragenter="onDragEnter"
     @dragleave="onDragLeave"
@@ -88,30 +100,27 @@ defineExpose({
       aria-hidden="true"
       :accept="acceptString"
       @change="emitFiles(($event.target as HTMLInputElement).files)"
-    >
+    />
     <button
       type="button"
       class="rr-button rr-button--primary rr-button--compact rr-upload-dropzone__button"
-      :title="props.hasDocuments ? metaLabel : undefined"
+      :title="isInline ? metaLabel : undefined"
       @click="openPicker"
     >
-      {{ props.hasDocuments ? t('documents.uploadCta') : t('documents.uploadOnboardingCta') }}
+      {{ isInline ? t('documents.uploadCta') : t('documents.uploadOnboardingCta') }}
     </button>
-    <div class="rr-upload-dropzone__copy">
-      <p class="rr-upload-dropzone__title">
-        {{ props.hasDocuments ? t('documents.uploadInlineTitle') : t('documents.uploadOnboardingTitle') }}
+    <div v-if="!isInline || props.showMeta" class="rr-upload-dropzone__copy">
+      <p v-if="!isInline" class="rr-upload-dropzone__title">
+        {{ t('documents.uploadOnboardingTitle') }}
       </p>
-      <p
-        v-if="!props.hasDocuments"
-        class="rr-upload-dropzone__lead"
-      >
+      <p v-if="!isInline" class="rr-upload-dropzone__lead">
         {{ t('documents.uploadOnboardingDescription') }}
       </p>
       <p class="rr-upload-dropzone__meta">
         {{ metaLabel }}
       </p>
-      <p class="rr-upload-dropzone__hint">
-        {{ props.hasDocuments ? t('documents.uploadCompactHint') : t('documents.uploadQueuedHint') }}
+      <p v-if="!isInline" class="rr-upload-dropzone__hint">
+        {{ t('documents.uploadQueuedHint') }}
       </p>
     </div>
   </div>
@@ -120,13 +129,12 @@ defineExpose({
 <style scoped lang="scss">
 .rr-upload-dropzone {
   display: inline-flex;
-  min-width: min(100%, 22rem);
+  width: 100%;
   align-items: center;
-  gap: 1rem;
-  padding: 1.05rem 1.15rem;
+  gap: 0.8rem;
   border: 1px solid var(--rr-border-soft);
   border-radius: var(--rr-radius-lg);
-  background: var(--rr-bg-subtle);
+  background: rgba(248, 250, 252, 0.92);
   transition:
     border-color 180ms ease,
     box-shadow 180ms ease,
@@ -148,19 +156,41 @@ defineExpose({
   opacity: 0.72;
 }
 
+.rr-upload-dropzone.is-inline {
+  width: auto;
+  min-width: 0;
+  gap: 0.4rem;
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+
+.rr-upload-dropzone.is-inline:hover {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.rr-upload-dropzone.is-panel {
+  width: min(100%, 30rem);
+  min-width: min(100%, 18rem);
+  padding: 1rem 1.05rem;
+  align-items: flex-start;
+}
+
 .rr-upload-dropzone__button {
   flex: none;
 }
 
 .rr-upload-dropzone__copy {
   display: grid;
-  gap: 0.2rem;
+  gap: 0.16rem;
   min-width: 0;
 }
 
 .rr-upload-dropzone__title {
   margin: 0;
-  font-size: 0.82rem;
+  font-size: 0.75rem;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -170,8 +200,8 @@ defineExpose({
 .rr-upload-dropzone__lead {
   margin: 0;
   color: var(--rr-text-secondary);
-  font-size: 0.95rem;
-  line-height: 1.5;
+  font-size: 0.88rem;
+  line-height: 1.4;
 }
 
 .rr-upload-dropzone__meta,
@@ -181,51 +211,36 @@ defineExpose({
 }
 
 .rr-upload-dropzone__meta {
-  font-size: 0.86rem;
+  font-size: 0.82rem;
   color: var(--rr-text-secondary);
 }
 
 .rr-upload-dropzone__hint {
-  font-size: 0.8rem;
+  font-size: 0.76rem;
   color: var(--rr-text-muted);
 }
 
-.rr-upload-dropzone.is-compact {
-  min-width: min(100%, 11rem);
+.rr-upload-dropzone.is-inline .rr-upload-dropzone__title,
+.rr-upload-dropzone.is-inline .rr-upload-dropzone__lead,
+.rr-upload-dropzone.is-inline .rr-upload-dropzone__hint {
+  display: none;
+}
+
+.rr-upload-dropzone.is-inline .rr-upload-dropzone__copy {
   gap: 0;
-  padding: 0.24rem 0.3rem;
-  background: rgba(248, 250, 252, 0.92);
 }
 
-.rr-upload-dropzone.is-compact .rr-upload-dropzone__title {
-  display: none;
-}
-
-.rr-upload-dropzone.is-compact .rr-upload-dropzone__copy {
-  display: none;
-}
-
-.rr-upload-dropzone.is-compact .rr-upload-dropzone__meta {
+.rr-upload-dropzone.is-inline .rr-upload-dropzone__meta {
   font-size: 0.56rem;
   line-height: 1.25;
 }
 
-.rr-upload-dropzone.is-compact .rr-upload-dropzone__hint {
-  display: none;
-}
-
 @media (max-width: 920px) {
-  .rr-upload-dropzone.is-compact {
-    min-width: min(100%, 10.8rem);
-    gap: 0;
-    padding: 0.24rem 0.3rem;
+  .rr-upload-dropzone.is-inline {
+    width: 100%;
+    justify-content: space-between;
+    padding: 0.3rem 0.34rem;
     border-radius: 14px;
-  }
-}
-
-@media (min-width: 1800px) {
-  .rr-upload-dropzone.is-compact {
-    min-width: min(100%, 12.4rem);
   }
 }
 
@@ -244,7 +259,7 @@ defineExpose({
 }
 
 @media (max-width: 600px) {
-  .rr-upload-dropzone.is-compact {
+  .rr-upload-dropzone.is-inline {
     min-width: 100%;
     gap: 0;
     padding: 0;
@@ -254,16 +269,16 @@ defineExpose({
     box-shadow: none;
   }
 
-  .rr-upload-dropzone.is-compact:hover {
+  .rr-upload-dropzone.is-inline:hover {
     border-color: transparent;
     box-shadow: none;
   }
 
-  .rr-upload-dropzone.is-compact .rr-upload-dropzone__button {
+  .rr-upload-dropzone.is-inline .rr-upload-dropzone__button {
     min-height: 2.5rem;
   }
 
-  .rr-upload-dropzone.is-compact .rr-upload-dropzone__meta {
+  .rr-upload-dropzone.is-inline .rr-upload-dropzone__meta {
     display: none;
   }
 }

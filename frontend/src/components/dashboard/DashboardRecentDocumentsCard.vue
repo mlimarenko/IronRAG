@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import StatusBadge from 'src/components/design-system/StatusBadge.vue'
 import { useDisplayFormatters } from 'src/composables/useDisplayFormatters'
@@ -12,24 +11,34 @@ const props = defineProps<{
 }>()
 
 const { t } = useI18n()
-const router = useRouter()
 const { formatCompactDateTime } = useDisplayFormatters()
 const showFileType = computed(() => new Set(props.documents.map((row) => row.fileType)).size > 1)
 const showStatusBadge = computed(() => props.documents.some((row) => row.status !== 'ready'))
-function rowMeta(row: DashboardRecentDocument): string {
-  return `${row.fileSizeLabel} · ${formatCompactDateTime(row.uploadedAt)}`
+const useSoloLayout = computed(() => Boolean(props.compact) && props.documents.length === 1)
+
+function statusKind(
+  row: DashboardRecentDocument,
+): 'queued' | 'processing' | 'failed' | 'graph_sparse' | 'graph_ready' {
+  switch (row.status) {
+    case 'queued':
+    case 'processing':
+    case 'failed':
+      return row.status
+    case 'ready_no_graph':
+      return 'graph_sparse'
+    case 'ready':
+    default:
+      return 'graph_ready'
+  }
 }
 
-async function openDocuments() {
-  await router.push('/documents')
+function rowMeta(row: DashboardRecentDocument): string {
+  return `${row.fileSizeLabel} · ${formatCompactDateTime(row.uploadedAt)}`
 }
 </script>
 
 <template>
-  <section
-    class="rr-dash-docs"
-    :class="{ 'is-compact': props.compact, 'is-solo': props.documents.length <= 1 }"
-  >
+  <section class="rr-dash-docs" :class="{ 'is-compact': props.compact, 'is-solo': useSoloLayout }">
     <header class="rr-dash-docs__header">
       <div class="rr-dash-docs__copy">
         <div class="rr-dash-docs__title-row">
@@ -37,46 +46,26 @@ async function openDocuments() {
         </div>
         <p class="rr-dash-docs__subtitle">{{ t('dashboard.recent.subtitle') }}</p>
       </div>
-      <button
-        type="button"
-        class="rr-button rr-button--ghost rr-button--tiny rr-dash-docs__view-all"
-        @click="openDocuments"
-      >
-        {{ t('shared.actions.viewAll') }}
-      </button>
     </header>
 
-    <div
-      v-if="props.documents.length"
-      class="rr-dash-docs__table"
-    >
-      <div
-        v-for="row in props.documents"
-        :key="row.id"
-        class="rr-dash-docs__row"
-      >
+    <div v-if="props.documents.length" class="rr-dash-docs__table">
+      <div v-for="row in props.documents" :key="row.id" class="rr-dash-docs__row">
         <div class="rr-dash-docs__name">
           <strong>{{ row.fileName }}</strong>
           <span class="rr-dash-docs__meta rr-dash-docs__meta--inline">{{ rowMeta(row) }}</span>
         </div>
-        <span
-          v-if="showFileType"
-          class="rr-dash-docs__meta rr-dash-docs__meta--type"
-        >
+        <span v-if="showFileType" class="rr-dash-docs__meta rr-dash-docs__meta--type">
           {{ row.fileType }}
         </span>
         <StatusBadge
           v-if="showStatusBadge"
           class="rr-dash-docs__status"
-          :kind="row.status"
+          :kind="statusKind(row)"
           :label="row.statusLabel"
         />
       </div>
     </div>
-    <p
-      v-else
-      class="rr-dash-docs__empty"
-    >
+    <p v-else class="rr-dash-docs__empty">
       {{ t('dashboard.recent.empty') }}
     </p>
   </section>

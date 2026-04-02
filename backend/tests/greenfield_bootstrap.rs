@@ -13,17 +13,23 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use rustrag_backend::{
-    app::{config::Settings, state::AppState},
+    app::{
+        config::{
+            Settings, UiBootstrapAiBindingDefault, UiBootstrapAiProviderSecret, UiBootstrapAiSetup,
+        },
+        state::AppState,
+    },
     infra::{
         arangodb::client::ArangoClient,
         persistence::{Persistence, canonical_ai_catalog_seeded, canonical_baseline_present},
+        repositories::catalog_repository,
     },
     interfaces::http::router,
 };
 
 const SEEDED_PROVIDER_COUNT: i64 = 3;
-const SEEDED_MODEL_COUNT: i64 = 7;
-const SEEDED_PRICE_COUNT: i64 = 12;
+const SEEDED_MODEL_COUNT: i64 = 40;
+const SEEDED_PRICE_COUNT: i64 = 118;
 const TEST_BOOTSTRAP_SECRET: &str = "greenfield-bootstrap-secret";
 
 struct TempDatabase {
@@ -83,6 +89,12 @@ struct GreenfieldBootstrapFixture {
 
 impl GreenfieldBootstrapFixture {
     async fn create() -> Result<Self> {
+        Self::create_with_ui_bootstrap_ai_setup(None).await
+    }
+
+    async fn create_with_ui_bootstrap_ai_setup(
+        ui_bootstrap_ai_setup: Option<UiBootstrapAiSetup>,
+    ) -> Result<Self> {
         let mut settings = Settings::from_env()
             .context("failed to load settings for greenfield bootstrap test")?;
         let temp_database = TempDatabase::create(&settings.database_url).await?;
@@ -104,7 +116,7 @@ impl GreenfieldBootstrapFixture {
             .await
             .context("failed to apply greenfield bootstrap migrations")?;
 
-        let state = build_test_state(settings, postgres)?;
+        let state = build_test_state(settings, postgres, ui_bootstrap_ai_setup)?;
         Ok(Self { state, temp_database })
     }
 
@@ -122,7 +134,11 @@ impl GreenfieldBootstrapFixture {
     }
 }
 
-fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppState> {
+fn build_test_state(
+    settings: Settings,
+    postgres: PgPool,
+    ui_bootstrap_ai_setup: Option<UiBootstrapAiSetup>,
+) -> Result<AppState> {
     let bootstrap_settings = settings.bootstrap_settings();
     let persistence = Persistence {
         postgres,
@@ -131,7 +147,7 @@ fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppState> {
     };
     let arango_client = Arc::new(ArangoClient::from_settings(&settings)?);
 
-    Ok(AppState::from_dependencies(
+    let mut state = AppState::from_dependencies(
         Settings {
             ui_bootstrap_admin_login: bootstrap_settings
                 .legacy_ui_bootstrap_admin
@@ -153,7 +169,9 @@ fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppState> {
         },
         persistence,
         arango_client,
-    ))
+    );
+    state.ui_bootstrap_ai_setup = ui_bootstrap_ai_setup;
+    Ok(state)
 }
 
 fn replace_database_name(database_url: &str, new_database: &str) -> Result<String> {
@@ -207,6 +225,72 @@ async fn response_json(response: axum::response::Response) -> Result<Value> {
         return Ok(Value::Null);
     }
     serde_json::from_slice(&bytes).context("failed to decode response json")
+}
+
+fn compose_like_bootstrap_ai_setup() -> UiBootstrapAiSetup {
+    UiBootstrapAiSetup {
+        provider_secrets: vec![
+            UiBootstrapAiProviderSecret {
+                provider_kind: "deepseek".to_string(),
+                api_key: "test-deepseek-bootstrap-token".to_string(),
+            },
+            UiBootstrapAiProviderSecret {
+                provider_kind: "openai".to_string(),
+                api_key: "test-openai-bootstrap-token".to_string(),
+            },
+        ],
+        binding_defaults: vec![
+            UiBootstrapAiBindingDefault {
+                binding_purpose: "extract_graph".to_string(),
+                provider_kind: Some("deepseek".to_string()),
+                model_name: Some("deepseek-chat".to_string()),
+            },
+            UiBootstrapAiBindingDefault {
+                binding_purpose: "embed_chunk".to_string(),
+                provider_kind: Some("openai".to_string()),
+                model_name: Some("text-embedding-3-large".to_string()),
+            },
+            UiBootstrapAiBindingDefault {
+                binding_purpose: "query_answer".to_string(),
+                provider_kind: Some("openai".to_string()),
+                model_name: Some("gpt-5.4".to_string()),
+            },
+            UiBootstrapAiBindingDefault {
+                binding_purpose: "vision".to_string(),
+                provider_kind: Some("openai".to_string()),
+                model_name: Some("gpt-5.4-mini".to_string()),
+            },
+        ],
+    }
+}
+
+async fn seed_orphaned_default_catalog_ai_runtime(
+    fixture: &GreenfieldBootstrapFixture,
+) -> Result<()> {
+    let workspace =
+        catalog_repository::create_workspace(fixture.pool(), "default", "Default workspace", None)
+            .await
+            .context("failed to create orphaned default workspace")?;
+    let library = catalog_repository::create_library(
+        fixture.pool(),
+        workspace.id,
+        "default-library",
+        "Default library",
+        Some("Backstage default library for the primary documents and ask flow"),
+        None,
+    )
+    .await
+    .context("failed to create orphaned default library")?;
+
+    fixture
+        .state
+        .canonical_services
+        .ai_catalog
+        .apply_configured_bootstrap_ai_setup(&fixture.state, workspace.id, library.id, None)
+        .await
+        .context("failed to seed orphaned bootstrap AI runtime")?;
+
+    Ok(())
 }
 
 #[tokio::test]
@@ -322,6 +406,304 @@ async fn fresh_bootstrap_starts_without_default_catalog_side_effect_rows() -> Re
         assert_eq!(scalar_count(fixture.pool(), "catalog_workspace").await?, 0);
         assert_eq!(scalar_count(fixture.pool(), "catalog_library").await?, 0);
         assert_eq!(scalar_count(fixture.pool(), "catalog_library_connector").await?, 0);
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn bootstrap_setup_route_rejects_missing_ai_payload_without_leaving_first_user_behind()
+-> Result<()> {
+    let fixture = GreenfieldBootstrapFixture::create().await?;
+
+    let result = async {
+        let payload = json!({
+            "login": "admin",
+            "displayName": "Admin",
+            "password": "super-secret-password",
+        });
+
+        let response = fixture
+            .app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/iam/bootstrap/setup")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .expect("build bootstrap setup request"),
+            )
+            .await
+            .context("bootstrap setup request failed")?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(body["errorKind"], "bad_request");
+
+        let status_response = fixture
+            .app()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/iam/bootstrap/status")
+                    .body(Body::empty())
+                    .expect("build bootstrap status request"),
+            )
+            .await
+            .context("bootstrap status request failed")?;
+        assert_eq!(status_response.status(), StatusCode::OK);
+        let status_body = response_json(status_response).await?;
+        assert_eq!(status_body["setupRequired"], true);
+        assert_eq!(scalar_count(fixture.pool(), "iam_principal").await?, 0);
+        assert_eq!(scalar_count(fixture.pool(), "iam_user").await?, 0);
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn bootstrap_setup_route_uses_env_backed_openai_defaults() -> Result<()> {
+    let fixture =
+        GreenfieldBootstrapFixture::create_with_ui_bootstrap_ai_setup(Some(UiBootstrapAiSetup {
+            provider_secrets: vec![UiBootstrapAiProviderSecret {
+                provider_kind: "openai".to_string(),
+                api_key: "test-openai-bootstrap-token".to_string(),
+            }],
+            binding_defaults: vec![],
+        }))
+        .await?;
+
+    let result = async {
+        let payload = json!({
+            "login": "admin",
+            "displayName": "Admin",
+            "password": "super-secret-password",
+        });
+
+        let response = fixture
+            .app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/iam/bootstrap/setup")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .expect("build env-backed bootstrap setup request"),
+            )
+            .await
+            .context("env-backed bootstrap setup request failed")?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().contains_key(header::SET_COOKIE));
+
+        let status_response = fixture
+            .app()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/iam/bootstrap/status")
+                    .body(Body::empty())
+                    .expect("build bootstrap status request"),
+            )
+            .await
+            .context("bootstrap status request failed")?;
+        let status_body = response_json(status_response).await?;
+        assert_eq!(status_body["setupRequired"], false);
+
+        assert_eq!(scalar_count(fixture.pool(), "iam_user").await?, 1);
+        assert_eq!(scalar_count(fixture.pool(), "ai_provider_credential").await?, 1);
+        assert_eq!(scalar_count(fixture.pool(), "ai_model_preset").await?, 4);
+        assert_eq!(scalar_count(fixture.pool(), "ai_library_model_binding").await?, 4);
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn bootstrap_setup_route_accepts_interactive_ai_payload_with_env_backed_defaults()
+-> Result<()> {
+    let fixture =
+        GreenfieldBootstrapFixture::create_with_ui_bootstrap_ai_setup(Some(UiBootstrapAiSetup {
+            provider_secrets: vec![
+                UiBootstrapAiProviderSecret {
+                    provider_kind: "deepseek".to_string(),
+                    api_key: "test-deepseek-bootstrap-token".to_string(),
+                },
+                UiBootstrapAiProviderSecret {
+                    provider_kind: "openai".to_string(),
+                    api_key: "test-openai-bootstrap-token".to_string(),
+                },
+            ],
+            binding_defaults: vec![
+                rustrag_backend::app::config::UiBootstrapAiBindingDefault {
+                    binding_purpose: "extract_graph".to_string(),
+                    provider_kind: Some("deepseek".to_string()),
+                    model_name: Some("deepseek-chat".to_string()),
+                },
+                rustrag_backend::app::config::UiBootstrapAiBindingDefault {
+                    binding_purpose: "embed_chunk".to_string(),
+                    provider_kind: Some("openai".to_string()),
+                    model_name: Some("text-embedding-3-large".to_string()),
+                },
+                rustrag_backend::app::config::UiBootstrapAiBindingDefault {
+                    binding_purpose: "query_answer".to_string(),
+                    provider_kind: Some("openai".to_string()),
+                    model_name: Some("gpt-5.4".to_string()),
+                },
+                rustrag_backend::app::config::UiBootstrapAiBindingDefault {
+                    binding_purpose: "vision".to_string(),
+                    provider_kind: Some("openai".to_string()),
+                    model_name: Some("gpt-5.4-mini".to_string()),
+                },
+            ],
+        }))
+        .await?;
+
+    let result = async {
+        let payload = json!({
+            "login": "admin",
+            "displayName": "Admin",
+            "password": "super-secret-password",
+            "aiSetup": {
+                "credentials": [],
+                "bindingSelections": [
+                    {
+                        "bindingPurpose": "extract_graph",
+                        "providerKind": "deepseek",
+                        "modelCatalogId": "00000000-0000-0000-0000-000000000204"
+                    },
+                    {
+                        "bindingPurpose": "embed_chunk",
+                        "providerKind": "openai",
+                        "modelCatalogId": "00000000-0000-0000-0000-000000000202"
+                    },
+                    {
+                        "bindingPurpose": "query_answer",
+                        "providerKind": "openai",
+                        "modelCatalogId": "00000000-0000-0000-0000-000000000203"
+                    },
+                    {
+                        "bindingPurpose": "vision",
+                        "providerKind": "openai",
+                        "modelCatalogId": "00000000-0000-0000-0000-000000000201"
+                    }
+                ]
+            }
+        });
+
+        let response = fixture
+            .app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/iam/bootstrap/setup")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .expect("build interactive env-backed bootstrap setup request"),
+            )
+            .await
+            .context("interactive env-backed bootstrap setup request failed")?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().contains_key(header::SET_COOKIE));
+
+        let status_response = fixture
+            .app()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/iam/bootstrap/status")
+                    .body(Body::empty())
+                    .expect("build bootstrap status request"),
+            )
+            .await
+            .context("bootstrap status request failed")?;
+        let status_body = response_json(status_response).await?;
+        assert_eq!(status_body["setupRequired"], false);
+
+        assert_eq!(scalar_count(fixture.pool(), "iam_user").await?, 1);
+        assert_eq!(scalar_count(fixture.pool(), "ai_provider_credential").await?, 2);
+        assert_eq!(scalar_count(fixture.pool(), "ai_model_preset").await?, 4);
+        assert_eq!(scalar_count(fixture.pool(), "ai_library_model_binding").await?, 4);
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn bootstrap_setup_route_recovers_from_orphaned_env_backed_ai_state() -> Result<()> {
+    let fixture = GreenfieldBootstrapFixture::create_with_ui_bootstrap_ai_setup(Some(
+        compose_like_bootstrap_ai_setup(),
+    ))
+    .await?;
+
+    let result = async {
+        seed_orphaned_default_catalog_ai_runtime(&fixture).await?;
+        assert_eq!(scalar_count(fixture.pool(), "iam_principal").await?, 0);
+        assert_eq!(scalar_count(fixture.pool(), "iam_user").await?, 0);
+        assert_eq!(scalar_count(fixture.pool(), "catalog_workspace").await?, 1);
+        assert_eq!(scalar_count(fixture.pool(), "catalog_library").await?, 1);
+        assert_eq!(scalar_count(fixture.pool(), "ai_provider_credential").await?, 2);
+        assert_eq!(scalar_count(fixture.pool(), "ai_model_preset").await?, 4);
+        assert_eq!(scalar_count(fixture.pool(), "ai_library_model_binding").await?, 4);
+
+        let payload = json!({
+            "login": "admin",
+            "displayName": "Admin",
+            "password": "super-secret-password",
+        });
+
+        let response = fixture
+            .app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/iam/bootstrap/setup")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .expect("build orphaned bootstrap recovery request"),
+            )
+            .await
+            .context("orphaned bootstrap recovery request failed")?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().contains_key(header::SET_COOKIE));
+
+        let status_response = fixture
+            .app()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/iam/bootstrap/status")
+                    .body(Body::empty())
+                    .expect("build bootstrap status request"),
+            )
+            .await
+            .context("bootstrap status request failed")?;
+        let status_body = response_json(status_response).await?;
+        assert_eq!(status_body["setupRequired"], false);
+
+        assert_eq!(scalar_count(fixture.pool(), "iam_principal").await?, 1);
+        assert_eq!(scalar_count(fixture.pool(), "iam_user").await?, 1);
+        assert_eq!(scalar_count(fixture.pool(), "catalog_workspace").await?, 1);
+        assert_eq!(scalar_count(fixture.pool(), "catalog_library").await?, 1);
+        assert_eq!(scalar_count(fixture.pool(), "ai_provider_credential").await?, 2);
+        assert_eq!(scalar_count(fixture.pool(), "ai_model_preset").await?, 4);
+        assert_eq!(scalar_count(fixture.pool(), "ai_library_model_binding").await?, 4);
+
         Ok(())
     }
     .await;

@@ -4015,6 +4015,7 @@ fn pricing_capability_label(value: &PricingCapability) -> &'static str {
 fn pricing_billing_unit_label(value: &PricingBillingUnit) -> &'static str {
     match value {
         PricingBillingUnit::Per1MInputTokens => "per_1m_input_tokens",
+        PricingBillingUnit::Per1MCachedInputTokens => "per_1m_cached_input_tokens",
         PricingBillingUnit::Per1MOutputTokens => "per_1m_output_tokens",
         PricingBillingUnit::Per1MTokens => "per_1m_tokens",
         PricingBillingUnit::FixedPerCall => "fixed_per_call",

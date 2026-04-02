@@ -10,11 +10,13 @@ const props = defineProps<{
 
 const { t } = useI18n()
 
-const totalCount = computed(() =>
-  props.summary?.segments.reduce((acc, segment) => acc + segment.value, 0) ?? 0,
+const totalCount = computed(
+  () => props.summary?.segments.reduce((acc, segment) => acc + segment.value, 0) ?? 0,
 )
 
-const nonZeroSegments = computed(() => props.summary?.segments.filter((segment) => segment.value > 0) ?? [])
+const nonZeroSegments = computed(
+  () => props.summary?.segments.filter((segment) => segment.value > 0) ?? [],
+)
 
 const barSegments = computed(() => {
   if (!props.summary) return []
@@ -34,12 +36,18 @@ const graphReadySegment = computed(
       (segment) => segment.key === 'graphReady' || segment.key === 'ready',
     ) ?? null,
 )
-const graphCatchUpSegment = computed(
-  () => props.summary?.segments.find((segment) => segment.key === 'graphCatchUp') ?? null,
+const graphSparseSegment = computed(
+  () => props.summary?.segments.find((segment) => segment.key === 'graphSparse') ?? null,
 )
-const processingSegment = computed(() => props.summary?.segments.find((segment) => segment.key === 'processing') ?? null)
-const failedSegment = computed(() => props.summary?.segments.find((segment) => segment.key === 'failed') ?? null)
-const singleStatus = computed(() => (nonZeroSegments.value.length === 1 ? nonZeroSegments.value[0] : null))
+const processingSegment = computed(
+  () => props.summary?.segments.find((segment) => segment.key === 'processing') ?? null,
+)
+const failedSegment = computed(
+  () => props.summary?.segments.find((segment) => segment.key === 'failed') ?? null,
+)
+const singleStatus = computed(() =>
+  nonZeroSegments.value.length === 1 ? nonZeroSegments.value[0] : null,
+)
 const mixedStatus = computed(() => nonZeroSegments.value.length > 1)
 const settledReady = computed(
   () => singleStatus.value?.key === 'ready' || singleStatus.value?.key === 'graphReady',
@@ -73,7 +81,7 @@ const summaryLine = computed(() => {
 
   return t('dashboard.chart.summaryMixed', {
     graphReady: graphReadySegment.value?.value ?? 0,
-    graphCatchUp: graphCatchUpSegment.value?.value ?? 0,
+    graphSparse: graphSparseSegment.value?.value ?? 0,
     processing: processingSegment.value?.value ?? 0,
     failed: failedSegment.value?.value ?? 0,
   })
@@ -89,7 +97,9 @@ const summaryLine = computed(() => {
     <header class="rr-dash-chart__head">
       <div class="rr-dash-chart__copy">
         <p class="rr-dash-chart__eyebrow">{{ t('dashboard.chart.eyebrow') }}</p>
-        <h2 class="rr-dash-chart__title">{{ props.summary?.label ?? t('dashboard.chart.title') }}</h2>
+        <h2 class="rr-dash-chart__title">
+          {{ props.summary?.label ?? t('dashboard.chart.title') }}
+        </h2>
         <p class="rr-dash-chart__subtitle">{{ t('dashboard.chart.subtitle') }}</p>
       </div>
     </header>
@@ -104,22 +114,12 @@ const summaryLine = computed(() => {
       />
     </div>
 
-    <p
-      v-if="summaryLine"
-      class="rr-dash-chart__summary"
-    >
+    <p v-if="summaryLine" class="rr-dash-chart__summary">
       {{ summaryLine }}
     </p>
 
-    <ul
-      v-if="mixedStatus"
-      class="rr-dash-chart__legend"
-    >
-      <li
-        v-for="seg in nonZeroSegments"
-        :key="seg.key"
-        class="rr-dash-chart__legend-item"
-      >
+    <ul v-if="mixedStatus" class="rr-dash-chart__legend">
+      <li v-for="seg in nonZeroSegments" :key="seg.key" class="rr-dash-chart__legend-item">
         <span class="rr-dash-chart__dot" :style="{ background: seg.color ?? undefined }" />
         <strong>{{ seg.value }}</strong>
         <span>{{ seg.label }}</span>

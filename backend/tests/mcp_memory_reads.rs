@@ -1,3 +1,6 @@
+#[path = "support/web_ingest_support.rs"]
+mod web_ingest_support;
+
 use anyhow::Context;
 use axum::{
     Router,
@@ -585,6 +588,72 @@ async fn failed_documents_with_extracted_text_remain_readable_for_memory_reads()
     }
     .await;
 
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango services"]
+async fn web_ingest_documents_are_readable_through_mcp_read_document() -> anyhow::Result<()> {
+    let settings =
+        Settings::from_env().context("failed to load settings for web-ingest read test")?;
+    let fixture = McpReadFixture::create(settings).await?;
+    let server = web_ingest_support::WebTestServer::start().await?;
+
+    let result = async {
+        let token =
+            fixture.bearer_token(&["documents:read", "documents:write"], "read-web-ingest").await?;
+
+        let submit = fixture
+            .mcp_tool_call(
+                &token,
+                "submit_web_ingest_run",
+                json!({
+                    "libraryId": fixture.library_id,
+                    "seedUrl": server.url("/seed"),
+                    "mode": "single_page",
+                }),
+            )
+            .await?;
+        assert_eq!(submit["result"]["isError"], json!(false));
+        assert_eq!(submit["result"]["structuredContent"]["runState"], json!("completed"));
+
+        let run_id: Uuid =
+            serde_json::from_value(submit["result"]["structuredContent"]["runId"].clone())
+                .context("run id missing")?;
+        let pages = fixture
+            .mcp_tool_call(&token, "list_web_ingest_run_pages", json!({ "runId": run_id }))
+            .await?;
+        let page_items = pages["result"]["structuredContent"]["pages"]
+            .as_array()
+            .context("pages payload missing")?;
+        assert_eq!(page_items.len(), 1);
+        let document_id: Uuid = serde_json::from_value(page_items[0]["documentId"].clone())
+            .context("document id missing")?;
+        assert_eq!(page_items[0]["candidateState"], json!("processed"));
+        assert_eq!(page_items[0]["classificationReason"], json!("seed_accepted"));
+
+        let read = fixture
+            .mcp_tool_call(
+                &token,
+                "read_document",
+                json!({ "documentId": document_id, "mode": "full" }),
+            )
+            .await?;
+        assert_eq!(read["result"]["isError"], json!(false));
+        assert_eq!(read["result"]["structuredContent"]["documentId"], json!(document_id));
+        assert_eq!(read["result"]["structuredContent"]["readabilityState"], json!("readable"));
+        assert_eq!(read["result"]["structuredContent"]["documentTitle"], json!("Seed Page"));
+        let content = read["result"]["structuredContent"]["content"]
+            .as_str()
+            .context("web-ingest read content missing")?;
+        assert!(content.contains("Canonical single-page ingest should keep only this page"));
+
+        Ok(())
+    }
+    .await;
+
+    server.shutdown().await?;
     fixture.cleanup().await?;
     result
 }
