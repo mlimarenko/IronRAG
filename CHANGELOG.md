@@ -12,6 +12,7 @@
 - Switched the default [`docker-compose.yml`](./docker-compose.yml) to published Docker Hub images so release installs no longer depend on local image builds.
 - Renamed the internal deployment surface from `docker-compose.ci.yml` to [`docker-compose-gitlab.yml`](./docker-compose-gitlab.yml) and updated Ansible plus GitLab CI to keep internal deploys aligned.
 - Updated root env documentation and release docs around the canonical `docker-compose.yml`, `docker-compose-local.yml`, and `docker-compose-gitlab.yml` split.
+- Tracked the canonical [`backend/Cargo.lock`](./backend/Cargo.lock) in release artifacts so clean GitHub checkouts can build the backend Docker image without missing-file failures.
 - Added the canonical `backend/src/agent_runtime/` subsystem with typed task contracts, staged execution, explicit policy decisions, and owner-linked runtime persistence.
 - Removed query-local lifecycle authority, raw structured task `ChatRequest` callers, hidden extraction parser repair, and transport-specific runtime aliases from the canonical success path.
 - Replaced full-library graph rebuilds during ingestion with targeted canonical graph reconciliation so uploads no longer stall behind unnecessary global rebuild work.
