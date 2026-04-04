@@ -8,11 +8,9 @@ Load files, links, and images into one knowledge base, turn them into searchable
 
 [README-RU](./README-RU.md) • [MCP](./MCP.md) • [MCP-RU](./MCP-RU.md)
 
-
-
-
-
-
+<p align="center">
+  <img src="./docs/assets/readme-flow.gif" alt="RustRAG demo: dashboard, documents, grounded assistant, and graph exploration" width="960">
+</p>
 
 > RustRAG is a practical knowledge system for LLMs: one `docker compose up`, one web app, one MCP endpoint, and one canonical pipeline for internal assistants, support bots, and private agent workflows.
 

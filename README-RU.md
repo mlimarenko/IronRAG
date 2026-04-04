@@ -6,7 +6,9 @@
 
 [README](./README.md) • [MCP](./MCP.md) • [MCP-RU](./MCP-RU.md)
 
-
+<p align="center">
+  <img src="./docs/assets/readme-flow.gif" alt="Демо RustRAG: dashboard, documents, grounded assistant и graph exploration" width="960">
+</p>
 
 > RustRAG даёт практическую систему знаний для LLM: один `docker compose up`, один веб-интерфейс, один MCP endpoint и один канонический пайплайн для внутренних ассистентов, саппорта и приватных агентных сценариев.
 
