@@ -6,10 +6,14 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
+    domains::agent_runtime::RuntimeTaskKind,
     domains::billing::{
         BillingCharge, BillingExecutionCost, BillingExecutionOwnerKind, BillingProviderCall,
     },
-    infra::repositories::{ai_repository, billing_repository, ingest_repository, query_repository},
+    infra::repositories::{
+        self, ai_repository, billing_repository, catalog_repository, ingest_repository,
+        query_repository, runtime_repository,
+    },
     interfaces::http::router_support::ApiError,
 };
 
@@ -36,6 +40,7 @@ pub struct CaptureQueryExecutionBillingCommand {
     pub workspace_id: Uuid,
     pub library_id: Uuid,
     pub execution_id: Uuid,
+    pub runtime_execution_id: Uuid,
     pub binding_id: Option<Uuid>,
     pub provider_kind: String,
     pub model_name: String,
@@ -48,6 +53,8 @@ pub struct CaptureExecutionBillingCommand {
     pub library_id: Uuid,
     pub owning_execution_kind: String,
     pub owning_execution_id: Uuid,
+    pub runtime_execution_id: Option<Uuid>,
+    pub runtime_task_kind: Option<RuntimeTaskKind>,
     pub binding_id: Option<Uuid>,
     pub provider_kind: String,
     pub model_name: String,
@@ -64,6 +71,18 @@ pub struct CaptureIngestAttemptBillingCommand {
     pub provider_kind: String,
     pub model_name: String,
     pub call_kind: String,
+    pub usage_json: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct CaptureGraphExtractionBillingCommand {
+    pub workspace_id: Uuid,
+    pub library_id: Uuid,
+    pub graph_extraction_id: Uuid,
+    pub runtime_execution_id: Uuid,
+    pub binding_id: Option<Uuid>,
+    pub provider_kind: String,
+    pub model_name: String,
     pub usage_json: Value,
 }
 
@@ -227,6 +246,8 @@ impl BillingService {
                 library_id: command.library_id,
                 owning_execution_kind: "query_execution".to_string(),
                 owning_execution_id: command.execution_id,
+                runtime_execution_id: Some(command.runtime_execution_id),
+                runtime_task_kind: Some(RuntimeTaskKind::QueryAnswer),
                 binding_id: command.binding_id,
                 provider_kind: command.provider_kind,
                 model_name: command.model_name,
@@ -249,10 +270,36 @@ impl BillingService {
                 library_id: command.library_id,
                 owning_execution_kind: "ingest_attempt".to_string(),
                 owning_execution_id: command.attempt_id,
+                runtime_execution_id: None,
+                runtime_task_kind: None,
                 binding_id: command.binding_id,
                 provider_kind: command.provider_kind,
                 model_name: command.model_name,
                 call_kind: command.call_kind,
+                usage_json: command.usage_json,
+            },
+        )
+        .await
+    }
+
+    pub async fn capture_graph_extraction(
+        &self,
+        state: &AppState,
+        command: CaptureGraphExtractionBillingCommand,
+    ) -> Result<Option<BillingExecutionCost>, ApiError> {
+        self.capture_execution_provider_call(
+            state,
+            CaptureExecutionBillingCommand {
+                workspace_id: command.workspace_id,
+                library_id: command.library_id,
+                owning_execution_kind: "graph_extraction_attempt".to_string(),
+                owning_execution_id: command.graph_extraction_id,
+                runtime_execution_id: Some(command.runtime_execution_id),
+                runtime_task_kind: Some(RuntimeTaskKind::GraphExtract),
+                binding_id: command.binding_id,
+                provider_kind: command.provider_kind,
+                model_name: command.model_name,
+                call_kind: "graph_extract".to_string(),
                 usage_json: command.usage_json,
             },
         )
@@ -265,6 +312,14 @@ impl BillingService {
         command: CaptureExecutionBillingCommand,
     ) -> Result<Option<BillingExecutionCost>, ApiError> {
         let owning_execution_kind = parse_execution_owner_kind(&command.owning_execution_kind)?;
+        self.validate_runtime_attribution(
+            state,
+            owning_execution_kind,
+            command.owning_execution_id,
+            command.runtime_execution_id,
+            command.runtime_task_kind,
+        )
+        .await?;
         let execution_scope = self
             .resolve_execution_scope(state, owning_execution_kind, command.owning_execution_id)
             .await?;
@@ -308,6 +363,8 @@ impl BillingService {
                 binding_id: command.binding_id,
                 owning_execution_kind: execution_owner_kind_key(owning_execution_kind),
                 owning_execution_id: command.owning_execution_id,
+                runtime_execution_id: command.runtime_execution_id,
+                runtime_task_kind: command.runtime_task_kind.map(RuntimeTaskKind::as_str),
                 provider_catalog_id: provider_catalog.id,
                 model_catalog_id: model_catalog.id,
                 call_kind: &command.call_kind,
@@ -423,6 +480,60 @@ struct BillingExecutionScope {
 }
 
 impl BillingService {
+    async fn validate_runtime_attribution(
+        &self,
+        state: &AppState,
+        owning_execution_kind: BillingExecutionOwnerKind,
+        owning_execution_id: Uuid,
+        runtime_execution_id: Option<Uuid>,
+        runtime_task_kind: Option<RuntimeTaskKind>,
+    ) -> Result<(), ApiError> {
+        match (runtime_execution_id, runtime_task_kind) {
+            (None, None) => Ok(()),
+            (Some(_), None) | (None, Some(_)) => Err(ApiError::Conflict(
+                "runtime billing attribution requires both runtime_execution_id and runtime_task_kind"
+                    .to_string(),
+            )),
+            (Some(runtime_execution_id), Some(runtime_task_kind)) => {
+                let runtime_execution =
+                    runtime_repository::get_runtime_execution_by_id(
+                        &state.persistence.postgres,
+                        runtime_execution_id,
+                    )
+                    .await
+                    .map_err(|_| ApiError::Internal)?
+                .ok_or_else(|| {
+                        ApiError::resource_not_found("runtime_execution", runtime_execution_id)
+                    })?;
+                if runtime_execution.owner_kind.as_str()
+                    != execution_owner_kind_key(owning_execution_kind)
+                {
+                    return Err(ApiError::Conflict(format!(
+                        "runtime execution {} belongs to owner kind {}, not {}",
+                        runtime_execution_id,
+                        runtime_execution.owner_kind.as_str(),
+                        execution_owner_kind_key(owning_execution_kind)
+                    )));
+                }
+                if runtime_execution.owner_id != owning_execution_id {
+                    return Err(ApiError::Conflict(format!(
+                        "runtime execution {} belongs to owner {}, not {}",
+                        runtime_execution_id, runtime_execution.owner_id, owning_execution_id
+                    )));
+                }
+                if runtime_execution.task_kind != runtime_task_kind {
+                    return Err(ApiError::Conflict(format!(
+                        "runtime execution {} belongs to task {}, not {}",
+                        runtime_execution_id,
+                        runtime_execution.task_kind.as_str(),
+                        runtime_task_kind.as_str()
+                    )));
+                }
+                Ok(())
+            }
+        }
+    }
+
     async fn resolve_execution_scope(
         &self,
         state: &AppState,
@@ -441,6 +552,28 @@ impl BillingService {
                 Ok(BillingExecutionScope {
                     workspace_id: execution.workspace_id,
                     library_id: execution.library_id,
+                })
+            }
+            BillingExecutionOwnerKind::GraphExtractionAttempt => {
+                let extraction = repositories::get_runtime_graph_extraction_record_by_id(
+                    &state.persistence.postgres,
+                    execution_id,
+                )
+                .await
+                .map_err(|_| ApiError::Internal)?
+                .ok_or_else(|| {
+                    ApiError::resource_not_found("runtime_graph_extraction", execution_id)
+                })?;
+                let library = catalog_repository::get_library_by_id(
+                    &state.persistence.postgres,
+                    extraction.project_id,
+                )
+                .await
+                .map_err(|_| ApiError::Internal)?
+                .ok_or_else(|| ApiError::resource_not_found("library", extraction.project_id))?;
+                Ok(BillingExecutionScope {
+                    workspace_id: library.workspace_id,
+                    library_id: extraction.project_id,
                 })
             }
             BillingExecutionOwnerKind::IngestAttempt => {
@@ -470,6 +603,7 @@ impl BillingService {
 fn parse_execution_owner_kind(value: &str) -> Result<BillingExecutionOwnerKind, ApiError> {
     match value {
         "query_execution" => Ok(BillingExecutionOwnerKind::QueryExecution),
+        "graph_extraction_attempt" => Ok(BillingExecutionOwnerKind::GraphExtractionAttempt),
         "ingest_attempt" => Ok(BillingExecutionOwnerKind::IngestAttempt),
         other => Err(ApiError::BadRequest(format!("unsupported executionKind '{other}'"))),
     }
@@ -566,6 +700,13 @@ fn map_provider_call_row(
         binding_id: row.binding_id,
         owning_execution_kind: parse_execution_owner_kind(&row.owning_execution_kind)?,
         owning_execution_id: row.owning_execution_id,
+        runtime_execution_id: row.runtime_execution_id,
+        runtime_task_kind: row
+            .runtime_task_kind
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(ApiError::BadRequest)?,
         provider_catalog_id: row.provider_catalog_id,
         model_catalog_id: row.model_catalog_id,
         call_kind: row.call_kind,
@@ -604,6 +745,7 @@ fn map_execution_cost_row(
 fn execution_owner_kind_key(value: BillingExecutionOwnerKind) -> &'static str {
     match value {
         BillingExecutionOwnerKind::QueryExecution => "query_execution",
+        BillingExecutionOwnerKind::GraphExtractionAttempt => "graph_extraction_attempt",
         BillingExecutionOwnerKind::IngestAttempt => "ingest_attempt",
     }
 }

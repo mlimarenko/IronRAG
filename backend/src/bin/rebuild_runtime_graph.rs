@@ -1,7 +1,7 @@
 use anyhow::Context;
 use rustrag_backend::{
     app::{config::Settings, state::AppState},
-    infra::repositories,
+    infra::repositories::catalog_repository,
 };
 use tracing::info;
 use uuid::Uuid;
@@ -16,12 +16,12 @@ async fn main() -> anyhow::Result<()> {
     let target_library_id = args.next().map(|value| Uuid::parse_str(&value)).transpose()?;
 
     let libraries = match target_library_id {
-        Some(library_id) => repositories::list_projects(&state.persistence.postgres, None)
+        Some(library_id) => catalog_repository::list_libraries(&state.persistence.postgres, None)
             .await?
             .into_iter()
-            .filter(|project| project.id == library_id)
+            .filter(|library| library.id == library_id)
             .collect::<Vec<_>>(),
-        None => repositories::list_projects(&state.persistence.postgres, None).await?,
+        None => catalog_repository::list_libraries(&state.persistence.postgres, None).await?,
     };
 
     if libraries.is_empty() {
@@ -29,7 +29,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     for library in libraries {
-        info!(library_id = %library.id, library_name = %library.name, "rebuilding runtime graph");
+        info!(
+            library_id = %library.id,
+            workspace_id = %library.workspace_id,
+            library_name = %library.display_name,
+            "rebuilding runtime graph"
+        );
         let outcome = state
             .canonical_services
             .graph

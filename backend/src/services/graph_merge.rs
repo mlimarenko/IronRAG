@@ -429,7 +429,7 @@ async fn upsert_document_node(
         scope.projection_version,
     )
     .await?;
-    let support_count = existing.as_ref().map_or(0, |row| row.support_count);
+    let support_count = existing.as_ref().map_or(1, |row| row.support_count.max(1));
     let aliases = serde_json::json!([label, document.external_key.clone()]);
 
     repositories::upsert_runtime_graph_node(
@@ -468,7 +468,7 @@ async fn upsert_graph_node(
         scope.projection_version,
     )
     .await?;
-    let support_count = existing.as_ref().map_or(0, |row| row.support_count);
+    let support_count = existing.as_ref().map_or(1, |row| row.support_count.max(1));
 
     repositories::upsert_runtime_graph_node(
         pool,
@@ -541,7 +541,7 @@ async fn upsert_graph_edge(
         scope.projection_version,
     )
     .await?;
-    let support_count = existing.as_ref().map_or(0, |row| row.support_count);
+    let support_count = existing.as_ref().map_or(1, |row| row.support_count.max(1));
 
     repositories::upsert_runtime_graph_edge(
         pool,
@@ -597,8 +597,6 @@ fn merge_graph_quality_metadata(
         metadata.get("has_partial_support").and_then(serde_json::Value::as_bool).unwrap_or(false);
     let existing_has_failed =
         metadata.get("has_failed_support").and_then(serde_json::Value::as_bool).unwrap_or(false);
-    let existing_parser_repair =
-        metadata.get("parser_repair_applied").and_then(serde_json::Value::as_bool).unwrap_or(false);
     let existing_second_pass =
         metadata.get("second_pass_applied").and_then(serde_json::Value::as_bool).unwrap_or(false);
 
@@ -612,8 +610,6 @@ fn merge_graph_quality_metadata(
         existing_has_partial || matches!(current_status, Some(ExtractionOutcomeStatus::Partial));
     let has_failed =
         existing_has_failed || matches!(current_status, Some(ExtractionOutcomeStatus::Failed));
-    let parser_repair_applied = existing_parser_repair
-        || extraction_recovery.is_some_and(|summary| summary.parser_repair_applied);
     let second_pass_applied = existing_second_pass
         || extraction_recovery.is_some_and(|summary| summary.second_pass_applied);
 
@@ -629,10 +625,6 @@ fn merge_graph_quality_metadata(
     metadata.insert("has_recovered_support".to_string(), serde_json::Value::Bool(has_recovered));
     metadata.insert("has_partial_support".to_string(), serde_json::Value::Bool(has_partial));
     metadata.insert("has_failed_support".to_string(), serde_json::Value::Bool(has_failed));
-    metadata.insert(
-        "parser_repair_applied".to_string(),
-        serde_json::Value::Bool(parser_repair_applied),
-    );
     metadata
         .insert("second_pass_applied".to_string(), serde_json::Value::Bool(second_pass_applied));
     metadata.insert(

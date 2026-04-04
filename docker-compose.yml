@@ -1,6 +1,6 @@
 x-rustrag-runtime-env: &rustrag-runtime-env
   RUSTRAG_BIND_ADDR: 0.0.0.0:8080
-  RUSTRAG_ENVIRONMENT: ${RUSTRAG_ENVIRONMENT:-local-compose}
+  RUSTRAG_ENVIRONMENT: ${RUSTRAG_ENVIRONMENT:-production}
   RUSTRAG_DATABASE_URL: postgres://${RUSTRAG_POSTGRES_USER:-postgres}:${RUSTRAG_POSTGRES_PASSWORD:-postgres}@postgres:5432/${RUSTRAG_POSTGRES_DB:-rustrag}
   RUSTRAG_DATABASE_MAX_CONNECTIONS: ${RUSTRAG_DATABASE_MAX_CONNECTIONS:-20}
   RUSTRAG_REDIS_URL: ${RUSTRAG_REDIS_URL:-redis://redis:6379}
@@ -10,22 +10,24 @@ x-rustrag-runtime-env: &rustrag-runtime-env
   RUSTRAG_ARANGODB_PASSWORD: ${RUSTRAG_ARANGODB_PASSWORD:-rustrag-dev}
   RUSTRAG_ARANGODB_REQUEST_TIMEOUT_SECONDS: ${RUSTRAG_ARANGODB_REQUEST_TIMEOUT_SECONDS:-15}
   RUSTRAG_LOG_FILTER: ${RUSTRAG_LOG_FILTER:-info}
-  RUSTRAG_FRONTEND_ORIGIN: ${RUSTRAG_FRONTEND_ORIGIN:-http://127.0.0.1:19000,http://localhost:19000,http://127.0.0.1:9000,http://localhost:9000,http://127.0.0.1:3000,http://localhost:3000}
+  RUSTRAG_FRONTEND_ORIGIN: ${RUSTRAG_FRONTEND_ORIGIN:-http://127.0.0.1:19000,http://localhost:19000}
   RUSTRAG_BOOTSTRAP_TOKEN: ${RUSTRAG_BOOTSTRAP_TOKEN:-bootstrap-local}
   RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN:-}
   RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD:-}
   RUSTRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN:-}
-  RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_PROVIDER_KIND: ${RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_PROVIDER_KIND:-deepseek}
-  RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_MODEL_NAME: ${RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_MODEL_NAME:-deepseek-chat}
+  RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_PROVIDER_KIND: ${RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_PROVIDER_KIND:-openai}
+  RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_MODEL_NAME: ${RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_MODEL_NAME:-gpt-5.4-mini}
   RUSTRAG_UI_BOOTSTRAP_EMBED_CHUNK_PROVIDER_KIND: ${RUSTRAG_UI_BOOTSTRAP_EMBED_CHUNK_PROVIDER_KIND:-openai}
   RUSTRAG_UI_BOOTSTRAP_EMBED_CHUNK_MODEL_NAME: ${RUSTRAG_UI_BOOTSTRAP_EMBED_CHUNK_MODEL_NAME:-text-embedding-3-large}
   RUSTRAG_UI_BOOTSTRAP_QUERY_ANSWER_PROVIDER_KIND: ${RUSTRAG_UI_BOOTSTRAP_QUERY_ANSWER_PROVIDER_KIND:-openai}
-  RUSTRAG_UI_BOOTSTRAP_QUERY_ANSWER_MODEL_NAME: ${RUSTRAG_UI_BOOTSTRAP_QUERY_ANSWER_MODEL_NAME:-gpt-5.4}
+  RUSTRAG_UI_BOOTSTRAP_QUERY_ANSWER_MODEL_NAME: ${RUSTRAG_UI_BOOTSTRAP_QUERY_ANSWER_MODEL_NAME:-gpt-5.4-mini}
   RUSTRAG_UI_BOOTSTRAP_VISION_PROVIDER_KIND: ${RUSTRAG_UI_BOOTSTRAP_VISION_PROVIDER_KIND:-openai}
   RUSTRAG_UI_BOOTSTRAP_VISION_MODEL_NAME: ${RUSTRAG_UI_BOOTSTRAP_VISION_MODEL_NAME:-gpt-5.4-mini}
   RUSTRAG_OPENAI_API_KEY: ${RUSTRAG_OPENAI_API_KEY:-}
   RUSTRAG_DEEPSEEK_API_KEY: ${RUSTRAG_DEEPSEEK_API_KEY:-}
   RUSTRAG_QWEN_API_KEY: ${RUSTRAG_QWEN_API_KEY:-}
+  RUSTRAG_RUNTIME_POLICY_REJECT_TASK_KINDS: ${RUSTRAG_RUNTIME_POLICY_REJECT_TASK_KINDS:-}
+  RUSTRAG_RUNTIME_POLICY_REJECT_TARGET_KINDS: ${RUSTRAG_RUNTIME_POLICY_REJECT_TARGET_KINDS:-}
   RUSTRAG_CONTENT_STORAGE_ROOT: /var/lib/rustrag/content-storage
   RUST_BACKTRACE: full
 
@@ -64,17 +66,16 @@ services:
       timeout: 5s
       retries: 20
     volumes:
-      # postgres:18-alpine stores PGDATA under /var/lib/postgresql by default.
-      # Mount the parent path to avoid anonymous volume allocation.
       - postgres_data:/var/lib/postgresql
 
   redis:
-    image: redis:8.4
+    image: redis:8.6
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 20
+
   arangodb:
     image: arangodb:3.12.4
     environment:
@@ -99,10 +100,7 @@ services:
       - arangodb_data:/var/lib/arangodb3
 
   backend:
-    image: ${RUSTRAG_BACKEND_IMAGE:-rustrag-backend:local}
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    image: ${RUSTRAG_BACKEND_IMAGE:-pipingspace/rustrag-backend:latest}
     restart: unless-stopped
     stop_signal: SIGTERM
     stop_grace_period: 10m
@@ -132,10 +130,7 @@ services:
           memory: 512M
 
   worker:
-    image: ${RUSTRAG_BACKEND_IMAGE:-rustrag-backend:local}
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    image: ${RUSTRAG_BACKEND_IMAGE:-pipingspace/rustrag-backend:latest}
     restart: unless-stopped
     stop_signal: SIGTERM
     stop_grace_period: 10m
@@ -162,9 +157,8 @@ services:
           memory: 512M
 
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
+    image: ${RUSTRAG_FRONTEND_IMAGE:-pipingspace/rustrag-frontend:latest}
+    restart: unless-stopped
     depends_on:
       - backend
     expose:

@@ -1,3 +1,11 @@
+#![allow(
+    clippy::future_not_send,
+    clippy::missing_const_for_fn,
+    clippy::missing_errors_doc,
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments
+)]
+
 use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
@@ -968,7 +976,7 @@ impl ArangoContextStore {
             .get("extra")
             .and_then(|extra| extra.get("stats"))
             .and_then(|stats| stats.get("writesExecuted"))
-            .and_then(|value| value.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         Ok(result)
     }

@@ -1,6 +1,41 @@
 # Changelog
 
-## 0.0.3 - Unreleased
+## 0.0.4 - 2026-04-04
+
+### Highlights
+- Added GitHub Release automation that builds and publishes the canonical Docker Hub images `pipingspace/rustrag-backend` and `pipingspace/rustrag-frontend`.
+- Split Compose surfaces into one default prebuilt deployment path, one manual local-build path, and one internal GitLab deployment path.
+- Added one-click `install.sh` installation without cloning the repository, with release-tag or `latest` resolution from GitHub.
+- Cut query and extraction orchestration over to one typed agent runtime with runtime-backed lifecycle, stage trace, and policy summaries across REST, MCP, and the assistant UI.
+
+### Platform
+- Switched the default [`docker-compose.yml`](./docker-compose.yml) to published Docker Hub images so release installs no longer depend on local image builds.
+- Renamed the internal deployment surface from `docker-compose.ci.yml` to [`docker-compose-gitlab.yml`](./docker-compose-gitlab.yml) and updated Ansible plus GitLab CI to keep internal deploys aligned.
+- Updated root env documentation and release docs around the canonical `docker-compose.yml`, `docker-compose-local.yml`, and `docker-compose-gitlab.yml` split.
+- Added the canonical `backend/src/agent_runtime/` subsystem with typed task contracts, staged execution, explicit policy decisions, and owner-linked runtime persistence.
+- Removed query-local lifecycle authority, raw structured task `ChatRequest` callers, hidden extraction parser repair, and transport-specific runtime aliases from the canonical success path.
+- Replaced full-library graph rebuilds during ingestion with targeted canonical graph reconciliation so uploads no longer stall behind unnecessary global rebuild work.
+- Reworked knowledge generation and operations read models around canonical revision readiness so library health, generation state, and runtime progress no longer depend on empty shadow collections or stale rebuild flags.
+
+### Product
+- Assistant execution surfaces now render runtime lifecycle, stage summaries, policy interventions, and explicit policy-rejected or policy-terminated outcomes instead of generic failures.
+- Query and extraction inspection now share the same runtime vocabulary for `accepted`, `running`, `completed`, `recovered`, `failed`, and `canceled`.
+- Documents, Dashboard, Graph, and auth surfaces were rebalanced around the canonical workbench layout, with calmer empty states, tighter login/bootstrap shells, and more truthful operator feedback.
+
+### Recovery And Policy
+- Strict structured-output success is now first-pass only; malformed machine-consumed outputs fail explicitly or surface as bounded recovered outcomes with trace evidence.
+- Runtime policy rejections and terminations now leave bounded redacted reason summaries, runtime-execution audit subjects, and explicit operator-visible terminal states.
+
+### Reliability And Performance
+- Fixed long-running document ingestion stalls by eliminating graph-persistence races in canonical merge/write paths and by stopping stale worker attempts from owning current document state.
+- Restored truthful operator state reporting so idle libraries now surface `healthy` plus `graph_ready` instead of lingering in false `rebuilding` or mixed-status states.
+- Revalidated the grounded benchmark matrix at release time with all strict suites passing and the canonical local stack staying green under fresh upload and answer runs.
+
+### Docs
+- Added quick-install `curl` flows for latest and version-pinned installs in the English and Russian READMEs.
+- Documented the new release-image channel and the manual local source-build path.
+
+## 0.0.3 - 2026-04-03
 
 ### Highlights
 - Added the full structured preparation pipeline: semantic sections, structure-aware chunks, typed technical facts, grounded graph evidence, and answer verification now feed one readiness model.
@@ -23,7 +58,7 @@
 - Fixed readiness and graph coverage drift so readable-but-sparse documents no longer appear fully graph-ready.
 - Fixed exact technical answers and follow-up handling so the assistant stays grounded in prepared evidence and active chat context.
 - Fixed mixed-script entity merge failures, DeepSeek `json_schema` fallback handling, and graph rebuild gaps after clean graph regeneration.
-- Fixed web-ingest URL handling, bootstrap recovery, clean README bootstrap behavior, bootstrap provider defaults, verification warning noise, and multiple Documents/auth layout regressions.
+- Fixed web-ingest URL handling, bootstrap recovery, clean README bootstrap behavior, bootstrap provider defaults, canonical backend Docker builds in local Compose and GitLab CI, verification warning noise, and multiple Documents/auth layout regressions.
 - Fixed grounded-query runtime drift on the neutral release corpus by improving deterministic multi-document role matching and exact-literal benchmark normalization.
 
 ## 0.0.2 - 2026-03-31

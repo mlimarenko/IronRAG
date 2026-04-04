@@ -12,6 +12,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
+    agent_runtime::{task::RuntimeTask, tasks::graph_extract::GraphExtractTask},
     app::config::Settings,
     app::state::AppState,
     domains::{
@@ -21,17 +22,18 @@ use crate::{
     },
     infra::{
         arangodb::document_store::{KnowledgeLibraryGenerationRow, KnowledgeRevisionRow},
-        repositories::{self, IngestionJobRow, content_repository, ingest_repository},
+        repositories::{
+            self, IngestionJobRow, catalog_repository, content_repository, ingest_repository,
+        },
     },
     services::{
         content_service::{MaterializeRevisionGraphCandidatesCommand, PromoteHeadCommand},
         document_accounting,
-        extract_service::PersistExtractContentCommand,
         graph_extract::{
             GraphExtractionCandidateSet, GraphExtractionRecoveryRecord, GraphExtractionRequest,
             GraphExtractionResumeHint, GraphExtractionStructuredChunkContext,
             GraphExtractionTechnicalFact, GraphExtractionTelemetrySummary,
-            extract_and_persist_chunk_graph_result, extraction_outcome_from_resume_state,
+            extract_chunk_graph_candidates, extraction_outcome_from_resume_state,
             summarize_graph_extraction_usage_calls,
         },
         graph_merge::{
@@ -56,9 +58,8 @@ use crate::{
         runtime_ingestion::{
             JobLeaseHeartbeat, RuntimeStageUsageSummary, embed_runtime_chunks,
             embed_runtime_graph_edges, embed_runtime_graph_nodes,
-            persist_extracted_content_from_payload, resolve_effective_provider_profile,
-            resolve_runtime_run_provider_profile,
-            upsert_runtime_document_chunk_contribution_summary,
+            persist_extracted_content_from_payload, resolve_effective_runtime_task_context,
+            resolve_runtime_run_task_context, upsert_runtime_document_chunk_contribution_summary,
             upsert_runtime_document_graph_contribution_summary,
         },
     },
@@ -546,10 +547,10 @@ async fn execute_job(
         .context("ingestion job payload missing or invalid")?;
     let runtime_ingestion_run_id = payload.runtime_ingestion_run_id;
     let workspace_id =
-        repositories::get_project_by_id(&state.persistence.postgres, payload.project_id)
+        catalog_repository::get_library_by_id(&state.persistence.postgres, payload.project_id)
             .await
-            .context("failed to load project while preparing stage accounting")?
-            .map(|project| project.workspace_id);
+            .context("failed to load library while preparing stage accounting")?
+            .map(|library| library.workspace_id);
     let runtime_run = if let Some(runtime_ingestion_run_id) = runtime_ingestion_run_id {
         repositories::get_runtime_ingestion_run_by_id(
             &state.persistence.postgres,
@@ -560,11 +561,17 @@ async fn execute_job(
     } else {
         None
     };
-    let provider_profile = if let Some(runtime_run) = runtime_run.as_ref() {
-        resolve_runtime_run_provider_profile(runtime_run)?
+    let graph_runtime_context = if let Some(runtime_run) = runtime_run.as_ref() {
+        resolve_runtime_run_task_context(state.as_ref(), runtime_run, &GraphExtractTask::spec())?
     } else {
-        resolve_effective_provider_profile(state.as_ref(), payload.project_id).await?
+        resolve_effective_runtime_task_context(
+            state.as_ref(),
+            payload.project_id,
+            &GraphExtractTask::spec(),
+        )
+        .await?
     };
+    let provider_profile = graph_runtime_context.provider_profile.clone();
     if let Some(runtime_ingestion_run_id) = runtime_ingestion_run_id {
         repositories::mark_runtime_ingestion_run_claimed(
             &state.persistence.postgres,
@@ -1114,9 +1121,9 @@ async fn execute_job(
             activated_by_attempt_id: runtime_ingestion_run_id,
             resume_hint,
         };
-        let extracted = match extract_and_persist_chunk_graph_result(
+        let extracted = match extract_chunk_graph_candidates(
             state.as_ref(),
-            &provider_profile,
+            &graph_runtime_context,
             &extraction_request,
         )
         .await
@@ -1131,6 +1138,7 @@ async fn execute_job(
                     attempt_no,
                     chunk.id,
                     document_context.target_revision_id.or(document.current_revision_id),
+                    outcome.runtime_execution_id,
                     &outcome.recovery_attempts,
                 )
                 .await?;
@@ -1146,6 +1154,7 @@ async fn execute_job(
                     attempt_no,
                     chunk.id,
                     document_context.target_revision_id.or(document.current_revision_id),
+                    error.runtime_execution_id,
                     &error.recovery_attempts,
                 )
                 .await?;
@@ -2321,8 +2330,9 @@ async fn persist_worker_graph_truth(
         )
     })?;
     let existing_generation = state
-        .arango_document_store
-        .list_library_generations(library_id)
+        .canonical_services
+        .knowledge
+        .derive_library_generation_rows(state, library_id)
         .await
         .ok()
         .and_then(|rows| rows.into_iter().next());
@@ -2581,12 +2591,12 @@ async fn persist_worker_graph_truth(
 
     let generation_id =
         existing_generation.as_ref().map(|row| row.generation_id).unwrap_or_else(Uuid::now_v7);
-    let active_text_generation = if current_revision.text_state == "ready" {
+    let active_text_generation = if text_stage_is_ready(&current_revision.text_state) {
         current_revision.revision_number
     } else {
         existing_generation.as_ref().map(|row| row.active_text_generation).unwrap_or(0)
     };
-    let active_vector_generation = if current_revision.vector_state == "ready" {
+    let active_vector_generation = if vector_stage_is_ready(&current_revision.vector_state) {
         current_revision.revision_number
     } else {
         existing_generation.as_ref().map(|row| row.active_vector_generation).unwrap_or(0)
@@ -2596,8 +2606,8 @@ async fn persist_worker_graph_truth(
     } else {
         existing_generation.as_ref().map(|row| row.active_graph_generation).unwrap_or(0)
     };
-    let degraded_state = if current_revision.text_state == "ready"
-        && current_revision.vector_state == "ready"
+    let degraded_state = if text_stage_is_ready(&current_revision.text_state)
+        && vector_stage_is_ready(&current_revision.vector_state)
         && graph_ready
     {
         "ready"
@@ -3177,23 +3187,25 @@ async fn finalize_document_attempt_failure(
                     )
                 })?;
 
-            if let Some(project) =
-                repositories::get_project_by_id(&state.persistence.postgres, payload.project_id)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "failed to load project {} while preserving failed knowledge truth",
-                            payload.project_id
-                        )
-                    })?
-            {
+            if let Some(library) = catalog_repository::get_library_by_id(
+                &state.persistence.postgres,
+                payload.project_id,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to load library {} while preserving failed knowledge truth",
+                    payload.project_id
+                )
+            })? {
                 let existing_generation = state
-                    .arango_document_store
-                    .list_library_generations(payload.project_id)
+                    .canonical_services
+                    .knowledge
+                    .derive_library_generation_rows(state, payload.project_id)
                     .await
                     .with_context(|| {
                         format!(
-                            "failed to list knowledge generations for library {} after terminal failure",
+                            "failed to derive knowledge generations for library {} after terminal failure",
                             payload.project_id
                         )
                     })?
@@ -3211,7 +3223,7 @@ async fn finalize_document_attempt_failure(
                             state,
                             RefreshKnowledgeLibraryGenerationCommand {
                                 generation_id: snapshot.generation_id,
-                                workspace_id: project.workspace_id,
+                                workspace_id: library.workspace_id,
                                 library_id: payload.project_id,
                                 active_text_generation: snapshot.active_text_generation,
                                 active_vector_generation: snapshot.active_vector_generation,
@@ -3917,15 +3929,20 @@ async fn persist_graph_extraction_recovery_attempts(
     attempt_no: i32,
     chunk_id: Uuid,
     revision_id: Option<Uuid>,
+    runtime_execution_id: Option<Uuid>,
     recovery_attempts: &[GraphExtractionRecoveryRecord],
 ) -> anyhow::Result<()> {
     let Some(workspace_id) = workspace_id else {
+        return Ok(());
+    };
+    let Some(runtime_execution_id) = runtime_execution_id else {
         return Ok(());
     };
     for attempt in recovery_attempts {
         let created = repositories::create_runtime_graph_extraction_recovery_attempt(
             &state.persistence.postgres,
             &repositories::CreateRuntimeGraphExtractionRecoveryAttemptInput {
+                runtime_execution_id,
                 workspace_id,
                 project_id,
                 document_id: document.id,
@@ -4382,6 +4399,15 @@ mod tests {
         assert!(support_node_ids.contains(&source_node_id));
         assert!(support_node_ids.contains(&target_node_id));
         assert!(support_node_ids.iter().any(|id| changed_node_ids.contains(id)));
+    }
+
+    #[test]
+    fn readiness_helpers_accept_canonical_stage_names() {
+        assert!(text_stage_is_ready("text_readable"));
+        assert!(vector_stage_is_ready("vector_ready"));
+        assert!(graph_stage_is_ready("graph_ready"));
+        assert!(!vector_stage_is_ready("accepted"));
+        assert!(!graph_stage_is_ready("processing"));
     }
 
     #[test]
@@ -5102,20 +5128,8 @@ async fn run_canonical_ingest_pipeline(
             let failure_code = error.failure_code.clone();
             let _ = state
                 .canonical_services
-                .extract
-                .persist_extract_content(
-                    state,
-                    PersistExtractContentCommand {
-                        revision_id,
-                        attempt_id: Some(attempt_id),
-                        extract_state: "failed".to_string(),
-                        normalized_text: None,
-                        text_checksum: None,
-                        warning_count: 0,
-                        preparation_state: None,
-                        preparation_checkpoint: None,
-                    },
-                )
+                .knowledge
+                .set_revision_extract_state(state, revision_id, "failed", None, None)
                 .await;
             let _ = state
                 .canonical_services
@@ -5147,22 +5161,13 @@ async fn run_canonical_ingest_pipeline(
 
     state
         .canonical_services
-        .extract
-        .persist_extract_content(
+        .knowledge
+        .set_revision_extract_state(
             state,
-            PersistExtractContentCommand {
-                revision_id,
-                attempt_id: Some(attempt_id),
-                extract_state: "ready".to_string(),
-                normalized_text: Some(normalized_text.clone()),
-                text_checksum: Some(text_checksum),
-                warning_count: i32::try_from(
-                    extracted_content.extraction_plan.extraction_warnings.len(),
-                )
-                .unwrap_or(i32::MAX),
-                preparation_state: None,
-                preparation_checkpoint: None,
-            },
+            revision_id,
+            "ready",
+            Some(&normalized_text),
+            Some(&text_checksum),
         )
         .await
         .context("failed to persist extracted content")?;
@@ -5182,40 +5187,6 @@ async fn run_canonical_ingest_pipeline(
         )
         .await
         .context("failed to record extract_content stage event")?;
-
-    let _ = state
-        .canonical_services
-        .extract
-        .persist_extract_content(
-            state,
-            PersistExtractContentCommand {
-                revision_id,
-                attempt_id: Some(attempt_id),
-                extract_state: "ready".to_string(),
-                normalized_text: Some(normalized_text.clone()),
-                text_checksum: Some(sha256_hex(&normalized_text)),
-                warning_count: i32::try_from(
-                    extracted_content.extraction_plan.extraction_warnings.len(),
-                )
-                .unwrap_or(i32::MAX),
-                preparation_state: Some("started".to_string()),
-                preparation_checkpoint: Some(
-                    crate::domains::extract::StructurePreparationCheckpoint {
-                        stage_name: INGEST_STAGE_PREPARE_STRUCTURE.to_string(),
-                        total_line_count: extracted_content
-                            .extraction_plan
-                            .source_format_metadata
-                            .line_count,
-                        completed_line_ordinal: -1,
-                        block_count: 0,
-                        chunk_count: 0,
-                        typed_fact_count: 0,
-                        text_checksum: Some(sha256_hex(&normalized_text)),
-                    },
-                ),
-            },
-        )
-        .await;
 
     // --- Stage: prepare_structure / chunk_content / extract_technical_facts ---
     state
@@ -5246,43 +5217,6 @@ async fn run_canonical_ingest_pipeline(
         )
         .await
         .context("failed to prepare and persist structured revision")?;
-    let _ = state
-        .canonical_services
-        .extract
-        .persist_extract_content(
-            state,
-            PersistExtractContentCommand {
-                revision_id,
-                attempt_id: Some(attempt_id),
-                extract_state: "ready".to_string(),
-                normalized_text: Some(normalized_text.clone()),
-                text_checksum: Some(sha256_hex(&normalized_text)),
-                warning_count: i32::try_from(
-                    extracted_content.extraction_plan.extraction_warnings.len(),
-                )
-                .unwrap_or(i32::MAX),
-                preparation_state: Some("completed".to_string()),
-                preparation_checkpoint: Some(
-                    crate::domains::extract::StructurePreparationCheckpoint {
-                        stage_name: INGEST_STAGE_PREPARE_STRUCTURE.to_string(),
-                        total_line_count: extracted_content
-                            .extraction_plan
-                            .source_format_metadata
-                            .line_count,
-                        completed_line_ordinal: extracted_content
-                            .extraction_plan
-                            .source_format_metadata
-                            .line_count
-                            .saturating_sub(1),
-                        block_count: preparation.prepared_revision.block_count,
-                        chunk_count: preparation.prepared_revision.chunk_count,
-                        typed_fact_count: preparation.prepared_revision.typed_fact_count,
-                        text_checksum: Some(sha256_hex(&normalized_text)),
-                    },
-                ),
-            },
-        )
-        .await;
     state
         .canonical_services
         .ingest
@@ -5397,11 +5331,15 @@ async fn run_canonical_ingest_pipeline(
             let graph_outcome = state
                 .canonical_services
                 .graph
-                .rebuild_arango_library_graph(state, job.library_id)
+                .reconcile_revision_graph(
+                    state,
+                    job.library_id,
+                    document_id,
+                    revision_id,
+                    Some(attempt_id),
+                )
                 .await;
-            graph_ready = graph_outcome.as_ref().is_ok_and(
-                crate::services::graph_service::ArangoGraphRebuildOutcome::has_materialized_graph,
-            );
+            graph_ready = graph_outcome.as_ref().is_ok_and(|outcome| outcome.graph_ready);
 
             match graph_outcome {
                 Ok(outcome) => {
@@ -5419,9 +5357,11 @@ async fn run_canonical_ingest_pipeline(
                                     "chunksProcessed": graph_materialization.chunk_count,
                                     "extractedEntityCandidates": graph_materialization.extracted_entities,
                                     "extractedRelationCandidates": graph_materialization.extracted_relations,
-                                    "upsertedEntities": outcome.upserted_entities,
-                                    "upsertedRelations": outcome.upserted_relations,
-                                    "upsertedEvidence": outcome.upserted_evidence,
+                                    "projectedNodes": outcome.projection.node_count,
+                                    "projectedEdges": outcome.projection.edge_count,
+                                    "projectionVersion": outcome.projection.projection_version,
+                                    "graphStatus": outcome.projection.graph_status,
+                                    "graphContributionCount": outcome.graph_contribution_count,
                                     "graphReady": graph_ready,
                                 }),
                             },

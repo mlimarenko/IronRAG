@@ -8,12 +8,14 @@ import GraphCoverageStateCard from 'src/components/graph/GraphCoverageStateCard.
 import GraphControls from 'src/components/graph/GraphControls.vue'
 import GraphLoadingState from 'src/components/graph/GraphLoadingState.vue'
 import GraphNodeDetailsCard from 'src/components/graph/GraphNodeDetailsCard.vue'
+import { useDisplayFormatters } from 'src/composables/useDisplayFormatters'
 import { resolveDefaultGraphLayoutMode } from 'src/models/ui/graph'
 import { useGraphStore } from 'src/stores/graph'
 import { useQueryStore } from 'src/stores/query'
 import { useShellStore } from 'src/stores/shell'
 
 const { t } = useI18n()
+const { formatCompactDateTime } = useDisplayFormatters()
 const graphStore = useGraphStore()
 const queryStore = useQueryStore()
 const shellStore = useShellStore()
@@ -106,6 +108,12 @@ const showNodeInspector = computed(
       Boolean(focusedNodeDetail.value) ||
       Boolean(inspectorError.value)),
 )
+
+const graphWorkbenchClasses = computed(() => ({
+  'has-canvas': showGraphCanvas.value,
+  'has-overlay-only': !showGraphCanvas.value && Boolean(overlayState.value),
+  'has-inspector': showNodeInspector.value,
+}))
 
 const overlayState = computed(() => {
   if (!surface.value || (surface.value.loading && surface.value.nodeCount === 0)) {
@@ -314,6 +322,72 @@ const overlayCoverageTone = computed<'loading' | 'empty' | 'sparse' | 'failed' |
   }
 })
 
+const overlaySummaryMessage = computed(() => {
+  if (!overlayState.value) {
+    return ''
+  }
+
+  switch (overlayState.value.tone) {
+    case 'loading':
+      return t('graph.workbenchSummary.loading')
+    case 'empty':
+      return t('graph.workbenchSummary.empty')
+    case 'failed':
+      return t('graph.workbenchSummary.failed')
+    case 'sparse':
+    default:
+      return t('graph.workbenchSummary.sparse')
+  }
+})
+
+const overlaySummaryUpdatedAt = computed(
+  () =>
+    graphCoverage.value?.updatedAt ??
+    readinessSummary.value?.updatedAt ??
+    surface.value?.lastBuiltAt ??
+    null,
+)
+
+const overlaySummaryMetrics = computed(() => {
+  const convergingCount = readinessCounts.value.readable + readinessCounts.value.graphSparse
+  const items = [
+    {
+      key: 'tracked',
+      label: t('graph.workbenchSummary.metrics.tracked'),
+      value: trackedDocumentCount.value,
+      tone: 'default',
+    },
+    {
+      key: 'graphReady',
+      label: t('graph.workbenchSummary.metrics.graphReady'),
+      value: readinessCounts.value.graphReady,
+      tone: 'success',
+    },
+    {
+      key: 'converging',
+      label: t('graph.workbenchSummary.metrics.converging'),
+      value: convergingCount,
+      tone: convergingCount > 0 ? 'warning' : 'default',
+    },
+    {
+      key: 'processing',
+      label: t('graph.workbenchSummary.metrics.processing'),
+      value: readinessCounts.value.processing,
+      tone: readinessCounts.value.processing > 0 ? 'info' : 'default',
+    },
+    {
+      key: 'failed',
+      label: t('graph.workbenchSummary.metrics.failed'),
+      value: readinessCounts.value.failed,
+      tone: readinessCounts.value.failed > 0 ? 'danger' : 'default',
+    },
+  ]
+
+  return items.filter(
+    (item) => item.key === 'tracked' || item.key === 'graphReady' || Number(item.value) > 0,
+  )
+})
+
 watch(
   activeLibraryId,
   async (libraryId) => {
@@ -420,25 +494,90 @@ async function reloadSurface() {
 <template>
   <div class="rr-graph-page rr-graph-page--immersive rr-graph-page--reset">
     <h1 class="rr-screen-reader-only">{{ $t('shell.graph') }}</h1>
-    <section class="rr-graph-workbench rr-graph-workbench--immersive">
-      <template v-if="showGraphCanvas">
-        <GraphCanvas
-          :nodes="surface?.nodes ?? []"
-          :edges="surface?.edges ?? []"
-          :filter="overlay?.nodeTypeFilter ?? ''"
-          :focused-node-id="focusedNodeId"
-          :layout-mode="overlay?.activeLayout ?? defaultLayoutMode"
-          :page-visible="isPageVisible"
-          :show-filtered-artifacts="overlay?.showFilteredArtifacts ?? false"
-          :surface-version="surface?.graphGeneration ?? 0"
-          @select-node="focusNode"
-          @clear-focus="clearFocus"
-          @ready="graphStore.registerCanvasControls"
-          @renderer-state="canvasRendererAvailable = $event"
-        />
-      </template>
+    <section
+      class="rr-graph-workbench rr-graph-workbench--immersive"
+      :class="graphWorkbenchClasses"
+    >
+      <div class="rr-graph-workbench__stage">
+        <template v-if="showGraphCanvas">
+          <GraphCanvas
+            :nodes="surface?.nodes ?? []"
+            :edges="surface?.edges ?? []"
+            :filter="overlay?.nodeTypeFilter ?? ''"
+            :focused-node-id="focusedNodeId"
+            :layout-mode="overlay?.activeLayout ?? defaultLayoutMode"
+            :page-visible="isPageVisible"
+            :show-filtered-artifacts="overlay?.showFilteredArtifacts ?? false"
+            :surface-version="surface?.graphGeneration ?? 0"
+            @select-node="focusNode"
+            @clear-focus="clearFocus"
+            @ready="graphStore.registerCanvasControls"
+            @renderer-state="canvasRendererAvailable = $event"
+          />
+        </template>
 
-      <div v-else class="rr-graph-workbench__canvas-fallback" />
+        <div v-else class="rr-graph-workbench__canvas-fallback">
+          <div
+            v-if="overlayState"
+            class="rr-graph-workbench__state"
+            :class="`is-${overlayState.tone}`"
+          >
+            <GraphLoadingState
+              v-if="overlayState.tone === 'loading'"
+              :title="overlayState.title"
+              :description="overlayState.description ?? ''"
+              :details="overlayDetails"
+              :readiness-summary="readinessSummary"
+              :graph-coverage="graphCoverage"
+            />
+            <GraphCoverageStateCard
+              v-else
+              :tone="overlayCoverageTone ?? 'loading'"
+              :title="overlayState.title"
+              :description="overlayState.description ?? ''"
+              :details="overlayDetails"
+              :readiness-summary="readinessSummary"
+              :graph-coverage="graphCoverage"
+              :action-label="overlayPrimaryAction?.label ?? null"
+              @action="overlayPrimaryAction?.action()"
+            />
+          </div>
+
+          <aside v-if="overlayState" class="rr-graph-workbench__summary">
+            <div class="rr-graph-workbench__summary-copy">
+              <p class="rr-graph-workbench__summary-eyebrow">
+                {{ t('graph.workbenchSummary.eyebrow') }}
+              </p>
+              <h2 class="rr-graph-workbench__summary-title">
+                {{ t('graph.workbenchSummary.title') }}
+              </h2>
+              <p class="rr-graph-workbench__summary-body">
+                {{ overlaySummaryMessage }}
+              </p>
+            </div>
+
+            <div class="rr-graph-workbench__summary-metrics">
+              <article
+                v-for="metric in overlaySummaryMetrics"
+                :key="metric.key"
+                class="rr-graph-workbench__summary-metric"
+                :class="`is-${metric.tone}`"
+              >
+                <span>{{ metric.label }}</span>
+                <strong>{{ metric.value }}</strong>
+              </article>
+            </div>
+
+            <p v-if="overlaySummaryUpdatedAt" class="rr-graph-workbench__summary-meta">
+              {{
+                t('graph.workbenchSummary.updatedAt', {
+                  time: formatCompactDateTime(overlaySummaryUpdatedAt),
+                })
+              }}
+            </p>
+          </aside>
+        </div>
+      </div>
 
       <GraphControls
         v-if="showControlDock"
@@ -493,28 +632,6 @@ async function reloadSurface() {
           @select-node="focusNode"
         />
       </aside>
-
-      <div v-if="overlayState" class="rr-graph-workbench__state" :class="`is-${overlayState.tone}`">
-        <GraphLoadingState
-          v-if="overlayState.tone === 'loading'"
-          :title="overlayState.title"
-          :description="overlayState.description ?? ''"
-          :details="overlayDetails"
-          :readiness-summary="readinessSummary"
-          :graph-coverage="graphCoverage"
-        />
-        <GraphCoverageStateCard
-          v-else
-          :tone="overlayCoverageTone ?? 'loading'"
-          :title="overlayState.title"
-          :description="overlayState.description ?? ''"
-          :details="overlayDetails"
-          :readiness-summary="readinessSummary"
-          :graph-coverage="graphCoverage"
-          :action-label="overlayPrimaryAction?.label ?? null"
-          @action="overlayPrimaryAction?.action()"
-        />
-      </div>
     </section>
   </div>
 </template>

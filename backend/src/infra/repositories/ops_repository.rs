@@ -303,14 +303,15 @@ pub async fn list_recent_bundle_assembly_failures(
 ) -> Result<Vec<OpsLibraryFailureRow>, sqlx::Error> {
     sqlx::query_as::<_, OpsLibraryFailureRow>(
         "select
-            coalesce(execution.completed_at, execution.started_at) as created_at,
-            execution.failure_code
+            coalesce(runtime.completed_at, execution.completed_at, execution.started_at) as created_at,
+            coalesce(runtime.failure_code, execution.failure_code) as failure_code
          from query_execution execution
+         join runtime_execution runtime on runtime.id = execution.runtime_execution_id
          where execution.library_id = $1
-           and execution.execution_state = 'failed'
-           and execution.failure_code is not null
-           and execution.failure_code ilike '%context bundle%'
-         order by coalesce(execution.completed_at, execution.started_at) desc, execution.id desc
+           and runtime.lifecycle_state = 'failed'
+           and coalesce(runtime.failure_code, execution.failure_code) is not null
+           and coalesce(runtime.failure_code, execution.failure_code) ilike '%context bundle%'
+         order by coalesce(runtime.completed_at, execution.completed_at, execution.started_at) desc, execution.id desc
          limit $2",
     )
     .bind(library_id)

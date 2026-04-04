@@ -5,7 +5,7 @@
   vars:
     ci_project_dir: "{{ lookup('env', 'CI_PROJECT_DIR') | default(playbook_dir | dirname, true) }}"
     deploy_path: "{{ lookup('env', 'DEPLOY_PATH') | default('/opt/docker/rustrag', true) }}"
-    compose_file: "{{ lookup('env', 'COMPOSE_FILE') | default(deploy_path ~ '/docker-compose.ci.yml', true) }}"
+    compose_file: "{{ lookup('env', 'COMPOSE_FILE') | default(deploy_path ~ '/docker-compose-gitlab.yml', true) }}"
     env_file: "{{ lookup('env', 'ENV_FILE') | default(deploy_path ~ '/.env', true) }}"
     image_env_file: "{{ lookup('env', 'IMAGE_ENV_FILE') | default(deploy_path ~ '/.images.env', true) }}"
     compose_project: "{{ lookup('env', 'APP_COMPOSE_PROJECT') | default('rustrag', true) }}"
@@ -46,9 +46,9 @@
         - "{{ deploy_path }}/data/arangodb"
         - "{{ deploy_path }}/data/content-storage"
 
-    - name: Sync CI compose file to target host
+    - name: Sync GitLab compose file to target host
       ansible.builtin.copy:
-        src: "{{ ci_project_dir }}/docker-compose.ci.yml"
+        src: "{{ ci_project_dir }}/docker-compose-gitlab.yml"
         dest: "{{ compose_file }}"
         mode: "0644"
 

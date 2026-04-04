@@ -3,27 +3,11 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StructurePreparationCheckpoint {
-    pub stage_name: String,
-    pub total_line_count: i32,
-    pub completed_line_ordinal: i32,
-    pub block_count: i32,
-    pub chunk_count: i32,
-    pub typed_fact_count: i32,
-    pub text_checksum: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractContent {
     pub revision_id: Uuid,
-    pub attempt_id: Option<Uuid>,
     pub extract_state: String,
     pub normalized_text: Option<String>,
     pub text_checksum: Option<String>,
-    pub warning_count: i32,
-    pub preparation_state: Option<String>,
-    pub preparation_checkpoint: Option<StructurePreparationCheckpoint>,
     pub updated_at: DateTime<Utc>,
 }
 

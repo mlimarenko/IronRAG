@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+use serde::{Deserialize, Serialize};
+
 use crate::domains::query::{QueryPlanningMetadata, RuntimeQueryMode};
 
 const MAX_TOP_K: usize = 48;
@@ -10,19 +12,53 @@ const STOP_WORDS: &[&str] = &[
     "your", "about", "there", "their", "have", "will", "would", "should", "could",
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum UnsupportedCapabilityIntent {
     GraphQlApi,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct QueryIntentProfile {
     pub exact_literal_technical: bool,
     pub unsupported_capability: Option<UnsupportedCapabilityIntent>,
     pub multi_document_technical: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryPlanTaskInput {
+    pub question: String,
+    pub top_k: Option<usize>,
+    pub explicit_mode: Option<RuntimeQueryMode>,
+    pub metadata: Option<QueryPlanningMetadata>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryPlanFailureCode {
+    InvalidTopK,
+}
+
+impl QueryPlanFailureCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidTopK => "invalid_top_k",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryPlanFailure {
+    pub code: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RuntimeQueryPlan {
     pub requested_mode: RuntimeQueryMode,
     pub planned_mode: RuntimeQueryMode,
@@ -32,6 +68,19 @@ pub struct RuntimeQueryPlan {
     pub low_level_keywords: Vec<String>,
     pub top_k: usize,
     pub context_budget_chars: usize,
+}
+
+pub fn build_task_query_plan(
+    input: &QueryPlanTaskInput,
+) -> Result<RuntimeQueryPlan, QueryPlanFailure> {
+    if matches!(input.top_k, Some(0)) {
+        return Err(QueryPlanFailure {
+            code: QueryPlanFailureCode::InvalidTopK.as_str().to_string(),
+            summary: "query plan topK must be greater than zero".to_string(),
+        });
+    }
+
+    Ok(build_query_plan(&input.question, input.explicit_mode, input.top_k, input.metadata.as_ref()))
 }
 
 #[must_use]

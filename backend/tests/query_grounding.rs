@@ -9,7 +9,12 @@ use uuid::Uuid;
 
 use rustrag_backend::{
     app::{config::Settings, state::AppState},
-    domains::query::{QueryExecution, QueryVerificationState},
+    domains::{
+        agent_runtime::{
+            RuntimeExecutionOwnerKind, RuntimeLifecycleState, RuntimeStageKind, RuntimeTaskKind,
+        },
+        query::{QueryExecution, QueryVerificationState},
+    },
     domains::{audit::AuditEventSubject, ops::OpsAsyncOperation},
     infra::arangodb::{
         bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
@@ -28,7 +33,7 @@ use rustrag_backend::{
         },
         graph_store::{ArangoGraphStore, NewKnowledgeEntity},
     },
-    infra::repositories::{self, query_repository},
+    infra::repositories::{self, query_repository, runtime_repository},
     services::query_service::QueryService,
 };
 
@@ -391,6 +396,28 @@ impl QueryGroundingAppFixture {
         .await
         .context("failed to create grounding request turn")?;
         let execution_id = Uuid::now_v7();
+        let runtime_execution_id = Uuid::now_v7();
+        runtime_repository::create_runtime_execution(
+            &self.state.persistence.postgres,
+            &runtime_repository::NewRuntimeExecution {
+                id: runtime_execution_id,
+                owner_kind: RuntimeExecutionOwnerKind::QueryExecution.as_str(),
+                owner_id: execution_id,
+                task_kind: RuntimeTaskKind::QueryAnswer.as_str(),
+                surface_kind: "rest",
+                contract_name: "query_answer",
+                contract_version: "1",
+                lifecycle_state: RuntimeLifecycleState::Completed.as_str(),
+                active_stage: None,
+                turn_budget: 4,
+                turn_count: 4,
+                parallel_action_limit: 1,
+                failure_code: None,
+                failure_summary_redacted: None,
+            },
+        )
+        .await
+        .context("failed to create grounding runtime execution")?;
         let execution = query_repository::create_execution(
             &self.state.persistence.postgres,
             &query_repository::NewQueryExecution {
@@ -402,7 +429,7 @@ impl QueryGroundingAppFixture {
                 request_turn_id: Some(request_turn.id),
                 response_turn_id: None,
                 binding_id: None,
-                execution_state: "ready",
+                runtime_execution_id,
                 query_text,
                 failure_code: None,
             },
@@ -458,6 +485,28 @@ impl QueryGroundingAppFixture {
         .await
         .context("failed to create grounding request turn with canonical evidence")?;
         let execution_id = Uuid::now_v7();
+        let runtime_execution_id = Uuid::now_v7();
+        runtime_repository::create_runtime_execution(
+            &self.state.persistence.postgres,
+            &runtime_repository::NewRuntimeExecution {
+                id: runtime_execution_id,
+                owner_kind: RuntimeExecutionOwnerKind::QueryExecution.as_str(),
+                owner_id: execution_id,
+                task_kind: RuntimeTaskKind::QueryAnswer.as_str(),
+                surface_kind: "rest",
+                contract_name: "query_answer",
+                contract_version: "1",
+                lifecycle_state: RuntimeLifecycleState::Completed.as_str(),
+                active_stage: None,
+                turn_budget: 4,
+                turn_count: 4,
+                parallel_action_limit: 1,
+                failure_code: None,
+                failure_summary_redacted: None,
+            },
+        )
+        .await
+        .context("failed to create grounded canonical runtime execution")?;
         let execution = query_repository::create_execution(
             &self.state.persistence.postgres,
             &query_repository::NewQueryExecution {
@@ -469,7 +518,7 @@ impl QueryGroundingAppFixture {
                 request_turn_id: Some(request_turn.id),
                 response_turn_id: None,
                 binding_id: None,
-                execution_state: "ready",
+                runtime_execution_id,
                 query_text,
                 failure_code: None,
             },
@@ -702,7 +751,9 @@ fn map_execution_row(row: &query_repository::QueryExecutionRow) -> QueryExecutio
         request_turn_id: row.request_turn_id,
         response_turn_id: row.response_turn_id,
         binding_id: row.binding_id,
-        execution_state: row.execution_state.clone(),
+        runtime_execution_id: Some(row.runtime_execution_id),
+        lifecycle_state: row.runtime_lifecycle_state,
+        active_stage: row.runtime_active_stage,
         query_text: row.query_text.clone(),
         failure_code: row.failure_code.clone(),
         started_at: row.started_at,
@@ -725,7 +776,9 @@ fn sample_query_execution(
         request_turn_id: None,
         response_turn_id: None,
         binding_id: None,
-        execution_state: "retrieving".to_string(),
+        runtime_execution_id: None,
+        lifecycle_state: RuntimeLifecycleState::Running,
+        active_stage: Some(RuntimeStageKind::Retrieve),
         query_text: query_text.to_string(),
         failure_code: None,
         started_at: Utc::now(),
@@ -780,7 +833,8 @@ fn sample_linked_query_execution(
     execution_id: Uuid,
     conversation_id: Uuid,
     query_text: &str,
-    execution_state: &str,
+    lifecycle_state: RuntimeLifecycleState,
+    active_stage: Option<RuntimeStageKind>,
     failure_code: Option<&str>,
     request_turn_id: Option<Uuid>,
     response_turn_id: Option<Uuid>,
@@ -792,7 +846,8 @@ fn sample_linked_query_execution(
         request_turn_id,
         response_turn_id,
         binding_id,
-        execution_state: execution_state.to_string(),
+        lifecycle_state,
+        active_stage,
         failure_code: failure_code.map(ToString::to_string),
         completed_at,
         ..sample_query_execution(workspace_id, library_id, execution_id, query_text)
@@ -884,6 +939,7 @@ fn sample_audit_subject(
         document_id,
         query_session_id: (subject_kind == "query_session").then_some(subject_id),
         query_execution_id: (subject_kind == "query_execution").then_some(subject_id),
+        runtime_execution_id: (subject_kind == "runtime_execution").then_some(subject_id),
         context_bundle_id: (subject_kind == "knowledge_bundle").then_some(subject_id),
         async_operation_id: (subject_kind == "async_operation").then_some(subject_id),
     }
@@ -1232,7 +1288,8 @@ fn failure_cancellation_and_retry_scaffold_preserve_execution_bundle_linkage() {
         failed_execution_id,
         conversation_id,
         query_text,
-        "failed",
+        RuntimeLifecycleState::Failed,
+        None,
         Some("provider_timeout"),
         Some(request_turn_id),
         None,
@@ -1245,7 +1302,8 @@ fn failure_cancellation_and_retry_scaffold_preserve_execution_bundle_linkage() {
         canceled_execution_id,
         conversation_id,
         query_text,
-        "canceled",
+        RuntimeLifecycleState::Canceled,
+        None,
         Some("canceled_by_user"),
         Some(request_turn_id),
         None,
@@ -1258,7 +1316,8 @@ fn failure_cancellation_and_retry_scaffold_preserve_execution_bundle_linkage() {
         retry_execution_id,
         conversation_id,
         query_text,
-        "retrieving",
+        RuntimeLifecycleState::Running,
+        Some(RuntimeStageKind::Retrieve),
         None,
         Some(request_turn_id),
         Some(response_turn_id),
@@ -1282,9 +1341,10 @@ fn failure_cancellation_and_retry_scaffold_preserve_execution_bundle_linkage() {
     assert_eq!(failed.binding_id, Some(binding_id));
     assert_eq!(canceled.binding_id, Some(binding_id));
     assert_eq!(retried.binding_id, Some(binding_id));
-    assert_eq!(failed.execution_state, "failed");
-    assert_eq!(canceled.execution_state, "canceled");
-    assert_eq!(retried.execution_state, "retrieving");
+    assert_eq!(failed.lifecycle_state, RuntimeLifecycleState::Failed);
+    assert_eq!(canceled.lifecycle_state, RuntimeLifecycleState::Canceled);
+    assert_eq!(retried.lifecycle_state, RuntimeLifecycleState::Running);
+    assert_eq!(retried.active_stage, Some(RuntimeStageKind::Retrieve));
     assert_eq!(failed.failure_code.as_deref(), Some("provider_timeout"));
     assert_eq!(canceled.failure_code.as_deref(), Some("canceled_by_user"));
     assert_eq!(retried.failure_code, None);

@@ -242,9 +242,7 @@ function fitViewport(duration = 260): void {
   void sigma.getCamera().animate({ x: 0.5, y: 0.5, ratio: 1.02, angle: 0 }, { duration })
 }
 
-function recoverRendererViewport(options?: {
-  fit?: boolean
-}): boolean {
+function recoverRendererViewport(options?: { fit?: boolean }): boolean {
   const sigma = sigmaRef.value
   const container = canvasRef.value
   if (!sigma || !container) {
@@ -271,9 +269,7 @@ function recoverRendererViewport(options?: {
   return true
 }
 
-function queueViewportRecovery(options?: {
-  fit?: boolean
-}): void {
+function queueViewportRecovery(options?: { fit?: boolean }): void {
   if (options?.fit) {
     pendingViewportFit.value = true
   }
@@ -1327,8 +1323,7 @@ watch(
       const previous = lastCanvasSize
       lastCanvasSize = { width, height }
       const becameVisible = !previous || previous.width < 2 || previous.height < 2
-      const resized =
-        !previous || previous.width !== width || previous.height !== height
+      const resized = !previous || previous.width !== width || previous.height !== height
 
       if (becameVisible || resized) {
         queueViewportRecovery({ fit: becameVisible || !didInitialFit.value })

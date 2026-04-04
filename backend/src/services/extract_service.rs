@@ -1,4 +1,3 @@
-use chrono::Utc;
 use tracing::error;
 use uuid::Uuid;
 
@@ -6,25 +5,13 @@ use crate::{
     app::state::AppState,
     domains::extract::{
         ExtractChunkResult, ExtractContent, ExtractEdgeCandidate, ExtractNodeCandidate,
-        ExtractResumeCursor, StructurePreparationCheckpoint,
+        ExtractResumeCursor,
     },
     domains::runtime_graph::RuntimeNodeType,
     infra::repositories::extract_repository,
     interfaces::http::router_support::ApiError,
     services::graph_identity,
 };
-
-#[derive(Debug, Clone)]
-pub struct PersistExtractContentCommand {
-    pub revision_id: Uuid,
-    pub attempt_id: Option<Uuid>,
-    pub extract_state: String,
-    pub normalized_text: Option<String>,
-    pub text_checksum: Option<String>,
-    pub warning_count: i32,
-    pub preparation_state: Option<String>,
-    pub preparation_checkpoint: Option<StructurePreparationCheckpoint>,
-}
 
 #[derive(Debug, Clone)]
 pub struct MaterializeChunkResultCommand {
@@ -72,50 +59,6 @@ impl ExtractService {
         Self
     }
 
-    pub async fn persist_extract_content(
-        &self,
-        state: &AppState,
-        command: PersistExtractContentCommand,
-    ) -> Result<ExtractContent, ApiError> {
-        let updated_at = Utc::now();
-        let text_readable_at = matches!(command.extract_state.as_str(), "readable" | "ready")
-            .then_some(updated_at)
-            .filter(|_| {
-                command.normalized_text.as_deref().is_some_and(|text| !text.trim().is_empty())
-            });
-        let _ = state
-            .canonical_services
-            .knowledge
-            .set_revision_text_state(
-                state,
-                command.revision_id,
-                map_extract_state_to_text_state(&command.extract_state),
-                command.normalized_text.as_deref(),
-                command.text_checksum.as_deref(),
-                text_readable_at,
-            )
-            .await?;
-        let persisted = extract_repository::upsert_extract_content(
-            &state.persistence.postgres,
-            command.revision_id,
-            command.attempt_id,
-            &command.extract_state,
-            command.normalized_text.as_deref(),
-            command.text_checksum.as_deref(),
-            command.warning_count,
-            command.preparation_state.as_deref(),
-            command
-                .preparation_checkpoint
-                .as_ref()
-                .map(|checkpoint| serde_json::to_value(checkpoint).unwrap_or(serde_json::json!({})))
-                .unwrap_or_else(|| serde_json::json!({})),
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?;
-        // TODO: Remove extract_content persistence after legacy readers are retired.
-        Ok(map_extract_content_row(persisted))
-    }
-
     pub async fn get_extract_content(
         &self,
         state: &AppState,
@@ -127,25 +70,11 @@ impl ExtractService {
             .await
             .map_err(|_| ApiError::Internal)?
             .ok_or_else(|| ApiError::resource_not_found("knowledge_revision", revision_id))?;
-        if let Some(row) = extract_repository::get_extract_content_by_revision_id(
-            &state.persistence.postgres,
-            revision_id,
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?
-        {
-            return Ok(map_extract_content_row(row));
-        }
-
         Ok(ExtractContent {
             revision_id,
-            attempt_id: None,
             extract_state: map_text_state_to_extract_state(&revision.text_state).to_string(),
             normalized_text: revision.normalized_text,
             text_checksum: revision.text_checksum,
-            warning_count: 0,
-            preparation_state: None,
-            preparation_checkpoint: None,
             updated_at: revision.text_readable_at.unwrap_or(revision.created_at),
         })
     }
@@ -385,15 +314,6 @@ impl ExtractService {
     }
 }
 
-fn map_extract_state_to_text_state(extract_state: &str) -> &str {
-    match extract_state {
-        "readable" | "ready" => "text_readable",
-        "failed" => "failed",
-        "processing" => "extracting_text",
-        _ => "accepted",
-    }
-}
-
 fn map_text_state_to_extract_state(text_state: &str) -> &'static str {
     match text_state {
         "text_readable" => "ready",
@@ -424,20 +344,6 @@ fn map_resume_cursor_row(row: extract_repository::ExtractResumeCursorRow) -> Ext
         last_completed_chunk_index: row.last_completed_chunk_index,
         replay_count: row.replay_count,
         downgrade_level: row.downgrade_level,
-        updated_at: row.updated_at,
-    }
-}
-
-fn map_extract_content_row(row: extract_repository::ExtractContentRow) -> ExtractContent {
-    ExtractContent {
-        revision_id: row.revision_id,
-        attempt_id: row.attempt_id,
-        extract_state: row.extract_state,
-        normalized_text: row.normalized_text,
-        text_checksum: row.text_checksum,
-        warning_count: row.warning_count,
-        preparation_state: row.preparation_state,
-        preparation_checkpoint: serde_json::from_value(row.preparation_checkpoint_json).ok(),
         updated_at: row.updated_at,
     }
 }

@@ -3,19 +3,6 @@ use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, FromRow)]
-pub struct ExtractContentRow {
-    pub revision_id: Uuid,
-    pub attempt_id: Option<Uuid>,
-    pub extract_state: String,
-    pub normalized_text: Option<String>,
-    pub text_checksum: Option<String>,
-    pub warning_count: i32,
-    pub preparation_state: Option<String>,
-    pub preparation_checkpoint_json: serde_json::Value,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, FromRow)]
 pub struct ExtractChunkResultRow {
     pub id: Uuid,
     pub chunk_id: Uuid,
@@ -72,109 +59,6 @@ pub struct NewExtractEdgeCandidate<'a> {
     pub from_canonical_key: &'a str,
     pub to_canonical_key: &'a str,
     pub summary: Option<&'a str>,
-}
-
-pub async fn get_extract_content_by_revision_id(
-    postgres: &PgPool,
-    revision_id: Uuid,
-) -> Result<Option<ExtractContentRow>, sqlx::Error> {
-    sqlx::query_as::<_, ExtractContentRow>(
-        "select
-            revision_id,
-            attempt_id,
-            extract_state::text as extract_state,
-            normalized_text,
-            text_checksum,
-            warning_count,
-            preparation_state,
-            preparation_checkpoint_json,
-            updated_at
-         from extract_content
-         where revision_id = $1",
-    )
-    .bind(revision_id)
-    .fetch_optional(postgres)
-    .await
-}
-
-pub async fn list_extract_content_by_attempt(
-    postgres: &PgPool,
-    attempt_id: Uuid,
-) -> Result<Vec<ExtractContentRow>, sqlx::Error> {
-    sqlx::query_as::<_, ExtractContentRow>(
-        "select
-            revision_id,
-            attempt_id,
-            extract_state::text as extract_state,
-            normalized_text,
-            text_checksum,
-            warning_count,
-            preparation_state,
-            preparation_checkpoint_json,
-            updated_at
-         from extract_content
-         where attempt_id = $1
-         order by updated_at desc, revision_id asc",
-    )
-    .bind(attempt_id)
-    .fetch_all(postgres)
-    .await
-}
-
-pub async fn upsert_extract_content(
-    postgres: &PgPool,
-    revision_id: Uuid,
-    attempt_id: Option<Uuid>,
-    extract_state: &str,
-    normalized_text: Option<&str>,
-    text_checksum: Option<&str>,
-    warning_count: i32,
-    preparation_state: Option<&str>,
-    preparation_checkpoint_json: serde_json::Value,
-) -> Result<ExtractContentRow, sqlx::Error> {
-    sqlx::query_as::<_, ExtractContentRow>(
-        "insert into extract_content (
-            revision_id,
-            attempt_id,
-            extract_state,
-            normalized_text,
-            text_checksum,
-            warning_count,
-            preparation_state,
-            preparation_checkpoint_json,
-            updated_at
-        )
-        values ($1, $2, $3::extract_state, $4, $5, $6, $7, $8, now())
-        on conflict (revision_id)
-        do update set attempt_id = excluded.attempt_id,
-                      extract_state = excluded.extract_state,
-                      normalized_text = excluded.normalized_text,
-                      text_checksum = excluded.text_checksum,
-                      warning_count = excluded.warning_count,
-                      preparation_state = excluded.preparation_state,
-                      preparation_checkpoint_json = excluded.preparation_checkpoint_json,
-                      updated_at = now()
-        returning
-            revision_id,
-            attempt_id,
-            extract_state::text as extract_state,
-            normalized_text,
-            text_checksum,
-            warning_count,
-            preparation_state,
-            preparation_checkpoint_json,
-            updated_at",
-    )
-    .bind(revision_id)
-    .bind(attempt_id)
-    .bind(extract_state)
-    .bind(normalized_text)
-    .bind(text_checksum)
-    .bind(warning_count)
-    .bind(preparation_state)
-    .bind(preparation_checkpoint_json)
-    .fetch_one(postgres)
-    .await
 }
 
 pub async fn get_extract_chunk_result_by_chunk_and_attempt(

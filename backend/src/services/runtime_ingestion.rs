@@ -12,8 +12,10 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
+    agent_runtime::task::RuntimeTaskSpec,
     app::state::AppState,
     domains::{
+        agent_runtime::RuntimeOverrideBudget,
         ai::AiBindingPurpose,
         provider_profiles::{EffectiveProviderProfile, ProviderModelSelection},
         runtime_ingestion::RuntimeDocumentActivityStatus,
@@ -69,6 +71,12 @@ pub struct JobLeaseHeartbeat {
     lease_duration: chrono::Duration,
     min_interval: Duration,
     last_renewed_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeTaskExecutionContext {
+    pub provider_profile: EffectiveProviderProfile,
+    pub runtime_overrides: RuntimeOverrideBudget,
 }
 
 #[derive(Debug)]
@@ -367,6 +375,30 @@ pub async fn resolve_effective_provider_profile(
     })
 }
 
+#[must_use]
+pub fn bounded_runtime_overrides(
+    state: &AppState,
+    task_spec: &RuntimeTaskSpec,
+) -> RuntimeOverrideBudget {
+    RuntimeOverrideBudget {
+        max_turns: Some(state.agent_runtime_settings.max_turns.min(task_spec.max_turns)),
+        max_parallel_actions: Some(
+            state.agent_runtime_settings.max_parallel_actions.min(task_spec.max_parallel_actions),
+        ),
+    }
+}
+
+pub async fn resolve_effective_runtime_task_context(
+    state: &AppState,
+    library_id: Uuid,
+    task_spec: &RuntimeTaskSpec,
+) -> anyhow::Result<RuntimeTaskExecutionContext> {
+    Ok(RuntimeTaskExecutionContext {
+        provider_profile: resolve_effective_provider_profile(state, library_id).await?,
+        runtime_overrides: bounded_runtime_overrides(state, task_spec),
+    })
+}
+
 pub fn resolve_runtime_run_provider_profile(
     runtime_run: &RuntimeIngestionRunRow,
 ) -> anyhow::Result<EffectiveProviderProfile> {
@@ -378,6 +410,17 @@ pub fn resolve_runtime_run_provider_profile(
             )
         },
     )
+}
+
+pub fn resolve_runtime_run_task_context(
+    state: &AppState,
+    runtime_run: &RuntimeIngestionRunRow,
+    task_spec: &RuntimeTaskSpec,
+) -> anyhow::Result<RuntimeTaskExecutionContext> {
+    Ok(RuntimeTaskExecutionContext {
+        provider_profile: resolve_runtime_run_provider_profile(runtime_run)?,
+        runtime_overrides: bounded_runtime_overrides(state, task_spec),
+    })
 }
 
 pub async fn persist_extracted_content_from_payload(

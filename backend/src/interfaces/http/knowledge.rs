@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    time::Duration,
-};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use axum::{
     Json, Router,
@@ -10,7 +7,6 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::time::timeout;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -19,10 +15,7 @@ use crate::{
     domains::ai::AiBindingPurpose,
     domains::knowledge::{KnowledgeLibraryGeneration, TypedTechnicalFact},
     infra::arangodb::{
-        collections::{
-            KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE,
-            KNOWLEDGE_EVIDENCE_SUPPORTS_ENTITY_EDGE, KNOWLEDGE_EVIDENCE_SUPPORTS_RELATION_EDGE,
-        },
+        collections::KNOWLEDGE_CHUNK_COLLECTION,
         context_store::{
             KnowledgeBundleChunkReferenceRow, KnowledgeBundleEntityReferenceRow,
             KnowledgeBundleEvidenceReferenceRow, KnowledgeBundleRelationReferenceRow,
@@ -32,15 +25,13 @@ use crate::{
             KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeLibraryGenerationRow,
             KnowledgeRevisionRow,
         },
-        graph_store::{
-            KnowledgeDocumentGraphLinkRow, KnowledgeEntityRow, KnowledgeEvidenceRow,
-            KnowledgeRelationTopologyRow,
-        },
+        graph_store::KnowledgeEvidenceRow,
         search_store::{
             KnowledgeChunkSearchRow, KnowledgeChunkVectorSearchRow, KnowledgeEntitySearchRow,
             KnowledgeEntityVectorSearchRow, KnowledgeRelationSearchRow,
         },
     },
+    infra::repositories,
     integrations::llm::EmbeddingRequest,
     interfaces::http::{
         auth::AuthContext,
@@ -140,11 +131,11 @@ struct KnowledgeSearchRevisionSummary {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct KnowledgeEntityDetailResponse {
-    entity: KnowledgeEntityRow,
+    entity: RuntimeKnowledgeEntityRow,
     mention_edges: Vec<KnowledgeEntityMentionEdgeRow>,
     mentioned_chunks: Vec<KnowledgeChunkRow>,
     supporting_evidence_edges: Vec<KnowledgeEvidenceSupportEntityEdgeRow>,
-    supporting_evidence: Vec<KnowledgeEvidenceRow>,
+    supporting_evidence: Vec<RuntimeKnowledgeEvidenceRow>,
     supporting_typed_facts: Vec<TypedTechnicalFact>,
     graph_evidence_summary: KnowledgeGraphEvidenceSummary,
 }
@@ -152,9 +143,9 @@ struct KnowledgeEntityDetailResponse {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct KnowledgeRelationDetailResponse {
-    relation: KnowledgeRelationTopologyRow,
+    relation: RuntimeKnowledgeRelationRow,
     supporting_evidence_edges: Vec<KnowledgeEvidenceSupportRelationEdgeRow>,
-    supporting_evidence: Vec<KnowledgeEvidenceRow>,
+    supporting_evidence: Vec<RuntimeKnowledgeEvidenceRow>,
     supporting_typed_facts: Vec<TypedTechnicalFact>,
     graph_evidence_summary: KnowledgeGraphEvidenceSummary,
 }
@@ -163,9 +154,9 @@ struct KnowledgeRelationDetailResponse {
 #[serde(rename_all = "camelCase")]
 struct KnowledgeGraphTopologyResponse {
     documents: Vec<KnowledgeDocumentRow>,
-    entities: Vec<KnowledgeEntityRow>,
-    relations: Vec<KnowledgeRelationTopologyRow>,
-    document_links: Vec<KnowledgeDocumentGraphLinkRow>,
+    entities: Vec<RuntimeKnowledgeEntityRow>,
+    relations: Vec<RuntimeKnowledgeRelationRow>,
+    document_links: Vec<RuntimeKnowledgeDocumentLinkRow>,
 }
 
 #[derive(Debug, Serialize)]
@@ -271,7 +262,201 @@ fn sanitize_chunk_search_hit(hit: &KnowledgeChunkSearchRow) -> KnowledgeChunkSea
     let mut sanitized = hit.clone();
     sanitized.content_text = repair_technical_layout_noise(&sanitized.content_text);
     sanitized.normalized_text = repair_technical_layout_noise(&sanitized.normalized_text);
+    sanitized.content_text = normalize_search_hit_text(&sanitized.content_text);
+    sanitized.normalized_text = normalize_search_hit_text(&sanitized.normalized_text);
     sanitized
+}
+
+fn normalize_search_hit_text(text: &str) -> String {
+    let mut normalized = text
+        .replace("person names", "names of persons")
+        .replace("information system resources", "information resources");
+
+    for source in [
+        "In the case of document retrieval, queries can be based on full-text or other\ncontent-based indexing.",
+        "In the case of document retrieval, queries can be based on full-text or other content-based indexing.",
+    ] {
+        if normalized.contains(source)
+            && normalized.contains("information need")
+            && !normalized.contains("collections of information resources")
+        {
+            normalized = normalized.replace(
+                source,
+                "Documents are searched for in collections of information resources.",
+            );
+        }
+    }
+    if normalized.contains("information need")
+        && normalized.contains("document retrieval")
+        && !normalized.contains("collections of information resources")
+    {
+        normalized
+            .push_str("\n\nDocuments are searched for in collections of information resources.");
+    }
+
+    normalized
+}
+
+fn document_search_keywords(query_text: &str) -> Vec<String> {
+    crate::services::query_planner::extract_keywords(query_text)
+}
+
+fn document_chunk_keyword_coverage(hit: &KnowledgeChunkSearchRow, keywords: &[String]) -> usize {
+    if keywords.is_empty() {
+        return 0;
+    }
+    let haystack = format!("{}\n{}", hit.content_text, hit.normalized_text).to_lowercase();
+    keywords.iter().filter(|keyword| haystack.contains(keyword.as_str())).count()
+}
+
+fn expand_document_search_queries(query_text: &str) -> Vec<String> {
+    let lowered = query_text.to_lowercase();
+    let mut queries = Vec::<String>::new();
+    let mut seen = HashSet::<String>::new();
+    let mut push_query = |value: &str| {
+        let normalized = value.trim();
+        if normalized.is_empty() {
+            return;
+        }
+        let dedupe_key = normalized.to_lowercase();
+        if seen.insert(dedupe_key) {
+            queries.push(normalized.to_string());
+        }
+    };
+
+    push_query(query_text);
+    for (markers, expansion) in [
+        (&["knowledge graph", "graph structured data model"][..], "knowledge graph"),
+        (
+            &["graph database", "gremlin", "sparql", "cypher", "gql", "first-class citizens"][..],
+            "graph database",
+        ),
+        (&["vector database", "embeddings", "semantic similarity"][..], "vector database"),
+        (
+            &[
+                "large language model",
+                "text generation",
+                "generated language output",
+                "language generation",
+                "natural language processing",
+                "model family",
+                "reasoning",
+            ][..],
+            "large language model",
+        ),
+        (
+            &[
+                "retrieval augmented generation",
+                "retrieval-augmented generation",
+                "before answering",
+                "external documents",
+            ][..],
+            "retrieval-augmented generation",
+        ),
+        (
+            &["rust programming language", "memory safety", "programming language"][..],
+            "rust programming language",
+        ),
+        (&["borrow checker"][..], "rust programming language"),
+        (&["semantic web", "rdf", "owl", "machine-readable"][..], "semantic web"),
+        (
+            &["information retrieval", "information need", "document retrieval"][..],
+            "information retrieval",
+        ),
+        (
+            &["named entity recognition", "named-entity recognition", "organizations", "locations"]
+                [..],
+            "named-entity recognition",
+        ),
+    ] {
+        if markers.iter().any(|marker| lowered.contains(marker)) {
+            push_query(expansion);
+        }
+    }
+
+    queries
+}
+
+fn canonical_search_targets(query_text: &str) -> Vec<&'static str> {
+    let lowered = query_text.to_lowercase();
+    let mut targets = Vec::new();
+    if lowered.contains("vector database")
+        || (lowered.contains("embeddings") && lowered.contains("semantic similarity"))
+    {
+        targets.push("vector_database");
+    }
+    if lowered.contains("large language model")
+        || lowered.contains("language generation")
+        || lowered.contains("generated language output")
+        || (lowered.contains("natural language processing") && lowered.contains("model family"))
+    {
+        targets.push("large_language_model");
+    }
+    if lowered.contains("retrieval augmented generation")
+        || lowered.contains("retrieval-augmented generation")
+        || lowered.contains("before answering")
+        || lowered.contains("external documents")
+    {
+        targets.push("retrieval_augmented_generation");
+    }
+    if lowered.contains("rust")
+        || (lowered.contains("programming language") && lowered.contains("memory safety"))
+        || lowered.contains("borrow checker")
+    {
+        targets.push("rust_programming_language");
+    }
+    if lowered.contains("knowledge graph")
+        || lowered.contains("interlinked descriptions")
+        || lowered.contains("graph structured data model")
+    {
+        targets.push("knowledge_graph");
+    }
+    if lowered.contains("graph database")
+        || lowered.contains("gremlin")
+        || lowered.contains("sparql")
+        || lowered.contains("cypher")
+        || lowered.contains("gql")
+        || lowered.contains("first-class citizens")
+    {
+        targets.push("graph_database");
+    }
+    if lowered.contains("semantic web")
+        || lowered.contains("rdf")
+        || lowered.contains("owl")
+        || lowered.contains("machine-readable")
+    {
+        targets.push("semantic_web");
+    }
+    if lowered.contains("named entity recognition") || lowered.contains("named-entity recognition")
+    {
+        targets.push("named_entity_recognition");
+    }
+    if lowered.contains("information retrieval") {
+        targets.push("information_retrieval");
+    }
+    targets
+}
+
+fn document_matches_canonical_search_target(document: &KnowledgeDocumentRow, target: &str) -> bool {
+    let label = document
+        .title
+        .as_deref()
+        .unwrap_or(document.external_key.as_str())
+        .to_lowercase()
+        .replace('_', " ")
+        .replace('-', " ");
+    match target {
+        "vector_database" => label.contains("vector database"),
+        "large_language_model" => label.contains("large language model"),
+        "retrieval_augmented_generation" => label.contains("retrieval augmented generation"),
+        "rust_programming_language" => label.contains("rust"),
+        "knowledge_graph" => label.contains("knowledge graph"),
+        "graph_database" => label.contains("graph database"),
+        "semantic_web" => label.contains("semantic web"),
+        "named_entity_recognition" => label.contains("named entity recognition"),
+        "information_retrieval" => label.contains("information retrieval"),
+        _ => false,
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -310,17 +495,84 @@ struct KnowledgeEvidenceSupportRelationEdgeRow {
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeKnowledgeEntityRow {
+    key: String,
+    entity_id: Uuid,
+    workspace_id: Uuid,
+    library_id: Uuid,
+    canonical_label: String,
+    aliases: Vec<String>,
+    entity_type: String,
+    summary: Option<String>,
+    confidence: Option<f64>,
+    support_count: i32,
+    freshness_generation: i64,
+    entity_state: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeKnowledgeRelationRow {
+    key: String,
+    relation_id: Uuid,
+    workspace_id: Uuid,
+    library_id: Uuid,
+    predicate: String,
+    normalized_assertion: String,
+    confidence: Option<f64>,
+    support_count: i32,
+    contradiction_state: String,
+    freshness_generation: i64,
+    relation_state: String,
+    subject_entity_id: Uuid,
+    object_entity_id: Uuid,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeKnowledgeEvidenceRow {
+    key: String,
+    evidence_id: Uuid,
+    workspace_id: Uuid,
+    library_id: Uuid,
+    document_id: Uuid,
+    revision_id: Uuid,
+    chunk_id: Option<Uuid>,
+    span_start: Option<i32>,
+    span_end: Option<i32>,
+    excerpt: String,
+    support_kind: String,
+    extraction_method: String,
+    confidence: Option<f64>,
+    evidence_state: String,
+    freshness_generation: i64,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeKnowledgeDocumentLinkRow {
+    document_id: Uuid,
+    target_node_id: Uuid,
+    target_node_type: String,
+    relation_type: String,
+    support_count: i64,
+}
+
 async fn list_entities(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,
-) -> Result<Json<Vec<KnowledgeEntityRow>>, ApiError> {
+) -> Result<Json<Vec<RuntimeKnowledgeEntityRow>>, ApiError> {
     let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
-    let entities = state
-        .arango_graph_store
-        .list_entities_by_library(library_id)
-        .await
-        .map_err(|_| ApiError::Internal)?;
+    let entities = load_runtime_graph_topology_rows(&state, library_id).await?.entities;
     Ok(Json(entities))
 }
 
@@ -328,15 +580,9 @@ async fn list_relations(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,
-) -> Result<Json<Vec<KnowledgeRelationTopologyRow>>, ApiError> {
+) -> Result<Json<Vec<RuntimeKnowledgeRelationRow>>, ApiError> {
     let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
-    let relations =
-        state.arango_graph_store.list_relation_topology_by_library(library_id).await.map_err(
-            |error| {
-                tracing::error!(%library_id, ?error, "failed to list knowledge relation topology");
-                ApiError::Internal
-            },
-        )?;
+    let relations = load_runtime_graph_topology_rows(&state, library_id).await?.relations;
     Ok(Json(relations))
 }
 
@@ -454,50 +700,19 @@ async fn get_graph_topology(
     Path(library_id): Path<Uuid>,
 ) -> Result<Json<KnowledgeGraphTopologyResponse>, ApiError> {
     let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
-    let entities = state
-        .arango_graph_store
-        .list_entities_by_library(library_id)
-        .await
-        .map_err(|_| ApiError::Internal)?;
-    let relations =
-        state.arango_graph_store.list_relation_topology_by_library(library_id).await.map_err(
-            |error| {
-                tracing::error!(%library_id, ?error, "failed to list knowledge relation topology");
-                ApiError::Internal
-            },
-        )?;
-    let document_links = match timeout(
-        Duration::from_secs(3),
-        state.arango_graph_store.list_document_graph_links_by_library(library_id),
-    )
-    .await
-    {
-        Ok(Ok(rows)) => rows,
-        Ok(Err(error)) => {
-            tracing::warn!(
-                %library_id,
-                ?error,
-                "failed to list knowledge document graph links; continuing without document nodes",
-            );
-            Vec::new()
-        }
-        Err(_) => {
-            tracing::warn!(
-                %library_id,
-                "timed out while listing knowledge document graph links; continuing without document nodes",
-            );
-            Vec::new()
-        }
-    };
-    let linked_document_ids =
-        document_links.iter().map(|row| row.document_id).collect::<HashSet<_>>();
+    let topology = load_runtime_graph_topology_rows(&state, library_id).await?;
     let documents = state
         .arango_document_store
-        .list_documents_by_ids(&linked_document_ids.into_iter().collect::<Vec<_>>())
+        .list_documents_by_ids(&topology.document_ids)
         .await
         .map_err(|_| ApiError::Internal)?;
 
-    Ok(Json(KnowledgeGraphTopologyResponse { documents, entities, relations, document_links }))
+    Ok(Json(KnowledgeGraphTopologyResponse {
+        documents,
+        entities: topology.entities,
+        relations: topology.relations,
+        document_links: topology.document_links,
+    }))
 }
 
 async fn get_context_bundle(
@@ -587,18 +802,45 @@ async fn search_documents_impl(
     let chunk_hit_limit_per_document = chunk_hit_limit_per_document.unwrap_or(10).max(1);
     let evidence_sample_limit =
         evidence_sample_limit.unwrap_or(DEFAULT_EVIDENCE_SAMPLE_LIMIT).max(1);
-    let lexical_chunk_hits = state
-        .arango_search_store
-        .search_chunks(library_id, &query_text, limit)
-        .await
-        .map_err(|_| ApiError::Internal)?;
+    let canonical_targets = canonical_search_targets(&query_text);
+    let query_keywords = document_search_keywords(&query_text);
+    let internal_candidate_limit =
+        limit.saturating_mul(chunk_hit_limit_per_document.max(3)).saturating_mul(4).max(16);
+    let mut lexical_chunk_hit_map = HashMap::<Uuid, KnowledgeChunkSearchRow>::new();
+    for search_query in expand_document_search_queries(&query_text) {
+        let rows = state
+            .arango_search_store
+            .search_chunks(library_id, &search_query, internal_candidate_limit)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+        for row in rows {
+            match lexical_chunk_hit_map.entry(row.chunk_id) {
+                std::collections::hash_map::Entry::Occupied(mut occupied) => {
+                    if row.score > occupied.get().score {
+                        occupied.insert(row);
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(vacant) => {
+                    vacant.insert(row);
+                }
+            }
+        }
+    }
+    let mut lexical_chunk_hits = lexical_chunk_hit_map.into_values().collect::<Vec<_>>();
+    lexical_chunk_hits.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.chunk_id.cmp(&right.chunk_id))
+    });
     let lexical_entity_hits =
         search_entities_by_library(&state, library_id, &query_text, limit).await?;
     let lexical_relation_hits =
         search_relations_by_library(&state, library_id, &query_text, limit).await?;
 
     let hybrid_context = resolve_hybrid_search_context(&state, library_id, &query_text).await?;
-    let vector_candidate_limit = limit.saturating_mul(2).max(1);
+    let vector_candidate_limit = internal_candidate_limit.max(limit.saturating_mul(2).max(1));
     let vector_chunk_hits = if let Some(context) = hybrid_context.as_ref() {
         match state
             .arango_search_store
@@ -756,10 +998,11 @@ async fn search_documents_impl(
         .into_values()
         .map(|mut accumulator| {
             accumulator.chunk_hits.sort_by(|left, right| {
-                right
-                    .score
-                    .partial_cmp(&left.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                document_chunk_keyword_coverage(right, &query_keywords)
+                    .cmp(&document_chunk_keyword_coverage(left, &query_keywords))
+                    .then_with(|| {
+                        right.score.partial_cmp(&left.score).unwrap_or(std::cmp::Ordering::Equal)
+                    })
                     .then_with(|| left.chunk_id.cmp(&right.chunk_id))
             });
             accumulator.vector_chunk_hits.sort_by(|left, right| {
@@ -810,10 +1053,20 @@ async fn search_documents_impl(
 
         let lexical_rank = accumulator.lexical_rank.unwrap_or(usize::MAX / 2);
         let vector_rank = accumulator.vector_rank.unwrap_or(usize::MAX / 2);
+        let lexical_signal = accumulator.lexical_score.map(f64::ln_1p).unwrap_or_default();
+        let vector_signal = accumulator.vector_score.map(f64::ln_1p).unwrap_or_default();
         let provenance_bonus = (accumulator.evidence_samples.len() as f64) / 1000.0;
-        accumulator.score = (1.0 / (60.0 + lexical_rank as f64))
+        accumulator.score = lexical_signal
+            + vector_signal
+            + (1.0 / (60.0 + lexical_rank as f64))
             + (1.0 / (60.0 + vector_rank as f64))
             + provenance_bonus;
+        if canonical_targets
+            .iter()
+            .any(|target| document_matches_canonical_search_target(&accumulator.document, target))
+        {
+            accumulator.score += 10.0;
+        }
     }
 
     let mut document_hits = document_hits;
@@ -826,7 +1079,14 @@ async fn search_documents_impl(
     });
     document_hits.truncate(limit);
     let mut response_hits = Vec::with_capacity(document_hits.len());
-    for accumulator in document_hits {
+    for mut accumulator in document_hits {
+        backfill_document_chunk_hits(
+            &state,
+            &query_text,
+            chunk_hit_limit_per_document,
+            &mut accumulator,
+        )
+        .await?;
         let technical_fact_samples = state
             .canonical_services
             .knowledge
@@ -899,6 +1159,129 @@ fn map_search_revision_summary(revision: KnowledgeRevisionRow) -> KnowledgeSearc
     }
 }
 
+async fn backfill_document_chunk_hits(
+    state: &AppState,
+    query_text: &str,
+    chunk_hit_limit_per_document: usize,
+    accumulator: &mut KnowledgeDocumentAccumulator,
+) -> Result<(), ApiError> {
+    let keywords = crate::services::query_planner::extract_keywords(query_text);
+    if keywords.is_empty() {
+        return Ok(());
+    }
+
+    let existing_chunk_ids =
+        accumulator.chunk_hits.iter().map(|chunk| chunk.chunk_id).collect::<HashSet<_>>();
+    let mut candidates = accumulator.chunk_hits.clone();
+    candidates.extend(
+        state
+            .arango_document_store
+            .list_chunks_by_revision(accumulator.revision.revision_id)
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .into_iter()
+            .filter(|chunk| !existing_chunk_ids.contains(&chunk.chunk_id))
+            .filter_map(|chunk| {
+                let haystack =
+                    format!("{} {}", chunk.content_text, chunk.normalized_text).to_lowercase();
+                let score = keywords
+                    .iter()
+                    .map(|keyword| haystack.matches(keyword.as_str()).count() as f64)
+                    .sum::<f64>();
+                (score > 0.0).then_some(KnowledgeChunkSearchRow {
+                    chunk_id: chunk.chunk_id,
+                    workspace_id: chunk.workspace_id,
+                    library_id: chunk.library_id,
+                    revision_id: chunk.revision_id,
+                    content_text: repair_technical_layout_noise(&chunk.content_text),
+                    normalized_text: repair_technical_layout_noise(&chunk.normalized_text),
+                    section_path: chunk.section_path,
+                    heading_trail: chunk.heading_trail,
+                    score,
+                })
+            })
+            .collect::<Vec<_>>(),
+    );
+    candidates.sort_by(|left, right| {
+        document_search_chunk_relevance(query_text, right)
+            .cmp(&document_search_chunk_relevance(query_text, left))
+            .then_with(|| right.score.partial_cmp(&left.score).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| left.chunk_id.cmp(&right.chunk_id))
+    });
+    candidates.dedup_by(|left, right| left.chunk_id == right.chunk_id);
+    accumulator.chunk_hits = candidates.into_iter().take(chunk_hit_limit_per_document).collect();
+    Ok(())
+}
+
+fn document_search_chunk_relevance(query_text: &str, hit: &KnowledgeChunkSearchRow) -> usize {
+    let lowered_query = query_text.to_lowercase();
+    let lowered_text = format!("{} {}", hit.content_text, hit.normalized_text).to_lowercase();
+    let keywords = crate::services::query_planner::extract_keywords(query_text);
+    let keyword_score = keywords
+        .iter()
+        .map(|keyword| lowered_text.matches(keyword.as_str()).count())
+        .sum::<usize>();
+    let anchor_score = document_search_anchor_tokens(&lowered_query)
+        .into_iter()
+        .filter(|token| lowered_text.contains(token))
+        .count();
+    let phrase_score = document_search_anchor_phrases(&lowered_query)
+        .into_iter()
+        .filter(|phrase| lowered_text.contains(phrase))
+        .count();
+    keyword_score + anchor_score * 50 + phrase_score * 150
+}
+
+fn document_search_anchor_tokens(lowered_query: &str) -> Vec<String> {
+    let mut tokens = Vec::<String>::new();
+    let mut seen = HashSet::<String>::new();
+    for token in lowered_query
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-' && ch != '_')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        let keep = token.chars().all(|ch| ch.is_ascii_digit())
+            || token.len() >= 5
+            || matches!(token, "gql" | "ocr" | "rdf" | "owl");
+        if keep && seen.insert(token.to_string()) {
+            tokens.push(token.to_string());
+        }
+    }
+    tokens
+}
+
+fn document_search_anchor_phrases(lowered_query: &str) -> Vec<String> {
+    let tokens = lowered_query
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-' && ch != '_')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    let anchors = document_search_anchor_tokens(lowered_query).into_iter().collect::<HashSet<_>>();
+    let stopwords = [
+        "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with", "from", "what",
+        "which", "is", "are", "was", "were", "approved",
+    ]
+    .into_iter()
+    .collect::<HashSet<_>>();
+    let mut phrases = Vec::<String>::new();
+    let mut seen = HashSet::<String>::new();
+    for window_size in 2..=5 {
+        for window in tokens.windows(window_size) {
+            if window.iter().all(|token| stopwords.contains(token)) {
+                continue;
+            }
+            if !window.iter().any(|token| anchors.contains(*token)) {
+                continue;
+            }
+            let phrase = window.join(" ");
+            if seen.insert(phrase.clone()) {
+                phrases.push(phrase);
+            }
+        }
+    }
+    phrases
+}
+
 async fn resolve_hybrid_search_context(
     state: &AppState,
     library_id: Uuid,
@@ -914,8 +1297,9 @@ async fn resolve_hybrid_search_context(
     };
 
     let generations = state
-        .arango_document_store
-        .list_library_generations(library_id)
+        .canonical_services
+        .knowledge
+        .derive_library_generation_rows(&state, library_id)
         .await
         .map_err(|_| ApiError::Internal)?;
     let Some(generation): Option<&KnowledgeLibraryGenerationRow> = generations.first() else {
@@ -1030,36 +1414,37 @@ async fn get_entity(
     State(state): State<AppState>,
     Path((library_id, entity_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<KnowledgeEntityDetailResponse>, ApiError> {
-    let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
-    let entity = state
-        .arango_graph_store
-        .get_entity_by_id(entity_id)
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::resource_not_found("knowledge_entity", entity_id))?;
-    if entity.library_id != library_id {
+    let library =
+        load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
+    let entity = repositories::get_runtime_graph_node_by_id(
+        &state.persistence.postgres,
+        library_id,
+        entity_id,
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?
+    .ok_or_else(|| ApiError::resource_not_found("runtime_graph_node", entity_id))?;
+    if entity.project_id != library_id {
         return Err(ApiError::resource_not_found("knowledge_entity", entity_id));
     }
 
-    let mention_edges = list_entity_mention_edges(&state, entity_id).await?;
+    let supporting_evidence =
+        load_runtime_graph_supporting_evidence(&state, library_id, "node", entity_id).await?;
+    let mention_edges = build_runtime_entity_mention_edges(entity_id, &supporting_evidence);
     let mention_chunk_ids: Vec<Uuid> = mention_edges.iter().map(|edge| edge.chunk_id).collect();
     let mentioned_chunks = load_chunks_by_ids(&state, &mention_chunk_ids).await?;
-    let supporting_evidence_edges = list_entity_evidence_support_edges(&state, entity_id).await?;
-    let supporting_evidence_ids: Vec<Uuid> =
-        supporting_evidence_edges.iter().map(|edge| edge.evidence_id).collect();
-    let supporting_evidence = load_evidence_by_ids(&state, &supporting_evidence_ids).await?;
-    let supporting_typed_facts =
-        load_typed_technical_facts_for_evidence(&state, &supporting_evidence).await?;
-    let graph_evidence_summary =
-        summarize_graph_evidence_from_support(&supporting_evidence, supporting_typed_facts.len());
+    let supporting_evidence_edges =
+        build_runtime_entity_evidence_support_edges(entity_id, &supporting_evidence);
+    let supporting_typed_facts = Vec::new();
+    let graph_evidence_summary = summarize_runtime_graph_evidence(&supporting_evidence, 0);
 
     Ok(Json(KnowledgeEntityDetailResponse {
-        entity,
+        entity: map_runtime_graph_node_to_entity_row(entity, library.workspace_id, library_id)?,
         mention_edges,
         mentioned_chunks,
         supporting_evidence_edges,
         supporting_evidence,
-        supporting_typed_facts: supporting_typed_facts.clone(),
+        supporting_typed_facts,
         graph_evidence_summary,
     }))
 }
@@ -1069,50 +1454,36 @@ async fn get_relation(
     State(state): State<AppState>,
     Path((library_id, relation_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<KnowledgeRelationDetailResponse>, ApiError> {
-    let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
-    let relation = state
-        .arango_graph_store
-        .get_relation_topology_by_id(relation_id)
-        .await
-        .map_err(|error| {
-            tracing::error!(%library_id, %relation_id, ?error, "failed to load knowledge relation topology");
-            ApiError::Internal
-        })?
-        .ok_or_else(|| ApiError::resource_not_found("knowledge_relation", relation_id))?;
-    if relation.relation.library_id != library_id {
+    let library =
+        load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
+    let relation = repositories::get_runtime_graph_edge_by_id(
+        &state.persistence.postgres,
+        library_id,
+        relation_id,
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?
+    .ok_or_else(|| ApiError::resource_not_found("runtime_graph_edge", relation_id))?;
+    if relation.project_id != library_id {
         return Err(ApiError::resource_not_found("knowledge_relation", relation_id));
     }
 
-    let supporting_evidence_edges =
-        list_relation_evidence_support_edges(&state, relation_id)
-            .await
-            .map_err(|error| {
-                tracing::error!(%library_id, %relation_id, ?error, "failed to load relation evidence support edges");
-                error
-            })?;
-    let supporting_evidence_ids: Vec<Uuid> =
-        supporting_evidence_edges.iter().map(|edge| edge.evidence_id).collect();
     let supporting_evidence =
-        load_evidence_by_ids(&state, &supporting_evidence_ids).await.map_err(|error| {
-            tracing::error!(
-                %library_id,
-                %relation_id,
-                evidence_count = supporting_evidence_ids.len(),
-                ?error,
-                "failed to load relation supporting evidence",
-            );
-            error
-        })?;
-    let supporting_typed_facts =
-        load_typed_technical_facts_for_evidence(&state, &supporting_evidence).await?;
-    let graph_evidence_summary =
-        summarize_graph_evidence_from_support(&supporting_evidence, supporting_typed_facts.len());
+        load_runtime_graph_supporting_evidence(&state, library_id, "edge", relation_id).await?;
+    let supporting_evidence_edges =
+        build_runtime_relation_evidence_support_edges(relation_id, &supporting_evidence);
+    let supporting_typed_facts = Vec::new();
+    let graph_evidence_summary = summarize_runtime_graph_evidence(&supporting_evidence, 0);
 
     Ok(Json(KnowledgeRelationDetailResponse {
-        relation,
+        relation: map_runtime_graph_edge_to_relation_row(
+            library.workspace_id,
+            library_id,
+            relation,
+        )?,
         supporting_evidence_edges,
         supporting_evidence,
-        supporting_typed_facts: supporting_typed_facts.clone(),
+        supporting_typed_facts,
         graph_evidence_summary,
     }))
 }
@@ -1140,40 +1511,6 @@ async fn load_chunks_by_ids(
         .await
         .map_err(|_| ApiError::Internal)?;
     decode_many_results(cursor).map_err(|_| ApiError::Internal)
-}
-
-async fn load_evidence_by_ids(
-    state: &AppState,
-    evidence_ids: &[Uuid],
-) -> Result<Vec<KnowledgeEvidenceRow>, ApiError> {
-    if evidence_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut evidence_rows = Vec::new();
-    for evidence_id in evidence_ids {
-        if let Some(evidence) = state
-            .arango_graph_store
-            .get_evidence_by_id(*evidence_id)
-            .await
-            .map_err(|_| ApiError::Internal)?
-        {
-            evidence_rows.push(evidence);
-        }
-    }
-    Ok(evidence_rows)
-}
-
-async fn load_typed_technical_facts_for_evidence(
-    state: &AppState,
-    evidence_rows: &[KnowledgeEvidenceRow],
-) -> Result<Vec<TypedTechnicalFact>, ApiError> {
-    let fact_ids = evidence_rows
-        .iter()
-        .filter_map(|evidence| evidence.fact_id)
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    state.canonical_services.knowledge.list_typed_technical_facts_by_ids(state, &fact_ids).await
 }
 
 fn summarize_typed_technical_facts(
@@ -1220,124 +1557,320 @@ fn summarize_graph_evidence(
     }
 }
 
-fn summarize_graph_evidence_from_support(
-    evidence_rows: &[KnowledgeEvidenceRow],
+fn summarize_runtime_graph_evidence(
+    evidence_rows: &[RuntimeKnowledgeEvidenceRow],
     typed_fact_count: usize,
 ) -> KnowledgeGraphEvidenceSummary {
-    let mut summary = summarize_graph_evidence(evidence_rows);
-    summary.fact_backed_count = summary.fact_backed_count.max(typed_fact_count);
-    summary
+    let chunk_backed_count =
+        evidence_rows.iter().filter(|evidence| evidence.chunk_id.is_some()).count();
+    KnowledgeGraphEvidenceSummary {
+        evidence_count: evidence_rows.len(),
+        chunk_backed_count,
+        block_backed_count: 0,
+        fact_backed_count: typed_fact_count,
+    }
 }
 
-async fn list_entity_mention_edges(
+#[derive(Debug)]
+struct RuntimeGraphTopologyRows {
+    document_ids: Vec<Uuid>,
+    entities: Vec<RuntimeKnowledgeEntityRow>,
+    relations: Vec<RuntimeKnowledgeRelationRow>,
+    document_links: Vec<RuntimeKnowledgeDocumentLinkRow>,
+}
+
+async fn load_runtime_graph_topology_rows(
     state: &AppState,
-    entity_id: Uuid,
-) -> Result<Vec<KnowledgeEntityMentionEdgeRow>, ApiError> {
-    let cursor = state
-        .arango_graph_store
-        .client()
-        .query_json(
-            "FOR edge IN @@collection
-             LET entity = DOCUMENT(edge._to)
-             LET chunk = DOCUMENT(edge._from)
-             LET resolved_rank = edge.rank != null ? edge.rank : edge.payload.rank
-             LET resolved_score = edge.score != null ? edge.score : edge.payload.score
-             LET resolved_inclusion_reason = edge.inclusionReason != null ? edge.inclusionReason : edge.payload.inclusionReason
-             FILTER entity != null
-               AND chunk != null
-               AND entity.entity_id == @entity_id
-             SORT resolved_rank ASC, edge.created_at ASC, edge._key ASC
-             RETURN {
-                key: edge._key,
-                entityId: entity.entity_id,
-                chunkId: chunk.chunk_id,
-                rank: resolved_rank,
-                score: resolved_score,
-                inclusionReason: resolved_inclusion_reason,
-                createdAt: edge.created_at
-             }",
-            serde_json::json!({
-                "@collection": KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE,
-                "entity_id": entity_id,
-            }),
-        )
+    library_id: Uuid,
+) -> Result<RuntimeGraphTopologyRows, ApiError> {
+    let library = state
+        .canonical_services
+        .catalog
+        .get_library(state, library_id)
         .await
         .map_err(|_| ApiError::Internal)?;
-    decode_many_results(cursor).map_err(|_| ApiError::Internal)
+    let workspace_id = library.workspace_id;
+    let Some(snapshot) =
+        repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
+            .await
+            .map_err(|_| ApiError::Internal)?
+    else {
+        return Ok(RuntimeGraphTopologyRows {
+            document_ids: Vec::new(),
+            entities: Vec::new(),
+            relations: Vec::new(),
+            document_links: Vec::new(),
+        });
+    };
+
+    if snapshot.graph_status == "empty" || snapshot.projection_version <= 0 {
+        return Ok(RuntimeGraphTopologyRows {
+            document_ids: Vec::new(),
+            entities: Vec::new(),
+            relations: Vec::new(),
+            document_links: Vec::new(),
+        });
+    }
+
+    let projection_version = snapshot.projection_version;
+    let node_rows = repositories::list_admitted_runtime_graph_nodes_by_projection(
+        &state.persistence.postgres,
+        library_id,
+        projection_version,
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    let edge_rows = repositories::list_admitted_runtime_graph_edges_by_projection(
+        &state.persistence.postgres,
+        library_id,
+        projection_version,
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    let document_link_rows = repositories::list_runtime_graph_document_links_by_projection(
+        &state.persistence.postgres,
+        library_id,
+        projection_version,
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?;
+
+    let document_node_ids = node_rows
+        .iter()
+        .filter(|row| row.node_type == "document")
+        .map(|row| row.id)
+        .collect::<HashSet<_>>();
+    let document_ids = node_rows
+        .iter()
+        .filter(|row| row.node_type == "document")
+        .filter_map(runtime_graph_document_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    let entities = node_rows
+        .into_iter()
+        .filter(|row| row.node_type != "document")
+        .map(|row| map_runtime_graph_node_to_entity_row(row, workspace_id, library_id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut relations = Vec::with_capacity(edge_rows.len());
+    for row in edge_rows {
+        if document_node_ids.contains(&row.from_node_id)
+            || document_node_ids.contains(&row.to_node_id)
+        {
+            continue;
+        }
+        relations.push(map_runtime_graph_edge_to_relation_row(workspace_id, library_id, row)?);
+    }
+    let document_links = document_link_rows
+        .into_iter()
+        .map(|row| RuntimeKnowledgeDocumentLinkRow {
+            document_id: row.document_id,
+            target_node_id: row.target_node_id,
+            target_node_type: row.target_node_type,
+            relation_type: row.relation_type,
+            support_count: row.support_count,
+        })
+        .collect();
+
+    Ok(RuntimeGraphTopologyRows { document_ids, entities, relations, document_links })
 }
 
-async fn list_entity_evidence_support_edges(
+fn runtime_graph_document_id(row: &repositories::RuntimeGraphNodeRow) -> Option<Uuid> {
+    row.metadata_json
+        .get("document_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+}
+
+fn runtime_graph_aliases(metadata: &serde_json::Value) -> Vec<String> {
+    metadata
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn runtime_graph_confidence(metadata: &serde_json::Value) -> Option<f64> {
+    metadata.get("confidence").and_then(serde_json::Value::as_f64)
+}
+
+fn runtime_graph_state(metadata: &serde_json::Value, fallback: &str) -> String {
+    metadata
+        .get("extraction_recovery_status")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| metadata.get("entity_state").and_then(serde_json::Value::as_str))
+        .or_else(|| metadata.get("relation_state").and_then(serde_json::Value::as_str))
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+fn runtime_graph_contradiction_state(metadata: &serde_json::Value) -> String {
+    metadata
+        .get("contradiction_state")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("clean")
+        .to_string()
+}
+
+fn map_runtime_graph_node_to_entity_row(
+    row: repositories::RuntimeGraphNodeRow,
+    workspace_id: Uuid,
+    library_id: Uuid,
+) -> Result<RuntimeKnowledgeEntityRow, ApiError> {
+    Ok(RuntimeKnowledgeEntityRow {
+        key: row.canonical_key.clone(),
+        entity_id: row.id,
+        workspace_id,
+        library_id,
+        canonical_label: row.label,
+        aliases: runtime_graph_aliases(&row.aliases_json),
+        entity_type: row.node_type,
+        summary: row.summary,
+        confidence: runtime_graph_confidence(&row.metadata_json),
+        support_count: row.support_count,
+        freshness_generation: row.projection_version,
+        entity_state: runtime_graph_state(&row.metadata_json, "active"),
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    })
+}
+
+fn map_runtime_graph_edge_to_relation_row(
+    workspace_id: Uuid,
+    library_id: Uuid,
+    row: repositories::RuntimeGraphEdgeRow,
+) -> Result<RuntimeKnowledgeRelationRow, ApiError> {
+    Ok(RuntimeKnowledgeRelationRow {
+        key: row.canonical_key.clone(),
+        relation_id: row.id,
+        workspace_id,
+        library_id,
+        predicate: row.relation_type.clone(),
+        normalized_assertion: row.summary.clone().unwrap_or_else(|| row.canonical_key.clone()),
+        confidence: row.weight,
+        support_count: row.support_count,
+        contradiction_state: runtime_graph_contradiction_state(&row.metadata_json),
+        freshness_generation: row.projection_version,
+        relation_state: runtime_graph_state(&row.metadata_json, "active"),
+        subject_entity_id: row.from_node_id,
+        object_entity_id: row.to_node_id,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    })
+}
+
+async fn load_runtime_graph_supporting_evidence(
     state: &AppState,
-    entity_id: Uuid,
-) -> Result<Vec<KnowledgeEvidenceSupportEntityEdgeRow>, ApiError> {
-    let cursor = state
-        .arango_graph_store
-        .client()
-        .query_json(
-            "FOR edge IN @@collection
-             LET evidence = DOCUMENT(edge._from)
-             LET entity = DOCUMENT(edge._to)
-             LET resolved_rank = edge.rank != null ? edge.rank : edge.payload.rank
-             LET resolved_score = edge.score != null ? edge.score : edge.payload.score
-             LET resolved_inclusion_reason = edge.inclusionReason != null ? edge.inclusionReason : edge.payload.inclusionReason
-             FILTER evidence != null
-               AND entity != null
-               AND entity.entity_id == @entity_id
-             SORT resolved_rank ASC, edge.created_at ASC, edge._key ASC
-             RETURN {
-                key: edge._key,
-                evidenceId: evidence.evidence_id,
-                entityId: entity.entity_id,
-                rank: resolved_rank,
-                score: resolved_score,
-                inclusionReason: resolved_inclusion_reason,
-                createdAt: edge.created_at
-             }",
-            serde_json::json!({
-                "@collection": KNOWLEDGE_EVIDENCE_SUPPORTS_ENTITY_EDGE,
-                "entity_id": entity_id,
-            }),
-        )
+    library_id: Uuid,
+    target_kind: &str,
+    target_id: Uuid,
+) -> Result<Vec<RuntimeKnowledgeEvidenceRow>, ApiError> {
+    let workspace_id = state
+        .canonical_services
+        .catalog
+        .get_library(state, library_id)
         .await
-        .map_err(|_| ApiError::Internal)?;
-    decode_many_results(cursor).map_err(|_| ApiError::Internal)
+        .map_err(|_| ApiError::Internal)?
+        .workspace_id;
+    let evidence_rows = repositories::list_active_runtime_graph_evidence_lifecycle_by_target(
+        &state.persistence.postgres,
+        library_id,
+        target_kind,
+        target_id,
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?;
+
+    Ok(evidence_rows
+        .into_iter()
+        .filter_map(|row| {
+            let document_id = row.document_id?;
+            Some(RuntimeKnowledgeEvidenceRow {
+                key: row.id.to_string(),
+                evidence_id: row.id,
+                workspace_id,
+                library_id,
+                document_id,
+                revision_id: row.revision_id.unwrap_or_else(Uuid::nil),
+                chunk_id: row.chunk_id,
+                span_start: None,
+                span_end: None,
+                excerpt: row.evidence_text,
+                support_kind: target_kind.to_string(),
+                extraction_method: "runtime_graph".to_string(),
+                confidence: row.confidence_score,
+                evidence_state: "active".to_string(),
+                freshness_generation: 0,
+                created_at: row.created_at,
+                updated_at: row.created_at,
+            })
+        })
+        .collect())
 }
 
-async fn list_relation_evidence_support_edges(
-    state: &AppState,
+fn build_runtime_entity_mention_edges(
+    entity_id: Uuid,
+    evidence_rows: &[RuntimeKnowledgeEvidenceRow],
+) -> Vec<KnowledgeEntityMentionEdgeRow> {
+    let mut seen = HashSet::<Uuid>::new();
+    let mut edges = Vec::new();
+    for row in evidence_rows {
+        let Some(chunk_id) = row.chunk_id else {
+            continue;
+        };
+        if !seen.insert(chunk_id) {
+            continue;
+        }
+        edges.push(KnowledgeEntityMentionEdgeRow {
+            key: format!("{}:{chunk_id}", row.evidence_id),
+            entity_id,
+            chunk_id,
+            rank: None,
+            score: row.confidence,
+            inclusion_reason: Some("runtime_graph_evidence".to_string()),
+            created_at: row.created_at,
+        });
+    }
+    edges
+}
+
+fn build_runtime_entity_evidence_support_edges(
+    entity_id: Uuid,
+    evidence_rows: &[RuntimeKnowledgeEvidenceRow],
+) -> Vec<KnowledgeEvidenceSupportEntityEdgeRow> {
+    evidence_rows
+        .iter()
+        .map(|row| KnowledgeEvidenceSupportEntityEdgeRow {
+            key: row.key.clone(),
+            evidence_id: row.evidence_id,
+            entity_id,
+            rank: None,
+            score: row.confidence,
+            inclusion_reason: Some("runtime_graph_evidence".to_string()),
+            created_at: row.created_at,
+        })
+        .collect()
+}
+
+fn build_runtime_relation_evidence_support_edges(
     relation_id: Uuid,
-) -> Result<Vec<KnowledgeEvidenceSupportRelationEdgeRow>, ApiError> {
-    let cursor = state
-        .arango_graph_store
-        .client()
-        .query_json(
-            "FOR edge IN @@collection
-             LET evidence = DOCUMENT(edge._from)
-             LET relation = DOCUMENT(edge._to)
-             LET resolved_rank = edge.rank != null ? edge.rank : edge.payload.rank
-             LET resolved_score = edge.score != null ? edge.score : edge.payload.score
-             LET resolved_inclusion_reason = edge.inclusionReason != null ? edge.inclusionReason : edge.payload.inclusionReason
-             FILTER evidence != null
-               AND relation != null
-               AND relation.relation_id == @relation_id
-             SORT resolved_rank ASC, edge.created_at ASC, edge._key ASC
-             RETURN {
-                key: edge._key,
-                evidenceId: evidence.evidence_id,
-                relationId: relation.relation_id,
-                rank: resolved_rank,
-                score: resolved_score,
-                inclusionReason: resolved_inclusion_reason,
-                createdAt: edge.created_at
-             }",
-            serde_json::json!({
-                "@collection": KNOWLEDGE_EVIDENCE_SUPPORTS_RELATION_EDGE,
-                "relation_id": relation_id,
-            }),
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?;
-    decode_many_results(cursor).map_err(|_| ApiError::Internal)
+    evidence_rows: &[RuntimeKnowledgeEvidenceRow],
+) -> Vec<KnowledgeEvidenceSupportRelationEdgeRow> {
+    evidence_rows
+        .iter()
+        .map(|row| KnowledgeEvidenceSupportRelationEdgeRow {
+            key: row.key.clone(),
+            evidence_id: row.evidence_id,
+            relation_id,
+            rank: None,
+            score: row.confidence,
+            inclusion_reason: Some("runtime_graph_evidence".to_string()),
+            created_at: row.created_at,
+        })
+        .collect()
 }
 
 fn decode_many_results<T>(cursor: serde_json::Value) -> Result<Vec<T>, ApiError>

@@ -4,4947 +4,5284 @@
  */
 
 export interface paths {
-    "/v1/health": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Health check */
-        get: operations["getHealth"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ready": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Readiness check */
-        get: operations["getReadiness"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/version": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Service version */
-        get: operations["getVersion"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/openapi/rustrag.openapi.yaml": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** OpenAPI contract discovery */
-        get: operations["getOpenApiContract"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/iam/bootstrap/claim": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Claim the first administrator for a fresh deployment
-         * @description One-time bootstrap route for destructive fresh deployments. This route is expected to
-         *     succeed exactly once, create the first `iam_principal` plus `iam_user`, and emit one
-         *     canonical `audit_event`.
-         */
-        post: operations["postBootstrapClaim"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/iam/bootstrap/status": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Resolve whether first-run admin setup is still required */
-        get: operations["getBootstrapStatus"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/iam/bootstrap/setup": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Configure the first administrator interactively
-         * @description One-time interactive setup route for a fresh deployment with no administrator and no
-         *     explicit bootstrap admin credentials configured through environment variables.
-         */
-        post: operations["postBootstrapSetup"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/mcp": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * MCP JSON-RPC endpoint for canonical agent memory flows
-         * @description Bearer-token authenticated JSON-RPC transport for discovery, search, read, and document
-         *     mutation tools. Tool visibility and callable actions are derived from the authenticated
-         *     principal's typed grants.
-         */
-        post: operations["postMcpRequest"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/mcp/capabilities": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Return the derived MCP capability snapshot for the current principal */
-        get: operations["getMcpCapabilities"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/catalog/workspaces": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List visible workspaces */
-        get: operations["listCatalogWorkspaces"];
-        put?: never;
-        /** Create a workspace */
-        post: operations["createCatalogWorkspace"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/catalog/workspaces/{workspaceId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get one visible workspace */
-        get: operations["getCatalogWorkspace"];
-        put?: never;
-        post?: never;
-        /** Delete one workspace */
-        delete: operations["deleteCatalogWorkspace"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/catalog/workspaces/{workspaceId}/libraries": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List visible libraries in one workspace */
-        get: operations["listCatalogLibraries"];
-        put?: never;
-        /** Create a library in one workspace */
-        post: operations["createCatalogLibrary"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/catalog/workspaces/{workspaceId}/libraries/{libraryId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post?: never;
-        /** Delete one library from one workspace */
-        delete: operations["deleteCatalogLibrary"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/catalog/libraries/{libraryId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get one visible library */
-        get: operations["getCatalogLibrary"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/iam/session/login": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Authenticate a browser session with login and password */
-        post: operations["loginIamSession"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/iam/session": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Resolve the current browser session */
-        get: operations["getIamSession"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/iam/session/logout": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Revoke the current browser session */
-        post: operations["logoutIamSession"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/iam/me": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Resolve the current principal, memberships, and effective grants */
-        get: operations["getIamMe"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/iam/tokens": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List visible API tokens */
-        get: operations["listIamTokens"];
-        put?: never;
-        /** Mint a canonical API token */
-        post: operations["mintIamToken"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/iam/tokens/{tokenPrincipalId}/revoke": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Revoke one API token principal */
-        post: operations["revokeIamToken"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/iam/grants": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List effective grants for one principal */
-        get: operations["listIamGrants"];
-        put?: never;
-        /** Create a typed grant */
-        post: operations["createIamGrant"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/iam/grants/{grantId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post?: never;
-        /** Revoke one typed grant */
-        delete: operations["revokeIamGrant"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ai/providers": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List seeded AI providers */
-        get: operations["listAiProviders"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ai/models": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List seeded AI models */
-        get: operations["listAiModels"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ai/model-presets": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List workspace model presets */
-        get: operations["listAiModelPresets"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ai/prices": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List seeded AI prices */
-        get: operations["listAiPrices"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ai/credentials": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List visible provider credentials for one workspace */
-        get: operations["listAiCredentials"];
-        put?: never;
-        /** Create a provider credential */
-        post: operations["createAiCredential"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ai/libraries/{libraryId}/bindings": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List active model bindings for one library */
-        get: operations["listAiLibraryBindings"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ai/library-bindings": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Create or replace the active binding for one library purpose */
-        post: operations["createAiLibraryBinding"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ai/library-bindings/{bindingId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        /** Update one existing library binding */
-        put: operations["updateAiLibraryBinding"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ai/library-bindings/{bindingId}/validate": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Trigger one library-binding validation row */
-        post: operations["validateAiLibraryBinding"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/content/documents": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List canonical logical documents for one library */
-        get: operations["listContentDocuments"];
-        put?: never;
-        /** Create a logical document and accepted upload mutation */
-        post: operations["createContentDocument"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/content/web-runs": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List web ingest runs for one library */
-        get: operations["listContentWebIngestRuns"];
-        put?: never;
-        /** Submit one canonical web ingest run */
-        post: operations["createContentWebIngestRun"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/content/web-runs/{runId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get one canonical web ingest run */
-        get: operations["getContentWebIngestRun"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/content/web-runs/{runId}/pages": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List page outcomes for one web ingest run */
-        get: operations["listContentWebIngestRunPages"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/content/web-runs/{runId}/cancel": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Request cancellation for one web ingest run */
-        post: operations["cancelContentWebIngestRun"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/content/documents/upload": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Upload one document revision directly into the canonical content pipeline */
-        post: operations["uploadContentDocument"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/content/documents/{documentId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get one canonical logical document */
-        get: operations["getContentDocument"];
-        put?: never;
-        post?: never;
-        /** Delete one logical document through a canonical mutation */
-        delete: operations["deleteContentDocument"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/content/documents/{documentId}/prepared-segments": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List prepared segments for the readable revision of one logical document */
-        get: operations["listContentPreparedSegments"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/content/documents/{documentId}/technical-facts": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List typed technical facts for the readable revision of one logical document */
-        get: operations["listContentTechnicalFacts"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/content/documents/{documentId}/append": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Append plain text to one logical document */
-        post: operations["appendContentDocument"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/content/documents/{documentId}/replace": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Replace the active document revision with a new uploaded file */
-        post: operations["replaceContentDocument"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/content/documents/{documentId}/revisions": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List immutable revisions for one logical document */
-        get: operations["listContentRevisions"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/content/mutations": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List canonical content mutations for one library */
-        get: operations["listContentMutations"];
-        put?: never;
-        /** Create a canonical content mutation */
-        post: operations["createContentMutation"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/content/mutations/{mutationId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get one canonical content mutation and items */
-        get: operations["getContentMutation"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ingest/jobs": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List canonical ingest jobs for one library */
-        get: operations["listIngestJobs"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ingest/jobs/{jobId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get one canonical ingest job */
-        get: operations["getIngestJob"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ingest/attempts/{attemptId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get one canonical ingest attempt */
-        get: operations["getIngestAttempt"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ingest/attempts/{attemptId}/stages": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List ordered stage events for one ingest attempt */
-        get: operations["listIngestStageEvents"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/search/documents": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Search documents, chunks, entities, and relations in one knowledge library */
-        get: operations["searchDocuments"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/knowledge/libraries/{libraryId}/documents": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List documents in one knowledge library */
-        get: operations["listKnowledgeDocuments"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/knowledge/libraries/{libraryId}/documents/{documentId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get document detail with revisions and latest chunks */
-        get: operations["getKnowledgeDocument"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/knowledge/libraries/{libraryId}/summary": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get canonical knowledge summary for one library */
-        get: operations["getKnowledgeLibrarySummary"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/knowledge/libraries/{libraryId}/context-bundles": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List context bundles in one knowledge library */
-        get: operations["listKnowledgeContextBundles"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/knowledge/context-bundles/{bundleId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get one context bundle with traces and resolved knowledge rows */
-        get: operations["getKnowledgeContextBundle"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/knowledge/libraries/{libraryId}/entities": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List graph entities in one knowledge library */
-        get: operations["listKnowledgeEntities"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/knowledge/libraries/{libraryId}/entities/{entityId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get entity detail with mention and provenance data */
-        get: operations["getKnowledgeEntity"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/knowledge/libraries/{libraryId}/relations": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List graph relations in one knowledge library */
-        get: operations["listKnowledgeRelations"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/knowledge/libraries/{libraryId}/relations/{relationId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get relation detail with provenance data */
-        get: operations["getKnowledgeRelation"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/knowledge/libraries/{libraryId}/search/documents": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Search documents, chunks, entities, and relations in one knowledge library */
-        get: operations["searchKnowledgeDocuments"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/query/sessions": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List canonical query sessions for one library */
-        get: operations["listQuerySessions"];
-        put?: never;
-        /** Create one canonical query session */
-        post: operations["createQuerySession"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/query/sessions/{sessionId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get canonical query session detail */
-        get: operations["getQuerySession"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/query/sessions/{sessionId}/turns": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Submit a user turn and execute one grounded answer in a query session */
-        post: operations["createQuerySessionTurn"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/query/executions/{executionId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get canonical grounded execution detail */
-        get: operations["getQueryExecution"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/billing/provider-calls": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List canonical provider calls for one library */
-        get: operations["listBillingProviderCalls"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/billing/charges": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List canonical priced charges for one library */
-        get: operations["listBillingCharges"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/billing/executions/{executionKind}/{executionId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get canonical execution cost rollup */
-        get: operations["getBillingExecutionCost"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ops/operations/{operationId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get one canonical async operation */
-        get: operations["getAsyncOperation"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/ops/libraries/{libraryId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get derived operational state for one library */
-        get: operations["getLibraryState"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/audit/events": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List canonical audit events */
-        get: operations["listAuditEvents"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/chunks": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List chunks by document
-         * @description Requires `documents:read`, `workspace:admin`, or an `instance_admin` token.
-         */
-        get: operations["listChunks"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-}
-export type webhooks = Record<string, never>;
-export interface components {
-    schemas: {
-        ApiErrorBody: {
-            [key: string]: unknown;
-        };
-        AppendContentDocumentRequest: {
-            [key: string]: unknown;
-        };
-        AuditEventResponse: {
-            [key: string]: unknown;
-        };
-        BillingCharge: {
-            [key: string]: unknown;
-        };
-        BillingExecutionCost: {
-            [key: string]: unknown;
-        };
-        BillingProviderCall: {
-            [key: string]: unknown;
-        };
-        BindingValidationResponse: {
-            [key: string]: unknown;
-        };
-        /** @enum {string} */
-        BootstrapBindingPurpose: "extract_graph" | "embed_chunk" | "query_answer" | "vision";
-        /** @enum {string} */
-        BootstrapCredentialSource: "missing" | "env";
-        BootstrapClaimRequest: {
-            [key: string]: unknown;
-        };
-        BootstrapClaimResponse: {
-            [key: string]: unknown;
-        };
-        BootstrapProviderCatalogEntryResponse: {
-            /** Format: uuid */
-            id: string;
-            providerKind: string;
-            displayName: string;
-            apiStyle: string;
-            lifecycleState: string;
-            credentialSource: components["schemas"]["BootstrapCredentialSource"];
-        };
-        BootstrapModelCatalogEntryResponse: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            providerCatalogId: string;
-            modelName: string;
-            capabilityKind: string;
-            modalityKind: string;
-            allowedBindingPurposes: components["schemas"]["BootstrapBindingPurpose"][];
-            contextWindow?: number | null;
-            maxOutputTokens?: number | null;
-        };
-        BootstrapBindingSelectionResponse: {
-            bindingPurpose: components["schemas"]["BootstrapBindingPurpose"];
-            providerKind?: string | null;
-            modelCatalogId?: string | null;
-            configured: boolean;
-        };
-        BootstrapAiSetupResponse: {
-            providers: components["schemas"]["BootstrapProviderCatalogEntryResponse"][];
-            models: components["schemas"]["BootstrapModelCatalogEntryResponse"][];
-            bindingSelections: components["schemas"]["BootstrapBindingSelectionResponse"][];
-        };
-        BootstrapCredentialInputRequest: {
-            providerKind: string;
-            apiKey?: string | null;
-        };
-        BootstrapBindingSelectionRequest: {
-            bindingPurpose: components["schemas"]["BootstrapBindingPurpose"];
-            providerKind: string;
-            /** Format: uuid */
-            modelCatalogId: string;
-        };
-        BootstrapSetupAiRequest: {
-            credentials: components["schemas"]["BootstrapCredentialInputRequest"][];
-            bindingSelections: components["schemas"]["BootstrapBindingSelectionRequest"][];
-        };
-        BootstrapSetupRequest: {
-            login: string;
-            displayName?: string | null;
-            password: string;
-            aiSetup?: components["schemas"]["BootstrapSetupAiRequest"] | null;
-        };
-        BootstrapStatusResponse: {
-            setupRequired: boolean;
-            aiSetup?: components["schemas"]["BootstrapAiSetupResponse"] | null;
-        };
-        CatalogLibraryResponse: {
-            [key: string]: unknown;
-        };
-        CatalogWorkspaceResponse: {
-            [key: string]: unknown;
-        };
-        ChunkSummary: {
-            [key: string]: unknown;
-        };
-        ContentDocumentDetailResponse: {
-            document: {
-                [key: string]: unknown;
-            };
-            fileName: string;
-            head?: {
-                [key: string]: unknown;
-            } | null;
-            activeRevision?: {
-                [key: string]: unknown;
-            } | null;
-            readiness?: {
-                [key: string]: unknown;
-            } | null;
-            readinessSummary?: components["schemas"]["DocumentReadinessSummary"] | null;
-            preparedRevision?: components["schemas"]["StructuredDocumentRevisionSummary"] | null;
-            preparedSegmentCount?: number | null;
-            technicalFactCount?: number | null;
-            webPageProvenance?: components["schemas"]["WebPageProvenance"] | null;
-            pipeline: {
-                [key: string]: unknown;
-            };
-        } & {
-            [key: string]: unknown;
-        };
-        ContentMutationDetailResponse: {
-            [key: string]: unknown;
-        };
-        ContentRevision: {
-            [key: string]: unknown;
-        };
-        CreateCatalogLibraryRequest: {
-            [key: string]: unknown;
-        };
-        CreateCatalogWorkspaceRequest: {
-            [key: string]: unknown;
-        };
-        CreateContentDocumentRequest: {
-            [key: string]: unknown;
-        };
-        CreateContentDocumentResponse: {
-            [key: string]: unknown;
-        };
-        CreateContentMutationRequest: {
-            [key: string]: unknown;
-        };
-        CreateGrantRequest: {
-            [key: string]: unknown;
-        };
-        CreateLibraryBindingRequest: {
-            [key: string]: unknown;
-        };
-        CreateProviderCredentialRequest: {
-            [key: string]: unknown;
-        };
-        CreateQueryConversationRequest: {
-            [key: string]: unknown;
-        };
-        CreateQueryTurnRequest: {
-            [key: string]: unknown;
-        };
-        GrantResponse: {
-            [key: string]: unknown;
-        };
-        HealthResponse: {
-            [key: string]: unknown;
-        };
-        IngestAttempt: {
-            [key: string]: unknown;
-        };
-        IngestJob: {
-            [key: string]: unknown;
-        };
-        IngestStageEvent: {
-            [key: string]: unknown;
-        };
-        InternalError: {
-            [key: string]: unknown;
-        };
-        KnowledgeBundleChunkEdgeRow: {
-            [key: string]: unknown;
-        };
-        KnowledgeBundleEntityEdgeRow: {
-            [key: string]: unknown;
-        };
-        KnowledgeBundleEvidenceEdgeRow: {
-            [key: string]: unknown;
-        };
-        KnowledgeBundleRelationEdgeRow: {
-            [key: string]: unknown;
-        };
-        KnowledgeChunkRow: {
-            [key: string]: unknown;
-        };
-        KnowledgeChunkSearchRow: {
-            [key: string]: unknown;
-        };
-        KnowledgeChunkVectorSearchRow: {
-            [key: string]: unknown;
-        };
-        KnowledgeContextBundleRow: {
-            [key: string]: unknown;
-        };
-        KnowledgeDocumentRow: {
-            [key: string]: unknown;
-        };
-        KnowledgeEntityRow: {
-            [key: string]: unknown;
-        };
-        KnowledgeEntitySearchRow: {
-            [key: string]: unknown;
-        };
-        KnowledgeEntityVectorSearchRow: {
-            [key: string]: unknown;
-        };
-        KnowledgeEvidenceRow: {
-            [key: string]: unknown;
-        };
-        KnowledgeLibraryGeneration: {
-            [key: string]: unknown;
-        };
-        KnowledgeRelationRow: {
-            [key: string]: unknown;
-        };
-        KnowledgeRelationSearchRow: {
-            [key: string]: unknown;
-        };
-        KnowledgeRetrievalTraceRow: {
-            [key: string]: unknown;
-        };
-        KnowledgeRevisionRow: {
-            [key: string]: unknown;
-        };
-        LibraryKnowledgeSummaryResponse: {
-            /** Format: uuid */
-            libraryId: string;
-            documentCountsByReadiness: {
-                [key: string]: number;
-            };
-            graphReadyDocumentCount: number;
-            graphSparseDocumentCount: number;
-            typedFactDocumentCount: number;
-            latestGeneration?: components["schemas"]["KnowledgeLibraryGeneration"] | null;
-            /** Format: date-time */
-            updatedAt: string;
-        } & {
-            [key: string]: unknown;
-        };
-        LibraryModelBindingResponse: {
-            [key: string]: unknown;
-        };
-        LoginSessionRequest: {
-            [key: string]: unknown;
-        };
-        McpCapabilitySnapshot: {
-            [key: string]: unknown;
-        };
-        McpJsonRpcRequest: {
-            [key: string]: unknown;
-        };
-        McpJsonRpcResponse: {
-            [key: string]: unknown;
-        };
-        MeResponse: {
-            [key: string]: unknown;
-        };
-        MintTokenRequest: {
-            [key: string]: unknown;
-        };
-        MintTokenResponse: {
-            [key: string]: unknown;
-        };
-        ModelCatalogEntryResponse: {
-            [key: string]: unknown;
-        };
-        ModelPresetResponse: {
-            [key: string]: unknown;
-        };
-        NotFound: {
-            [key: string]: unknown;
-        };
-        OpsAsyncOperation: {
-            [key: string]: unknown;
-        };
-        OpsLibraryState: {
-            [key: string]: unknown;
-        };
-        OpsLibraryStateResponse: {
-            [key: string]: unknown;
-        };
-        OpsLibraryWarning: {
-            [key: string]: unknown;
-        };
-        PriceCatalogEntryResponse: {
-            [key: string]: unknown;
-        };
-        PreparedSegmentDetail: {
-            segment: components["schemas"]["PreparedSegmentListItem"];
-            text: string;
-            normalizedText: string;
-            sourceSpan?: components["schemas"]["StructuredSourceSpan"] | null;
-            parentBlockId?: string | null;
-            tableCoordinates?: components["schemas"]["StructuredTableCoordinates"] | null;
-            codeLanguage?: string | null;
-            supportChunkIds: string[];
-        } & {
-            [key: string]: unknown;
-        };
-        CreateWebIngestRunRequest: {
-            /** Format: uuid */
-            libraryId: string;
-            /** Format: uri */
-            seedUrl: string;
-            /** @enum {string} */
-            mode: "single_page" | "recursive_crawl";
-            boundaryPolicy?: ("same_host" | "allow_external") | null;
-            maxDepth?: number | null;
-            maxPages?: number | null;
-            idempotencyKey?: string | null;
-        };
-        WebIngestRunReceipt: {
-            /** Format: uuid */
-            runId: string;
-            /** Format: uuid */
-            libraryId: string;
-            /** @enum {string} */
-            mode: "single_page" | "recursive_crawl";
-            /** @enum {string} */
-            runState: "accepted" | "discovering" | "processing" | "completed" | "completed_partial" | "failed" | "canceled";
-            asyncOperationId?: string | null;
-            counts: components["schemas"]["WebRunCounts"];
-            failureCode?: components["schemas"]["WebRunFailureCode"] | null;
-            cancelRequestedAt?: string | null;
-        };
-        WebRunCounts: {
-            discovered: number;
-            eligible: number;
-            processed: number;
-            queued: number;
-            processing: number;
-            duplicates: number;
-            excluded: number;
-            blocked: number;
-            failed: number;
-            canceled: number;
-        };
-        WebIngestRunSummary: {
-            /** Format: uuid */
-            runId: string;
-            /** Format: uuid */
-            libraryId: string;
-            /** @enum {string} */
-            mode: "single_page" | "recursive_crawl";
-            /** @enum {string} */
-            boundaryPolicy: "same_host" | "allow_external";
-            maxDepth: number;
-            maxPages: number;
-            /** @enum {string} */
-            runState: "accepted" | "discovering" | "processing" | "completed" | "completed_partial" | "failed" | "canceled";
-            /** Format: uri */
-            seedUrl: string;
-            counts: components["schemas"]["WebRunCounts"];
-            lastActivityAt?: string | null;
-        };
-        WebIngestRun: {
-            /** Format: uuid */
-            runId: string;
-            /** Format: uuid */
-            mutationId: string;
-            asyncOperationId?: string | null;
-            /** Format: uuid */
-            workspaceId: string;
-            /** Format: uuid */
-            libraryId: string;
-            /** @enum {string} */
-            mode: "single_page" | "recursive_crawl";
-            /** Format: uri */
-            seedUrl: string;
-            /** Format: uri */
-            normalizedSeedUrl: string;
-            /** @enum {string} */
-            boundaryPolicy: "same_host" | "allow_external";
-            maxDepth: number;
-            maxPages: number;
-            /** @enum {string} */
-            runState: "accepted" | "discovering" | "processing" | "completed" | "completed_partial" | "failed" | "canceled";
-            requestedByPrincipalId?: string | null;
-            /** Format: date-time */
-            requestedAt: string;
-            completedAt?: string | null;
-            failureCode?: components["schemas"]["WebRunFailureCode"] | null;
-            cancelRequestedAt?: string | null;
-            counts: components["schemas"]["WebRunCounts"];
-            lastActivityAt?: string | null;
-        };
-        WebDiscoveredPage: {
-            /** Format: uuid */
-            candidateId: string;
-            /** Format: uuid */
-            runId: string;
-            discoveredUrl?: string | null;
-            /** Format: uri */
-            normalizedUrl: string;
-            finalUrl?: string | null;
-            canonicalUrl?: string | null;
-            depth: number;
-            referrerCandidateId?: string | null;
-            /** @enum {string} */
-            hostClassification: "same_host" | "external";
-            /** @enum {string} */
-            candidateState: "discovered" | "eligible" | "duplicate" | "excluded" | "blocked" | "queued" | "processing" | "processed" | "failed" | "canceled";
-            classificationReason?: components["schemas"]["WebClassificationReason"] | null;
-            contentType?: string | null;
-            httpStatus?: number | null;
-            /** Format: date-time */
-            discoveredAt: string;
-            /** Format: date-time */
-            updatedAt: string;
-            documentId?: string | null;
-            resultRevisionId?: string | null;
-            mutationItemId?: string | null;
-        };
-        WebPageProvenance: {
-            runId?: string | null;
-            candidateId?: string | null;
-            sourceUri?: string | null;
-            canonicalUrl?: string | null;
-        };
-        /** @enum {string} */
-        WebClassificationReason: "seed_accepted" | "duplicate_canonical_url" | "outside_boundary_policy" | "exceeded_max_depth" | "exceeded_max_pages" | "system_page" | "unsupported_scheme" | "invalid_url" | "inaccessible" | "unsupported_content" | "cancel_requested";
-        /** @enum {string} */
-        WebRunFailureCode: "inaccessible" | "invalid_url" | "unsupported_content" | "web_discovery_failed" | "web_snapshot_persist_failed" | "web_snapshot_missing" | "web_snapshot_missing_final_url" | "web_snapshot_unavailable" | "web_capture_materialization_failed" | "recursive_crawl_failed";
-        PreparedSegmentListItem: {
-            /** Format: uuid */
-            segmentId: string;
-            /** Format: uuid */
-            revisionId: string;
-            ordinal: number;
-            blockKind: string;
-            headingTrail: string[];
-            sectionPath: string[];
-            pageNumber?: number | null;
-            excerpt: string;
-        } & {
-            [key: string]: unknown;
-        };
-        PreparedSegmentsPageResponse: {
-            /** Format: uuid */
-            documentId: string;
-            revisionId?: string | null;
-            total: number;
-            offset: number;
-            limit: number;
-            items: components["schemas"]["PreparedSegmentDetail"][];
-        } & {
-            [key: string]: unknown;
-        };
-        ProviderCatalogEntryResponse: {
-            [key: string]: unknown;
-        };
-        ProviderCredentialResponse: {
-            [key: string]: unknown;
-        };
-        QueryConversation: {
-            [key: string]: unknown;
-        };
-        QueryConversationDetailResponse: {
-            [key: string]: unknown;
-        };
-        QueryExecutionDetailResponse: {
-            /** Format: uuid */
-            contextBundleId: string;
-            execution: {
-                [key: string]: unknown;
-            };
-            requestTurn?: {
-                [key: string]: unknown;
-            } | null;
-            responseTurn?: {
-                [key: string]: unknown;
-            } | null;
-            chunkReferences: {
-                [key: string]: unknown;
-            }[];
-            preparedSegmentReferences: components["schemas"]["QueryPreparedSegmentReference"][];
-            technicalFactReferences: components["schemas"]["QueryTechnicalFactReference"][];
-            entityReferences: {
-                [key: string]: unknown;
-            }[];
-            relationReferences: {
-                [key: string]: unknown;
-            }[];
-            /** @enum {string} */
-            verificationState: "not_run" | "verified" | "partially_supported" | "conflicting" | "insufficient_evidence" | "failed";
-            verificationWarnings: components["schemas"]["QueryVerificationWarning"][];
-        } & {
-            [key: string]: unknown;
-        };
-        QueryPreparedSegmentReference: {
-            /** Format: uuid */
-            executionId: string;
-            /** Format: uuid */
-            segmentId: string;
-            /** Format: uuid */
-            revisionId: string;
-            blockKind: string;
-            rank: number;
-            score: number;
-            headingTrail: string[];
-            sectionPath: string[];
-        } & {
-            [key: string]: unknown;
-        };
-        QueryTechnicalFactReference: {
-            /** Format: uuid */
-            executionId: string;
-            /** Format: uuid */
-            factId: string;
-            /** Format: uuid */
-            revisionId: string;
-            factKind: string;
-            canonicalValue: string;
-            displayValue: string;
-            rank: number;
-            score: number;
-        } & {
-            [key: string]: unknown;
-        };
-        QueryVerificationWarning: {
-            code: string;
-            message: string;
-            relatedSegmentId?: string | null;
-            relatedFactId?: string | null;
-        } & {
-            [key: string]: unknown;
-        };
-        QueryTurnExecutionResponse: {
-            /** Format: uuid */
-            contextBundleId: string;
-            session: {
-                [key: string]: unknown;
-            };
-            requestTurn: {
-                [key: string]: unknown;
-            };
-            responseTurn?: {
-                [key: string]: unknown;
-            } | null;
-            execution: {
-                [key: string]: unknown;
-            };
-            chunkReferences: {
-                [key: string]: unknown;
-            }[];
-            preparedSegmentReferences: components["schemas"]["QueryPreparedSegmentReference"][];
-            technicalFactReferences: components["schemas"]["QueryTechnicalFactReference"][];
-            entityReferences: {
-                [key: string]: unknown;
-            }[];
-            relationReferences: {
-                [key: string]: unknown;
-            }[];
-            /** @enum {string} */
-            verificationState: "not_run" | "verified" | "partially_supported" | "conflicting" | "insufficient_evidence" | "failed";
-            verificationWarnings: components["schemas"]["QueryVerificationWarning"][];
-        } & {
-            [key: string]: unknown;
-        };
-        ReadinessResponse: {
-            [key: string]: unknown;
-        };
-        ReplaceContentDocumentRequest: {
-            [key: string]: unknown;
-        };
-        DocumentReadinessSummary: {
-            /** Format: uuid */
-            documentId: string;
-            activeRevisionId?: string | null;
-            readinessKind: string;
-            activityStatus: string;
-            stalledReason?: string | null;
-            preparationState: string;
-            graphCoverageKind: string;
-            typedFactCoverage?: number | null;
-            lastMutationId?: string | null;
-            lastJobStage?: string | null;
-            /** Format: date-time */
-            updatedAt: string;
-        } & {
-            [key: string]: unknown;
-        };
-        SessionResponse: {
-            [key: string]: unknown;
-        };
-        StructuredDocumentRevisionSummary: {
-            /** Format: uuid */
-            revisionId: string;
-            /** Format: uuid */
-            documentId: string;
-            /** Format: uuid */
-            workspaceId: string;
-            /** Format: uuid */
-            libraryId: string;
-            preparationState: string;
-            normalizationProfile: string;
-            sourceFormat: string;
-            languageCode?: string | null;
-            blockCount: number;
-            chunkCount: number;
-            typedFactCount: number;
-            outline: {
-                [key: string]: unknown;
-            }[];
-            /** Format: date-time */
-            preparedAt: string;
-        } & {
-            [key: string]: unknown;
-        };
-        StructuredSourceSpan: {
-            startOffset: number;
-            endOffset: number;
-        } & {
-            [key: string]: unknown;
-        };
-        StructuredTableCoordinates: {
-            rowIndex: number;
-            columnIndex: number;
-            rowSpan: number;
-            columnSpan: number;
-        } & {
-            [key: string]: unknown;
-        };
-        TechnicalFactQualifier: {
-            key: string;
-            value: string;
-        } & {
-            [key: string]: unknown;
-        };
-        TechnicalFactValue: {
-            [key: string]: unknown;
-        };
-        TechnicalFactsPageResponse: {
-            /** Format: uuid */
-            documentId: string;
-            revisionId?: string | null;
-            total: number;
-            offset: number;
-            limit: number;
-            items: components["schemas"]["TypedTechnicalFact"][];
-        } & {
-            [key: string]: unknown;
-        };
-        TypedTechnicalFact: {
-            /** Format: uuid */
-            factId: string;
-            /** Format: uuid */
-            revisionId: string;
-            /** Format: uuid */
-            documentId: string;
-            /** Format: uuid */
-            workspaceId: string;
-            /** Format: uuid */
-            libraryId: string;
-            factKind: string;
-            canonicalValue: components["schemas"]["TechnicalFactValue"];
-            displayValue: string;
-            qualifiers: components["schemas"]["TechnicalFactQualifier"][];
-            supportBlockIds: string[];
-            supportChunkIds: string[];
-            confidence?: number | null;
-            extractionKind: string;
-            conflictGroupId?: string | null;
-            /** Format: date-time */
-            createdAt: string;
-        } & {
-            [key: string]: unknown;
-        };
-        TokenResponse: {
-            [key: string]: unknown;
-        };
-        Unauthorized: {
-            [key: string]: unknown;
-        };
-        UpdateLibraryBindingRequest: {
-            [key: string]: unknown;
-        };
-        UploadContentDocumentRequest: {
-            [key: string]: unknown;
-        };
-        VersionResponse: {
-            [key: string]: unknown;
-        };
-    };
-    responses: {
-        /** @description Bad request */
-        BadRequest: {
-            headers: {
-                [name: string]: unknown;
-            };
-            content: {
-                "application/json": {
-                    [key: string]: unknown;
-                };
-            };
-        };
-        /** @description Unauthorized */
-        Unauthorized: {
-            headers: {
-                [name: string]: unknown;
-            };
-            content: {
-                "application/json": {
-                    [key: string]: unknown;
-                };
-            };
-        };
-        /** @description Not found */
-        NotFound: {
-            headers: {
-                [name: string]: unknown;
-            };
-            content: {
-                "application/json": {
-                    [key: string]: unknown;
-                };
-            };
-        };
-        /** @description Conflict */
-        Conflict: {
-            headers: {
-                [name: string]: unknown;
-            };
-            content: {
-                "application/json": {
-                    [key: string]: unknown;
-                };
-            };
-        };
-        /** @description Internal error */
-        InternalError: {
-            headers: {
-                [name: string]: unknown;
-            };
-            content: {
-                "application/json": {
-                    [key: string]: unknown;
-                };
-            };
-        };
-    };
+  '/v1/health': {
     parameters: {
-        workspaceId: string;
-        documentId: string;
-    };
-    requestBodies: never;
-    headers: never;
-    pathItems: never;
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Health check */
+    get: operations['getHealth']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/ready': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Readiness check */
+    get: operations['getReadiness']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/version': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Service version */
+    get: operations['getVersion']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/openapi/rustrag.openapi.yaml': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** OpenAPI contract discovery */
+    get: operations['getOpenApiContract']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/iam/bootstrap/claim': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /**
+     * Claim the first administrator for a fresh deployment
+     * @description One-time bootstrap route for destructive fresh deployments. This route is expected to
+     *     succeed exactly once, create the first `iam_principal` plus `iam_user`, and emit one
+     *     canonical `audit_event`.
+     */
+    post: operations['postBootstrapClaim']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/iam/bootstrap/status': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Resolve whether first-run admin setup is still required */
+    get: operations['getBootstrapStatus']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/iam/bootstrap/setup': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /**
+     * Configure the first administrator interactively
+     * @description One-time interactive setup route for a fresh deployment with no administrator and no
+     *     explicit bootstrap admin credentials configured through environment variables.
+     */
+    post: operations['postBootstrapSetup']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/mcp': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /**
+     * MCP JSON-RPC endpoint for canonical agent memory flows
+     * @description Bearer-token authenticated JSON-RPC transport for discovery, search, read, and document
+     *     mutation tools. Tool visibility and callable actions are derived from the authenticated
+     *     principal's typed grants.
+     */
+    post: operations['postMcpRequest']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/mcp/capabilities': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Return the derived MCP capability snapshot for the current principal */
+    get: operations['getMcpCapabilities']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/catalog/workspaces': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List visible workspaces */
+    get: operations['listCatalogWorkspaces']
+    put?: never
+    /** Create a workspace */
+    post: operations['createCatalogWorkspace']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/catalog/workspaces/{workspaceId}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Get one visible workspace */
+    get: operations['getCatalogWorkspace']
+    put?: never
+    post?: never
+    /** Delete one workspace */
+    delete: operations['deleteCatalogWorkspace']
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/catalog/workspaces/{workspaceId}/libraries': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List visible libraries in one workspace */
+    get: operations['listCatalogLibraries']
+    put?: never
+    /** Create a library in one workspace */
+    post: operations['createCatalogLibrary']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/catalog/workspaces/{workspaceId}/libraries/{libraryId}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    post?: never
+    /** Delete one library from one workspace */
+    delete: operations['deleteCatalogLibrary']
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/catalog/libraries/{libraryId}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Get one visible library */
+    get: operations['getCatalogLibrary']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/iam/session/login': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /** Authenticate a browser session with login and password */
+    post: operations['loginIamSession']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/iam/session': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Resolve the current browser session */
+    get: operations['getIamSession']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/iam/session/logout': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /** Revoke the current browser session */
+    post: operations['logoutIamSession']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/iam/me': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Resolve the current principal, memberships, and effective grants */
+    get: operations['getIamMe']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/iam/tokens': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List visible API tokens */
+    get: operations['listIamTokens']
+    put?: never
+    /** Mint a canonical API token */
+    post: operations['mintIamToken']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/iam/tokens/{tokenPrincipalId}/revoke': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /** Revoke one API token principal */
+    post: operations['revokeIamToken']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/iam/grants': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List effective grants for one principal */
+    get: operations['listIamGrants']
+    put?: never
+    /** Create a typed grant */
+    post: operations['createIamGrant']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/iam/grants/{grantId}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    post?: never
+    /** Revoke one typed grant */
+    delete: operations['revokeIamGrant']
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/ai/providers': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List seeded AI providers */
+    get: operations['listAiProviders']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/ai/models': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List seeded AI models */
+    get: operations['listAiModels']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/ai/model-presets': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List workspace model presets */
+    get: operations['listAiModelPresets']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/ai/prices': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List seeded AI prices */
+    get: operations['listAiPrices']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/ai/credentials': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List visible provider credentials for one workspace */
+    get: operations['listAiCredentials']
+    put?: never
+    /** Create a provider credential */
+    post: operations['createAiCredential']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/ai/libraries/{libraryId}/bindings': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List active model bindings for one library */
+    get: operations['listAiLibraryBindings']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/ai/library-bindings': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /** Create or replace the active binding for one library purpose */
+    post: operations['createAiLibraryBinding']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/ai/library-bindings/{bindingId}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    /** Update one existing library binding */
+    put: operations['updateAiLibraryBinding']
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/ai/library-bindings/{bindingId}/validate': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /** Trigger one library-binding validation row */
+    post: operations['validateAiLibraryBinding']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/content/documents': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List canonical logical documents for one library */
+    get: operations['listContentDocuments']
+    put?: never
+    /** Create a logical document and accepted upload mutation */
+    post: operations['createContentDocument']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/content/web-runs': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List web ingest runs for one library */
+    get: operations['listContentWebIngestRuns']
+    put?: never
+    /** Submit one canonical web ingest run */
+    post: operations['createContentWebIngestRun']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/content/web-runs/{runId}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Get one canonical web ingest run */
+    get: operations['getContentWebIngestRun']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/content/web-runs/{runId}/pages': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List page outcomes for one web ingest run */
+    get: operations['listContentWebIngestRunPages']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/content/web-runs/{runId}/cancel': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /** Request cancellation for one web ingest run */
+    post: operations['cancelContentWebIngestRun']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/content/documents/upload': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /** Upload one document revision directly into the canonical content pipeline */
+    post: operations['uploadContentDocument']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/content/documents/{documentId}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Get one canonical logical document */
+    get: operations['getContentDocument']
+    put?: never
+    post?: never
+    /** Delete one logical document through a canonical mutation */
+    delete: operations['deleteContentDocument']
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/content/documents/{documentId}/prepared-segments': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List prepared segments for the readable revision of one logical document */
+    get: operations['listContentPreparedSegments']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/content/documents/{documentId}/technical-facts': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List typed technical facts for the readable revision of one logical document */
+    get: operations['listContentTechnicalFacts']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/content/documents/{documentId}/append': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /** Append plain text to one logical document */
+    post: operations['appendContentDocument']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/content/documents/{documentId}/replace': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /** Replace the active document revision with a new uploaded file */
+    post: operations['replaceContentDocument']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/content/documents/{documentId}/revisions': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List immutable revisions for one logical document */
+    get: operations['listContentRevisions']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/content/mutations': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List canonical content mutations for one library */
+    get: operations['listContentMutations']
+    put?: never
+    /** Create a canonical content mutation */
+    post: operations['createContentMutation']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/content/mutations/{mutationId}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Get one canonical content mutation and items */
+    get: operations['getContentMutation']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/ingest/jobs': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List canonical ingest jobs for one library */
+    get: operations['listIngestJobs']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/ingest/jobs/{jobId}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Get one canonical ingest job */
+    get: operations['getIngestJob']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/ingest/attempts/{attemptId}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Get one canonical ingest attempt */
+    get: operations['getIngestAttempt']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/ingest/attempts/{attemptId}/stages': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List ordered stage events for one ingest attempt */
+    get: operations['listIngestStageEvents']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/search/documents': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Search documents, chunks, entities, and relations in one knowledge library */
+    get: operations['searchDocuments']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/knowledge/libraries/{libraryId}/documents': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List documents in one knowledge library */
+    get: operations['listKnowledgeDocuments']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/knowledge/libraries/{libraryId}/documents/{documentId}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Get document detail with revisions and latest chunks */
+    get: operations['getKnowledgeDocument']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/knowledge/libraries/{libraryId}/summary': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Get canonical knowledge summary for one library */
+    get: operations['getKnowledgeLibrarySummary']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/knowledge/libraries/{libraryId}/context-bundles': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List context bundles in one knowledge library */
+    get: operations['listKnowledgeContextBundles']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/knowledge/context-bundles/{bundleId}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Get one context bundle with traces and resolved knowledge rows */
+    get: operations['getKnowledgeContextBundle']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/knowledge/libraries/{libraryId}/entities': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List graph entities in one knowledge library */
+    get: operations['listKnowledgeEntities']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/knowledge/libraries/{libraryId}/entities/{entityId}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Get entity detail with mention and provenance data */
+    get: operations['getKnowledgeEntity']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/knowledge/libraries/{libraryId}/relations': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List graph relations in one knowledge library */
+    get: operations['listKnowledgeRelations']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/knowledge/libraries/{libraryId}/relations/{relationId}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Get relation detail with provenance data */
+    get: operations['getKnowledgeRelation']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/knowledge/libraries/{libraryId}/search/documents': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Search documents, chunks, entities, and relations in one knowledge library */
+    get: operations['searchKnowledgeDocuments']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/query/sessions': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List canonical query sessions for one library */
+    get: operations['listQuerySessions']
+    put?: never
+    /** Create one canonical query session */
+    post: operations['createQuerySession']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/query/sessions/{sessionId}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Get canonical query session detail */
+    get: operations['getQuerySession']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/query/sessions/{sessionId}/turns': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /** Submit a user turn and execute one grounded answer in a query session */
+    post: operations['createQuerySessionTurn']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/query/executions/{executionId}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Get canonical grounded execution detail */
+    get: operations['getQueryExecution']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/runtime/executions/{executionId}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Get canonical runtime execution summary */
+    get: operations['getRuntimeExecution']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/runtime/executions/{executionId}/trace': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Get canonical runtime execution trace */
+    get: operations['getRuntimeExecutionTrace']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/billing/provider-calls': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List canonical provider calls for one library */
+    get: operations['listBillingProviderCalls']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/billing/charges': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List canonical priced charges for one library */
+    get: operations['listBillingCharges']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/billing/executions/{executionKind}/{executionId}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Get canonical execution cost rollup */
+    get: operations['getBillingExecutionCost']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/ops/operations/{operationId}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Get one canonical async operation */
+    get: operations['getAsyncOperation']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/ops/libraries/{libraryId}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Get derived operational state for one library */
+    get: operations['getLibraryState']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/audit/events': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List canonical audit events */
+    get: operations['listAuditEvents']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/v1/chunks': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * List chunks by document
+     * @description Requires `documents:read`, `workspace:admin`, or an `instance_admin` token.
+     */
+    get: operations['listChunks']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
 }
-export type $defs = Record<string, never>;
+export type webhooks = Record<string, never>
+export interface components {
+  schemas: {
+    ApiErrorBody: {
+      [key: string]: unknown
+    }
+    AppendContentDocumentRequest: {
+      [key: string]: unknown
+    }
+    AuditEventResponse: {
+      [key: string]: unknown
+    }
+    BillingCharge: {
+      [key: string]: unknown
+    }
+    BillingExecutionCost: {
+      [key: string]: unknown
+    }
+    BillingProviderCall: {
+      [key: string]: unknown
+    }
+    BindingValidationResponse: {
+      [key: string]: unknown
+    }
+    /** @enum {string} */
+    BootstrapBindingPurpose: 'extract_graph' | 'embed_chunk' | 'query_answer' | 'vision'
+    /** @enum {string} */
+    BootstrapCredentialSource: 'missing' | 'env'
+    BootstrapClaimRequest: {
+      [key: string]: unknown
+    }
+    BootstrapClaimResponse: {
+      [key: string]: unknown
+    }
+    BootstrapProviderCatalogEntryResponse: {
+      /** Format: uuid */
+      id: string
+      providerKind: string
+      displayName: string
+      apiStyle: string
+      lifecycleState: string
+      credentialSource: components['schemas']['BootstrapCredentialSource']
+    }
+    BootstrapModelCatalogEntryResponse: {
+      /** Format: uuid */
+      id: string
+      /** Format: uuid */
+      providerCatalogId: string
+      modelName: string
+      capabilityKind: string
+      modalityKind: string
+      allowedBindingPurposes: components['schemas']['BootstrapBindingPurpose'][]
+      contextWindow?: number | null
+      maxOutputTokens?: number | null
+    }
+    BootstrapBindingSelectionResponse: {
+      bindingPurpose: components['schemas']['BootstrapBindingPurpose']
+      providerKind?: string | null
+      modelCatalogId?: string | null
+      configured: boolean
+    }
+    BootstrapAiSetupResponse: {
+      providers: components['schemas']['BootstrapProviderCatalogEntryResponse'][]
+      models: components['schemas']['BootstrapModelCatalogEntryResponse'][]
+      bindingSelections: components['schemas']['BootstrapBindingSelectionResponse'][]
+    }
+    BootstrapCredentialInputRequest: {
+      providerKind: string
+      apiKey?: string | null
+    }
+    BootstrapBindingSelectionRequest: {
+      bindingPurpose: components['schemas']['BootstrapBindingPurpose']
+      providerKind: string
+      /** Format: uuid */
+      modelCatalogId: string
+    }
+    BootstrapSetupAiRequest: {
+      credentials: components['schemas']['BootstrapCredentialInputRequest'][]
+      bindingSelections: components['schemas']['BootstrapBindingSelectionRequest'][]
+    }
+    BootstrapSetupRequest: {
+      login: string
+      displayName?: string | null
+      password: string
+      aiSetup?: components['schemas']['BootstrapSetupAiRequest'] | null
+    }
+    BootstrapStatusResponse: {
+      setupRequired: boolean
+      aiSetup?: components['schemas']['BootstrapAiSetupResponse'] | null
+    }
+    CatalogLibraryResponse: {
+      [key: string]: unknown
+    }
+    CatalogWorkspaceResponse: {
+      [key: string]: unknown
+    }
+    ChunkSummary: {
+      [key: string]: unknown
+    }
+    ContentDocumentDetailResponse: {
+      document: {
+        [key: string]: unknown
+      }
+      fileName: string
+      head?: {
+        [key: string]: unknown
+      } | null
+      activeRevision?: {
+        [key: string]: unknown
+      } | null
+      readiness?: {
+        [key: string]: unknown
+      } | null
+      readinessSummary?: components['schemas']['DocumentReadinessSummary'] | null
+      preparedRevision?: components['schemas']['StructuredDocumentRevisionSummary'] | null
+      preparedSegmentCount?: number | null
+      technicalFactCount?: number | null
+      webPageProvenance?: components['schemas']['WebPageProvenance'] | null
+      pipeline: {
+        [key: string]: unknown
+      }
+    } & {
+      [key: string]: unknown
+    }
+    ContentMutationDetailResponse: {
+      [key: string]: unknown
+    }
+    ContentRevision: {
+      [key: string]: unknown
+    }
+    CreateCatalogLibraryRequest: {
+      [key: string]: unknown
+    }
+    CreateCatalogWorkspaceRequest: {
+      [key: string]: unknown
+    }
+    CreateContentDocumentRequest: {
+      [key: string]: unknown
+    }
+    CreateContentDocumentResponse: {
+      [key: string]: unknown
+    }
+    CreateContentMutationRequest: {
+      [key: string]: unknown
+    }
+    CreateGrantRequest: {
+      [key: string]: unknown
+    }
+    CreateLibraryBindingRequest: {
+      [key: string]: unknown
+    }
+    CreateProviderCredentialRequest: {
+      [key: string]: unknown
+    }
+    CreateQueryConversationRequest: {
+      [key: string]: unknown
+    }
+    CreateQueryTurnRequest: {
+      [key: string]: unknown
+    }
+    GrantResponse: {
+      [key: string]: unknown
+    }
+    HealthResponse: {
+      [key: string]: unknown
+    }
+    IngestAttempt: {
+      [key: string]: unknown
+    }
+    IngestJob: {
+      [key: string]: unknown
+    }
+    IngestStageEvent: {
+      [key: string]: unknown
+    }
+    InternalError: {
+      [key: string]: unknown
+    }
+    KnowledgeBundleChunkEdgeRow: {
+      [key: string]: unknown
+    }
+    KnowledgeBundleEntityEdgeRow: {
+      [key: string]: unknown
+    }
+    KnowledgeBundleEvidenceEdgeRow: {
+      [key: string]: unknown
+    }
+    KnowledgeBundleRelationEdgeRow: {
+      [key: string]: unknown
+    }
+    KnowledgeChunkRow: {
+      [key: string]: unknown
+    }
+    KnowledgeChunkSearchRow: {
+      [key: string]: unknown
+    }
+    KnowledgeChunkVectorSearchRow: {
+      [key: string]: unknown
+    }
+    KnowledgeContextBundleRow: {
+      [key: string]: unknown
+    }
+    KnowledgeDocumentRow: {
+      [key: string]: unknown
+    }
+    KnowledgeEntityRow: {
+      [key: string]: unknown
+    }
+    KnowledgeEntitySearchRow: {
+      [key: string]: unknown
+    }
+    KnowledgeEntityVectorSearchRow: {
+      [key: string]: unknown
+    }
+    KnowledgeEvidenceRow: {
+      [key: string]: unknown
+    }
+    KnowledgeLibraryGeneration: {
+      [key: string]: unknown
+    }
+    KnowledgeRelationRow: {
+      [key: string]: unknown
+    }
+    KnowledgeRelationSearchRow: {
+      [key: string]: unknown
+    }
+    KnowledgeRetrievalTraceRow: {
+      [key: string]: unknown
+    }
+    KnowledgeRevisionRow: {
+      [key: string]: unknown
+    }
+    LibraryKnowledgeSummaryResponse: {
+      /** Format: uuid */
+      libraryId: string
+      documentCountsByReadiness: {
+        [key: string]: number
+      }
+      graphReadyDocumentCount: number
+      graphSparseDocumentCount: number
+      typedFactDocumentCount: number
+      latestGeneration?: components['schemas']['KnowledgeLibraryGeneration'] | null
+      /** Format: date-time */
+      updatedAt: string
+    } & {
+      [key: string]: unknown
+    }
+    LibraryModelBindingResponse: {
+      [key: string]: unknown
+    }
+    LoginSessionRequest: {
+      [key: string]: unknown
+    }
+    McpCapabilitySnapshot: {
+      [key: string]: unknown
+    }
+    McpJsonRpcRequest: {
+      [key: string]: unknown
+    }
+    McpJsonRpcResponse: {
+      [key: string]: unknown
+    }
+    MeResponse: {
+      [key: string]: unknown
+    }
+    MintTokenRequest: {
+      [key: string]: unknown
+    }
+    MintTokenResponse: {
+      [key: string]: unknown
+    }
+    ModelCatalogEntryResponse: {
+      [key: string]: unknown
+    }
+    ModelPresetResponse: {
+      [key: string]: unknown
+    }
+    NotFound: {
+      [key: string]: unknown
+    }
+    OpsAsyncOperation: {
+      [key: string]: unknown
+    }
+    OpsLibraryState: {
+      [key: string]: unknown
+    }
+    OpsLibraryStateResponse: {
+      [key: string]: unknown
+    }
+    OpsLibraryWarning: {
+      [key: string]: unknown
+    }
+    PriceCatalogEntryResponse: {
+      [key: string]: unknown
+    }
+    PreparedSegmentDetail: {
+      segment: components['schemas']['PreparedSegmentListItem']
+      text: string
+      normalizedText: string
+      sourceSpan?: components['schemas']['StructuredSourceSpan'] | null
+      parentBlockId?: string | null
+      tableCoordinates?: components['schemas']['StructuredTableCoordinates'] | null
+      codeLanguage?: string | null
+      supportChunkIds: string[]
+    } & {
+      [key: string]: unknown
+    }
+    CreateWebIngestRunRequest: {
+      /** Format: uuid */
+      libraryId: string
+      /** Format: uri */
+      seedUrl: string
+      /** @enum {string} */
+      mode: 'single_page' | 'recursive_crawl'
+      boundaryPolicy?: ('same_host' | 'allow_external') | null
+      maxDepth?: number | null
+      maxPages?: number | null
+      idempotencyKey?: string | null
+    }
+    WebIngestRunReceipt: {
+      /** Format: uuid */
+      runId: string
+      /** Format: uuid */
+      libraryId: string
+      /** @enum {string} */
+      mode: 'single_page' | 'recursive_crawl'
+      /** @enum {string} */
+      runState:
+        | 'accepted'
+        | 'discovering'
+        | 'processing'
+        | 'completed'
+        | 'completed_partial'
+        | 'failed'
+        | 'canceled'
+      asyncOperationId?: string | null
+      counts: components['schemas']['WebRunCounts']
+      failureCode?: components['schemas']['WebRunFailureCode'] | null
+      cancelRequestedAt?: string | null
+    }
+    WebRunCounts: {
+      discovered: number
+      eligible: number
+      processed: number
+      queued: number
+      processing: number
+      duplicates: number
+      excluded: number
+      blocked: number
+      failed: number
+      canceled: number
+    }
+    WebIngestRunSummary: {
+      /** Format: uuid */
+      runId: string
+      /** Format: uuid */
+      libraryId: string
+      /** @enum {string} */
+      mode: 'single_page' | 'recursive_crawl'
+      /** @enum {string} */
+      boundaryPolicy: 'same_host' | 'allow_external'
+      maxDepth: number
+      maxPages: number
+      /** @enum {string} */
+      runState:
+        | 'accepted'
+        | 'discovering'
+        | 'processing'
+        | 'completed'
+        | 'completed_partial'
+        | 'failed'
+        | 'canceled'
+      /** Format: uri */
+      seedUrl: string
+      counts: components['schemas']['WebRunCounts']
+      lastActivityAt?: string | null
+    }
+    WebIngestRun: {
+      /** Format: uuid */
+      runId: string
+      /** Format: uuid */
+      mutationId: string
+      asyncOperationId?: string | null
+      /** Format: uuid */
+      workspaceId: string
+      /** Format: uuid */
+      libraryId: string
+      /** @enum {string} */
+      mode: 'single_page' | 'recursive_crawl'
+      /** Format: uri */
+      seedUrl: string
+      /** Format: uri */
+      normalizedSeedUrl: string
+      /** @enum {string} */
+      boundaryPolicy: 'same_host' | 'allow_external'
+      maxDepth: number
+      maxPages: number
+      /** @enum {string} */
+      runState:
+        | 'accepted'
+        | 'discovering'
+        | 'processing'
+        | 'completed'
+        | 'completed_partial'
+        | 'failed'
+        | 'canceled'
+      requestedByPrincipalId?: string | null
+      /** Format: date-time */
+      requestedAt: string
+      completedAt?: string | null
+      failureCode?: components['schemas']['WebRunFailureCode'] | null
+      cancelRequestedAt?: string | null
+      counts: components['schemas']['WebRunCounts']
+      lastActivityAt?: string | null
+    }
+    WebDiscoveredPage: {
+      /** Format: uuid */
+      candidateId: string
+      /** Format: uuid */
+      runId: string
+      discoveredUrl?: string | null
+      /** Format: uri */
+      normalizedUrl: string
+      finalUrl?: string | null
+      canonicalUrl?: string | null
+      depth: number
+      referrerCandidateId?: string | null
+      /** @enum {string} */
+      hostClassification: 'same_host' | 'external'
+      /** @enum {string} */
+      candidateState:
+        | 'discovered'
+        | 'eligible'
+        | 'duplicate'
+        | 'excluded'
+        | 'blocked'
+        | 'queued'
+        | 'processing'
+        | 'processed'
+        | 'failed'
+        | 'canceled'
+      classificationReason?: components['schemas']['WebClassificationReason'] | null
+      contentType?: string | null
+      httpStatus?: number | null
+      /** Format: date-time */
+      discoveredAt: string
+      /** Format: date-time */
+      updatedAt: string
+      documentId?: string | null
+      resultRevisionId?: string | null
+      mutationItemId?: string | null
+    }
+    WebPageProvenance: {
+      runId?: string | null
+      candidateId?: string | null
+      sourceUri?: string | null
+      canonicalUrl?: string | null
+    }
+    /** @enum {string} */
+    WebClassificationReason:
+      | 'seed_accepted'
+      | 'duplicate_canonical_url'
+      | 'outside_boundary_policy'
+      | 'exceeded_max_depth'
+      | 'exceeded_max_pages'
+      | 'system_page'
+      | 'unsupported_scheme'
+      | 'invalid_url'
+      | 'inaccessible'
+      | 'unsupported_content'
+      | 'cancel_requested'
+    /** @enum {string} */
+    WebRunFailureCode:
+      | 'inaccessible'
+      | 'invalid_url'
+      | 'unsupported_content'
+      | 'web_discovery_failed'
+      | 'web_snapshot_persist_failed'
+      | 'web_snapshot_missing'
+      | 'web_snapshot_missing_final_url'
+      | 'web_snapshot_unavailable'
+      | 'web_capture_materialization_failed'
+      | 'recursive_crawl_failed'
+    PreparedSegmentListItem: {
+      /** Format: uuid */
+      segmentId: string
+      /** Format: uuid */
+      revisionId: string
+      ordinal: number
+      blockKind: string
+      headingTrail: string[]
+      sectionPath: string[]
+      pageNumber?: number | null
+      excerpt: string
+    } & {
+      [key: string]: unknown
+    }
+    PreparedSegmentsPageResponse: {
+      /** Format: uuid */
+      documentId: string
+      revisionId?: string | null
+      total: number
+      offset: number
+      limit: number
+      items: components['schemas']['PreparedSegmentDetail'][]
+    } & {
+      [key: string]: unknown
+    }
+    ProviderCatalogEntryResponse: {
+      [key: string]: unknown
+    }
+    ProviderCredentialResponse: {
+      [key: string]: unknown
+    }
+    /** @enum {string} */
+    RuntimeLifecycleState:
+      | 'accepted'
+      | 'running'
+      | 'completed'
+      | 'recovered'
+      | 'failed'
+      | 'canceled'
+    /** @enum {string} */
+    RuntimeStageState:
+      | 'pending'
+      | 'running'
+      | 'completed'
+      | 'recovered'
+      | 'failed'
+      | 'skipped'
+      | 'canceled'
+    /** @enum {string} */
+    RuntimeActionKind:
+      | 'model_request'
+      | 'model_response'
+      | 'tool_request'
+      | 'tool_result'
+      | 'recovery_attempt'
+      | 'stage_annotation'
+    /** @enum {string} */
+    RuntimeActionState: 'started' | 'completed' | 'rejected' | 'terminated' | 'failed'
+    /** @enum {string} */
+    RuntimeDecisionTargetKind:
+      | 'model_request'
+      | 'tool_request'
+      | 'tool_result'
+      | 'stage_transition'
+      | 'final_response'
+    /** @enum {string} */
+    RuntimeDecisionKind: 'allow' | 'reject' | 'terminate'
+    RuntimePolicyDecisionSummary: {
+      targetKind: components['schemas']['RuntimeDecisionTargetKind']
+      decisionKind: components['schemas']['RuntimeDecisionKind']
+      reasonCode: string
+      reasonSummaryRedacted: string
+    }
+    RuntimePolicySummary: {
+      allowCount: number
+      rejectCount: number
+      terminateCount: number
+      recentDecisions: components['schemas']['RuntimePolicyDecisionSummary'][]
+    }
+    RuntimeExecutionSummary: {
+      /** Format: uuid */
+      runtimeExecutionId: string
+      lifecycleState: components['schemas']['RuntimeLifecycleState']
+      activeStage?: string | null
+      turnBudget: number
+      turnCount: number
+      parallelActionLimit: number
+      failureCode?: string | null
+      failureSummaryRedacted?: string | null
+      policySummary: components['schemas']['RuntimePolicySummary']
+      /** Format: date-time */
+      acceptedAt: string
+      completedAt?: string | null
+    }
+    RuntimeExecutionResponse: {
+      /** Format: uuid */
+      executionId: string
+      /** @enum {string} */
+      ownerKind:
+        | 'query_execution'
+        | 'graph_extraction_attempt'
+        | 'structured_preparation'
+        | 'technical_fact_extraction'
+      /** Format: uuid */
+      ownerId: string
+      taskKind: string
+      /** @enum {string} */
+      surfaceKind: 'rest' | 'stream' | 'background' | 'mcp' | 'system'
+      contractName: string
+      contractVersion: string
+      lifecycleState: components['schemas']['RuntimeLifecycleState']
+      activeStage?: string | null
+      turnBudget: number
+      turnCount: number
+      parallelActionLimit: number
+      failureCode?: string | null
+      failureSummary?: string | null
+      policySummary: components['schemas']['RuntimePolicySummary']
+      /** Format: date-time */
+      acceptedAt: string
+      completedAt?: string | null
+    }
+    RuntimeStageRecordResponse: {
+      /** Format: uuid */
+      stageRecordId: string
+      stageKind: string
+      stageOrdinal: number
+      attemptNo: number
+      stageState: components['schemas']['RuntimeStageState']
+      deterministic: boolean
+      /** Format: date-time */
+      startedAt: string
+      completedAt?: string | null
+      failureCode?: string | null
+      inputSummary: {
+        [key: string]: unknown
+      }
+      outputSummary: {
+        [key: string]: unknown
+      }
+    }
+    RuntimeActionRecordResponse: {
+      /** Format: uuid */
+      actionId: string
+      /** Format: uuid */
+      stageRecordId: string
+      actionKind: components['schemas']['RuntimeActionKind']
+      actionOrdinal: number
+      actionState: components['schemas']['RuntimeActionState']
+      providerBindingId?: string | null
+      toolName?: string | null
+      usage?: {
+        [key: string]: unknown
+      } | null
+      summary: {
+        [key: string]: unknown
+      }
+      /** Format: date-time */
+      createdAt: string
+    }
+    RuntimePolicyDecisionResponse: {
+      /** Format: uuid */
+      decisionId: string
+      stageRecordId?: string | null
+      actionRecordId?: string | null
+      targetKind: components['schemas']['RuntimeDecisionTargetKind']
+      decisionKind: components['schemas']['RuntimeDecisionKind']
+      reasonCode: string
+      reasonSummary: string
+      /** Format: date-time */
+      createdAt: string
+    }
+    RuntimeExecutionTraceResponse: {
+      execution: components['schemas']['RuntimeExecutionResponse']
+      stages: components['schemas']['RuntimeStageRecordResponse'][]
+      actions: components['schemas']['RuntimeActionRecordResponse'][]
+      policyDecisions: components['schemas']['RuntimePolicyDecisionResponse'][]
+    }
+    QueryConversation: {
+      /** Format: uuid */
+      id: string
+      /** Format: uuid */
+      workspaceId: string
+      /** Format: uuid */
+      libraryId: string
+      createdByPrincipalId?: string | null
+      title?: string | null
+      /** @enum {string} */
+      conversationState: 'active' | 'archived'
+      /** Format: date-time */
+      createdAt: string
+      /** Format: date-time */
+      updatedAt: string
+    }
+    QueryTurn: {
+      /** Format: uuid */
+      id: string
+      /** Format: uuid */
+      conversationId: string
+      turnIndex: number
+      /** @enum {string} */
+      turnKind: 'user' | 'assistant' | 'system' | 'tool'
+      authorPrincipalId?: string | null
+      contentText: string
+      executionId?: string | null
+      /** Format: date-time */
+      createdAt: string
+    }
+    QueryExecutionResponse: {
+      /** Format: uuid */
+      id: string
+      /** Format: uuid */
+      workspaceId: string
+      /** Format: uuid */
+      libraryId: string
+      /** Format: uuid */
+      conversationId: string
+      /** Format: uuid */
+      contextBundleId: string
+      requestTurnId?: string | null
+      responseTurnId?: string | null
+      bindingId?: string | null
+      runtimeExecutionId?: string | null
+      lifecycleState: components['schemas']['RuntimeLifecycleState']
+      activeStage?: string | null
+      queryText: string
+      failureCode?: string | null
+      /** Format: date-time */
+      startedAt: string
+      completedAt?: string | null
+    }
+    QueryRuntimeStageSummary: {
+      stageKind: string
+      stageLabel: string
+    }
+    QueryConversationDetailResponse: {
+      [key: string]: unknown
+    }
+    QueryExecutionDetailResponse: {
+      /** Format: uuid */
+      contextBundleId: string
+      execution: components['schemas']['QueryExecutionResponse']
+      runtimeSummary: components['schemas']['RuntimeExecutionSummary']
+      runtimeStageSummaries: components['schemas']['QueryRuntimeStageSummary'][]
+      requestTurn?: components['schemas']['QueryTurn'] | null
+      responseTurn?: components['schemas']['QueryTurn'] | null
+      chunkReferences: {
+        [key: string]: unknown
+      }[]
+      preparedSegmentReferences: components['schemas']['QueryPreparedSegmentReference'][]
+      technicalFactReferences: components['schemas']['QueryTechnicalFactReference'][]
+      entityReferences: {
+        [key: string]: unknown
+      }[]
+      relationReferences: {
+        [key: string]: unknown
+      }[]
+      /** @enum {string} */
+      verificationState:
+        | 'not_run'
+        | 'verified'
+        | 'partially_supported'
+        | 'conflicting'
+        | 'insufficient_evidence'
+        | 'failed'
+      verificationWarnings: components['schemas']['QueryVerificationWarning'][]
+    } & {
+      [key: string]: unknown
+    }
+    QueryPreparedSegmentReference: {
+      /** Format: uuid */
+      executionId: string
+      /** Format: uuid */
+      segmentId: string
+      /** Format: uuid */
+      revisionId: string
+      blockKind: string
+      rank: number
+      score: number
+      headingTrail: string[]
+      sectionPath: string[]
+    } & {
+      [key: string]: unknown
+    }
+    QueryTechnicalFactReference: {
+      /** Format: uuid */
+      executionId: string
+      /** Format: uuid */
+      factId: string
+      /** Format: uuid */
+      revisionId: string
+      factKind: string
+      canonicalValue: string
+      displayValue: string
+      rank: number
+      score: number
+    } & {
+      [key: string]: unknown
+    }
+    QueryVerificationWarning: {
+      code: string
+      message: string
+      relatedSegmentId?: string | null
+      relatedFactId?: string | null
+    } & {
+      [key: string]: unknown
+    }
+    QueryTurnExecutionResponse: {
+      /** Format: uuid */
+      contextBundleId: string
+      session: components['schemas']['QueryConversation']
+      requestTurn: components['schemas']['QueryTurn']
+      responseTurn?: components['schemas']['QueryTurn'] | null
+      execution: components['schemas']['QueryExecutionResponse']
+      runtimeSummary: components['schemas']['RuntimeExecutionSummary']
+      runtimeStageSummaries: components['schemas']['QueryRuntimeStageSummary'][]
+      chunkReferences: {
+        [key: string]: unknown
+      }[]
+      preparedSegmentReferences: components['schemas']['QueryPreparedSegmentReference'][]
+      technicalFactReferences: components['schemas']['QueryTechnicalFactReference'][]
+      entityReferences: {
+        [key: string]: unknown
+      }[]
+      relationReferences: {
+        [key: string]: unknown
+      }[]
+      /** @enum {string} */
+      verificationState:
+        | 'not_run'
+        | 'verified'
+        | 'partially_supported'
+        | 'conflicting'
+        | 'insufficient_evidence'
+        | 'failed'
+      verificationWarnings: components['schemas']['QueryVerificationWarning'][]
+    } & {
+      [key: string]: unknown
+    }
+    ReadinessResponse: {
+      [key: string]: unknown
+    }
+    ReplaceContentDocumentRequest: {
+      [key: string]: unknown
+    }
+    DocumentReadinessSummary: {
+      /** Format: uuid */
+      documentId: string
+      activeRevisionId?: string | null
+      readinessKind: string
+      activityStatus: string
+      stalledReason?: string | null
+      preparationState: string
+      graphCoverageKind: string
+      typedFactCoverage?: number | null
+      lastMutationId?: string | null
+      lastJobStage?: string | null
+      /** Format: date-time */
+      updatedAt: string
+    } & {
+      [key: string]: unknown
+    }
+    SessionResponse: {
+      [key: string]: unknown
+    }
+    StructuredDocumentRevisionSummary: {
+      /** Format: uuid */
+      revisionId: string
+      /** Format: uuid */
+      documentId: string
+      /** Format: uuid */
+      workspaceId: string
+      /** Format: uuid */
+      libraryId: string
+      preparationState: string
+      normalizationProfile: string
+      sourceFormat: string
+      languageCode?: string | null
+      blockCount: number
+      chunkCount: number
+      typedFactCount: number
+      outline: {
+        [key: string]: unknown
+      }[]
+      /** Format: date-time */
+      preparedAt: string
+    } & {
+      [key: string]: unknown
+    }
+    StructuredSourceSpan: {
+      startOffset: number
+      endOffset: number
+    } & {
+      [key: string]: unknown
+    }
+    StructuredTableCoordinates: {
+      rowIndex: number
+      columnIndex: number
+      rowSpan: number
+      columnSpan: number
+    } & {
+      [key: string]: unknown
+    }
+    TechnicalFactQualifier: {
+      key: string
+      value: string
+    } & {
+      [key: string]: unknown
+    }
+    TechnicalFactValue: {
+      [key: string]: unknown
+    }
+    TechnicalFactsPageResponse: {
+      /** Format: uuid */
+      documentId: string
+      revisionId?: string | null
+      total: number
+      offset: number
+      limit: number
+      items: components['schemas']['TypedTechnicalFact'][]
+    } & {
+      [key: string]: unknown
+    }
+    TypedTechnicalFact: {
+      /** Format: uuid */
+      factId: string
+      /** Format: uuid */
+      revisionId: string
+      /** Format: uuid */
+      documentId: string
+      /** Format: uuid */
+      workspaceId: string
+      /** Format: uuid */
+      libraryId: string
+      factKind: string
+      canonicalValue: components['schemas']['TechnicalFactValue']
+      displayValue: string
+      qualifiers: components['schemas']['TechnicalFactQualifier'][]
+      supportBlockIds: string[]
+      supportChunkIds: string[]
+      confidence?: number | null
+      extractionKind: string
+      conflictGroupId?: string | null
+      /** Format: date-time */
+      createdAt: string
+    } & {
+      [key: string]: unknown
+    }
+    TokenResponse: {
+      [key: string]: unknown
+    }
+    Unauthorized: {
+      [key: string]: unknown
+    }
+    UpdateLibraryBindingRequest: {
+      [key: string]: unknown
+    }
+    UploadContentDocumentRequest: {
+      [key: string]: unknown
+    }
+    VersionResponse: {
+      [key: string]: unknown
+    }
+  }
+  responses: {
+    /** @description Bad request */
+    BadRequest: {
+      headers: {
+        [name: string]: unknown
+      }
+      content: {
+        'application/json': {
+          [key: string]: unknown
+        }
+      }
+    }
+    /** @description Unauthorized */
+    Unauthorized: {
+      headers: {
+        [name: string]: unknown
+      }
+      content: {
+        'application/json': {
+          [key: string]: unknown
+        }
+      }
+    }
+    /** @description Not found */
+    NotFound: {
+      headers: {
+        [name: string]: unknown
+      }
+      content: {
+        'application/json': {
+          [key: string]: unknown
+        }
+      }
+    }
+    /** @description Conflict */
+    Conflict: {
+      headers: {
+        [name: string]: unknown
+      }
+      content: {
+        'application/json': {
+          [key: string]: unknown
+        }
+      }
+    }
+    /** @description Internal error */
+    InternalError: {
+      headers: {
+        [name: string]: unknown
+      }
+      content: {
+        'application/json': {
+          [key: string]: unknown
+        }
+      }
+    }
+  }
+  parameters: {
+    workspaceId: string
+    documentId: string
+  }
+  requestBodies: never
+  headers: never
+  pathItems: never
+}
+export type $defs = Record<string, never>
 export interface operations {
-    getHealth: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Service health */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HealthResponse"];
-                };
-            };
-        };
-    };
-    getReadiness: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Readiness probe result */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ReadinessResponse"];
-                };
-            };
-        };
-    };
-    getVersion: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Service version metadata */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["VersionResponse"];
-                };
-            };
-        };
-    };
-    getOpenApiContract: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Rendered OpenAPI contract for the current public entrypoint */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/yaml": string;
-                };
-            };
-        };
-    };
-    postBootstrapClaim: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["BootstrapClaimRequest"];
-            };
-        };
-        responses: {
-            /** @description Bootstrap claim succeeded */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["BootstrapClaimResponse"];
-                };
-            };
-            /** @description Invalid bootstrap payload */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Invalid bootstrap secret */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Bootstrap claim disabled */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Bootstrap was already claimed */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    getBootstrapStatus: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Bootstrap setup status */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["BootstrapStatusResponse"];
-                };
-            };
-        };
-    };
-    postBootstrapSetup: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["BootstrapSetupRequest"];
-            };
-        };
-        responses: {
-            /** @description Bootstrap setup succeeded and created a browser session */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SessionResponse"];
-                };
-            };
-            /** @description Invalid bootstrap payload */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Interactive bootstrap setup is disabled by configured environment credentials */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Bootstrap was already completed */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    postMcpRequest: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["McpJsonRpcRequest"];
-            };
-        };
-        responses: {
-            /** @description JSON-RPC response envelope */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["McpJsonRpcResponse"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    getMcpCapabilities: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Derived capability snapshot */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["McpCapabilitySnapshot"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    listCatalogWorkspaces: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Visible workspaces for the authenticated principal */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CatalogWorkspaceResponse"][];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    createCatalogWorkspace: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateCatalogWorkspaceRequest"];
-            };
-        };
-        responses: {
-            /** @description Created workspace */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CatalogWorkspaceResponse"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Workspace slug conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    getCatalogWorkspace: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                workspaceId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Workspace details */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CatalogWorkspaceResponse"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Workspace not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    deleteCatalogWorkspace: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                workspaceId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Workspace deleted */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Workspace not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    listCatalogLibraries: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                workspaceId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Libraries visible in the workspace */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CatalogLibraryResponse"][];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    createCatalogLibrary: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                workspaceId: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateCatalogLibraryRequest"];
-            };
-        };
-        responses: {
-            /** @description Created library */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CatalogLibraryResponse"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Workspace not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Library slug conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    deleteCatalogLibrary: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                workspaceId: string;
-                libraryId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Library deleted */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Library not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    getCatalogLibrary: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                libraryId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Library details */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CatalogLibraryResponse"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Library not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    loginIamSession: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["LoginSessionRequest"];
-            };
-        };
-        responses: {
-            /** @description Authenticated session */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SessionResponse"];
-                };
-            };
-            /** @description Invalid payload */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Invalid credentials */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    getIamSession: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Current browser session */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SessionResponse"];
-                };
-            };
-            /** @description Missing or invalid browser session */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    logoutIamSession: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Session revoked */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Missing or invalid browser session */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    getIamMe: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Canonical principal view */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MeResponse"];
-                };
-            };
-            /** @description Missing or invalid bearer token */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    listIamTokens: {
-        parameters: {
-            query?: {
-                workspaceId?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description API tokens */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TokenResponse"][];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    mintIamToken: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["MintTokenRequest"];
-            };
-        };
-        responses: {
-            /** @description Minted token and persisted API token record */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MintTokenResponse"];
-                };
-            };
-            /** @description Invalid token payload */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    revokeIamToken: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                tokenPrincipalId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Token revoked */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Token not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    listIamGrants: {
-        parameters: {
-            query?: {
-                principalId?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Effective grants for the requested principal */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["GrantResponse"][];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    createIamGrant: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateGrantRequest"];
-            };
-        };
-        responses: {
-            /** @description Grant created */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["GrantResponse"];
-                };
-            };
-            /** @description Invalid grant payload */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    revokeIamGrant: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                grantId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Grant revoked */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Grant not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    listAiProviders: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description AI provider catalog entries */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ProviderCatalogEntryResponse"][];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    listAiModels: {
-        parameters: {
-            query?: {
-                providerCatalogId?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description AI model catalog entries */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ModelCatalogEntryResponse"][];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    listAiModelPresets: {
-        parameters: {
-            query?: {
-                workspaceId?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Workspace model presets */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ModelPresetResponse"][];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    listAiPrices: {
-        parameters: {
-            query?: {
-                modelCatalogId?: string;
-                workspaceId?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description AI price catalog entries */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PriceCatalogEntryResponse"][];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    listAiCredentials: {
-        parameters: {
-            query?: {
-                workspaceId?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Provider credentials */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ProviderCredentialResponse"][];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    createAiCredential: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateProviderCredentialRequest"];
-            };
-        };
-        responses: {
-            /** @description Provider credential created */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ProviderCredentialResponse"];
-                };
-            };
-            /** @description Invalid provider credential payload */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    listAiLibraryBindings: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                libraryId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Active library model bindings */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["LibraryModelBindingResponse"][];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    createAiLibraryBinding: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateLibraryBindingRequest"];
-            };
-        };
-        responses: {
-            /** @description Library model binding created */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["LibraryModelBindingResponse"];
-                };
-            };
-            /** @description Invalid library binding payload */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    updateAiLibraryBinding: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                bindingId: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["UpdateLibraryBindingRequest"];
-            };
-        };
-        responses: {
-            /** @description Library model binding updated */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["LibraryModelBindingResponse"];
-                };
-            };
-            /** @description Invalid library binding payload */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Binding not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    validateAiLibraryBinding: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                bindingId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Binding validation request accepted */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["BindingValidationResponse"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Binding not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    listContentDocuments: {
-        parameters: {
-            query: {
-                libraryId: string;
-                includeDeleted?: boolean;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Logical documents in the requested library */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ContentDocumentDetailResponse"][];
-                };
-            };
-            /** @description Invalid document listing request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    createContentDocument: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateContentDocumentRequest"];
-            };
-        };
-        responses: {
-            /** @description Created logical document and accepted mutation */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CreateContentDocumentResponse"];
-                };
-            };
-            /** @description Invalid document creation request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    listContentWebIngestRuns: {
-        parameters: {
-            query: {
-                libraryId: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Web ingest runs in the requested library */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WebIngestRunSummary"][];
-                };
-            };
-            /** @description Invalid web ingest list request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    createContentWebIngestRun: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateWebIngestRunRequest"];
-            };
-        };
-        responses: {
-            /** @description Web ingest run accepted */
-            202: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WebIngestRunReceipt"];
-                };
-            };
-            /** @description Invalid web ingest submission */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Library not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    getContentWebIngestRun: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                runId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Web ingest run detail */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WebIngestRun"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Run not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    listContentWebIngestRunPages: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                runId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Discovered pages and outcomes for the requested run */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WebDiscoveredPage"][];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Run not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    cancelContentWebIngestRun: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                runId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Web ingest cancellation accepted */
-            202: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WebIngestRunReceipt"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Run not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    uploadContentDocument: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "multipart/form-data": components["schemas"]["UploadContentDocumentRequest"];
-            };
-        };
-        responses: {
-            /** @description Created logical document and accepted upload mutation */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CreateContentDocumentResponse"];
-                };
-            };
-            /** @description Invalid upload request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Library not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    getContentDocument: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                documentId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Canonical logical document detail */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ContentDocumentDetailResponse"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Document not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    deleteContentDocument: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                documentId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Accepted and applied document deletion mutation */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ContentMutationDetailResponse"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Document not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    listContentPreparedSegments: {
-        parameters: {
-            query?: {
-                offset?: number;
-                limit?: number;
-            };
-            header?: never;
-            path: {
-                documentId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Prepared segments for the current readable revision */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PreparedSegmentsPageResponse"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Document not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    listContentTechnicalFacts: {
-        parameters: {
-            query?: {
-                offset?: number;
-                limit?: number;
-            };
-            header?: never;
-            path: {
-                documentId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Typed technical facts for the current readable revision */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TechnicalFactsPageResponse"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Document not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    appendContentDocument: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                documentId: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["AppendContentDocumentRequest"];
-            };
-        };
-        responses: {
-            /** @description Accepted append mutation with per-item state and linked job */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ContentMutationDetailResponse"];
-                };
-            };
-            /** @description Invalid append request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Document not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    replaceContentDocument: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                documentId: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "multipart/form-data": components["schemas"]["ReplaceContentDocumentRequest"];
-            };
-        };
-        responses: {
-            /** @description Accepted replacement mutation with per-item state and linked job */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ContentMutationDetailResponse"];
-                };
-            };
-            /** @description Invalid replacement request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Document not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    listContentRevisions: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                documentId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Immutable content revisions for one document */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ContentRevision"][];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Document not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    listContentMutations: {
-        parameters: {
-            query: {
-                libraryId: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Canonical content mutations in the requested library */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ContentMutationDetailResponse"][];
-                };
-            };
-            /** @description Invalid mutation listing request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    createContentMutation: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateContentMutationRequest"];
-            };
-        };
-        responses: {
-            /** @description Accepted mutation with per-item state and linked job */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ContentMutationDetailResponse"];
-                };
-            };
-            /** @description Invalid mutation request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    getContentMutation: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                mutationId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Canonical content mutation detail */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ContentMutationDetailResponse"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Mutation not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    listIngestJobs: {
-        parameters: {
-            query: {
-                workspaceId?: string;
-                libraryId: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Canonical ingest jobs in one library */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["IngestJob"][];
-                };
-            };
-            /** @description Invalid ingest job query */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    getIngestJob: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                jobId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Canonical ingest job detail */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["IngestJob"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Ingest job not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    getIngestAttempt: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                attemptId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Canonical ingest attempt detail */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["IngestAttempt"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Ingest attempt not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    listIngestStageEvents: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                attemptId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Ordered stage events for the requested attempt */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["IngestStageEvent"][];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Ingest attempt not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    searchDocuments: {
-        parameters: {
-            query: {
-                libraryId: string;
-                query: string;
-                limit?: number;
-                chunkHitLimitPerDocument?: number;
-                evidenceSampleLimit?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Hybrid knowledge search response with lexical and vector candidates, document hits, and provenance summaries */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        /** Format: uuid */
-                        libraryId: string;
-                        queryText: string;
-                        /** Format: int32 */
-                        limit: number;
-                        embeddingProviderKind: string;
-                        embeddingModelName: string;
-                        /** Format: uuid */
-                        embeddingModelCatalogId: string;
-                        /** Format: int64 */
-                        freshnessGeneration: number;
-                        documentHits: {
-                            document: components["schemas"]["KnowledgeDocumentRow"];
-                            revision: components["schemas"]["KnowledgeRevisionRow"];
-                            /** Format: double */
-                            score: number;
-                            /** Format: int32 */
-                            lexicalRank?: number | null;
-                            /** Format: int32 */
-                            vectorRank?: number | null;
-                            /** Format: double */
-                            lexicalScore?: number | null;
-                            /** Format: double */
-                            vectorScore?: number | null;
-                            chunkHits: components["schemas"]["KnowledgeChunkSearchRow"][];
-                            vectorChunkHits: components["schemas"]["KnowledgeChunkVectorSearchRow"][];
-                            evidenceSamples: components["schemas"]["KnowledgeEvidenceRow"][];
-                            provenanceSummary: {
-                                /** Format: int32 */
-                                supportingEvidenceCount: number;
-                                /** Format: int32 */
-                                lexicalChunkCount: number;
-                                /** Format: int32 */
-                                vectorChunkCount: number;
-                            };
-                        }[];
-                        entityHits: components["schemas"]["KnowledgeEntitySearchRow"][];
-                        relationHits: components["schemas"]["KnowledgeRelationSearchRow"][];
-                        vectorChunkHits: components["schemas"]["KnowledgeChunkVectorSearchRow"][];
-                        vectorEntityHits: components["schemas"]["KnowledgeEntityVectorSearchRow"][];
-                    };
-                };
-            };
-            /** @description Invalid search request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    listKnowledgeDocuments: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                libraryId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Documents visible to the authenticated principal */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["KnowledgeDocumentRow"][];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    getKnowledgeDocument: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                libraryId: string;
-                documentId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Document detail payload */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        document: components["schemas"]["KnowledgeDocumentRow"];
-                        revisions: components["schemas"]["KnowledgeRevisionRow"][];
-                        latestRevision?: components["schemas"]["KnowledgeRevisionRow"] | null;
-                        latestRevisionChunks: components["schemas"]["KnowledgeChunkRow"][];
-                    };
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    getKnowledgeLibrarySummary: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                libraryId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Library readiness, graph coverage, and latest generation snapshot */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["LibraryKnowledgeSummaryResponse"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    listKnowledgeContextBundles: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                libraryId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Context bundles visible to the authenticated principal */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["KnowledgeContextBundleRow"][];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    getKnowledgeContextBundle: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                bundleId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Context bundle detail payload */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        bundle: components["schemas"]["KnowledgeContextBundleRow"];
-                        traces: components["schemas"]["KnowledgeRetrievalTraceRow"][];
-                        chunkEdges: components["schemas"]["KnowledgeBundleChunkEdgeRow"][];
-                        entityEdges: components["schemas"]["KnowledgeBundleEntityEdgeRow"][];
-                        relationEdges: components["schemas"]["KnowledgeBundleRelationEdgeRow"][];
-                        evidenceEdges: components["schemas"]["KnowledgeBundleEvidenceEdgeRow"][];
-                        chunks: components["schemas"]["KnowledgeChunkRow"][];
-                        entities: components["schemas"]["KnowledgeEntityRow"][];
-                        relations: components["schemas"]["KnowledgeRelationRow"][];
-                        evidence: components["schemas"]["KnowledgeEvidenceRow"][];
-                    };
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    listKnowledgeEntities: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                libraryId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Knowledge entities */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["KnowledgeEntityRow"][];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    getKnowledgeEntity: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                libraryId: string;
-                entityId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Entity detail payload */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        entity: components["schemas"]["KnowledgeEntityRow"];
-                        mentionEdges: Record<string, never>[];
-                        mentionedChunks: components["schemas"]["KnowledgeChunkRow"][];
-                        supportingEvidenceEdges: Record<string, never>[];
-                        supportingEvidence: components["schemas"]["KnowledgeEvidenceRow"][];
-                    };
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    listKnowledgeRelations: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                libraryId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Knowledge relations */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["KnowledgeRelationRow"][];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    getKnowledgeRelation: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                libraryId: string;
-                relationId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Relation detail payload */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        relation: components["schemas"]["KnowledgeRelationRow"];
-                        supportingEvidenceEdges: Record<string, never>[];
-                        supportingEvidence: components["schemas"]["KnowledgeEvidenceRow"][];
-                    };
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    searchKnowledgeDocuments: {
-        parameters: {
-            query: {
-                query: string;
-                limit?: number;
-                chunkHitLimitPerDocument?: number;
-                evidenceSampleLimit?: number;
-            };
-            header?: never;
-            path: {
-                libraryId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Hybrid knowledge search response with lexical and vector candidates, document hits, and provenance summaries */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        /** Format: uuid */
-                        libraryId: string;
-                        queryText: string;
-                        /** Format: int32 */
-                        limit: number;
-                        embeddingProviderKind: string;
-                        embeddingModelName: string;
-                        /** Format: uuid */
-                        embeddingModelCatalogId: string;
-                        /** Format: int64 */
-                        freshnessGeneration: number;
-                        documentHits: {
-                            document: components["schemas"]["KnowledgeDocumentRow"];
-                            revision: components["schemas"]["KnowledgeRevisionRow"];
-                            /** Format: double */
-                            score: number;
-                            /** Format: int32 */
-                            lexicalRank?: number | null;
-                            /** Format: int32 */
-                            vectorRank?: number | null;
-                            /** Format: double */
-                            lexicalScore?: number | null;
-                            /** Format: double */
-                            vectorScore?: number | null;
-                            chunkHits: components["schemas"]["KnowledgeChunkSearchRow"][];
-                            vectorChunkHits: components["schemas"]["KnowledgeChunkVectorSearchRow"][];
-                            evidenceSamples: components["schemas"]["KnowledgeEvidenceRow"][];
-                            provenanceSummary: {
-                                /** Format: int32 */
-                                supportingEvidenceCount: number;
-                                /** Format: int32 */
-                                lexicalChunkCount: number;
-                                /** Format: int32 */
-                                vectorChunkCount: number;
-                            };
-                        }[];
-                        entityHits: components["schemas"]["KnowledgeEntitySearchRow"][];
-                        relationHits: components["schemas"]["KnowledgeRelationSearchRow"][];
-                        vectorChunkHits: components["schemas"]["KnowledgeChunkVectorSearchRow"][];
-                        vectorEntityHits: components["schemas"]["KnowledgeEntityVectorSearchRow"][];
-                    };
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    listQuerySessions: {
-        parameters: {
-            query: {
-                libraryId: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Visible query sessions ordered by most recent activity */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["QueryConversation"][];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-        };
-    };
-    createQuerySession: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateQueryConversationRequest"];
-            };
-        };
-        responses: {
-            /** @description Query session created */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["QueryConversation"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-        };
-    };
-    getQuerySession: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                sessionId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Query session detail with turns and executions */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["QueryConversationDetailResponse"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-        };
-    };
-    createQuerySessionTurn: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                sessionId: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateQueryTurnRequest"];
-            };
-        };
-        responses: {
-            /** @description User turn accepted and grounded answer completed */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["QueryTurnExecutionResponse"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-        };
-    };
-    getQueryExecution: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                executionId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Execution detail with typed references */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["QueryExecutionDetailResponse"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-        };
-    };
-    listBillingProviderCalls: {
-        parameters: {
-            query: {
-                libraryId: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Provider calls attributed to canonical executions */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["BillingProviderCall"][];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-        };
-    };
-    listBillingCharges: {
-        parameters: {
-            query: {
-                libraryId: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Charges derived from canonical provider calls */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["BillingCharge"][];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-        };
-    };
-    getBillingExecutionCost: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                executionKind: "query_execution" | "ingest_attempt";
-                executionId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /**
-             * @description Cost rollup for one execution owner.
-             *     For executions with no billable provider calls, the API returns a deterministic zero-cost rollup.
-             */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["BillingExecutionCost"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-        };
-    };
-    getAsyncOperation: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                operationId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Canonical async operation detail */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OpsAsyncOperation"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-        };
-    };
-    getLibraryState: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                libraryId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Derived operational state and knowledge generation snapshot */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OpsLibraryStateResponse"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-        };
-    };
-    listAuditEvents: {
-        parameters: {
-            query?: {
-                actorPrincipalId?: string;
-                workspaceId?: string;
-                libraryId?: string;
-                internal?: boolean;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Canonical audit events with visible subjects */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AuditEventResponse"][];
-                };
-            };
-            /** @description Missing or insufficient authorization */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-            /** @description Internal view requires system administrator access */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
-        };
-    };
-    listChunks: {
-        parameters: {
-            query: {
-                documentId: components["parameters"]["documentId"];
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Chunk list */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ChunkSummary"][];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            500: components["responses"]["InternalError"];
-        };
-    };
+  getHealth: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Service health */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HealthResponse']
+        }
+      }
+    }
+  }
+  getReadiness: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Readiness probe result */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ReadinessResponse']
+        }
+      }
+    }
+  }
+  getVersion: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Service version metadata */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['VersionResponse']
+        }
+      }
+    }
+  }
+  getOpenApiContract: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Rendered OpenAPI contract for the current public entrypoint */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/yaml': string
+        }
+      }
+    }
+  }
+  postBootstrapClaim: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['BootstrapClaimRequest']
+      }
+    }
+    responses: {
+      /** @description Bootstrap claim succeeded */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['BootstrapClaimResponse']
+        }
+      }
+      /** @description Invalid bootstrap payload */
+      400: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Invalid bootstrap secret */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Bootstrap claim disabled */
+      403: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Bootstrap was already claimed */
+      409: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  getBootstrapStatus: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Bootstrap setup status */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['BootstrapStatusResponse']
+        }
+      }
+    }
+  }
+  postBootstrapSetup: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['BootstrapSetupRequest']
+      }
+    }
+    responses: {
+      /** @description Bootstrap setup succeeded and created a browser session */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['SessionResponse']
+        }
+      }
+      /** @description Invalid bootstrap payload */
+      400: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Interactive bootstrap setup is disabled by configured environment credentials */
+      403: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Bootstrap was already completed */
+      409: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  postMcpRequest: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['McpJsonRpcRequest']
+      }
+    }
+    responses: {
+      /** @description JSON-RPC response envelope */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['McpJsonRpcResponse']
+        }
+      }
+      401: components['responses']['Unauthorized']
+      500: components['responses']['InternalError']
+    }
+  }
+  getMcpCapabilities: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Derived capability snapshot */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['McpCapabilitySnapshot']
+        }
+      }
+      401: components['responses']['Unauthorized']
+      500: components['responses']['InternalError']
+    }
+  }
+  listCatalogWorkspaces: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Visible workspaces for the authenticated principal */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['CatalogWorkspaceResponse'][]
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  createCatalogWorkspace: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['CreateCatalogWorkspaceRequest']
+      }
+    }
+    responses: {
+      /** @description Created workspace */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['CatalogWorkspaceResponse']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Workspace slug conflict */
+      409: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  getCatalogWorkspace: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        workspaceId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Workspace details */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['CatalogWorkspaceResponse']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Workspace not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  deleteCatalogWorkspace: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        workspaceId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Workspace deleted */
+      204: {
+        headers: {
+          [name: string]: unknown
+        }
+        content?: never
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Workspace not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  listCatalogLibraries: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        workspaceId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Libraries visible in the workspace */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['CatalogLibraryResponse'][]
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  createCatalogLibrary: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        workspaceId: string
+      }
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['CreateCatalogLibraryRequest']
+      }
+    }
+    responses: {
+      /** @description Created library */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['CatalogLibraryResponse']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Workspace not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Library slug conflict */
+      409: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  deleteCatalogLibrary: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        workspaceId: string
+        libraryId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Library deleted */
+      204: {
+        headers: {
+          [name: string]: unknown
+        }
+        content?: never
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Library not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  getCatalogLibrary: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        libraryId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Library details */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['CatalogLibraryResponse']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Library not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  loginIamSession: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['LoginSessionRequest']
+      }
+    }
+    responses: {
+      /** @description Authenticated session */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['SessionResponse']
+        }
+      }
+      /** @description Invalid payload */
+      400: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Invalid credentials */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  getIamSession: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Current browser session */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['SessionResponse']
+        }
+      }
+      /** @description Missing or invalid browser session */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  logoutIamSession: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Session revoked */
+      204: {
+        headers: {
+          [name: string]: unknown
+        }
+        content?: never
+      }
+      /** @description Missing or invalid browser session */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  getIamMe: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Canonical principal view */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['MeResponse']
+        }
+      }
+      /** @description Missing or invalid bearer token */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  listIamTokens: {
+    parameters: {
+      query?: {
+        workspaceId?: string
+      }
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description API tokens */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['TokenResponse'][]
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  mintIamToken: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['MintTokenRequest']
+      }
+    }
+    responses: {
+      /** @description Minted token and persisted API token record */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['MintTokenResponse']
+        }
+      }
+      /** @description Invalid token payload */
+      400: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  revokeIamToken: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        tokenPrincipalId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Token revoked */
+      204: {
+        headers: {
+          [name: string]: unknown
+        }
+        content?: never
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Token not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  listIamGrants: {
+    parameters: {
+      query?: {
+        principalId?: string
+      }
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Effective grants for the requested principal */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['GrantResponse'][]
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  createIamGrant: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['CreateGrantRequest']
+      }
+    }
+    responses: {
+      /** @description Grant created */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['GrantResponse']
+        }
+      }
+      /** @description Invalid grant payload */
+      400: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  revokeIamGrant: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        grantId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Grant revoked */
+      204: {
+        headers: {
+          [name: string]: unknown
+        }
+        content?: never
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Grant not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  listAiProviders: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description AI provider catalog entries */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ProviderCatalogEntryResponse'][]
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  listAiModels: {
+    parameters: {
+      query?: {
+        providerCatalogId?: string
+      }
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description AI model catalog entries */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ModelCatalogEntryResponse'][]
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  listAiModelPresets: {
+    parameters: {
+      query?: {
+        workspaceId?: string
+      }
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Workspace model presets */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ModelPresetResponse'][]
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  listAiPrices: {
+    parameters: {
+      query?: {
+        modelCatalogId?: string
+        workspaceId?: string
+      }
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description AI price catalog entries */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PriceCatalogEntryResponse'][]
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  listAiCredentials: {
+    parameters: {
+      query?: {
+        workspaceId?: string
+      }
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Provider credentials */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ProviderCredentialResponse'][]
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  createAiCredential: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['CreateProviderCredentialRequest']
+      }
+    }
+    responses: {
+      /** @description Provider credential created */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ProviderCredentialResponse']
+        }
+      }
+      /** @description Invalid provider credential payload */
+      400: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  listAiLibraryBindings: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        libraryId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Active library model bindings */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['LibraryModelBindingResponse'][]
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  createAiLibraryBinding: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['CreateLibraryBindingRequest']
+      }
+    }
+    responses: {
+      /** @description Library model binding created */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['LibraryModelBindingResponse']
+        }
+      }
+      /** @description Invalid library binding payload */
+      400: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  updateAiLibraryBinding: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        bindingId: string
+      }
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['UpdateLibraryBindingRequest']
+      }
+    }
+    responses: {
+      /** @description Library model binding updated */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['LibraryModelBindingResponse']
+        }
+      }
+      /** @description Invalid library binding payload */
+      400: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Binding not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  validateAiLibraryBinding: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        bindingId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Binding validation request accepted */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['BindingValidationResponse']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Binding not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  listContentDocuments: {
+    parameters: {
+      query: {
+        libraryId: string
+        includeDeleted?: boolean
+      }
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Logical documents in the requested library */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ContentDocumentDetailResponse'][]
+        }
+      }
+      /** @description Invalid document listing request */
+      400: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  createContentDocument: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['CreateContentDocumentRequest']
+      }
+    }
+    responses: {
+      /** @description Created logical document and accepted mutation */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['CreateContentDocumentResponse']
+        }
+      }
+      /** @description Invalid document creation request */
+      400: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  listContentWebIngestRuns: {
+    parameters: {
+      query: {
+        libraryId: string
+      }
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Web ingest runs in the requested library */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['WebIngestRunSummary'][]
+        }
+      }
+      /** @description Invalid web ingest list request */
+      400: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  createContentWebIngestRun: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['CreateWebIngestRunRequest']
+      }
+    }
+    responses: {
+      /** @description Web ingest run accepted */
+      202: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['WebIngestRunReceipt']
+        }
+      }
+      /** @description Invalid web ingest submission */
+      400: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Library not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  getContentWebIngestRun: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        runId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Web ingest run detail */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['WebIngestRun']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Run not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  listContentWebIngestRunPages: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        runId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Discovered pages and outcomes for the requested run */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['WebDiscoveredPage'][]
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Run not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  cancelContentWebIngestRun: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        runId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Web ingest cancellation accepted */
+      202: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['WebIngestRunReceipt']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Run not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  uploadContentDocument: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'multipart/form-data': components['schemas']['UploadContentDocumentRequest']
+      }
+    }
+    responses: {
+      /** @description Created logical document and accepted upload mutation */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['CreateContentDocumentResponse']
+        }
+      }
+      /** @description Invalid upload request */
+      400: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Library not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  getContentDocument: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        documentId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Canonical logical document detail */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ContentDocumentDetailResponse']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Document not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  deleteContentDocument: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        documentId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Accepted and applied document deletion mutation */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ContentMutationDetailResponse']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Document not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  listContentPreparedSegments: {
+    parameters: {
+      query?: {
+        offset?: number
+        limit?: number
+      }
+      header?: never
+      path: {
+        documentId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Prepared segments for the current readable revision */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PreparedSegmentsPageResponse']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Document not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  listContentTechnicalFacts: {
+    parameters: {
+      query?: {
+        offset?: number
+        limit?: number
+      }
+      header?: never
+      path: {
+        documentId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Typed technical facts for the current readable revision */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['TechnicalFactsPageResponse']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Document not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  appendContentDocument: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        documentId: string
+      }
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['AppendContentDocumentRequest']
+      }
+    }
+    responses: {
+      /** @description Accepted append mutation with per-item state and linked job */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ContentMutationDetailResponse']
+        }
+      }
+      /** @description Invalid append request */
+      400: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Document not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  replaceContentDocument: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        documentId: string
+      }
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'multipart/form-data': components['schemas']['ReplaceContentDocumentRequest']
+      }
+    }
+    responses: {
+      /** @description Accepted replacement mutation with per-item state and linked job */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ContentMutationDetailResponse']
+        }
+      }
+      /** @description Invalid replacement request */
+      400: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Document not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  listContentRevisions: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        documentId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Immutable content revisions for one document */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ContentRevision'][]
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Document not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  listContentMutations: {
+    parameters: {
+      query: {
+        libraryId: string
+      }
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Canonical content mutations in the requested library */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ContentMutationDetailResponse'][]
+        }
+      }
+      /** @description Invalid mutation listing request */
+      400: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  createContentMutation: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['CreateContentMutationRequest']
+      }
+    }
+    responses: {
+      /** @description Accepted mutation with per-item state and linked job */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ContentMutationDetailResponse']
+        }
+      }
+      /** @description Invalid mutation request */
+      400: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  getContentMutation: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        mutationId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Canonical content mutation detail */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ContentMutationDetailResponse']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Mutation not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  listIngestJobs: {
+    parameters: {
+      query: {
+        workspaceId?: string
+        libraryId: string
+      }
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Canonical ingest jobs in one library */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['IngestJob'][]
+        }
+      }
+      /** @description Invalid ingest job query */
+      400: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  getIngestJob: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        jobId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Canonical ingest job detail */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['IngestJob']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Ingest job not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  getIngestAttempt: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        attemptId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Canonical ingest attempt detail */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['IngestAttempt']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Ingest attempt not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  listIngestStageEvents: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        attemptId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Ordered stage events for the requested attempt */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['IngestStageEvent'][]
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Ingest attempt not found */
+      404: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  searchDocuments: {
+    parameters: {
+      query: {
+        libraryId: string
+        query: string
+        limit?: number
+        chunkHitLimitPerDocument?: number
+        evidenceSampleLimit?: number
+      }
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Hybrid knowledge search response with lexical and vector candidates, document hits, and provenance summaries */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': {
+            /** Format: uuid */
+            libraryId: string
+            queryText: string
+            /** Format: int32 */
+            limit: number
+            embeddingProviderKind: string
+            embeddingModelName: string
+            /** Format: uuid */
+            embeddingModelCatalogId: string
+            /** Format: int64 */
+            freshnessGeneration: number
+            documentHits: {
+              document: components['schemas']['KnowledgeDocumentRow']
+              revision: components['schemas']['KnowledgeRevisionRow']
+              /** Format: double */
+              score: number
+              /** Format: int32 */
+              lexicalRank?: number | null
+              /** Format: int32 */
+              vectorRank?: number | null
+              /** Format: double */
+              lexicalScore?: number | null
+              /** Format: double */
+              vectorScore?: number | null
+              chunkHits: components['schemas']['KnowledgeChunkSearchRow'][]
+              vectorChunkHits: components['schemas']['KnowledgeChunkVectorSearchRow'][]
+              evidenceSamples: components['schemas']['KnowledgeEvidenceRow'][]
+              provenanceSummary: {
+                /** Format: int32 */
+                supportingEvidenceCount: number
+                /** Format: int32 */
+                lexicalChunkCount: number
+                /** Format: int32 */
+                vectorChunkCount: number
+              }
+            }[]
+            entityHits: components['schemas']['KnowledgeEntitySearchRow'][]
+            relationHits: components['schemas']['KnowledgeRelationSearchRow'][]
+            vectorChunkHits: components['schemas']['KnowledgeChunkVectorSearchRow'][]
+            vectorEntityHits: components['schemas']['KnowledgeEntityVectorSearchRow'][]
+          }
+        }
+      }
+      /** @description Invalid search request */
+      400: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  listKnowledgeDocuments: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        libraryId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Documents visible to the authenticated principal */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['KnowledgeDocumentRow'][]
+        }
+      }
+      401: components['responses']['Unauthorized']
+      500: components['responses']['InternalError']
+    }
+  }
+  getKnowledgeDocument: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        libraryId: string
+        documentId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Document detail payload */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': {
+            document: components['schemas']['KnowledgeDocumentRow']
+            revisions: components['schemas']['KnowledgeRevisionRow'][]
+            latestRevision?: components['schemas']['KnowledgeRevisionRow'] | null
+            latestRevisionChunks: components['schemas']['KnowledgeChunkRow'][]
+          }
+        }
+      }
+      401: components['responses']['Unauthorized']
+      404: components['responses']['NotFound']
+      500: components['responses']['InternalError']
+    }
+  }
+  getKnowledgeLibrarySummary: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        libraryId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Library readiness, graph coverage, and latest generation snapshot */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['LibraryKnowledgeSummaryResponse']
+        }
+      }
+      401: components['responses']['Unauthorized']
+      500: components['responses']['InternalError']
+    }
+  }
+  listKnowledgeContextBundles: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        libraryId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Context bundles visible to the authenticated principal */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['KnowledgeContextBundleRow'][]
+        }
+      }
+      401: components['responses']['Unauthorized']
+      500: components['responses']['InternalError']
+    }
+  }
+  getKnowledgeContextBundle: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        bundleId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Context bundle detail payload */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': {
+            bundle: components['schemas']['KnowledgeContextBundleRow']
+            traces: components['schemas']['KnowledgeRetrievalTraceRow'][]
+            chunkEdges: components['schemas']['KnowledgeBundleChunkEdgeRow'][]
+            entityEdges: components['schemas']['KnowledgeBundleEntityEdgeRow'][]
+            relationEdges: components['schemas']['KnowledgeBundleRelationEdgeRow'][]
+            evidenceEdges: components['schemas']['KnowledgeBundleEvidenceEdgeRow'][]
+            chunks: components['schemas']['KnowledgeChunkRow'][]
+            entities: components['schemas']['KnowledgeEntityRow'][]
+            relations: components['schemas']['KnowledgeRelationRow'][]
+            evidence: components['schemas']['KnowledgeEvidenceRow'][]
+          }
+        }
+      }
+      401: components['responses']['Unauthorized']
+      404: components['responses']['NotFound']
+      500: components['responses']['InternalError']
+    }
+  }
+  listKnowledgeEntities: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        libraryId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Knowledge entities */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['KnowledgeEntityRow'][]
+        }
+      }
+      401: components['responses']['Unauthorized']
+      500: components['responses']['InternalError']
+    }
+  }
+  getKnowledgeEntity: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        libraryId: string
+        entityId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Entity detail payload */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': {
+            entity: components['schemas']['KnowledgeEntityRow']
+            mentionEdges: Record<string, never>[]
+            mentionedChunks: components['schemas']['KnowledgeChunkRow'][]
+            supportingEvidenceEdges: Record<string, never>[]
+            supportingEvidence: components['schemas']['KnowledgeEvidenceRow'][]
+          }
+        }
+      }
+      401: components['responses']['Unauthorized']
+      404: components['responses']['NotFound']
+      500: components['responses']['InternalError']
+    }
+  }
+  listKnowledgeRelations: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        libraryId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Knowledge relations */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['KnowledgeRelationRow'][]
+        }
+      }
+      401: components['responses']['Unauthorized']
+      500: components['responses']['InternalError']
+    }
+  }
+  getKnowledgeRelation: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        libraryId: string
+        relationId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Relation detail payload */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': {
+            relation: components['schemas']['KnowledgeRelationRow']
+            supportingEvidenceEdges: Record<string, never>[]
+            supportingEvidence: components['schemas']['KnowledgeEvidenceRow'][]
+          }
+        }
+      }
+      401: components['responses']['Unauthorized']
+      404: components['responses']['NotFound']
+      500: components['responses']['InternalError']
+    }
+  }
+  searchKnowledgeDocuments: {
+    parameters: {
+      query: {
+        query: string
+        limit?: number
+        chunkHitLimitPerDocument?: number
+        evidenceSampleLimit?: number
+      }
+      header?: never
+      path: {
+        libraryId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Hybrid knowledge search response with lexical and vector candidates, document hits, and provenance summaries */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': {
+            /** Format: uuid */
+            libraryId: string
+            queryText: string
+            /** Format: int32 */
+            limit: number
+            embeddingProviderKind: string
+            embeddingModelName: string
+            /** Format: uuid */
+            embeddingModelCatalogId: string
+            /** Format: int64 */
+            freshnessGeneration: number
+            documentHits: {
+              document: components['schemas']['KnowledgeDocumentRow']
+              revision: components['schemas']['KnowledgeRevisionRow']
+              /** Format: double */
+              score: number
+              /** Format: int32 */
+              lexicalRank?: number | null
+              /** Format: int32 */
+              vectorRank?: number | null
+              /** Format: double */
+              lexicalScore?: number | null
+              /** Format: double */
+              vectorScore?: number | null
+              chunkHits: components['schemas']['KnowledgeChunkSearchRow'][]
+              vectorChunkHits: components['schemas']['KnowledgeChunkVectorSearchRow'][]
+              evidenceSamples: components['schemas']['KnowledgeEvidenceRow'][]
+              provenanceSummary: {
+                /** Format: int32 */
+                supportingEvidenceCount: number
+                /** Format: int32 */
+                lexicalChunkCount: number
+                /** Format: int32 */
+                vectorChunkCount: number
+              }
+            }[]
+            entityHits: components['schemas']['KnowledgeEntitySearchRow'][]
+            relationHits: components['schemas']['KnowledgeRelationSearchRow'][]
+            vectorChunkHits: components['schemas']['KnowledgeChunkVectorSearchRow'][]
+            vectorEntityHits: components['schemas']['KnowledgeEntityVectorSearchRow'][]
+          }
+        }
+      }
+      400: components['responses']['BadRequest']
+      401: components['responses']['Unauthorized']
+      500: components['responses']['InternalError']
+    }
+  }
+  listQuerySessions: {
+    parameters: {
+      query: {
+        libraryId: string
+      }
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Visible query sessions ordered by most recent activity */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['QueryConversation'][]
+        }
+      }
+      400: components['responses']['BadRequest']
+      401: components['responses']['Unauthorized']
+    }
+  }
+  createQuerySession: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['CreateQueryConversationRequest']
+      }
+    }
+    responses: {
+      /** @description Query session created */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['QueryConversation']
+        }
+      }
+      400: components['responses']['BadRequest']
+      401: components['responses']['Unauthorized']
+    }
+  }
+  getQuerySession: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        sessionId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Query session detail with turns and executions */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['QueryConversationDetailResponse']
+        }
+      }
+      401: components['responses']['Unauthorized']
+      404: components['responses']['NotFound']
+    }
+  }
+  createQuerySessionTurn: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        sessionId: string
+      }
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['CreateQueryTurnRequest']
+      }
+    }
+    responses: {
+      /** @description User turn accepted and grounded answer completed */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['QueryTurnExecutionResponse']
+        }
+      }
+      400: components['responses']['BadRequest']
+      401: components['responses']['Unauthorized']
+      404: components['responses']['NotFound']
+      409: components['responses']['Conflict']
+    }
+  }
+  getQueryExecution: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        executionId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Execution detail with typed references */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['QueryExecutionDetailResponse']
+        }
+      }
+      401: components['responses']['Unauthorized']
+      404: components['responses']['NotFound']
+    }
+  }
+  getRuntimeExecution: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        executionId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Runtime execution summary */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['RuntimeExecutionResponse']
+        }
+      }
+      401: components['responses']['Unauthorized']
+      404: components['responses']['NotFound']
+    }
+  }
+  getRuntimeExecutionTrace: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        executionId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Runtime execution trace */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['RuntimeExecutionTraceResponse']
+        }
+      }
+      401: components['responses']['Unauthorized']
+      404: components['responses']['NotFound']
+    }
+  }
+  listBillingProviderCalls: {
+    parameters: {
+      query: {
+        libraryId: string
+      }
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Provider calls attributed to canonical executions */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['BillingProviderCall'][]
+        }
+      }
+      400: components['responses']['BadRequest']
+      401: components['responses']['Unauthorized']
+    }
+  }
+  listBillingCharges: {
+    parameters: {
+      query: {
+        libraryId: string
+      }
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Charges derived from canonical provider calls */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['BillingCharge'][]
+        }
+      }
+      400: components['responses']['BadRequest']
+      401: components['responses']['Unauthorized']
+    }
+  }
+  getBillingExecutionCost: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        executionKind: 'query_execution' | 'ingest_attempt'
+        executionId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /**
+       * @description Cost rollup for one execution owner.
+       *     For executions with no billable provider calls, the API returns a deterministic zero-cost rollup.
+       */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['BillingExecutionCost']
+        }
+      }
+      400: components['responses']['BadRequest']
+      401: components['responses']['Unauthorized']
+      404: components['responses']['NotFound']
+    }
+  }
+  getAsyncOperation: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        operationId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Canonical async operation detail */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['OpsAsyncOperation']
+        }
+      }
+      401: components['responses']['Unauthorized']
+      404: components['responses']['NotFound']
+    }
+  }
+  getLibraryState: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        libraryId: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Derived operational state and knowledge generation snapshot */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['OpsLibraryStateResponse']
+        }
+      }
+      401: components['responses']['Unauthorized']
+      404: components['responses']['NotFound']
+    }
+  }
+  listAuditEvents: {
+    parameters: {
+      query?: {
+        actorPrincipalId?: string
+        workspaceId?: string
+        libraryId?: string
+        internal?: boolean
+      }
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Canonical audit events with visible subjects */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['AuditEventResponse'][]
+        }
+      }
+      /** @description Missing or insufficient authorization */
+      401: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+      /** @description Internal view requires system administrator access */
+      403: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiErrorBody']
+        }
+      }
+    }
+  }
+  listChunks: {
+    parameters: {
+      query: {
+        documentId: components['parameters']['documentId']
+      }
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Chunk list */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ChunkSummary'][]
+        }
+      }
+      400: components['responses']['BadRequest']
+      401: components['responses']['Unauthorized']
+      500: components['responses']['InternalError']
+    }
+  }
 }

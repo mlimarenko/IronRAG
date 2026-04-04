@@ -11,7 +11,7 @@ use crate::{
             ContentDocumentPipelineJob, ContentDocumentSummary, ContentMutation,
             DocumentReadinessSummary, LibraryKnowledgeCoverage, revision_text_state_is_readable,
         },
-        knowledge::{KnowledgeLibraryGeneration, KnowledgeRevision, StructuredDocumentRevision},
+        knowledge::{KnowledgeLibraryGeneration, StructuredDocumentRevision},
     },
     infra::arangodb::document_store::KnowledgeRevisionRow,
     infra::repositories::ops_repository,
@@ -146,7 +146,6 @@ impl OpsService {
         state: &AppState,
         library_id: Uuid,
     ) -> Result<OpsLibraryStateSnapshot, ApiError> {
-        let library = state.canonical_services.catalog.get_library(state, library_id).await?;
         let facts = ops_repository::get_library_facts(&state.persistence.postgres, library_id)
             .await
             .map_err(|_| ApiError::Internal)?
@@ -156,13 +155,13 @@ impl OpsService {
         knowledge_generations.sort_by(|left, right| {
             right.created_at.cmp(&left.created_at).then_with(|| right.id.cmp(&left.id))
         });
-        let coverage = state
-            .canonical_services
-            .knowledge
-            .get_library_knowledge_coverage(state, library_id)
-            .await?;
-        let revision_health =
-            load_library_revision_health(state, library.workspace_id, library_id).await?;
+        let document_summaries =
+            state.canonical_services.content.list_documents(state, library_id).await?;
+        let coverage = self.derive_library_knowledge_coverage(
+            library_id,
+            &document_summaries,
+            knowledge_generations.first().map(|generation| generation.id),
+        );
         let failed_attempts = ops_repository::list_recent_failed_ingest_attempts(
             &state.persistence.postgres,
             library_id,
@@ -181,7 +180,7 @@ impl OpsService {
             &facts,
             &coverage,
             &knowledge_generations,
-            &revision_health,
+            &document_summaries,
             !failed_attempts.is_empty(),
             !bundle_failures.is_empty(),
         );
@@ -193,9 +192,8 @@ impl OpsService {
         state: &AppState,
         library_id: Uuid,
     ) -> Result<Vec<OpsLibraryWarning>, ApiError> {
-        let library = state.canonical_services.catalog.get_library(state, library_id).await?;
-        let revision_health =
-            load_library_revision_health(state, library.workspace_id, library_id).await?;
+        let document_summaries =
+            state.canonical_services.content.list_documents(state, library_id).await?;
         let failed_attempts = ops_repository::list_recent_failed_ingest_attempts(
             &state.persistence.postgres,
             library_id,
@@ -210,7 +208,12 @@ impl OpsService {
         )
         .await
         .map_err(|_| ApiError::Internal)?;
-        Ok(build_library_warnings(library_id, &revision_health, &failed_attempts, &bundle_failures))
+        Ok(build_library_warnings(
+            library_id,
+            &document_summaries,
+            &failed_attempts,
+            &bundle_failures,
+        ))
     }
 
     #[must_use]
@@ -447,7 +450,7 @@ fn map_library_facts_row(
     row: &ops_repository::OpsLibraryFactsRow,
     coverage: &LibraryKnowledgeCoverage,
     knowledge_generations: &[KnowledgeLibraryGeneration],
-    revision_health: &[KnowledgeRevision],
+    document_summaries: &[ContentDocumentSummary],
     has_failed_attempts: bool,
     has_bundle_failures: bool,
 ) -> OpsLibraryState {
@@ -459,9 +462,9 @@ fn map_library_facts_row(
     let failed_document_count =
         coverage.document_counts_by_readiness.get("failed").copied().unwrap_or_default();
     let stale_vector_count =
-        revision_health.iter().filter(|revision| is_revision_vector_stale(revision)).count();
+        document_summaries.iter().filter(|summary| is_document_vector_rebuilding(summary)).count();
     let stale_relation_count =
-        revision_health.iter().filter(|revision| is_revision_graph_stale(revision)).count();
+        document_summaries.iter().filter(|summary| is_document_graph_rebuilding(summary)).count();
 
     OpsLibraryState {
         library_id: row.library_id,
@@ -486,62 +489,33 @@ fn map_library_facts_row(
     }
 }
 
-async fn load_library_revision_health(
-    state: &AppState,
-    workspace_id: Uuid,
-    library_id: Uuid,
-) -> Result<Vec<KnowledgeRevision>, ApiError> {
-    let documents = state
-        .arango_document_store
-        .list_documents_by_library(workspace_id, library_id)
-        .await
-        .map_err(|_| ApiError::Internal)?;
-    let mut revisions = Vec::new();
-    for document in documents {
-        let Some(revision_id) = document.readable_revision_id.or(document.active_revision_id)
-        else {
-            continue;
-        };
-        let Some(revision) = state
-            .arango_document_store
-            .get_revision(revision_id)
-            .await
-            .map_err(|_| ApiError::Internal)?
-        else {
-            continue;
-        };
-        revisions.push(KnowledgeRevision {
-            id: revision.revision_id,
-            document_id: revision.document_id,
-            revision_number: revision.revision_number,
-            revision_state: revision.revision_state,
-            source_uri: revision.source_uri,
-            mime_type: revision.mime_type,
-            checksum: revision.checksum,
-            title: revision.title,
-            byte_size: revision.byte_size,
-            normalized_text: revision.normalized_text,
-            text_checksum: revision.text_checksum,
-            text_state: revision.text_state,
-            vector_state: revision.vector_state,
-            graph_state: revision.graph_state,
-            text_readable_at: revision.text_readable_at,
-            vector_ready_at: revision.vector_ready_at,
-            graph_ready_at: revision.graph_ready_at,
-            created_at: revision.created_at,
-        });
-    }
-    Ok(revisions)
+fn document_has_active_processing(summary: &ContentDocumentSummary) -> bool {
+    summary
+        .pipeline
+        .latest_job
+        .as_ref()
+        .is_some_and(|job| matches!(job.queue_state.as_str(), "queued" | "leased" | "running"))
+        || summary.pipeline.latest_mutation.as_ref().is_some_and(|mutation| {
+            matches!(mutation.mutation_state.as_str(), "accepted" | "running")
+        })
 }
 
-fn is_revision_vector_stale(revision: &KnowledgeRevision) -> bool {
-    revision_text_state_is_readable(&revision.text_state)
-        && !matches!(revision.vector_state.as_str(), "ready" | "vector_ready")
+fn is_document_vector_rebuilding(summary: &ContentDocumentSummary) -> bool {
+    let Some(readiness) = summary.readiness.as_ref() else {
+        return false;
+    };
+    document_has_active_processing(summary)
+        && revision_text_state_is_readable(&readiness.text_state)
+        && !matches!(readiness.vector_state.as_str(), "ready" | "vector_ready" | "graph_ready")
 }
 
-fn is_revision_graph_stale(revision: &KnowledgeRevision) -> bool {
-    revision_text_state_is_readable(&revision.text_state)
-        && !matches!(revision.graph_state.as_str(), "ready" | "graph_ready")
+fn is_document_graph_rebuilding(summary: &ContentDocumentSummary) -> bool {
+    let Some(readiness) = summary.readiness.as_ref() else {
+        return false;
+    };
+    document_has_active_processing(summary)
+        && revision_text_state_is_readable(&readiness.text_state)
+        && !matches!(readiness.graph_state.as_str(), "ready" | "graph_ready")
 }
 
 fn derive_degraded_state(
@@ -561,28 +535,27 @@ fn derive_degraded_state(
     } else if queue_depth > 0 || running_attempts > 0 {
         "processing".to_string()
     } else {
-        latest_generation
-            .map(|generation| generation.generation_state.clone())
-            .unwrap_or_else(|| "healthy".to_string())
+        let _ = latest_generation;
+        "healthy".to_string()
     }
 }
 
 fn build_library_warnings(
     library_id: Uuid,
-    revision_health: &[KnowledgeRevision],
+    document_summaries: &[ContentDocumentSummary],
     failed_attempts: &[ops_repository::OpsLibraryFailureRow],
     bundle_failures: &[ops_repository::OpsLibraryFailureRow],
 ) -> Vec<OpsLibraryWarning> {
     let mut warnings = Vec::new();
 
     let stale_vectors =
-        revision_health.iter().filter(|revision| is_revision_vector_stale(revision)).count();
+        document_summaries.iter().filter(|summary| is_document_vector_rebuilding(summary)).count();
     if stale_vectors > 0 {
         warnings.push(derived_warning(library_id, "stale_vectors", "warning", Utc::now()));
     }
 
     let stale_relations =
-        revision_health.iter().filter(|revision| is_revision_graph_stale(revision)).count();
+        document_summaries.iter().filter(|summary| is_document_graph_rebuilding(summary)).count();
     if stale_relations > 0 {
         warnings.push(derived_warning(library_id, "stale_relations", "warning", Utc::now()));
     }
@@ -631,5 +604,133 @@ fn derived_warning(
         severity: severity.to_string(),
         created_at,
         resolved_at: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_library_warnings, derive_degraded_state};
+    use crate::domains::content::{
+        ContentDocument, ContentDocumentHead, ContentDocumentPipelineState, ContentDocumentSummary,
+        ContentMutation, ContentRevisionReadiness, revision_text_state_is_readable,
+    };
+    use crate::domains::knowledge::KnowledgeLibraryGeneration;
+    use crate::domains::ops::OpsLibraryWarning;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn sample_summary(
+        text_state: &str,
+        vector_state: &str,
+        graph_state: &str,
+        mutation_state: Option<&str>,
+    ) -> ContentDocumentSummary {
+        let now = Utc::now();
+        ContentDocumentSummary {
+            document: ContentDocument {
+                id: Uuid::now_v7(),
+                workspace_id: Uuid::now_v7(),
+                library_id: Uuid::now_v7(),
+                external_key: "sample".to_string(),
+                document_state: "active".to_string(),
+                created_at: now,
+            },
+            head: Some(ContentDocumentHead {
+                document_id: Uuid::now_v7(),
+                active_revision_id: None,
+                readable_revision_id: None,
+                latest_mutation_id: None,
+                latest_successful_attempt_id: None,
+                head_updated_at: now,
+            }),
+            active_revision: None,
+            readiness: Some(ContentRevisionReadiness {
+                revision_id: Uuid::now_v7(),
+                text_state: text_state.to_string(),
+                vector_state: vector_state.to_string(),
+                graph_state: graph_state.to_string(),
+                text_readable_at: revision_text_state_is_readable(text_state).then_some(now),
+                vector_ready_at: matches!(vector_state, "ready" | "vector_ready" | "graph_ready")
+                    .then_some(now),
+                graph_ready_at: matches!(graph_state, "ready" | "graph_ready").then_some(now),
+            }),
+            readiness_summary: None,
+            prepared_revision: None,
+            web_page_provenance: None,
+            pipeline: ContentDocumentPipelineState {
+                latest_mutation: mutation_state.map(|state| ContentMutation {
+                    id: Uuid::now_v7(),
+                    workspace_id: Uuid::now_v7(),
+                    library_id: Uuid::now_v7(),
+                    operation_kind: "upload".to_string(),
+                    mutation_state: state.to_string(),
+                    requested_at: now,
+                    completed_at: None,
+                    requested_by_principal_id: None,
+                    request_surface: "rest".to_string(),
+                    idempotency_key: None,
+                    source_identity: None,
+                    failure_code: None,
+                    conflict_code: None,
+                }),
+                latest_job: None,
+            },
+        }
+    }
+
+    fn sample_generation(state: &str) -> KnowledgeLibraryGeneration {
+        KnowledgeLibraryGeneration {
+            id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            generation_kind: "library".to_string(),
+            generation_state: state.to_string(),
+            source_revision_id: None,
+            created_at: Utc::now(),
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn derive_degraded_state_reports_healthy_when_idle_without_active_rebuilds() {
+        let degraded_state = derive_degraded_state(
+            0,
+            0,
+            0,
+            0,
+            0,
+            false,
+            false,
+            Some(&sample_generation("graph_ready")),
+        );
+
+        assert_eq!(degraded_state, "healthy");
+    }
+
+    #[test]
+    fn build_library_warnings_ignores_idle_sparse_documents() {
+        let warnings = build_library_warnings(
+            Uuid::now_v7(),
+            &[sample_summary("text_readable", "vector_ready", "pending", None)],
+            &[],
+            &[],
+        );
+
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn build_library_warnings_reports_active_graph_rebuilds() {
+        let warnings = build_library_warnings(
+            Uuid::now_v7(),
+            &[sample_summary("text_readable", "vector_ready", "pending", Some("running"))],
+            &[],
+            &[],
+        );
+
+        assert!(
+            warnings
+                .iter()
+                .any(|warning: &OpsLibraryWarning| warning.warning_kind == "stale_relations")
+        );
     }
 }

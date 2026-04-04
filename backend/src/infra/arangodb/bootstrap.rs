@@ -1,3 +1,10 @@
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::redundant_clone,
+    clippy::struct_excessive_bools,
+    clippy::too_many_lines
+)]
+
 use anyhow::Context;
 
 use crate::infra::arangodb::{

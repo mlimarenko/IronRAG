@@ -1,3 +1,12 @@
+#![allow(
+    clippy::drain_collect,
+    clippy::map_unwrap_or,
+    clippy::missing_const_for_fn,
+    clippy::missing_errors_doc,
+    clippy::needless_pass_by_value,
+    clippy::too_many_lines
+)]
+
 use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
@@ -437,7 +446,7 @@ impl ArangoSearchStore {
             )
             .await
             .context("failed to search knowledge chunks")?;
-        let mut rows = decode_many_results(cursor)?;
+        let rows = decode_many_results(cursor)?;
         if query_lower.is_empty() {
             return Ok(rows);
         }
@@ -511,7 +520,7 @@ impl ArangoSearchStore {
         }
 
         let mut by_chunk_id = rows
-            .drain(..)
+            .into_iter()
             .map(|row| (row.chunk_id, row))
             .collect::<std::collections::HashMap<_, _>>();
         for row in direct_rows {

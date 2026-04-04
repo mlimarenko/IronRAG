@@ -185,9 +185,22 @@ const ru = {
       executing: 'Ассистент собирает grounded контекст и готовит ответ…',
     },
     progress: {
-      retrieving: 'Ищу релевантные документы',
+      planning: 'Планирую и собираю доказательства',
       grounding: 'Связываю граф и доказательства',
-      answering: 'Формулирую ответ',
+      response: 'Формирую ответ',
+    },
+    errors: {
+      queryRetrieveFailed:
+        'Ассистент не смог собрать grounded-доказательства для этого вопроса. Проверьте активные AI bindings и креденшлы провайдера, затем повторите запрос.',
+      queryContextAssemblyFailed:
+        'Ассистент не смог собрать grounded-контекст для этого вопроса. Обновите состояние библиотеки и повторите запрос.',
+      queryAnswerFailed:
+        'Ассистент не смог завершить генерацию ответа. Проверьте настройки активного провайдера и попробуйте снова.',
+      queryPersistFailed:
+        'Ассистент сгенерировал результат, но не смог сохранить его. Повторите запрос.',
+      runtimePolicyRejected: 'Runtime policy отклонила этот answer run до завершения.',
+      runtimePolicyTerminated: 'Runtime policy остановила этот answer run уже после старта.',
+      runtimePolicyBlocked: 'Runtime policy заблокировала этот answer run.',
     },
     verification: {
       eyebrow: 'Проверка ответа',
@@ -200,6 +213,20 @@ const ru = {
       },
       messages: {
         literalNotGrounded: 'Литерал `{literal}` не найден в выбранных доказательствах.',
+      },
+      policyStates: {
+        rejected: {
+          title: 'Выполнение отклонено runtime policy',
+          body: 'Runtime policy явно отклонила это выполнение до завершения. Подробности смотрите в policy intervention внутри answer trace.',
+        },
+        terminated: {
+          title: 'Выполнение остановлено runtime policy',
+          body: 'Runtime policy остановила это выполнение уже после старта. Подробности смотрите в policy intervention внутри answer trace.',
+        },
+        blocked: {
+          title: 'Выполнение заблокировано runtime policy',
+          body: 'Runtime policy заблокировала это выполнение. Подробности смотрите в policy intervention внутри answer trace.',
+        },
       },
       states: {
         not_run: {
@@ -214,7 +241,7 @@ const ru = {
           title: 'Ответ подтверждён только частично',
           body: 'Часть ответа grounded, но часть запрошенных деталей всё ещё слабее, чем выбранные доказательства.',
         },
-        conflicting_evidence: {
+        conflicting: {
           title: 'Выбранные доказательства конфликтуют',
           body: 'В текущем наборе доказательств есть конфликтующие технические факты, поэтому ответ пока нельзя считать разрешённым.',
         },
@@ -227,10 +254,11 @@ const ru = {
           body: 'Ответ не удалось подтвердить относительно канонического набора доказательств. Перед использованием проверьте предупреждения.',
         },
       },
+      runtimeFailureCode: 'Код сбоя runtime: {code}',
     },
     readinessWarning: {
       title: 'Покрытие библиотеки ещё сходится',
-      body: 'Это точный технический вопрос, но {readable} читаемых и {graphSparse} graph-sparse документ(ов) ещё не сошлись до устойчивого графового покрытия.',
+      body: 'Это точный технический вопрос, но {readable} читаемых и {graphSparse} документ(ов) с редким графом ещё не сошлись до устойчивого графового покрытия.',
       factHint:
         'У {count} документ(ов) уже есть typed facts; опирайтесь на эти литералы, а не на переформулированный ответ.',
     },
@@ -275,15 +303,47 @@ const ru = {
       executingTitle: 'Ответ формируется',
       executionTitle: 'Последний grounded запуск',
       executionState: 'Состояние: {state}',
+      activeStage: 'Стадия: {stage}',
       startedAt: 'Запущено: {value}',
       completedAt: 'Завершено: {value}',
       failureCode: 'Код сбоя: {value}',
+      runtimeStagesLabel: 'Выполненные стадии',
+      policyTitle: 'Решения policy',
+      policyCounts: '{rejectCount} отклонено · {terminateCount} остановлено',
       bundleLabel: 'Контекст',
       bundleState: 'Контекст {state} · режим {strategy}',
       executionStates: {
-        retrieving: 'собирается',
+        accepted: 'принят',
+        running: 'в работе',
         completed: 'завершён',
+        recovered: 'завершён после восстановления',
         failed: 'сбой',
+        canceled: 'отменён',
+      },
+      runtimeStages: {
+        plan: 'планирование',
+        retrieve: 'сбор доказательств',
+        rerank: 'переранжирование',
+        assemble_context: 'сборка контекста',
+        answer: 'генерация ответа',
+        verify: 'проверка',
+        extract_graph: 'извлечение графа',
+        structured_preparation: 'структурная подготовка',
+        technical_fact_extraction: 'извлечение технических фактов',
+        recovery: 'восстановление',
+        persist: 'сохранение',
+      },
+      policyDecisionKinds: {
+        reject: 'Отклонено',
+        terminate: 'Остановлено',
+        allow: 'Разрешено',
+      },
+      policyTargetKinds: {
+        model_request: 'запрос к модели',
+        tool_request: 'запрос к инструменту',
+        tool_result: 'результат инструмента',
+        stage_transition: 'переход стадии',
+        final_outcome: 'финальный результат',
       },
       bundleStates: {
         ready: 'готов',
@@ -362,7 +422,7 @@ const ru = {
       documents: 'Документы',
       documentsHint: 'Все файлы доступны для поиска и графа.',
       documentsGraphSparseHint:
-        'Читаемых {readable}, graph-sparse {graphSparse}, в графе уже подтверждено {graphReady}.',
+        'Читаемых {readable}, с редким графом {graphSparse}, в графе уже подтверждено {graphReady}.',
       nextCheck: 'Следующая проверка',
       reviewValue: '{count} пункт(ов) внимания',
       reviewHint: 'Сначала проверьте активные предупреждения.',
@@ -387,11 +447,11 @@ const ru = {
     narrative: {
       empty: 'Загрузите файлы, чтобы появился обзор библиотеки.',
       attention:
-        'Ошибок {failed}, в работе {inFlight}, читаемых {readable}, graph-sparse {graphSparse}, в графе {graphReady}, граф {graph}.',
+        'Ошибок {failed}, в работе {inFlight}, читаемых {readable}, с редким графом {graphSparse}, в графе {graphReady}, граф {graph}.',
       active:
-        'Документов {total}, в работе {inFlight}, читаемых {readable}, graph-sparse {graphSparse}, в графе {graphReady}, граф {graph}.',
+        'Документов {total}, в работе {inFlight}, читаемых {readable}, с редким графом {graphSparse}, в графе {graphReady}, граф {graph}.',
       settled:
-        'Документов {total}, читаемых {readable}, graph-sparse {graphSparse}, в графе {graphReady}, граф {graph}.',
+        'Документов {total}, читаемых {readable}, с редким графом {graphSparse}, в графе {graphReady}, граф {graph}.',
     },
     narrativeCalm: {
       single: 'В библиотеке один документ. Можно открыть документы или перейти к графу.',
@@ -430,7 +490,7 @@ const ru = {
       warningsAction: 'Подробнее',
       graphSparseTitle: 'Графовое покрытие ещё редкое',
       graphSparseMessage:
-        'Читаемых документов {readable}, graph-sparse документов {graphSparse}; графу ещё нужна более сильная связность.',
+        'Читаемых документов {readable}, документов с редким графом {graphSparse}; графу ещё нужна более сильная связность.',
       graphSparseAction: 'Открыть документы',
       graphTitle: 'Граф знаний',
       graphMessage: 'Граф {status} — это нормально, данные скоро обновятся.',
@@ -448,17 +508,17 @@ const ru = {
     chart: {
       eyebrow: 'Статус библиотеки',
       title: 'Срез статусов',
-      subtitle: 'Граф готов, читаемо, graph-sparse, в работе и с ошибками.',
+      subtitle: 'Граф готов, читаемо, покрытие редкое, в работе и с ошибками.',
       total: 'Всего документов',
       empty: 'Нет данных по статусам.',
       graphReady: 'В графе',
-      graphSparse: 'Читаемо или graph-sparse',
+      graphSparse: 'Читаемо или граф ещё редкий',
       processing: 'В работе',
       failed: 'Ошибки',
       summaryAllReady: 'Все {count} документов готовы.',
       summarySingleStatus: '{count} документ(ов) сейчас в статусе «{status}».',
       summaryMixed:
-        'В графе {graphReady}, читаемо или graph-sparse {graphSparse}, в работе {processing}, с ошибкой {failed}.',
+        'В графе {graphReady}, читаемо или граф ещё редкий {graphSparse}, в работе {processing}, с ошибкой {failed}.',
     },
   },
   dialogs: {
@@ -513,7 +573,7 @@ const ru = {
         documents: 'Документы',
         inFlight: 'В работе',
         readable: 'Читаемо',
-        graphSparse: 'Graph-sparse',
+        graphSparse: 'Граф редкий',
       },
       table: {
         name: 'Название',
@@ -527,9 +587,9 @@ const ru = {
         title: 'В обработке: {count}',
         queued: 'В очереди: {count}',
         processing: 'Обрабатывается: {count}',
-        readinessTitle: 'Покрытие ещё сходится: читаемых {readable}, graph-sparse {graphSparse}',
+        readinessTitle: 'Покрытие ещё сходится: читаемых {readable}, с редким графом {graphSparse}',
         readable: 'Только читаемый текст: {count}',
-        graphSparse: 'Graph-sparse: {count}',
+        graphSparse: 'Граф редкий: {count}',
         webRunTitle: 'Активных web-запусков: {count}',
         webRuns: '{count} web-запуск(ов) · ещё в очереди или обработке {pages} стр.',
       },
@@ -1575,7 +1635,7 @@ const ru = {
     sparseDocumentsDetail: 'Документов в графе сейчас: {count}.',
     sparseQueueDetail: 'Ещё обрабатывается документ(ов): {processing}.',
     sparseReadinessDetail:
-      'Читаемых документов {readable}, graph-sparse документов {graphSparse}; графовое покрытие ещё нужно усилить.',
+      'Читаемых документов {readable}, документов с редким графом {graphSparse}; графовое покрытие ещё нужно усилить.',
     sparseCatchUpDetail: 'Граф ещё догоняет {count} документ(ов), уже готовых для поиска.',
     sparseGenerationDetail: 'Текущее состояние извлечения графа: {state}.',
     failedTitle: 'Обновление графа не удалось',
@@ -1621,11 +1681,27 @@ const ru = {
       eyebrow: 'Покрытие графа',
       processing: 'В обработке: {count}',
       readable: 'Читаемо: {count}',
-      graphSparse: 'Graph-sparse: {count}',
+      graphSparse: 'Граф редкий: {count}',
       graphReady: 'Граф готов: {count}',
       failed: 'С ошибкой: {count}',
       typedFacts: 'У {count} документ(ов) уже есть typed facts',
       confirmed: 'У {count} документ(ов) графовое покрытие уже подтверждено',
+    },
+    workbenchSummary: {
+      eyebrow: 'Сводка покрытия',
+      title: 'Что происходит в библиотеке',
+      loading: 'Подтягиваем текущее состояние графа и готовности документов.',
+      empty: 'Графу ещё нечего показать на canvas, но здесь уже видно, чего не хватает до первого устойчивого вида.',
+      sparse: 'Покрытие уже растёт, но библиотеке ещё не хватает устойчивых сущностей и связей для полноценного canvas.',
+      failed: 'Последняя проекция графа не сошлась. Ниже видно, в каком состоянии библиотека осталась после сбоя.',
+      updatedAt: 'Последнее обновление: {time}',
+      metrics: {
+        tracked: 'Документы',
+        graphReady: 'В графе',
+        converging: 'Покрытие сходится',
+        processing: 'В работе',
+        failed: 'Ошибки',
+      },
     },
     hud: {
       state: 'Состояние',
@@ -1657,7 +1733,7 @@ const ru = {
     rebuildBacklog: '{count} документ(ов) ещё в очереди или перестраивают покрытие графа.',
     readyNoGraph: 'У {count} обработанных документов покрытие графа всё ещё редкое.',
     toolbarBacklog: '{count} в backlog',
-    toolbarReadyNoGraph: '{count} graph-sparse',
+    toolbarReadyNoGraph: '{count} с редким графом',
     toolbarFilteredArtifacts: '{count} отфильтровано',
     artifacts: 'Артефакты',
     artifactsHidden: 'Скрыты',

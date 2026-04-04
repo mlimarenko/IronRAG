@@ -1178,6 +1178,8 @@ async fn mcp_tools_list_respects_system_workspace_library_and_document_grants() 
         assert!(system_tools.contains(&"upload_documents".to_string()));
         assert!(system_tools.contains(&"update_document".to_string()));
         assert!(system_tools.contains(&"get_mutation_status".to_string()));
+        assert!(system_tools.contains(&"get_runtime_execution".to_string()));
+        assert!(system_tools.contains(&"get_runtime_execution_trace".to_string()));
         assert!(system_tools.contains(&"submit_web_ingest_run".to_string()));
         assert!(system_tools.contains(&"get_web_ingest_run".to_string()));
         assert!(system_tools.contains(&"list_web_ingest_run_pages".to_string()));
@@ -1191,6 +1193,8 @@ async fn mcp_tools_list_respects_system_workspace_library_and_document_grants() 
         assert!(workspace_tools.contains(&"upload_documents".to_string()));
         assert!(workspace_tools.contains(&"update_document".to_string()));
         assert!(workspace_tools.contains(&"get_mutation_status".to_string()));
+        assert!(workspace_tools.contains(&"get_runtime_execution".to_string()));
+        assert!(workspace_tools.contains(&"get_runtime_execution_trace".to_string()));
         assert!(workspace_tools.contains(&"submit_web_ingest_run".to_string()));
         assert!(workspace_tools.contains(&"get_web_ingest_run".to_string()));
         assert!(workspace_tools.contains(&"list_web_ingest_run_pages".to_string()));
@@ -1204,6 +1208,8 @@ async fn mcp_tools_list_respects_system_workspace_library_and_document_grants() 
         assert!(library_tools.contains(&"upload_documents".to_string()));
         assert!(library_tools.contains(&"update_document".to_string()));
         assert!(library_tools.contains(&"get_mutation_status".to_string()));
+        assert!(library_tools.contains(&"get_runtime_execution".to_string()));
+        assert!(library_tools.contains(&"get_runtime_execution_trace".to_string()));
         assert!(library_tools.contains(&"submit_web_ingest_run".to_string()));
         assert!(library_tools.contains(&"get_web_ingest_run".to_string()));
         assert!(library_tools.contains(&"list_web_ingest_run_pages".to_string()));
@@ -1217,6 +1223,8 @@ async fn mcp_tools_list_respects_system_workspace_library_and_document_grants() 
         assert!(!document_tools.contains(&"upload_documents".to_string()));
         assert!(document_tools.contains(&"update_document".to_string()));
         assert!(document_tools.contains(&"get_mutation_status".to_string()));
+        assert!(document_tools.contains(&"get_runtime_execution".to_string()));
+        assert!(document_tools.contains(&"get_runtime_execution_trace".to_string()));
         assert!(!document_tools.contains(&"submit_web_ingest_run".to_string()));
         assert!(!document_tools.contains(&"get_web_ingest_run".to_string()));
         assert!(!document_tools.contains(&"list_web_ingest_run_pages".to_string()));

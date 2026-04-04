@@ -198,7 +198,6 @@ pub fn sample_mcp_mutation_receipt(
             .to_string(),
         idempotency_key: "mcp-upload-001".to_string(),
         payload_identity: Some("sha256:payload".to_string()),
-        runtime_tracking_id: Some("track-upload-001".to_string()),
         status: serde_json::to_string(&McpMutationReceiptStatus::Accepted)
             .unwrap()
             .trim_matches('"')

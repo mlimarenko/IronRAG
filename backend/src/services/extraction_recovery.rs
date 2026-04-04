@@ -4,61 +4,24 @@ use crate::{
 };
 
 const MIN_SECOND_PASS_WORD_COUNT: usize = 12;
+const MAX_RECOVERY_SUMMARY_CHARS: usize = 240;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParserRepairClassification {
-    pub should_attempt: bool,
-    pub trigger_reason: Option<String>,
-    pub repair_candidate: Option<String>,
-    pub issue_summary: Option<String>,
+pub struct RecoveryDecisionSummary {
+    pub reason_code: String,
+    pub reason_summary_redacted: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecondPassTrigger {
     pub should_attempt: bool,
-    pub trigger_reason: Option<String>,
-    pub issue_summary: Option<String>,
+    pub decision: Option<RecoveryDecisionSummary>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct ExtractionRecoveryService;
 
 impl ExtractionRecoveryService {
-    #[must_use]
-    pub fn classify_parser_repair(
-        &self,
-        raw_output: &str,
-        enabled: bool,
-    ) -> ParserRepairClassification {
-        let trimmed = raw_output.trim();
-        if !enabled || trimmed.is_empty() {
-            return ParserRepairClassification {
-                should_attempt: false,
-                trigger_reason: None,
-                repair_candidate: None,
-                issue_summary: None,
-            };
-        }
-
-        let repair_candidate = repair_graph_extraction_output(trimmed);
-        let trigger_reason = repair_candidate.as_ref().map(|candidate| {
-            if candidate.contains("\"entities\"") || candidate.contains("\"relations\"") {
-                "malformed_json_sections".to_string()
-            } else {
-                "malformed_json_wrapper".to_string()
-            }
-        });
-
-        ParserRepairClassification {
-            should_attempt: repair_candidate.is_some(),
-            trigger_reason,
-            repair_candidate,
-            issue_summary: Some(
-                "The extraction output looked malformed but still salvageable.".to_string(),
-            ),
-        }
-    }
-
     #[must_use]
     pub fn classify_second_pass(
         &self,
@@ -70,59 +33,61 @@ impl ExtractionRecoveryService {
         max_attempts: usize,
     ) -> SecondPassTrigger {
         if !enabled || attempt_no >= max_attempts {
-            return SecondPassTrigger {
-                should_attempt: false,
-                trigger_reason: None,
-                issue_summary: None,
-            };
+            return SecondPassTrigger { should_attempt: false, decision: None };
         }
 
         let word_count = chunk_text.split_whitespace().count();
         if word_count < MIN_SECOND_PASS_WORD_COUNT {
-            return SecondPassTrigger {
-                should_attempt: false,
-                trigger_reason: None,
-                issue_summary: None,
-            };
+            return SecondPassTrigger { should_attempt: false, decision: None };
         }
 
         let total = entity_count.saturating_add(relationship_count);
         if entity_count == 0 && relationship_count > 0 {
             return SecondPassTrigger {
                 should_attempt: true,
-                trigger_reason: Some("inconsistent_relations_without_entities".to_string()),
-                issue_summary: Some(
-                    "Relationships were extracted without enough entity support.".to_string(),
-                ),
+                decision: Some(self.recovery_decision(
+                    "inconsistent_relations_without_entities",
+                    "Relationships were extracted without enough entity support.",
+                )),
             };
         }
         if total <= 1 {
             return SecondPassTrigger {
                 should_attempt: true,
-                trigger_reason: Some("sparse_extraction".to_string()),
-                issue_summary: Some(
-                    "The extraction result looked too sparse for the chunk content.".to_string(),
-                ),
+                decision: Some(self.recovery_decision(
+                    "sparse_extraction",
+                    "The extraction result looked too sparse for the chunk content.",
+                )),
             };
         }
         if relationship_count > entity_count.saturating_add(1) {
             return SecondPassTrigger {
                 should_attempt: true,
-                trigger_reason: Some("inconsistent_relation_density".to_string()),
-                issue_summary: Some(
-                    "The extraction result looked internally inconsistent.".to_string(),
-                ),
+                decision: Some(self.recovery_decision(
+                    "inconsistent_relation_density",
+                    "The extraction result looked internally inconsistent.",
+                )),
             };
         }
 
-        SecondPassTrigger { should_attempt: false, trigger_reason: None, issue_summary: None }
+        SecondPassTrigger { should_attempt: false, decision: None }
+    }
+
+    #[must_use]
+    pub fn redact_recovery_summary(&self, summary: &str) -> String {
+        let normalized = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+        let trimmed = normalized.trim();
+        if trimmed.chars().count() <= MAX_RECOVERY_SUMMARY_CHARS {
+            return trimmed.to_string();
+        }
+        let truncated = trimmed.chars().take(MAX_RECOVERY_SUMMARY_CHARS).collect::<String>();
+        format!("{truncated}...")
     }
 
     #[must_use]
     pub fn classify_outcome(
         &self,
         provider_attempt_count: usize,
-        parser_repair_applied: bool,
         second_pass_applied: bool,
         partial: bool,
         failed: bool,
@@ -131,7 +96,7 @@ impl ExtractionRecoveryService {
             ExtractionOutcomeStatus::Failed
         } else if partial {
             ExtractionOutcomeStatus::Partial
-        } else if parser_repair_applied || second_pass_applied || provider_attempt_count > 1 {
+        } else if second_pass_applied || provider_attempt_count > 1 {
             ExtractionOutcomeStatus::Recovered
         } else {
             ExtractionOutcomeStatus::Clean
@@ -140,7 +105,6 @@ impl ExtractionRecoveryService {
         ExtractionRecoverySummary {
             warning: warning_for_status(&status),
             status,
-            parser_repair_applied,
             second_pass_applied,
         }
     }
@@ -154,8 +118,6 @@ impl ExtractionRecoveryService {
             return None;
         }
 
-        let parser_repair_applied =
-            attempts.iter().any(|attempt| attempt.recovery_kind == "parser_repair");
         let second_pass_applied =
             attempts.iter().any(|attempt| attempt.recovery_kind == "second_pass");
         let status = if attempts.iter().any(|attempt| attempt.status == "failed") {
@@ -171,9 +133,19 @@ impl ExtractionRecoveryService {
         Some(ExtractionRecoverySummary {
             warning: warning_for_status(&status),
             status,
-            parser_repair_applied,
             second_pass_applied,
         })
+    }
+
+    fn recovery_decision(
+        &self,
+        reason_code: &str,
+        reason_summary: &str,
+    ) -> RecoveryDecisionSummary {
+        RecoveryDecisionSummary {
+            reason_code: reason_code.to_string(),
+            reason_summary_redacted: self.redact_recovery_summary(reason_summary),
+        }
     }
 }
 
@@ -195,99 +167,11 @@ fn warning_for_status(status: &ExtractionOutcomeStatus) -> Option<String> {
     }
 }
 
-fn repair_graph_extraction_output(output_text: &str) -> Option<String> {
-    let normalized = normalize_jsonish_text(output_text);
-    let mut candidates = Vec::new();
-    if let Some(candidate) = synthesize_root_object_from_sections(&normalized) {
-        candidates.push(candidate);
-    }
-    if normalized != output_text.trim() {
-        candidates.push(normalized.clone());
-    }
-
-    candidates.into_iter().find(|candidate| !candidate.trim().is_empty())
-}
-
-fn normalize_jsonish_text(value: &str) -> String {
-    value
-        .replace(['\u{2018}', '\u{2019}'], "'")
-        .replace(['\u{201C}', '\u{201D}'], "\"")
-        .replace('\u{00A0}', " ")
-        .replace('\u{200B}', "")
-        .trim()
-        .to_string()
-}
-
-fn synthesize_root_object_from_sections(value: &str) -> Option<String> {
-    let entities =
-        extract_named_array_fragment(value, "entities").unwrap_or_else(|| "[]".to_string());
-    let relations =
-        extract_named_array_fragment(value, "relations").unwrap_or_else(|| "[]".to_string());
-    if entities == "[]" && relations == "[]" {
-        return None;
-    }
-    Some(format!("{{\"entities\":{entities},\"relations\":{relations}}}"))
-}
-
-fn extract_named_array_fragment(value: &str, key: &str) -> Option<String> {
-    let lower = value.to_ascii_lowercase();
-    let needle = key.to_ascii_lowercase();
-    let key_index = lower.find(&needle)?;
-    let array_start = value[key_index..].find('[')? + key_index;
-    let array_end = find_matching_bracket(value, array_start)?;
-    Some(value[array_start..=array_end].trim().to_string())
-}
-
-fn find_matching_bracket(value: &str, start_index: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (index, ch) in value.char_indices().skip_while(|(index, _)| *index < start_index) {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' && in_string {
-            escaped = true;
-            continue;
-        }
-        if ch == '"' {
-            in_string = !in_string;
-            continue;
-        }
-        if in_string {
-            continue;
-        }
-        match ch {
-            '[' => depth += 1,
-            ']' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some(index);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use crate::domains::graph_quality::ExtractionOutcomeStatus;
 
     use super::*;
-
-    #[test]
-    fn classifies_parser_repair_for_named_sections() {
-        let service = ExtractionRecoveryService;
-        let decision =
-            service.classify_parser_repair("entities:[{\"label\":\"OpenAI\"}] relations:[]", true);
-
-        assert!(decision.should_attempt);
-        assert_eq!(decision.trigger_reason.as_deref(), Some("malformed_json_sections"));
-        assert!(decision.repair_candidate.is_some());
-    }
 
     #[test]
     fn classifies_second_pass_for_sparse_output() {
@@ -302,14 +186,17 @@ mod tests {
         );
 
         assert!(decision.should_attempt);
-        assert_eq!(decision.trigger_reason.as_deref(), Some("sparse_extraction"));
+        assert_eq!(
+            decision.decision.as_ref().map(|decision| decision.reason_code.as_str()),
+            Some("sparse_extraction")
+        );
     }
 
     #[test]
     fn classifies_partial_and_failed_outcomes() {
         let service = ExtractionRecoveryService;
-        let partial = service.classify_outcome(2, false, true, true, false);
-        let failed = service.classify_outcome(2, false, false, false, true);
+        let partial = service.classify_outcome(2, true, true, false);
+        let failed = service.classify_outcome(2, false, false, true);
 
         assert_eq!(partial.status, ExtractionOutcomeStatus::Partial);
         assert!(partial.second_pass_applied);

@@ -11,7 +11,7 @@ use crate::{
     domains::iam::{
         ApiToken, Grant, GrantResourceKind, Principal, PrincipalKind, WorkspaceMembership,
     },
-    infra::repositories::{audit_repository, iam_repository},
+    infra::repositories::{audit_repository, iam_repository, query_repository, runtime_repository},
     interfaces::http::router_support::ApiError,
     services::ai_catalog_service::{
         ApplyBootstrapAiSetupCommand, BootstrapAiBindingInput, BootstrapAiCredentialInput,
@@ -112,6 +112,13 @@ pub struct EffectiveGrantResolution {
     pub workspace_memberships: Vec<WorkspaceMembership>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct RuntimeExecutionAccessScope {
+    pub workspace_id: Uuid,
+    pub library_id: Uuid,
+    pub document_id: Option<Uuid>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CreateGrantCommand {
     pub principal_id: Uuid,
@@ -126,6 +133,77 @@ impl IamService {
     #[must_use]
     pub const fn new() -> Self {
         Self
+    }
+
+    pub async fn resolve_runtime_execution_access_scope(
+        &self,
+        state: &AppState,
+        runtime_execution: &runtime_repository::RuntimeExecutionRow,
+    ) -> Result<RuntimeExecutionAccessScope, ApiError> {
+        match runtime_execution.owner_kind {
+            crate::domains::agent_runtime::RuntimeExecutionOwnerKind::QueryExecution => {
+                let execution = query_repository::get_execution_by_id(
+                    &state.persistence.postgres,
+                    runtime_execution.owner_id,
+                )
+                .await
+                .map_err(|_| ApiError::Internal)?
+                .ok_or_else(|| {
+                    ApiError::resource_not_found("query_execution", runtime_execution.owner_id)
+                })?;
+                Ok(RuntimeExecutionAccessScope {
+                    workspace_id: execution.workspace_id,
+                    library_id: execution.library_id,
+                    document_id: None,
+                })
+            }
+            crate::domains::agent_runtime::RuntimeExecutionOwnerKind::GraphExtractionAttempt => {
+                let extraction =
+                    crate::infra::repositories::get_runtime_graph_extraction_record_by_id(
+                        &state.persistence.postgres,
+                        runtime_execution.owner_id,
+                    )
+                    .await
+                    .map_err(|_| ApiError::Internal)?
+                    .ok_or_else(|| {
+                        ApiError::resource_not_found(
+                            "runtime_graph_extraction",
+                            runtime_execution.owner_id,
+                        )
+                    })?;
+                let library = crate::infra::repositories::catalog_repository::get_library_by_id(
+                    &state.persistence.postgres,
+                    extraction.project_id,
+                )
+                .await
+                .map_err(|_| ApiError::Internal)?
+                .ok_or_else(|| ApiError::resource_not_found("library", extraction.project_id))?;
+                Ok(RuntimeExecutionAccessScope {
+                    workspace_id: library.workspace_id,
+                    library_id: library.id,
+                    document_id: Some(extraction.document_id),
+                })
+            }
+            crate::domains::agent_runtime::RuntimeExecutionOwnerKind::StructuredPreparation
+            | crate::domains::agent_runtime::RuntimeExecutionOwnerKind::TechnicalFactExtraction => {
+                let revision = state
+                    .arango_document_store
+                    .get_revision(runtime_execution.owner_id)
+                    .await
+                    .map_err(|_| ApiError::Internal)?
+                    .ok_or_else(|| {
+                        ApiError::resource_not_found(
+                            "knowledge_revision",
+                            runtime_execution.owner_id,
+                        )
+                    })?;
+                Ok(RuntimeExecutionAccessScope {
+                    workspace_id: revision.workspace_id,
+                    library_id: revision.library_id,
+                    document_id: Some(revision.document_id),
+                })
+            }
+        }
     }
 
     /// Claims the first canonical administrator explicitly through the IAM surface.

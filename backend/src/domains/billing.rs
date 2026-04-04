@@ -3,6 +3,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::domains::agent_runtime::RuntimeTaskKind;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PricingCapability {
@@ -57,6 +59,7 @@ pub enum RuntimeStageBillingPolicy {
 #[serde(rename_all = "snake_case")]
 pub enum BillingExecutionOwnerKind {
     QueryExecution,
+    GraphExtractionAttempt,
     IngestAttempt,
 }
 
@@ -68,6 +71,8 @@ pub struct BillingProviderCall {
     pub binding_id: Option<Uuid>,
     pub owning_execution_kind: BillingExecutionOwnerKind,
     pub owning_execution_id: Uuid,
+    pub runtime_execution_id: Option<Uuid>,
+    pub runtime_task_kind: Option<RuntimeTaskKind>,
     pub provider_catalog_id: Uuid,
     pub model_catalog_id: Uuid,
     pub call_kind: String,

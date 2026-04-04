@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { resolveDashboardVisibleMetrics, type DashboardMetric } from 'src/models/ui/dashboard'
+import type { DashboardMetric } from 'src/models/ui/dashboard'
 
 const props = defineProps<{
   metrics: DashboardMetric[]
 }>()
 
-const tiles = computed(() => resolveDashboardVisibleMetrics(props.metrics))
+const tiles = computed(() => props.metrics)
 
 const columnCount = computed(() => Math.max(1, Math.min(tiles.value.length, 4)))
 

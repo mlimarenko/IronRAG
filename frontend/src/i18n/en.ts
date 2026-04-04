@@ -187,9 +187,24 @@ const en = {
       executing: 'The assistant is assembling grounded context and drafting an answer…',
     },
     progress: {
-      retrieving: 'Retrieving relevant documents',
+      planning: 'Planning and collecting evidence',
       grounding: 'Grounding graph and evidence',
-      answering: 'Drafting the answer',
+      response: 'Drafting the response',
+    },
+    errors: {
+      queryRetrieveFailed:
+        'The assistant could not collect grounded evidence for this question. Check the active AI bindings and provider credentials, then try again.',
+      queryContextAssemblyFailed:
+        'The assistant could not assemble the grounded context for this question. Refresh the library state and try again.',
+      queryAnswerFailed:
+        'The assistant could not finish generating the answer. Check the active provider settings, then try again.',
+      queryPersistFailed:
+        'The assistant generated a result but could not persist it. Retry the request.',
+      runtimePolicyRejected:
+        'The runtime policy rejected this answer run before it could complete.',
+      runtimePolicyTerminated:
+        'The runtime policy terminated this answer run after it had already started.',
+      runtimePolicyBlocked: 'The runtime policy blocked this answer run.',
     },
     verification: {
       eyebrow: 'Answer verification',
@@ -202,6 +217,20 @@ const en = {
       },
       messages: {
         literalNotGrounded: 'Literal `{literal}` was not found in the selected evidence.',
+      },
+      policyStates: {
+        rejected: {
+          title: 'Runtime policy rejected the answer run',
+          body: 'The runtime policy explicitly rejected this execution before it could complete. Review the policy intervention details in the answer trace.',
+        },
+        terminated: {
+          title: 'Runtime policy terminated the answer run',
+          body: 'The runtime policy stopped this execution after it had already started. Review the policy intervention details in the answer trace.',
+        },
+        blocked: {
+          title: 'Runtime policy blocked the answer run',
+          body: 'The runtime policy blocked this execution. Review the policy intervention details in the answer trace.',
+        },
       },
       states: {
         not_run: {
@@ -216,7 +245,7 @@ const en = {
           title: 'Answer is only partially supported',
           body: 'Some parts of the answer are grounded, but parts of the requested detail remain weaker than the selected evidence.',
         },
-        conflicting_evidence: {
+        conflicting: {
           title: 'Selected evidence conflicts',
           body: 'The current evidence bundle contains conflicting technical facts, so the answer should be treated as unresolved until the conflict is reviewed.',
         },
@@ -229,6 +258,7 @@ const en = {
           body: 'The answer could not be verified against the canonical evidence bundle. Review the warning list before relying on it.',
         },
       },
+      runtimeFailureCode: 'Runtime failure code: {code}',
     },
     readinessWarning: {
       title: 'Library coverage is still settling',
@@ -277,15 +307,47 @@ const en = {
       executingTitle: 'Answer in progress',
       executionTitle: 'Latest grounded run',
       executionState: 'State: {state}',
+      activeStage: 'Stage: {stage}',
       startedAt: 'Started: {value}',
       completedAt: 'Completed: {value}',
       failureCode: 'Failure code: {value}',
+      runtimeStagesLabel: 'Executed stages',
+      policyTitle: 'Policy interventions',
+      policyCounts: '{rejectCount} rejected · {terminateCount} terminated',
       bundleLabel: 'Context',
       bundleState: 'Context {state} · mode {strategy}',
       executionStates: {
-        retrieving: 'retrieving',
+        accepted: 'accepted',
+        running: 'running',
         completed: 'completed',
+        recovered: 'recovered',
         failed: 'failed',
+        canceled: 'canceled',
+      },
+      runtimeStages: {
+        plan: 'planning',
+        retrieve: 'evidence retrieval',
+        rerank: 'reranking',
+        assemble_context: 'assembling context',
+        answer: 'response generation',
+        verify: 'verification',
+        extract_graph: 'graph extraction',
+        structured_preparation: 'structured preparation',
+        technical_fact_extraction: 'technical fact extraction',
+        recovery: 'recovery',
+        persist: 'persistence',
+      },
+      policyDecisionKinds: {
+        reject: 'Rejected',
+        terminate: 'Terminated',
+        allow: 'Allowed',
+      },
+      policyTargetKinds: {
+        model_request: 'model request',
+        tool_request: 'tool request',
+        tool_result: 'tool result',
+        stage_transition: 'stage transition',
+        final_outcome: 'final outcome',
       },
       bundleStates: {
         ready: 'ready',
@@ -1628,6 +1690,24 @@ const en = {
       failed: '{count} failed',
       typedFacts: '{count} document(s) expose typed facts',
       confirmed: '{count} document(s) already have confirmed graph coverage',
+    },
+    workbenchSummary: {
+      eyebrow: 'Coverage summary',
+      title: 'What is happening in this library',
+      loading: 'Fetching the current graph and document-readiness state.',
+      empty: 'The graph still has nothing stable to show on the canvas, but this summary makes the blockers explicit.',
+      sparse:
+        'Coverage is already moving forward, but the library still lacks enough stable entities and links for a full canvas.',
+      failed:
+        'The last graph projection failed. This summary shows the library state that remained after the failure.',
+      updatedAt: 'Last updated: {time}',
+      metrics: {
+        tracked: 'Documents',
+        graphReady: 'On graph',
+        converging: 'Coverage converging',
+        processing: 'Processing',
+        failed: 'Failed',
+      },
     },
     hud: {
       state: 'State',

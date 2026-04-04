@@ -5,6 +5,7 @@ import type {
   KnowledgeBundleRelationReference,
   KnowledgeContextBundleDetail,
   QueryExecutionDetail,
+  RuntimePolicyDecisionSummary,
 } from 'src/services/api/query'
 import { useDisplayFormatters } from 'src/composables/useDisplayFormatters'
 import { useI18n } from 'vue-i18n'
@@ -41,16 +42,37 @@ function humanizeToken(value: string): string {
   return value.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
-function localizedExecutionState(state: string): string {
+function localizedLifecycleState(state: string): string {
   const key = `assistant.evidence.executionStates.${state}`
   const translated = t(key)
   return translated === key ? humanizeToken(state) : translated
+}
+
+function localizedRuntimeStage(stage: string, fallbackLabel?: string | null): string {
+  if (fallbackLabel) {
+    return fallbackLabel
+  }
+  const key = `assistant.evidence.runtimeStages.${stage}`
+  const translated = t(key)
+  return translated === key ? humanizeToken(stage) : translated
 }
 
 function localizedBundleState(state: string): string {
   const key = `assistant.evidence.bundleStates.${state}`
   const translated = t(key)
   return translated === key ? humanizeToken(state) : translated
+}
+
+function localizedPolicyDecisionKind(decisionKind: string): string {
+  const key = `assistant.evidence.policyDecisionKinds.${decisionKind}`
+  const translated = t(key)
+  return translated === key ? humanizeToken(decisionKind) : translated
+}
+
+function localizedPolicyTargetKind(targetKind: string): string {
+  const key = `assistant.evidence.policyTargetKinds.${targetKind}`
+  const translated = t(key)
+  return translated === key ? humanizeToken(targetKind) : translated
 }
 
 function localizedBlockKind(kind: string): string {
@@ -106,13 +128,61 @@ const executionSummary = computed(() => {
   }
 
   return {
-    state: props.execution.execution.executionState,
+    state: props.execution.runtimeSummary.lifecycleState,
+    activeStage: props.execution.runtimeSummary.activeStage,
+    stageSummaries: props.execution.runtimeStageSummaries,
+    policySummary: props.execution.runtimeSummary.policySummary,
     queryText: props.execution.execution.queryText,
-    startedAt: props.execution.execution.startedAt,
-    completedAt: props.execution.execution.completedAt,
-    failureCode: props.execution.execution.failureCode,
+    startedAt: props.execution.runtimeSummary.acceptedAt,
+    completedAt: props.execution.runtimeSummary.completedAt,
+    failureCode:
+      props.execution.runtimeSummary.failureCode ?? props.execution.execution.failureCode,
   }
 })
+
+const activeStageLabel = computed(() => {
+  const summary = executionSummary.value
+  if (!summary?.activeStage) {
+    return null
+  }
+  const stage = summary.stageSummaries.find((item) => item.stageKind === summary.activeStage)
+  return localizedRuntimeStage(summary.activeStage, stage?.stageLabel ?? null)
+})
+
+const runtimeStageHistory = computed(() => {
+  if (!props.execution) {
+    return []
+  }
+  return props.execution.runtimeStageSummaries.map((item) => ({
+    key: item.stageKind,
+    label: localizedRuntimeStage(item.stageKind, item.stageLabel),
+    active: item.stageKind === props.execution?.runtimeSummary.activeStage,
+  }))
+})
+
+const policySummary = computed(() => executionSummary.value?.policySummary ?? null)
+
+const policyInterventions = computed(() => {
+  const decisions = policySummary.value?.recentDecisions ?? []
+  return decisions.filter(
+    (decision) => decision.decisionKind === 'reject' || decision.decisionKind === 'terminate',
+  )
+})
+
+const hasPolicyIntervention = computed(
+  () =>
+    (policySummary.value?.rejectCount ?? 0) > 0 || (policySummary.value?.terminateCount ?? 0) > 0,
+)
+
+const policyDecisionItems = computed<
+  Array<RuntimePolicyDecisionSummary & { decisionLabel: string; targetLabel: string }>
+>(() =>
+  policyInterventions.value.map((decision) => ({
+    ...decision,
+    decisionLabel: localizedPolicyDecisionKind(decision.decisionKind),
+    targetLabel: localizedPolicyTargetKind(decision.targetKind),
+  })),
+)
 
 const executionMetrics = computed(() => {
   if (!props.execution) {
@@ -323,9 +393,12 @@ const referenceSections = computed(() =>
             <div class="rr-assistant-evidence__meta">
               <span>{{
                 t('assistant.evidence.executionState', {
-                  state: localizedExecutionState(executionSummary.state),
+                  state: localizedLifecycleState(executionSummary.state),
                 })
               }}</span>
+              <span v-if="activeStageLabel">
+                {{ t('assistant.evidence.activeStage', { stage: activeStageLabel }) }}
+              </span>
               <span>{{
                 t('assistant.evidence.startedAt', {
                   value: formatDateTime(executionSummary.startedAt),
@@ -353,6 +426,47 @@ const referenceSections = computed(() =>
               <strong>{{ metric.value }}</strong>
               <span>{{ metric.label }}</span>
             </div>
+          </div>
+
+          <div v-if="runtimeStageHistory.length > 0" class="rr-assistant-evidence__runtime-stages">
+            <span>{{ t('assistant.evidence.runtimeStagesLabel') }}</span>
+            <div class="rr-assistant-evidence__runtime-stage-list">
+              <span
+                v-for="stage in runtimeStageHistory"
+                :key="stage.key"
+                class="rr-assistant-evidence__runtime-stage-pill"
+                :class="{ 'rr-assistant-evidence__runtime-stage-pill--active': stage.active }"
+              >
+                {{ stage.label }}
+              </span>
+            </div>
+          </div>
+
+          <div
+            v-if="hasPolicyIntervention"
+            class="rr-assistant-evidence__policy rr-assistant-evidence__policy--intervention"
+          >
+            <div class="rr-assistant-evidence__policy-head">
+              <span>{{ t('assistant.evidence.policyTitle') }}</span>
+              <strong>
+                {{
+                  t('assistant.evidence.policyCounts', {
+                    rejectCount: policySummary?.rejectCount ?? 0,
+                    terminateCount: policySummary?.terminateCount ?? 0,
+                  })
+                }}
+              </strong>
+            </div>
+            <ul class="rr-assistant-evidence__policy-list">
+              <li
+                v-for="decision in policyDecisionItems"
+                :key="`${decision.targetKind}:${decision.decisionKind}:${decision.reasonCode}`"
+              >
+                <strong>{{ decision.decisionLabel }}</strong>
+                <span>{{ decision.targetLabel }}</span>
+                <p>{{ decision.reasonSummaryRedacted }}</p>
+              </li>
+            </ul>
           </div>
 
           <div v-if="bundle" class="rr-assistant-evidence__bundle">

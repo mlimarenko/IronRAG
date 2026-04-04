@@ -1,3 +1,6 @@
+CARGO_TARGET_DIR ?= $(CURDIR)/.cargo-target
+export CARGO_TARGET_DIR
+
 run:
 	cargo run
 

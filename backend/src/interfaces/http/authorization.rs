@@ -9,6 +9,7 @@ use crate::{
         },
         ops_repository::{self, OpsAsyncOperationRow},
         query_repository::{self, QueryConversationRow},
+        runtime_repository,
     },
     interfaces::http::{auth::AuthContext, router_support::ApiError},
 };
@@ -83,6 +84,7 @@ pub const POLICY_QUERY_RUN: &[&str] = &[
     PERMISSION_WORKSPACE_ADMIN,
     PERMISSION_IAM_ADMIN,
 ];
+pub const POLICY_RUNTIME_READ: &[&str] = POLICY_QUERY_READ;
 pub const POLICY_USAGE_READ: &[&str] =
     &[PERMISSION_OPS_READ, PERMISSION_WORKSPACE_ADMIN, PERMISSION_IAM_ADMIN];
 pub const POLICY_MCP_DISCOVERY: &[&str] = &[
@@ -402,6 +404,40 @@ pub async fn load_query_execution_and_authorize(
         execution.library_id,
         accepted_permissions,
     )?;
+    Ok(execution)
+}
+
+pub async fn load_runtime_execution_and_authorize(
+    auth: &AuthContext,
+    state: &AppState,
+    execution_id: Uuid,
+    accepted_permissions: &[&str],
+) -> Result<runtime_repository::RuntimeExecutionRow, ApiError> {
+    let execution =
+        runtime_repository::get_runtime_execution_by_id(&state.persistence.postgres, execution_id)
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .ok_or_else(|| ApiError::resource_not_found("runtime_execution", execution_id))?;
+    let scope = state
+        .canonical_services
+        .iam
+        .resolve_runtime_execution_access_scope(state, &execution)
+        .await?;
+    match scope.document_id {
+        Some(document_id) => authorize_document_permission(
+            auth,
+            scope.workspace_id,
+            scope.library_id,
+            document_id,
+            accepted_permissions,
+        )?,
+        None => authorize_library_permission(
+            auth,
+            scope.workspace_id,
+            scope.library_id,
+            accepted_permissions,
+        )?,
+    }
     Ok(execution)
 }
 

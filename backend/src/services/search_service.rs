@@ -693,10 +693,11 @@ async fn refresh_library_vector_generation_if_present(
     vector_generation: i64,
 ) -> Result<()> {
     let Some(existing) = state
-        .arango_document_store
-        .list_library_generations(library_id)
+        .canonical_services
+        .knowledge
+        .derive_library_generation_rows(state, library_id)
         .await
-        .with_context(|| format!("failed to list library generations for {}", library_id))?
+        .with_context(|| format!("failed to derive library generations for {}", library_id))?
         .into_iter()
         .next()
     else {

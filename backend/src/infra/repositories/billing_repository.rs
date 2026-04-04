@@ -11,6 +11,8 @@ pub struct BillingProviderCallRow {
     pub binding_id: Option<Uuid>,
     pub owning_execution_kind: String,
     pub owning_execution_id: Uuid,
+    pub runtime_execution_id: Option<Uuid>,
+    pub runtime_task_kind: Option<String>,
     pub provider_catalog_id: Uuid,
     pub model_catalog_id: Uuid,
     pub call_kind: String,
@@ -65,6 +67,8 @@ pub struct NewBillingProviderCall<'a> {
     pub binding_id: Option<Uuid>,
     pub owning_execution_kind: &'a str,
     pub owning_execution_id: Uuid,
+    pub runtime_execution_id: Option<Uuid>,
+    pub runtime_task_kind: Option<&'a str>,
     pub provider_catalog_id: Uuid,
     pub model_catalog_id: Uuid,
     pub call_kind: &'a str,
@@ -112,6 +116,8 @@ pub async fn create_provider_call(
             binding_id,
             owning_execution_kind,
             owning_execution_id,
+            runtime_execution_id,
+            runtime_task_kind,
             provider_catalog_id,
             model_catalog_id,
             call_kind,
@@ -119,7 +125,7 @@ pub async fn create_provider_call(
             completed_at,
             call_state
         )
-        values ($1, $2, $3, $4, $5::billing_owning_execution_kind, $6, $7, $8, $9, now(), $10, $11::billing_call_state)
+        values ($1, $2, $3, $4, $5::billing_owning_execution_kind, $6, $7, $8::runtime_task_kind, $9, $10, $11, now(), $12, $13::billing_call_state)
         returning
             id,
             workspace_id,
@@ -127,6 +133,8 @@ pub async fn create_provider_call(
             binding_id,
             owning_execution_kind::text as owning_execution_kind,
             owning_execution_id,
+            runtime_execution_id,
+            runtime_task_kind::text as runtime_task_kind,
             provider_catalog_id,
             model_catalog_id,
             call_kind,
@@ -140,6 +148,8 @@ pub async fn create_provider_call(
     .bind(input.binding_id)
     .bind(input.owning_execution_kind)
     .bind(input.owning_execution_id)
+    .bind(input.runtime_execution_id)
+    .bind(input.runtime_task_kind)
     .bind(input.provider_catalog_id)
     .bind(input.model_catalog_id)
     .bind(input.call_kind)
@@ -167,6 +177,8 @@ pub async fn update_provider_call_state(
             binding_id,
             owning_execution_kind::text as owning_execution_kind,
             owning_execution_id,
+            runtime_execution_id,
+            runtime_task_kind::text as runtime_task_kind,
             provider_catalog_id,
             model_catalog_id,
             call_kind,
@@ -194,6 +206,8 @@ pub async fn list_provider_calls_by_execution(
             binding_id,
             owning_execution_kind::text as owning_execution_kind,
             owning_execution_id,
+            runtime_execution_id,
+            runtime_task_kind::text as runtime_task_kind,
             provider_catalog_id,
             model_catalog_id,
             call_kind,

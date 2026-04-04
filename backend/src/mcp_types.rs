@@ -4,7 +4,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domains::ai::AiBindingPurpose;
+use crate::domains::{
+    agent_runtime::{
+        RuntimeActionKind, RuntimeActionState, RuntimeDecisionKind, RuntimeDecisionTargetKind,
+        RuntimeExecutionOwnerKind, RuntimeLifecycleState, RuntimePolicySummary, RuntimeStageKind,
+        RuntimeStageState, RuntimeSurfaceKind, RuntimeTaskKind,
+    },
+    ai::AiBindingPurpose,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -285,6 +292,20 @@ pub struct McpGetMutationStatusRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct McpGetRuntimeExecutionRequest {
+    #[serde(alias = "execution_id")]
+    pub execution_id: Uuid,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpGetRuntimeExecutionTraceRequest {
+    #[serde(alias = "execution_id")]
+    pub execution_id: Uuid,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct McpSubmitWebIngestRunRequest {
     #[serde(alias = "library_id")]
     pub library_id: Uuid,
@@ -353,6 +374,8 @@ pub enum McpAuditActionKind {
     UploadDocuments,
     UpdateDocument,
     GetMutationStatus,
+    GetRuntimeExecution,
+    GetRuntimeExecutionTrace,
     SubmitWebIngestRun,
     GetWebIngestRun,
     ListWebIngestRunPages,
@@ -400,10 +423,86 @@ pub struct McpReadDocumentResponse {
     pub evidence_references: Vec<McpEvidenceReference>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpRuntimeExecutionSummary {
+    pub runtime_execution_id: Uuid,
+    pub owner_kind: RuntimeExecutionOwnerKind,
+    pub owner_id: Uuid,
+    pub task_kind: RuntimeTaskKind,
+    pub surface_kind: RuntimeSurfaceKind,
+    pub contract_name: String,
+    pub contract_version: String,
+    pub lifecycle_state: RuntimeLifecycleState,
+    pub active_stage: Option<RuntimeStageKind>,
+    pub turn_budget: i32,
+    pub turn_count: i32,
+    pub parallel_action_limit: i32,
+    pub failure_code: Option<String>,
+    pub failure_summary: Option<String>,
+    pub policy_summary: RuntimePolicySummary,
+    pub accepted_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpRuntimeStageSummary {
+    pub stage_record_id: Uuid,
+    pub stage_kind: RuntimeStageKind,
+    pub stage_ordinal: i32,
+    pub attempt_no: i32,
+    pub stage_state: RuntimeStageState,
+    pub deterministic: bool,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub failure_code: Option<String>,
+    pub input_summary: serde_json::Value,
+    pub output_summary: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpRuntimeActionSummary {
+    pub action_id: Uuid,
+    pub stage_record_id: Uuid,
+    pub action_kind: RuntimeActionKind,
+    pub action_ordinal: i32,
+    pub action_state: RuntimeActionState,
+    pub provider_binding_id: Option<Uuid>,
+    pub tool_name: Option<String>,
+    pub usage: Option<serde_json::Value>,
+    pub summary: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpRuntimePolicySummary {
+    pub decision_id: Uuid,
+    pub stage_record_id: Option<Uuid>,
+    pub action_record_id: Option<Uuid>,
+    pub target_kind: RuntimeDecisionTargetKind,
+    pub decision_kind: RuntimeDecisionKind,
+    pub reason_code: String,
+    pub reason_summary: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpRuntimeExecutionTrace {
+    pub execution: McpRuntimeExecutionSummary,
+    pub stages: Vec<McpRuntimeStageSummary>,
+    pub actions: Vec<McpRuntimeActionSummary>,
+    pub policy_decisions: Vec<McpRuntimePolicySummary>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        McpCancelWebIngestRunRequest, McpGetMutationStatusRequest, McpGetWebIngestRunRequest,
+        McpCancelWebIngestRunRequest, McpGetMutationStatusRequest, McpGetRuntimeExecutionRequest,
+        McpGetRuntimeExecutionTraceRequest, McpGetWebIngestRunRequest,
         McpListWebIngestRunPagesRequest, McpReadDocumentRequest, McpSearchDocumentsRequest,
         McpSubmitWebIngestRunRequest, McpUpdateDocumentRequest, McpUploadDocumentInput,
         McpUploadDocumentsRequest,
@@ -498,6 +597,28 @@ mod tests {
         .expect("request should deserialize");
 
         assert_eq!(request.receipt_id, receipt_id);
+    }
+
+    #[test]
+    fn runtime_execution_request_accepts_snake_case_field() {
+        let execution_id = Uuid::now_v7();
+        let request: McpGetRuntimeExecutionRequest = serde_json::from_value(json!({
+            "execution_id": execution_id
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(request.execution_id, execution_id);
+    }
+
+    #[test]
+    fn runtime_execution_trace_request_accepts_snake_case_field() {
+        let execution_id = Uuid::now_v7();
+        let request: McpGetRuntimeExecutionTraceRequest = serde_json::from_value(json!({
+            "execution_id": execution_id
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(request.execution_id, execution_id);
     }
 
     #[test]
@@ -596,7 +717,6 @@ pub struct McpMutationReceipt {
     pub operation_kind: McpMutationOperationKind,
     pub idempotency_key: String,
     pub status: McpMutationReceiptStatus,
-    pub runtime_tracking_id: Option<String>,
     pub accepted_at: DateTime<Utc>,
     pub last_status_at: DateTime<Utc>,
     pub failure_kind: Option<String>,

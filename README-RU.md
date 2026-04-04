@@ -1,16 +1,10 @@
-
-
 # RustRAG
 
 ### Система знаний для документов, внутренних ботов и AI-агентов в один клик
 
 Загружайте файлы, ссылки и изображения, получайте searchable text, embeddings и граф связей, а затем используйте одну и ту же память и в UI, и через MCP.
 
-[README](./README.md) • [MCP](./MCP.md) • [MCP.ru](./MCP.ru.md)
-
-
-
-
+[README](./README.md) • [MCP](./MCP.md) • [MCP-RU](./MCP-RU.md)
 
 
 
@@ -27,9 +21,36 @@
 
 Нужен Docker с Compose v2.
 
+Выберите один сценарий запуска:
+
+### 1. Установить опубликованный релиз без клона репозитория
+
+Последний релиз:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mlimarenko/RustRAG/master/install.sh | bash
+```
+
+Конкретный тег:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mlimarenko/RustRAG/master/install.sh | bash -s -- 0.0.3
+```
+
+Скрипт создаёт каталог `./rustrag`, скачивает релизные `docker-compose.yml`, `.env.example` и `docker/nginx/default.conf`, затем поднимает опубликованные Docker Hub образы `pipingspace/rustrag-backend` и `pipingspace/rustrag-frontend`.
+
+### 2. Запустить готовые образы из клонированного репозитория
+
 ```bash
 cp .env.example .env
-docker compose up --build -d
+docker compose up -d
+```
+
+### 3. Собрать из исходников из клонированного репозитория
+
+```bash
+cp .env.example .env
+docker compose -f docker-compose-local.yml up --build -d
 ```
 
 Откройте:
@@ -47,42 +68,31 @@ RUSTRAG_PORT=8080 docker compose up -d
 
 ## Модель конфигурации
 
-Теперь у RustRAG один канонический стиль переменных приложения: `RUSTRAG_*`.
+У RustRAG один канонический стиль переменных приложения: `RUSTRAG_*`.
 
-- [`.env.example`](./.env.example): простой compose-ориентированный набор. Его копируют в `.env`.
-- [`backend/.env.example`](./backend/.env.example): более полный справочник переменных backend/worker для прямых запусков и тонкой настройки.
-- [`docker-compose.yml`](./docker-compose.yml) и [`docker-compose.ci.yml`](./docker-compose.ci.yml): compose-поверхности, которые берут значения из root `.env`.
-- [`backend/src/app/config.rs`](./backend/src/app/config.rs): встроенные значения по умолчанию.
+- `[.env.example](./.env.example)`: простой compose-ориентированный набор. Его копируют в `.env` для релизной установки, локальной сборки или внутреннего деплоя.
+- `[backend/.env.example](./backend/.env.example)`: более полный справочник переменных backend/worker для прямых запусков и тонкой настройки.
+- `[docker-compose.yml](./docker-compose.yml)`: compose-поверхность по умолчанию на готовых Docker Hub образах.
+- `[docker-compose-local.yml](./docker-compose-local.yml)`: compose-поверхность для ручной локальной сборки из исходников.
+- `[backend/src/app/config.rs](./backend/src/app/config.rs)`: встроенные значения по умолчанию.
 
-Нижний регистр, смешанные алиасы и ad-hoc варианты имён больше не считаются поддерживаемой конфигурацией.
-
-## Варианты развёртывания
-
-### 1. Локальный compose со сборкой из исходников
-
-```bash
-cp .env.example .env
-docker compose up --build -d
-```
-
-### 2. Compose с явным env-файлом
-
-```bash
-docker compose --env-file .env up --build -d
-```
-
-### 4. Прямой запуск backend / worker без compose
-
-Экспортируйте значения из [`backend/.env.example`](./backend/.env.example) и запускайте бинарники напрямую. Это удобно для локальной разработки сервисов, дебага и нестандартной оркестрации.
+Нижний регистр, смешанные алиасы и ad-hoc варианты имён не поддерживаются.
 
 ## Где смотреть переменные
 
 - Root `.env`: активный файл интерполяции для compose.
-- [`./.env.example`](./.env.example): минимальный compose-facing набор.
-- [`./backend/.env.example`](./backend/.env.example): более полный справочник runtime-конфигурации.
-- [`./docker-compose.yml`](./docker-compose.yml) и [`./docker-compose.ci.yml`](./docker-compose.ci.yml): что реально попадает в контейнеры.
-- [`./backend/src/app/config.rs`](./backend/src/app/config.rs): канонические имена настроек и встроенные дефолты.
+- `[./.env.example](./.env.example)`: минимальный compose-facing набор.
+- `[./backend/.env.example](./backend/.env.example)`: более полный справочник runtime-конфигурации.
+- `[./docker-compose.yml](./docker-compose.yml)`: дефолтная compose-поверхность на готовых образах.
+- `[./docker-compose-local.yml](./docker-compose-local.yml)`: локальная compose-поверхность со сборкой из исходников.
+- `[./backend/src/app/config.rs](./backend/src/app/config.rs)`: канонические имена настроек и встроенные дефолты.
 - `docker compose config`: итоговый отрендеренный compose после подстановки `.env`.
+
+## Релизные образы
+
+- GitHub Releases публикуют `pipingspace/rustrag-backend:<tag>` и `pipingspace/rustrag-frontend:<tag>` в Docker Hub и обновляют теги `latest`.
+- `[docker-compose.yml](./docker-compose.yml)` по умолчанию смотрит на этот релизный канал.
+- При необходимости можно зафиксировать другой тег через `RUSTRAG_BACKEND_IMAGE` и `RUSTRAG_FRONTEND_IMAGE` в `.env`.
 
 ## Стек
 
@@ -176,7 +186,7 @@ HTTP MCP встроен в продукт из коробки. Создайте 
 
 Базовая поверхность инструментов включает `list_workspaces`, `list_libraries`, `search_documents`, `read_document`, `upload_documents`, `update_document` и `get_mutation_status`. Админские инструменты доступны только при нужных правах.
 
-Быстрое подключение клиентов описано в [MCP.ru.md](./MCP.ru.md).
+Быстрое подключение клиентов описано в [MCP-RU.md](./MCP-RU.md).
 
 ## Дальнейшее развитие
 

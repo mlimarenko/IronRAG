@@ -145,14 +145,17 @@ const graphCoverageFacts = computed(() => {
 .rr-graph-coverage-card {
   position: relative;
   display: grid;
-  gap: 0.9rem;
-  width: min(32rem, calc(100vw - 3rem));
-  padding: 1.2rem 1.25rem;
+  gap: 0.95rem;
+  width: min(46rem, 100%);
+  max-width: 100%;
+  padding: 1.25rem 1.35rem;
   border: 1px solid rgba(191, 219, 254, 0.85);
-  border-radius: 1.35rem;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.97));
+  border-radius: 1.3rem;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.97)),
+    rgba(255, 255, 255, 0.96);
   box-shadow:
-    0 18px 40px rgba(15, 23, 42, 0.08),
+    0 18px 40px rgba(15, 23, 42, 0.07),
     inset 0 1px 0 rgba(255, 255, 255, 0.92);
 }
 
@@ -184,7 +187,7 @@ const graphCoverageFacts = computed(() => {
 
 .rr-graph-coverage-card.is-failed,
 .rr-graph-coverage-card.is-empty {
-  width: min(36rem, calc(100vw - 3rem));
+  width: min(48rem, 100%);
 }
 
 .rr-graph-coverage-card.is-failed::before {
@@ -207,7 +210,7 @@ const graphCoverageFacts = computed(() => {
 .rr-graph-coverage-card__copy h3 {
   margin: 0;
   color: rgba(15, 23, 42, 0.96);
-  font-size: 1.08rem;
+  font-size: 1.12rem;
   line-height: 1.2;
 }
 
@@ -245,10 +248,10 @@ const graphCoverageFacts = computed(() => {
   display: grid;
   gap: 0.45rem;
   margin: 0;
-  padding: 0.85rem 0.95rem 0.85rem 1.55rem;
+  padding: 0.9rem 1rem 0.9rem 1.6rem;
   border-radius: 1rem;
-  background: rgba(248, 250, 252, 0.76);
-  border: 1px solid rgba(191, 219, 254, 0.42);
+  background: rgba(248, 250, 252, 0.82);
+  border: 1px solid rgba(191, 219, 254, 0.38);
   color: rgba(51, 65, 85, 0.8);
   font-size: 0.84rem;
   line-height: 1.45;
@@ -258,6 +261,23 @@ const graphCoverageFacts = computed(() => {
   display: flex;
   justify-content: flex-start;
   padding-top: 0.15rem;
+}
+
+@media (max-width: 860px) {
+  .rr-graph-coverage-card {
+    width: 100%;
+    padding: 1.05rem 1rem;
+    border-radius: 1.15rem;
+  }
+
+  .rr-graph-coverage-card__copy h3 {
+    font-size: 1rem;
+  }
+
+  .rr-graph-coverage-card__copy p,
+  .rr-graph-coverage-card__details {
+    font-size: 0.8rem;
+  }
 }
 
 @media (min-width: 1400px) {

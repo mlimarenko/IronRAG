@@ -7,8 +7,11 @@ use uuid::Uuid;
 
 use rustrag_backend::{
     app::{config::Settings, state::AppState},
+    domains::agent_runtime::{RuntimeExecutionOwnerKind, RuntimeLifecycleState, RuntimeTaskKind},
     infra::{
-        arangodb::client::ArangoClient, persistence::Persistence, repositories::query_repository,
+        arangodb::client::ArangoClient,
+        persistence::Persistence,
+        repositories::{query_repository, runtime_repository},
     },
     services::{
         billing_service::{
@@ -76,6 +79,7 @@ struct BillingRollupsFixture {
     workspace_id: Uuid,
     library_id: Uuid,
     query_execution_id: Uuid,
+    query_runtime_execution_id: Uuid,
     ingest_attempt_id: Uuid,
 }
 
@@ -94,6 +98,12 @@ impl BillingRollupsFixture {
             .execute(&postgres)
             .await
             .context("failed to apply canonical 0001_init.sql for billing_rollups test")?;
+        sqlx::raw_sql(include_str!("../migrations/0002_typed_agent_runtime.sql"))
+            .execute(&postgres)
+            .await
+            .context(
+                "failed to apply canonical 0002_typed_agent_runtime.sql for billing_rollups test",
+            )?;
 
         let state = build_test_state(settings, postgres)?;
         let workspace = state
@@ -150,10 +160,33 @@ impl BillingRollupsFixture {
         )
         .await
         .context("failed to create query request turn")?;
+        let execution_id = Uuid::now_v7();
+        let runtime_execution_id = Uuid::now_v7();
+        runtime_repository::create_runtime_execution(
+            &state.persistence.postgres,
+            &runtime_repository::NewRuntimeExecution {
+                id: runtime_execution_id,
+                owner_kind: RuntimeExecutionOwnerKind::QueryExecution.as_str(),
+                owner_id: execution_id,
+                task_kind: RuntimeTaskKind::QueryAnswer.as_str(),
+                surface_kind: "rest",
+                contract_name: "query_answer",
+                contract_version: "1",
+                lifecycle_state: RuntimeLifecycleState::Running.as_str(),
+                active_stage: None,
+                turn_budget: 4,
+                turn_count: 1,
+                parallel_action_limit: 1,
+                failure_code: None,
+                failure_summary_redacted: None,
+            },
+        )
+        .await
+        .context("failed to create billing runtime execution")?;
         let query_execution = query_repository::create_execution(
             &state.persistence.postgres,
             &query_repository::NewQueryExecution {
-                execution_id: Uuid::now_v7(),
+                execution_id,
                 context_bundle_id: Uuid::now_v7(),
                 workspace_id: workspace.id,
                 library_id: library.id,
@@ -161,7 +194,7 @@ impl BillingRollupsFixture {
                 request_turn_id: Some(request_turn.id),
                 response_turn_id: None,
                 binding_id: None,
-                execution_state: "retrieving",
+                runtime_execution_id,
                 query_text: "How much did this execution cost?",
                 failure_code: None,
             },
@@ -212,6 +245,7 @@ impl BillingRollupsFixture {
             workspace_id: workspace.id,
             library_id: library.id,
             query_execution_id: query_execution.id,
+            query_runtime_execution_id: runtime_execution_id,
             ingest_attempt_id: ingest_attempt.id,
         })
     }
@@ -277,6 +311,8 @@ async fn canonical_billing_rollups_cover_query_and_ingest_executions() -> Result
                     library_id: fixture.library_id,
                     owning_execution_kind: "query_execution".to_string(),
                     owning_execution_id: fixture.query_execution_id,
+                    runtime_execution_id: Some(fixture.query_runtime_execution_id),
+                    runtime_task_kind: Some(RuntimeTaskKind::QueryPlan),
                     binding_id: None,
                     provider_kind: "openai".to_string(),
                     model_name: "gpt-5.4-mini".to_string(),
@@ -295,6 +331,7 @@ async fn canonical_billing_rollups_cover_query_and_ingest_executions() -> Result
                     workspace_id: fixture.workspace_id,
                     library_id: fixture.library_id,
                     execution_id: fixture.query_execution_id,
+                    runtime_execution_id: fixture.query_runtime_execution_id,
                     binding_id: None,
                     provider_kind: "openai".to_string(),
                     model_name: "gpt-5.4".to_string(),
@@ -320,6 +357,8 @@ async fn canonical_billing_rollups_cover_query_and_ingest_executions() -> Result
                     library_id: fixture.library_id,
                     owning_execution_kind: "query_execution".to_string(),
                     owning_execution_id: fixture.query_execution_id,
+                    runtime_execution_id: Some(fixture.query_runtime_execution_id),
+                    runtime_task_kind: Some(RuntimeTaskKind::QueryRerank),
                     binding_id: None,
                     provider_kind: "openai".to_string(),
                     model_name: "gpt-5.4-mini".to_string(),

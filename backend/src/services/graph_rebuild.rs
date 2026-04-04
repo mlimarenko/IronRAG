@@ -1,11 +1,12 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Context;
+use chrono::Utc;
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    infra::repositories,
+    infra::repositories::{self, ChunkRow, DocumentRow, content_repository},
     services::{
         graph_extract::{
             GraphExtractionCandidateSet, extraction_lifecycle_from_record,
@@ -15,8 +16,8 @@ use crate::{
             GraphMergeScope, merge_chunk_graph_candidates, reconcile_merge_support_counts,
         },
         graph_projection::{
-            GraphProjectionOutcome, GraphProjectionScope, active_projection_version,
-            ensure_empty_graph_snapshot, next_projection_version, project_canonical_graph,
+            GraphProjectionOutcome, GraphProjectionScope, ensure_empty_graph_snapshot,
+            next_projection_version, project_canonical_graph,
         },
         runtime_ingestion::{
             embed_runtime_graph_edges, embed_runtime_graph_nodes,
@@ -29,25 +30,6 @@ pub async fn rebuild_library_graph(
     state: &AppState,
     library_id: Uuid,
 ) -> anyhow::Result<GraphProjectionOutcome> {
-    if let Some(targeted_scope) = load_high_confidence_targeted_scope(state, library_id).await? {
-        let snapshot =
-            repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
-                .await
-                .context("failed to load graph snapshot before targeted rebuild")?;
-        let projection_scope =
-            GraphProjectionScope::new(library_id, active_projection_version(snapshot.as_ref()))
-                .with_targeted_refresh(
-                    parse_scope_ids(&targeted_scope.affected_node_ids_json),
-                    parse_scope_ids(&targeted_scope.affected_relationship_ids_json),
-                );
-        return run_rebuild_projection(
-            state,
-            &projection_scope,
-            "failed to apply targeted graph reconciliation rebuild",
-        )
-        .await;
-    }
-
     let snapshot =
         repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
             .await
@@ -74,28 +56,76 @@ pub async fn rebuild_library_graph(
             continue;
         }
 
-        let Some(document) =
-            repositories::get_document_by_id(&state.persistence.postgres, record.document_id)
+        let Some(document_row) =
+            content_repository::get_document_by_id(&state.persistence.postgres, record.document_id)
                 .await
                 .with_context(|| format!("failed to load document {}", record.document_id))?
         else {
             continue;
         };
-        if document.deleted_at.is_some() {
+        if document_row.deleted_at.is_some() {
             continue;
         }
+        let Some(document_head) =
+            content_repository::get_document_head(&state.persistence.postgres, record.document_id)
+                .await
+                .with_context(|| format!("failed to load document head {}", record.document_id))?
+        else {
+            continue;
+        };
         let extraction_lifecycle = extraction_lifecycle_from_record(&record);
         if extraction_lifecycle.revision_id.is_some()
-            && extraction_lifecycle.revision_id != document.current_revision_id
+            && extraction_lifecycle.revision_id != document_head.active_revision_id
         {
             continue;
         }
-        let Some(chunk) =
-            repositories::get_chunk_by_id(&state.persistence.postgres, record.chunk_id)
+        let active_revision_id =
+            extraction_lifecycle.revision_id.or(document_head.active_revision_id);
+        let revision = match active_revision_id {
+            Some(revision_id) => {
+                content_repository::get_revision_by_id(&state.persistence.postgres, revision_id)
+                    .await
+                    .with_context(|| format!("failed to load revision {}", revision_id))?
+            }
+            None => None,
+        };
+        let Some(chunk_row) =
+            content_repository::get_chunk_by_id(&state.persistence.postgres, record.chunk_id)
                 .await
                 .with_context(|| format!("failed to load chunk {}", record.chunk_id))?
         else {
             continue;
+        };
+        let document = DocumentRow {
+            id: document_row.id,
+            project_id: library_id,
+            source_id: None,
+            external_key: document_row.external_key.clone(),
+            title: revision.as_ref().and_then(|value| value.title.clone()),
+            mime_type: revision.as_ref().map(|value| value.mime_type.clone()),
+            checksum: revision.as_ref().map(|value| value.checksum.clone()),
+            current_revision_id: document_head.active_revision_id,
+            active_status: document_row.document_state.clone(),
+            active_mutation_kind: None,
+            active_mutation_status: None,
+            deleted_at: document_row.deleted_at,
+            created_at: document_row.created_at,
+            updated_at: document_head.head_updated_at,
+        };
+        let chunk = ChunkRow {
+            id: chunk_row.id,
+            document_id: document_row.id,
+            project_id: library_id,
+            ordinal: chunk_row.chunk_index,
+            content: chunk_row.normalized_text.clone(),
+            token_count: chunk_row.token_count,
+            metadata_json: serde_json::json!({
+                "revision_id": chunk_row.revision_id,
+                "start_offset": chunk_row.start_offset,
+                "end_offset": chunk_row.end_offset,
+                "text_checksum": chunk_row.text_checksum,
+            }),
+            created_at: revision.as_ref().map(|value| value.created_at).unwrap_or_else(Utc::now),
         };
         let candidates = serde_json::from_value::<GraphExtractionCandidateSet>(
             record.normalized_output_json.clone(),
@@ -105,10 +135,8 @@ pub async fn rebuild_library_graph(
             continue;
         }
 
-        let merge_scope = GraphMergeScope::new(library_id, projection_version).with_lifecycle(
-            extraction_lifecycle.revision_id.or(document.current_revision_id),
-            extraction_lifecycle.activated_by_attempt_id,
-        );
+        let merge_scope = GraphMergeScope::new(library_id, projection_version)
+            .with_lifecycle(active_revision_id, extraction_lifecycle.activated_by_attempt_id);
         let merge_outcome = merge_chunk_graph_candidates(
             &state.persistence.postgres,
             &state.bulk_ingest_hardening_services.graph_quality_guard,
@@ -171,31 +199,281 @@ pub async fn rebuild_library_graph(
     run_rebuild_projection(state, &projection_scope, "failed to project rebuilt graph").await
 }
 
+#[derive(Debug, Clone)]
+pub struct RevisionGraphReconcileOutcome {
+    pub projection: GraphProjectionOutcome,
+    pub graph_contribution_count: usize,
+    pub graph_ready: bool,
+}
+
+pub async fn reconcile_revision_graph(
+    state: &AppState,
+    library_id: Uuid,
+    document_id: Uuid,
+    revision_id: Uuid,
+    activated_by_attempt_id: Option<Uuid>,
+) -> anyhow::Result<RevisionGraphReconcileOutcome> {
+    let document_row =
+        content_repository::get_document_by_id(&state.persistence.postgres, document_id)
+            .await
+            .with_context(|| format!("failed to load content document {document_id}"))?
+            .with_context(|| format!("content document {document_id} not found"))?;
+    let document_head =
+        content_repository::get_document_head(&state.persistence.postgres, document_id)
+            .await
+            .with_context(|| format!("failed to load content document head {document_id}"))?
+            .with_context(|| format!("content document head {document_id} not found"))?;
+    let revision = content_repository::get_revision_by_id(&state.persistence.postgres, revision_id)
+        .await
+        .with_context(|| format!("failed to load content revision {revision_id}"))?
+        .with_context(|| format!("content revision {revision_id} not found"))?;
+    let revision_chunks =
+        content_repository::list_chunks_by_revision(&state.persistence.postgres, revision_id)
+            .await
+            .with_context(|| format!("failed to list chunks for content revision {revision_id}"))?;
+
+    let document = synthesize_document_row(&document_row, &document_head, Some(&revision));
+    let revision_chunk_ids = revision_chunks.iter().map(|chunk| chunk.id).collect::<BTreeSet<_>>();
+    let chunk_rows_by_id = revision_chunks
+        .iter()
+        .map(|chunk| {
+            (chunk.id, synthesize_chunk_row(chunk, document_id, library_id, revision.created_at))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let previous_active_revision_id = document_head
+        .active_revision_id
+        .filter(|active_revision_id| *active_revision_id != revision_id);
+    if let Some(previous_active_revision_id) = previous_active_revision_id {
+        repositories::delete_query_execution_references_by_document_revision(
+            &state.persistence.postgres,
+            library_id,
+            document_id,
+            previous_active_revision_id,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to delete stale query references for document {document_id} revision {previous_active_revision_id}"
+            )
+        })?;
+        repositories::deactivate_runtime_graph_evidence_by_document_revision(
+            &state.persistence.postgres,
+            library_id,
+            document_id,
+            previous_active_revision_id,
+            None,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to deactivate stale graph evidence for document {document_id} revision {previous_active_revision_id}"
+            )
+        })?;
+    }
+
+    let snapshot =
+        repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
+            .await
+            .context("failed to load graph snapshot while reconciling revision graph")?;
+    let mut projection_scope =
+        crate::services::graph_projection::resolve_projection_scope(state, library_id)
+            .await
+            .context("failed to resolve active projection scope for revision graph reconcile")?;
+    let existing_graph_is_empty =
+        snapshot.as_ref().is_none_or(|value| value.node_count <= 0 && value.edge_count <= 0);
+
+    let extraction_records = repositories::list_runtime_graph_extraction_records_by_document(
+        &state.persistence.postgres,
+        document_id,
+    )
+    .await
+    .with_context(|| {
+        format!("failed to list graph extraction records for document {document_id}")
+    })?;
+    let mut latest_records_by_chunk =
+        BTreeMap::<Uuid, repositories::RuntimeGraphExtractionRecordRow>::new();
+    for record in extraction_records {
+        if record.status != "ready" || !revision_chunk_ids.contains(&record.chunk_id) {
+            continue;
+        }
+        let extraction_lifecycle = extraction_lifecycle_from_record(&record);
+        if extraction_lifecycle.revision_id.is_some()
+            && extraction_lifecycle.revision_id != Some(revision_id)
+        {
+            continue;
+        }
+        latest_records_by_chunk.insert(record.chunk_id, record);
+    }
+
+    let mut graph_contribution_count = 0usize;
+    let mut merge_follow_up_required = false;
+    let mut changed_node_ids = BTreeSet::new();
+    let mut changed_edge_ids = BTreeSet::new();
+    let merge_scope = GraphMergeScope::new(library_id, projection_scope.projection_version)
+        .with_lifecycle(Some(revision_id), activated_by_attempt_id);
+
+    for record in latest_records_by_chunk.values() {
+        let Some(chunk_row) = chunk_rows_by_id.get(&record.chunk_id) else {
+            continue;
+        };
+        let candidates = serde_json::from_value::<GraphExtractionCandidateSet>(
+            record.normalized_output_json.clone(),
+        )
+        .unwrap_or_default();
+        if candidates.entities.is_empty() && candidates.relations.is_empty() {
+            continue;
+        }
+        let merge_outcome = merge_chunk_graph_candidates(
+            &state.persistence.postgres,
+            &state.bulk_ingest_hardening_services.graph_quality_guard,
+            &merge_scope,
+            &document,
+            chunk_row,
+            &candidates,
+            extraction_recovery_summary_from_record(record).as_ref(),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to merge graph candidates for document {document_id} chunk {}",
+                chunk_row.id
+            )
+        })?;
+        merge_follow_up_required |= merge_outcome.has_projection_follow_up();
+        graph_contribution_count += merge_outcome.nodes.len() + merge_outcome.edges.len();
+        changed_node_ids.extend(merge_outcome.summary_refresh_node_ids());
+        changed_edge_ids.extend(merge_outcome.summary_refresh_edge_ids());
+    }
+
+    reconcile_merge_support_counts(
+        &state.persistence.postgres,
+        &merge_scope,
+        &changed_node_ids.iter().copied().collect::<Vec<_>>(),
+        &changed_edge_ids.iter().copied().collect::<Vec<_>>(),
+    )
+    .await
+    .context("failed to reconcile graph support counts during revision graph reconcile")?;
+
+    let changed_edge_ids = changed_edge_ids.into_iter().collect::<Vec<_>>();
+    let changed_node_ids = changed_node_ids.into_iter().collect::<Vec<_>>();
+    let changed_edge_rows = repositories::list_admitted_runtime_graph_edges_by_ids(
+        &state.persistence.postgres,
+        library_id,
+        projection_scope.projection_version,
+        &changed_edge_ids,
+    )
+    .await
+    .context("failed to load changed graph edges during revision graph reconcile")?;
+    let changed_node_rows = repositories::list_admitted_runtime_graph_nodes_by_ids(
+        &state.persistence.postgres,
+        library_id,
+        projection_scope.projection_version,
+        &changed_node_ids,
+    )
+    .await
+    .context("failed to load changed graph nodes during revision graph reconcile")?;
+
+    if merge_follow_up_required {
+        let provider_profile = resolve_effective_provider_profile(state, library_id).await?;
+        let supporting_node_rows = if changed_edge_rows.is_empty() {
+            Vec::new()
+        } else {
+            let supporting_node_ids =
+                collect_supporting_node_ids(&changed_node_ids, &changed_edge_rows);
+            repositories::list_admitted_runtime_graph_nodes_by_ids(
+                &state.persistence.postgres,
+                library_id,
+                projection_scope.projection_version,
+                &supporting_node_ids,
+            )
+            .await
+            .context("failed to load supporting graph nodes during revision graph reconcile")?
+        };
+        if !changed_node_rows.is_empty() {
+            embed_runtime_graph_nodes(state, &provider_profile, &changed_node_rows, None)
+                .await
+                .context("failed to embed changed graph nodes during revision graph reconcile")?;
+        }
+        if !changed_edge_rows.is_empty() {
+            embed_runtime_graph_edges(
+                state,
+                &provider_profile,
+                &supporting_node_rows,
+                &changed_edge_rows,
+                None,
+            )
+            .await
+            .context("failed to embed changed graph edges during revision graph reconcile")?;
+        }
+    }
+
+    let source_truth_version =
+        crate::services::query_support::invalidate_library_source_truth(state, library_id)
+            .await
+            .context("failed to advance source truth during revision graph reconcile")?;
+    let summary_refresh = if previous_active_revision_id.is_some()
+        || (changed_node_ids.is_empty() && changed_edge_ids.is_empty())
+    {
+        crate::services::graph_summary::GraphSummaryRefreshRequest::broad()
+    } else {
+        crate::services::graph_summary::GraphSummaryRefreshRequest::targeted(
+            changed_node_ids.clone(),
+            changed_edge_ids.clone(),
+        )
+    }
+    .with_source_truth_version(source_truth_version);
+    projection_scope = projection_scope.with_summary_refresh(summary_refresh);
+    if previous_active_revision_id.is_none()
+        && !existing_graph_is_empty
+        && (!changed_node_ids.is_empty() || !changed_edge_ids.is_empty())
+    {
+        projection_scope = projection_scope
+            .with_targeted_refresh(changed_node_ids.clone(), changed_edge_ids.clone());
+    }
+
+    let projection = if graph_contribution_count > 0
+        || previous_active_revision_id.is_some()
+        || existing_graph_is_empty
+    {
+        project_canonical_graph(state, &projection_scope)
+            .await
+            .context("failed to project reconciled revision graph")?
+    } else if let Some(snapshot) = snapshot {
+        repositories::upsert_runtime_graph_snapshot(
+            &state.persistence.postgres,
+            library_id,
+            "ready",
+            projection_scope.projection_version,
+            snapshot.node_count,
+            snapshot.edge_count,
+            Some(snapshot.provenance_coverage_percent.unwrap_or(100.0)),
+            None,
+        )
+        .await
+        .context("failed to preserve ready graph snapshot during no-op revision reconcile")?;
+        GraphProjectionOutcome {
+            projection_version: projection_scope.projection_version,
+            node_count: usize::try_from(snapshot.node_count).unwrap_or_default(),
+            edge_count: usize::try_from(snapshot.edge_count).unwrap_or_default(),
+            graph_status: "ready".to_string(),
+        }
+    } else {
+        ensure_empty_graph_snapshot(state, library_id, projection_scope.projection_version)
+            .await
+            .context("failed to persist empty graph snapshot during no-op revision reconcile")?
+    };
+
+    Ok(RevisionGraphReconcileOutcome {
+        graph_ready: graph_contribution_count > 0 && projection.graph_status == "ready",
+        graph_contribution_count,
+        projection,
+    })
+}
+
 #[cfg(test)]
 fn count_surviving_documents(records: &[repositories::RuntimeGraphExtractionRecordRow]) -> usize {
     records.iter().map(|record| record.document_id).collect::<BTreeSet<_>>().len()
-}
-
-async fn load_high_confidence_targeted_scope(
-    state: &AppState,
-    library_id: Uuid,
-) -> anyhow::Result<Option<repositories::DocumentMutationImpactScopeRow>> {
-    let scopes = repositories::list_active_document_mutation_impact_scopes_by_project(
-        &state.persistence.postgres,
-        library_id,
-    )
-    .await
-    .context("failed to load active mutation impact scopes while planning rebuild")?;
-    Ok(scopes.into_iter().find(|scope| {
-        scope.scope_status == "targeted"
-            && scope.confidence_status == "high"
-            && (!parse_scope_ids(&scope.affected_node_ids_json).is_empty()
-                || !parse_scope_ids(&scope.affected_relationship_ids_json).is_empty())
-    }))
-}
-
-fn parse_scope_ids(value: &serde_json::Value) -> Vec<Uuid> {
-    serde_json::from_value::<Vec<Uuid>>(value.clone()).unwrap_or_default()
 }
 
 async fn run_rebuild_projection(
@@ -204,6 +482,64 @@ async fn run_rebuild_projection(
     failure_context: &str,
 ) -> anyhow::Result<GraphProjectionOutcome> {
     project_canonical_graph(state, scope).await.with_context(|| failure_context.to_string())
+}
+
+fn synthesize_document_row(
+    document_row: &content_repository::ContentDocumentRow,
+    document_head: &content_repository::ContentDocumentHeadRow,
+    revision: Option<&content_repository::ContentRevisionRow>,
+) -> DocumentRow {
+    DocumentRow {
+        id: document_row.id,
+        project_id: document_row.library_id,
+        source_id: None,
+        external_key: document_row.external_key.clone(),
+        title: revision.and_then(|value| value.title.clone()),
+        mime_type: revision.map(|value| value.mime_type.clone()),
+        checksum: revision.map(|value| value.checksum.clone()),
+        current_revision_id: document_head.active_revision_id,
+        active_status: document_row.document_state.clone(),
+        active_mutation_kind: None,
+        active_mutation_status: None,
+        deleted_at: document_row.deleted_at,
+        created_at: document_row.created_at,
+        updated_at: document_head.head_updated_at,
+    }
+}
+
+fn synthesize_chunk_row(
+    chunk_row: &content_repository::ContentChunkRow,
+    document_id: Uuid,
+    library_id: Uuid,
+    created_at: chrono::DateTime<Utc>,
+) -> ChunkRow {
+    ChunkRow {
+        id: chunk_row.id,
+        document_id,
+        project_id: library_id,
+        ordinal: chunk_row.chunk_index,
+        content: chunk_row.normalized_text.clone(),
+        token_count: chunk_row.token_count,
+        metadata_json: serde_json::json!({
+            "revision_id": chunk_row.revision_id,
+            "start_offset": chunk_row.start_offset,
+            "end_offset": chunk_row.end_offset,
+            "text_checksum": chunk_row.text_checksum,
+        }),
+        created_at,
+    }
+}
+
+fn collect_supporting_node_ids(
+    changed_node_ids: &[Uuid],
+    changed_edges: &[repositories::RuntimeGraphEdgeRow],
+) -> Vec<Uuid> {
+    let mut node_ids = changed_node_ids.iter().copied().collect::<BTreeSet<_>>();
+    for edge in changed_edges {
+        node_ids.insert(edge.from_node_id);
+        node_ids.insert(edge.to_node_id);
+    }
+    node_ids.into_iter().collect()
 }
 
 #[cfg(test)]
@@ -219,6 +555,7 @@ mod tests {
         let records = vec![
             RuntimeGraphExtractionRecordRow {
                 id: Uuid::now_v7(),
+                runtime_execution_id: Uuid::now_v7(),
                 project_id: Uuid::now_v7(),
                 document_id,
                 chunk_id: Uuid::now_v7(),
@@ -235,6 +572,7 @@ mod tests {
             },
             RuntimeGraphExtractionRecordRow {
                 id: Uuid::now_v7(),
+                runtime_execution_id: Uuid::now_v7(),
                 project_id: Uuid::now_v7(),
                 document_id,
                 chunk_id: Uuid::now_v7(),
@@ -251,6 +589,7 @@ mod tests {
             },
             RuntimeGraphExtractionRecordRow {
                 id: Uuid::now_v7(),
+                runtime_execution_id: Uuid::now_v7(),
                 project_id: Uuid::now_v7(),
                 document_id: other_document_id,
                 chunk_id: Uuid::now_v7(),

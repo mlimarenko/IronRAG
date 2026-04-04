@@ -17,7 +17,9 @@ import {
   type KnowledgeContextBundleDetail,
   type QueryExecution,
   type QueryExecutionDetail,
+  type QueryRuntimeStageSummary,
   type QueryPreparedSegmentReference,
+  type RuntimeExecutionSummary,
   type QuerySession,
   type QuerySessionDetail,
   type QueryTechnicalFactReference,
@@ -32,6 +34,8 @@ interface QueryState {
   sessions: QuerySession[]
   activeSession: QuerySessionDetail | null
   activeExecution: QueryExecutionDetail | null
+  activeRuntimeSummary: RuntimeExecutionSummary | null
+  activeRuntimeStageSummaries: QueryRuntimeStageSummary[]
   activeBundle: KnowledgeContextBundleDetail | null
   loadingSessions: boolean
   loadingSession: boolean
@@ -64,6 +68,8 @@ export const useQueryStore = defineStore('query', {
     sessions: [],
     activeSession: null,
     activeExecution: null,
+    activeRuntimeSummary: null,
+    activeRuntimeStageSummaries: [],
     activeBundle: null,
     loadingSessions: false,
     loadingSession: false,
@@ -103,6 +109,12 @@ export const useQueryStore = defineStore('query', {
     verificationWarnings(state): QueryVerificationWarning[] {
       return state.activeExecution?.verificationWarnings ?? []
     },
+    runtimeSummary(state): RuntimeExecutionSummary | null {
+      return state.activeRuntimeSummary
+    },
+    runtimeStageSummaries(state): QueryRuntimeStageSummary[] {
+      return state.activeRuntimeStageSummaries
+    },
     activeBundleId(state): string | null {
       return state.activeExecution?.contextBundleId ?? state.activeBundle?.bundle.bundleId ?? null
     },
@@ -113,6 +125,8 @@ export const useQueryStore = defineStore('query', {
       this.sessions = []
       this.activeSession = null
       this.activeExecution = null
+      this.activeRuntimeSummary = null
+      this.activeRuntimeStageSummaries = []
       this.activeBundle = null
       this.loadingSessions = false
       this.loadingSession = false
@@ -196,12 +210,31 @@ export const useQueryStore = defineStore('query', {
     ): Promise<void> {
       this.executingTurn = true
       this.error = null
+      this.activeRuntimeSummary = null
+      this.activeRuntimeStageSummaries = []
       try {
-        const result = await executeQueryTurn(sessionId, payload, handlers)
+        const result = await executeQueryTurn(sessionId, payload, {
+          ...handlers,
+          onRuntime: (runtime) => {
+            this.activeRuntimeSummary = runtime
+            handlers.onRuntime?.(runtime)
+          },
+        })
         this.activeLibraryId = result.session.libraryId
+        this.activeRuntimeSummary = result.runtimeSummary
+        this.activeRuntimeStageSummaries = result.runtimeStageSummaries
         await this.loadSession(result.session.id)
         await this.loadExecution(result.execution.id)
       } catch (error) {
+        try {
+          await this.loadSession(sessionId)
+          const latestExecutionId = this.activeSession?.executions[0]?.id ?? null
+          if (latestExecutionId) {
+            await this.loadExecution(latestExecutionId)
+          }
+        } catch {
+          // Preserve the original execution error; best-effort refresh only.
+        }
         this.error = normalizeErrorMessage(error, 'Failed to execute grounded query turn')
         throw error
       } finally {
@@ -214,6 +247,8 @@ export const useQueryStore = defineStore('query', {
       try {
         const detail = await fetchQueryExecutionDetail(executionId)
         this.activeExecution = detail
+        this.activeRuntimeSummary = detail.runtimeSummary
+        this.activeRuntimeStageSummaries = detail.runtimeStageSummaries
         if (detail.contextBundleId) {
           try {
             this.activeBundle = await fetchKnowledgeContextBundle(detail.contextBundleId)

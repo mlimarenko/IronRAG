@@ -1,3 +1,5 @@
+#![allow(clippy::missing_errors_doc, clippy::too_many_arguments, clippy::too_many_lines)]
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
@@ -121,6 +123,15 @@ pub struct RuntimeGraphContributionCountsRow {
 pub struct RuntimeGraphProjectionCountsRow {
     pub node_count: i64,
     pub edge_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct RuntimeGraphDocumentLinkRow {
+    pub document_id: Uuid,
+    pub target_node_id: Uuid,
+    pub target_node_type: String,
+    pub relation_type: String,
+    pub support_count: i64,
 }
 
 /// Loads the active runtime graph snapshot for one project.
@@ -553,6 +564,27 @@ pub async fn get_runtime_graph_node_by_key(
     .await
 }
 
+/// Loads one canonical runtime graph node by id.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while querying the graph node.
+pub async fn get_runtime_graph_node_by_id(
+    pool: &PgPool,
+    project_id: Uuid,
+    id: Uuid,
+) -> Result<Option<RuntimeGraphNodeRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeGraphNodeRow>(
+        "select id, project_id, canonical_key, label, node_type, aliases_json, summary,
+            metadata_json, support_count, projection_version, created_at, updated_at
+         from runtime_graph_node
+         where project_id = $1 and id = $2",
+    )
+    .bind(project_id)
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
 /// Lists canonical runtime graph nodes for one projection version.
 ///
 /// # Errors
@@ -643,6 +675,27 @@ pub async fn get_runtime_graph_edge_by_key(
     .bind(project_id)
     .bind(canonical_key)
     .bind(projection_version)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Loads one canonical runtime graph edge by id.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while querying the graph edge.
+pub async fn get_runtime_graph_edge_by_id(
+    pool: &PgPool,
+    project_id: Uuid,
+    id: Uuid,
+) -> Result<Option<RuntimeGraphEdgeRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeGraphEdgeRow>(
+        "select id, project_id, from_node_id, to_node_id, relation_type, canonical_key,
+            summary, weight, support_count, metadata_json, projection_version, created_at, updated_at
+         from runtime_graph_edge
+         where project_id = $1 and id = $2",
+    )
+    .bind(project_id)
+    .bind(id)
     .fetch_optional(pool)
     .await
 }
@@ -858,6 +911,94 @@ pub async fn list_runtime_graph_evidence_by_target(
     .bind(project_id)
     .bind(target_kind)
     .bind(target_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Lists active runtime graph evidence lifecycle rows for one target.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while querying the evidence rows.
+pub async fn list_active_runtime_graph_evidence_lifecycle_by_target(
+    pool: &PgPool,
+    project_id: Uuid,
+    target_kind: &str,
+    target_id: Uuid,
+) -> Result<Vec<RuntimeGraphEvidenceLifecycleRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeGraphEvidenceLifecycleRow>(
+        "select id, project_id, target_kind, target_id, document_id, revision_id,
+            activated_by_attempt_id, deactivated_by_mutation_id, chunk_id, source_file_name,
+            page_ref, evidence_text, confidence_score, is_active, created_at
+         from runtime_graph_evidence
+         where project_id = $1
+           and target_kind = $2
+           and target_id = $3
+           and is_active = true
+         order by created_at desc",
+    )
+    .bind(project_id)
+    .bind(target_kind)
+    .bind(target_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Lists document-to-runtime-graph links for the active projection.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while querying document link rows.
+pub async fn list_runtime_graph_document_links_by_projection(
+    pool: &PgPool,
+    project_id: Uuid,
+    projection_version: i64,
+) -> Result<Vec<RuntimeGraphDocumentLinkRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeGraphDocumentLinkRow>(
+        "with active_node_links as (
+            select
+                evidence.document_id,
+                evidence.target_id as target_node_id,
+                'entity'::text as target_node_type,
+                'supports'::text as relation_type,
+                count(*)::bigint as support_count
+            from runtime_graph_evidence as evidence
+            inner join runtime_graph_node as node
+                on node.project_id = evidence.project_id
+               and node.id = evidence.target_id
+               and node.projection_version = $2
+            where evidence.project_id = $1
+              and evidence.target_kind = 'node'
+              and evidence.is_active = true
+              and evidence.document_id is not null
+            group by evidence.document_id, evidence.target_id
+        ),
+        active_edge_links as (
+            select
+                evidence.document_id,
+                evidence.target_id as target_node_id,
+                'topic'::text as target_node_type,
+                'supports'::text as relation_type,
+                count(*)::bigint as support_count
+            from runtime_graph_evidence as evidence
+            inner join runtime_graph_edge as edge
+                on edge.project_id = evidence.project_id
+               and edge.id = evidence.target_id
+               and edge.projection_version = $2
+            where evidence.project_id = $1
+              and evidence.target_kind = 'edge'
+              and evidence.is_active = true
+              and evidence.document_id is not null
+            group by evidence.document_id, evidence.target_id
+        )
+        select document_id, target_node_id, target_node_type, relation_type, support_count
+        from (
+            select * from active_node_links
+            union all
+            select * from active_edge_links
+        ) as links
+        order by support_count desc, document_id asc, target_node_id asc",
+    )
+    .bind(project_id)
+    .bind(projection_version)
     .fetch_all(pool)
     .await
 }

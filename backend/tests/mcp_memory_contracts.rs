@@ -86,7 +86,6 @@ fn mutation_receipt_serializes_optional_runtime_and_failure_fields() {
         operation_kind: McpMutationOperationKind::Upload,
         idempotency_key: "mcp-upload-1".to_string(),
         status: McpMutationReceiptStatus::Accepted,
-        runtime_tracking_id: None,
         accepted_at: Utc::now(),
         last_status_at: Utc::now(),
         failure_kind: None,
@@ -94,7 +93,6 @@ fn mutation_receipt_serializes_optional_runtime_and_failure_fields() {
     .unwrap();
 
     assert!(value.get("documentId").is_some_and(serde_json::Value::is_null));
-    assert!(value.get("runtimeTrackingId").is_some_and(serde_json::Value::is_null));
     assert!(value.get("failureKind").is_some_and(serde_json::Value::is_null));
     assert_eq!(value.get("operationKind"), Some(&json!("upload")));
     assert_eq!(value.get("status"), Some(&json!("accepted")));
@@ -598,6 +596,8 @@ async fn web_ingest_tools_advertise_recursive_defaults_and_page_listing_contract
         assert!(tools.iter().any(|tool| tool == "get_web_ingest_run"));
         assert!(tools.iter().any(|tool| tool == "list_web_ingest_run_pages"));
         assert!(tools.iter().any(|tool| tool == "cancel_web_ingest_run"));
+        assert!(tools.iter().any(|tool| tool == "get_runtime_execution"));
+        assert!(tools.iter().any(|tool| tool == "get_runtime_execution_trace"));
 
         let tool_list = fixture.rpc_call(&token, "tools/list", json!({})).await?;
         let tool_items = tool_list["result"]["tools"]
@@ -653,6 +653,18 @@ async fn web_ingest_tools_advertise_recursive_defaults_and_page_listing_contract
             .find(|tool| tool["name"] == json!("cancel_web_ingest_run"))
             .context("cancel_web_ingest_run tool missing from tools/list")?;
         assert_eq!(cancel_tool["inputSchema"]["required"], json!(["runId"]));
+
+        let runtime_tool = tool_items
+            .iter()
+            .find(|tool| tool["name"] == json!("get_runtime_execution"))
+            .context("get_runtime_execution tool missing from tools/list")?;
+        assert_eq!(runtime_tool["inputSchema"]["required"], json!(["executionId"]));
+
+        let trace_tool = tool_items
+            .iter()
+            .find(|tool| tool["name"] == json!("get_runtime_execution_trace"))
+            .context("get_runtime_execution_trace tool missing from tools/list")?;
+        assert_eq!(trace_tool["inputSchema"]["required"], json!(["executionId"]));
 
         Ok(())
     }

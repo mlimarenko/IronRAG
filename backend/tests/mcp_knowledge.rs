@@ -380,6 +380,8 @@ async fn mcp_tool_visibility_tracks_grants_without_legacy_fallbacks() -> Result<
         assert!(read_tools.contains(&"list_libraries".to_string()));
         assert!(read_tools.contains(&"search_documents".to_string()));
         assert!(read_tools.contains(&"read_document".to_string()));
+        assert!(read_tools.contains(&"get_runtime_execution".to_string()));
+        assert!(read_tools.contains(&"get_runtime_execution_trace".to_string()));
         assert!(read_tools.contains(&"get_web_ingest_run".to_string()));
         assert!(read_tools.contains(&"list_web_ingest_run_pages".to_string()));
         assert!(!read_tools.contains(&"create_workspace".to_string()));
@@ -397,6 +399,8 @@ async fn mcp_tool_visibility_tracks_grants_without_legacy_fallbacks() -> Result<
         assert!(write_tools.contains(&"upload_documents".to_string()));
         assert!(write_tools.contains(&"update_document".to_string()));
         assert!(write_tools.contains(&"get_mutation_status".to_string()));
+        assert!(write_tools.contains(&"get_runtime_execution".to_string()));
+        assert!(write_tools.contains(&"get_runtime_execution_trace".to_string()));
         assert!(write_tools.contains(&"submit_web_ingest_run".to_string()));
         assert!(write_tools.contains(&"get_web_ingest_run".to_string()));
         assert!(write_tools.contains(&"list_web_ingest_run_pages".to_string()));
@@ -456,9 +460,7 @@ async fn upload_status_and_grounded_search_read_share_canonical_knowledge_truth(
         ));
         let receipt_document_id: Uuid =
             serde_json::from_value(receipt["documentId"].clone()).context("missing document id")?;
-        assert!(
-            receipt["runtimeTrackingId"].is_string() || receipt["runtimeTrackingId"].is_null()
-        );
+        assert!(receipt.get("runtimeTrackingId").is_none());
         let receipt_id: Uuid =
             serde_json::from_value(receipt["receiptId"].clone()).context("missing receipt id")?;
 

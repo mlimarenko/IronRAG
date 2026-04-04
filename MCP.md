@@ -4,7 +4,7 @@
 
 ### Connect Codex, Cursor, VS Code, Claude Code, or any HTTP MCP client to the same knowledge base used by RustRAG
 
-[README.md](./README.md) | [MCP.ru.md](./MCP.ru.md)
+[README.md](./README.md) | [MCP-RU.md](./MCP-RU.md)
 
 </div>
 

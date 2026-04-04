@@ -4,10 +4,21 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::time::Instant;
+use uuid::Uuid;
 
 use crate::{
+    agent_runtime::{
+        builder::StructuredRequestBuilder,
+        executor::{RuntimeExecutionError, RuntimeExecutionSession},
+        persistence as runtime_persistence,
+        request::build_provider_request,
+        response::{RuntimeFailureSummary, RuntimeRecoveryOutcome, RuntimeTerminalOutcome},
+        task::RuntimeTask,
+        tasks::graph_extract::{GraphExtractTask, GraphExtractTaskInput},
+    },
     app::state::AppState,
     domains::{
+        agent_runtime::{RuntimeExecutionOwner, RuntimeStageKind, RuntimeStageState},
         ai::AiBindingPurpose,
         graph_quality::{ExtractionOutcomeStatus, ExtractionRecoverySummary},
         provider_profiles::EffectiveProviderProfile,
@@ -15,11 +26,10 @@ use crate::{
         runtime_ingestion::{RuntimeProviderFailureClass, RuntimeProviderFailureDetail},
     },
     infra::repositories::{self, ChunkRow, DocumentRow, RuntimeGraphExtractionRecordRow},
-    integrations::llm::{ChatRequest, LlmGateway},
+    integrations::llm::{ChatRequestSeed, LlmGateway},
     services::{
-        ai_catalog_service::ResolvedRuntimeBinding,
-        extraction_recovery::{ExtractionRecoveryService, ParserRepairClassification},
-        graph_identity,
+        ai_catalog_service::ResolvedRuntimeBinding, extraction_recovery::ExtractionRecoveryService,
+        graph_identity, runtime_ingestion::RuntimeTaskExecutionContext,
     },
     shared::technical_facts::TechnicalFactQualifier,
 };
@@ -124,8 +134,34 @@ pub struct GraphExtractionCandidateSet {
     pub relations: Vec<GraphRelationCandidate>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphExtractionTaskFailureCode {
+    MalformedOutput,
+    InvalidCandidateSet,
+}
+
+impl GraphExtractionTaskFailureCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MalformedOutput => "malformed_output",
+            Self::InvalidCandidateSet => "invalid_candidate_set",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphExtractionTaskFailure {
+    pub code: String,
+    pub summary: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct GraphExtractionOutcome {
+    pub graph_extraction_id: Option<uuid::Uuid>,
+    pub runtime_execution_id: Option<uuid::Uuid>,
     pub provider_kind: String,
     pub model_name: String,
     pub prompt_hash: String,
@@ -204,7 +240,6 @@ struct GraphExtractionRecoveryAttempt {
     timing: GraphExtractionCallTiming,
     parse_error: Option<String>,
     normalization_path: String,
-    repair_candidate: Option<String>,
     recovery_kind: Option<String>,
     trigger_reason: Option<String>,
 }
@@ -213,7 +248,6 @@ struct GraphExtractionRecoveryAttempt {
 struct GraphExtractionRecoveryTrace {
     provider_attempt_count: usize,
     reask_count: usize,
-    local_repair_applied: bool,
     attempts: Vec<GraphExtractionRecoveryAttempt>,
 }
 
@@ -247,6 +281,7 @@ struct GraphExtractionFailureOutcome {
 
 #[derive(Debug, Clone)]
 pub struct GraphExtractionExecutionError {
+    pub runtime_execution_id: Option<uuid::Uuid>,
     pub message: String,
     pub request_shape_key: String,
     pub request_size_bytes: usize,
@@ -274,7 +309,6 @@ fn unconfigured_graph_extraction_failure(
         provider_failure: None,
         recovery_summary: ExtractionRecoverySummary {
             status: ExtractionOutcomeStatus::Failed,
-            parser_repair_applied: false,
             second_pass_applied: false,
             warning: None,
         },
@@ -294,14 +328,11 @@ impl std::error::Error for GraphExtractionExecutionError {}
 struct NormalizedGraphExtractionAttempt {
     normalized: GraphExtractionCandidateSet,
     normalization_path: &'static str,
-    repair_candidate: Option<String>,
-    parser_repair: ParserRepairClassification,
 }
 
 #[derive(Debug, Clone)]
 struct FailedNormalizationAttempt {
     parse_error: String,
-    parser_repair: ParserRepairClassification,
 }
 
 #[derive(Debug, Clone)]
@@ -309,7 +340,6 @@ struct ParsedGraphExtractionCandidate {
     raw: RawGraphExtractionResponse,
     normalized: GraphExtractionCandidateSet,
     normalization_path: &'static str,
-    repair_candidate: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -582,7 +612,8 @@ fn render_graph_extraction_technical_facts(
     (!rendered.is_empty()).then_some(rendered)
 }
 
-fn graph_extraction_response_format_json(provider_kind: &str) -> serde_json::Value {
+#[cfg(test)]
+fn graph_extraction_response_format(provider_kind: &str) -> serde_json::Value {
     if provider_kind == "deepseek" {
         return serde_json::json!({
             "type": "json_object"
@@ -675,71 +706,149 @@ pub fn summarize_graph_extraction_usage_calls(
     }
 }
 
-pub async fn extract_and_persist_chunk_graph_result(
+pub async fn extract_chunk_graph_candidates(
     state: &AppState,
-    provider_profile: &EffectiveProviderProfile,
+    runtime_context: &RuntimeTaskExecutionContext,
     request: &GraphExtractionRequest,
 ) -> std::result::Result<GraphExtractionOutcome, GraphExtractionExecutionError> {
-    match extract_chunk_graph_candidates(state, provider_profile, request).await {
-        Ok(outcome) => {
-            let raw_output_json = outcome.raw_output_json.clone();
-            let normalized_json =
-                serde_json::to_value(&outcome.normalized).unwrap_or_else(|_| serde_json::json!({}));
-            repositories::create_runtime_graph_extraction_record(
+    let extraction_record_id = uuid::Uuid::now_v7();
+    let mut runtime_session =
+        seed_graph_extract_runtime_session(state, extraction_record_id, request, runtime_context)
+            .await
+            .map_err(|error| map_graph_runtime_execution_error(request, None, error))?;
+
+    let initial_selection = runtime_context
+        .provider_profile
+        .selection_for_binding_purpose(AiBindingPurpose::ExtractGraph);
+    repositories::create_runtime_graph_extraction_record(
+        &state.persistence.postgres,
+        &repositories::CreateRuntimeGraphExtractionRecordInput {
+            id: extraction_record_id,
+            runtime_execution_id: runtime_session.execution.id,
+            project_id: request.project_id,
+            document_id: request.document.id,
+            chunk_id: request.chunk.id,
+            provider_kind: initial_selection.provider_kind.as_str().to_string(),
+            model_name: initial_selection.model_name.clone(),
+            extraction_version: GRAPH_EXTRACTION_VERSION.to_string(),
+            prompt_hash: "pending".to_string(),
+            status: "processing".to_string(),
+            raw_output_json: serde_json::json!({}),
+            normalized_output_json: serde_json::json!({ "entities": [], "relations": [] }),
+            glean_pass_count: 0,
+            error_message: None,
+        },
+    )
+    .await
+    .map_err(|error| {
+        graph_extraction_execution_error(
+            request,
+            Some(runtime_session.execution.id),
+            format!("failed to create graph extraction owner record: {error:#}"),
+            None,
+            ExtractionRecoverySummary {
+                status: ExtractionOutcomeStatus::Failed,
+                second_pass_applied: false,
+                warning: None,
+            },
+            Vec::new(),
+        )
+    })?;
+
+    let execution_result = run_graph_extraction_runtime(
+        state,
+        &runtime_context.provider_profile,
+        request,
+        extraction_record_id,
+        &mut runtime_session,
+    )
+    .await;
+
+    match execution_result {
+        Ok((runtime_outcome, extraction_outcome)) => {
+            let runtime_result = state
+                .agent_runtime
+                .executor()
+                .finalize_session::<GraphExtractTask>(runtime_session, runtime_outcome)
+                .await;
+            runtime_persistence::persist_runtime_result(
                 &state.persistence.postgres,
-                request.project_id,
-                request.document.id,
-                request.chunk.id,
-                &outcome.provider_kind,
-                &outcome.model_name,
-                GRAPH_EXTRACTION_VERSION,
-                &outcome.prompt_hash,
-                "ready",
-                raw_output_json,
-                normalized_json,
-                i32::try_from(outcome.usage_calls.len()).unwrap_or(i32::MAX),
-                None,
+                &runtime_result.execution,
+                &runtime_result.trace,
             )
             .await
-            .map_err(|error| GraphExtractionExecutionError {
-                message: format!("failed to persist graph extraction record: {error:#}"),
-                request_shape_key: outcome.request_shape_key.clone(),
-                request_size_bytes: outcome.request_size_bytes,
-                provider_failure: outcome.provider_failure.clone(),
-                recovery_summary: outcome.recovery_summary.clone(),
-                recovery_attempts: outcome.recovery_attempts.clone(),
-                resume_state: outcome.resume_state.clone(),
+            .map_err(|error| {
+                graph_extraction_execution_error(
+                    request,
+                    Some(runtime_result.execution.id),
+                    format!("failed to persist graph extraction runtime trace: {error:#}"),
+                    extraction_outcome.provider_failure.clone(),
+                    extraction_outcome.recovery_summary.clone(),
+                    extraction_outcome.recovery_attempts.clone(),
+                )
             })?;
-            Ok(outcome)
-        }
-        Err(error) => {
-            repositories::create_runtime_graph_extraction_record(
+            repositories::update_runtime_graph_extraction_record(
                 &state.persistence.postgres,
-                request.project_id,
-                request.document.id,
-                request.chunk.id,
-                error
-                    .provider_failure
-                    .as_ref()
-                    .and_then(|failure| failure.provider_kind.as_deref())
-                    .unwrap_or("unknown"),
-                error
-                    .provider_failure
-                    .as_ref()
-                    .and_then(|failure| failure.model_name.as_deref())
-                    .unwrap_or("unknown"),
-                GRAPH_EXTRACTION_VERSION,
-                "unknown",
-                "failed",
-                serde_json::json!({}),
-                serde_json::json!({ "entities": [], "relations": [] }),
-                i32::try_from(error.resume_state.replay_count).unwrap_or(i32::MAX),
-                Some(&error.message),
+                extraction_record_id,
+                &repositories::UpdateRuntimeGraphExtractionRecordInput {
+                    provider_kind: extraction_outcome.provider_kind.clone(),
+                    model_name: extraction_outcome.model_name.clone(),
+                    prompt_hash: extraction_outcome.prompt_hash.clone(),
+                    status: "ready".to_string(),
+                    raw_output_json: extraction_outcome.raw_output_json.clone(),
+                    normalized_output_json: serde_json::to_value(&extraction_outcome.normalized)
+                        .unwrap_or_else(|_| serde_json::json!({})),
+                    glean_pass_count: i32::try_from(extraction_outcome.usage_calls.len())
+                        .unwrap_or(i32::MAX),
+                    error_message: None,
+                },
+            )
+            .await
+            .map_err(|error| {
+                graph_extraction_execution_error(
+                    request,
+                    Some(runtime_result.execution.id),
+                    format!("failed to update graph extraction owner record: {error:#}"),
+                    extraction_outcome.provider_failure.clone(),
+                    extraction_outcome.recovery_summary.clone(),
+                    extraction_outcome.recovery_attempts.clone(),
+                )
+            })?
+            .ok_or_else(|| {
+                graph_extraction_execution_error(
+                    request,
+                    Some(runtime_result.execution.id),
+                    format!(
+                        "graph extraction owner record {} was not found during update",
+                        extraction_record_id
+                    ),
+                    extraction_outcome.provider_failure.clone(),
+                    extraction_outcome.recovery_summary.clone(),
+                    extraction_outcome.recovery_attempts.clone(),
+                )
+            })?;
+            Ok(GraphExtractionOutcome {
+                graph_extraction_id: Some(extraction_record_id),
+                runtime_execution_id: Some(runtime_result.execution.id),
+                ..extraction_outcome
+            })
+        }
+        Err((runtime_outcome, error)) => {
+            let runtime_result = state
+                .agent_runtime
+                .executor()
+                .finalize_session::<GraphExtractTask>(runtime_session, runtime_outcome)
+                .await;
+            runtime_persistence::persist_runtime_result(
+                &state.persistence.postgres,
+                &runtime_result.execution,
+                &runtime_result.trace,
             )
             .await
             .map_err(|persist_error| GraphExtractionExecutionError {
+                runtime_execution_id: Some(runtime_result.execution.id),
                 message: format!(
-                    "failed to persist graph extraction failure record: {persist_error:#}"
+                    "failed to persist graph extraction runtime trace: {persist_error:#}"
                 ),
                 request_shape_key: error.request_shape_key.clone(),
                 request_size_bytes: error.request_size_bytes,
@@ -748,65 +857,525 @@ pub async fn extract_and_persist_chunk_graph_result(
                 recovery_attempts: error.recovery_attempts.clone(),
                 resume_state: error.resume_state.clone(),
             })?;
-            Err(error)
+            repositories::update_runtime_graph_extraction_record(
+                &state.persistence.postgres,
+                extraction_record_id,
+                &repositories::UpdateRuntimeGraphExtractionRecordInput {
+                    provider_kind: error
+                        .provider_failure
+                        .as_ref()
+                        .and_then(|failure| failure.provider_kind.clone())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    model_name: error
+                        .provider_failure
+                        .as_ref()
+                        .and_then(|failure| failure.model_name.clone())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    prompt_hash: "unknown".to_string(),
+                    status: graph_async_operation_status(&runtime_result.outcome).to_string(),
+                    raw_output_json: serde_json::json!({}),
+                    normalized_output_json: serde_json::json!({ "entities": [], "relations": [] }),
+                    glean_pass_count: i32::try_from(error.resume_state.replay_count)
+                        .unwrap_or(i32::MAX),
+                    error_message: Some(error.message.clone()),
+                },
+            )
+            .await
+            .map_err(|persist_error| GraphExtractionExecutionError {
+                runtime_execution_id: Some(runtime_result.execution.id),
+                message: format!(
+                    "failed to update graph extraction failure record: {persist_error:#}"
+                ),
+                request_shape_key: error.request_shape_key.clone(),
+                request_size_bytes: error.request_size_bytes,
+                provider_failure: error.provider_failure.clone(),
+                recovery_summary: error.recovery_summary.clone(),
+                recovery_attempts: error.recovery_attempts.clone(),
+                resume_state: error.resume_state.clone(),
+            })?
+            .ok_or_else(|| GraphExtractionExecutionError {
+                runtime_execution_id: Some(runtime_result.execution.id),
+                message: format!(
+                    "graph extraction owner record {} was not found during failure update",
+                    extraction_record_id
+                ),
+                request_shape_key: error.request_shape_key.clone(),
+                request_size_bytes: error.request_size_bytes,
+                provider_failure: error.provider_failure.clone(),
+                recovery_summary: error.recovery_summary.clone(),
+                recovery_attempts: error.recovery_attempts.clone(),
+                resume_state: error.resume_state.clone(),
+            })?;
+            append_graph_runtime_policy_audit(
+                state,
+                request,
+                extraction_record_id,
+                &runtime_result,
+            )
+            .await;
+            Err(GraphExtractionExecutionError {
+                runtime_execution_id: Some(runtime_result.execution.id),
+                ..error
+            })
         }
     }
 }
 
-pub async fn extract_chunk_graph_candidates(
+async fn seed_graph_extract_runtime_session(
+    state: &AppState,
+    graph_extraction_id: uuid::Uuid,
+    request: &GraphExtractionRequest,
+    runtime_context: &RuntimeTaskExecutionContext,
+) -> std::result::Result<RuntimeExecutionSession, RuntimeExecutionError> {
+    let runtime_request = StructuredRequestBuilder::<GraphExtractTask>::new(
+        GraphExtractTaskInput {
+            project_id: request.project_id,
+            document_id: request.document.id,
+            chunk_id: request.chunk.id,
+            revision_id: request.revision_id,
+            normalized_text: request.chunk.content.clone(),
+            technical_facts: request.technical_facts.clone(),
+        },
+        RuntimeExecutionOwner::graph_extraction_attempt(graph_extraction_id),
+    )
+    .with_budget_limits(
+        runtime_context.runtime_overrides.max_turns,
+        runtime_context.runtime_overrides.max_parallel_actions,
+    )
+    .build();
+
+    state
+        .agent_runtime
+        .seed_and_persist_session(&state.persistence.postgres, &runtime_request)
+        .await
+}
+
+async fn run_graph_extraction_runtime(
     state: &AppState,
     provider_profile: &EffectiveProviderProfile,
     request: &GraphExtractionRequest,
-) -> std::result::Result<GraphExtractionOutcome, GraphExtractionExecutionError> {
-    match resolve_graph_extraction(state, provider_profile, request).await {
-        Ok(resolved) => Ok(GraphExtractionOutcome {
-            provider_kind: resolved.provider_kind.clone(),
-            model_name: resolved.model_name.clone(),
-            prompt_hash: resolved.prompt_hash.clone(),
-            raw_output_json: build_raw_output_json(
-                &resolved.output_text,
-                resolved.usage_json.clone(),
-                &resolved.lifecycle,
-                &resolved.recovery,
-                &resolved.recovery_summary,
-                &resolved.usage_calls,
-            ),
-            usage_json: resolved.usage_json.clone(),
-            usage_calls: resolved.usage_calls.clone(),
-            normalized: resolved.normalized,
-            request_shape_key: resolved.request_shape_key.clone(),
-            request_size_bytes: resolved.request_size_bytes,
-            provider_failure: resolved.provider_failure.clone(),
-            recovery_summary: resolved.recovery_summary,
-            recovery_attempts: resolved.recovery_attempts,
-            resume_state: GraphExtractionResumeState {
-                resumed_from_checkpoint: false,
-                replay_count: request
-                    .resume_hint
-                    .as_ref()
-                    .map(|hint| hint.replay_count)
-                    .unwrap_or(0),
-                downgrade_level: normalized_downgrade_level(request),
+    graph_extraction_id: uuid::Uuid,
+    runtime_session: &mut RuntimeExecutionSession,
+) -> std::result::Result<
+    (
+        RuntimeTerminalOutcome<GraphExtractionCandidateSet, GraphExtractionTaskFailure>,
+        GraphExtractionOutcome,
+    ),
+    (
+        RuntimeTerminalOutcome<GraphExtractionCandidateSet, GraphExtractionTaskFailure>,
+        GraphExtractionExecutionError,
+    ),
+> {
+    if let Err(failure) = begin_graph_runtime_stage(
+        state.agent_runtime.executor(),
+        runtime_session,
+        RuntimeStageKind::ExtractGraph,
+    )
+    .await
+    {
+        record_graph_runtime_stage(
+            state.agent_runtime.executor(),
+            runtime_session,
+            RuntimeStageKind::ExtractGraph,
+            RuntimeStageState::Failed,
+            false,
+            Some(&failure),
+        );
+        let error = graph_extraction_execution_error(
+            request,
+            Some(runtime_session.execution.id),
+            failure.summary.clone(),
+            None,
+            ExtractionRecoverySummary {
+                status: ExtractionOutcomeStatus::Failed,
+                second_pass_applied: false,
+                warning: None,
             },
-        }),
-        Err(failure) => Err(GraphExtractionExecutionError {
-            message: failure.error_message,
-            request_shape_key: failure.request_shape_key,
-            request_size_bytes: failure.request_size_bytes,
-            provider_failure: failure.provider_failure,
-            recovery_summary: failure.recovery_summary,
-            recovery_attempts: failure.recovery_attempts,
-            resume_state: GraphExtractionResumeState {
-                resumed_from_checkpoint: false,
-                replay_count: request
-                    .resume_hint
-                    .as_ref()
-                    .map(|hint| hint.replay_count.saturating_add(1))
-                    .unwrap_or(1),
-                downgrade_level: normalized_downgrade_level(request),
-            },
-        }),
+            Vec::new(),
+        );
+        return Err((make_graph_terminal_failure_outcome(failure.clone()), error));
     }
+
+    match resolve_graph_extraction(state, provider_profile, request).await {
+        Ok(resolved) => {
+            record_graph_runtime_stage(
+                state.agent_runtime.executor(),
+                runtime_session,
+                RuntimeStageKind::ExtractGraph,
+                RuntimeStageState::Completed,
+                false,
+                None,
+            );
+
+            let runtime_execution_id = runtime_session.execution.id;
+            let recovery_status = resolved.recovery_summary.status.clone();
+            if matches!(
+                recovery_status,
+                ExtractionOutcomeStatus::Recovered | ExtractionOutcomeStatus::Partial
+            ) {
+                if let Err(failure) = begin_graph_runtime_stage(
+                    state.agent_runtime.executor(),
+                    runtime_session,
+                    RuntimeStageKind::Recovery,
+                )
+                .await
+                {
+                    record_graph_runtime_stage(
+                        state.agent_runtime.executor(),
+                        runtime_session,
+                        RuntimeStageKind::Recovery,
+                        RuntimeStageState::Failed,
+                        false,
+                        Some(&failure),
+                    );
+                    let error = graph_extraction_execution_error(
+                        request,
+                        Some(runtime_execution_id),
+                        failure.summary.clone(),
+                        resolved.provider_failure.clone(),
+                        resolved.recovery_summary.clone(),
+                        resolved.recovery_attempts.clone(),
+                    );
+                    return Err((make_graph_terminal_failure_outcome(failure.clone()), error));
+                }
+                record_graph_runtime_stage(
+                    state.agent_runtime.executor(),
+                    runtime_session,
+                    RuntimeStageKind::Recovery,
+                    RuntimeStageState::Recovered,
+                    false,
+                    None,
+                );
+            }
+
+            let normalized = resolved.normalized.clone();
+            let outcome = GraphExtractionOutcome {
+                graph_extraction_id: Some(graph_extraction_id),
+                runtime_execution_id: Some(runtime_execution_id),
+                provider_kind: resolved.provider_kind.clone(),
+                model_name: resolved.model_name.clone(),
+                prompt_hash: resolved.prompt_hash.clone(),
+                raw_output_json: build_raw_output_json(
+                    &resolved.output_text,
+                    resolved.usage_json.clone(),
+                    &resolved.lifecycle,
+                    &resolved.recovery,
+                    &resolved.recovery_summary,
+                    &resolved.usage_calls,
+                ),
+                usage_json: resolved.usage_json.clone(),
+                usage_calls: resolved.usage_calls.clone(),
+                normalized: resolved.normalized,
+                request_shape_key: resolved.request_shape_key.clone(),
+                request_size_bytes: resolved.request_size_bytes,
+                provider_failure: resolved.provider_failure.clone(),
+                recovery_summary: resolved.recovery_summary.clone(),
+                recovery_attempts: resolved.recovery_attempts.clone(),
+                resume_state: GraphExtractionResumeState {
+                    resumed_from_checkpoint: false,
+                    replay_count: request
+                        .resume_hint
+                        .as_ref()
+                        .map(|hint| hint.replay_count)
+                        .unwrap_or(0),
+                    downgrade_level: normalized_downgrade_level(request),
+                },
+            };
+
+            let runtime_outcome = match recovery_status {
+                ExtractionOutcomeStatus::Clean => {
+                    RuntimeTerminalOutcome::Completed { success: normalized }
+                }
+                ExtractionOutcomeStatus::Recovered | ExtractionOutcomeStatus::Partial => {
+                    RuntimeTerminalOutcome::Recovered {
+                        success: normalized,
+                        recovery: RuntimeRecoveryOutcome {
+                            attempts: u8::try_from(outcome.recovery_attempts.len())
+                                .unwrap_or(u8::MAX),
+                            summary_redacted: outcome.recovery_summary.warning.clone(),
+                        },
+                    }
+                }
+                ExtractionOutcomeStatus::Failed => RuntimeTerminalOutcome::Failed {
+                    failure: GraphExtractionTaskFailure {
+                        code: GraphExtractionTaskFailureCode::MalformedOutput.as_str().to_string(),
+                        summary: "graph extraction resolved with failed recovery status"
+                            .to_string(),
+                    },
+                    summary: make_graph_runtime_failure_summary(
+                        GraphExtractionTaskFailureCode::MalformedOutput.as_str(),
+                        "graph extraction resolved with failed recovery status",
+                    ),
+                },
+            };
+            match runtime_outcome {
+                RuntimeTerminalOutcome::Failed { failure, summary } => Err((
+                    RuntimeTerminalOutcome::Failed { failure, summary },
+                    graph_extraction_execution_error(
+                        request,
+                        Some(runtime_execution_id),
+                        "graph extraction resolved with failed recovery status",
+                        outcome.provider_failure.clone(),
+                        outcome.recovery_summary.clone(),
+                        outcome.recovery_attempts.clone(),
+                    ),
+                )),
+                _ => Ok((runtime_outcome, outcome)),
+            }
+        }
+        Err(failure) => {
+            record_graph_runtime_stage(
+                state.agent_runtime.executor(),
+                runtime_session,
+                RuntimeStageKind::ExtractGraph,
+                RuntimeStageState::Failed,
+                false,
+                Some(&GraphExtractionTaskFailure {
+                    code: graph_failure_code_from_outcome(&failure).to_string(),
+                    summary: failure.error_message.clone(),
+                }),
+            );
+            let task_failure = GraphExtractionTaskFailure {
+                code: graph_failure_code_from_outcome(&failure).to_string(),
+                summary: failure.error_message.clone(),
+            };
+            Err((
+                make_graph_terminal_failure_outcome(task_failure.clone()),
+                GraphExtractionExecutionError {
+                    runtime_execution_id: Some(runtime_session.execution.id),
+                    message: failure.error_message,
+                    request_shape_key: failure.request_shape_key,
+                    request_size_bytes: failure.request_size_bytes,
+                    provider_failure: failure.provider_failure,
+                    recovery_summary: failure.recovery_summary,
+                    recovery_attempts: failure.recovery_attempts,
+                    resume_state: GraphExtractionResumeState {
+                        resumed_from_checkpoint: false,
+                        replay_count: request
+                            .resume_hint
+                            .as_ref()
+                            .map(|hint| hint.replay_count.saturating_add(1))
+                            .unwrap_or(1),
+                        downgrade_level: normalized_downgrade_level(request),
+                    },
+                },
+            ))
+        }
+    }
+}
+
+fn map_graph_runtime_execution_error(
+    request: &GraphExtractionRequest,
+    runtime_execution_id: Option<uuid::Uuid>,
+    error: RuntimeExecutionError,
+) -> GraphExtractionExecutionError {
+    let message = match error {
+        RuntimeExecutionError::InvalidTaskSpec(message) => message,
+        RuntimeExecutionError::UnregisteredTask(task_kind) => {
+            format!("runtime task is not registered: {}", task_kind.as_str())
+        }
+        RuntimeExecutionError::TurnBudgetExhausted => {
+            "runtime execution budget exhausted".to_string()
+        }
+        RuntimeExecutionError::PolicyBlocked { reason_code, reason_summary_redacted, .. } => {
+            format!("{reason_code}: {reason_summary_redacted}")
+        }
+    };
+    graph_extraction_execution_error(
+        request,
+        runtime_execution_id,
+        message,
+        None,
+        ExtractionRecoverySummary {
+            status: ExtractionOutcomeStatus::Failed,
+            second_pass_applied: false,
+            warning: None,
+        },
+        Vec::new(),
+    )
+}
+
+fn graph_extraction_execution_error(
+    request: &GraphExtractionRequest,
+    runtime_execution_id: Option<uuid::Uuid>,
+    message: impl Into<String>,
+    provider_failure: Option<RuntimeProviderFailureDetail>,
+    recovery_summary: ExtractionRecoverySummary,
+    recovery_attempts: Vec<GraphExtractionRecoveryRecord>,
+) -> GraphExtractionExecutionError {
+    GraphExtractionExecutionError {
+        runtime_execution_id,
+        message: message.into(),
+        request_shape_key: "graph_extract_v5:runtime".to_string(),
+        request_size_bytes: request.chunk.content.len(),
+        provider_failure,
+        recovery_summary,
+        recovery_attempts,
+        resume_state: GraphExtractionResumeState {
+            resumed_from_checkpoint: false,
+            replay_count: request.resume_hint.as_ref().map(|hint| hint.replay_count).unwrap_or(0),
+            downgrade_level: normalized_downgrade_level(request),
+        },
+    }
+}
+
+fn make_graph_terminal_failure_outcome(
+    failure: GraphExtractionTaskFailure,
+) -> RuntimeTerminalOutcome<GraphExtractionCandidateSet, GraphExtractionTaskFailure> {
+    let summary = make_graph_runtime_failure_summary(&failure.code, &failure.summary);
+    if matches!(
+        failure.code.as_str(),
+        "runtime_policy_rejected" | "runtime_policy_terminated" | "runtime_policy_blocked"
+    ) {
+        RuntimeTerminalOutcome::Canceled { failure, summary }
+    } else {
+        RuntimeTerminalOutcome::Failed { failure, summary }
+    }
+}
+
+fn graph_async_operation_status(
+    outcome: &RuntimeTerminalOutcome<GraphExtractionCandidateSet, GraphExtractionTaskFailure>,
+) -> &'static str {
+    match outcome {
+        RuntimeTerminalOutcome::Completed { .. } | RuntimeTerminalOutcome::Recovered { .. } => {
+            "ready"
+        }
+        RuntimeTerminalOutcome::Canceled { .. } => "canceled",
+        RuntimeTerminalOutcome::Failed { .. } => "failed",
+    }
+}
+
+fn graph_policy_action_kind(failure_code: &str) -> Option<&'static str> {
+    match failure_code {
+        "runtime_policy_rejected" => Some("graph_extract.runtime.policy.rejected"),
+        "runtime_policy_terminated" => Some("graph_extract.runtime.policy.terminated"),
+        "runtime_policy_blocked" => Some("graph_extract.runtime.policy.blocked"),
+        _ => None,
+    }
+}
+
+async fn append_graph_runtime_policy_audit(
+    state: &AppState,
+    request: &GraphExtractionRequest,
+    graph_extraction_id: Uuid,
+    runtime_result: &crate::agent_runtime::task::RuntimeTaskResult<GraphExtractTask>,
+) {
+    let RuntimeTerminalOutcome::Canceled { summary, .. } = &runtime_result.outcome else {
+        return;
+    };
+    let Some(action_kind) = graph_policy_action_kind(&summary.code) else {
+        return;
+    };
+    let _ = state
+        .canonical_services
+        .audit
+        .append_event(
+            state,
+            crate::services::audit_service::AppendAuditEventCommand {
+                actor_principal_id: None,
+                surface_kind: "worker".to_string(),
+                action_kind: action_kind.to_string(),
+                request_id: None,
+                trace_id: None,
+                result_kind: "rejected".to_string(),
+                redacted_message: summary.summary_redacted.clone(),
+                internal_message: Some(format!(
+                    "runtime policy canceled graph extraction {} for document {} via runtime execution {} with code {}",
+                    graph_extraction_id, request.document.id, runtime_result.execution.id, summary.code
+                )),
+                subjects: vec![state.canonical_services.audit.runtime_execution_subject(
+                    runtime_result.execution.id,
+                    None,
+                    None,
+                )],
+            },
+        )
+        .await;
+}
+
+async fn begin_graph_runtime_stage(
+    executor: &crate::agent_runtime::executor::RuntimeExecutor,
+    session: &mut RuntimeExecutionSession,
+    stage_kind: RuntimeStageKind,
+) -> std::result::Result<(), GraphExtractionTaskFailure> {
+    executor.begin_stage(session, stage_kind).await.map_err(|error| match error {
+        RuntimeExecutionError::TurnBudgetExhausted => GraphExtractionTaskFailure {
+            code: "runtime_budget_exhausted".to_string(),
+            summary: "runtime execution budget exhausted".to_string(),
+        },
+        RuntimeExecutionError::InvalidTaskSpec(message) => GraphExtractionTaskFailure {
+            code: "invalid_runtime_task_spec".to_string(),
+            summary: message,
+        },
+        RuntimeExecutionError::UnregisteredTask(task_kind) => GraphExtractionTaskFailure {
+            code: "unregistered_runtime_task".to_string(),
+            summary: format!("runtime task is not registered: {}", task_kind.as_str()),
+        },
+        RuntimeExecutionError::PolicyBlocked {
+            decision_kind,
+            reason_code,
+            reason_summary_redacted,
+        } => GraphExtractionTaskFailure {
+            code: match decision_kind {
+                crate::domains::agent_runtime::RuntimeDecisionKind::Reject => {
+                    "runtime_policy_rejected".to_string()
+                }
+                crate::domains::agent_runtime::RuntimeDecisionKind::Terminate => {
+                    "runtime_policy_terminated".to_string()
+                }
+                crate::domains::agent_runtime::RuntimeDecisionKind::Allow => {
+                    "runtime_policy_blocked".to_string()
+                }
+            },
+            summary: format!("{reason_code}: {reason_summary_redacted}"),
+        },
+    })
+}
+
+fn record_graph_runtime_stage(
+    executor: &crate::agent_runtime::executor::RuntimeExecutor,
+    session: &mut RuntimeExecutionSession,
+    stage_kind: RuntimeStageKind,
+    stage_state: RuntimeStageState,
+    deterministic: bool,
+    failure: Option<&GraphExtractionTaskFailure>,
+) {
+    executor.complete_stage(
+        session,
+        stage_kind,
+        stage_state,
+        deterministic,
+        failure.map(|value| value.code.clone()),
+        failure.map(|value| truncate_failure_code(&value.summary).to_string()),
+    );
+}
+
+fn make_graph_runtime_failure_summary(code: &str, summary: &str) -> RuntimeFailureSummary {
+    RuntimeFailureSummary {
+        code: code.to_string(),
+        summary_redacted: Some(truncate_failure_code(summary).to_string()),
+    }
+}
+
+fn graph_failure_code_from_outcome(failure: &GraphExtractionFailureOutcome) -> &'static str {
+    match failure.provider_failure.as_ref().map(|value| value.failure_class.clone()) {
+        Some(RuntimeProviderFailureClass::InvalidModelOutput) => {
+            GraphExtractionTaskFailureCode::MalformedOutput.as_str()
+        }
+        _ => "graph_extract_failed",
+    }
+}
+
+fn truncate_failure_code(message: &str) -> &str {
+    const MAX_LEN: usize = 160;
+    if message.len() <= MAX_LEN {
+        return message;
+    }
+    let mut end = MAX_LEN;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    &message[..end]
 }
 
 #[must_use]
@@ -840,7 +1409,6 @@ pub fn extraction_outcome_from_resume_state(
         serde_json::from_value::<ExtractionRecoverySummary>(row.recovery_summary_json.clone())
             .unwrap_or(ExtractionRecoverySummary {
                 status: crate::domains::graph_quality::ExtractionOutcomeStatus::Clean,
-                parser_repair_applied: false,
                 second_pass_applied: false,
                 warning: None,
             });
@@ -850,6 +1418,8 @@ pub fn extraction_outcome_from_resume_state(
         .and_then(|value| serde_json::from_value::<RuntimeProviderFailureDetail>(value).ok());
 
     Ok(GraphExtractionOutcome {
+        graph_extraction_id: None,
+        runtime_execution_id: None,
         provider_kind: row.provider_kind.clone().unwrap_or_else(|| "unknown".to_string()),
         model_name: row.model_name.clone().unwrap_or_else(|| "unknown".to_string()),
         prompt_hash: row.prompt_hash.clone().unwrap_or_else(|| "unknown".to_string()),
@@ -1024,15 +1594,19 @@ async fn resolve_graph_extraction_with_gateway(
                 if let (true, Some((trigger_reason, recovered_summary))) =
                     (allow_transient_retry, transient_retry_plan)
                 {
+                    let raw_issue_summary =
+                        extraction_recovery.redact_recovery_summary(&error_context);
                     pending_recovery_records.push(PendingRecoveryRecord {
                         recovery_kind: "provider_retry".to_string(),
                         trigger_reason: trigger_reason.to_string(),
-                        raw_issue_summary: Some(error_context.clone()),
-                        recovered_summary: Some(recovered_summary.to_string()),
+                        raw_issue_summary: Some(raw_issue_summary.clone()),
+                        recovered_summary: Some(
+                            extraction_recovery.redact_recovery_summary(recovered_summary),
+                        ),
                     });
                     pending_follow_up = Some(RecoveryFollowUpRequest::ProviderRetry {
                         trigger_reason: trigger_reason.to_string(),
-                        issue_summary: error_context.clone(),
+                        issue_summary: raw_issue_summary,
                         previous_output: String::new(),
                     });
                     trace.provider_attempt_count = provider_attempt_no;
@@ -1044,7 +1618,6 @@ async fn resolve_graph_extraction_with_gateway(
                 if let Some(candidate) = best_partial_candidate.clone() {
                     let recovery_summary = extraction_recovery.classify_outcome(
                         trace.provider_attempt_count,
-                        trace.local_repair_applied,
                         pending_recovery_records.iter().any(|record: &PendingRecoveryRecord| {
                             record.recovery_kind == "second_pass"
                         }),
@@ -1071,7 +1644,6 @@ async fn resolve_graph_extraction_with_gateway(
                 }
                 let recovery_summary = extraction_recovery.classify_outcome(
                     trace.provider_attempt_count,
-                    trace.local_repair_applied,
                     pending_recovery_records.iter().any(|record: &PendingRecoveryRecord| {
                         record.recovery_kind == "second_pass"
                     }),
@@ -1110,11 +1682,10 @@ async fn resolve_graph_extraction_with_gateway(
             usage_json: raw.usage_json.clone(),
             timing: raw.timing.clone(),
         });
-        match normalize_graph_extraction_output_with_repair(extraction_recovery, &raw.output_text) {
+        match normalize_graph_extraction_output(&raw.output_text) {
             Ok(normalized_attempt) => {
                 trace.provider_attempt_count = provider_attempt_no;
                 trace.reask_count = provider_attempt_no.saturating_sub(1);
-                trace.local_repair_applied |= normalized_attempt.normalization_path == "repaired";
                 trace.attempts.push(GraphExtractionRecoveryAttempt {
                     provider_attempt_no,
                     prompt_hash: raw.prompt_hash.clone(),
@@ -1123,29 +1694,9 @@ async fn resolve_graph_extraction_with_gateway(
                     timing: raw.timing.clone(),
                     parse_error: None,
                     normalization_path: normalized_attempt.normalization_path.to_string(),
-                    repair_candidate: normalized_attempt.repair_candidate.clone(),
-                    recovery_kind: normalized_attempt
-                        .parser_repair
-                        .trigger_reason
-                        .as_ref()
-                        .map(|_| "parser_repair".to_string()),
-                    trigger_reason: normalized_attempt.parser_repair.trigger_reason.clone(),
+                    recovery_kind: None,
+                    trigger_reason: None,
                 });
-                if normalized_attempt.normalization_path == "repaired" {
-                    pending_recovery_records.push(PendingRecoveryRecord {
-                        recovery_kind: "parser_repair".to_string(),
-                        trigger_reason: normalized_attempt
-                            .parser_repair
-                            .trigger_reason
-                            .clone()
-                            .unwrap_or_else(|| "malformed_json".to_string()),
-                        raw_issue_summary: normalized_attempt.parser_repair.issue_summary.clone(),
-                        recovered_summary: Some(
-                            "Recovered malformed extraction output with local parser repair."
-                                .to_string(),
-                        ),
-                    });
-                }
 
                 let second_pass = extraction_recovery.classify_second_pass(
                     &request.chunk.content,
@@ -1159,24 +1710,29 @@ async fn resolve_graph_extraction_with_gateway(
                     raw: raw.clone(),
                     normalized: normalized_attempt.normalized,
                     normalization_path: normalized_attempt.normalization_path,
-                    repair_candidate: normalized_attempt.repair_candidate,
                 };
 
                 if second_pass.should_attempt {
+                    let second_pass_decision = second_pass.decision.clone().unwrap_or_else(|| {
+                        crate::services::extraction_recovery::RecoveryDecisionSummary {
+                            reason_code: "sparse_extraction".to_string(),
+                            reason_summary_redacted: extraction_recovery.redact_recovery_summary(
+                                "The extraction result looked too sparse for the chunk content.",
+                            ),
+                        }
+                    });
                     best_partial_candidate = select_better_partial_candidate(
                         best_partial_candidate,
                         current_candidate.clone(),
                     );
                     pending_recovery_records.push(PendingRecoveryRecord {
                         recovery_kind: "second_pass".to_string(),
-                        trigger_reason: second_pass
-                            .trigger_reason
-                            .clone()
-                            .unwrap_or_else(|| "sparse_extraction".to_string()),
-                        raw_issue_summary: second_pass.issue_summary.clone(),
+                        trigger_reason: second_pass_decision.reason_code.clone(),
+                        raw_issue_summary: Some(second_pass_decision.reason_summary_redacted.clone()),
                         recovered_summary: Some(
-                            "Requested a second extraction pass because the first result looked sparse or inconsistent."
-                                .to_string(),
+                            extraction_recovery.redact_recovery_summary(
+                                "Requested a second extraction pass because the first result looked sparse or inconsistent.",
+                            ),
                         ),
                     });
                     trace.attempts.push(GraphExtractionRecoveryAttempt {
@@ -1187,18 +1743,12 @@ async fn resolve_graph_extraction_with_gateway(
                         timing: raw.timing.clone(),
                         parse_error: None,
                         normalization_path: current_candidate.normalization_path.to_string(),
-                        repair_candidate: current_candidate.repair_candidate.clone(),
                         recovery_kind: Some("second_pass".to_string()),
-                        trigger_reason: second_pass.trigger_reason.clone(),
+                        trigger_reason: Some(second_pass_decision.reason_code.clone()),
                     });
                     pending_follow_up = Some(RecoveryFollowUpRequest::SecondPass {
-                        trigger_reason: second_pass
-                            .trigger_reason
-                            .unwrap_or_else(|| "sparse_extraction".to_string()),
-                        issue_summary: second_pass.issue_summary.unwrap_or_else(|| {
-                            "The extraction result looked too sparse for the chunk content."
-                                .to_string()
-                        }),
+                        trigger_reason: second_pass_decision.reason_code,
+                        issue_summary: second_pass_decision.reason_summary_redacted,
                         previous_output: raw.output_text.clone(),
                     });
                     continue;
@@ -1206,7 +1756,6 @@ async fn resolve_graph_extraction_with_gateway(
 
                 let recovery_summary = extraction_recovery.classify_outcome(
                     trace.provider_attempt_count,
-                    trace.local_repair_applied,
                     pending_recovery_records
                         .iter()
                         .any(|record| record.recovery_kind == "second_pass"),
@@ -1252,36 +1801,27 @@ async fn resolve_graph_extraction_with_gateway(
                     timing: raw.timing.clone(),
                     parse_error: Some(parse_error.clone()),
                     normalization_path: "failed".to_string(),
-                    repair_candidate: parse_failure.parser_repair.repair_candidate.clone(),
-                    recovery_kind: parse_failure
-                        .parser_repair
-                        .trigger_reason
-                        .as_ref()
-                        .map(|_| "provider_retry".to_string()),
-                    trigger_reason: parse_failure.parser_repair.trigger_reason.clone(),
+                    recovery_kind: (provider_attempt_no < max_provider_attempts)
+                        .then_some("provider_retry".to_string()),
+                    trigger_reason: (provider_attempt_no < max_provider_attempts)
+                        .then_some("malformed_output".to_string()),
                 });
                 trace.provider_attempt_count = provider_attempt_no;
                 trace.reask_count = provider_attempt_no.saturating_sub(1);
                 if provider_attempt_no < max_provider_attempts {
+                    let parse_error_redacted =
+                        extraction_recovery.redact_recovery_summary(&parse_error);
                     pending_recovery_records.push(PendingRecoveryRecord {
                         recovery_kind: "provider_retry".to_string(),
-                        trigger_reason: parse_failure
-                            .parser_repair
-                            .trigger_reason
-                            .clone()
-                            .unwrap_or_else(|| "malformed_output".to_string()),
-                        raw_issue_summary: Some(parse_error.clone()),
-                        recovered_summary: Some(
-                            "Requested a stricter retry after malformed extraction output."
-                                .to_string(),
-                        ),
+                        trigger_reason: "malformed_output".to_string(),
+                        raw_issue_summary: Some(parse_error_redacted.clone()),
+                        recovered_summary: Some(extraction_recovery.redact_recovery_summary(
+                            "Requested a stricter retry after malformed extraction output.",
+                        )),
                     });
                     pending_follow_up = Some(RecoveryFollowUpRequest::ProviderRetry {
-                        trigger_reason: parse_failure
-                            .parser_repair
-                            .trigger_reason
-                            .unwrap_or_else(|| "malformed_output".to_string()),
-                        issue_summary: parse_error,
+                        trigger_reason: "malformed_output".to_string(),
+                        issue_summary: parse_error_redacted,
                         previous_output: raw.output_text.clone(),
                     });
                     continue;
@@ -1290,7 +1830,6 @@ async fn resolve_graph_extraction_with_gateway(
                 if let Some(candidate) = best_partial_candidate.clone() {
                     let recovery_summary = extraction_recovery.classify_outcome(
                         trace.provider_attempt_count,
-                        trace.local_repair_applied,
                         pending_recovery_records
                             .iter()
                             .any(|record| record.recovery_kind == "second_pass"),
@@ -1331,7 +1870,6 @@ async fn resolve_graph_extraction_with_gateway(
                     let provider_attempt_count = trace.provider_attempt_count;
                     let recovery_summary = extraction_recovery.classify_outcome(
                         trace.provider_attempt_count,
-                        trace.local_repair_applied,
                         pending_recovery_records
                             .iter()
                             .any(|record| record.recovery_kind == "second_pass"),
@@ -1373,7 +1911,6 @@ async fn resolve_graph_extraction_with_gateway(
         request_size_bytes: 0,
         recovery_summary: extraction_recovery.classify_outcome(
             trace.provider_attempt_count,
-            trace.local_repair_applied,
             pending_recovery_records.iter().any(|record| record.recovery_kind == "second_pass"),
             false,
             true,
@@ -1384,7 +1921,6 @@ async fn resolve_graph_extraction_with_gateway(
             &pending_recovery_records,
             &extraction_recovery.classify_outcome(
                 trace.provider_attempt_count,
-                trace.local_repair_applied,
                 pending_recovery_records.iter().any(|record| record.recovery_kind == "second_pass"),
                 false,
                 true,
@@ -1405,24 +1941,24 @@ async fn request_graph_extraction_with_prompt_plan(
     let model_name = runtime_binding.model_name.clone();
     let started_at = Utc::now();
     let started = Instant::now();
-    let response = gateway
-        .generate(ChatRequest {
+    let task_spec = GraphExtractTask::spec();
+    let request = build_provider_request(
+        &task_spec,
+        ChatRequestSeed {
             provider_kind: runtime_binding.provider_kind.clone(),
             model_name: runtime_binding.model_name.clone(),
-            prompt: prompt_plan.prompt.clone(),
             api_key_override: Some(runtime_binding.api_key.clone()),
             base_url_override: runtime_binding.provider_base_url.clone(),
             system_prompt: runtime_binding.system_prompt.clone(),
             temperature: runtime_binding.temperature,
             top_p: runtime_binding.top_p,
             max_output_tokens_override: runtime_binding.max_output_tokens_override,
-            response_format_json: Some(graph_extraction_response_format_json(
-                &runtime_binding.provider_kind,
-            )),
             extra_parameters_json: runtime_binding.extra_parameters_json.clone(),
-        })
-        .await
-        .context("graph extraction provider call failed")?;
+        },
+        prompt_plan.prompt.clone(),
+    );
+    let response =
+        gateway.generate(request).await.context("graph extraction provider call failed")?;
     let finished_at = Utc::now();
     let output_text = response.output_text;
     let usage_json = build_provider_usage_json(&provider_kind, &model_name, response.usage_json);
@@ -1646,44 +2182,21 @@ fn finalize_recovery_attempt_records(
         .collect()
 }
 
-fn normalize_graph_extraction_output_with_repair(
-    extraction_recovery: &ExtractionRecoveryService,
+fn normalize_graph_extraction_output(
     output_text: &str,
 ) -> std::result::Result<NormalizedGraphExtractionAttempt, FailedNormalizationAttempt> {
-    match parse_graph_extraction_output(output_text) {
-        Ok(normalized) => Ok(NormalizedGraphExtractionAttempt {
+    parse_graph_extraction_output(output_text)
+        .map(|normalized| NormalizedGraphExtractionAttempt {
             normalized,
             normalization_path: "direct",
-            repair_candidate: None,
-            parser_repair: ParserRepairClassification {
-                should_attempt: false,
-                trigger_reason: None,
-                repair_candidate: None,
-                issue_summary: None,
-            },
-        }),
-        Err(primary_error) => {
-            let parser_repair = extraction_recovery.classify_parser_repair(output_text, true);
-            if let Some(candidate) = &parser_repair.repair_candidate {
-                if let Ok(normalized) = parse_graph_extraction_output(candidate) {
-                    return Ok(NormalizedGraphExtractionAttempt {
-                        normalized,
-                        normalization_path: "repaired",
-                        repair_candidate: Some(candidate.clone()),
-                        parser_repair,
-                    });
-                }
-            }
-            Err(FailedNormalizationAttempt {
-                parse_error: primary_error.to_string(),
-                parser_repair,
-            })
-        }
-    }
+        })
+        .map_err(|error| FailedNormalizationAttempt { parse_error: error.to_string() })
 }
 
 pub fn parse_graph_extraction_output(output_text: &str) -> Result<GraphExtractionCandidateSet> {
-    let parsed = extract_json_payload(output_text)?;
+    let parsed = extract_json_payload(output_text).map_err(|error| {
+        anyhow!("{}: {}", GraphExtractionTaskFailureCode::MalformedOutput.as_str(), error)
+    })?;
     let entities = parsed
         .get("entities")
         .and_then(serde_json::Value::as_array)
@@ -1695,7 +2208,30 @@ pub fn parse_graph_extraction_output(output_text: &str) -> Result<GraphExtractio
         .map(|items| items.iter().filter_map(parse_relation_candidate).collect::<Vec<_>>())
         .unwrap_or_default();
 
-    Ok(GraphExtractionCandidateSet { entities, relations })
+    let candidate_set = GraphExtractionCandidateSet { entities, relations };
+    validate_graph_extraction_candidate_set(&candidate_set)
+        .map_err(|failure| anyhow!(failure.summary.clone()))?;
+    Ok(candidate_set)
+}
+
+pub fn validate_graph_extraction_candidate_set(
+    candidate_set: &GraphExtractionCandidateSet,
+) -> Result<(), GraphExtractionTaskFailure> {
+    if candidate_set.entities.iter().any(|entity| entity.label.trim().is_empty())
+        || candidate_set.relations.iter().any(|relation| {
+            relation.source_label.trim().is_empty()
+                || relation.target_label.trim().is_empty()
+                || relation.relation_type.trim().is_empty()
+        })
+    {
+        return Err(GraphExtractionTaskFailure {
+            code: GraphExtractionTaskFailureCode::InvalidCandidateSet.as_str().to_string(),
+            summary: "graph extraction candidate set contains empty labels or relation fields"
+                .to_string(),
+        });
+    }
+
+    Ok(())
 }
 
 fn parse_entity_candidate(value: &serde_json::Value) -> Option<GraphEntityCandidate> {
@@ -1811,117 +2347,9 @@ fn relation_type_is_canonical_ascii(normalized_relation_type: &str) -> bool {
 fn extract_json_payload(output_text: &str) -> Result<serde_json::Value> {
     let trimmed = output_text.trim();
     if trimmed.is_empty() {
-        return Ok(serde_json::json!({ "entities": [], "relations": [] }));
+        return Err(anyhow!("graph extraction output is empty"));
     }
-
-    let unfenced = strip_markdown_fence(trimmed);
-    let mut candidates = vec![unfenced.to_string()];
-    if let Some(object_candidate) = extract_outer_json_object(unfenced) {
-        if object_candidate != unfenced {
-            candidates.push(object_candidate);
-        }
-    }
-
-    let repaired_candidates = candidates
-        .iter()
-        .filter_map(|candidate| {
-            let repaired = close_unbalanced_json_containers(candidate);
-            (repaired != *candidate).then_some(repaired)
-        })
-        .collect::<Vec<_>>();
-    candidates.extend(repaired_candidates);
-
-    let mut parse_errors = Vec::new();
-    for candidate in &candidates {
-        match serde_json::from_str::<serde_json::Value>(candidate) {
-            Ok(value) => return Ok(value),
-            Err(json_error) => parse_errors.push(format!("strict json: {json_error}")),
-        }
-    }
-    for candidate in &candidates {
-        match json5::from_str::<serde_json::Value>(candidate) {
-            Ok(value) => {
-                tracing::warn!(
-                    target: "rustrag::graph_extract",
-                    "graph extraction JSON parsed via json5 fallback; prefer provider structured output"
-                );
-                return Ok(value);
-            }
-            Err(json5_error) => parse_errors.push(format!("json5 fallback: {json5_error}")),
-        }
-    }
-
-    Err(anyhow!(
-        "invalid graph extraction json: {}",
-        if parse_errors.is_empty() {
-            "unknown parse failure".to_string()
-        } else {
-            parse_errors.join(" | ")
-        }
-    ))
-}
-
-fn strip_markdown_fence(value: &str) -> &str {
-    if !value.starts_with("```") {
-        return value;
-    }
-
-    value
-        .trim_start_matches("```json")
-        .trim_start_matches("```JSON")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim()
-}
-
-fn extract_outer_json_object(value: &str) -> Option<String> {
-    let start = value.find('{')?;
-    let end = value.rfind('}')?;
-    if end <= start {
-        return None;
-    }
-    Some(value[start..=end].trim().to_string())
-}
-
-fn close_unbalanced_json_containers(value: &str) -> String {
-    let mut stack = Vec::new();
-    let mut in_string = false;
-    let mut escaped = false;
-
-    for ch in value.chars() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' && in_string {
-            escaped = true;
-            continue;
-        }
-        if ch == '"' {
-            in_string = !in_string;
-            continue;
-        }
-        if in_string {
-            continue;
-        }
-
-        match ch {
-            '{' => stack.push('}'),
-            '[' => stack.push(']'),
-            '}' | ']' => {
-                if stack.last().copied() == Some(ch) {
-                    stack.pop();
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let mut repaired = value.trim_end().to_string();
-    while let Some(ch) = stack.pop() {
-        repaired.push(ch);
-    }
-    repaired
+    serde_json::from_str::<serde_json::Value>(trimmed).context("invalid graph extraction json")
 }
 
 fn sha256_hex(value: &str) -> String {
@@ -2110,14 +2538,12 @@ mod tests {
             provider_failure_json: None,
             recovery_summary_json: serde_json::json!({
                 "status": "recovered",
-                "parserRepairApplied": true,
                 "secondPassApplied": false,
                 "warning": "used persisted chunk result"
             }),
             raw_output_json: serde_json::json!({
                 "lifecycle": {
                     "provider_attempt_count": 2,
-                    "local_repair_applied": true,
                     "reask_count": 0
                 }
             }),
@@ -2185,7 +2611,7 @@ mod tests {
 
     #[test]
     fn response_format_enum_matches_canonical_relation_catalog() {
-        let response_format = graph_extraction_response_format_json("openai");
+        let response_format = graph_extraction_response_format("openai");
         let enum_values = response_format
             .get("json_schema")
             .and_then(|value| value.get("schema"))
@@ -2207,7 +2633,7 @@ mod tests {
 
     #[test]
     fn deepseek_uses_json_object_response_format() {
-        let response_format = graph_extraction_response_format_json("deepseek");
+        let response_format = graph_extraction_response_format("deepseek");
 
         assert_eq!(
             response_format.get("type").and_then(serde_json::Value::as_str),
@@ -2255,13 +2681,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_json_inside_markdown_fence() {
-        let normalized =
+    fn rejects_json_inside_markdown_fence() {
+        let error =
             parse_graph_extraction_output("```json\n{\"entities\":[],\"relations\":[]}\n```")
-                .expect("normalize fenced graph extraction");
+                .expect_err("fenced output must fail");
 
-        assert!(normalized.entities.is_empty());
-        assert!(normalized.relations.is_empty());
+        assert!(error.to_string().contains("invalid graph extraction json"));
     }
 
     #[test]
@@ -2322,39 +2747,6 @@ mod tests {
     }
 
     #[test]
-    fn extracts_json_object_from_surrounding_prose() {
-        let normalized = parse_graph_extraction_output(
-            "Here is the result:\n{\"entities\":[\"OpenAI\"],\"relations\":[]}\nThanks.",
-        )
-        .expect("normalize graph extraction with prose");
-
-        assert_eq!(normalized.entities.len(), 1);
-        assert_eq!(normalized.entities[0].label, "OpenAI");
-    }
-
-    #[test]
-    fn accepts_json5_style_payloads() {
-        let normalized = parse_graph_extraction_output(
-            "{entities:[{label:'OpenAI', node_type:'entity', aliases:['Open AI'], summary:'provider',},], relations:[]}",
-        )
-        .expect("normalize json5 graph extraction");
-
-        assert_eq!(normalized.entities.len(), 1);
-        assert_eq!(normalized.entities[0].aliases, vec!["Open AI".to_string()]);
-    }
-
-    #[test]
-    fn closes_missing_json_containers_at_end() {
-        let normalized = parse_graph_extraction_output(
-            r#"{"entities":[{"label":"OpenAI","node_type":"entity","aliases":[],"summary":"provider"}],"relations":[{"source_label":"OpenAI","target_label":"Graph","relation_type":"mentions","summary":"link"}"#,
-        )
-        .expect("normalize truncated graph extraction");
-
-        assert_eq!(normalized.entities.len(), 1);
-        assert_eq!(normalized.relations.len(), 1);
-    }
-
-    #[test]
     fn rejects_non_json_payloads() {
         let error = parse_graph_extraction_output("not valid json").expect_err("invalid json");
 
@@ -2362,10 +2754,38 @@ mod tests {
     }
 
     #[test]
-    fn repairs_named_sections_without_outer_object() {
-        let recovery_service = ExtractionRecoveryService;
-        let normalized_attempt = normalize_graph_extraction_output_with_repair(
-            &recovery_service,
+    fn rejects_json_object_surrounded_by_prose() {
+        let error = parse_graph_extraction_output(
+            "Here is the result:\n{\"entities\":[\"OpenAI\"],\"relations\":[]}\nThanks.",
+        )
+        .expect_err("prose wrapper must fail");
+
+        assert!(error.to_string().contains("invalid graph extraction json"));
+    }
+
+    #[test]
+    fn rejects_json5_style_payloads() {
+        let error = parse_graph_extraction_output(
+            "{entities:[{label:'OpenAI', node_type:'entity', aliases:['Open AI'], summary:'provider',},], relations:[]}",
+        )
+        .expect_err("json5 payload must fail");
+
+        assert!(error.to_string().contains("invalid graph extraction json"));
+    }
+
+    #[test]
+    fn rejects_truncated_json_payloads() {
+        let error = parse_graph_extraction_output(
+            r#"{"entities":[{"label":"OpenAI","node_type":"entity","aliases":[],"summary":"provider"}],"relations":[{"source_label":"OpenAI","target_label":"Graph","relation_type":"mentions","summary":"link"}"#,
+        )
+        .expect_err("truncated payload must fail");
+
+        assert!(error.to_string().contains("invalid graph extraction json"));
+    }
+
+    #[test]
+    fn rejects_named_sections_without_outer_object() {
+        let error = normalize_graph_extraction_output(
             r#"
             entities:
             [{"label":"OpenAI","node_type":"entity","aliases":[],"summary":"provider"}]
@@ -2373,12 +2793,9 @@ mod tests {
             [{"source_label":"OpenAI","target_label":"Annual report","relation_type":"mentions","summary":"citation"}]
             "#,
         )
-        .expect("repair malformed extraction payload");
+        .expect_err("named sections must fail");
 
-        assert_eq!(normalized_attempt.normalization_path, "repaired");
-        assert!(normalized_attempt.repair_candidate.is_some());
-        assert_eq!(normalized_attempt.normalized.entities.len(), 1);
-        assert_eq!(normalized_attempt.normalized.relations.len(), 1);
+        assert!(error.parse_error.contains("malformed_output"));
     }
 
     #[tokio::test]

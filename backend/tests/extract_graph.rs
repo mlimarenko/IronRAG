@@ -17,7 +17,7 @@ use rustrag_backend::{
     services::{
         extract_service::{
             CheckpointResumeCursorCommand, ExtractService, MaterializeChunkResultCommand,
-            NewEdgeCandidate, NewNodeCandidate, PersistExtractContentCommand,
+            NewEdgeCandidate, NewNodeCandidate,
         },
         search_service::{ChunkEmbeddingWrite, GraphNodeEmbeddingWrite, SearchService},
     },
@@ -224,21 +224,16 @@ impl ExtractGraphFixture {
         .context("failed to insert ingest attempt")?;
 
         let extract_service = ExtractService::new();
-        let _ = extract_service
-            .persist_extract_content(
+        let _ = self
+            .state
+            .canonical_services
+            .knowledge
+            .set_revision_extract_state(
                 &self.state,
-                PersistExtractContentCommand {
-                    revision_id: revision.id,
-                    attempt_id: Some(attempt),
-                    extract_state: "readable".to_string(),
-                    normalized_text: Some(
-                        "Readable extracted text for the canonical greenfield test.".to_string(),
-                    ),
-                    text_checksum: Some("sha256:extract-graph".to_string()),
-                    warning_count: 0,
-                    preparation_state: None,
-                    preparation_checkpoint: None,
-                },
+                revision.id,
+                "readable",
+                Some("Readable extracted text for the canonical greenfield test."),
+                Some("sha256:extract-graph"),
             )
             .await
             .context("failed to persist extract content")?;
@@ -399,7 +394,7 @@ async fn terminate_database_connections(postgres: &PgPool, database_name: &str) 
 }
 
 async fn assert_legacy_truth_tables_absent(pool: &PgPool) -> Result<()> {
-    for table in ["entity", "relation", "runtime_vector_target"] {
+    for table in ["entity", "relation", "runtime_vector_target", "extract_content"] {
         let exists = sqlx::query_scalar::<_, Option<String>>("select to_regclass($1)::text")
             .bind(table)
             .fetch_one(pool)

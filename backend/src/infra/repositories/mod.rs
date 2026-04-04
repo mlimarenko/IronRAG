@@ -1,15 +1,40 @@
+#![allow(
+    clippy::doc_markdown,
+    clippy::missing_const_for_fn,
+    clippy::missing_errors_doc,
+    clippy::too_many_arguments,
+    clippy::too_many_lines
+)]
+
+#[allow(
+    clippy::bool_to_int_with_if,
+    clippy::missing_errors_doc,
+    clippy::option_if_let_else,
+    clippy::too_many_arguments,
+    clippy::too_many_lines
+)]
 pub mod ai_repository;
+#[allow(clippy::missing_errors_doc)]
 pub mod audit_repository;
+#[allow(clippy::missing_errors_doc)]
 pub mod billing_repository;
+#[allow(clippy::missing_errors_doc)]
 pub mod catalog_repository;
+#[allow(clippy::missing_errors_doc)]
 pub mod content_repository;
+#[allow(clippy::missing_errors_doc)]
 pub mod extract_repository;
+#[allow(clippy::missing_errors_doc)]
 pub mod iam_repository;
+#[allow(clippy::missing_errors_doc, clippy::too_many_lines)]
 pub mod ingest_repository;
+#[allow(clippy::missing_errors_doc)]
 pub mod ops_repository;
+#[allow(clippy::missing_errors_doc)]
 pub mod query_repository;
 mod runtime_graph_repository;
 mod runtime_graph_summary_repository;
+pub mod runtime_repository;
 
 pub use runtime_graph_repository::*;
 pub use runtime_graph_summary_repository::*;
@@ -1036,25 +1061,6 @@ pub async fn create_ingestion_job(
     .await
 }
 
-pub async fn repair_queued_runtime_ingestion_job_attempt_counts(
-    pool: &PgPool,
-) -> Result<u64, sqlx::Error> {
-    let repaired = sqlx::query(
-        "update ingestion_job as job
-         set attempt_count = greatest(job.attempt_count, run.current_attempt_no),
-             updated_at = now()
-         from runtime_ingestion_run as run
-         where job.status = 'queued'
-           and job.payload_json ? 'runtime_ingestion_run_id'
-           and (job.payload_json ->> 'runtime_ingestion_run_id')::uuid = run.id
-           and job.attempt_count < run.current_attempt_no",
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(repaired.rows_affected())
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct DocumentRow {
     pub id: Uuid,
@@ -1987,7 +1993,6 @@ pub struct McpMutationReceiptRow {
     pub operation_kind: String,
     pub idempotency_key: String,
     pub payload_identity: Option<String>,
-    pub runtime_tracking_id: Option<String>,
     pub status: String,
     pub failure_kind: Option<String>,
     pub accepted_at: DateTime<Utc>,
@@ -2005,7 +2010,6 @@ pub struct NewMcpMutationReceipt {
     pub operation_kind: String,
     pub idempotency_key: String,
     pub payload_identity: Option<String>,
-    pub runtime_tracking_id: Option<String>,
     pub status: String,
     pub failure_kind: Option<String>,
 }
@@ -2084,10 +2088,10 @@ pub async fn create_mcp_mutation_receipt(
     sqlx::query_as::<_, McpMutationReceiptRow>(
         "insert into mcp_mutation_receipt (
             id, token_id, workspace_id, library_id, document_id, operation_kind,
-            idempotency_key, payload_identity, runtime_tracking_id, status, failure_kind
-         ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            idempotency_key, payload_identity, status, failure_kind
+         ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          returning id, token_id, workspace_id, library_id, document_id, operation_kind,
-            idempotency_key, payload_identity, runtime_tracking_id, status, failure_kind,
+            idempotency_key, payload_identity, status, failure_kind,
             accepted_at, last_status_at, created_at, updated_at",
     )
     .bind(Uuid::now_v7())
@@ -2098,7 +2102,6 @@ pub async fn create_mcp_mutation_receipt(
     .bind(&new_receipt.operation_kind)
     .bind(&new_receipt.idempotency_key)
     .bind(new_receipt.payload_identity.as_deref())
-    .bind(new_receipt.runtime_tracking_id.as_deref())
     .bind(&new_receipt.status)
     .bind(new_receipt.failure_kind.as_deref())
     .fetch_one(pool)
@@ -2119,7 +2122,7 @@ pub async fn find_mcp_mutation_receipt_by_idempotency(
 ) -> Result<Option<McpMutationReceiptRow>, sqlx::Error> {
     sqlx::query_as::<_, McpMutationReceiptRow>(
         "select id, token_id, workspace_id, library_id, document_id, operation_kind,
-            idempotency_key, payload_identity, runtime_tracking_id, status, failure_kind,
+            idempotency_key, payload_identity, status, failure_kind,
             accepted_at, last_status_at, created_at, updated_at
          from mcp_mutation_receipt
          where token_id = $1
@@ -2147,7 +2150,7 @@ pub async fn get_mcp_mutation_receipt_by_id(
 ) -> Result<Option<McpMutationReceiptRow>, sqlx::Error> {
     sqlx::query_as::<_, McpMutationReceiptRow>(
         "select id, token_id, workspace_id, library_id, document_id, operation_kind,
-            idempotency_key, payload_identity, runtime_tracking_id, status, failure_kind,
+            idempotency_key, payload_identity, status, failure_kind,
             accepted_at, last_status_at, created_at, updated_at
          from mcp_mutation_receipt
          where id = $1",
@@ -3654,6 +3657,7 @@ pub struct RuntimeExtractedContentRow {
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct RuntimeGraphExtractionRecordRow {
     pub id: Uuid,
+    pub runtime_execution_id: Uuid,
     pub project_id: Uuid,
     pub document_id: Uuid,
     pub chunk_id: Uuid,
@@ -3732,6 +3736,7 @@ pub struct UpsertRuntimeGraphExtractionResumeStateInput {
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct RuntimeGraphExtractionRecoveryAttemptRow {
     pub id: Uuid,
+    pub runtime_execution_id: Uuid,
     pub workspace_id: Uuid,
     pub project_id: Uuid,
     pub document_id: Uuid,
@@ -3752,6 +3757,7 @@ pub struct RuntimeGraphExtractionRecoveryAttemptRow {
 
 #[derive(Debug, Clone)]
 pub struct CreateRuntimeGraphExtractionRecoveryAttemptInput {
+    pub runtime_execution_id: Uuid,
     pub workspace_id: Uuid,
     pub project_id: Uuid,
     pub document_id: Uuid,
@@ -3764,6 +3770,36 @@ pub struct CreateRuntimeGraphExtractionRecoveryAttemptInput {
     pub status: String,
     pub raw_issue_summary: Option<String>,
     pub recovered_summary: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateRuntimeGraphExtractionRecordInput {
+    pub id: Uuid,
+    pub runtime_execution_id: Uuid,
+    pub project_id: Uuid,
+    pub document_id: Uuid,
+    pub chunk_id: Uuid,
+    pub provider_kind: String,
+    pub model_name: String,
+    pub extraction_version: String,
+    pub prompt_hash: String,
+    pub status: String,
+    pub raw_output_json: serde_json::Value,
+    pub normalized_output_json: serde_json::Value,
+    pub glean_pass_count: i32,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateRuntimeGraphExtractionRecordInput {
+    pub provider_kind: String,
+    pub model_name: String,
+    pub prompt_hash: String,
+    pub status: String,
+    pub raw_output_json: serde_json::Value,
+    pub normalized_output_json: serde_json::Value,
+    pub glean_pass_count: i32,
+    pub error_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -6455,42 +6491,70 @@ pub async fn delete_query_execution_references_by_document_revision(
 /// Returns any `SQLx` error raised while inserting the graph extraction record.
 pub async fn create_runtime_graph_extraction_record(
     pool: &PgPool,
-    project_id: Uuid,
-    document_id: Uuid,
-    chunk_id: Uuid,
-    provider_kind: &str,
-    model_name: &str,
-    extraction_version: &str,
-    prompt_hash: &str,
-    status: &str,
-    raw_output_json: serde_json::Value,
-    normalized_output_json: serde_json::Value,
-    glean_pass_count: i32,
-    error_message: Option<&str>,
+    input: &CreateRuntimeGraphExtractionRecordInput,
 ) -> Result<RuntimeGraphExtractionRecordRow, sqlx::Error> {
     sqlx::query_as::<_, RuntimeGraphExtractionRecordRow>(
         "insert into runtime_graph_extraction (
-            id, project_id, document_id, chunk_id, provider_kind, model_name, extraction_version,
-            prompt_hash, status, raw_output_json, normalized_output_json, glean_pass_count, error_message
-         ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-         returning id, project_id, document_id, chunk_id, provider_kind, model_name, extraction_version,
-            prompt_hash, status, raw_output_json, normalized_output_json, glean_pass_count,
-            error_message, created_at",
+            id, runtime_execution_id, project_id, document_id, chunk_id, provider_kind, model_name,
+            extraction_version, prompt_hash, status, raw_output_json, normalized_output_json,
+            glean_pass_count, error_message
+         ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+         returning id, runtime_execution_id, project_id, document_id, chunk_id, provider_kind,
+            model_name, extraction_version, prompt_hash, status, raw_output_json,
+            normalized_output_json, glean_pass_count, error_message, created_at",
     )
-    .bind(Uuid::now_v7())
-    .bind(project_id)
-    .bind(document_id)
-    .bind(chunk_id)
-    .bind(provider_kind)
-    .bind(model_name)
-    .bind(extraction_version)
-    .bind(prompt_hash)
-    .bind(status)
-    .bind(raw_output_json)
-    .bind(normalized_output_json)
-    .bind(glean_pass_count)
-    .bind(error_message)
+    .bind(input.id)
+    .bind(input.runtime_execution_id)
+    .bind(input.project_id)
+    .bind(input.document_id)
+    .bind(input.chunk_id)
+    .bind(&input.provider_kind)
+    .bind(&input.model_name)
+    .bind(&input.extraction_version)
+    .bind(&input.prompt_hash)
+    .bind(&input.status)
+    .bind(input.raw_output_json.clone())
+    .bind(input.normalized_output_json.clone())
+    .bind(input.glean_pass_count)
+    .bind(input.error_message.as_deref())
     .fetch_one(pool)
+    .await
+}
+
+/// Updates one chunk-level graph extraction record.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while updating the graph extraction record.
+pub async fn update_runtime_graph_extraction_record(
+    pool: &PgPool,
+    id: Uuid,
+    input: &UpdateRuntimeGraphExtractionRecordInput,
+) -> Result<Option<RuntimeGraphExtractionRecordRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeGraphExtractionRecordRow>(
+        "update runtime_graph_extraction
+         set provider_kind = $2,
+             model_name = $3,
+             prompt_hash = $4,
+             status = $5,
+             raw_output_json = $6,
+             normalized_output_json = $7,
+             glean_pass_count = $8,
+             error_message = $9
+         where id = $1
+         returning id, runtime_execution_id, project_id, document_id, chunk_id, provider_kind,
+            model_name, extraction_version, prompt_hash, status, raw_output_json,
+            normalized_output_json, glean_pass_count, error_message, created_at",
+    )
+    .bind(id)
+    .bind(&input.provider_kind)
+    .bind(&input.model_name)
+    .bind(&input.prompt_hash)
+    .bind(&input.status)
+    .bind(input.raw_output_json.clone())
+    .bind(input.normalized_output_json.clone())
+    .bind(input.glean_pass_count)
+    .bind(input.error_message.as_deref())
+    .fetch_optional(pool)
     .await
 }
 
@@ -6643,15 +6707,35 @@ pub async fn list_runtime_graph_extraction_records_by_document(
     document_id: Uuid,
 ) -> Result<Vec<RuntimeGraphExtractionRecordRow>, sqlx::Error> {
     sqlx::query_as::<_, RuntimeGraphExtractionRecordRow>(
-        "select id, project_id, document_id, chunk_id, provider_kind, model_name, extraction_version,
-            prompt_hash, status, raw_output_json, normalized_output_json, glean_pass_count,
-            error_message, created_at
+        "select id, runtime_execution_id, project_id, document_id, chunk_id, provider_kind,
+            model_name, extraction_version, prompt_hash, status, raw_output_json,
+            normalized_output_json, glean_pass_count, error_message, created_at
          from runtime_graph_extraction
          where document_id = $1
          order by created_at asc, id asc",
     )
     .bind(document_id)
     .fetch_all(pool)
+    .await
+}
+
+/// Loads one graph extraction record by id.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while querying the graph extraction record.
+pub async fn get_runtime_graph_extraction_record_by_id(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<Option<RuntimeGraphExtractionRecordRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeGraphExtractionRecordRow>(
+        "select id, runtime_execution_id, project_id, document_id, chunk_id, provider_kind,
+            model_name, extraction_version, prompt_hash, status, raw_output_json,
+            normalized_output_json, glean_pass_count, error_message, created_at
+         from runtime_graph_extraction
+         where id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
     .await
 }
 
@@ -6664,9 +6748,9 @@ pub async fn list_runtime_graph_extraction_records_by_project(
     project_id: Uuid,
 ) -> Result<Vec<RuntimeGraphExtractionRecordRow>, sqlx::Error> {
     sqlx::query_as::<_, RuntimeGraphExtractionRecordRow>(
-        "select id, project_id, document_id, chunk_id, provider_kind, model_name, extraction_version,
-            prompt_hash, status, raw_output_json, normalized_output_json, glean_pass_count,
-            error_message, created_at
+        "select id, runtime_execution_id, project_id, document_id, chunk_id, provider_kind,
+            model_name, extraction_version, prompt_hash, status, raw_output_json,
+            normalized_output_json, glean_pass_count, error_message, created_at
          from runtime_graph_extraction
          where project_id = $1
          order by created_at asc, id asc",
@@ -6862,19 +6946,20 @@ pub async fn create_runtime_graph_extraction_recovery_attempt(
 ) -> Result<RuntimeGraphExtractionRecoveryAttemptRow, sqlx::Error> {
     sqlx::query_as::<_, RuntimeGraphExtractionRecoveryAttemptRow>(
         "insert into runtime_graph_extraction_recovery_attempt (
-            id, workspace_id, project_id, document_id, revision_id, ingestion_run_id,
-            attempt_no, chunk_id, recovery_kind, trigger_reason, status, raw_issue_summary,
-            recovered_summary
+            id, runtime_execution_id, workspace_id, project_id, document_id, revision_id,
+            ingestion_run_id, attempt_no, chunk_id, recovery_kind, trigger_reason, status,
+            raw_issue_summary, recovered_summary
          ) values (
-            $1, $2, $3, $4, $5, $6,
-            $7, $8, $9, $10, $11, $12,
-            $13
+            $1, $2, $3, $4, $5, $6, $7,
+            $8, $9, $10, $11, $12, $13,
+            $14
          )
-         returning id, workspace_id, project_id, document_id, revision_id, ingestion_run_id,
-            attempt_no, chunk_id, recovery_kind, trigger_reason, status, raw_issue_summary,
-            recovered_summary, started_at, finished_at, created_at, updated_at",
+         returning id, runtime_execution_id, workspace_id, project_id, document_id, revision_id,
+            ingestion_run_id, attempt_no, chunk_id, recovery_kind, trigger_reason, status,
+            raw_issue_summary, recovered_summary, started_at, finished_at, created_at, updated_at",
     )
     .bind(Uuid::now_v7())
+    .bind(input.runtime_execution_id)
     .bind(input.workspace_id)
     .bind(input.project_id)
     .bind(input.document_id)
@@ -6911,9 +6996,9 @@ pub async fn update_runtime_graph_extraction_recovery_attempt_status(
              end,
              updated_at = now()
          where id = $1
-         returning id, workspace_id, project_id, document_id, revision_id, ingestion_run_id,
-            attempt_no, chunk_id, recovery_kind, trigger_reason, status, raw_issue_summary,
-            recovered_summary, started_at, finished_at, created_at, updated_at",
+         returning id, runtime_execution_id, workspace_id, project_id, document_id, revision_id,
+            ingestion_run_id, attempt_no, chunk_id, recovery_kind, trigger_reason, status,
+            raw_issue_summary, recovered_summary, started_at, finished_at, created_at, updated_at",
     )
     .bind(id)
     .bind(status)
@@ -6932,9 +7017,9 @@ pub async fn list_runtime_graph_extraction_recovery_attempts_by_run(
     attempt_no: i32,
 ) -> Result<Vec<RuntimeGraphExtractionRecoveryAttemptRow>, sqlx::Error> {
     sqlx::query_as::<_, RuntimeGraphExtractionRecoveryAttemptRow>(
-        "select id, workspace_id, project_id, document_id, revision_id, ingestion_run_id,
-            attempt_no, chunk_id, recovery_kind, trigger_reason, status, raw_issue_summary,
-            recovered_summary, started_at, finished_at, created_at, updated_at
+        "select id, runtime_execution_id, workspace_id, project_id, document_id, revision_id,
+            ingestion_run_id, attempt_no, chunk_id, recovery_kind, trigger_reason, status,
+            raw_issue_summary, recovered_summary, started_at, finished_at, created_at, updated_at
          from runtime_graph_extraction_recovery_attempt
          where ingestion_run_id = $1
            and attempt_no = $2
@@ -6955,9 +7040,9 @@ pub async fn list_runtime_graph_extraction_recovery_attempts_by_document(
     document_id: Uuid,
 ) -> Result<Vec<RuntimeGraphExtractionRecoveryAttemptRow>, sqlx::Error> {
     sqlx::query_as::<_, RuntimeGraphExtractionRecoveryAttemptRow>(
-        "select id, workspace_id, project_id, document_id, revision_id, ingestion_run_id,
-            attempt_no, chunk_id, recovery_kind, trigger_reason, status, raw_issue_summary,
-            recovered_summary, started_at, finished_at, created_at, updated_at
+        "select id, runtime_execution_id, workspace_id, project_id, document_id, revision_id,
+            ingestion_run_id, attempt_no, chunk_id, recovery_kind, trigger_reason, status,
+            raw_issue_summary, recovered_summary, started_at, finished_at, created_at, updated_at
          from runtime_graph_extraction_recovery_attempt
          where document_id = $1
          order by started_at desc, created_at desc",

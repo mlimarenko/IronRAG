@@ -1,3 +1,11 @@
+#![allow(
+    clippy::missing_const_for_fn,
+    clippy::missing_errors_doc,
+    clippy::needless_pass_by_value,
+    clippy::too_many_lines,
+    clippy::uninlined_format_args
+)]
+
 use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, anyhow};

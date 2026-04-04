@@ -1,5 +1,5 @@
 DOCKER_COMPOSE ?= docker compose
-DOCKER_COMPOSE_FILE ?= docker-compose.yml
+DOCKER_COMPOSE_FILE ?= docker-compose-local.yml
 LOCAL_DOCKER_APP_SERVICES ?= backend frontend
 LOCAL_DOCKER_ALL_SERVICES ?= postgres redis arangodb backend frontend
 RUSTRAG_BENCHMARK_BASE_URL ?= http://127.0.0.1:19000/v1
@@ -7,6 +7,7 @@ RUSTRAG_BENCHMARK_SUITES ?= backend/benchmarks/grounded_query/api_baseline_suite
 RUSTRAG_BENCHMARK_OUTPUT_DIR ?= tmp-grounded-benchmarks
 RUSTRAG_BENCHMARK_CANONICALIZE_REUSED_LIBRARY ?= 1
 RUSTRAG_BENCHMARK_LIBRARY_NAME ?= Grounded Benchmark Seed
+BACKEND_CARGO_TARGET_DIR ?= $(CURDIR)/backend/.cargo-target
 
 .PHONY: \
 	backend-fmt \
@@ -41,22 +42,22 @@ backend-fmt:
 	cd backend && cargo fmt --all
 
 backend-build:
-	cd backend && cargo build --release
+	cd backend && CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo build --release
 
 backend-lint:
-	cd backend && cargo clippy --all-targets --all-features -- -D warnings
+	cd backend && CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo clippy --all-targets --all-features -- -D warnings
 
 backend-doc:
-	cd backend && cargo doc --no-deps
+	cd backend && CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo doc --no-deps
 
 backend-test:
-	cd backend && cargo test
+	cd backend && CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo test
 
 backend-change-gate:
-	cd backend && $(MAKE) change-gate
+	cd backend && CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" $(MAKE) change-gate
 
 backend-audit:
-	cd backend && cargo audit
+	cd backend && CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo audit
 
 frontend-install:
 	cd frontend && npm install
@@ -106,7 +107,7 @@ benchmark-grounded-seed:
 	@test -n "$(RUSTRAG_SESSION_COOKIE)" || (echo "RUSTRAG_SESSION_COOKIE is required" && exit 1)
 	@test -n "$(RUSTRAG_BENCHMARK_WORKSPACE_ID)" || (echo "RUSTRAG_BENCHMARK_WORKSPACE_ID is required" && exit 1)
 	@mkdir -p "$(RUSTRAG_BENCHMARK_OUTPUT_DIR)"
-	@args="--base-url $(RUSTRAG_BENCHMARK_BASE_URL) --workspace-id $(RUSTRAG_BENCHMARK_WORKSPACE_ID) --session-cookie $(RUSTRAG_SESSION_COOKIE) --library-name $(RUSTRAG_BENCHMARK_LIBRARY_NAME) --upload-only --output-dir $(RUSTRAG_BENCHMARK_OUTPUT_DIR)"; \
+	@args="--base-url $(RUSTRAG_BENCHMARK_BASE_URL) --workspace-id $(RUSTRAG_BENCHMARK_WORKSPACE_ID) --session-cookie $(RUSTRAG_SESSION_COOKIE) --library-name \"$(RUSTRAG_BENCHMARK_LIBRARY_NAME)\" --upload-only --output-dir $(RUSTRAG_BENCHMARK_OUTPUT_DIR)"; \
 	for suite in $(RUSTRAG_BENCHMARK_SUITES); do \
 	  args="$$args --suite $$suite"; \
 	done; \

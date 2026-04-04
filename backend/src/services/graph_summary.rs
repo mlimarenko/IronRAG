@@ -7,7 +7,7 @@ use crate::{
     app::state::AppState,
     domains::graph_quality::GraphSummaryConfidenceStatus,
     infra::repositories::{
-        self, RuntimeGraphEdgeRow, RuntimeGraphEvidenceRow, RuntimeGraphNodeRow,
+        self, RuntimeGraphEdgeRow, RuntimeGraphEvidenceRow, RuntimeGraphNodeRow, catalog_repository,
     },
     services::graph_projection::active_projection_version,
 };
@@ -118,12 +118,12 @@ impl GraphSummaryService {
             return Ok(0);
         };
 
-        let Some(project) =
-            repositories::get_project_by_id(&state.persistence.postgres, library_id)
+        let Some(library) =
+            catalog_repository::get_library_by_id(&state.persistence.postgres, library_id)
                 .await
-                .context("failed to load project while refreshing canonical summaries")?
+                .context("failed to load library while refreshing canonical summaries")?
         else {
-            return Err(anyhow!("project {library_id} not found while refreshing summaries"));
+            return Err(anyhow!("library {library_id} not found while refreshing summaries"));
         };
 
         let snapshot =
@@ -176,7 +176,7 @@ impl GraphSummaryService {
             repositories::upsert_runtime_graph_canonical_summary(
                 &state.persistence.postgres,
                 &repositories::UpsertRuntimeGraphCanonicalSummaryInput {
-                    workspace_id: project.workspace_id,
+                    workspace_id: library.workspace_id,
                     project_id: library_id,
                     target_kind: "node".to_string(),
                     target_id: node.id,
@@ -215,7 +215,7 @@ impl GraphSummaryService {
             repositories::upsert_runtime_graph_canonical_summary(
                 &state.persistence.postgres,
                 &repositories::UpsertRuntimeGraphCanonicalSummaryInput {
-                    workspace_id: project.workspace_id,
+                    workspace_id: library.workspace_id,
                     project_id: library_id,
                     target_kind: "edge".to_string(),
                     target_id: edge.id,

@@ -1,3 +1,5 @@
+#![allow(clippy::cast_precision_loss, clippy::cast_sign_loss, clippy::missing_errors_doc)]
+
 use anyhow::{Context, anyhow};
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};

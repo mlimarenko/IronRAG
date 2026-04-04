@@ -45,12 +45,17 @@ function resolveFocusedNodeId(nodes: GraphNode[], identifier: string | null): st
     return exactMatch.id
   }
 
-  const documentMatch = nodes.find((node) => node.canonicalKey === `document:${identifier}`)
-  if (documentMatch) {
-    return documentMatch.id
+  const canonicalMatch = nodes.find((node) => node.canonicalKey === identifier)
+  if (canonicalMatch) {
+    return canonicalMatch.id
   }
 
-  return null
+  return (
+    nodes.find((node) => node.canonicalKey === `document:${identifier}`)?.id ??
+    nodes.find((node) => node.canonicalKey === `entity:${identifier}`)?.id ??
+    nodes.find((node) => node.canonicalKey === `relation:${identifier}`)?.id ??
+    null
+  )
 }
 
 export const useGraphStore = defineStore('graph', {

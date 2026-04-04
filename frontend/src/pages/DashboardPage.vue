@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useI18n } from 'vue-i18n'
 import FeedbackState from 'src/components/design-system/FeedbackState.vue'
+import DashboardAttentionCard from 'src/components/dashboard/DashboardAttentionCard.vue'
 import DashboardHero from 'src/components/dashboard/DashboardHero.vue'
 import DashboardRecentDocumentsCard from 'src/components/dashboard/DashboardRecentDocumentsCard.vue'
 import DashboardStatsStrip from 'src/components/dashboard/DashboardStatsStrip.vue'
@@ -143,37 +144,41 @@ const isSettledOverview = computed(() => {
     attentionItems.value.length === 0
   )
 })
-const nonZeroChartSegments = computed(
-  () => chartSummary.value?.segments.filter((segment) => segment.value > 0) ?? [],
-)
-const showStatusChart = computed(() => {
-  if (!chartSummary.value || isSettledOverview.value) {
-    return false
-  }
-
-  if (attentionItems.value.length > 0) {
-    return true
-  }
-
-  const activeOrFailed =
-    (documentCounts.value?.inFlightDocuments ?? 0) > 0 ||
-    (documentCounts.value?.failedDocuments ?? 0) > 0
-  if (activeOrFailed) {
-    return true
-  }
-
-  return nonZeroChartSegments.value.length > 1
-})
+const showStatusChart = computed(() => Boolean(chartSummary.value))
 const compactStatusChart = computed(
   () => attentionItems.value.length > 0 || recentDocuments.value.length <= 3,
 )
-const showStatsStrip = computed(() => visibleMetrics.value.length > 1)
-const compactRecentDocuments = computed(() => !showStatusChart.value)
-const showSingleSettledCard = computed(
-  () => !showStatusChart.value && recentDocuments.value.length === 1,
-)
-const useCalmLayout = computed(() => !showEmptyOverview.value && !showStatusChart.value)
 const showEmptyOverview = computed(() => (documentCounts.value?.totalDocuments ?? 0) === 0)
+const railMetrics = computed(() => {
+  if (showEmptyOverview.value) {
+    return []
+  }
+
+  if (visibleMetrics.value.length >= 2) {
+    return visibleMetrics.value.slice(0, 4)
+  }
+
+  const metricMap = new Map(metrics.value.map((metric) => [metric.key, metric]))
+
+  return ['documents', 'graphReady', 'inFlight', 'attention']
+    .map((key) => metricMap.get(key))
+    .filter((metric): metric is NonNullable<(typeof metrics.value)[number]> => Boolean(metric))
+    .filter((metric, index) => {
+      if (metric.key === 'documents') {
+        return Number(metric.value) > 0
+      }
+      if (metric.key === 'graphReady') {
+        return true
+      }
+      return Number(metric.value) > 0 || index < 2
+    })
+    .slice(0, 2)
+})
+const showStatsStrip = computed(() => railMetrics.value.length > 0)
+const showAttentionCard = computed(() => attentionItems.value.length > 0)
+const showOperationsRail = computed(
+  () => showAttentionCard.value || showStatusChart.value || railMetrics.value.length >= 3,
+)
 const heroFacts = computed<DashboardHeroFact[]>(() => {
   const shellContext = shellStore.context
   const facts: DashboardHeroFact[] = []
@@ -228,6 +233,14 @@ const heroFacts = computed<DashboardHeroFact[]>(() => {
 
   return facts
 })
+
+async function refreshOverview() {
+  try {
+    await dashboardStore.load(shellStore.context?.activeLibrary.id ?? null)
+  } catch {
+    // Store error state is authoritative for page feedback.
+  }
+}
 </script>
 
 <template>
@@ -247,65 +260,54 @@ const heroFacts = computed<DashboardHeroFact[]>(() => {
     <div
       v-else
       class="rr-dashboard__layout"
-      :class="{ 'is-empty': showEmptyOverview, 'is-calm': useCalmLayout }"
+      :class="{ 'is-empty': showEmptyOverview }"
     >
       <div v-if="error && overview" class="rr-stale-banner" role="alert">
         {{ t('dashboard.staleData', 'Данные могут быть устаревшими') }}
       </div>
 
       <DashboardHero
-        v-if="showEmptyOverview"
-        class="rr-dashboard__hero-standalone"
+        class="rr-dashboard__header"
         :narrative="heroNarrative"
         :actions="primaryActions"
         :facts="heroFacts"
         :refresh-loading="loading"
         :attention-items="attentionItems"
-        :compact="false"
-        @refresh="dashboardStore.load(shellStore.context?.activeLibrary.id ?? null)"
+        :compact="!showEmptyOverview"
+        @refresh="refreshOverview"
       />
 
-      <template v-else>
-        <div
-          class="rr-dashboard__overview"
-          :class="{
-            'is-solo': !showStatsStrip,
-            'is-solo-doc': showSingleSettledCard,
-            'is-calm': useCalmLayout,
-          }"
-        >
-          <DashboardHero
-            :narrative="heroNarrative"
-            :actions="primaryActions"
-            :facts="heroFacts"
-            :refresh-loading="loading"
-            :attention-items="attentionItems"
-            :compact="true"
-            @refresh="dashboardStore.load(shellStore.context?.activeLibrary.id ?? null)"
-          />
+      <div
+        v-if="!showEmptyOverview"
+        class="rr-dashboard__workbench"
+        :class="{ 'has-rail': showOperationsRail }"
+      >
+        <DashboardRecentDocumentsCard class="rr-dashboard__primary-surface" :documents="recentDocuments" />
 
-          <DashboardStatsStrip v-if="showStatsStrip" :metrics="metrics" />
-        </div>
-
-        <div
-          class="rr-dashboard__workbench"
-          :class="{
-            'is-settled': !showStatusChart,
-            'is-solo-doc': showSingleSettledCard,
-            'is-calm': useCalmLayout,
-          }"
-        >
+        <aside v-if="showOperationsRail" class="rr-dashboard__rail">
+          <DashboardAttentionCard v-if="showAttentionCard" :items="attentionItems" />
           <DashboardStatusChartCard
             v-if="showStatusChart"
             :summary="chartSummary"
             :compact="compactStatusChart"
           />
-          <DashboardRecentDocumentsCard
-            :documents="recentDocuments"
-            :compact="compactRecentDocuments"
-          />
+          <DashboardStatsStrip v-if="showStatsStrip" :metrics="railMetrics" />
+        </aside>
+      </div>
+
+      <div v-else class="rr-dashboard__empty-workbench">
+        <DashboardRecentDocumentsCard
+          class="rr-dashboard__primary-surface"
+          :documents="recentDocuments"
+          :compact="false"
+        />
+        <div
+          v-if="showStatsStrip"
+          class="rr-dashboard__rail rr-dashboard__rail--empty"
+        >
+          <DashboardStatsStrip :metrics="railMetrics" />
         </div>
-      </template>
+      </div>
     </div>
   </div>
 </template>

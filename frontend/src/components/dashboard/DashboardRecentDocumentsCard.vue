@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { useI18n } from 'vue-i18n'
 import StatusBadge from 'src/components/design-system/StatusBadge.vue'
 import { useDisplayFormatters } from 'src/composables/useDisplayFormatters'
 import { computed } from 'vue'
+import { i18n } from 'src/lib/i18n'
 import type { DashboardRecentDocument } from 'src/models/ui/dashboard'
 
 const props = defineProps<{
@@ -10,7 +10,7 @@ const props = defineProps<{
   compact?: boolean
 }>()
 
-const { t } = useI18n()
+const t = (key: string) => i18n.global.t(key)
 const { formatCompactDateTime } = useDisplayFormatters()
 const showFileType = computed(() => new Set(props.documents.map((row) => row.fileType)).size > 1)
 const showStatusBadge = computed(() => props.documents.some((row) => row.status !== 'ready'))
@@ -29,6 +29,22 @@ function statusKind(
     case 'ready':
     default:
       return 'graph_ready'
+  }
+}
+
+function statusLabel(row: DashboardRecentDocument): string {
+  switch (row.status) {
+    case 'queued':
+      return t('documents.statuses.queued')
+    case 'processing':
+      return t('documents.statuses.processing')
+    case 'failed':
+      return t('documents.statuses.failed')
+    case 'ready_no_graph':
+      return t('documents.statuses.ready_no_graph')
+    case 'ready':
+    default:
+      return t('documents.statuses.ready')
   }
 }
 
@@ -61,7 +77,7 @@ function rowMeta(row: DashboardRecentDocument): string {
           v-if="showStatusBadge"
           class="rr-dash-docs__status"
           :kind="statusKind(row)"
-          :label="row.statusLabel"
+          :label="statusLabel(row)"
         />
       </div>
     </div>

@@ -19,8 +19,59 @@ pub struct ChatRequest {
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
     pub max_output_tokens_override: Option<i32>,
-    pub response_format_json: Option<serde_json::Value>,
+    pub response_format: Option<serde_json::Value>,
     pub extra_parameters_json: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatRequestSeed {
+    pub provider_kind: String,
+    pub model_name: String,
+    pub api_key_override: Option<String>,
+    pub base_url_override: Option<String>,
+    pub system_prompt: Option<String>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub max_output_tokens_override: Option<i32>,
+    pub extra_parameters_json: serde_json::Value,
+}
+
+#[must_use]
+pub fn build_text_chat_request(seed: ChatRequestSeed, prompt: String) -> ChatRequest {
+    ChatRequest {
+        provider_kind: seed.provider_kind,
+        model_name: seed.model_name,
+        prompt,
+        api_key_override: seed.api_key_override,
+        base_url_override: seed.base_url_override,
+        system_prompt: seed.system_prompt,
+        temperature: seed.temperature,
+        top_p: seed.top_p,
+        max_output_tokens_override: seed.max_output_tokens_override,
+        response_format: None,
+        extra_parameters_json: seed.extra_parameters_json,
+    }
+}
+
+#[must_use]
+pub fn build_structured_chat_request(
+    seed: ChatRequestSeed,
+    prompt: String,
+    response_format: serde_json::Value,
+) -> ChatRequest {
+    ChatRequest {
+        provider_kind: seed.provider_kind,
+        model_name: seed.model_name,
+        prompt,
+        api_key_override: seed.api_key_override,
+        base_url_override: seed.base_url_override,
+        system_prompt: seed.system_prompt,
+        temperature: seed.temperature,
+        top_p: seed.top_p,
+        max_output_tokens_override: seed.max_output_tokens_override,
+        response_format: Some(response_format),
+        extra_parameters_json: seed.extra_parameters_json,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -189,7 +240,7 @@ impl UnifiedGateway {
         temperature: Option<f64>,
         top_p: Option<f64>,
         max_output_tokens: Option<i32>,
-        response_format_json: Option<&serde_json::Value>,
+        response_format: Option<&serde_json::Value>,
         extra_parameters_json: &serde_json::Value,
     ) -> Result<(String, serde_json::Value)> {
         let request_body = serialize_openai_compatible_chat_request(
@@ -199,7 +250,7 @@ impl UnifiedGateway {
             temperature,
             top_p,
             max_output_tokens,
-            response_format_json,
+            response_format,
             extra_parameters_json,
             false,
         )?;
@@ -301,7 +352,7 @@ impl UnifiedGateway {
         temperature: Option<f64>,
         top_p: Option<f64>,
         max_output_tokens: Option<i32>,
-        response_format_json: Option<&serde_json::Value>,
+        response_format: Option<&serde_json::Value>,
         extra_parameters_json: &serde_json::Value,
         on_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<(String, serde_json::Value)> {
@@ -312,7 +363,7 @@ impl UnifiedGateway {
             temperature,
             top_p,
             max_output_tokens,
-            response_format_json,
+            response_format,
             extra_parameters_json,
             true,
         )?;
@@ -549,7 +600,7 @@ impl LlmGateway for UnifiedGateway {
                 request.temperature,
                 request.top_p,
                 request.max_output_tokens_override,
-                request.response_format_json.as_ref(),
+                request.response_format.as_ref(),
                 &request.extra_parameters_json,
             )
             .await?;
@@ -585,7 +636,7 @@ impl LlmGateway for UnifiedGateway {
                 request.temperature,
                 request.top_p,
                 request.max_output_tokens_override,
-                request.response_format_json.as_ref(),
+                request.response_format.as_ref(),
                 &request.extra_parameters_json,
                 on_delta,
             )
@@ -873,7 +924,7 @@ fn serialize_openai_compatible_chat_request(
     temperature: Option<f64>,
     top_p: Option<f64>,
     max_output_tokens: Option<i32>,
-    response_format_json: Option<&serde_json::Value>,
+    response_format: Option<&serde_json::Value>,
     extra_parameters_json: &serde_json::Value,
     stream: bool,
 ) -> Result<Vec<u8>> {
@@ -892,7 +943,7 @@ fn serialize_openai_compatible_chat_request(
         temperature,
         top_p,
         max_output_tokens,
-        response_format: response_format_json.cloned(),
+        response_format: response_format.cloned(),
         stream: stream.then_some(true),
         stream_options: stream.then(|| serde_json::json!({ "include_usage": true })),
         extra_parameters_json: extra_parameters_json.clone(),

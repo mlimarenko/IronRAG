@@ -6,7 +6,10 @@ use uuid::Uuid;
 use crate::{
     app::state::McpMemorySettings,
     interfaces::http::{auth::AuthContext, router_support::ApiError},
-    mcp_types::{McpMutationOperationKind, McpMutationReceiptStatus, McpReadMode},
+    mcp_types::{
+        McpMutationOperationKind, McpMutationReceiptStatus, McpReadMode,
+        McpRuntimeExecutionSummary, McpRuntimeExecutionTrace,
+    },
     shared::file_extract::UploadAdmissionError,
 };
 
@@ -258,6 +261,66 @@ pub(crate) fn payload_identity_from_source_uri(source_uri: Option<&str>) -> Opti
             value.strip_prefix("mcp://payload/").or_else(|| value.strip_prefix("inline://payload/"))
         })
         .map(ToString::to_string)
+}
+
+pub(crate) fn describe_runtime_execution_summary(execution: &McpRuntimeExecutionSummary) -> String {
+    let policy_suffix = if execution.policy_summary.reject_count > 0
+        || execution.policy_summary.terminate_count > 0
+    {
+        format!(
+            " Policy interventions: {} rejected, {} terminated.",
+            execution.policy_summary.reject_count, execution.policy_summary.terminate_count
+        )
+    } else {
+        String::new()
+    };
+    match (execution.lifecycle_state, execution.active_stage) {
+        (crate::domains::agent_runtime::RuntimeLifecycleState::Running, Some(active_stage)) => {
+            format!(
+                "Runtime execution {} is running in stage {}.{}",
+                execution.runtime_execution_id,
+                canonical_runtime_value(&active_stage),
+                policy_suffix
+            )
+        }
+        (
+            crate::domains::agent_runtime::RuntimeLifecycleState::Completed
+            | crate::domains::agent_runtime::RuntimeLifecycleState::Recovered,
+            Some(active_stage),
+        ) => format!(
+            "Runtime execution {} finished in state {} after stage {}.{}",
+            execution.runtime_execution_id,
+            canonical_runtime_value(&execution.lifecycle_state),
+            canonical_runtime_value(&active_stage),
+            policy_suffix
+        ),
+        _ => format!(
+            "Runtime execution {} is {}.{}",
+            execution.runtime_execution_id,
+            canonical_runtime_value(&execution.lifecycle_state),
+            policy_suffix
+        ),
+    }
+}
+
+pub(crate) fn describe_runtime_trace_summary(trace: &McpRuntimeExecutionTrace) -> String {
+    format!(
+        "Runtime trace loaded for execution {} with {} stage(s), {} action(s), and {} policy decision(s).",
+        trace.execution.runtime_execution_id,
+        trace.stages.len(),
+        trace.actions.len(),
+        trace.policy_decisions.len()
+    )
+}
+
+fn canonical_runtime_value<T>(value: &T) -> String
+where
+    T: Serialize,
+{
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(ToString::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 pub(crate) fn preview_hit(text: &str, query_lower: &str) -> Option<(String, usize, usize, f64)> {

@@ -3,6 +3,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::domains::agent_runtime::RuntimeTaskKind;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum AiBindingPurpose {
@@ -12,6 +14,32 @@ pub enum AiBindingPurpose {
     QueryRetrieve,
     QueryAnswer,
     Vision,
+}
+
+impl AiBindingPurpose {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExtractText => "extract_text",
+            Self::ExtractGraph => "extract_graph",
+            Self::EmbedChunk => "embed_chunk",
+            Self::QueryRetrieve => "query_retrieve",
+            Self::QueryAnswer => "query_answer",
+            Self::Vision => "vision",
+        }
+    }
+
+    #[must_use]
+    pub const fn for_runtime_task_kind(task_kind: RuntimeTaskKind) -> Option<Self> {
+        match task_kind {
+            RuntimeTaskKind::QueryPlan
+            | RuntimeTaskKind::QueryAnswer
+            | RuntimeTaskKind::QueryVerify => Some(Self::QueryAnswer),
+            RuntimeTaskKind::QueryRerank => Some(Self::QueryRetrieve),
+            RuntimeTaskKind::GraphExtract => Some(Self::ExtractGraph),
+            RuntimeTaskKind::StructuredPrepare | RuntimeTaskKind::TechnicalFactExtract => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

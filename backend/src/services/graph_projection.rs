@@ -35,6 +35,13 @@ pub struct GraphProjectionOutcome {
     pub graph_status: String,
 }
 
+impl GraphProjectionOutcome {
+    #[must_use]
+    pub fn has_materialized_graph(&self) -> bool {
+        self.graph_status == "ready" && (self.node_count > 0 || self.edge_count > 0)
+    }
+}
+
 impl GraphProjectionScope {
     #[must_use]
     pub const fn new(library_id: Uuid, projection_version: i64) -> Self {

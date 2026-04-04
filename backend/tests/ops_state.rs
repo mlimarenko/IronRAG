@@ -8,6 +8,7 @@ use uuid::Uuid;
 use rustrag_backend::{
     app::{config::Settings, state::AppState},
     domains::{
+        agent_runtime::{RuntimeExecutionOwnerKind, RuntimeLifecycleState, RuntimeTaskKind},
         content::{
             ContentDocument, ContentDocumentPipelineJob, ContentDocumentPipelineState,
             ContentDocumentSummary, ContentMutation, ContentRevision, ContentRevisionReadiness,
@@ -22,7 +23,7 @@ use rustrag_backend::{
             document_store::KnowledgeRevisionRow,
         },
         persistence::Persistence,
-        repositories::{ingest_repository, query_repository},
+        repositories::{ingest_repository, query_repository, runtime_repository},
     },
     services::{
         catalog_service::{CreateLibraryCommand, CreateWorkspaceCommand},
@@ -173,6 +174,10 @@ impl OpsStateFixture {
             .execute(&postgres)
             .await
             .context("failed to apply canonical 0001_init.sql for ops_state")?;
+        sqlx::raw_sql(include_str!("../migrations/0002_typed_agent_runtime.sql"))
+            .execute(&postgres)
+            .await
+            .context("failed to apply canonical 0002_typed_agent_runtime.sql for ops_state")?;
 
         let arango_client = Arc::new(
             ArangoClient::from_settings(&settings).context("failed to build Arango client")?,
@@ -469,6 +474,28 @@ impl OpsStateFixture {
         .context("failed to create ops_state request turn")?;
         let execution_id = Uuid::now_v7();
         let bundle_id = execution_id;
+        let runtime_execution_id = Uuid::now_v7();
+        runtime_repository::create_runtime_execution(
+            &self.state.persistence.postgres,
+            &runtime_repository::NewRuntimeExecution {
+                id: runtime_execution_id,
+                owner_kind: RuntimeExecutionOwnerKind::QueryExecution.as_str(),
+                owner_id: execution_id,
+                task_kind: RuntimeTaskKind::QueryAnswer.as_str(),
+                surface_kind: "rest",
+                contract_name: "query_answer",
+                contract_version: "1",
+                lifecycle_state: RuntimeLifecycleState::Failed.as_str(),
+                active_stage: None,
+                turn_budget: 4,
+                turn_count: 2,
+                parallel_action_limit: 1,
+                failure_code: Some("failed to assemble knowledge context bundle"),
+                failure_summary_redacted: Some("failed to assemble knowledge context bundle"),
+            },
+        )
+        .await
+        .context("failed to seed bundle assembly runtime execution")?;
         query_repository::create_execution(
             &self.state.persistence.postgres,
             &query_repository::NewQueryExecution {
@@ -480,7 +507,7 @@ impl OpsStateFixture {
                 request_turn_id: Some(request_turn.id),
                 response_turn_id: None,
                 binding_id: None,
-                execution_state: "failed",
+                runtime_execution_id,
                 query_text: "Why did bundle assembly fail?",
                 failure_code: Some(
                     "failed to assemble knowledge context bundle: missing grounded references",
@@ -582,7 +609,6 @@ impl OpsStateFixture {
             &self.state.persistence.postgres,
             execution_id,
             &query_repository::UpdateQueryExecution {
-                execution_state: "completed",
                 request_turn_id: None,
                 response_turn_id: None,
                 failure_code: None,

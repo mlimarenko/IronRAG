@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, anyhow};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    app::state::AppState,
     domains::query::{
         ContextAssemblyMetadata, ContextAssemblyStatus, GroupedReference, GroupedReferenceKind,
         IntentKeywords, QueryIntentCacheStatus, QueryPlanningMetadata, RerankMetadata,
@@ -21,7 +21,8 @@ pub struct IntentResolutionRequest {
     pub source_truth_version: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RerankRequest {
     pub question: String,
     pub requested_mode: RuntimeQueryMode,
@@ -30,19 +31,62 @@ pub struct RerankRequest {
     pub result_limit: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RerankCandidate {
     pub id: String,
     pub text: String,
     pub score: Option<f32>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RerankOutcome {
     pub entities: Vec<String>,
     pub relationships: Vec<String>,
     pub chunks: Vec<String>,
     pub metadata: RerankMetadata,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryRerankTaskInput {
+    pub request: RerankRequest,
+    pub entity_candidates: Vec<RerankCandidate>,
+    pub relationship_candidates: Vec<RerankCandidate>,
+    pub chunk_candidates: Vec<RerankCandidate>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryRerankFailureCode {
+    InvalidResultLimit,
+    DuplicateCandidateId,
+}
+
+impl QueryRerankFailureCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidResultLimit => "invalid_result_limit",
+            Self::DuplicateCandidateId => "duplicate_candidate_id",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryRerankFailure {
+    pub code: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextAssemblyRequest {
+    pub requested_mode: RuntimeQueryMode,
+    pub graph_support_count: usize,
+    pub document_support_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -56,7 +100,7 @@ pub struct GroupedReferenceCandidate {
 }
 
 pub async fn invalidate_library_source_truth(
-    state: &AppState,
+    state: &crate::app::state::AppState,
     library_id: Uuid,
 ) -> anyhow::Result<i64> {
     let source_truth_version = crate::infra::repositories::touch_project_source_truth_version(
@@ -68,18 +112,14 @@ pub async fn invalidate_library_source_truth(
     Ok(source_truth_version)
 }
 
-/// Resolves query planning metadata for retrieval. Today this is a deterministic fallback derived
-/// from the question text (no LLM call); when a model-backed planner is added, keep the output
-/// shape stable so callers stay predictable.
-pub async fn resolve_intent(
-    _state: &AppState,
-    request: &IntentResolutionRequest,
-) -> anyhow::Result<QueryPlanningMetadata> {
+#[must_use]
+pub fn derive_query_planning_metadata(request: &IntentResolutionRequest) -> QueryPlanningMetadata {
     let _ = (request.library_id, request.source_truth_version);
-    Ok(build_fallback_metadata(request, QueryIntentCacheStatus::Miss))
+    derive_planning_metadata(request, QueryIntentCacheStatus::Miss)
 }
 
-pub fn rerank_stub(request: &RerankRequest) -> RerankMetadata {
+#[must_use]
+pub fn derive_rerank_metadata(request: &RerankRequest) -> RerankMetadata {
     let status =
         if matches!(request.requested_mode, RuntimeQueryMode::Hybrid | RuntimeQueryMode::Mix) {
             RerankStatus::Skipped
@@ -89,47 +129,34 @@ pub fn rerank_stub(request: &RerankRequest) -> RerankMetadata {
     RerankMetadata { status, candidate_count: request.candidate_count, reordered_count: None }
 }
 
-pub fn rerank_hybrid_candidates(
-    request: &RerankRequest,
-    entities: &[RerankCandidate],
-    relationships: &[RerankCandidate],
-    chunks: &[RerankCandidate],
-) -> RerankOutcome {
-    rerank_candidates(request, entities, relationships, chunks)
-}
+pub fn rerank_query_candidates(
+    input: &QueryRerankTaskInput,
+) -> Result<RerankOutcome, QueryRerankFailure> {
+    if input.request.result_limit == 0 {
+        return Err(QueryRerankFailure {
+            code: QueryRerankFailureCode::InvalidResultLimit.as_str().to_string(),
+            summary: "query rerank result limit must be greater than zero".to_string(),
+        });
+    }
 
-pub fn rerank_mix_candidates(
-    request: &RerankRequest,
-    entities: &[RerankCandidate],
-    relationships: &[RerankCandidate],
-    chunks: &[RerankCandidate],
-) -> RerankOutcome {
-    rerank_candidates(request, entities, relationships, chunks)
-}
-
-fn rerank_candidates(
-    request: &RerankRequest,
-    entities: &[RerankCandidate],
-    relationships: &[RerankCandidate],
-    chunks: &[RerankCandidate],
-) -> RerankOutcome {
-    rerank_candidate_bundle(request, entities, relationships, chunks)
-        .unwrap_or_else(|_| fallback_failed_rerank_outcome(entities, relationships, chunks))
+    rerank_candidate_bundle(
+        &input.request,
+        &input.entity_candidates,
+        &input.relationship_candidates,
+        &input.chunk_candidates,
+    )
+    .map_err(map_query_rerank_failure)
 }
 
 #[must_use]
-pub fn context_assembly_stub(
-    requested_mode: RuntimeQueryMode,
-    graph_support_count: usize,
-    document_support_count: usize,
-) -> ContextAssemblyMetadata {
-    let (status, warning) = match requested_mode {
+pub fn assemble_context_metadata(request: &ContextAssemblyRequest) -> ContextAssemblyMetadata {
+    let (status, warning) = match request.requested_mode {
         RuntimeQueryMode::Document => (ContextAssemblyStatus::DocumentOnly, None),
         RuntimeQueryMode::Local | RuntimeQueryMode::Global => {
             (ContextAssemblyStatus::GraphOnly, None)
         }
         RuntimeQueryMode::Hybrid | RuntimeQueryMode::Mix => {
-            if graph_support_count == 0 || document_support_count == 0 {
+            if request.graph_support_count == 0 || request.document_support_count == 0 {
                 (
                     ContextAssemblyStatus::MixedSkewed,
                     Some(
@@ -137,7 +164,7 @@ pub fn context_assembly_stub(
                             .to_string(),
                     ),
                 )
-            } else if graph_support_count.abs_diff(document_support_count) > 2 {
+            } else if request.graph_support_count.abs_diff(request.document_support_count) > 2 {
                 (
                     ContextAssemblyStatus::MixedSkewed,
                     Some(
@@ -214,7 +241,7 @@ struct GroupAccumulator {
     support_ids: Vec<String>,
 }
 
-fn build_fallback_metadata(
+fn derive_planning_metadata(
     request: &IntentResolutionRequest,
     cache_status: QueryIntentCacheStatus,
 ) -> QueryPlanningMetadata {
@@ -286,7 +313,7 @@ fn rerank_candidate_bundle(
     })
 }
 
-fn fallback_failed_rerank_outcome(
+pub(crate) fn build_failed_rerank_outcome(
     entities: &[RerankCandidate],
     relationships: &[RerankCandidate],
     chunks: &[RerankCandidate],
@@ -301,6 +328,16 @@ fn fallback_failed_rerank_outcome(
             reordered_count: None,
         },
     }
+}
+
+fn map_query_rerank_failure(error: anyhow::Error) -> QueryRerankFailure {
+    let summary = error.to_string();
+    let code = if summary.contains("duplicate rerank candidate id") {
+        QueryRerankFailureCode::DuplicateCandidateId
+    } else {
+        QueryRerankFailureCode::InvalidResultLimit
+    };
+    QueryRerankFailure { code: code.as_str().to_string(), summary }
 }
 
 fn validate_unique_candidate_ids(candidates: &[RerankCandidate]) -> anyhow::Result<()> {
@@ -353,59 +390,67 @@ mod tests {
 
     #[test]
     fn rerank_bundle_skips_when_disabled() {
-        let outcome = rerank_hybrid_candidates(
-            &RerankRequest {
-                question: "budget approval".to_string(),
-                requested_mode: RuntimeQueryMode::Hybrid,
-                candidate_count: 3,
-                enabled: false,
-                result_limit: 2,
-            },
-            &[RerankCandidate {
-                id: "e1".to_string(),
-                text: "Budget committee".to_string(),
-                score: Some(0.5),
-            }],
-            &[],
-            &[RerankCandidate {
-                id: "c1".to_string(),
-                text: "Approval memo".to_string(),
-                score: Some(0.4),
-            }],
-        );
+        let request = RerankRequest {
+            question: "budget approval".to_string(),
+            requested_mode: RuntimeQueryMode::Hybrid,
+            candidate_count: 3,
+            enabled: false,
+            result_limit: 2,
+        };
+        let entities = [RerankCandidate {
+            id: "e1".to_string(),
+            text: "Budget committee".to_string(),
+            score: Some(0.5),
+        }];
+        let chunks = [RerankCandidate {
+            id: "c1".to_string(),
+            text: "Approval memo".to_string(),
+            score: Some(0.4),
+        }];
+        let outcome = rerank_query_candidates(&QueryRerankTaskInput {
+            request,
+            entity_candidates: entities.to_vec(),
+            relationship_candidates: Vec::new(),
+            chunk_candidates: chunks.to_vec(),
+        })
+        .unwrap_or_else(|_| build_failed_rerank_outcome(&entities, &[], &chunks));
 
         assert_eq!(outcome.metadata.status, RerankStatus::Skipped);
     }
 
     #[test]
     fn rerank_bundle_reorders_candidates_by_keyword_overlap() {
-        let outcome = rerank_mix_candidates(
-            &RerankRequest {
-                question: "budget approval".to_string(),
-                requested_mode: RuntimeQueryMode::Mix,
-                candidate_count: 4,
-                enabled: true,
-                result_limit: 2,
+        let request = RerankRequest {
+            question: "budget approval".to_string(),
+            requested_mode: RuntimeQueryMode::Mix,
+            candidate_count: 4,
+            enabled: true,
+            result_limit: 2,
+        };
+        let entities = [RerankCandidate {
+            id: "e1".to_string(),
+            text: "General project node".to_string(),
+            score: Some(0.9),
+        }];
+        let chunks = [
+            RerankCandidate {
+                id: "c2".to_string(),
+                text: "Unrelated rollout draft".to_string(),
+                score: Some(0.8),
             },
-            &[RerankCandidate {
-                id: "e1".to_string(),
-                text: "General project node".to_string(),
-                score: Some(0.9),
-            }],
-            &[],
-            &[
-                RerankCandidate {
-                    id: "c2".to_string(),
-                    text: "Unrelated rollout draft".to_string(),
-                    score: Some(0.8),
-                },
-                RerankCandidate {
-                    id: "c1".to_string(),
-                    text: "Budget approval memo".to_string(),
-                    score: Some(0.2),
-                },
-            ],
-        );
+            RerankCandidate {
+                id: "c1".to_string(),
+                text: "Budget approval memo".to_string(),
+                score: Some(0.2),
+            },
+        ];
+        let outcome = rerank_query_candidates(&QueryRerankTaskInput {
+            request,
+            entity_candidates: entities.to_vec(),
+            relationship_candidates: Vec::new(),
+            chunk_candidates: chunks.to_vec(),
+        })
+        .unwrap_or_else(|_| build_failed_rerank_outcome(&entities, &[], &chunks));
 
         assert_eq!(outcome.metadata.status, RerankStatus::Applied);
         assert_eq!(outcome.chunks.first().map(String::as_str), Some("c1"));
@@ -414,29 +459,32 @@ mod tests {
 
     #[test]
     fn rerank_bundle_returns_failed_metadata_when_candidates_are_invalid() {
-        let outcome = rerank_hybrid_candidates(
-            &RerankRequest {
-                question: "budget approval".to_string(),
-                requested_mode: RuntimeQueryMode::Hybrid,
-                candidate_count: 3,
-                enabled: true,
-                result_limit: 1,
+        let request = RerankRequest {
+            question: "budget approval".to_string(),
+            requested_mode: RuntimeQueryMode::Hybrid,
+            candidate_count: 3,
+            enabled: true,
+            result_limit: 1,
+        };
+        let entities = [
+            RerankCandidate {
+                id: "dup".to_string(),
+                text: "Budget committee".to_string(),
+                score: Some(0.5),
             },
-            &[
-                RerankCandidate {
-                    id: "dup".to_string(),
-                    text: "Budget committee".to_string(),
-                    score: Some(0.5),
-                },
-                RerankCandidate {
-                    id: "dup".to_string(),
-                    text: "Approval committee".to_string(),
-                    score: Some(0.4),
-                },
-            ],
-            &[],
-            &[],
-        );
+            RerankCandidate {
+                id: "dup".to_string(),
+                text: "Approval committee".to_string(),
+                score: Some(0.4),
+            },
+        ];
+        let outcome = rerank_query_candidates(&QueryRerankTaskInput {
+            request,
+            entity_candidates: entities.to_vec(),
+            relationship_candidates: Vec::new(),
+            chunk_candidates: Vec::new(),
+        })
+        .unwrap_or_else(|_| build_failed_rerank_outcome(&entities, &[], &[]));
 
         assert_eq!(outcome.metadata.status, RerankStatus::Failed);
         assert_eq!(outcome.entities, vec!["dup".to_string(), "dup".to_string()]);

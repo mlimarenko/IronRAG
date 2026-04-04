@@ -1,6 +1,7 @@
 .git
 .gitlab
 backend/target
+backend/.cargo-target
 frontend/node_modules
 frontend/dist
 **/.DS_Store

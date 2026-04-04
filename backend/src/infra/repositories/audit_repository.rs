@@ -56,6 +56,7 @@ pub struct AuditEventSubjectFilter {
     pub context_bundle_id: Option<Uuid>,
     pub query_session_id: Option<Uuid>,
     pub query_execution_id: Option<Uuid>,
+    pub runtime_execution_id: Option<Uuid>,
     pub async_operation_id: Option<Uuid>,
 }
 
@@ -216,6 +217,10 @@ pub async fn list_audit_events(
 
     if let Some(query_execution_id) = subject_filter.query_execution_id {
         push_exact_subject_filter(&mut builder, "query_execution", query_execution_id);
+    }
+
+    if let Some(runtime_execution_id) = subject_filter.runtime_execution_id {
+        push_exact_subject_filter(&mut builder, "runtime_execution", runtime_execution_id);
     }
 
     if let Some(async_operation_id) = subject_filter.async_operation_id {

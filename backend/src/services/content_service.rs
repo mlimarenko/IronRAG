@@ -3,9 +3,11 @@ use std::collections::{HashMap, HashSet};
 use chrono::Utc;
 use futures::{StreamExt, TryStreamExt, stream};
 use sha2::{Digest, Sha256};
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
+    agent_runtime::{task::RuntimeTask, tasks::graph_extract::GraphExtractTask},
     app::state::AppState,
     domains::content::{
         ContentChunk, ContentDocument, ContentDocumentHead, ContentDocumentPipelineJob,
@@ -18,7 +20,6 @@ use crate::{
     },
     domains::{
         ai::AiBindingPurpose, ingest::IngestStageEvent, provider_profiles::ProviderModelSelection,
-        runtime_graph::RuntimeNodeType,
     },
     infra::arangodb::document_store::{
         KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeRevisionRow, KnowledgeStructuredBlockRow,
@@ -34,12 +35,8 @@ use crate::{
     },
     interfaces::http::router_support::ApiError,
     services::{
-        billing_service::CaptureIngestAttemptBillingCommand,
+        billing_service::CaptureGraphExtractionBillingCommand,
         content_storage::ContentStorageService,
-        extract_service::{
-            MaterializeChunkResultCommand, NewEdgeCandidate, NewNodeCandidate,
-            PersistExtractContentCommand,
-        },
         graph_extract::{
             GraphExtractionRequest, GraphExtractionStructuredChunkContext,
             GraphExtractionTechnicalFact, extract_chunk_graph_candidates,
@@ -56,7 +53,7 @@ use crate::{
             CreateKnowledgeRevisionCommand, PromoteKnowledgeDocumentCommand,
         },
         ops_service::{CreateAsyncOperationCommand, UpdateAsyncOperationCommand},
-        runtime_ingestion::resolve_effective_provider_profile,
+        runtime_ingestion::resolve_effective_runtime_task_context,
         structured_preparation_service::PrepareStructuredRevisionCommand,
         technical_fact_service::ExtractTechnicalFactsCommand,
     },
@@ -2041,19 +2038,13 @@ impl ContentService {
             .await?;
         state
             .canonical_services
-            .extract
-            .persist_extract_content(
+            .knowledge
+            .set_revision_extract_state(
                 state,
-                PersistExtractContentCommand {
-                    revision_id: context.revision_id,
-                    attempt_id: Some(attempt.id),
-                    extract_state: "ready".to_string(),
-                    normalized_text: Some(text.clone()),
-                    text_checksum: Some(sha256_hex_text(&text)),
-                    warning_count: 0,
-                    preparation_state: None,
-                    preparation_checkpoint: None,
-                },
+                context.revision_id,
+                "ready",
+                Some(&text),
+                Some(&sha256_hex_text(&text)),
             )
             .await?;
         state
@@ -2085,73 +2076,8 @@ impl ContentService {
             )
             .await?;
         let extraction_plan = build_inline_text_extraction_plan(&text);
-        let _ = state
-            .canonical_services
-            .extract
-            .persist_extract_content(
-                state,
-                PersistExtractContentCommand {
-                    revision_id: context.revision_id,
-                    attempt_id: Some(attempt.id),
-                    extract_state: "ready".to_string(),
-                    normalized_text: extraction_plan.normalized_text.clone(),
-                    text_checksum: extraction_plan.normalized_text.as_deref().map(sha256_hex_text),
-                    warning_count: i32::try_from(extraction_plan.extraction_warnings.len())
-                        .unwrap_or(i32::MAX),
-                    preparation_state: Some("started".to_string()),
-                    preparation_checkpoint: Some(
-                        crate::domains::extract::StructurePreparationCheckpoint {
-                            stage_name: INGEST_STAGE_PREPARE_STRUCTURE.to_string(),
-                            total_line_count: extraction_plan.source_format_metadata.line_count,
-                            completed_line_ordinal: -1,
-                            block_count: 0,
-                            chunk_count: 0,
-                            typed_fact_count: 0,
-                            text_checksum: extraction_plan
-                                .normalized_text
-                                .as_deref()
-                                .map(sha256_hex_text),
-                        },
-                    ),
-                },
-            )
-            .await?;
         let preparation = self
             .prepare_and_persist_revision_structure(state, context.revision_id, &extraction_plan)
-            .await?;
-        let _ = state
-            .canonical_services
-            .extract
-            .persist_extract_content(
-                state,
-                PersistExtractContentCommand {
-                    revision_id: context.revision_id,
-                    attempt_id: Some(attempt.id),
-                    extract_state: "ready".to_string(),
-                    normalized_text: extraction_plan.normalized_text.clone(),
-                    text_checksum: extraction_plan.normalized_text.as_deref().map(sha256_hex_text),
-                    warning_count: i32::try_from(extraction_plan.extraction_warnings.len())
-                        .unwrap_or(i32::MAX),
-                    preparation_state: Some("completed".to_string()),
-                    preparation_checkpoint: Some(
-                        crate::domains::extract::StructurePreparationCheckpoint {
-                            stage_name: INGEST_STAGE_PREPARE_STRUCTURE.to_string(),
-                            total_line_count: extraction_plan.source_format_metadata.line_count,
-                            completed_line_ordinal: extraction_plan
-                                .source_format_metadata
-                                .line_count
-                                .saturating_sub(1),
-                            block_count: preparation.prepared_revision.block_count,
-                            chunk_count: preparation.prepared_revision.chunk_count,
-                            typed_fact_count: preparation.prepared_revision.typed_fact_count,
-                            text_checksum: extraction_plan
-                                .normalized_text
-                                .as_deref()
-                                .map(sha256_hex_text),
-                        },
-                    ),
-                },
-            )
             .await?;
         state
             .canonical_services
@@ -2380,11 +2306,15 @@ impl ContentService {
                 let graph_outcome = state
                     .canonical_services
                     .graph
-                    .rebuild_arango_library_graph(state, context.library_id)
+                    .reconcile_revision_graph(
+                        state,
+                        context.library_id,
+                        context.document_id,
+                        context.revision_id,
+                        Some(attempt_id),
+                    )
                     .await;
-                graph_ready = graph_outcome.as_ref().is_ok_and(
-                    crate::services::graph_service::ArangoGraphRebuildOutcome::has_materialized_graph,
-                );
+                graph_ready = graph_outcome.as_ref().is_ok_and(|outcome| outcome.graph_ready);
 
                 match graph_outcome {
                     Ok(graph_outcome) => {
@@ -2402,9 +2332,11 @@ impl ContentService {
                                         "chunksProcessed": graph_materialization.chunk_count,
                                         "extractedEntityCandidates": graph_materialization.extracted_entities,
                                         "extractedRelationCandidates": graph_materialization.extracted_relations,
-                                        "upsertedEntities": graph_outcome.upserted_entities,
-                                        "upsertedRelations": graph_outcome.upserted_relations,
-                                        "upsertedEvidence": graph_outcome.upserted_evidence,
+                                        "projectedNodes": graph_outcome.projection.node_count,
+                                        "projectedEdges": graph_outcome.projection.edge_count,
+                                        "projectionVersion": graph_outcome.projection.projection_version,
+                                        "graphStatus": graph_outcome.projection.graph_status,
+                                        "graphContributionCount": graph_outcome.graph_contribution_count,
                                         "graphReady": graph_ready,
                                     }),
                                 },
@@ -2496,13 +2428,17 @@ impl ContentService {
         state: &AppState,
         command: MaterializeRevisionGraphCandidatesCommand,
     ) -> Result<RevisionGraphCandidateMaterialization, ApiError> {
-        let provider_profile = resolve_effective_provider_profile(state, command.library_id)
-            .await
-            .map_err(|error| {
-                ApiError::BadRequest(format!(
-                    "active extract_graph binding is required for graph extraction: {error:#}"
-                ))
-            })?;
+        let graph_runtime_context = resolve_effective_runtime_task_context(
+            state,
+            command.library_id,
+            &GraphExtractTask::spec(),
+        )
+        .await
+        .map_err(|error| {
+            ApiError::BadRequest(format!(
+                "active extract_graph binding is required for graph extraction: {error:#}"
+            ))
+        })?;
         let revision = state
             .arango_document_store
             .get_revision(command.revision_id)
@@ -2531,7 +2467,6 @@ impl ContentService {
             .await?;
         let chunk_count = chunks.len();
         let graph_extract_parallelism = state.settings.ingestion_worker_concurrency.clamp(1, 4);
-        let materialization_attempt_id = command.attempt_id.unwrap_or_else(Uuid::now_v7);
 
         let _ = state
             .arango_graph_store
@@ -2546,12 +2481,11 @@ impl ContentService {
 
         let per_chunk_totals = stream::iter(chunks.into_iter().map(|chunk| {
             let state = state.clone();
-            let provider_profile = provider_profile.clone();
+            let graph_runtime_context = graph_runtime_context.clone();
             let document = document.clone();
             let revision = revision.clone();
             let command = command.clone();
             let revision_facts = revision_facts.clone();
-            let materialization_attempt_id = materialization_attempt_id;
 
             async move {
                 let chunk_facts = revision_facts
@@ -2561,7 +2495,7 @@ impl ContentService {
                     .collect::<Vec<_>>();
                 let response = extract_chunk_graph_candidates(
                     &state,
-                    &provider_profile,
+                    &graph_runtime_context,
                     &build_canonical_graph_extraction_request(
                         &document,
                         &revision,
@@ -2578,99 +2512,48 @@ impl ContentService {
                     ))
                 })?;
 
-                if let Some(attempt_id) = command.attempt_id {
-                    let _ = state
-                        .canonical_services
-                        .billing
-                        .capture_ingest_attempt(
-                            &state,
-                            CaptureIngestAttemptBillingCommand {
-                                workspace_id: command.workspace_id,
-                                library_id: command.library_id,
-                                attempt_id,
-                                binding_id: None,
-                                provider_kind: response.provider_kind.clone(),
-                                model_name: response.model_name.clone(),
-                                call_kind: "extract_graph".to_string(),
-                                usage_json: response.usage_json.clone(),
-                            },
-                        )
-                        .await?;
-                }
-
-                let mut entity_key_index =
-                    crate::services::graph_identity::GraphLabelNodeTypeIndex::new();
-                for entity in &response.normalized.entities {
-                    entity_key_index.insert_aliases(
-                        &entity.label,
-                        &entity.aliases,
-                        entity.node_type.clone(),
-                    );
-                }
-                let node_candidates = response
-                    .normalized
-                    .entities
-                    .iter()
-                    .map(|entity| {
-                        let canonical_key =
-                            entity_key_index.canonical_node_key_for_label(&entity.label);
-                        let canonical_node_type =
-                            crate::services::graph_identity::runtime_node_type_from_key(
-                                &canonical_key,
-                            );
-                        NewNodeCandidate {
-                            canonical_key,
-                            node_kind: inline_runtime_node_type_slug(&canonical_node_type)
-                                .to_string(),
-                            display_label: entity.label.clone(),
-                            summary: entity.summary.clone(),
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                let edge_candidates = response
-                    .normalized
-                    .relations
-                    .iter()
-                    .map(|relation| {
-                        let from_canonical_key =
-                            entity_key_index.canonical_node_key_for_label(&relation.source_label);
-                        let to_canonical_key =
-                            entity_key_index.canonical_node_key_for_label(&relation.target_label);
-                        NewEdgeCandidate {
-                            canonical_key: crate::services::graph_identity::canonical_edge_key(
-                                &from_canonical_key,
-                                &relation.relation_type,
-                                &to_canonical_key,
-                            ),
-                            edge_kind: relation.relation_type.clone(),
-                            from_display_label: relation.source_label.clone(),
-                            from_canonical_key,
-                            to_display_label: relation.target_label.clone(),
-                            to_canonical_key,
-                            summary: relation.summary.clone(),
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                let extracted_entities = node_candidates.len();
-                let extracted_relations = edge_candidates.len();
-
-                let _ = state
+                let graph_extraction_id = response.graph_extraction_id.ok_or_else(|| {
+                    ApiError::Conflict(
+                        "graph extraction response is missing canonical graph_extraction_id"
+                            .to_string(),
+                    )
+                })?;
+                let runtime_execution_id = response.runtime_execution_id.ok_or_else(|| {
+                    ApiError::Conflict(
+                        "graph extraction response is missing canonical runtime_execution_id"
+                            .to_string(),
+                    )
+                })?;
+                if let Err(error) = state
                     .canonical_services
-                    .extract
-                    .materialize_chunk_result(
+                    .billing
+                    .capture_graph_extraction(
                         &state,
-                        MaterializeChunkResultCommand {
-                            chunk_id: chunk.chunk_id,
-                            attempt_id: materialization_attempt_id,
-                            extract_state: "ready".to_string(),
-                            provider_call_id: None,
-                            finished_at: Some(Utc::now()),
-                            failure_code: None,
-                            node_candidates,
-                            edge_candidates,
+                        CaptureGraphExtractionBillingCommand {
+                            workspace_id: command.workspace_id,
+                            library_id: command.library_id,
+                            graph_extraction_id,
+                            runtime_execution_id,
+                            binding_id: None,
+                            provider_kind: response.provider_kind.clone(),
+                            model_name: response.model_name.clone(),
+                            usage_json: response.usage_json.clone(),
                         },
                     )
-                    .await?;
+                    .await
+                {
+                    warn!(
+                        revision_id = %command.revision_id,
+                        chunk_id = %chunk.chunk_id,
+                        graph_extraction_id = %graph_extraction_id,
+                        runtime_execution_id = %runtime_execution_id,
+                        ?error,
+                        "graph extraction billing capture failed; continuing canonical graph admission",
+                    );
+                }
+
+                let extracted_entities = response.normalized.entities.len();
+                let extracted_relations = response.normalized.relations.len();
 
                 Ok::<(usize, usize), ApiError>((extracted_entities, extracted_relations))
             }
@@ -3835,14 +3718,6 @@ fn build_canonical_graph_extraction_request(
 fn typed_fact_supports_chunk(fact: &TypedTechnicalFact, chunk: &KnowledgeChunkRow) -> bool {
     fact.support_chunk_ids.contains(&chunk.chunk_id)
         || fact.support_block_ids.iter().any(|block_id| chunk.support_block_ids.contains(block_id))
-}
-
-fn inline_runtime_node_type_slug(node_type: &RuntimeNodeType) -> &'static str {
-    match node_type {
-        RuntimeNodeType::Document => "document",
-        RuntimeNodeType::Entity => "entity",
-        RuntimeNodeType::Topic => "topic",
-    }
 }
 
 fn validate_extraction_plan(

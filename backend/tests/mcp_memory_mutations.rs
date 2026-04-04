@@ -380,7 +380,7 @@ async fn authorized_upload_returns_receipt_but_document_remains_unreadable_until
             serde_json::from_value(receipt["documentId"].clone()).context("document id missing")?;
         assert_eq!(receipt["operationKind"], json!("upload"));
         assert_eq!(receipt["status"], json!("accepted"));
-        assert!(receipt["runtimeTrackingId"].is_string());
+        assert!(receipt.get("runtimeTrackingId").is_none());
         assert_eq!(receipt_row_count_for_id(&fixture.state, receipt_id).await?, 1);
 
         let status = fixture
@@ -449,17 +449,7 @@ async fn append_and_replace_mutations_preserve_logical_document_identity() -> an
         assert_eq!(append["result"]["isError"], json!(false));
         assert_eq!(append["result"]["structuredContent"]["documentId"], json!(document_id));
         assert_eq!(append["result"]["structuredContent"]["operationKind"], json!("append"));
-        let append_track_id = append["result"]["structuredContent"]["runtimeTrackingId"]
-            .as_str()
-            .context("append runtime tracking id missing")?;
-        let append_run = repositories::get_runtime_ingestion_run_by_track_id(
-            &fixture.state.persistence.postgres,
-            append_track_id,
-        )
-        .await
-        .context("failed to reload append runtime run")?
-        .context("append runtime run missing")?;
-        assert_eq!(append_run.document_id, Some(document_id));
+        assert!(append["result"]["structuredContent"].get("runtimeTrackingId").is_none());
 
         let replace = fixture
             .mcp_tool_call(
@@ -479,17 +469,7 @@ async fn append_and_replace_mutations_preserve_logical_document_identity() -> an
         assert_eq!(replace["result"]["isError"], json!(false));
         assert_eq!(replace["result"]["structuredContent"]["documentId"], json!(document_id));
         assert_eq!(replace["result"]["structuredContent"]["operationKind"], json!("replace"));
-        let replace_track_id = replace["result"]["structuredContent"]["runtimeTrackingId"]
-            .as_str()
-            .context("replace runtime tracking id missing")?;
-        let replace_run = repositories::get_runtime_ingestion_run_by_track_id(
-            &fixture.state.persistence.postgres,
-            replace_track_id,
-        )
-        .await
-        .context("failed to reload replace runtime run")?
-        .context("replace runtime run missing")?;
-        assert_eq!(replace_run.document_id, Some(document_id));
+        assert!(replace["result"]["structuredContent"].get("runtimeTrackingId").is_none());
 
         Ok(())
     }
@@ -638,7 +618,7 @@ async fn failed_but_readable_documents_can_still_accept_append_mutations() -> an
         assert_eq!(append["result"]["isError"], json!(false));
         assert_eq!(append["result"]["structuredContent"]["documentId"], json!(document_id));
         assert_eq!(append["result"]["structuredContent"]["operationKind"], json!("append"));
-        assert!(append["result"]["structuredContent"]["runtimeTrackingId"].is_string());
+        assert!(append["result"]["structuredContent"].get("runtimeTrackingId").is_none());
 
         Ok(())
     }
@@ -667,7 +647,7 @@ async fn mutation_status_reports_ready_when_failed_runtime_run_already_exposes_m
         .await
         .context("failed to reload token for failed-readable receipt test")?
         .context("failed-readable receipt token missing")?;
-        let (document_id, track_id) = fixture
+        let (document_id, _track_id) = fixture
             .create_document_with_status(
                 "memory-failed-receipt",
                 "Readable memory survived a later graph projection failure.",
@@ -684,7 +664,6 @@ async fn mutation_status_reports_ready_when_failed_runtime_run_already_exposes_m
                 operation_kind: "upload".to_string(),
                 idempotency_key: "receipt-after-graph-failure".to_string(),
                 payload_identity: Some("sha256:failed-readable".to_string()),
-                runtime_tracking_id: Some(track_id),
                 status: "accepted".to_string(),
                 failure_kind: None,
             },

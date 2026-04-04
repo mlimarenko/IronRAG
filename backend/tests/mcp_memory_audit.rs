@@ -296,7 +296,6 @@ impl McpAuditFixture {
                 operation_kind: "broken_operation".to_string(),
                 idempotency_key: format!("broken-receipt-{}", Uuid::now_v7()),
                 payload_identity: Some("broken-payload".to_string()),
-                runtime_tracking_id: None,
                 status: "accepted".to_string(),
                 failure_kind: None,
             },

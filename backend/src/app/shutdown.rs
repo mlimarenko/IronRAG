@@ -61,6 +61,12 @@ impl ShutdownSignal {
     }
 }
 
+impl Default for ShutdownSignal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub async fn wait_for_termination_signal() -> &'static str {
     #[cfg(unix)]
     {

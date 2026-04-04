@@ -1,6 +1,6 @@
 x-rustrag-runtime-env: &rustrag-runtime-env
   RUSTRAG_BIND_ADDR: 0.0.0.0:8080
-  RUSTRAG_ENVIRONMENT: ${RUSTRAG_ENVIRONMENT:-production}
+  RUSTRAG_ENVIRONMENT: ${RUSTRAG_ENVIRONMENT:-local-compose}
   RUSTRAG_DATABASE_URL: postgres://${RUSTRAG_POSTGRES_USER:-postgres}:${RUSTRAG_POSTGRES_PASSWORD:-postgres}@postgres:5432/${RUSTRAG_POSTGRES_DB:-rustrag}
   RUSTRAG_DATABASE_MAX_CONNECTIONS: ${RUSTRAG_DATABASE_MAX_CONNECTIONS:-20}
   RUSTRAG_REDIS_URL: ${RUSTRAG_REDIS_URL:-redis://redis:6379}
@@ -10,11 +10,24 @@ x-rustrag-runtime-env: &rustrag-runtime-env
   RUSTRAG_ARANGODB_PASSWORD: ${RUSTRAG_ARANGODB_PASSWORD:-rustrag-dev}
   RUSTRAG_ARANGODB_REQUEST_TIMEOUT_SECONDS: ${RUSTRAG_ARANGODB_REQUEST_TIMEOUT_SECONDS:-15}
   RUSTRAG_LOG_FILTER: ${RUSTRAG_LOG_FILTER:-info}
-  RUSTRAG_FRONTEND_ORIGIN: ${RUSTRAG_FRONTEND_ORIGIN:-https://graph.piping.space}
+  RUSTRAG_FRONTEND_ORIGIN: ${RUSTRAG_FRONTEND_ORIGIN:-http://127.0.0.1:19000,http://localhost:19000,http://127.0.0.1:9000,http://localhost:9000,http://127.0.0.1:3000,http://localhost:3000}
   RUSTRAG_BOOTSTRAP_TOKEN: ${RUSTRAG_BOOTSTRAP_TOKEN:-bootstrap-local}
   RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN:-}
   RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD:-}
   RUSTRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN:-}
+  RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_PROVIDER_KIND: ${RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_PROVIDER_KIND:-openai}
+  RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_MODEL_NAME: ${RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_MODEL_NAME:-gpt-5.4-mini}
+  RUSTRAG_UI_BOOTSTRAP_EMBED_CHUNK_PROVIDER_KIND: ${RUSTRAG_UI_BOOTSTRAP_EMBED_CHUNK_PROVIDER_KIND:-openai}
+  RUSTRAG_UI_BOOTSTRAP_EMBED_CHUNK_MODEL_NAME: ${RUSTRAG_UI_BOOTSTRAP_EMBED_CHUNK_MODEL_NAME:-text-embedding-3-large}
+  RUSTRAG_UI_BOOTSTRAP_QUERY_ANSWER_PROVIDER_KIND: ${RUSTRAG_UI_BOOTSTRAP_QUERY_ANSWER_PROVIDER_KIND:-openai}
+  RUSTRAG_UI_BOOTSTRAP_QUERY_ANSWER_MODEL_NAME: ${RUSTRAG_UI_BOOTSTRAP_QUERY_ANSWER_MODEL_NAME:-gpt-5.4-mini}
+  RUSTRAG_UI_BOOTSTRAP_VISION_PROVIDER_KIND: ${RUSTRAG_UI_BOOTSTRAP_VISION_PROVIDER_KIND:-openai}
+  RUSTRAG_UI_BOOTSTRAP_VISION_MODEL_NAME: ${RUSTRAG_UI_BOOTSTRAP_VISION_MODEL_NAME:-gpt-5.4-mini}
+  RUSTRAG_OPENAI_API_KEY: ${RUSTRAG_OPENAI_API_KEY:-}
+  RUSTRAG_DEEPSEEK_API_KEY: ${RUSTRAG_DEEPSEEK_API_KEY:-}
+  RUSTRAG_QWEN_API_KEY: ${RUSTRAG_QWEN_API_KEY:-}
+  RUSTRAG_RUNTIME_POLICY_REJECT_TASK_KINDS: ${RUSTRAG_RUNTIME_POLICY_REJECT_TASK_KINDS:-}
+  RUSTRAG_RUNTIME_POLICY_REJECT_TARGET_KINDS: ${RUSTRAG_RUNTIME_POLICY_REJECT_TARGET_KINDS:-}
   RUSTRAG_CONTENT_STORAGE_ROOT: /var/lib/rustrag/content-storage
   RUST_BACKTRACE: full
 
@@ -38,9 +51,7 @@ x-rustrag-worker-env: &rustrag-worker-env
 
 services:
   postgres:
-    image: ${RUSTRAG_POSTGRES_IMAGE:-postgres:18-alpine}
-    security_opt:
-      - apparmor=unconfined
+    image: postgres:18-alpine
     environment:
       POSTGRES_PASSWORD: ${RUSTRAG_POSTGRES_PASSWORD:-postgres}
       POSTGRES_USER: ${RUSTRAG_POSTGRES_USER:-postgres}
@@ -57,21 +68,17 @@ services:
     volumes:
       # postgres:18-alpine stores PGDATA under /var/lib/postgresql by default.
       # Mount the parent path to avoid anonymous volume allocation.
-      - ./data/postgres:/var/lib/postgresql
+      - postgres_data:/var/lib/postgresql
 
   redis:
-    image: ${RUSTRAG_REDIS_IMAGE:-redis:8.4}
-    security_opt:
-      - apparmor=unconfined
+    image: redis:8.6
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 20
   arangodb:
-    image: ${RUSTRAG_ARANGODB_IMAGE:-arangodb:3.12.4}
-    security_opt:
-      - apparmor=unconfined
+    image: arangodb:3.12.4
     environment:
       ARANGO_ROOT_PASSWORD: ${RUSTRAG_ARANGODB_PASSWORD:-rustrag-dev}
     command:
@@ -91,12 +98,13 @@ services:
     expose:
       - "8529"
     volumes:
-      - ./data/arangodb:/var/lib/arangodb3
+      - arangodb_data:/var/lib/arangodb3
 
   backend:
     image: ${RUSTRAG_BACKEND_IMAGE:-rustrag-backend:local}
-    security_opt:
-      - apparmor=unconfined
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     restart: unless-stopped
     stop_signal: SIGTERM
     stop_grace_period: 10m
@@ -110,21 +118,28 @@ services:
     environment: *rustrag-backend-env
     expose:
       - "8080"
-    ports:
-      - "${RUSTRAG_BACKEND_PORT:-18080}:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
-      - ./data/content-storage:/var/lib/rustrag/content-storage
+      - content_storage_data:/var/lib/rustrag/content-storage
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/v1/ready"]
       interval: 10s
       timeout: 5s
       retries: 3
       start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
 
   worker:
     image: ${RUSTRAG_BACKEND_IMAGE:-rustrag-backend:local}
-    security_opt:
-      - apparmor=unconfined
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     restart: unless-stopped
     stop_signal: SIGTERM
     stop_grace_period: 10m
@@ -135,23 +150,40 @@ services:
         condition: service_healthy
       arangodb:
         condition: service_healthy
+      backend:
+        condition: service_healthy
     environment: *rustrag-worker-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
-      - ./data/content-storage:/var/lib/rustrag/content-storage
+      - content_storage_data:/var/lib/rustrag/content-storage
     healthcheck:
       test: ["CMD", "true"]
       interval: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
 
   frontend:
     image: ${RUSTRAG_FRONTEND_IMAGE:-rustrag-frontend:local}
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
       - backend
     expose:
       - "3000"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
 
   nginx:
-    image: ${RUSTRAG_NGINX_IMAGE:-nginx:1.28-alpine}
+    image: nginx:1.28-alpine
     restart: unless-stopped
     depends_on:
       - backend
@@ -160,9 +192,14 @@ services:
     volumes:
       - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
-      - "${RUSTRAG_FRONTEND_PORT:-13000}:80"
+      - "${RUSTRAG_PORT:-19000}:80"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/health >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10
+
+volumes:
+  postgres_data:
+  arangodb_data:
+  content_storage_data:

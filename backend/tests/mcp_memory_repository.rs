@@ -278,7 +278,6 @@ async fn mcp_repository_helpers_persist_and_project_memory_truth() -> anyhow::Re
                 operation_kind: "upload".to_string(),
                 idempotency_key: "mcp-upload-1".to_string(),
                 payload_identity: Some("sha256:abc123".to_string()),
-                runtime_tracking_id: Some(readable_run.track_id.clone()),
                 status: "accepted".to_string(),
                 failure_kind: None,
             },
@@ -309,12 +308,11 @@ async fn mcp_repository_helpers_persist_and_project_memory_truth() -> anyhow::Re
         .await
         .context("failed to load mcp mutation receipt by idempotency")?
         .context("missing mcp mutation receipt by idempotency")?;
-        let receipt_by_id = repositories::get_mcp_mutation_receipt_by_id(&pool, receipt.id)
+        let _receipt_by_id = repositories::get_mcp_mutation_receipt_by_id(&pool, receipt.id)
             .await
             .context("failed to load mcp mutation receipt by id")?
             .context("missing mcp mutation receipt by id")?;
         assert_eq!(receipt_by_key.id, receipt.id);
-        assert_eq!(receipt_by_id.runtime_tracking_id, Some(readable_run.track_id.clone()));
 
         let libraries =
             repositories::list_visible_libraries_with_counts(&pool, fixture.workspace.id)

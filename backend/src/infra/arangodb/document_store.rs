@@ -1,3 +1,10 @@
+#![allow(
+    clippy::missing_const_for_fn,
+    clippy::missing_errors_doc,
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments
+)]
+
 use std::sync::Arc;
 
 use anyhow::{Context, anyhow};

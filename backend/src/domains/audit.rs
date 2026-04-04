@@ -52,6 +52,7 @@ pub struct AuditEventSubject {
     pub document_id: Option<Uuid>,
     pub query_session_id: Option<Uuid>,
     pub query_execution_id: Option<Uuid>,
+    pub runtime_execution_id: Option<Uuid>,
     pub context_bundle_id: Option<Uuid>,
     pub async_operation_id: Option<Uuid>,
 }

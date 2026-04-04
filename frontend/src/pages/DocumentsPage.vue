@@ -86,6 +86,27 @@ const hasActiveFilters = computed(
 const hasDocuments = computed(() =>
   Boolean(mergedRows.value.length || workspace.value.uploadQueue.length),
 )
+const derivedSummaryCounts = computed(() => {
+  const rows = mergedRows.value
+  const total = rows.length
+  const processing = rows.filter((row) => row.status === 'queued' || row.status === 'processing').length
+  const failed = rows.filter((row) => row.status === 'failed').length
+  const graphSparse = rows.filter((row) => row.preparation?.readinessKind === 'graph_sparse').length
+  const readable = rows.filter((row) => row.preparation?.readinessKind === 'readable').length
+  const graphReady = rows.filter((row) => {
+    const readinessKind = row.preparation?.readinessKind ?? null
+    return readinessKind === 'graph_ready' || row.status === 'ready'
+  }).length
+
+  return {
+    total,
+    processing,
+    failed,
+    readable,
+    graphSparse,
+    graphReady,
+  }
+})
 const showWorkspaceHeader = computed(
   () => hasDocuments.value || workspace.value.uploadFailures.length > 0,
 )
@@ -249,12 +270,12 @@ function clearFilters(): void {
       :accepted-formats="workspace.acceptedFormats"
       :max-size-mb="workspace.maxSizeMb"
       :loading="workspace.uploadInProgress"
-      :total-count="mergedRows.length"
-      :active-count="activeBacklogCount"
-      :readable-count="readableCount"
-      :failed-count="workspace.counters.failed"
-      :graph-sparse-count="graphSparseCount"
-      :graph-ready-count="graphReadyCount"
+      :total-count="derivedSummaryCounts.total"
+      :active-count="derivedSummaryCounts.processing"
+      :readable-count="derivedSummaryCounts.readable"
+      :failed-count="derivedSummaryCounts.failed"
+      :graph-sparse-count="derivedSummaryCounts.graphSparse"
+      :graph-ready-count="derivedSummaryCounts.graphReady"
       :cost-summary="workspace.costSummary"
       :upload-failures="workspace.uploadFailures"
       :has-documents="hasDocuments"
@@ -436,15 +457,15 @@ function clearFilters(): void {
 <style scoped lang="scss">
 .rr-docs-page {
   display: grid;
-  gap: 8px;
+  gap: 14px;
   width: 100%;
-  max-width: min(1480px, calc(100vw - 28px));
+  max-width: min(1720px, calc(100vw - 36px));
   margin: 0 auto;
-  padding: 0 2px 10px;
+  padding: 2px 6px 18px;
 }
 
 .rr-docs-page.has-inspector-layout {
-  max-width: min(1820px, calc(100vw - 32px));
+  max-width: min(1880px, calc(100vw - 40px));
 }
 
 .rr-docs-page__workspace-notice {
@@ -483,37 +504,41 @@ function clearFilters(): void {
   position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 10px;
+  gap: 14px;
   align-items: start;
 }
 
 .rr-docs-page__workspace.has-inspector {
-  grid-template-columns: minmax(0, 1fr) minmax(360px, 430px);
-  gap: 12px;
+  grid-template-columns: minmax(0, 1.45fr) minmax(360px, 430px);
 }
 
 .rr-docs-page__primary {
   --rr-docs-sticky-top: 4.85rem;
   display: grid;
-  gap: 0;
+  gap: 0.45rem;
   min-width: 0;
-  min-height: 0;
-  padding: 5px;
+  min-height: min(32rem, calc(100vh - 10.2rem));
+  padding: 10px;
   border: 1px solid rgba(203, 213, 225, 0.82);
-  border-radius: 14px;
-  background: #fff;
-  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.035);
+  border-radius: 1.2rem;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.95)),
+    #fff;
+  box-shadow:
+    0 18px 36px rgba(15, 23, 42, 0.04),
+    inset 0 1px 0 rgba(255, 255, 255, 0.84);
 }
 
 .rr-docs-page__primary.is-sparse {
   min-height: 0;
-  padding-block: 8px 9px;
+  align-content: start;
+  padding-block: 10px;
 }
 
 .rr-docs-page__primary.is-loading-empty {
   min-height: 0;
   align-content: start;
-  max-width: min(52rem, 100%);
+  max-width: min(64rem, 100%);
   width: 100%;
   justify-self: center;
   padding: 0;
@@ -524,7 +549,7 @@ function clearFilters(): void {
 
 .rr-docs-page__primary.is-empty-panel {
   min-height: 0;
-  max-width: min(52rem, 100%);
+  max-width: min(64rem, 100%);
   width: 100%;
   justify-self: center;
   padding: 0;
@@ -542,6 +567,19 @@ function clearFilters(): void {
   position: relative;
   align-self: start;
   min-width: 0;
+}
+
+.rr-docs-page__primary :deep(.rr-documents-filters) {
+  margin: 0;
+}
+
+.rr-docs-page__primary :deep(.rr-documents-filters__activity),
+.rr-docs-page__primary :deep(.rr-web-ingest-activity) {
+  margin-inline: 4px;
+}
+
+.rr-docs-page__primary :deep(.rr-docs-table) {
+  min-height: 0;
 }
 
 .rr-docs-page__inspector :deep(.rr-document-inspector) {
@@ -567,7 +605,6 @@ function clearFilters(): void {
 
 @media (min-width: 1800px) {
   .rr-docs-page {
-    gap: 14px;
     max-width: min(1760px, calc(100vw - 64px));
     padding-inline: 10px;
   }
@@ -577,14 +614,15 @@ function clearFilters(): void {
   }
 
   .rr-docs-page__workspace.has-inspector {
-    grid-template-columns: minmax(0, 1fr) minmax(390px, 460px);
+    grid-template-columns: minmax(0, 1.55fr) minmax(390px, 460px);
     gap: 14px;
   }
 
   .rr-docs-page__primary {
     --rr-docs-sticky-top: 5.05rem;
-    padding: 8px;
-    border-radius: 16px;
+    min-height: min(40rem, calc(100vh - 9.6rem));
+    padding: 12px;
+    border-radius: 1.3rem;
   }
 
   .rr-docs-page__inspector :deep(.rr-document-inspector) {

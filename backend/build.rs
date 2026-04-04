@@ -1,11 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let migrations_dir = Path::new("migrations");
     let mut migration_files = Vec::new();
 
-    collect_sql_files(migrations_dir, &mut migration_files);
+    collect_sql_files(migrations_dir, &mut migration_files)?;
     migration_files.sort();
 
     println!("cargo:rerun-if-changed=build.rs");
@@ -14,25 +14,27 @@ fn main() {
     let mut hasher = Fnv64::default();
     for path in &migration_files {
         println!("cargo:rerun-if-changed={}", path.display());
-        let contents = fs::read(path).expect("failed to read migration file for fingerprint");
+        let contents = fs::read(path)?;
         hasher.update(path.display().to_string().as_bytes());
         hasher.update(&contents.len().to_le_bytes());
         hasher.update(&contents);
     }
 
     println!("cargo:rustc-env=RUSTRAG_MIGRATIONS_FINGERPRINT={:016x}", hasher.finish());
+    Ok(())
 }
 
-fn collect_sql_files(dir: &Path, files: &mut Vec<PathBuf>) {
-    for entry in fs::read_dir(dir).expect("failed to read migrations directory") {
-        let entry = entry.expect("failed to read migrations directory entry");
+fn collect_sql_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), std::io::Error> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            collect_sql_files(&path, files);
+            collect_sql_files(&path, files)?;
         } else if path.extension().is_some_and(|extension| extension == "sql") {
             files.push(path);
         }
     }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -52,7 +54,7 @@ impl Fnv64 {
         }
     }
 
-    fn finish(self) -> u64 {
+    const fn finish(self) -> u64 {
         if self.0 == 0 { Self::OFFSET_BASIS } else { self.0 }
     }
 }

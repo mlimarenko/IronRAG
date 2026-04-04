@@ -1,3 +1,5 @@
+#![allow(clippy::cast_possible_wrap, clippy::missing_const_for_fn, clippy::struct_excessive_bools)]
+
 use serde::Deserialize;
 
 const DEFAULT_UI_BOOTSTRAP_ADMIN_EMAIL_DOMAIN: &str = "rustrag.local";
@@ -5,6 +7,13 @@ const DEFAULT_UI_BOOTSTRAP_ADMIN_NAME: &str = "Admin";
 const BOOTSTRAP_PROVIDER_ENV_OPENAI: &str = "RUSTRAG_OPENAI_API_KEY";
 const BOOTSTRAP_PROVIDER_ENV_DEEPSEEK: &str = "RUSTRAG_DEEPSEEK_API_KEY";
 const BOOTSTRAP_PROVIDER_ENV_QWEN: &str = "RUSTRAG_QWEN_API_KEY";
+pub const DEFAULT_RUNTIME_DIAGNOSTIC_PAYLOAD_BUDGET_BYTES: usize = 32_768;
+pub const DEFAULT_RUNTIME_POLICY_REASON_BUDGET_CHARS: usize = 2_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeHookBehavior {
+    ObserveOnly,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UiBootstrapAdmin {
@@ -132,6 +141,12 @@ pub struct Settings {
     pub llm_http_timeout_seconds: u64,
     pub llm_transport_retry_attempts: usize,
     pub llm_transport_retry_base_delay_ms: u64,
+    pub runtime_agent_max_turns: u8,
+    pub runtime_agent_max_parallel_actions: u8,
+    pub runtime_trace_payload_budget_bytes: usize,
+    pub runtime_policy_reason_budget_chars: usize,
+    pub runtime_policy_reject_task_kinds: Option<String>,
+    pub runtime_policy_reject_target_kinds: Option<String>,
     pub query_intent_cache_ttl_hours: u64,
     pub query_intent_cache_max_entries_per_library: usize,
     pub query_rerank_enabled: bool,
@@ -177,9 +192,20 @@ impl Settings {
         validate_service_role(&settings).map_err(config::ConfigError::Message)?;
         validate_service_name(&settings).map_err(config::ConfigError::Message)?;
         validate_arangodb_settings(&settings).map_err(config::ConfigError::Message)?;
+        validate_runtime_agent_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_mcp_memory_settings(&settings).map_err(config::ConfigError::Message)?;
 
         Ok(settings)
+    }
+
+    #[must_use]
+    pub const fn runtime_hook_behavior(&self) -> RuntimeHookBehavior {
+        RuntimeHookBehavior::ObserveOnly
+    }
+
+    #[must_use]
+    pub const fn runtime_maximum_diagnostic_payload_bytes(&self) -> usize {
+        self.runtime_trace_payload_budget_bytes
     }
 
     #[must_use]
@@ -268,15 +294,19 @@ impl Settings {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(str::to_lowercase)
-            .unwrap_or_else(|| format!("{login}@{DEFAULT_UI_BOOTSTRAP_ADMIN_EMAIL_DOMAIN}"));
+            .map_or_else(
+                || format!("{login}@{DEFAULT_UI_BOOTSTRAP_ADMIN_EMAIL_DOMAIN}"),
+                str::to_lowercase,
+            );
         let display_name = self
             .ui_bootstrap_admin_name
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(std::string::ToString::to_string)
-            .unwrap_or_else(|| DEFAULT_UI_BOOTSTRAP_ADMIN_NAME.to_string());
+            .map_or_else(
+                || DEFAULT_UI_BOOTSTRAP_ADMIN_NAME.to_string(),
+                std::string::ToString::to_string,
+            );
         let api_token = self
             .ui_bootstrap_admin_api_token
             .as_deref()
@@ -399,6 +429,16 @@ fn settings_config_builder()
         .set_default("llm_http_timeout_seconds", 120)?
         .set_default("llm_transport_retry_attempts", 3)?
         .set_default("llm_transport_retry_base_delay_ms", 250)?
+        .set_default("runtime_agent_max_turns", 4)?
+        .set_default("runtime_agent_max_parallel_actions", 4)?
+        .set_default(
+            "runtime_trace_payload_budget_bytes",
+            DEFAULT_RUNTIME_DIAGNOSTIC_PAYLOAD_BUDGET_BYTES as i64,
+        )?
+        .set_default(
+            "runtime_policy_reason_budget_chars",
+            DEFAULT_RUNTIME_POLICY_REASON_BUDGET_CHARS as i64,
+        )?
         .set_default("query_intent_cache_ttl_hours", 24)?
         .set_default("query_intent_cache_max_entries_per_library", 500)?
         .set_default("query_rerank_enabled", true)?
@@ -501,6 +541,43 @@ fn validate_arangodb_settings(settings: &Settings) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_runtime_agent_settings(settings: &Settings) -> Result<(), String> {
+    if settings.runtime_agent_max_turns == 0 {
+        return Err("runtime_agent_max_turns must be greater than zero".into());
+    }
+    if settings.runtime_agent_max_parallel_actions == 0 {
+        return Err("runtime_agent_max_parallel_actions must be greater than zero".into());
+    }
+    if settings.runtime_trace_payload_budget_bytes == 0 {
+        return Err("runtime_trace_payload_budget_bytes must be greater than zero".into());
+    }
+    if settings.runtime_policy_reason_budget_chars == 0 {
+        return Err("runtime_policy_reason_budget_chars must be greater than zero".into());
+    }
+    for task_kind in parse_runtime_policy_csv(settings.runtime_policy_reject_task_kinds.as_ref()) {
+        task_kind
+            .parse::<crate::domains::agent_runtime::RuntimeTaskKind>()
+            .map_err(|error| format!("runtime_policy_reject_task_kinds contains {error}"))?;
+    }
+    for target_kind in
+        parse_runtime_policy_csv(settings.runtime_policy_reject_target_kinds.as_ref())
+    {
+        target_kind
+            .parse::<crate::domains::agent_runtime::RuntimeDecisionTargetKind>()
+            .map_err(|error| format!("runtime_policy_reject_target_kinds contains {error}"))?;
+    }
+    Ok(())
+}
+
+fn parse_runtime_policy_csv(value: Option<&String>) -> Vec<&str> {
+    value
+        .map(std::string::String::as_str)
+        .map(|raw| {
+            raw.split(',').map(str::trim).filter(|item| !item.is_empty()).collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
 fn validate_mcp_memory_settings(settings: &Settings) -> Result<(), String> {
     if settings.mcp_memory_default_read_window_chars == 0 {
         return Err("mcp_memory_default_read_window_chars must be greater than zero".into());
@@ -595,6 +672,12 @@ mod tests {
             llm_http_timeout_seconds: 120,
             llm_transport_retry_attempts: 3,
             llm_transport_retry_base_delay_ms: 250,
+            runtime_agent_max_turns: 4,
+            runtime_agent_max_parallel_actions: 4,
+            runtime_trace_payload_budget_bytes: DEFAULT_RUNTIME_DIAGNOSTIC_PAYLOAD_BUDGET_BYTES,
+            runtime_policy_reason_budget_chars: DEFAULT_RUNTIME_POLICY_REASON_BUDGET_CHARS,
+            runtime_policy_reject_task_kinds: None,
+            runtime_policy_reject_target_kinds: None,
             query_intent_cache_ttl_hours: 24,
             query_intent_cache_max_entries_per_library: 500,
             query_rerank_enabled: true,
@@ -641,6 +724,7 @@ mod tests {
         validate_service_role(&settings).expect("role should validate");
         validate_service_name(&settings).expect("service name should validate");
         validate_arangodb_settings(&settings).expect("arangodb settings should validate");
+        validate_runtime_agent_settings(&settings).expect("runtime settings should validate");
         validate_mcp_memory_settings(&settings).expect("mcp settings should validate");
         settings
     }
@@ -659,6 +743,16 @@ mod tests {
         assert_eq!(settings.arangodb_database, "rustrag");
         assert_eq!(settings.log_filter, "info");
         assert_eq!(settings.ingestion_worker_concurrency, 4);
+        assert_eq!(settings.runtime_agent_max_turns, 4);
+        assert_eq!(settings.runtime_agent_max_parallel_actions, 4);
+        assert_eq!(
+            settings.runtime_trace_payload_budget_bytes,
+            DEFAULT_RUNTIME_DIAGNOSTIC_PAYLOAD_BUDGET_BYTES
+        );
+        assert_eq!(
+            settings.runtime_policy_reason_budget_chars,
+            DEFAULT_RUNTIME_POLICY_REASON_BUDGET_CHARS
+        );
         assert_eq!(settings.query_intent_cache_ttl_hours, 24);
         assert!(settings.query_rerank_enabled);
         assert!(settings.runtime_graph_extract_recovery_enabled);
@@ -882,6 +976,16 @@ mod tests {
 
         let error = validate_mcp_memory_settings(&settings).expect_err("range should fail");
         assert!(error.contains("mcp_memory_default_read_window_chars"));
+    }
+
+    #[test]
+    fn rejects_invalid_runtime_agent_limits() {
+        let mut settings = sample_settings();
+        settings.runtime_agent_max_turns = 0;
+
+        let error =
+            validate_runtime_agent_settings(&settings).expect_err("runtime settings should fail");
+        assert!(error.contains("runtime_agent_max_turns"));
     }
 
     #[test]

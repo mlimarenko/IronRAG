@@ -17,10 +17,11 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
+    domains::agent_runtime::RuntimeExecutionSummary,
     domains::query::{
         PreparedSegmentReference, QueryChunkReference, QueryConversation, QueryConversationDetail,
         QueryExecution, QueryExecutionDetail, QueryGraphEdgeReference, QueryGraphNodeReference,
-        QueryTurn, QueryTurnStreamStage, QueryVerificationState, QueryVerificationWarning,
+        QueryRuntimeStageSummary, QueryTurn, QueryVerificationState, QueryVerificationWarning,
         TechnicalFactReference,
     },
     interfaces::http::{
@@ -74,6 +75,8 @@ struct QuerySessionDetailResponse {
 struct QueryExecutionDetailResponse {
     context_bundle_id: Uuid,
     execution: QueryExecution,
+    runtime_summary: RuntimeExecutionSummary,
+    runtime_stage_summaries: Vec<QueryRuntimeStageSummary>,
     request_turn: Option<QueryTurn>,
     response_turn: Option<QueryTurn>,
     chunk_references: Vec<QueryChunkReference>,
@@ -93,6 +96,8 @@ struct QuerySessionTurnExecutionResponse {
     request_turn: QueryTurn,
     response_turn: Option<QueryTurn>,
     execution: QueryExecution,
+    runtime_summary: RuntimeExecutionSummary,
+    runtime_stage_summaries: Vec<QueryRuntimeStageSummary>,
     chunk_references: Vec<QueryChunkReference>,
     prepared_segment_references: Vec<PreparedSegmentReference>,
     technical_fact_references: Vec<TechnicalFactReference>,
@@ -104,8 +109,8 @@ struct QuerySessionTurnExecutionResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct QueryTurnStreamStagePayload {
-    stage: QueryTurnStreamStage,
+struct QueryTurnStreamRuntimePayload {
+    runtime: RuntimeExecutionSummary,
 }
 
 #[derive(Debug, Serialize)]
@@ -259,6 +264,8 @@ fn map_execution_detail(detail: QueryExecutionDetail) -> QueryExecutionDetailRes
     QueryExecutionDetailResponse {
         context_bundle_id: detail.execution.context_bundle_id,
         execution: detail.execution,
+        runtime_summary: detail.runtime_summary,
+        runtime_stage_summaries: detail.runtime_stage_summaries,
         request_turn: detail.request_turn,
         response_turn: detail.response_turn,
         chunk_references: detail.chunk_references,
@@ -286,6 +293,8 @@ fn map_turn_execution_response(
         request_turn: outcome.request_turn,
         response_turn: outcome.response_turn,
         execution: outcome.execution,
+        runtime_summary: outcome.runtime_summary,
+        runtime_stage_summaries: outcome.runtime_stage_summaries,
         chunk_references: outcome.chunk_references,
         prepared_segment_references: outcome.prepared_segment_references,
         technical_fact_references: outcome.technical_fact_references,
@@ -420,7 +429,7 @@ fn create_session_turn_stream(
 }
 
 enum QueryTurnStreamFrame {
-    Stage(QueryTurnStreamStagePayload),
+    Runtime(QueryTurnStreamRuntimePayload),
     Delta(QueryTurnStreamDeltaPayload),
     Completed(QuerySessionTurnExecutionResponse),
     Error(QueryTurnStreamErrorPayload),
@@ -429,8 +438,8 @@ enum QueryTurnStreamFrame {
 impl From<QueryTurnProgressEvent> for QueryTurnStreamFrame {
     fn from(value: QueryTurnProgressEvent) -> Self {
         match value {
-            QueryTurnProgressEvent::Stage(stage) => {
-                Self::Stage(QueryTurnStreamStagePayload { stage })
+            QueryTurnProgressEvent::Runtime(runtime) => {
+                Self::Runtime(QueryTurnStreamRuntimePayload { runtime })
             }
             QueryTurnProgressEvent::AnswerDelta(delta) => {
                 Self::Delta(QueryTurnStreamDeltaPayload { delta })
@@ -442,7 +451,7 @@ impl From<QueryTurnProgressEvent> for QueryTurnStreamFrame {
 impl QueryTurnStreamFrame {
     fn into_event(self) -> Event {
         match self {
-            Self::Stage(payload) => serialize_sse_event("status", &payload),
+            Self::Runtime(payload) => serialize_sse_event("runtime", &payload),
             Self::Delta(payload) => serialize_sse_event("delta", &payload),
             Self::Completed(payload) => serialize_sse_event("completed", &payload),
             Self::Error(payload) => serialize_sse_event("error", &payload),

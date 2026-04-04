@@ -162,8 +162,9 @@ describe('Bootstrap setup form helpers', () => {
   it('keeps OpenAI available for graph extraction when the catalog exposes it', () => {
     const aiSetup = sampleAiSetup()
 
-    const extractProviders = providersForPurpose(aiSetup, 'extract_graph')
-      .map((provider) => provider.providerKind)
+    const extractProviders = providersForPurpose(aiSetup, 'extract_graph').map(
+      (provider) => provider.providerKind,
+    )
 
     expect(extractProviders).toEqual(['openai', 'deepseek'])
   })

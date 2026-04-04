@@ -326,6 +326,8 @@ async fn read_only_tokens_do_not_receive_writable_tool_descriptors() -> anyhow::
         assert!(tool_names.contains(&"list_libraries"));
         assert!(tool_names.contains(&"search_documents"));
         assert!(tool_names.contains(&"read_document"));
+        assert!(tool_names.contains(&"get_runtime_execution"));
+        assert!(tool_names.contains(&"get_runtime_execution_trace"));
         assert!(!tool_names.contains(&"create_workspace"));
         assert!(!tool_names.contains(&"create_library"));
         assert!(!tool_names.contains(&"upload_documents"));

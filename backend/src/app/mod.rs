@@ -108,8 +108,7 @@ fn build_router(config: &config::Settings, state: state::AppState) -> Router {
                     let request_id = request
                         .extensions()
                         .get::<router_support::RequestId>()
-                        .map(|request_id| request_id.0.clone())
-                        .unwrap_or_else(|| "-".to_string());
+                        .map_or_else(|| "-".to_string(), |request_id| request_id.0.clone());
                     tracing::info_span!(
                         "http_request",
                         method = %request.method(),
@@ -131,8 +130,7 @@ fn build_router(config: &config::Settings, state: state::AppState) -> Router {
                     let request_id = request
                         .extensions()
                         .get::<router_support::RequestId>()
-                        .map(|request_id| request_id.0.as_str())
-                        .unwrap_or("-");
+                        .map_or("-", |request_id| request_id.0.as_str());
                     info!(
                         method = %request.method(),
                         matched_path,

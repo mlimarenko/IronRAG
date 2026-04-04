@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use argon2::{
     Argon2,
     password_hash::{PasswordHasher, SaltString, rand_core::OsRng},
@@ -189,6 +191,9 @@ async fn ensure_bootstrap_api_token(
     Ok(())
 }
 
+/// # Errors
+/// Returns an error when the configured bootstrap admin cannot be created, loaded, or connected
+/// to the default workspace and library.
 pub async fn ensure_bootstrap_admin(state: &AppState) -> Result<(), ApiError> {
     let Some(bootstrap_admin) = state.ui_bootstrap_admin.clone() else {
         return Ok(());
@@ -233,6 +238,9 @@ pub async fn ensure_bootstrap_admin(state: &AppState) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// # Errors
+/// Returns an error when the canonical bootstrap principal, catalog workspace, library, or
+/// bootstrap API token cannot be provisioned.
 pub async fn ensure_canonical_bootstrap_admin(state: &AppState) -> Result<(), ApiError> {
     let Some(bootstrap_admin) = state.ui_bootstrap_admin.clone() else {
         return Ok(());

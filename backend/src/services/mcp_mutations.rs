@@ -745,7 +745,6 @@ pub(crate) async fn resolve_mutation_receipt(
         operation_kind: parse_mutation_operation_kind(&row.operation_kind)?,
         idempotency_key: row.idempotency_key.unwrap_or_default(),
         status,
-        runtime_tracking_id: None,
         accepted_at: row.requested_at,
         last_status_at,
         failure_kind,

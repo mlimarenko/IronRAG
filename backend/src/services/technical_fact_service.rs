@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
@@ -21,7 +22,8 @@ const HTTP_METHODS: [&str; 8] =
     ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "CONNECT"];
 const PROTOCOLS: [&str; 8] = ["http", "https", "tcp", "udp", "ws", "wss", "grpc", "soap"];
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExtractTechnicalFactsCommand {
     pub revision_id: Uuid,
     pub document_id: Uuid,
@@ -30,10 +32,33 @@ pub struct ExtractTechnicalFactsCommand {
     pub blocks: Vec<StructuredBlockData>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExtractTechnicalFactsResult {
     pub facts: Vec<TypedTechnicalFact>,
     pub conflicts: Vec<TechnicalFactConflict>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TechnicalFactExtractionFailureCode {
+    EmptyBlocks,
+}
+
+impl TechnicalFactExtractionFailureCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EmptyBlocks => "empty_blocks",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TechnicalFactExtractionFailure {
+    pub code: String,
+    pub summary: String,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +131,21 @@ impl TechnicalFactService {
         });
 
         ExtractTechnicalFactsResult { facts, conflicts }
+    }
+
+    pub fn extract_runtime_stage(
+        &self,
+        command: ExtractTechnicalFactsCommand,
+    ) -> Result<ExtractTechnicalFactsResult, TechnicalFactExtractionFailure> {
+        if command.blocks.is_empty() {
+            return Err(TechnicalFactExtractionFailure {
+                code: TechnicalFactExtractionFailureCode::EmptyBlocks.as_str().to_string(),
+                summary: "technical fact extraction requires at least one structured block"
+                    .to_string(),
+            });
+        }
+
+        Ok(self.extract_from_blocks(command))
     }
 }
 

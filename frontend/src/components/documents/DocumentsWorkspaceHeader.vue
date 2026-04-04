@@ -47,25 +47,58 @@ const contextCopy = computed(() => {
 
 const summaryItems = computed(() => {
   const items: { key: string; label: string; value: string | number; tone: string }[] = []
+  const totalCount = props.totalCount ?? 0
+  const graphReadyCount = props.graphReadyCount ?? 0
+  const graphSparseCount = props.graphSparseCount ?? 0
+  const activeCount = props.activeCount ?? 0
+  const failedCount = props.failedCount ?? 0
 
-  if ((props.activeCount ?? 0) > 0) {
+  if (props.hasDocuments && totalCount > 0) {
+    items.push({
+      key: 'total',
+      label: t('documents.workspace.stats.total'),
+      value: totalCount,
+      tone: 'default',
+    })
+  }
+
+  if (props.hasDocuments && graphReadyCount > 0) {
+    items.push({
+      key: 'graphReady',
+      label: t('documents.workspace.stats.graphReady'),
+      value: graphReadyCount,
+      tone: 'success',
+    })
+  }
+
+  if (graphSparseCount > 0) {
+    items.push({
+      key: 'graphSparse',
+      label: t('documents.workspace.stats.graphSparse'),
+      value: graphSparseCount,
+      tone: activeCount > 0 ? 'info' : 'warning',
+    })
+  }
+
+  if (activeCount > 0) {
     items.push({
       key: 'processing',
       label: t('documents.workspace.stats.processing'),
-      value: props.activeCount ?? 0,
+      value: activeCount,
       tone: 'warning',
     })
   }
-  if ((props.failedCount ?? 0) > 0) {
+
+  if (failedCount > 0) {
     items.push({
       key: 'failed',
       label: t('documents.workspace.stats.failed'),
-      value: props.failedCount ?? 0,
+      value: failedCount,
       tone: 'danger',
     })
   }
 
-  return items
+  return items.slice(0, 4)
 })
 
 function uploadFailureKindLabel(failure: DocumentUploadFailure): string | null {
@@ -158,41 +191,41 @@ function uploadFailureKindLabel(failure: DocumentUploadFailure): string | null {
 <style scoped>
 .rr-docs-header {
   display: grid;
-  gap: 6px;
+  gap: 10px;
 }
 
 .rr-docs-header__overview {
   display: grid;
-  gap: 6px;
-  padding: 4px 2px 2px;
+  gap: 10px;
+  padding: 2px 2px 4px;
 }
 
 .rr-docs-header__topline {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 12px 16px;
+  gap: 12px 18px;
   align-items: start;
 }
 
 .rr-docs-header__copy {
   display: grid;
-  gap: 0.28rem;
+  gap: 0.35rem;
   min-width: 0;
 }
 
 .rr-docs-header__title {
   margin: 0;
-  font-size: 1.02rem;
+  font-size: clamp(1.08rem, 0.96rem + 0.34vw, 1.34rem);
   font-weight: 700;
   letter-spacing: -0.03em;
-  line-height: 1.12;
+  line-height: 1.06;
   color: var(--rr-text-primary, #0f172a);
 }
 
 .rr-docs-header__subtitle,
 .rr-docs-header__context {
   margin: 0;
-  font-size: 0.74rem;
+  font-size: 0.78rem;
   line-height: 1.5;
 }
 
@@ -213,7 +246,7 @@ function uploadFailureKindLabel(failure: DocumentUploadFailure): string | null {
   align-items: center;
   justify-content: flex-end;
   justify-self: end;
-  gap: 0.42rem;
+  gap: 0.5rem;
   max-width: none;
   min-width: 0;
 }
@@ -234,123 +267,171 @@ function uploadFailureKindLabel(failure: DocumentUploadFailure): string | null {
 .rr-docs-header__stats {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.38rem;
-  align-content: start;
+  gap: 0.5rem;
   min-width: 0;
 }
 
 .rr-docs-header__stat-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.34rem;
-  min-height: 1.9rem;
-  padding: 0.28rem 0.62rem;
-  border: 1px solid rgba(226, 232, 240, 0.9);
-  border-radius: 999px;
-  background: rgba(248, 250, 252, 0.9);
+  display: inline-grid;
+  grid-auto-flow: row;
+  gap: 0.15rem;
+  min-width: 7.6rem;
+  min-height: 0;
+  padding: 0.62rem 0.78rem;
+  border: 1px solid rgba(226, 232, 240, 0.86);
+  border-radius: 1rem;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.92)),
+    rgba(248, 250, 252, 0.9);
+  box-shadow:
+    0 8px 18px rgba(15, 23, 42, 0.03),
+    inset 0 1px 0 rgba(255, 255, 255, 0.82);
 }
 
 .rr-docs-header__stat-chip strong {
-  font-size: 0.86rem;
+  font-size: 0.98rem;
   font-weight: 700;
-  line-height: 1;
+  line-height: 1.08;
   color: var(--rr-text-primary, #0f172a);
 }
 
 .rr-docs-header__stat-chip span {
-  font-size: 0.66rem;
-  font-weight: 600;
-  line-height: 1;
-  letter-spacing: 0.04em;
+  color: rgba(71, 85, 105, 0.88);
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: rgba(71, 85, 105, 0.8);
+}
+
+.rr-docs-header__stat-chip--success {
+  border-color: rgba(167, 243, 208, 0.84);
+  background:
+    linear-gradient(180deg, rgba(240, 253, 244, 0.98), rgba(236, 253, 245, 0.94)),
+    rgba(240, 253, 244, 0.92);
 }
 
 .rr-docs-header__stat-chip--success strong {
   color: #059669;
 }
 
+.rr-docs-header__stat-chip--info {
+  border-color: rgba(125, 211, 252, 0.56);
+  background:
+    linear-gradient(180deg, rgba(240, 249, 255, 0.98), rgba(236, 254, 255, 0.94)),
+    rgba(240, 249, 255, 0.92);
+}
+
 .rr-docs-header__stat-chip--info strong {
   color: #0f766e;
+}
+
+.rr-docs-header__stat-chip--warning {
+  border-color: rgba(253, 224, 71, 0.5);
+  background:
+    linear-gradient(180deg, rgba(255, 251, 235, 0.98), rgba(255, 247, 237, 0.95)),
+    rgba(255, 251, 235, 0.92);
 }
 
 .rr-docs-header__stat-chip--warning strong {
   color: #d97706;
 }
 
+.rr-docs-header__stat-chip--danger {
+  border-color: rgba(252, 165, 165, 0.52);
+  background:
+    linear-gradient(180deg, rgba(254, 242, 242, 0.98), rgba(255, 241, 242, 0.95)),
+    rgba(254, 242, 242, 0.92);
+}
+
 .rr-docs-header__stat-chip--danger strong {
   color: #dc2626;
 }
 
-.rr-docs-header__stat-chip--cost strong {
-  color: #7c3aed;
-}
-
 .rr-docs-header__alert {
-  padding: 10px 12px;
-  border-radius: 14px;
-  border: 1px solid rgba(239, 68, 68, 0.16);
-  background: rgba(254, 242, 242, 0.84);
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.88rem 0.95rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(252, 165, 165, 0.42);
+  background:
+    linear-gradient(180deg, rgba(254, 242, 242, 0.98), rgba(255, 247, 237, 0.94)),
+    rgba(254, 242, 242, 0.92);
+  box-shadow: 0 12px 24px rgba(127, 29, 29, 0.05);
 }
 
 .rr-docs-header__alert-top {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: 0.85rem;
+}
+
+.rr-docs-header__alert-top strong {
+  color: rgba(127, 29, 29, 0.94);
 }
 
 .rr-docs-header__alert-top p {
-  margin: 2px 0 0;
-  color: rgba(127, 29, 29, 0.74);
+  margin: 0.2rem 0 0;
+  color: rgba(153, 27, 27, 0.82);
+  font-size: 0.76rem;
+  line-height: 1.45;
 }
 
 .rr-docs-header__alert-list {
   display: grid;
-  gap: 6px;
-  padding-left: 16px;
-  margin: 8px 0 0;
-  color: rgba(127, 29, 29, 0.84);
+  gap: 0.55rem;
+  margin: 0.2rem 0 0;
+  padding-left: 1rem;
+}
+
+.rr-docs-header__alert-list li {
+  display: grid;
+  gap: 0.16rem;
+  color: rgba(71, 85, 105, 0.92);
+  font-size: 0.74rem;
+  line-height: 1.4;
 }
 
 .rr-docs-header__alert-kind {
-  padding: 2px 6px;
-  border-radius: 999px;
-  background: rgba(127, 29, 29, 0.08);
-  font-size: 0.72rem;
+  color: rgba(190, 24, 93, 0.86);
   font-weight: 700;
 }
 
-@media (max-width: 920px) {
-  .rr-docs-header__overview {
-    padding: 2px 0 0;
-  }
-
+@media (max-width: 820px) {
   .rr-docs-header__topline {
     grid-template-columns: minmax(0, 1fr);
-    gap: 10px;
-    align-items: start;
   }
 
   .rr-docs-header__actions {
     justify-self: stretch;
     justify-content: flex-start;
   }
-}
-
-@media (max-width: 600px) {
-  .rr-docs-header__title {
-    font-size: 1.04rem;
-  }
 
   .rr-docs-header__stats {
-    display: none;
+    gap: 0.45rem;
   }
 
+  .rr-docs-header__stat-chip {
+    min-width: 7rem;
+    padding: 0.58rem 0.7rem;
+  }
+}
+
+@media (max-width: 640px) {
   .rr-docs-header__actions {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
-    gap: 0.44rem;
+    gap: 0.5rem;
+  }
+
+  .rr-docs-header__stats {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .rr-docs-header__alert-top {
+    flex-direction: column;
   }
 
   .rr-docs-header__actions :deep(.rr-button--tiny),

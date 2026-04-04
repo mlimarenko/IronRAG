@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -15,7 +16,8 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PrepareStructuredRevisionCommand {
     pub revision_id: Uuid,
     pub document_id: Uuid,
@@ -32,7 +34,8 @@ pub struct PrepareStructuredRevisionCommand {
     pub prepared_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PreparedStructuredRevision {
     pub prepared_revision: StructuredDocumentRevisionData,
     pub ordered_blocks: Vec<StructuredBlockData>,
@@ -43,6 +46,28 @@ pub struct PreparedStructuredRevision {
 pub enum StructuredPreparationError {
     #[error(transparent)]
     Validation(#[from] StructuredDocumentValidationError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuredPreparationFailureCode {
+    InvalidStructuredRevision,
+}
+
+impl StructuredPreparationFailureCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidStructuredRevision => "invalid_structured_revision",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StructuredPreparationFailure {
+    pub code: String,
+    pub summary: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -80,6 +105,16 @@ impl StructuredPreparationService {
         };
         prepared_revision.validate()?;
         Ok(PreparedStructuredRevision { prepared_revision, ordered_blocks, chunk_windows })
+    }
+
+    pub fn prepare_runtime_stage(
+        &self,
+        command: PrepareStructuredRevisionCommand,
+    ) -> Result<PreparedStructuredRevision, StructuredPreparationFailure> {
+        self.prepare_revision(command).map_err(|error| StructuredPreparationFailure {
+            code: StructuredPreparationFailureCode::InvalidStructuredRevision.as_str().to_string(),
+            summary: error.to_string(),
+        })
     }
 }
 

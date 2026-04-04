@@ -30,6 +30,7 @@ use crate::{
         graph_identity,
         graph_merge::{self, GraphMergeOutcome, GraphMergeScope},
         graph_projection::{self, GraphProjectionOutcome, GraphProjectionScope},
+        graph_rebuild::RevisionGraphReconcileOutcome,
         graph_summary::{GraphSummaryRefreshRequest, GraphSummaryService},
     },
 };
@@ -351,24 +352,6 @@ impl GraphService {
         })
     }
 
-    pub async fn rebuild_arango_library_graph(
-        &self,
-        state: &AppState,
-        library_id: Uuid,
-    ) -> Result<ArangoGraphRebuildOutcome> {
-        self.with_runtime_graph_lock(state, library_id, async {
-            self.refresh_arango_library_candidate_materialization(state, library_id).await?;
-            let mut outcome =
-                self.reconcile_arango_library_candidates(state, library_id, None).await?;
-            outcome.target = Some(ArangoGraphRebuildTarget::Graph);
-            self.recalculate_arango_library_generations(state, library_id)
-                .await
-                .context("failed to refresh arango generation state after graph rebuild")?;
-            Ok(outcome)
-        })
-        .await
-    }
-
     pub async fn reconcile_arango_library_graph(
         &self,
         state: &AppState,
@@ -446,14 +429,14 @@ impl GraphService {
         .await
     }
 
-    async fn with_runtime_graph_lock<F>(
+    async fn with_runtime_graph_lock<T, F>(
         &self,
         state: &AppState,
         library_id: Uuid,
         operation: F,
-    ) -> Result<ArangoGraphRebuildOutcome>
+    ) -> Result<T>
     where
-        F: std::future::Future<Output = Result<ArangoGraphRebuildOutcome>>,
+        F: std::future::Future<Output = Result<T>>,
     {
         let graph_lock = repositories::acquire_runtime_library_graph_lock(
             &state.persistence.postgres,
@@ -1882,6 +1865,24 @@ impl GraphService {
         library_id: Uuid,
     ) -> Result<GraphProjectionOutcome> {
         crate::services::graph_rebuild::rebuild_library_graph(state, library_id).await
+    }
+
+    pub async fn reconcile_revision_graph(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+        document_id: Uuid,
+        revision_id: Uuid,
+        activated_by_attempt_id: Option<Uuid>,
+    ) -> Result<RevisionGraphReconcileOutcome> {
+        crate::services::graph_rebuild::reconcile_revision_graph(
+            state,
+            library_id,
+            document_id,
+            revision_id,
+            activated_by_attempt_id,
+        )
+        .await
     }
 }
 

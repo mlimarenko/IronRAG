@@ -1,9 +1,10 @@
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
     domains::{
-        content::LibraryKnowledgeCoverage,
+        content::{LibraryKnowledgeCoverage, revision_text_state_is_readable},
         knowledge::{
             KnowledgeChunk, KnowledgeContextBundle, KnowledgeDocument, KnowledgeLibraryGeneration,
             KnowledgeLibrarySummary, KnowledgeRevision, StructuredBlock,
@@ -240,6 +241,33 @@ impl KnowledgeService {
             .map_err(|_| ApiError::Internal)?
             .ok_or_else(|| ApiError::resource_not_found("knowledge_revision", revision_id))?;
         Ok(map_revision_row(row))
+    }
+
+    pub async fn set_revision_extract_state(
+        &self,
+        state: &AppState,
+        revision_id: Uuid,
+        extract_state: &str,
+        normalized_text: Option<&str>,
+        text_checksum: Option<&str>,
+    ) -> Result<KnowledgeRevision, ApiError> {
+        let text_readable_at = matches!(extract_state, "readable" | "ready")
+            .then_some(chrono::Utc::now())
+            .filter(|_| normalized_text.is_some_and(|text| !text.trim().is_empty()));
+        self.set_revision_text_state(
+            state,
+            revision_id,
+            match extract_state {
+                "readable" | "ready" => "text_readable",
+                "failed" => "failed",
+                "processing" => "extracting_text",
+                _ => "accepted",
+            },
+            normalized_text,
+            text_checksum,
+            text_readable_at,
+        )
+        .await
     }
 
     pub async fn set_revision_storage_ref(
@@ -495,11 +523,7 @@ impl KnowledgeService {
         state: &AppState,
         library_id: Uuid,
     ) -> Result<Vec<KnowledgeLibraryGeneration>, ApiError> {
-        let rows = state
-            .arango_document_store
-            .list_library_generations(library_id)
-            .await
-            .map_err(|_| ApiError::Internal)?;
+        let rows = self.derive_library_generation_rows(state, library_id).await?;
         Ok(rows.into_iter().map(map_library_generation_row).collect())
     }
 
@@ -545,6 +569,89 @@ impl KnowledgeService {
             updated_at: coverage.updated_at,
             latest_generation,
         })
+    }
+}
+
+impl KnowledgeService {
+    pub async fn derive_library_generation_rows(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+    ) -> Result<Vec<crate::infra::arangodb::document_store::KnowledgeLibraryGenerationRow>, ApiError>
+    {
+        let library = state.canonical_services.catalog.get_library(state, library_id).await?;
+        let documents = state
+            .arango_document_store
+            .list_documents_by_library(library.workspace_id, library_id)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+
+        let mut active_text_generation = 0i64;
+        let mut active_vector_generation = 0i64;
+        let mut active_graph_generation = 0i64;
+        let mut has_ready_text = false;
+        let mut has_ready_vector = false;
+        let mut has_ready_graph = false;
+        let mut updated_at = None;
+
+        for document in documents {
+            let revisions = state
+                .arango_document_store
+                .list_revisions_by_document(document.document_id)
+                .await
+                .map_err(|_| ApiError::Internal)?;
+            for revision in revisions {
+                updated_at = Some(updated_at.map_or(revision.created_at, |current| {
+                    if revision.created_at > current { revision.created_at } else { current }
+                }));
+                if revision_text_state_is_readable(&revision.text_state) {
+                    has_ready_text = true;
+                    active_text_generation = active_text_generation.max(revision.revision_number);
+                }
+                if matches!(
+                    revision.vector_state.as_str(),
+                    "ready" | "vector_ready" | "graph_ready"
+                ) {
+                    has_ready_vector = true;
+                    active_vector_generation =
+                        active_vector_generation.max(revision.revision_number);
+                }
+                if matches!(revision.graph_state.as_str(), "ready" | "graph_ready") {
+                    has_ready_graph = true;
+                    active_graph_generation = active_graph_generation.max(revision.revision_number);
+                }
+            }
+        }
+
+        if !has_ready_text && !has_ready_vector && !has_ready_graph {
+            return Ok(Vec::new());
+        }
+
+        let degraded_state = if has_ready_text && has_ready_vector && has_ready_graph {
+            "ready"
+        } else {
+            "degraded"
+        };
+        let generation_id = derive_library_generation_id(
+            library_id,
+            active_text_generation,
+            active_vector_generation,
+            active_graph_generation,
+            degraded_state,
+        );
+        Ok(vec![crate::infra::arangodb::document_store::KnowledgeLibraryGenerationRow {
+            key: library_id.to_string(),
+            arango_id: None,
+            arango_rev: None,
+            generation_id,
+            workspace_id: library.workspace_id,
+            library_id,
+            active_text_generation,
+            active_vector_generation,
+            active_graph_generation,
+            degraded_state: degraded_state.to_string(),
+            updated_at: updated_at.unwrap_or_else(chrono::Utc::now),
+        }])
     }
 }
 
@@ -697,4 +804,22 @@ fn map_library_generation_row(
         created_at: row.updated_at,
         completed_at: None,
     }
+}
+
+fn derive_library_generation_id(
+    library_id: Uuid,
+    active_text_generation: i64,
+    active_vector_generation: i64,
+    active_graph_generation: i64,
+    degraded_state: &str,
+) -> Uuid {
+    let seed = format!(
+        "library-generation:{library_id}:{active_text_generation}:{active_vector_generation}:{active_graph_generation}:{degraded_state}"
+    );
+    let digest = sha2::Sha256::digest(seed.as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
 }

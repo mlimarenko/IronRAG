@@ -23,8 +23,8 @@ import type {
   ExecuteQueryTurnPayload,
   QuerySession,
   QuerySessionDetail,
-  QueryTurnStreamStage,
   QueryTurn,
+  RuntimeExecutionSummary,
 } from 'src/services/api/query'
 import { isExactTechnicalQuery } from 'src/services/api/query'
 import { useQueryStore } from 'src/stores/query'
@@ -44,7 +44,86 @@ interface RenderedChatMessage {
   variant?: 'progress' | 'stream'
 }
 
-type AssistantProgressStage = 'retrieving' | 'grounding' | 'answering'
+type AssistantProgressStage = 'planning' | 'grounding' | 'response'
+
+interface GraphFocusCandidate {
+  target: string
+  rank: number
+  score: number
+}
+
+const RETRIEVAL_RUNTIME_STAGES = new Set(['plan', 'retrieve', 'rerank'])
+const GROUNDING_RUNTIME_STAGES = new Set(['assemble_context', 'verify'])
+
+function resolveAssistantProgressStage(
+  runtime: RuntimeExecutionSummary | null,
+): AssistantProgressStage {
+  const activeStage = runtime?.activeStage ?? null
+  if (!activeStage) {
+    return 'planning'
+  }
+  if (RETRIEVAL_RUNTIME_STAGES.has(activeStage)) {
+    return 'planning'
+  }
+  if (GROUNDING_RUNTIME_STAGES.has(activeStage)) {
+    return 'grounding'
+  }
+  if (activeStage === 'answer') {
+    return 'response'
+  }
+  return 'planning'
+}
+
+function resolveAssistantFailureMessage(
+  runtime: RuntimeExecutionSummary | null,
+  fallback: string | null,
+): string | null {
+  const failureCode = runtime?.failureCode ?? null
+  switch (failureCode) {
+    case 'query_retrieve_failed':
+      return t('assistant.errors.queryRetrieveFailed')
+    case 'query_context_assembly_failed':
+      return t('assistant.errors.queryContextAssemblyFailed')
+    case 'query_answer_failed':
+      return t('assistant.errors.queryAnswerFailed')
+    case 'query_persist_failed':
+      return t('assistant.errors.queryPersistFailed')
+    case 'runtime_policy_rejected':
+      return t('assistant.errors.runtimePolicyRejected')
+    case 'runtime_policy_terminated':
+      return t('assistant.errors.runtimePolicyTerminated')
+    case 'runtime_policy_blocked':
+      return t('assistant.errors.runtimePolicyBlocked')
+    default:
+      return fallback?.trim() ? fallback : null
+  }
+}
+
+function resolveGraphFocusTarget(): string | null {
+  if (!activeExecution.value) {
+    return null
+  }
+
+  const candidates: GraphFocusCandidate[] = [
+    ...activeExecution.value.entityReferences.map((reference) => ({
+      target: `entity:${reference.nodeId}`,
+      rank: reference.rank,
+      score: reference.score,
+    })),
+    ...activeExecution.value.relationReferences.map((reference) => ({
+      target: `relation:${reference.edgeId}`,
+      rank: reference.rank,
+      score: reference.score,
+    })),
+  ]
+
+  if (candidates.length === 0) {
+    return null
+  }
+
+  candidates.sort((left, right) => left.rank - right.rank || right.score - left.score)
+  return candidates[0]?.target ?? null
+}
 
 function buildComposerFileKey(file: File): string {
   return [file.name, String(file.size), String(file.lastModified)].join(':')
@@ -61,6 +140,7 @@ const { formatCompactDateTime } = useDisplayFormatters()
 const {
   activeBundle,
   activeExecution,
+  runtimeSummary,
   activeSession,
   error,
   executingTurn,
@@ -84,7 +164,6 @@ const conversationBodyRef = ref<HTMLElement | null>(null)
 const composerFileInputRef = ref<HTMLInputElement | null>(null)
 const composerInputRef = ref<HTMLTextAreaElement | null>(null)
 const pendingUserMessage = ref<string | null>(null)
-const pendingAssistantStage = ref<AssistantProgressStage>('retrieving')
 const retainedSession = ref<QuerySessionDetail | null>(null)
 const conversationPinnedToBottom = ref(true)
 const showEvidencePanel = ref(!initialCompactAssistantLayout)
@@ -279,16 +358,37 @@ const contextIndicatorCount = computed(() => {
 const emptyConversation = computed(
   () =>
     !loadingState.value &&
+    Boolean(activeThreadSession.value) &&
     visibleTurns.value.length === 0 &&
     !pendingUserMessage.value &&
     !assistantResponseStreaming.value &&
     !executingTurn.value,
 )
 
+const showThreadPlaceholder = computed(
+  () => !loadingState.value && !activeThreadSession.value && !assistantResponseStreaming.value,
+)
+
+const threadPlaceholderTitle = computed(() =>
+  sessions.value.length > 0 ? t('assistant.chat.roomEmpty') : t('assistant.chat.roomsEmpty'),
+)
+
+const threadPlaceholderBody = computed(() =>
+  sessions.value.length > 0
+    ? t('assistant.chat.emptyConversationBody')
+    : t('assistant.chat.searchEmptyBody'),
+)
+
+const pendingAssistantStage = computed(() => resolveAssistantProgressStage(runtimeSummary.value))
+
 const pendingAssistantLabel = computed(() => t(`assistant.progress.${pendingAssistantStage.value}`))
 
+const assistantErrorMessage = computed(() =>
+  resolveAssistantFailureMessage(activeExecution.value?.runtimeSummary ?? null, error.value),
+)
+
 const pendingAssistantSteps = computed(() => {
-  const stages: AssistantProgressStage[] = ['retrieving', 'grounding', 'answering']
+  const stages: AssistantProgressStage[] = ['planning', 'grounding', 'response']
   const activeIndex = stages.indexOf(pendingAssistantStage.value)
   return stages.map((stage, index) => ({
     key: stage,
@@ -297,15 +397,34 @@ const pendingAssistantSteps = computed(() => {
   }))
 })
 
+const activeExecutionSuppressesAssistantTurn = computed(() =>
+  Boolean(
+    activeExecution.value &&
+      (activeExecution.value.runtimeSummary.failureCode === 'runtime_policy_rejected' ||
+        activeExecution.value.runtimeSummary.failureCode === 'runtime_policy_terminated' ||
+        activeExecution.value.runtimeSummary.failureCode === 'runtime_policy_blocked'),
+  ),
+)
+
 const renderedMessages = computed<RenderedChatMessage[]>(() => {
-  const mapped = visibleTurns.value.map<RenderedChatMessage>((turn) => {
-    return {
+  const suppressedExecutionId = activeExecutionSuppressesAssistantTurn.value
+    ? activeExecution.value?.execution.id ?? null
+    : null
+  const mapped = visibleTurns.value
+    .filter(
+      (turn) =>
+        !(
+          suppressedExecutionId &&
+          turn.turnKind === 'assistant' &&
+          turn.executionId === suppressedExecutionId
+        ),
+    )
+    .map<RenderedChatMessage>((turn) => ({
       id: turn.id,
       author: turn.turnKind === 'assistant' ? 'assistant' : 'user',
       content: turn.contentText,
       createdAt: turn.createdAt,
-    }
-  })
+    }))
 
   if (pendingUserMessage.value) {
     mapped.push({
@@ -341,10 +460,10 @@ const renderedMessages = computed<RenderedChatMessage[]>(() => {
 })
 
 const chatNotice = computed<AssistantNotice | null>(() => {
-  if (error.value) {
+  if (assistantErrorMessage.value) {
     return {
       kind: 'error',
-      message: error.value,
+      message: assistantErrorMessage.value,
     }
   }
   if (transientNotice.value) {
@@ -359,7 +478,11 @@ const chatNotice = computed<AssistantNotice | null>(() => {
 const showVerificationBanner = computed(() =>
   Boolean(
     activeExecution.value &&
-    (verificationState.value !== 'not_run' || verificationWarnings.value.length > 0),
+    (verificationState.value !== 'not_run' ||
+      verificationWarnings.value.length > 0 ||
+      activeExecution.value.runtimeSummary.failureCode === 'runtime_policy_rejected' ||
+      activeExecution.value.runtimeSummary.failureCode === 'runtime_policy_terminated' ||
+      activeExecution.value.runtimeSummary.failureCode === 'runtime_policy_blocked'),
   ),
 )
 
@@ -460,14 +583,6 @@ function composeSessionPreview(session: QuerySession): string {
   return title.length > 74 ? `${title.slice(0, 74)}…` : title
 }
 
-function startAssistantProgress(): void {
-  pendingAssistantStage.value = 'retrieving'
-}
-
-function stopAssistantProgress(): void {
-  pendingAssistantStage.value = 'retrieving'
-}
-
 function syncComposerHeight(): void {
   const textarea = composerInputRef.value
   if (!textarea) {
@@ -496,10 +611,6 @@ function focusComposer(): void {
 function stopAssistantResponseStream(): void {
   streamedAssistantText.value = ''
   assistantResponseStreaming.value = false
-}
-
-function handleAssistantStreamStage(stage: QueryTurnStreamStage): void {
-  pendingAssistantStage.value = stage
 }
 
 function appendAssistantResponseDelta(delta: string): void {
@@ -594,6 +705,8 @@ async function syncLatestExecution(): Promise<void> {
   const latestExecutionId = activeSession.value?.executions[0]?.id ?? null
   if (!latestExecutionId) {
     queryStore.activeExecution = null
+    queryStore.activeRuntimeSummary = null
+    queryStore.activeRuntimeStageSummaries = []
     queryStore.activeBundle = null
     return
   }
@@ -890,7 +1003,12 @@ function handleComposerPaste(event: ClipboardEvent): void {
   mergeComposerFiles(pastedFiles)
   transientNotice.value = t('assistant.notices.imagesPasted', { count: pastedFiles.length })
 
-  const plainText = event.clipboardData?.getData('text/plain')?.trim() ?? ''
+  const clipboardData = event.clipboardData
+  if (!clipboardData) {
+    event.preventDefault()
+    return
+  }
+  const plainText = clipboardData.getData('text/plain').trim()
   if (plainText.length === 0) {
     event.preventDefault()
   }
@@ -949,7 +1067,6 @@ async function sendPrompt(): Promise<void> {
 
   if (content) {
     pendingUserMessage.value = content
-    startAssistantProgress()
     conversationPinnedToBottom.value = true
     void scrollConversationToBottom('smooth')
   }
@@ -977,11 +1094,9 @@ async function sendPrompt(): Promise<void> {
       includeDebug: false,
     }
     await queryStore.runTurn(sessionId, payloadBody, {
-      onStage: handleAssistantStreamStage,
       onAnswerDelta: appendAssistantResponseDelta,
     })
     pendingUserMessage.value = null
-    stopAssistantProgress()
     stopAssistantResponseStream()
     if (compactAssistantLayout.value) {
       showSessionRail.value = false
@@ -990,7 +1105,6 @@ async function sendPrompt(): Promise<void> {
     await scrollConversationToBottom('smooth')
   } catch {
     pendingUserMessage.value = null
-    stopAssistantProgress()
     stopAssistantResponseStream()
     composerText.value = restoreText
     composerFiles.value = restoreFiles
@@ -1003,11 +1117,9 @@ function openDocuments(): void {
 }
 
 function openGraph(): void {
-  const firstEntityReference = activeExecution.value?.entityReferences[0]
+  const graphFocusTarget = resolveGraphFocusTarget()
   void router.push(
-    firstEntityReference
-      ? { path: '/graph', query: { node: firstEntityReference.nodeId } }
-      : '/graph',
+    graphFocusTarget ? { path: '/graph', query: { node: graphFocusTarget } } : '/graph',
   )
 }
 
@@ -1053,9 +1165,9 @@ function retryAssistant(): void {
     />
 
     <FeedbackState
-      v-else-if="error && !activeSession && !sessions.length"
+      v-else-if="assistantErrorMessage && !activeSession && !sessions.length"
       :title="t('assistant.states.errorTitle')"
-      :message="error"
+      :message="assistantErrorMessage"
       kind="error"
       :action-label="t('assistant.actions.retry')"
       @action="retryAssistant"
@@ -1196,7 +1308,23 @@ function retryAssistant(): void {
               class="rr-assistant-chat__thread-body"
               @scroll="handleConversationScroll"
             >
-              <div v-if="emptyConversation" class="rr-assistant-chat__empty">
+              <div v-if="showThreadPlaceholder" class="rr-assistant-chat__empty">
+                <strong>{{ threadPlaceholderTitle }}</strong>
+                <p>{{ threadPlaceholderBody }}</p>
+                <div class="rr-assistant-chat__starter-list">
+                  <button
+                    v-for="prompt in starterPrompts"
+                    :key="prompt"
+                    type="button"
+                    class="rr-assistant-chat__starter"
+                    @click="applyStarterPrompt(prompt)"
+                  >
+                    {{ prompt }}
+                  </button>
+                </div>
+              </div>
+
+              <div v-else-if="emptyConversation" class="rr-assistant-chat__empty">
                 <strong>{{ t('assistant.chat.emptyConversationTitle') }}</strong>
                 <p>{{ t('assistant.chat.emptyConversationBody') }}</p>
                 <div class="rr-assistant-chat__starter-list">
@@ -1407,6 +1535,7 @@ function retryAssistant(): void {
             compact
             :state="verificationState"
             :warnings="verificationWarnings"
+            :runtime-failure-code="activeExecution?.runtimeSummary.failureCode ?? null"
           />
 
           <section
@@ -1426,7 +1555,7 @@ function retryAssistant(): void {
         <AssistantEvidencePanel
           :library-name="activeLibrary?.name ?? '—'"
           :executing="executingTurn || assistantResponseStreaming"
-          :error="error"
+          :error="assistantErrorMessage"
           :execution="activeExecution"
           :bundle="activeBundle"
           :closable="compactAssistantLayout"

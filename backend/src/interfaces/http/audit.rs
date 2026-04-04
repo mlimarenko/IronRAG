@@ -30,6 +30,7 @@ pub struct AuditEventsQuery {
     pub context_bundle_id: Option<Uuid>,
     pub query_session_id: Option<Uuid>,
     pub query_execution_id: Option<Uuid>,
+    pub runtime_execution_id: Option<Uuid>,
     pub async_operation_id: Option<Uuid>,
     pub internal: Option<bool>,
 }
@@ -47,6 +48,7 @@ pub struct AuditEventSubjectResponse {
     pub knowledge_revision_id: Option<Uuid>,
     pub query_session_id: Option<Uuid>,
     pub query_execution_id: Option<Uuid>,
+    pub runtime_execution_id: Option<Uuid>,
     pub context_bundle_id: Option<Uuid>,
     pub async_operation_id: Option<Uuid>,
 }
@@ -111,6 +113,7 @@ async fn list_audit_events(
         context_bundle_id: query.context_bundle_id,
         query_session_id: query.query_session_id,
         query_execution_id: query.query_execution_id,
+        runtime_execution_id: query.runtime_execution_id,
         async_operation_id: query.async_operation_id,
     };
 
@@ -256,6 +259,7 @@ fn map_subject(subject: AuditEventSubject) -> AuditEventSubjectResponse {
         knowledge_revision_id,
         query_session_id: subject.query_session_id,
         query_execution_id: subject.query_execution_id,
+        runtime_execution_id: subject.runtime_execution_id,
         context_bundle_id: subject.context_bundle_id,
         async_operation_id: subject.async_operation_id,
     }

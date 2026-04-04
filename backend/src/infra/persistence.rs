@@ -1,3 +1,5 @@
+#![allow(clippy::missing_errors_doc)]
+
 use redis::Client as RedisClient;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
@@ -162,7 +164,7 @@ pub async fn canonical_ai_catalog_seeded(postgres: &PgPool) -> anyhow::Result<bo
     let provider_count = sqlx::query_scalar::<_, i64>(
         "select count(*) from ai_provider_catalog where provider_kind = any($1)",
     )
-    .bind(&SEEDED_PROVIDER_KINDS)
+    .bind(SEEDED_PROVIDER_KINDS)
     .fetch_one(postgres)
     .await?;
     let model_count = sqlx::query_scalar::<_, i64>("select count(*) from ai_model_catalog")
@@ -179,15 +181,6 @@ pub async fn canonical_ai_catalog_seeded(postgres: &PgPool) -> anyhow::Result<bo
 
 pub async fn legacy_runtime_repair_tables_present(postgres: &PgPool) -> anyhow::Result<bool> {
     // Legacy worker loops still rely on the old runtime queue schema.
-    Ok(table_exists(postgres, "ingestion_job").await?
-        && table_exists(postgres, "runtime_ingestion_run").await?)
-}
-
-pub async fn legacy_runtime_attempt_repair_tables_present(
-    postgres: &PgPool,
-) -> anyhow::Result<bool> {
-    // Old attempt-repair SQL still targets `ingestion_job`.
-    // Guard that path explicitly so canonical stacks can boot workers.
     Ok(table_exists(postgres, "ingestion_job").await?
         && table_exists(postgres, "runtime_ingestion_run").await?)
 }

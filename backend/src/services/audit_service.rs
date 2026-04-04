@@ -38,6 +38,7 @@ pub struct ListAuditEventSubjectFilter {
     pub context_bundle_id: Option<Uuid>,
     pub query_session_id: Option<Uuid>,
     pub query_execution_id: Option<Uuid>,
+    pub runtime_execution_id: Option<Uuid>,
     pub async_operation_id: Option<Uuid>,
 }
 
@@ -232,6 +233,21 @@ impl AuditService {
             document_id: None,
         }
     }
+
+    pub fn runtime_execution_subject(
+        &self,
+        runtime_execution_id: Uuid,
+        workspace_id: Option<Uuid>,
+        library_id: Option<Uuid>,
+    ) -> AppendAuditEventSubjectCommand {
+        AppendAuditEventSubjectCommand {
+            subject_kind: "runtime_execution".to_string(),
+            subject_id: runtime_execution_id,
+            workspace_id,
+            library_id,
+            document_id: None,
+        }
+    }
 }
 
 fn map_subject_filter(
@@ -243,6 +259,7 @@ fn map_subject_filter(
         context_bundle_id: filter.context_bundle_id,
         query_session_id: filter.query_session_id,
         query_execution_id: filter.query_execution_id,
+        runtime_execution_id: filter.runtime_execution_id,
         async_operation_id: filter.async_operation_id,
     }
 }
@@ -293,6 +310,7 @@ fn map_internal_event(row: audit_repository::AuditEventRow) -> AuditEventInterna
 fn map_event_subject(row: audit_repository::AuditEventSubjectRow) -> AuditEventSubject {
     let query_session_id = (row.subject_kind == "query_session").then_some(row.subject_id);
     let query_execution_id = (row.subject_kind == "query_execution").then_some(row.subject_id);
+    let runtime_execution_id = (row.subject_kind == "runtime_execution").then_some(row.subject_id);
     let context_bundle_id = (row.subject_kind == "knowledge_bundle").then_some(row.subject_id);
     let async_operation_id = (row.subject_kind == "async_operation").then_some(row.subject_id);
     AuditEventSubject {
@@ -304,6 +322,7 @@ fn map_event_subject(row: audit_repository::AuditEventSubjectRow) -> AuditEventS
         document_id: row.document_id,
         query_session_id,
         query_execution_id,
+        runtime_execution_id,
         context_bundle_id,
         async_operation_id,
     }

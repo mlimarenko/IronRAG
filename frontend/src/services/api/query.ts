@@ -1,8 +1,18 @@
+import type { components } from 'src/contracts/api/generated'
 import { ApiClientError, apiHttp, resolveApiPath, unwrap } from './http'
 
-export type QueryTurnStreamStage = 'retrieving' | 'grounding' | 'answering'
+type ApiSchemas = components['schemas']
 
 type RawRow = Record<string, unknown>
+
+export type QueryConversationState = ApiSchemas['QueryConversation']['conversationState']
+export type QueryTurnKind = ApiSchemas['QueryTurn']['turnKind']
+export type RuntimeLifecycleState = ApiSchemas['RuntimeLifecycleState']
+export type RuntimeExecutionSummary = ApiSchemas['RuntimeExecutionSummary']
+export type RuntimePolicySummary = ApiSchemas['RuntimePolicySummary']
+export type RuntimePolicyDecisionSummary = ApiSchemas['RuntimePolicyDecisionSummary']
+export type QueryRuntimeStageSummary = ApiSchemas['QueryRuntimeStageSummary']
+export type QueryVerificationState = ApiSchemas['QueryExecutionDetailResponse']['verificationState']
 
 export interface QuerySession {
   id: string
@@ -10,7 +20,7 @@ export interface QuerySession {
   libraryId: string
   createdByPrincipalId: string | null
   title: string | null
-  conversationState: string
+  conversationState: QueryConversationState
   createdAt: string
   updatedAt: string
 }
@@ -19,7 +29,7 @@ export interface QueryTurn {
   id: string
   conversationId: string
   turnIndex: number
-  turnKind: string
+  turnKind: QueryTurnKind
   authorPrincipalId: string | null
   contentText: string
   executionId: string | null
@@ -35,7 +45,9 @@ export interface QueryExecution {
   requestTurnId: string | null
   responseTurnId: string | null
   bindingId: string | null
-  executionState: string
+  runtimeExecutionId: string | null
+  lifecycleState: RuntimeLifecycleState
+  activeStage: string | null
   queryText: string
   failureCode: string | null
   startedAt: string
@@ -62,14 +74,6 @@ export interface QueryRelationReference {
   rank: number
   score: number
 }
-
-export type QueryVerificationState =
-  | 'not_run'
-  | 'verified'
-  | 'partially_supported'
-  | 'conflicting_evidence'
-  | 'insufficient_evidence'
-  | 'failed'
 
 export interface QueryPreparedSegmentReference {
   executionId: string
@@ -109,6 +113,8 @@ export interface QuerySessionDetail {
 export interface QueryExecutionDetail {
   contextBundleId: string
   execution: QueryExecution
+  runtimeSummary: RuntimeExecutionSummary
+  runtimeStageSummaries: QueryRuntimeStageSummary[]
   requestTurn: QueryTurn | null
   responseTurn: QueryTurn | null
   chunkReferences: QueryChunkReference[]
@@ -126,6 +132,8 @@ export interface QueryTurnExecutionResult {
   requestTurn: QueryTurn
   responseTurn: QueryTurn | null
   execution: QueryExecution
+  runtimeSummary: RuntimeExecutionSummary
+  runtimeStageSummaries: QueryRuntimeStageSummary[]
   chunkReferences: QueryChunkReference[]
   preparedSegmentReferences: QueryPreparedSegmentReference[]
   technicalFactReferences: QueryTechnicalFactReference[]
@@ -233,7 +241,7 @@ export interface ExecuteQueryTurnPayload {
 }
 
 export interface ExecuteQueryTurnStreamHandlers {
-  onStage?: (stage: QueryTurnStreamStage) => void
+  onRuntime?: (runtime: RuntimeExecutionSummary) => void
   onAnswerDelta?: (delta: string) => void
 }
 
@@ -313,6 +321,97 @@ function normalizeBooleanRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
 }
 
+function normalizeQueryConversationState(value: unknown): QueryConversationState {
+  return normalizeString(value) === 'archived' ? 'archived' : 'active'
+}
+
+function normalizeQueryTurnKind(value: unknown): QueryTurnKind {
+  const normalized = normalizeString(value)
+  switch (normalized) {
+    case 'user':
+      return 'user'
+    case 'assistant':
+      return 'assistant'
+    case 'tool':
+      return 'tool'
+    default:
+      return 'system'
+  }
+}
+
+function normalizeRuntimeLifecycleState(value: unknown): RuntimeLifecycleState {
+  const normalized = normalizeString(value)
+  switch (normalized) {
+    case 'running':
+      return 'running'
+    case 'completed':
+      return 'completed'
+    case 'recovered':
+      return 'recovered'
+    case 'failed':
+      return 'failed'
+    case 'canceled':
+      return 'canceled'
+    default:
+      return 'accepted'
+  }
+}
+
+function normalizeRuntimeExecutionSummary(row: RawRow): RuntimeExecutionSummary {
+  return {
+    runtimeExecutionId: normalizeString(row.runtimeExecutionId ?? row.runtime_execution_id),
+    lifecycleState: normalizeRuntimeLifecycleState(row.lifecycleState ?? row.lifecycle_state),
+    activeStage: normalizeNullableString(row.activeStage ?? row.active_stage),
+    turnBudget: normalizeNumber(row.turnBudget ?? row.turn_budget),
+    turnCount: normalizeNumber(row.turnCount ?? row.turn_count),
+    parallelActionLimit: normalizeNumber(row.parallelActionLimit ?? row.parallel_action_limit),
+    failureCode: normalizeNullableString(row.failureCode ?? row.failure_code),
+    failureSummaryRedacted: normalizeNullableString(
+      row.failureSummaryRedacted ?? row.failure_summary_redacted,
+    ),
+    policySummary: normalizeRuntimePolicySummary(
+      ((row.policySummary ?? row.policy_summary) as RawRow | undefined) ?? {},
+    ),
+    acceptedAt: normalizeString(row.acceptedAt ?? row.accepted_at),
+    completedAt: normalizeNullableString(row.completedAt ?? row.completed_at),
+  }
+}
+
+function normalizeRuntimePolicyDecisionSummary(row: RawRow): RuntimePolicyDecisionSummary {
+  return {
+    targetKind: normalizeString(
+      row.targetKind ?? row.target_kind,
+    ) as RuntimePolicyDecisionSummary['targetKind'],
+    decisionKind: normalizeString(
+      row.decisionKind ?? row.decision_kind,
+    ) as RuntimePolicyDecisionSummary['decisionKind'],
+    reasonCode: normalizeString(row.reasonCode ?? row.reason_code),
+    reasonSummaryRedacted: normalizeString(
+      row.reasonSummaryRedacted ?? row.reason_summary_redacted,
+    ),
+  }
+}
+
+function normalizeRuntimePolicySummary(row: RawRow): RuntimePolicySummary {
+  const rawRecentDecisions = row.recentDecisions ?? row.recent_decisions
+  const recentDecisions: unknown[] = Array.isArray(rawRecentDecisions) ? rawRecentDecisions : []
+  return {
+    allowCount: normalizeNumber(row.allowCount ?? row.allow_count),
+    rejectCount: normalizeNumber(row.rejectCount ?? row.reject_count),
+    terminateCount: normalizeNumber(row.terminateCount ?? row.terminate_count),
+    recentDecisions: recentDecisions.map((decision) =>
+      normalizeRuntimePolicyDecisionSummary((decision ?? {}) as RawRow),
+    ),
+  }
+}
+
+function normalizeQueryRuntimeStageSummary(row: RawRow): QueryRuntimeStageSummary {
+  return {
+    stageKind: normalizeString(row.stageKind ?? row.stage_kind),
+    stageLabel: normalizeString(row.stageLabel ?? row.stage_label),
+  }
+}
+
 function normalizeQuerySessionRow(row: RawRow): QuerySession {
   return {
     id: normalizeString(row.id),
@@ -322,7 +421,9 @@ function normalizeQuerySessionRow(row: RawRow): QuerySession {
       row.createdByPrincipalId ?? row.created_by_principal_id,
     ),
     title: normalizeNullableString(row.title),
-    conversationState: normalizeString(row.conversationState ?? row.conversation_state),
+    conversationState: normalizeQueryConversationState(
+      row.conversationState ?? row.conversation_state,
+    ),
     createdAt: normalizeString(row.createdAt ?? row.created_at),
     updatedAt: normalizeString(row.updatedAt ?? row.updated_at),
   }
@@ -333,7 +434,7 @@ function normalizeQueryTurnRow(row: RawRow): QueryTurn {
     id: normalizeString(row.id),
     conversationId: normalizeString(row.conversationId ?? row.conversation_id),
     turnIndex: normalizeNumber(row.turnIndex ?? row.turn_index),
-    turnKind: normalizeString(row.turnKind ?? row.turn_kind),
+    turnKind: normalizeQueryTurnKind(row.turnKind ?? row.turn_kind),
     authorPrincipalId: normalizeNullableString(row.authorPrincipalId ?? row.author_principal_id),
     contentText: normalizeString(row.contentText ?? row.content_text),
     executionId: normalizeNullableString(row.executionId ?? row.execution_id),
@@ -350,8 +451,10 @@ function normalizeQueryExecutionRow(row: RawRow): QueryExecution {
     contextBundleId: normalizeNullableString(row.contextBundleId ?? row.context_bundle_id),
     requestTurnId: normalizeNullableString(row.requestTurnId ?? row.request_turn_id),
     responseTurnId: normalizeNullableString(row.responseTurnId ?? row.response_turn_id),
-    bindingId: normalizeNullableString(row.bindingId),
-    executionState: normalizeString(row.executionState ?? row.execution_state),
+    bindingId: normalizeNullableString(row.bindingId ?? row.binding_id),
+    runtimeExecutionId: normalizeNullableString(row.runtimeExecutionId ?? row.runtime_execution_id),
+    lifecycleState: normalizeRuntimeLifecycleState(row.lifecycleState ?? row.lifecycle_state),
+    activeStage: normalizeNullableString(row.activeStage ?? row.active_stage),
     queryText: normalizeString(row.queryText ?? row.query_text),
     failureCode: normalizeNullableString(row.failureCode ?? row.failure_code),
     startedAt: normalizeString(row.startedAt ?? row.started_at),
@@ -417,10 +520,10 @@ function normalizeQueryVerificationState(value: unknown): QueryVerificationState
   switch (normalized) {
     case 'verified':
     case 'partially_supported':
-    case 'conflicting_evidence':
+    case 'conflicting':
     case 'insufficient_evidence':
     case 'failed':
-      return normalized
+      return normalized as QueryVerificationState
     default:
       return 'not_run'
   }
@@ -574,14 +677,13 @@ export async function executeQueryTurn(
   const contentType = response.headers.get('content-type') ?? ''
   if (!contentType.includes('text/event-stream')) {
     const jsonResponse = (await response.json()) as {
-      contextBundleId?: string | null
-      context_bundle_id?: string | null
+      contextBundleId: string
       session: RawRow
-      requestTurn?: RawRow
-      request_turn?: RawRow
+      requestTurn: RawRow
       responseTurn?: RawRow | null
-      response_turn?: RawRow | null
       execution: RawRow
+      runtimeSummary: RawRow
+      runtimeStageSummaries?: RawRow[]
     }
     return normalizeQueryTurnExecutionResult(jsonResponse)
   }
@@ -666,9 +768,12 @@ function consumeQueryTurnStreamFrame(
   }
 
   const payload = JSON.parse(dataLines.join('\n')) as Record<string, unknown>
-  if (eventName === 'status') {
-    const stage = normalizeString(payload.stage) as QueryTurnStreamStage
-    handlers.onStage?.(stage)
+  if (eventName === 'runtime') {
+    const runtime = payload.runtime
+    if (!runtime || typeof runtime !== 'object') {
+      throw new ApiClientError('Runtime stream payload is missing runtime summary', 500, 'internal')
+    }
+    handlers.onRuntime?.(normalizeRuntimeExecutionSummary(runtime as RawRow))
     return
   }
 
@@ -681,14 +786,13 @@ function consumeQueryTurnStreamFrame(
     setCompletedResult(
       normalizeQueryTurnExecutionResult(
         payload as {
-          contextBundleId?: string | null
-          context_bundle_id?: string | null
+          contextBundleId: string
           session: RawRow
-          requestTurn?: RawRow
-          request_turn?: RawRow
+          requestTurn: RawRow
           responseTurn?: RawRow | null
-          response_turn?: RawRow | null
           execution: RawRow
+          runtimeSummary: RawRow
+          runtimeStageSummaries?: RawRow[]
           chunkReferences?: RawRow[]
           chunk_references?: RawRow[]
           preparedSegmentReferences?: RawRow[]
@@ -719,14 +823,13 @@ function consumeQueryTurnStreamFrame(
 }
 
 function normalizeQueryTurnExecutionResult(response: {
-  contextBundleId?: string | null
-  context_bundle_id?: string | null
+  contextBundleId: string
   session: RawRow
-  requestTurn?: RawRow
-  request_turn?: RawRow
+  requestTurn: RawRow
   responseTurn?: RawRow | null
-  response_turn?: RawRow | null
   execution: RawRow
+  runtimeSummary: RawRow
+  runtimeStageSummaries?: RawRow[]
   chunkReferences?: RawRow[]
   chunk_references?: RawRow[]
   preparedSegmentReferences?: RawRow[]
@@ -742,17 +845,16 @@ function normalizeQueryTurnExecutionResult(response: {
   verificationWarnings?: RawRow[]
   verification_warnings?: RawRow[]
 }): QueryTurnExecutionResult {
-  const requestTurnRow = response.requestTurn ?? response.request_turn
-  if (!requestTurnRow) {
-    throw new ApiClientError('Completed query turn payload is missing requestTurn', 500, 'internal')
-  }
-  const responseTurnRow = response.responseTurn ?? response.response_turn
   return {
-    contextBundleId: normalizeString(response.contextBundleId ?? response.context_bundle_id),
+    contextBundleId: normalizeString(response.contextBundleId),
     session: normalizeQuerySessionRow(response.session),
-    requestTurn: normalizeQueryTurnRow(requestTurnRow),
-    responseTurn: responseTurnRow ? normalizeQueryTurnRow(responseTurnRow) : null,
+    requestTurn: normalizeQueryTurnRow(response.requestTurn),
+    responseTurn: response.responseTurn ? normalizeQueryTurnRow(response.responseTurn) : null,
     execution: normalizeQueryExecutionRow(response.execution),
+    runtimeSummary: normalizeRuntimeExecutionSummary(response.runtimeSummary),
+    runtimeStageSummaries: (response.runtimeStageSummaries ?? []).map((row) =>
+      normalizeQueryRuntimeStageSummary(row),
+    ),
     chunkReferences: (response.chunkReferences ?? response.chunk_references ?? []).map((row) =>
       normalizeQueryChunkReference(row),
     ),
@@ -811,13 +913,12 @@ export async function fetchQueryExecutionDetail(
 ): Promise<QueryExecutionDetail> {
   const payload = await unwrap(
     apiHttp.get<{
-      contextBundleId?: string | null
-      context_bundle_id?: string | null
+      contextBundleId: string
       execution: RawRow
+      runtimeSummary: RawRow
+      runtimeStageSummaries: RawRow[]
       requestTurn?: RawRow | null
-      request_turn?: RawRow | null
       responseTurn?: RawRow | null
-      response_turn?: RawRow | null
       chunkReferences?: RawRow[]
       chunk_references?: RawRow[]
       preparedSegmentReferences?: RawRow[]
@@ -834,13 +935,15 @@ export async function fetchQueryExecutionDetail(
       verification_warnings?: RawRow[]
     }>(`/query/executions/${executionId}`),
   )
-  const requestTurnRow = payload.requestTurn ?? payload.request_turn
-  const responseTurnRow = payload.responseTurn ?? payload.response_turn
   return {
-    contextBundleId: normalizeString(payload.contextBundleId ?? payload.context_bundle_id),
+    contextBundleId: normalizeString(payload.contextBundleId),
     execution: normalizeQueryExecutionRow(payload.execution),
-    requestTurn: requestTurnRow ? normalizeQueryTurnRow(requestTurnRow) : null,
-    responseTurn: responseTurnRow ? normalizeQueryTurnRow(responseTurnRow) : null,
+    runtimeSummary: normalizeRuntimeExecutionSummary(payload.runtimeSummary),
+    runtimeStageSummaries: payload.runtimeStageSummaries.map((row) =>
+      normalizeQueryRuntimeStageSummary(row),
+    ),
+    requestTurn: payload.requestTurn ? normalizeQueryTurnRow(payload.requestTurn) : null,
+    responseTurn: payload.responseTurn ? normalizeQueryTurnRow(payload.responseTurn) : null,
     chunkReferences: (payload.chunkReferences ?? payload.chunk_references ?? []).map((row) =>
       normalizeQueryChunkReference(row),
     ),

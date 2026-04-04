@@ -122,14 +122,6 @@ create type web_candidate_state as enum (
 
 create type query_conversation_state as enum ('active', 'archived');
 create type query_turn_kind as enum ('user', 'assistant', 'system', 'tool');
-create type query_execution_state as enum (
-    'planned',
-    'retrieving',
-    'answering',
-    'completed',
-    'failed',
-    'canceled'
-);
 
 create type billing_owning_execution_kind as enum ('ingest_attempt', 'query_execution', 'binding_validation');
 create type billing_call_state as enum ('started', 'completed', 'failed', 'canceled');
@@ -612,18 +604,6 @@ create table ingest_stage_event (
     unique (attempt_id, ordinal)
 );
 
-create table extract_content (
-    revision_id uuid primary key references content_revision(id) on delete cascade,
-    attempt_id uuid references ingest_attempt(id) on delete set null,
-    extract_state extract_state not null default 'missing',
-    normalized_text text,
-    text_checksum text,
-    preparation_state text,
-    preparation_checkpoint_json jsonb not null default '{}'::jsonb,
-    warning_count integer not null default 0,
-    updated_at timestamptz not null default now()
-);
-
 create table extract_chunk_result (
     id uuid primary key default uuidv7(),
     chunk_id uuid not null references content_chunk(id) on delete cascade,
@@ -687,7 +667,6 @@ create table query_execution (
     request_turn_id uuid,
     response_turn_id uuid,
     binding_id uuid references ai_library_model_binding(id) on delete set null,
-    execution_state query_execution_state not null default 'planned',
     query_text text not null,
     failure_code text,
     started_at timestamptz not null default now(),
@@ -881,8 +860,8 @@ create index idx_extract_chunk_result_attempt_state
 create index idx_query_conversation_library_updated_at
     on query_conversation (library_id, updated_at desc);
 
-create index idx_query_execution_library_state
-    on query_execution (library_id, execution_state, started_at desc);
+create index idx_query_execution_library_started_at
+    on query_execution (library_id, started_at desc);
 
 create index idx_billing_provider_call_owner
     on billing_provider_call (owning_execution_kind, owning_execution_id);

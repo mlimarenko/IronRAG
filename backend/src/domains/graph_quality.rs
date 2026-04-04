@@ -13,7 +13,6 @@ pub enum ExtractionOutcomeStatus {
 #[serde(rename_all = "camelCase")]
 pub struct ExtractionRecoverySummary {
     pub status: ExtractionOutcomeStatus,
-    pub parser_repair_applied: bool,
     pub second_pass_applied: bool,
     pub warning: Option<String>,
 }

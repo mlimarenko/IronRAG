@@ -1,4 +1,4 @@
-<div align="center">
+
 
 # RustRAG
 
@@ -6,24 +6,13 @@
 
 Load files, links, and images into one knowledge base, turn them into searchable text, embeddings, and graph relations, then expose the same memory in the operator UI and over MCP.
 
-<p>
-  <a href="./README.ru.md">README.ru</a> •
-  <a href="./MCP.md">MCP</a> •
-  <a href="./MCP.ru.md">MCP.ru</a>
-</p>
+[README-RU](./README-RU.md) • [MCP](./MCP.md) • [MCP-RU](./MCP-RU.md)
 
-<p>
-  <img src="https://img.shields.io/badge/Launch-Docker%20Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker Compose">
-  <img src="https://img.shields.io/badge/Backend-Rust-000000?style=for-the-badge&logo=rust&logoColor=white" alt="Rust">
-  <img src="https://img.shields.io/badge/Graph-ArangoDB-DDE072?style=for-the-badge&logo=arangodb&logoColor=000000" alt="ArangoDB">
-  <img src="https://img.shields.io/badge/Protocol-MCP-111827?style=for-the-badge" alt="MCP">
-</p>
 
-</div>
 
-<p align="center">
-  <img src="./docs/assets/readme-flow.gif" alt="RustRAG demo: dashboard, documents, grounded assistant, and graph exploration" width="960">
-</p>
+
+
+
 
 > RustRAG is a practical knowledge system for LLMs: one `docker compose up`, one web app, one MCP endpoint, and one canonical pipeline for internal assistants, support bots, and private agent workflows.
 
@@ -38,9 +27,36 @@ Load files, links, and images into one knowledge base, turn them into searchable
 
 Prerequisite: Docker with Compose v2.
 
+Choose one startup path:
+
+### 1. Install the published release without cloning
+
+Latest release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mlimarenko/RustRAG/master/install.sh | bash
+```
+
+Specific tag:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mlimarenko/RustRAG/master/install.sh | bash -s -- 0.0.3
+```
+
+This creates `./rustrag`, downloads the release `docker-compose.yml`, `.env.example`, and `docker/nginx/default.conf`, then starts the published Docker Hub images `pipingspace/rustrag-backend` and `pipingspace/rustrag-frontend`.
+
+### 2. Run prebuilt images from a cloned repository
+
 ```bash
 cp .env.example .env
-docker compose up --build -d
+docker compose up -d
+```
+
+### 3. Build from source from a cloned repository
+
+```bash
+cp .env.example .env
+docker compose -f docker-compose-local.yml up --build -d
 ```
 
 Open:
@@ -58,43 +74,31 @@ On a fresh local stack, the first visit runs bootstrap: you set the admin login 
 
 ## Configuration Model
 
-RustRAG now uses one canonical application env style: `RUSTRAG_*`.
+RustRAG uses one canonical application env style: `RUSTRAG_*`.
 
-- Root [`.env.example`](./.env.example): the simple Docker Compose surface. Copy it to `.env` for local or CI launches.
-- Backend [`backend/.env.example`](./backend/.env.example): the fuller application reference for direct backend/worker runs and advanced overrides.
-- [`docker-compose.yml`](./docker-compose.yml) and [`docker-compose.ci.yml`](./docker-compose.ci.yml): compose surfaces that interpolate from root `.env`.
-- [`backend/src/app/config.rs`](./backend/src/app/config.rs): built-in defaults when a variable is omitted.
+- Root `[.env.example](./.env.example)`: the simple Docker Compose surface. Copy it to `.env` for release installs, local builds, or internal deploys.
+- Backend `[backend/.env.example](./backend/.env.example)`: the fuller application reference for direct backend/worker runs and advanced overrides.
+- `[docker-compose.yml](./docker-compose.yml)`: the default prebuilt deployment surface using Docker Hub images.
+- `[docker-compose-local.yml](./docker-compose-local.yml)`: the source-build compose surface for manual local builds.
+- `[backend/src/app/config.rs](./backend/src/app/config.rs)`: built-in defaults when a variable is omitted.
 
-Lower-case aliases and mixed env naming are intentionally not supported anymore.
-
-## Deployment Variants
-
-### 1. Local compose with source builds
-
-```bash
-cp .env.example .env
-docker compose up --build -d
-```
-
-### 2. Local/remote compose with an explicit env file
-
-```bash
-docker compose --env-file .env up --build -d
-```
-
-
-### 4. Direct backend / worker runs without compose
-
-Export values from [`backend/.env.example`](./backend/.env.example), then run the binaries directly. This mode is useful for service development, debugging, or non-compose orchestration.
+Lower-case aliases and mixed env naming are not supported.
 
 ## Where To Inspect Variables
 
 - Root `.env`: the active compose interpolation file.
-- [`./.env.example`](./.env.example): the minimal compose-facing variable set.
-- [`./backend/.env.example`](./backend/.env.example): the broader application config reference.
-- [`./docker-compose.yml`](./docker-compose.yml) or [`./docker-compose.ci.yml`](./docker-compose.ci.yml): what each service actually receives.
-- [`./backend/src/app/config.rs`](./backend/src/app/config.rs): the canonical defaults and setting names.
+- `[./.env.example](./.env.example)`: the minimal compose-facing variable set.
+- `[./backend/.env.example](./backend/.env.example)`: the broader application config reference.
+- `[./docker-compose.yml](./docker-compose.yml)`: the default prebuilt deployment surface.
+- `[./docker-compose-local.yml](./docker-compose-local.yml)`: the local source-build surface.
+- `[./backend/src/app/config.rs](./backend/src/app/config.rs)`: the canonical defaults and setting names.
 - `docker compose config`: the fully rendered compose config after `.env` interpolation.
+
+## Release Images
+
+- GitHub Releases publish `pipingspace/rustrag-backend:<tag>` and `pipingspace/rustrag-frontend:<tag>` to Docker Hub, plus refresh the `latest` tags.
+- `[docker-compose.yml](./docker-compose.yml)` follows that release channel by default.
+- Override `RUSTRAG_BACKEND_IMAGE` or `RUSTRAG_FRONTEND_IMAGE` in `.env` when you need to pin a different image tag.
 
 ## Stack
 

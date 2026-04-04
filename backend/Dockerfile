@@ -9,27 +9,27 @@ RUN cargo install cargo-chef --locked
 
 FROM chef AS planner
 WORKDIR /build
-COPY Cargo.toml Cargo.lock rust-toolchain.toml build.rs ./
-COPY src ./src
-COPY migrations ./migrations
-COPY contracts ./contracts
+COPY backend/Cargo.toml backend/Cargo.lock backend/rust-toolchain.toml backend/build.rs ./
+COPY backend/src ./src
+COPY backend/migrations ./migrations
+COPY backend/contracts ./contracts
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 WORKDIR /build
 COPY --from=planner /build/recipe.json recipe.json
-COPY Cargo.toml Cargo.lock rust-toolchain.toml build.rs ./
-COPY migrations ./migrations
+COPY backend/Cargo.toml backend/Cargo.lock backend/rust-toolchain.toml backend/build.rs ./
+COPY backend/migrations ./migrations
 ENV RUSTFLAGS="-C link-arg=-fuse-ld=mold"
 RUN --mount=type=cache,target=/usr/local/cargo/registry,id=rustrag-cargo-reg \
     --mount=type=cache,target=/usr/local/cargo/git,id=rustrag-cargo-git \
     --mount=type=cache,target=/build/target,id=rustrag-target \
     cargo chef cook --release --recipe-path recipe.json
 # cargo-chef rewrites Cargo.toml during cook; restore the real manifest and build script before the final build.
-COPY Cargo.toml Cargo.lock rust-toolchain.toml build.rs ./
-COPY src ./src
-COPY migrations ./migrations
-COPY contracts ./contracts
+COPY backend/Cargo.toml backend/Cargo.lock backend/rust-toolchain.toml backend/build.rs ./
+COPY backend/src ./src
+COPY backend/migrations ./migrations
+COPY backend/contracts ./contracts
 # BuildKit target cache does not become part of the image layer, so copy release binaries into /artifacts for the runtime stage.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,id=rustrag-cargo-reg \
     --mount=type=cache,target=/usr/local/cargo/git,id=rustrag-cargo-git \
@@ -48,7 +48,7 @@ RUN apt-get update \
 
 COPY --from=builder /artifacts/rustrag-backend /usr/local/bin/rustrag-backend
 COPY --from=builder /artifacts/rebuild_runtime_graph /usr/local/bin/rebuild_runtime_graph
-COPY docker/runtime-entrypoint.sh /usr/local/bin/runtime-entrypoint.sh
+COPY backend/docker/runtime-entrypoint.sh /usr/local/bin/runtime-entrypoint.sh
 
 RUN adduser --disabled-password --gecos "" appuser \
   && chown -R appuser:appuser /app \

@@ -2,7 +2,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::shared::{structured_document::StructuredBlockKind, technical_facts::TechnicalFactKind};
+use crate::{
+    domains::agent_runtime::{RuntimeExecutionSummary, RuntimeLifecycleState, RuntimeStageKind},
+    shared::{structured_document::StructuredBlockKind, technical_facts::TechnicalFactKind},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -12,14 +15,6 @@ pub enum RuntimeQueryMode {
     Global,
     Hybrid,
     Mix,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum QueryTurnStreamStage {
-    Retrieving,
-    Grounding,
-    Answering,
 }
 
 impl RuntimeQueryMode {
@@ -129,6 +124,77 @@ pub struct GroupedReference {
     pub support_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryConversationState {
+    Active,
+    Archived,
+}
+
+impl QueryConversationState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Archived => "archived",
+        }
+    }
+}
+
+impl std::str::FromStr for QueryConversationState {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "active" => Ok(Self::Active),
+            "archived" => Ok(Self::Archived),
+            other => Err(format!("unsupported query conversation state: {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryTurnKind {
+    User,
+    Assistant,
+    System,
+    Tool,
+}
+
+impl QueryTurnKind {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::System => "system",
+            Self::Tool => "tool",
+        }
+    }
+}
+
+impl std::str::FromStr for QueryTurnKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "user" => Ok(Self::User),
+            "assistant" => Ok(Self::Assistant),
+            "system" => Ok(Self::System),
+            "tool" => Ok(Self::Tool),
+            other => Err(format!("unsupported query turn kind: {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryRuntimeStageSummary {
+    pub stage_kind: RuntimeStageKind,
+    pub stage_label: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryConversation {
     pub id: Uuid,
@@ -136,7 +202,7 @@ pub struct QueryConversation {
     pub library_id: Uuid,
     pub created_by_principal_id: Option<Uuid>,
     pub title: Option<String>,
-    pub conversation_state: String,
+    pub conversation_state: QueryConversationState,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -146,7 +212,7 @@ pub struct QueryTurn {
     pub id: Uuid,
     pub conversation_id: Uuid,
     pub turn_index: i32,
-    pub turn_kind: String,
+    pub turn_kind: QueryTurnKind,
     pub author_principal_id: Option<Uuid>,
     pub content_text: String,
     pub execution_id: Option<Uuid>,
@@ -163,7 +229,9 @@ pub struct QueryExecution {
     pub request_turn_id: Option<Uuid>,
     pub response_turn_id: Option<Uuid>,
     pub binding_id: Option<Uuid>,
-    pub execution_state: String,
+    pub runtime_execution_id: Option<Uuid>,
+    pub lifecycle_state: RuntimeLifecycleState,
+    pub active_stage: Option<RuntimeStageKind>,
     pub query_text: String,
     pub failure_code: Option<String>,
     pub started_at: DateTime<Utc>,
@@ -251,6 +319,8 @@ pub struct QueryConversationDetail {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryExecutionDetail {
     pub execution: QueryExecution,
+    pub runtime_summary: RuntimeExecutionSummary,
+    pub runtime_stage_summaries: Vec<QueryRuntimeStageSummary>,
     pub request_turn: Option<QueryTurn>,
     pub response_turn: Option<QueryTurn>,
     pub chunk_references: Vec<QueryChunkReference>,

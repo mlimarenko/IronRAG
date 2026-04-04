@@ -20,6 +20,7 @@ tags:
   - name: ingest
   - name: search
   - name: query
+  - name: runtime
   - name: billing
   - name: ops
   - name: audit
@@ -35,6 +36,7 @@ x-greenfield-scaffold:
     - /v1/ingest
     - /v1/search
     - /v1/query
+    - /v1/runtime
     - /v1/billing
     - /v1/ops
     - /v1/audit
@@ -2590,6 +2592,52 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+  /v1/runtime/executions/{executionId}:
+    get:
+      tags: [runtime]
+      summary: Get canonical runtime execution summary
+      operationId: getRuntimeExecution
+      parameters:
+        - in: path
+          name: executionId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Runtime execution summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeExecutionResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/runtime/executions/{executionId}/trace:
+    get:
+      tags: [runtime]
+      summary: Get canonical runtime execution trace
+      operationId: getRuntimeExecutionTrace
+      parameters:
+        - in: path
+          name: executionId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Runtime execution trace
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeExecutionTraceResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /v1/billing/provider-calls:
     get:
       tags: [billing]
@@ -3551,25 +3599,421 @@ components:
             $ref: "#/components/schemas/PreparedSegmentDetail"
     ProviderCatalogEntryResponse: *genericObject
     ProviderCredentialResponse: *genericObject
-    QueryConversation: *genericObject
+    RuntimeLifecycleState:
+      type: string
+      enum: [accepted, running, completed, recovered, failed, canceled]
+    RuntimeStageState:
+      type: string
+      enum: [pending, running, completed, recovered, failed, skipped, canceled]
+    RuntimeActionKind:
+      type: string
+      enum: [model_request, model_response, tool_request, tool_result, recovery_attempt, stage_annotation]
+    RuntimeActionState:
+      type: string
+      enum: [started, completed, rejected, terminated, failed]
+    RuntimeDecisionTargetKind:
+      type: string
+      enum: [model_request, tool_request, tool_result, stage_transition, final_response]
+    RuntimeDecisionKind:
+      type: string
+      enum: [allow, reject, terminate]
+    RuntimePolicyDecisionSummary:
+      type: object
+      additionalProperties: false
+      required: [targetKind, decisionKind, reasonCode, reasonSummaryRedacted]
+      properties:
+        targetKind:
+          $ref: "#/components/schemas/RuntimeDecisionTargetKind"
+        decisionKind:
+          $ref: "#/components/schemas/RuntimeDecisionKind"
+        reasonCode:
+          type: string
+        reasonSummaryRedacted:
+          type: string
+    RuntimePolicySummary:
+      type: object
+      additionalProperties: false
+      required: [allowCount, rejectCount, terminateCount, recentDecisions]
+      properties:
+        allowCount:
+          type: integer
+        rejectCount:
+          type: integer
+        terminateCount:
+          type: integer
+        recentDecisions:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimePolicyDecisionSummary"
+    RuntimeExecutionSummary:
+      type: object
+      additionalProperties: false
+      required:
+        [runtimeExecutionId, lifecycleState, turnBudget, turnCount, parallelActionLimit, policySummary, acceptedAt]
+      properties:
+        runtimeExecutionId:
+          type: string
+          format: uuid
+        lifecycleState:
+          $ref: "#/components/schemas/RuntimeLifecycleState"
+        activeStage:
+          oneOf:
+            - type: string
+            - type: "null"
+        turnBudget:
+          type: integer
+        turnCount:
+          type: integer
+        parallelActionLimit:
+          type: integer
+        failureCode:
+          oneOf:
+            - type: string
+            - type: "null"
+        failureSummaryRedacted:
+          oneOf:
+            - type: string
+            - type: "null"
+        policySummary:
+          $ref: "#/components/schemas/RuntimePolicySummary"
+        acceptedAt:
+          type: string
+          format: date-time
+        completedAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+    RuntimeExecutionResponse:
+      type: object
+      additionalProperties: false
+      required:
+        [executionId, ownerKind, ownerId, taskKind, surfaceKind, contractName, contractVersion, lifecycleState, turnBudget, turnCount, parallelActionLimit, policySummary, acceptedAt]
+      properties:
+        executionId:
+          type: string
+          format: uuid
+        ownerKind:
+          type: string
+          enum: [query_execution, graph_extraction_attempt, structured_preparation, technical_fact_extraction]
+        ownerId:
+          type: string
+          format: uuid
+        taskKind:
+          type: string
+        surfaceKind:
+          type: string
+          enum: [rest, stream, background, mcp, system]
+        contractName:
+          type: string
+        contractVersion:
+          type: string
+        lifecycleState:
+          $ref: "#/components/schemas/RuntimeLifecycleState"
+        activeStage:
+          oneOf:
+            - type: string
+            - type: "null"
+        turnBudget:
+          type: integer
+        turnCount:
+          type: integer
+        parallelActionLimit:
+          type: integer
+        failureCode:
+          oneOf:
+            - type: string
+            - type: "null"
+        failureSummary:
+          oneOf:
+            - type: string
+            - type: "null"
+        policySummary:
+          $ref: "#/components/schemas/RuntimePolicySummary"
+        acceptedAt:
+          type: string
+          format: date-time
+        completedAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+    RuntimeStageRecordResponse:
+      type: object
+      additionalProperties: false
+      required:
+        [stageRecordId, stageKind, stageOrdinal, attemptNo, stageState, deterministic, startedAt, inputSummary, outputSummary]
+      properties:
+        stageRecordId:
+          type: string
+          format: uuid
+        stageKind:
+          type: string
+        stageOrdinal:
+          type: integer
+        attemptNo:
+          type: integer
+        stageState:
+          $ref: "#/components/schemas/RuntimeStageState"
+        deterministic:
+          type: boolean
+        startedAt:
+          type: string
+          format: date-time
+        completedAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        failureCode:
+          oneOf:
+            - type: string
+            - type: "null"
+        inputSummary: *genericObject
+        outputSummary: *genericObject
+    RuntimeActionRecordResponse:
+      type: object
+      additionalProperties: false
+      required:
+        [actionId, stageRecordId, actionKind, actionOrdinal, actionState, summary, createdAt]
+      properties:
+        actionId:
+          type: string
+          format: uuid
+        stageRecordId:
+          type: string
+          format: uuid
+        actionKind:
+          $ref: "#/components/schemas/RuntimeActionKind"
+        actionOrdinal:
+          type: integer
+        actionState:
+          $ref: "#/components/schemas/RuntimeActionState"
+        providerBindingId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        toolName:
+          oneOf:
+            - type: string
+            - type: "null"
+        usage:
+          oneOf:
+            - *genericObject
+            - type: "null"
+        summary: *genericObject
+        createdAt:
+          type: string
+          format: date-time
+    RuntimePolicyDecisionResponse:
+      type: object
+      additionalProperties: false
+      required:
+        [decisionId, targetKind, decisionKind, reasonCode, reasonSummary, createdAt]
+      properties:
+        decisionId:
+          type: string
+          format: uuid
+        stageRecordId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        actionRecordId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        targetKind:
+          $ref: "#/components/schemas/RuntimeDecisionTargetKind"
+        decisionKind:
+          $ref: "#/components/schemas/RuntimeDecisionKind"
+        reasonCode:
+          type: string
+        reasonSummary:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+    RuntimeExecutionTraceResponse:
+      type: object
+      additionalProperties: false
+      required: [execution, stages, actions, policyDecisions]
+      properties:
+        execution:
+          $ref: "#/components/schemas/RuntimeExecutionResponse"
+        stages:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeStageRecordResponse"
+        actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeActionRecordResponse"
+        policyDecisions:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimePolicyDecisionResponse"
+    QueryConversation:
+      type: object
+      additionalProperties: false
+      required:
+        [id, workspaceId, libraryId, conversationState, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspaceId:
+          type: string
+          format: uuid
+        libraryId:
+          type: string
+          format: uuid
+        createdByPrincipalId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        title:
+          oneOf:
+            - type: string
+            - type: "null"
+        conversationState:
+          type: string
+          enum: [active, archived]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    QueryTurn:
+      type: object
+      additionalProperties: false
+      required: [id, conversationId, turnIndex, turnKind, contentText, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        conversationId:
+          type: string
+          format: uuid
+        turnIndex:
+          type: integer
+        turnKind:
+          type: string
+          enum: [user, assistant, system, tool]
+        authorPrincipalId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        contentText:
+          type: string
+        executionId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        createdAt:
+          type: string
+          format: date-time
+    QueryExecutionResponse:
+      type: object
+      additionalProperties: false
+      required:
+        [id, workspaceId, libraryId, conversationId, contextBundleId, lifecycleState, queryText, startedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspaceId:
+          type: string
+          format: uuid
+        libraryId:
+          type: string
+          format: uuid
+        conversationId:
+          type: string
+          format: uuid
+        contextBundleId:
+          type: string
+          format: uuid
+        requestTurnId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        responseTurnId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        bindingId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        runtimeExecutionId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        lifecycleState:
+          $ref: "#/components/schemas/RuntimeLifecycleState"
+        activeStage:
+          oneOf:
+            - type: string
+            - type: "null"
+        queryText:
+          type: string
+        failureCode:
+          oneOf:
+            - type: string
+            - type: "null"
+        startedAt:
+          type: string
+          format: date-time
+        completedAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+    QueryRuntimeStageSummary:
+      type: object
+      additionalProperties: false
+      required: [stageKind, stageLabel]
+      properties:
+        stageKind:
+          type: string
+        stageLabel:
+          type: string
     QueryConversationDetailResponse: *genericObject
     QueryExecutionDetailResponse:
       type: object
       additionalProperties: true
       required:
-        [contextBundleId, execution, chunkReferences, preparedSegmentReferences, technicalFactReferences, entityReferences, relationReferences, verificationState, verificationWarnings]
+        [contextBundleId, execution, runtimeSummary, runtimeStageSummaries, chunkReferences, preparedSegmentReferences, technicalFactReferences, entityReferences, relationReferences, verificationState, verificationWarnings]
       properties:
         contextBundleId:
           type: string
           format: uuid
-        execution: *genericObject
+        execution:
+          $ref: "#/components/schemas/QueryExecutionResponse"
+        runtimeSummary:
+          $ref: "#/components/schemas/RuntimeExecutionSummary"
+        runtimeStageSummaries:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueryRuntimeStageSummary"
         requestTurn:
           oneOf:
-            - *genericObject
+            - $ref: "#/components/schemas/QueryTurn"
             - type: "null"
         responseTurn:
           oneOf:
-            - *genericObject
+            - $ref: "#/components/schemas/QueryTurn"
             - type: "null"
         chunkReferences:
           type: array
@@ -3672,18 +4116,27 @@ components:
       type: object
       additionalProperties: true
       required:
-        [contextBundleId, session, requestTurn, execution, chunkReferences, preparedSegmentReferences, technicalFactReferences, entityReferences, relationReferences, verificationState, verificationWarnings]
+        [contextBundleId, session, requestTurn, execution, runtimeSummary, runtimeStageSummaries, chunkReferences, preparedSegmentReferences, technicalFactReferences, entityReferences, relationReferences, verificationState, verificationWarnings]
       properties:
         contextBundleId:
           type: string
           format: uuid
-        session: *genericObject
-        requestTurn: *genericObject
+        session:
+          $ref: "#/components/schemas/QueryConversation"
+        requestTurn:
+          $ref: "#/components/schemas/QueryTurn"
         responseTurn:
           oneOf:
-            - *genericObject
+            - $ref: "#/components/schemas/QueryTurn"
             - type: "null"
-        execution: *genericObject
+        execution:
+          $ref: "#/components/schemas/QueryExecutionResponse"
+        runtimeSummary:
+          $ref: "#/components/schemas/RuntimeExecutionSummary"
+        runtimeStageSummaries:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueryRuntimeStageSummary"
         chunkReferences:
           type: array
           items: *genericObject

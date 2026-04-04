@@ -7,10 +7,12 @@ const props = withDefaults(
   defineProps<{
     state: QueryVerificationState
     warnings: QueryVerificationWarning[]
+    runtimeFailureCode?: string | null
     compact?: boolean
   }>(),
   {
     compact: false,
+    runtimeFailureCode: null,
   },
 )
 
@@ -33,13 +35,29 @@ const unsupportedCapability = computed(() =>
   props.warnings.some((warning) => warning.code.startsWith('unsupported')),
 )
 
+const policyFailureKind = computed(() => {
+  switch (props.runtimeFailureCode) {
+    case 'runtime_policy_rejected':
+      return 'rejected'
+    case 'runtime_policy_terminated':
+      return 'terminated'
+    case 'runtime_policy_blocked':
+      return 'blocked'
+    default:
+      return null
+  }
+})
+
 const tone = computed(() => {
+  if (policyFailureKind.value) {
+    return 'error'
+  }
   switch (props.state) {
     case 'verified':
       return 'success'
     case 'partially_supported':
       return 'warning'
-    case 'conflicting_evidence':
+    case 'conflicting':
     case 'insufficient_evidence':
       return 'warning'
     case 'failed':
@@ -50,6 +68,9 @@ const tone = computed(() => {
 })
 
 const title = computed(() => {
+  if (policyFailureKind.value) {
+    return t(`assistant.verification.policyStates.${policyFailureKind.value}.title`)
+  }
   if (unsupportedCapability.value) {
     return t('assistant.verification.unsupportedTitle')
   }
@@ -57,6 +78,9 @@ const title = computed(() => {
 })
 
 const body = computed(() => {
+  if (policyFailureKind.value) {
+    return t(`assistant.verification.policyStates.${policyFailureKind.value}.body`)
+  }
   if (unsupportedCapability.value) {
     return t('assistant.verification.unsupportedBody')
   }
@@ -141,6 +165,9 @@ const warningSummary = computed<VerificationWarningSummaryItem[]>(() => {
       <span>{{ t('assistant.verification.eyebrow') }}</span>
       <strong>{{ title }}</strong>
       <p>{{ body }}</p>
+      <p v-if="props.runtimeFailureCode" class="rr-assistant-verification__runtime-note">
+        {{ t('assistant.verification.runtimeFailureCode', { code: props.runtimeFailureCode }) }}
+      </p>
     </div>
     <div v-if="warningSummary.length > 0" class="rr-assistant-verification__summary">
       <span

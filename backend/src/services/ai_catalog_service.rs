@@ -1,3 +1,10 @@
+#![allow(
+    clippy::iter_without_into_iter,
+    clippy::missing_errors_doc,
+    clippy::result_large_err,
+    clippy::too_many_lines
+)]
+
 use rust_decimal::Decimal;
 use serde_json::Value;
 use uuid::Uuid;
@@ -2033,6 +2040,88 @@ mod tests {
             &[model],
         )
         .expect("configured suggestion should resolve");
+
+        assert_eq!(selection.provider_kind.as_deref(), Some("openai"));
+        assert!(selection.configured);
+    }
+
+    #[test]
+    fn bootstrap_binding_suggestion_keeps_openai_available_for_extract_graph() {
+        let openai_provider = sample_provider("openai", BootstrapAiCredentialSource::Env);
+        let deepseek_provider = sample_provider("deepseek", BootstrapAiCredentialSource::Missing);
+        let qwen_provider = sample_provider("qwen", BootstrapAiCredentialSource::Missing);
+        let providers = vec![
+            crate::domains::ai::ProviderCatalogEntry {
+                id: openai_provider.provider_catalog_id,
+                provider_kind: openai_provider.provider_kind.clone(),
+                display_name: openai_provider.display_name.clone(),
+                api_style: openai_provider.api_style.clone(),
+                lifecycle_state: openai_provider.lifecycle_state.clone(),
+            },
+            crate::domains::ai::ProviderCatalogEntry {
+                id: deepseek_provider.provider_catalog_id,
+                provider_kind: deepseek_provider.provider_kind.clone(),
+                display_name: deepseek_provider.display_name.clone(),
+                api_style: deepseek_provider.api_style.clone(),
+                lifecycle_state: deepseek_provider.lifecycle_state.clone(),
+            },
+            crate::domains::ai::ProviderCatalogEntry {
+                id: qwen_provider.provider_catalog_id,
+                provider_kind: qwen_provider.provider_kind.clone(),
+                display_name: qwen_provider.display_name.clone(),
+                api_style: qwen_provider.api_style.clone(),
+                lifecycle_state: qwen_provider.lifecycle_state.clone(),
+            },
+        ];
+        let models = vec![
+            ModelCatalogEntry {
+                id: Uuid::now_v7(),
+                provider_catalog_id: openai_provider.provider_catalog_id,
+                model_name: "gpt-5.4".to_string(),
+                capability_kind: "chat".to_string(),
+                modality_kind: "multimodal".to_string(),
+                allowed_binding_purposes: vec![AiBindingPurpose::ExtractGraph],
+                context_window: None,
+                max_output_tokens: None,
+            },
+            ModelCatalogEntry {
+                id: Uuid::now_v7(),
+                provider_catalog_id: deepseek_provider.provider_catalog_id,
+                model_name: "deepseek-chat".to_string(),
+                capability_kind: "chat".to_string(),
+                modality_kind: "text".to_string(),
+                allowed_binding_purposes: vec![AiBindingPurpose::ExtractGraph],
+                context_window: None,
+                max_output_tokens: None,
+            },
+            ModelCatalogEntry {
+                id: Uuid::now_v7(),
+                provider_catalog_id: qwen_provider.provider_catalog_id,
+                model_name: "qwen-flash".to_string(),
+                capability_kind: "chat".to_string(),
+                modality_kind: "text".to_string(),
+                allowed_binding_purposes: vec![AiBindingPurpose::ExtractGraph],
+                context_window: None,
+                max_output_tokens: None,
+            },
+        ];
+        let configured = crate::app::config::UiBootstrapAiSetup {
+            provider_secrets: vec![],
+            binding_defaults: vec![UiBootstrapAiBindingDefault {
+                binding_purpose: "extract_graph".to_string(),
+                provider_kind: Some("openai".to_string()),
+                model_name: Some("gpt-5.4".to_string()),
+            }],
+        };
+
+        let selection = resolve_bootstrap_binding_suggestion(
+            AiBindingPurpose::ExtractGraph,
+            Some(&configured),
+            &[openai_provider, deepseek_provider, qwen_provider],
+            &providers,
+            &models,
+        )
+        .expect("configured extract_graph suggestion should resolve");
 
         assert_eq!(selection.provider_kind.as_deref(), Some("openai"));
         assert!(selection.configured);

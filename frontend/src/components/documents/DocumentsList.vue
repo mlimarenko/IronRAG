@@ -540,7 +540,7 @@ function lastActivityText(row: DocumentRowSummary): string | null {
 }
 
 .rr-docs-table__col--status {
-  width: 286px;
+  width: 250px;
 }
 
 @media (min-width: 1500px) {
@@ -561,7 +561,7 @@ function lastActivityText(row: DocumentRowSummary): string | null {
   }
 
   .rr-docs-table__col--status {
-    width: 316px;
+    width: 272px;
   }
 
   .rr-docs-table__th,
@@ -596,7 +596,7 @@ function lastActivityText(row: DocumentRowSummary): string | null {
   }
 
   .rr-docs-table__col--status {
-    width: 336px;
+    width: 286px;
   }
 
   .rr-docs-table__th,
@@ -786,7 +786,7 @@ function lastActivityText(row: DocumentRowSummary): string | null {
 }
 
 .rr-docs-table__cell {
-  padding: 7px 12px;
+  padding: 10px 14px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -809,7 +809,7 @@ function lastActivityText(row: DocumentRowSummary): string | null {
 
 .rr-docs-table__name-stack {
   display: grid;
-  gap: 3px;
+  gap: 4px;
   min-width: 0;
 }
 
@@ -865,16 +865,16 @@ function lastActivityText(row: DocumentRowSummary): string | null {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.84rem;
+  font-size: 0.88rem;
   font-weight: 700;
   line-height: 1.35;
 }
 
 .rr-docs-table__name-stack span {
-  display: none;
+  display: block;
   color: var(--rr-text-secondary, rgba(15, 23, 42, 0.72));
-  font-size: 0.75rem;
-  line-height: 1.35;
+  font-size: 0.72rem;
+  line-height: 1.4;
 }
 
 .rr-docs-table__cell--type,
@@ -898,13 +898,13 @@ function lastActivityText(row: DocumentRowSummary): string | null {
 
 .rr-docs-table__cell--status {
   white-space: normal;
-  padding-block: 8px;
+  padding-block: 10px;
 }
 
 .rr-docs-table__status-stack {
   display: grid;
   justify-items: start;
-  gap: 0.28rem;
+  gap: 0.22rem;
   min-width: 0;
   justify-self: stretch;
   width: 100%;
@@ -921,36 +921,22 @@ function lastActivityText(row: DocumentRowSummary): string | null {
 
 .rr-docs-table__status-stack.is-in-flight {
   min-height: 0;
-  padding: 0.36rem 0.46rem;
-  border-radius: 10px;
-  border: 1px solid rgba(191, 219, 254, 0.44);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(246, 249, 255, 0.68)),
-    rgba(255, 255, 255, 0.72);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.88);
 }
 
 .rr-docs-table__status-stack.is-readable,
 .rr-docs-table__status-stack.is-graph-sparse {
   min-height: 0;
-  padding: 0.36rem 0.46rem;
-  border-radius: 10px;
-  border: 1px solid rgba(186, 230, 253, 0.5);
-  background:
-    linear-gradient(180deg, rgba(248, 252, 255, 0.92), rgba(240, 249, 255, 0.74)),
-    rgba(248, 252, 255, 0.78);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
 
 .rr-docs-table__status-copy {
   margin: 0;
   color: rgba(71, 85, 105, 0.94);
-  font-size: 0.65rem;
+  font-size: 0.68rem;
   font-weight: 600;
   line-height: 1.42;
   display: -webkit-box;
   overflow: hidden;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 1;
   -webkit-box-orient: vertical;
   overflow-wrap: anywhere;
 }
@@ -960,7 +946,7 @@ function lastActivityText(row: DocumentRowSummary): string | null {
   flex-wrap: wrap;
   gap: 0.3rem 0.45rem;
   color: rgba(100, 116, 139, 0.92);
-  font-size: 0.64rem;
+  font-size: 0.62rem;
   font-weight: 700;
   line-height: 1.35;
   width: 100%;
@@ -981,7 +967,7 @@ function lastActivityText(row: DocumentRowSummary): string | null {
 .rr-docs-table__status-progress {
   position: relative;
   width: 100%;
-  height: 0.26rem;
+  height: 0.24rem;
   overflow: hidden;
   border-radius: 999px;
   background: rgba(226, 232, 240, 0.9);
@@ -1080,7 +1066,7 @@ function lastActivityText(row: DocumentRowSummary): string | null {
 
 @media (max-width: 1180px) {
   .rr-docs-table__col--status {
-    width: 270px;
+    width: 244px;
   }
 
   .rr-docs-table__cell--type,
@@ -1101,8 +1087,8 @@ function lastActivityText(row: DocumentRowSummary): string | null {
     display: none;
   }
 
-  .rr-docs-table__name-stack span {
-    display: block;
+  .rr-docs-table__status-copy {
+    -webkit-line-clamp: 2;
   }
 }
 

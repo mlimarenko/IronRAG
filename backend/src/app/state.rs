@@ -1,7 +1,15 @@
+#![allow(clippy::missing_const_for_fn, clippy::struct_excessive_bools, clippy::too_many_lines)]
+
 use std::sync::Arc;
 
 use crate::{
-    app::config::{Settings, UiBootstrapAdmin, UiBootstrapAiSetup},
+    agent_runtime::{
+        AgentRuntime,
+        default_policy::{DefaultRuntimePolicy, DefaultRuntimePolicyRules},
+        tasks::register_task_catalog,
+    },
+    app::config::{RuntimeHookBehavior, Settings, UiBootstrapAdmin, UiBootstrapAiSetup},
+    domains::agent_runtime::{RuntimeDecisionTargetKind, RuntimeTaskKind},
     infra::{
         arangodb::{
             bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
@@ -85,6 +93,20 @@ pub struct BulkIngestHardeningSettings {
 }
 
 #[derive(Clone)]
+pub struct RuntimeDiagnosticsSettings {
+    pub maximum_payload_bytes: usize,
+    pub policy_reason_budget_chars: usize,
+}
+
+#[derive(Clone)]
+pub struct AgentRuntimeSettings {
+    pub max_turns: u8,
+    pub max_parallel_actions: u8,
+    pub diagnostics: RuntimeDiagnosticsSettings,
+    pub hook_behavior: RuntimeHookBehavior,
+}
+
+#[derive(Clone)]
 pub struct WebIngestRuntimeSettings {
     pub request_timeout_seconds: u64,
     pub max_redirects: usize,
@@ -107,7 +129,7 @@ impl McpMemorySettings {
     const BODY_ENVELOPE_HEADROOM_BYTES: u64 = 1024 * 1024;
 
     #[must_use]
-    pub fn max_upload_file_bytes(&self) -> u64 {
+    pub const fn max_upload_file_bytes(&self) -> u64 {
         self.upload_max_size_mb.saturating_mul(Self::MIB)
     }
 
@@ -186,6 +208,7 @@ pub struct ResolveSettleBlockersServices {
 pub struct AppState {
     pub settings: Settings,
     pub persistence: Persistence,
+    pub agent_runtime: AgentRuntime,
     pub llm_gateway: Arc<dyn LlmGateway>,
     pub content_storage: ContentStorageService,
     pub arango_client: Arc<ArangoClient>,
@@ -200,6 +223,7 @@ pub struct AppState {
     pub arango_search_store: ArangoSearchStore,
     pub arango_context_store: ArangoContextStore,
     pub retrieval_intelligence: RetrievalIntelligenceSettings,
+    pub agent_runtime_settings: AgentRuntimeSettings,
     pub retrieval_intelligence_services: RetrievalIntelligenceServices,
     pub bulk_ingest_hardening: BulkIngestHardeningSettings,
     pub web_ingest_runtime: WebIngestRuntimeSettings,
@@ -257,6 +281,15 @@ impl AppState {
             targeted_reconciliation_enabled: settings.runtime_graph_targeted_reconciliation_enabled,
             targeted_reconciliation_max_targets: settings
                 .runtime_graph_targeted_reconciliation_max_targets,
+        };
+        let agent_runtime_settings = AgentRuntimeSettings {
+            max_turns: settings.runtime_agent_max_turns,
+            max_parallel_actions: settings.runtime_agent_max_parallel_actions,
+            diagnostics: RuntimeDiagnosticsSettings {
+                maximum_payload_bytes: settings.runtime_maximum_diagnostic_payload_bytes(),
+                policy_reason_budget_chars: settings.runtime_policy_reason_budget_chars,
+            },
+            hook_behavior: settings.runtime_hook_behavior(),
         };
         let retrieval_intelligence_services = RetrievalIntelligenceServices::default();
         let bulk_ingest_hardening = BulkIngestHardeningSettings {
@@ -346,7 +379,24 @@ impl AppState {
                 resolve_settle_blockers.provider_request_size_soft_limit_bytes,
             ),
         };
+        let agent_runtime = AgentRuntime::with_defaults();
+        let agent_runtime = AgentRuntime::new(
+            register_task_catalog(agent_runtime.registry()),
+            Arc::new(DefaultRuntimePolicy::new(
+                agent_runtime_settings.diagnostics.policy_reason_budget_chars,
+                DefaultRuntimePolicyRules::new(
+                    parse_runtime_task_kind_list(
+                        settings.runtime_policy_reject_task_kinds.as_ref(),
+                    ),
+                    parse_runtime_decision_target_kind_list(
+                        settings.runtime_policy_reject_target_kinds.as_ref(),
+                    ),
+                ),
+            )),
+            agent_runtime.hooks(),
+        );
         Self {
+            agent_runtime,
             llm_gateway: Arc::new(UnifiedGateway::from_settings(&settings)),
             content_storage,
             arango_client,
@@ -363,6 +413,7 @@ impl AppState {
             arango_search_store,
             arango_context_store,
             retrieval_intelligence,
+            agent_runtime_settings,
             retrieval_intelligence_services,
             bulk_ingest_hardening,
             web_ingest_runtime,
@@ -381,20 +432,6 @@ impl AppState {
     /// Returns any initialization error from persistence setup.
     pub async fn new(settings: Settings) -> anyhow::Result<Self> {
         let persistence = Persistence::connect(&settings).await?;
-        if settings.destructive_fresh_bootstrap_settings().allow_legacy_startup_side_effects
-            && crate::infra::persistence::legacy_runtime_attempt_repair_tables_present(
-                &persistence.postgres,
-            )
-            .await?
-        {
-            crate::infra::repositories::repair_queued_runtime_ingestion_job_attempt_counts(
-                &persistence.postgres,
-            )
-            .await
-            .map_err(|error| {
-                anyhow::anyhow!("failed to repair queued runtime ingestion attempts: {error}")
-            })?;
-        }
         let arango_client = Arc::new(ArangoClient::from_settings(&settings)?);
         arango_client.ensure_database().await?;
         let bootstrap_options = ArangoBootstrapOptions {
@@ -415,4 +452,30 @@ impl AppState {
         ArangoGraphStore::new(Arc::clone(&arango_client)).ping().await?;
         Ok(Self::from_dependencies(settings, persistence, arango_client))
     }
+}
+
+fn parse_runtime_task_kind_list(value: Option<&String>) -> Vec<RuntimeTaskKind> {
+    parse_runtime_policy_list(value, |item| item.parse::<RuntimeTaskKind>().ok())
+}
+
+fn parse_runtime_decision_target_kind_list(
+    value: Option<&String>,
+) -> Vec<RuntimeDecisionTargetKind> {
+    parse_runtime_policy_list(value, |item| item.parse::<RuntimeDecisionTargetKind>().ok())
+}
+
+fn parse_runtime_policy_list<T>(
+    value: Option<&String>,
+    parse: impl Fn(&str) -> Option<T>,
+) -> Vec<T> {
+    value
+        .map(std::string::String::as_str)
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .filter_map(parse)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
