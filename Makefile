@@ -1,13 +1,14 @@
 DOCKER_COMPOSE ?= docker compose
 DOCKER_COMPOSE_FILE ?= docker-compose-local.yml
-LOCAL_DOCKER_APP_SERVICES ?= backend frontend
-LOCAL_DOCKER_ALL_SERVICES ?= postgres redis arangodb backend frontend
+LOCAL_DOCKER_APP_SERVICES ?= backend
+LOCAL_DOCKER_ALL_SERVICES ?= postgres redis arangodb backend worker nginx
 RUSTRAG_BENCHMARK_BASE_URL ?= http://127.0.0.1:19000/v1
-RUSTRAG_BENCHMARK_SUITES ?= backend/benchmarks/grounded_query/api_baseline_suite.json backend/benchmarks/grounded_query/workflow_strict_suite.json backend/benchmarks/grounded_query/layout_noise_suite.json backend/benchmarks/grounded_query/graph_multihop_suite.json backend/benchmarks/grounded_query/multiformat_surface_suite.json
+RUSTRAG_BENCHMARK_SUITES ?= apps/api/benchmarks/grounded_query/api_baseline_suite.json apps/api/benchmarks/grounded_query/workflow_strict_suite.json apps/api/benchmarks/grounded_query/layout_noise_suite.json apps/api/benchmarks/grounded_query/graph_multihop_suite.json apps/api/benchmarks/grounded_query/multiformat_surface_suite.json
 RUSTRAG_BENCHMARK_OUTPUT_DIR ?= tmp-grounded-benchmarks
 RUSTRAG_BENCHMARK_CANONICALIZE_REUSED_LIBRARY ?= 1
 RUSTRAG_BENCHMARK_LIBRARY_NAME ?= Grounded Benchmark Seed
-BACKEND_CARGO_TARGET_DIR ?= $(CURDIR)/backend/.cargo-target
+BACKEND_CARGO_TARGET_DIR ?= $(CURDIR)/.cargo-target/api
+FRONTEND_CARGO_TARGET_DIR ?= $(CURDIR)/.cargo-target/web
 
 .PHONY: \
 	backend-fmt \
@@ -22,6 +23,7 @@ BACKEND_CARGO_TARGET_DIR ?= $(CURDIR)/backend/.cargo-target
 	frontend-format-check \
 	frontend-typecheck \
 	frontend-build \
+	frontend-check \
 	check \
 	check-strict \
 	enterprise-validate \
@@ -39,48 +41,49 @@ BACKEND_CARGO_TARGET_DIR ?= $(CURDIR)/backend/.cargo-target
 	docker-local-down
 
 backend-fmt:
-	cd backend && cargo fmt --all
+	cargo fmt --all
 
 backend-build:
-	cd backend && CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo build --release
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo build --release -p rustrag-backend --bin rustrag-backend --bin rebuild_runtime_graph
 
 backend-lint:
-	cd backend && CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo clippy --all-targets --all-features -- -D warnings
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo clippy -p rustrag-backend --all-targets --all-features -- -D warnings
 
 backend-doc:
-	cd backend && CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo doc --no-deps
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo doc -p rustrag-backend --no-deps
 
 backend-test:
-	cd backend && CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo test
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo test -p rustrag-backend
 
 backend-change-gate:
-	cd backend && CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" $(MAKE) change-gate
+	cargo fmt --all --check
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo check -q -p rustrag-backend
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo test -q -p rustrag-backend
 
 backend-audit:
-	cd backend && CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo audit
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo audit
 
 frontend-install:
-	cd frontend && npm install
+	cd apps/web && npm ci
 
 frontend-lint:
-	cd frontend && npm run lint
-
-frontend-format-check:
-	cd frontend && npm run format:check
+	cd apps/web && npx eslint . --max-warnings 0
 
 frontend-typecheck:
-	cd frontend && npm run typecheck
+	cd apps/web && npx tsc --noEmit
 
 frontend-build:
-	cd frontend && npm run build
+	cd apps/web && npx vite build
 
-check: backend-change-gate frontend-lint frontend-format-check frontend-typecheck
+frontend-check: frontend-typecheck frontend-build
 
-check-strict: backend-change-gate backend-doc frontend-lint frontend-format-check frontend-typecheck
+check: backend-change-gate frontend-check
+
+check-strict: backend-change-gate backend-doc frontend-check
 
 enterprise-validate:
 	$(MAKE) backend-change-gate
-	cd frontend && npm run enterprise:check
+	$(MAKE) frontend-check
 
 audit: backend-audit
 
@@ -88,17 +91,22 @@ benchmark-grounded:
 	@test -n "$(RUSTRAG_SESSION_COOKIE)" || (echo "RUSTRAG_SESSION_COOKIE is required" && exit 1)
 	@test -n "$(RUSTRAG_BENCHMARK_WORKSPACE_ID)" || (echo "RUSTRAG_BENCHMARK_WORKSPACE_ID is required" && exit 1)
 	@mkdir -p "$(RUSTRAG_BENCHMARK_OUTPUT_DIR)"
-	@args="--base-url $(RUSTRAG_BENCHMARK_BASE_URL) --workspace-id $(RUSTRAG_BENCHMARK_WORKSPACE_ID) --session-cookie $(RUSTRAG_SESSION_COOKIE) --strict --output-dir $(RUSTRAG_BENCHMARK_OUTPUT_DIR)"; \
+	@set -- \
+	  --base-url "$(RUSTRAG_BENCHMARK_BASE_URL)" \
+	  --workspace-id "$(RUSTRAG_BENCHMARK_WORKSPACE_ID)" \
+	  --session-cookie "$(RUSTRAG_SESSION_COOKIE)" \
+	  --strict \
+	  --output-dir "$(RUSTRAG_BENCHMARK_OUTPUT_DIR)"; \
 	for suite in $(RUSTRAG_BENCHMARK_SUITES); do \
-	  args="$$args --suite $$suite"; \
+	  set -- "$$@" --suite "$$suite"; \
 	done; \
 	if [ -n "$(RUSTRAG_BENCHMARK_LIBRARY_ID)" ]; then \
-	  args="$$args --library-id $(RUSTRAG_BENCHMARK_LIBRARY_ID) --skip-upload"; \
+	  set -- "$$@" --library-id "$(RUSTRAG_BENCHMARK_LIBRARY_ID)" --skip-upload; \
 	  if [ "$(RUSTRAG_BENCHMARK_CANONICALIZE_REUSED_LIBRARY)" = "1" ]; then \
-	    args="$$args --canonicalize-reused-library"; \
+	    set -- "$$@" --canonicalize-reused-library; \
 	  fi; \
 	fi; \
-	python3 backend/benchmarks/grounded_query/run_live_benchmark.py $$args
+	python3 apps/api/benchmarks/grounded_query/run_live_benchmark.py "$$@"
 
 benchmark-grounded-all:
 	@$(MAKE) benchmark-grounded
@@ -107,20 +115,30 @@ benchmark-grounded-seed:
 	@test -n "$(RUSTRAG_SESSION_COOKIE)" || (echo "RUSTRAG_SESSION_COOKIE is required" && exit 1)
 	@test -n "$(RUSTRAG_BENCHMARK_WORKSPACE_ID)" || (echo "RUSTRAG_BENCHMARK_WORKSPACE_ID is required" && exit 1)
 	@mkdir -p "$(RUSTRAG_BENCHMARK_OUTPUT_DIR)"
-	@args="--base-url $(RUSTRAG_BENCHMARK_BASE_URL) --workspace-id $(RUSTRAG_BENCHMARK_WORKSPACE_ID) --session-cookie $(RUSTRAG_SESSION_COOKIE) --library-name \"$(RUSTRAG_BENCHMARK_LIBRARY_NAME)\" --upload-only --output-dir $(RUSTRAG_BENCHMARK_OUTPUT_DIR)"; \
+	@library_name="$(RUSTRAG_BENCHMARK_LIBRARY_NAME)"; \
+	if [ "$$library_name" = "Grounded Benchmark Seed" ]; then \
+	  library_name="Grounded Benchmark Seed $$(date +%Y%m%d-%H%M%S)"; \
+	fi; \
+	set -- \
+	  --base-url "$(RUSTRAG_BENCHMARK_BASE_URL)" \
+	  --workspace-id "$(RUSTRAG_BENCHMARK_WORKSPACE_ID)" \
+	  --session-cookie "$(RUSTRAG_SESSION_COOKIE)" \
+	  --library-name "$$library_name" \
+	  --upload-only \
+	  --output-dir "$(RUSTRAG_BENCHMARK_OUTPUT_DIR)"; \
 	for suite in $(RUSTRAG_BENCHMARK_SUITES); do \
-	  args="$$args --suite $$suite"; \
+	  set -- "$$@" --suite "$$suite"; \
 	done; \
 	if [ -n "$(RUSTRAG_BENCHMARK_LIBRARY_ID)" ]; then \
-	  args="$$args --library-id $(RUSTRAG_BENCHMARK_LIBRARY_ID)"; \
+	  set -- "$$@" --library-id "$(RUSTRAG_BENCHMARK_LIBRARY_ID)"; \
 	fi; \
-	python3 backend/benchmarks/grounded_query/run_live_benchmark.py $$args
+	python3 apps/api/benchmarks/grounded_query/run_live_benchmark.py "$$@"
 
 benchmark-grounded-noisy-layout:
-	@$(MAKE) benchmark-grounded RUSTRAG_BENCHMARK_SUITES="backend/benchmarks/grounded_query/layout_noise_suite.json"
+	@$(MAKE) benchmark-grounded RUSTRAG_BENCHMARK_SUITES="apps/api/benchmarks/grounded_query/layout_noise_suite.json"
 
 benchmark-grounded-multihop:
-	@$(MAKE) benchmark-grounded RUSTRAG_BENCHMARK_SUITES="backend/benchmarks/grounded_query/graph_multihop_suite.json"
+	@$(MAKE) benchmark-grounded RUSTRAG_BENCHMARK_SUITES="apps/api/benchmarks/grounded_query/graph_multihop_suite.json"
 
 docker-local-build:
 	$(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) build $(LOCAL_DOCKER_APP_SERVICES)

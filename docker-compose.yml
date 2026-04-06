@@ -28,6 +28,7 @@ x-rustrag-runtime-env: &rustrag-runtime-env
   RUSTRAG_QWEN_API_KEY: ${RUSTRAG_QWEN_API_KEY:-}
   RUSTRAG_RUNTIME_POLICY_REJECT_TASK_KINDS: ${RUSTRAG_RUNTIME_POLICY_REJECT_TASK_KINDS:-}
   RUSTRAG_RUNTIME_POLICY_REJECT_TARGET_KINDS: ${RUSTRAG_RUNTIME_POLICY_REJECT_TARGET_KINDS:-}
+  RUSTRAG_UI_DEFAULT_LOCALE: ${RUSTRAG_UI_DEFAULT_LOCALE:-ru}
   RUSTRAG_CONTENT_STORAGE_ROOT: /var/lib/rustrag/content-storage
   RUST_BACKTRACE: full
 
@@ -159,14 +160,13 @@ services:
   frontend:
     image: ${RUSTRAG_FRONTEND_IMAGE:-pipingspace/rustrag-frontend:latest}
     restart: unless-stopped
-    depends_on:
-      - backend
     expose:
-      - "3000"
-    deploy:
-      resources:
-        limits:
-          memory: 256M
+      - "80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/ >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   nginx:
     image: nginx:1.28-alpine

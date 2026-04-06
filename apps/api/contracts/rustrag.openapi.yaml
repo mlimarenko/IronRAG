@@ -1,0 +1,4514 @@
+openapi: 3.1.0
+info:
+  title: RustRAG API
+  version: 0.1.0
+  description: |
+    Public HTTP API for the ArangoDB-backed RustRAG API service (`apps/api/src/interfaces/http`).
+    Operation paths include the `/v1` prefix. `servers.url` is only the origin (e.g. `/` or `https://api.example.com`).
+    Set `RUSTRAG_OPENAPI_PUBLIC_ORIGIN` to that origin; a trailing `/v1` is stripped if present.
+servers:
+  - url: /
+    description: Same origin (paths include /v1)
+security:
+  - bearerAuth: []
+tags:
+  - name: system
+  - name: catalog
+  - name: iam
+  - name: ai
+  - name: knowledge
+  - name: ingest
+  - name: search
+  - name: query
+  - name: runtime
+  - name: billing
+  - name: ops
+  - name: audit
+  - name: automation
+  - name: admin
+  - name: content
+x-greenfield-scaffold:
+  canonicalPathPrefixes:
+    - /v1/catalog
+    - /v1/iam
+    - /v1/ai
+    - /v1/knowledge
+    - /v1/content
+    - /v1/ingest
+    - /v1/search
+    - /v1/query
+    - /v1/runtime
+    - /v1/billing
+    - /v1/ops
+    - /v1/audit
+    - /v1/mcp
+  forbiddenLegacyVocabulary:
+    - runtime prefix
+    - ui prefix
+    - mcp memory module
+  seededAiCatalog:
+    providers: 3
+    models: 7
+    prices: 12
+  freshBootstrapDiscovery:
+    - /v1/openapi/rustrag.openapi.yaml
+    - /v1/iam/bootstrap/status
+    - /v1/iam/bootstrap/setup
+    - /v1/iam/bootstrap/claim
+  scaffoldStatus: canonical-cutover
+paths:
+  /v1/health:
+    get:
+      tags: [system]
+      summary: Health check
+      operationId: getHealth
+      security: []
+      responses:
+        "200":
+          description: Service health
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /v1/ready:
+    get:
+      tags: [system]
+      summary: Readiness check
+      operationId: getReadiness
+      security: []
+      responses:
+        "200":
+          description: Readiness probe result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessResponse"
+  /v1/version:
+    get:
+      tags: [system]
+      summary: Service version
+      operationId: getVersion
+      security: []
+      responses:
+        "200":
+          description: Service version metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionResponse"
+  /v1/openapi/rustrag.openapi.yaml:
+    get:
+      tags: [system]
+      summary: OpenAPI contract discovery
+      operationId: getOpenApiContract
+      security: []
+      responses:
+        "200":
+          description: Rendered OpenAPI contract for the current public entrypoint
+          content:
+            application/yaml:
+              schema:
+                type: string
+  /v1/iam/bootstrap/claim:
+    post:
+      tags: [iam]
+      summary: Claim the first administrator for a fresh deployment
+      operationId: postBootstrapClaim
+      security: []
+      description: |
+        One-time bootstrap route for destructive fresh deployments. This route is expected to
+        succeed exactly once, create the first `iam_principal` plus `iam_user`, and emit one
+        canonical `audit_event`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BootstrapClaimRequest"
+      responses:
+        "200":
+          description: Bootstrap claim succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BootstrapClaimResponse"
+        "400":
+          description: Invalid bootstrap payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Invalid bootstrap secret
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "403":
+          description: Bootstrap claim disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "409":
+          description: Bootstrap was already claimed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/iam/bootstrap/status:
+    get:
+      tags: [iam]
+      summary: Resolve whether first-run admin setup is still required
+      operationId: getBootstrapStatus
+      security: []
+      responses:
+        "200":
+          description: Bootstrap setup status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BootstrapStatusResponse"
+  /v1/iam/bootstrap/setup:
+    post:
+      tags: [iam]
+      summary: Configure the first administrator interactively
+      operationId: postBootstrapSetup
+      security: []
+      description: |
+        One-time interactive setup route for a fresh deployment with no administrator and no
+        explicit bootstrap admin credentials configured through environment variables.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BootstrapSetupRequest"
+      responses:
+        "200":
+          description: Bootstrap setup succeeded and created a browser session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "400":
+          description: Invalid bootstrap payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "403":
+          description: Interactive bootstrap setup is disabled by configured environment credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "409":
+          description: Bootstrap was already completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/mcp:
+    post:
+      tags: [automation]
+      summary: MCP JSON-RPC endpoint for canonical agent memory flows
+      operationId: postMcpRequest
+      description: |
+        Bearer-token authenticated JSON-RPC transport for discovery, search, read, and document
+        mutation tools. Tool visibility and callable actions are derived from the authenticated
+        principal's typed grants.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/McpJsonRpcRequest"
+      responses:
+        "200":
+          description: JSON-RPC response envelope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/McpJsonRpcResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/mcp/capabilities:
+    get:
+      tags: [automation]
+      summary: Return the derived MCP capability snapshot for the current principal
+      operationId: getMcpCapabilities
+      responses:
+        "200":
+          description: Derived capability snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/McpCapabilitySnapshot"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/surface:
+    get:
+      tags: [admin]
+      summary: Return the canonical admin surface snapshot
+      operationId: getAdminSurface
+      responses:
+        "200":
+          description: Admin surface summary for navigation, capability gates, and metadata
+          content:
+            application/json:
+              schema:
+                type: object
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/catalog/workspaces:
+    get:
+      tags: [catalog]
+      summary: List visible workspaces
+      operationId: listCatalogWorkspaces
+      responses:
+        "200":
+          description: Visible workspaces for the authenticated principal
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CatalogWorkspaceResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+    post:
+      tags: [catalog]
+      summary: Create a workspace
+      operationId: createCatalogWorkspace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCatalogWorkspaceRequest"
+      responses:
+        "200":
+          description: Created workspace
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogWorkspaceResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "409":
+          description: Workspace slug conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/catalog/workspaces/{workspaceId}:
+    get:
+      tags: [catalog]
+      summary: Get one visible workspace
+      operationId: getCatalogWorkspace
+      parameters:
+        - in: path
+          name: workspaceId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Workspace details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogWorkspaceResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Workspace not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+    delete:
+      tags: [catalog]
+      summary: Delete one workspace
+      operationId: deleteCatalogWorkspace
+      parameters:
+        - in: path
+          name: workspaceId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Workspace deleted
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Workspace not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/catalog/workspaces/{workspaceId}/libraries:
+    get:
+      tags: [catalog]
+      summary: List visible libraries in one workspace
+      operationId: listCatalogLibraries
+      parameters:
+        - in: path
+          name: workspaceId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Libraries visible in the workspace
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CatalogLibraryResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+    post:
+      tags: [catalog]
+      summary: Create a library in one workspace
+      operationId: createCatalogLibrary
+      parameters:
+        - in: path
+          name: workspaceId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCatalogLibraryRequest"
+      responses:
+        "200":
+          description: Created library
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogLibraryResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Workspace not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "409":
+          description: Library slug conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/catalog/workspaces/{workspaceId}/libraries/{libraryId}:
+    delete:
+      tags: [catalog]
+      summary: Delete one library from one workspace
+      operationId: deleteCatalogLibrary
+      parameters:
+        - in: path
+          name: workspaceId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Library deleted
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Library not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/catalog/libraries/{libraryId}:
+    get:
+      tags: [catalog]
+      summary: Get one visible library
+      operationId: getCatalogLibrary
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Library details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogLibraryResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Library not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/iam/session/login:
+    post:
+      tags: [iam]
+      summary: Authenticate a browser session with login and password
+      operationId: loginIamSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginSessionRequest"
+      responses:
+        "200":
+          description: Authenticated session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "400":
+          description: Invalid payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/iam/session:
+    get:
+      tags: [iam]
+      summary: Resolve the current browser session
+      operationId: getIamSession
+      responses:
+        "200":
+          description: Current browser session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "401":
+          description: Missing or invalid browser session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/iam/session/logout:
+    post:
+      tags: [iam]
+      summary: Revoke the current browser session
+      operationId: logoutIamSession
+      responses:
+        "204":
+          description: Session revoked
+        "401":
+          description: Missing or invalid browser session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/iam/me:
+    get:
+      tags: [iam]
+      summary: Resolve the current principal, memberships, and effective grants
+      operationId: getIamMe
+      responses:
+        "200":
+          description: Canonical principal view
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeResponse"
+        "401":
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/iam/tokens:
+    get:
+      tags: [iam]
+      summary: List visible API tokens
+      operationId: listIamTokens
+      parameters:
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: API tokens
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TokenResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+    post:
+      tags: [iam]
+      summary: Mint a canonical API token
+      operationId: mintIamToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MintTokenRequest"
+      responses:
+        "200":
+          description: Minted token and persisted API token record
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MintTokenResponse"
+        "400":
+          description: Invalid token payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/iam/tokens/{tokenPrincipalId}/revoke:
+    post:
+      tags: [iam]
+      summary: Revoke one API token principal
+      operationId: revokeIamToken
+      parameters:
+        - in: path
+          name: tokenPrincipalId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Token revoked
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Token not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/iam/grants:
+    get:
+      tags: [iam]
+      summary: List effective grants for one principal
+      operationId: listIamGrants
+      parameters:
+        - in: query
+          name: principalId
+          required: false
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Effective grants for the requested principal
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/GrantResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+    post:
+      tags: [iam]
+      summary: Create a typed grant
+      operationId: createIamGrant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateGrantRequest"
+      responses:
+        "200":
+          description: Grant created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GrantResponse"
+        "400":
+          description: Invalid grant payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/iam/grants/{grantId}:
+    delete:
+      tags: [iam]
+      summary: Revoke one typed grant
+      operationId: revokeIamGrant
+      parameters:
+        - in: path
+          name: grantId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Grant revoked
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Grant not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ai/providers:
+    get:
+      tags: [ai]
+      summary: List seeded AI providers
+      operationId: listAiProviders
+      responses:
+        "200":
+          description: AI provider catalog entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProviderCatalogEntryResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ai/models:
+    get:
+      tags: [ai]
+      summary: List seeded AI models
+      operationId: listAiModels
+      parameters:
+        - in: query
+          name: providerCatalogId
+          required: false
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: AI model catalog entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ModelCatalogEntryResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ai/model-presets:
+    get:
+      tags: [ai]
+      summary: List workspace model presets
+      operationId: listAiModelPresets
+      parameters:
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Workspace model presets
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ModelPresetResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ai/prices:
+    get:
+      tags: [ai]
+      summary: List seeded AI prices
+      operationId: listAiPrices
+      parameters:
+        - in: query
+          name: modelCatalogId
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: AI price catalog entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PriceCatalogEntryResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ai/credentials:
+    get:
+      tags: [ai]
+      summary: List visible provider credentials for one workspace
+      operationId: listAiCredentials
+      parameters:
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Provider credentials
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProviderCredentialResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+    post:
+      tags: [ai]
+      summary: Create a provider credential
+      operationId: createAiCredential
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProviderCredentialRequest"
+      responses:
+        "200":
+          description: Provider credential created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderCredentialResponse"
+        "400":
+          description: Invalid provider credential payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ai/libraries/{libraryId}/bindings:
+    get:
+      tags: [ai]
+      summary: List active model bindings for one library
+      operationId: listAiLibraryBindings
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Active library model bindings
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LibraryModelBindingResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ai/library-bindings:
+    post:
+      tags: [ai]
+      summary: Create or replace the active binding for one library purpose
+      operationId: createAiLibraryBinding
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateLibraryBindingRequest"
+      responses:
+        "200":
+          description: Library model binding created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LibraryModelBindingResponse"
+        "400":
+          description: Invalid library binding payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ai/library-bindings/{bindingId}:
+    put:
+      tags: [ai]
+      summary: Update one existing library binding
+      operationId: updateAiLibraryBinding
+      parameters:
+        - in: path
+          name: bindingId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateLibraryBindingRequest"
+      responses:
+        "200":
+          description: Library model binding updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LibraryModelBindingResponse"
+        "400":
+          description: Invalid library binding payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Binding not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ai/library-bindings/{bindingId}/validate:
+    post:
+      tags: [ai]
+      summary: Trigger one library-binding validation row
+      operationId: validateAiLibraryBinding
+      parameters:
+        - in: path
+          name: bindingId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Binding validation request accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BindingValidationResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Binding not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/documents:
+    get:
+      tags: [content]
+      summary: List canonical logical documents for one library
+      operationId: listContentDocuments
+      parameters:
+        - in: query
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: includeDeleted
+          required: false
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: Logical documents in the requested library
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ContentDocumentDetailResponse"
+        "400":
+          description: Invalid document listing request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+    post:
+      tags: [content]
+      summary: Create a logical document and accepted upload mutation
+      operationId: createContentDocument
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateContentDocumentRequest"
+      responses:
+        "200":
+          description: Created logical document and accepted mutation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateContentDocumentResponse"
+        "400":
+          description: Invalid document creation request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/web-runs:
+    get:
+      tags: [content]
+      summary: List web ingest runs for one library
+      operationId: listContentWebIngestRuns
+      parameters:
+        - in: query
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Web ingest runs in the requested library
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WebIngestRunSummary"
+        "400":
+          description: Invalid web ingest list request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+    post:
+      tags: [content]
+      summary: Submit one canonical web ingest run
+      operationId: createContentWebIngestRun
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWebIngestRunRequest"
+      responses:
+        "202":
+          description: Web ingest run accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebIngestRunReceipt"
+        "400":
+          description: Invalid web ingest submission
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Library not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/web-runs/{runId}:
+    get:
+      tags: [content]
+      summary: Get one canonical web ingest run
+      operationId: getContentWebIngestRun
+      parameters:
+        - in: path
+          name: runId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Web ingest run detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebIngestRun"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Run not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/web-runs/{runId}/pages:
+    get:
+      tags: [content]
+      summary: List page outcomes for one web ingest run
+      operationId: listContentWebIngestRunPages
+      parameters:
+        - in: path
+          name: runId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Discovered pages and outcomes for the requested run
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WebDiscoveredPage"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Run not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/web-runs/{runId}/cancel:
+    post:
+      tags: [content]
+      summary: Request cancellation for one web ingest run
+      operationId: cancelContentWebIngestRun
+      parameters:
+        - in: path
+          name: runId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "202":
+          description: Web ingest cancellation accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebIngestRunReceipt"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Run not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/documents/upload:
+    post:
+      tags: [content]
+      summary: Upload one document revision directly into the canonical content pipeline
+      operationId: uploadContentDocument
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/UploadContentDocumentRequest"
+      responses:
+        "200":
+          description: Created logical document and accepted upload mutation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateContentDocumentResponse"
+        "400":
+          description: Invalid upload request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Library not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/documents/{documentId}:
+    get:
+      tags: [content]
+      summary: Get one canonical logical document
+      operationId: getContentDocument
+      parameters:
+        - in: path
+          name: documentId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Canonical logical document detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentDocumentDetailResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+    delete:
+      tags: [content]
+      summary: Delete one logical document through a canonical mutation
+      operationId: deleteContentDocument
+      parameters:
+        - in: path
+          name: documentId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Accepted and applied document deletion mutation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentMutationDetailResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/documents/{documentId}/reprocess:
+    post:
+      tags: [content]
+      summary: Reprocess one canonical content document
+      operationId: reprocessContentDocument
+      parameters:
+        - in: path
+          name: documentId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReprocessDocumentRequest"
+      responses:
+        "200":
+          description: Canonical content mutation detail for the reprocess request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentMutationDetailResponse"
+        "400":
+          description: Document cannot be reprocessed in the current state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/documents/{documentId}/prepared-segments:
+    get:
+      tags: [content]
+      summary: List prepared segments for the readable revision of one logical document
+      operationId: listContentPreparedSegments
+      parameters:
+        - in: path
+          name: documentId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: offset
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+      responses:
+        "200":
+          description: Prepared segments for the current readable revision
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PreparedSegmentsPageResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/documents/{documentId}/technical-facts:
+    get:
+      tags: [content]
+      summary: List typed technical facts for the readable revision of one logical document
+      operationId: listContentTechnicalFacts
+      parameters:
+        - in: path
+          name: documentId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: offset
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+      responses:
+        "200":
+          description: Typed technical facts for the current readable revision
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TechnicalFactsPageResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/documents/{documentId}/append:
+    post:
+      tags: [content]
+      summary: Append plain text to one logical document
+      operationId: appendContentDocument
+      parameters:
+        - in: path
+          name: documentId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppendContentDocumentRequest"
+      responses:
+        "200":
+          description: Accepted append mutation with per-item state and linked job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentMutationDetailResponse"
+        "400":
+          description: Invalid append request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/documents/{documentId}/replace:
+    post:
+      tags: [content]
+      summary: Replace the active document revision with a new uploaded file
+      operationId: replaceContentDocument
+      parameters:
+        - in: path
+          name: documentId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/ReplaceContentDocumentRequest"
+      responses:
+        "200":
+          description: Accepted replacement mutation with per-item state and linked job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentMutationDetailResponse"
+        "400":
+          description: Invalid replacement request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/documents/{documentId}/revisions:
+    get:
+      tags: [content]
+      summary: List immutable revisions for one logical document
+      operationId: listContentRevisions
+      parameters:
+        - in: path
+          name: documentId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Immutable content revisions for one document
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ContentRevision"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/mutations:
+    get:
+      tags: [content]
+      summary: List canonical content mutations for one library
+      operationId: listContentMutations
+      parameters:
+        - in: query
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Canonical content mutations in the requested library
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ContentMutationDetailResponse"
+        "400":
+          description: Invalid mutation listing request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+    post:
+      tags: [content]
+      summary: Create a canonical content mutation
+      operationId: createContentMutation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateContentMutationRequest"
+      responses:
+        "200":
+          description: Accepted mutation with per-item state and linked job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentMutationDetailResponse"
+        "400":
+          description: Invalid mutation request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/mutations/{mutationId}:
+    get:
+      tags: [content]
+      summary: Get one canonical content mutation and items
+      operationId: getContentMutation
+      parameters:
+        - in: path
+          name: mutationId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Canonical content mutation detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentMutationDetailResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Mutation not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ingest/jobs:
+    get:
+      tags: [ingest]
+      summary: List canonical ingest jobs for one library
+      operationId: listIngestJobs
+      parameters:
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Canonical ingest jobs in one library
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/IngestJob"
+        "400":
+          description: Invalid ingest job query
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ingest/jobs/{jobId}:
+    get:
+      tags: [ingest]
+      summary: Get one canonical ingest job
+      operationId: getIngestJob
+      parameters:
+        - in: path
+          name: jobId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Canonical ingest job detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestJob"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Ingest job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ingest/attempts/{attemptId}:
+    get:
+      tags: [ingest]
+      summary: Get one canonical ingest attempt
+      operationId: getIngestAttempt
+      parameters:
+        - in: path
+          name: attemptId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Canonical ingest attempt detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestAttempt"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Ingest attempt not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/ingest/attempts/{attemptId}/stages:
+    get:
+      tags: [ingest]
+      summary: List ordered stage events for one ingest attempt
+      operationId: listIngestStageEvents
+      parameters:
+        - in: path
+          name: attemptId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Ordered stage events for the requested attempt
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/IngestStageEvent"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Ingest attempt not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/search/documents:
+    get:
+      tags: [knowledge]
+      summary: Search documents, chunks, entities, and relations in one knowledge library
+      operationId: searchDocuments
+      parameters:
+        - in: query
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: query
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 50
+        - in: query
+          name: chunkHitLimitPerDocument
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 50
+        - in: query
+          name: evidenceSampleLimit
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 50
+      responses:
+        "200":
+          description: Hybrid knowledge search response with lexical and vector candidates, document hits, and provenance summaries
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  [
+                    libraryId,
+                    queryText,
+                    limit,
+                    embeddingProviderKind,
+                    embeddingModelName,
+                    embeddingModelCatalogId,
+                    freshnessGeneration,
+                    documentHits,
+                    entityHits,
+                    relationHits,
+                    vectorChunkHits,
+                    vectorEntityHits,
+                  ]
+                properties:
+                  libraryId:
+                    type: string
+                    format: uuid
+                  queryText:
+                    type: string
+                  limit:
+                    type: integer
+                    format: int32
+                  embeddingProviderKind:
+                    type: string
+                  embeddingModelName:
+                    type: string
+                  embeddingModelCatalogId:
+                    type: string
+                    format: uuid
+                  freshnessGeneration:
+                    type: integer
+                    format: int64
+                  documentHits:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                        [
+                          document,
+                          revision,
+                          score,
+                          provenanceSummary,
+                          chunkHits,
+                          vectorChunkHits,
+                          evidenceSamples,
+                        ]
+                      properties:
+                        document:
+                          $ref: "#/components/schemas/KnowledgeDocumentRow"
+                        revision:
+                          $ref: "#/components/schemas/KnowledgeRevisionRow"
+                        score:
+                          type: number
+                          format: double
+                        lexicalRank:
+                          type:
+                            - integer
+                            - "null"
+                          format: int32
+                        vectorRank:
+                          type:
+                            - integer
+                            - "null"
+                          format: int32
+                        lexicalScore:
+                          type:
+                            - number
+                            - "null"
+                          format: double
+                        vectorScore:
+                          type:
+                            - number
+                            - "null"
+                          format: double
+                        chunkHits:
+                          type: array
+                          items:
+                            $ref: "#/components/schemas/KnowledgeChunkSearchRow"
+                        vectorChunkHits:
+                          type: array
+                          items:
+                            $ref: "#/components/schemas/KnowledgeChunkVectorSearchRow"
+                        evidenceSamples:
+                          type: array
+                          items:
+                            $ref: "#/components/schemas/KnowledgeEvidenceRow"
+                        provenanceSummary:
+                          type: object
+                          required: [supportingEvidenceCount, lexicalChunkCount, vectorChunkCount]
+                          properties:
+                            supportingEvidenceCount:
+                              type: integer
+                              format: int32
+                            lexicalChunkCount:
+                              type: integer
+                              format: int32
+                            vectorChunkCount:
+                              type: integer
+                              format: int32
+                  entityHits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeEntitySearchRow"
+                  relationHits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeRelationSearchRow"
+                  vectorChunkHits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeChunkVectorSearchRow"
+                  vectorEntityHits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeEntityVectorSearchRow"
+        "400":
+          description: Invalid search request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/knowledge/libraries/{libraryId}/documents:
+    get:
+      tags: [knowledge]
+      summary: List documents in one knowledge library
+      operationId: listKnowledgeDocuments
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Documents visible to the authenticated principal
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/KnowledgeDocumentRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/libraries/{libraryId}/documents/{documentId}:
+    get:
+      tags: [knowledge]
+      summary: Get document detail with revisions and latest chunks
+      operationId: getKnowledgeDocument
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: path
+          name: documentId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Document detail payload
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [document, revisions, latestRevisionChunks]
+                properties:
+                  document:
+                    $ref: "#/components/schemas/KnowledgeDocumentRow"
+                  revisions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeRevisionRow"
+                  latestRevision:
+                    oneOf:
+                      - $ref: "#/components/schemas/KnowledgeRevisionRow"
+                      - type: "null"
+                  latestRevisionChunks:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeChunkRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/libraries/{libraryId}/summary:
+    get:
+      tags: [knowledge]
+      summary: Get canonical knowledge summary for one library
+      operationId: getKnowledgeLibrarySummary
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Library readiness, graph coverage, and latest generation snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LibraryKnowledgeSummaryResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/libraries/{libraryId}/graph-workbench:
+    get:
+      tags: [knowledge]
+      summary: Get the canonical graph workbench for one knowledge library
+      operationId: getKnowledgeGraphWorkbench
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: searchQuery
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: focusDocumentId
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: includeFilteredArtifacts
+          required: false
+          schema:
+            type: boolean
+            default: false
+        - in: query
+          name: selectedNodeId
+          required: false
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Graph workbench surface with graph, filters, selection, and diagnostics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GraphWorkbenchSurface"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/libraries/{libraryId}/context-bundles:
+    get:
+      tags: [knowledge]
+      summary: List context bundles in one knowledge library
+      operationId: listKnowledgeContextBundles
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Context bundles visible to the authenticated principal
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/KnowledgeContextBundleRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/context-bundles/{bundleId}:
+    get:
+      tags: [knowledge]
+      summary: Get one context bundle with traces and resolved knowledge rows
+      operationId: getKnowledgeContextBundle
+      parameters:
+        - in: path
+          name: bundleId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Context bundle detail payload
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [bundle, traces, chunkEdges, entityEdges, relationEdges, evidenceEdges, chunks, entities, relations, evidence]
+                properties:
+                  bundle:
+                    $ref: "#/components/schemas/KnowledgeContextBundleRow"
+                  traces:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeRetrievalTraceRow"
+                  chunkEdges:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeBundleChunkEdgeRow"
+                  entityEdges:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeBundleEntityEdgeRow"
+                  relationEdges:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeBundleRelationEdgeRow"
+                  evidenceEdges:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeBundleEvidenceEdgeRow"
+                  chunks:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeChunkRow"
+                  entities:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeEntityRow"
+                  relations:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeRelationRow"
+                  evidence:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeEvidenceRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/libraries/{libraryId}/entities:
+    get:
+      tags: [knowledge]
+      summary: List graph entities in one knowledge library
+      operationId: listKnowledgeEntities
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Knowledge entities
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/KnowledgeEntityRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/libraries/{libraryId}/entities/{entityId}:
+    get:
+      tags: [knowledge]
+      summary: Get entity detail with mention and provenance data
+      operationId: getKnowledgeEntity
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: path
+          name: entityId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Entity detail payload
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entity, mentionEdges, mentionedChunks, supportingEvidenceEdges, supportingEvidence]
+                properties:
+                  entity:
+                    $ref: "#/components/schemas/KnowledgeEntityRow"
+                  mentionEdges:
+                    type: array
+                    items:
+                      type: object
+                  mentionedChunks:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeChunkRow"
+                  supportingEvidenceEdges:
+                    type: array
+                    items:
+                      type: object
+                  supportingEvidence:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeEvidenceRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/libraries/{libraryId}/relations:
+    get:
+      tags: [knowledge]
+      summary: List graph relations in one knowledge library
+      operationId: listKnowledgeRelations
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Knowledge relations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/KnowledgeRelationRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/libraries/{libraryId}/relations/{relationId}:
+    get:
+      tags: [knowledge]
+      summary: Get relation detail with provenance data
+      operationId: getKnowledgeRelation
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: path
+          name: relationId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Relation detail payload
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [relation, supportingEvidenceEdges, supportingEvidence]
+                properties:
+                  relation:
+                    $ref: "#/components/schemas/KnowledgeRelationRow"
+                  supportingEvidenceEdges:
+                    type: array
+                    items:
+                      type: object
+                  supportingEvidence:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeEvidenceRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/knowledge/libraries/{libraryId}/search/documents:
+    get:
+      tags: [knowledge]
+      summary: Search documents, chunks, entities, and relations in one knowledge library
+      operationId: searchKnowledgeDocuments
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: query
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 50
+        - in: query
+          name: chunkHitLimitPerDocument
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 50
+        - in: query
+          name: evidenceSampleLimit
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 50
+      responses:
+        "200":
+          description: Hybrid knowledge search response with lexical and vector candidates, document hits, and provenance summaries
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  [
+                    libraryId,
+                    queryText,
+                    limit,
+                    embeddingProviderKind,
+                    embeddingModelName,
+                    embeddingModelCatalogId,
+                    freshnessGeneration,
+                    documentHits,
+                    entityHits,
+                    relationHits,
+                    vectorChunkHits,
+                    vectorEntityHits,
+                  ]
+                properties:
+                  libraryId:
+                    type: string
+                    format: uuid
+                  queryText:
+                    type: string
+                  limit:
+                    type: integer
+                    format: int32
+                  embeddingProviderKind:
+                    type: string
+                  embeddingModelName:
+                    type: string
+                  embeddingModelCatalogId:
+                    type: string
+                    format: uuid
+                  freshnessGeneration:
+                    type: integer
+                    format: int64
+                  documentHits:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                        [
+                          document,
+                          revision,
+                          score,
+                          provenanceSummary,
+                          chunkHits,
+                          vectorChunkHits,
+                          evidenceSamples,
+                        ]
+                      properties:
+                        document:
+                          $ref: "#/components/schemas/KnowledgeDocumentRow"
+                        revision:
+                          $ref: "#/components/schemas/KnowledgeRevisionRow"
+                        score:
+                          type: number
+                          format: double
+                        lexicalRank:
+                          type:
+                            - integer
+                            - "null"
+                          format: int32
+                        vectorRank:
+                          type:
+                            - integer
+                            - "null"
+                          format: int32
+                        lexicalScore:
+                          type:
+                            - number
+                            - "null"
+                          format: double
+                        vectorScore:
+                          type:
+                            - number
+                            - "null"
+                          format: double
+                        chunkHits:
+                          type: array
+                          items:
+                            $ref: "#/components/schemas/KnowledgeChunkSearchRow"
+                        vectorChunkHits:
+                          type: array
+                          items:
+                            $ref: "#/components/schemas/KnowledgeChunkVectorSearchRow"
+                        evidenceSamples:
+                          type: array
+                          items:
+                            $ref: "#/components/schemas/KnowledgeEvidenceRow"
+                        provenanceSummary:
+                          type: object
+                          required: [supportingEvidenceCount, lexicalChunkCount, vectorChunkCount]
+                          properties:
+                            supportingEvidenceCount:
+                              type: integer
+                              format: int32
+                            lexicalChunkCount:
+                              type: integer
+                              format: int32
+                            vectorChunkCount:
+                              type: integer
+                              format: int32
+                  entityHits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeEntitySearchRow"
+                  relationHits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeRelationSearchRow"
+                  vectorChunkHits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeChunkVectorSearchRow"
+                  vectorEntityHits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeEntityVectorSearchRow"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/query/sessions:
+    get:
+      tags: [query]
+      summary: List canonical query sessions for one library
+      operationId: listQuerySessions
+      parameters:
+        - in: query
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Visible query sessions ordered by most recent activity
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/QueryConversation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [query]
+      summary: Create one canonical query session
+      operationId: createQuerySession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateQueryConversationRequest"
+      responses:
+        "200":
+          description: Query session created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryConversation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/query/sessions/{sessionId}:
+    get:
+      tags: [query]
+      summary: Get canonical query session detail
+      operationId: getQuerySession
+      parameters:
+        - in: path
+          name: sessionId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Query session detail with turns and executions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryConversationDetailResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/query/sessions/{sessionId}/turns:
+    post:
+      tags: [query]
+      summary: Submit a user turn and execute one grounded answer in a query session
+      operationId: createQuerySessionTurn
+      parameters:
+        - in: path
+          name: sessionId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateQueryTurnRequest"
+      responses:
+        "200":
+          description: User turn accepted and grounded answer completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryTurnExecutionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /v1/query/executions/{executionId}:
+    get:
+      tags: [query]
+      summary: Get canonical grounded execution detail
+      operationId: getQueryExecution
+      parameters:
+        - in: path
+          name: executionId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Execution detail with typed references
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryExecutionDetailResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/runtime/executions/{executionId}:
+    get:
+      tags: [runtime]
+      summary: Get canonical runtime execution summary
+      operationId: getRuntimeExecution
+      parameters:
+        - in: path
+          name: executionId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Runtime execution summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeExecutionResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/runtime/executions/{executionId}/trace:
+    get:
+      tags: [runtime]
+      summary: Get canonical runtime execution trace
+      operationId: getRuntimeExecutionTrace
+      parameters:
+        - in: path
+          name: executionId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Runtime execution trace
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeExecutionTraceResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/billing/provider-calls:
+    get:
+      tags: [billing]
+      summary: List canonical provider calls for one library
+      operationId: listBillingProviderCalls
+      parameters:
+        - in: query
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Provider calls attributed to canonical executions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BillingProviderCall"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/billing/charges:
+    get:
+      tags: [billing]
+      summary: List canonical priced charges for one library
+      operationId: listBillingCharges
+      parameters:
+        - in: query
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Charges derived from canonical provider calls
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BillingCharge"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/billing/executions/{executionKind}/{executionId}:
+    get:
+      tags: [billing]
+      summary: Get canonical execution cost rollup
+      operationId: getBillingExecutionCost
+      parameters:
+        - in: path
+          name: executionKind
+          required: true
+          schema:
+            type: string
+            enum: [query_execution, ingest_attempt]
+        - in: path
+          name: executionId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: |
+            Cost rollup for one execution owner.
+            For executions with no billable provider calls, the API returns a deterministic zero-cost rollup.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BillingExecutionCost"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/ops/operations/{operationId}:
+    get:
+      tags: [ops]
+      summary: Get one canonical async operation
+      operationId: getAsyncOperation
+      parameters:
+        - in: path
+          name: operationId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Canonical async operation detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpsAsyncOperation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/ops/libraries/{libraryId}:
+    get:
+      tags: [ops]
+      summary: Get derived operational state for one library
+      operationId: getLibraryState
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Derived operational state and knowledge generation snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpsLibraryStateResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/audit/events:
+    get:
+      tags: [audit]
+      summary: List canonical audit events
+      operationId: listAuditEvents
+      parameters:
+        - in: query
+          name: actorPrincipalId
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: libraryId
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: internal
+          required: false
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: Canonical audit events with visible subjects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AuditEventResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "403":
+          description: Internal view requires system administrator access
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/chunks:
+    get:
+      tags: [content]
+      summary: List chunks by document
+      operationId: listChunks
+      description: Requires `documents:read`, `workspace:admin`, or an `instance_admin` token.
+      parameters:
+        - $ref: "#/components/parameters/documentId"
+      responses:
+        "200":
+          description: Chunk list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ChunkSummary"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    workspaceId:
+      name: workspaceId
+      in: query
+      required: true
+      schema: &uuidString
+        type: string
+        format: uuid
+    documentId:
+      name: documentId
+      in: query
+      required: true
+      schema: *uuidString
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema: &genericObject
+            type: object
+            additionalProperties: true
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema: *genericObject
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema: *genericObject
+    Conflict:
+      description: Conflict
+      content:
+        application/json:
+          schema: *genericObject
+    InternalError:
+      description: Internal error
+      content:
+        application/json:
+          schema: *genericObject
+  schemas:
+    ApiErrorBody: *genericObject
+    AppendContentDocumentRequest: *genericObject
+    AuditEventResponse: *genericObject
+    BillingCharge: *genericObject
+    BillingExecutionCost: *genericObject
+    BillingProviderCall: *genericObject
+    BindingValidationResponse: *genericObject
+    BootstrapBindingPurpose:
+      type: string
+      enum: [extract_graph, embed_chunk, query_answer, vision]
+    BootstrapCredentialSource:
+      type: string
+      enum: [missing, env]
+    BootstrapClaimRequest: *genericObject
+    BootstrapClaimResponse: *genericObject
+    BootstrapProviderCatalogEntryResponse:
+      type: object
+      additionalProperties: false
+      required: [id, providerKind, displayName, apiStyle, lifecycleState, credentialSource]
+      properties:
+        id:
+          type: string
+          format: uuid
+        providerKind:
+          type: string
+        displayName:
+          type: string
+        apiStyle:
+          type: string
+        lifecycleState:
+          type: string
+        credentialSource:
+          $ref: "#/components/schemas/BootstrapCredentialSource"
+    BootstrapModelCatalogEntryResponse:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          id,
+          providerCatalogId,
+          modelName,
+          capabilityKind,
+          modalityKind,
+          allowedBindingPurposes,
+        ]
+      properties:
+        id:
+          type: string
+          format: uuid
+        providerCatalogId:
+          type: string
+          format: uuid
+        modelName:
+          type: string
+        capabilityKind:
+          type: string
+        modalityKind:
+          type: string
+        allowedBindingPurposes:
+          type: array
+          items:
+            $ref: "#/components/schemas/BootstrapBindingPurpose"
+        contextWindow:
+          oneOf:
+            - type: integer
+            - type: "null"
+        maxOutputTokens:
+          oneOf:
+            - type: integer
+            - type: "null"
+    BootstrapBindingSelectionResponse:
+      type: object
+      additionalProperties: false
+      required: [bindingPurpose, configured]
+      properties:
+        bindingPurpose:
+          $ref: "#/components/schemas/BootstrapBindingPurpose"
+        providerKind:
+          oneOf:
+            - type: string
+            - type: "null"
+        modelCatalogId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        configured:
+          type: boolean
+    BootstrapAiSetupResponse:
+      type: object
+      additionalProperties: false
+      required: [providers, models, bindingSelections]
+      properties:
+        providers:
+          type: array
+          items:
+            $ref: "#/components/schemas/BootstrapProviderCatalogEntryResponse"
+        models:
+          type: array
+          items:
+            $ref: "#/components/schemas/BootstrapModelCatalogEntryResponse"
+        bindingSelections:
+          type: array
+          items:
+            $ref: "#/components/schemas/BootstrapBindingSelectionResponse"
+    BootstrapCredentialInputRequest:
+      type: object
+      additionalProperties: false
+      required: [providerKind]
+      properties:
+        providerKind:
+          type: string
+        apiKey:
+          oneOf:
+            - type: string
+            - type: "null"
+    BootstrapBindingSelectionRequest:
+      type: object
+      additionalProperties: false
+      required: [bindingPurpose, providerKind, modelCatalogId]
+      properties:
+        bindingPurpose:
+          $ref: "#/components/schemas/BootstrapBindingPurpose"
+        providerKind:
+          type: string
+        modelCatalogId:
+          type: string
+          format: uuid
+    BootstrapSetupAiRequest:
+      type: object
+      additionalProperties: false
+      required: [credentials, bindingSelections]
+      properties:
+        credentials:
+          type: array
+          items:
+            $ref: "#/components/schemas/BootstrapCredentialInputRequest"
+        bindingSelections:
+          type: array
+          items:
+            $ref: "#/components/schemas/BootstrapBindingSelectionRequest"
+    BootstrapSetupRequest:
+      type: object
+      additionalProperties: false
+      required: [login, password]
+      properties:
+        login:
+          type: string
+        displayName:
+          oneOf:
+            - type: string
+            - type: "null"
+        password:
+          type: string
+        aiSetup:
+          oneOf:
+            - $ref: "#/components/schemas/BootstrapSetupAiRequest"
+            - type: "null"
+    BootstrapStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [setupRequired]
+      properties:
+        setupRequired:
+          type: boolean
+        aiSetup:
+          oneOf:
+            - $ref: "#/components/schemas/BootstrapAiSetupResponse"
+            - type: "null"
+    CatalogLibraryResponse: *genericObject
+    CatalogWorkspaceResponse: *genericObject
+    ChunkSummary: *genericObject
+    ContentDocumentDetailResponse:
+      type: object
+      additionalProperties: true
+      required: [document, fileName, pipeline]
+      properties:
+        document: *genericObject
+        fileName:
+          type: string
+        head:
+          oneOf:
+            - *genericObject
+            - type: "null"
+        activeRevision:
+          oneOf:
+            - *genericObject
+            - type: "null"
+        readiness:
+          oneOf:
+            - *genericObject
+            - type: "null"
+        readinessSummary:
+          oneOf:
+            - $ref: "#/components/schemas/DocumentReadinessSummary"
+            - type: "null"
+        preparedRevision:
+          oneOf:
+            - $ref: "#/components/schemas/StructuredDocumentRevisionSummary"
+            - type: "null"
+        preparedSegmentCount:
+          oneOf:
+            - type: integer
+            - type: "null"
+        technicalFactCount:
+          oneOf:
+            - type: integer
+            - type: "null"
+        webPageProvenance:
+          oneOf:
+            - $ref: "#/components/schemas/WebPageProvenance"
+            - type: "null"
+        pipeline: *genericObject
+    ContentMutationDetailResponse: *genericObject
+    ContentRevision: *genericObject
+    CreateCatalogLibraryRequest: *genericObject
+    CreateCatalogWorkspaceRequest: *genericObject
+    CreateContentDocumentRequest: *genericObject
+    CreateContentDocumentResponse: *genericObject
+    CreateContentMutationRequest: *genericObject
+    CreateGrantRequest: *genericObject
+    CreateLibraryBindingRequest: *genericObject
+    CreateProviderCredentialRequest: *genericObject
+    CreateQueryConversationRequest: *genericObject
+    CreateQueryTurnRequest: *genericObject
+    GrantResponse: *genericObject
+    HealthResponse: *genericObject
+    IngestAttempt: *genericObject
+    IngestJob: *genericObject
+    IngestStageEvent: *genericObject
+    InternalError: *genericObject
+    GraphFilterState:
+      type: object
+      additionalProperties: false
+      required: [includeFilteredArtifacts]
+      properties:
+        searchQuery:
+          oneOf:
+            - type: string
+            - type: "null"
+        focusDocumentId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        includeFilteredArtifacts:
+          type: boolean
+    GraphWorkbenchSurface:
+      type: object
+      additionalProperties: true
+      required: [graph, filters, selectedNodeId, selectedNode, diagnostics]
+      properties:
+        graph: *genericObject
+        filters:
+          $ref: "#/components/schemas/GraphFilterState"
+        selectedNodeId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        selectedNode:
+          oneOf:
+            - *genericObject
+            - type: "null"
+        diagnostics:
+          type: array
+          items: *genericObject
+    KnowledgeBundleChunkEdgeRow: *genericObject
+    KnowledgeBundleEntityEdgeRow: *genericObject
+    KnowledgeBundleEvidenceEdgeRow: *genericObject
+    KnowledgeBundleRelationEdgeRow: *genericObject
+    KnowledgeChunkRow: *genericObject
+    KnowledgeChunkSearchRow: *genericObject
+    KnowledgeChunkVectorSearchRow: *genericObject
+    KnowledgeContextBundleRow: *genericObject
+    KnowledgeDocumentRow: *genericObject
+    KnowledgeEntityRow: *genericObject
+    KnowledgeEntitySearchRow: *genericObject
+    KnowledgeEntityVectorSearchRow: *genericObject
+    KnowledgeEvidenceRow: *genericObject
+    KnowledgeLibraryGeneration: *genericObject
+    KnowledgeRelationRow: *genericObject
+    KnowledgeRelationSearchRow: *genericObject
+    KnowledgeRetrievalTraceRow: *genericObject
+    KnowledgeRevisionRow: *genericObject
+    LibraryKnowledgeSummaryResponse:
+      type: object
+      additionalProperties: true
+      required:
+        [
+          libraryId,
+          documentCountsByReadiness,
+          graphReadyDocumentCount,
+          graphSparseDocumentCount,
+          typedFactDocumentCount,
+          updatedAt,
+        ]
+      properties:
+        libraryId:
+          type: string
+          format: uuid
+        documentCountsByReadiness:
+          type: object
+          additionalProperties:
+            type: integer
+        graphReadyDocumentCount:
+          type: integer
+        graphSparseDocumentCount:
+          type: integer
+        typedFactDocumentCount:
+          type: integer
+        latestGeneration:
+          oneOf:
+            - $ref: "#/components/schemas/KnowledgeLibraryGeneration"
+            - type: "null"
+        updatedAt:
+          type: string
+          format: date-time
+    LibraryModelBindingResponse: *genericObject
+    LoginSessionRequest: *genericObject
+    McpCapabilitySnapshot: *genericObject
+    McpJsonRpcRequest: *genericObject
+    McpJsonRpcResponse: *genericObject
+    MeResponse: *genericObject
+    MintTokenRequest: *genericObject
+    MintTokenResponse: *genericObject
+    ModelCatalogEntryResponse: *genericObject
+    ModelPresetResponse: *genericObject
+    NotFound: *genericObject
+    OpsAsyncOperation: *genericObject
+    OpsLibraryState: *genericObject
+    OpsLibraryStateResponse: *genericObject
+    OpsLibraryWarning: *genericObject
+    PriceCatalogEntryResponse: *genericObject
+    PreparedSegmentDetail:
+      type: object
+      additionalProperties: true
+      required: [segment, text, normalizedText, supportChunkIds]
+      properties:
+        segment:
+          $ref: "#/components/schemas/PreparedSegmentListItem"
+        text:
+          type: string
+        normalizedText:
+          type: string
+        sourceSpan:
+          oneOf:
+            - $ref: "#/components/schemas/StructuredSourceSpan"
+            - type: "null"
+        parentBlockId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        tableCoordinates:
+          oneOf:
+            - $ref: "#/components/schemas/StructuredTableCoordinates"
+            - type: "null"
+        codeLanguage:
+          oneOf:
+            - type: string
+            - type: "null"
+        supportChunkIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+    CreateWebIngestRunRequest:
+      type: object
+      additionalProperties: false
+      required: [libraryId, seedUrl, mode]
+      properties:
+        libraryId:
+          type: string
+          format: uuid
+        seedUrl:
+          type: string
+          format: uri
+        mode:
+          type: string
+          enum: [single_page, recursive_crawl]
+        boundaryPolicy:
+          oneOf:
+            - type: string
+              enum: [same_host, allow_external]
+            - type: "null"
+        maxDepth:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - type: "null"
+        maxPages:
+          oneOf:
+            - type: integer
+              minimum: 1
+            - type: "null"
+        idempotencyKey:
+          oneOf:
+            - type: string
+            - type: "null"
+    WebIngestRunReceipt:
+      type: object
+      additionalProperties: false
+      required: [runId, libraryId, mode, runState, counts]
+      properties:
+        runId:
+          type: string
+          format: uuid
+        libraryId:
+          type: string
+          format: uuid
+        mode:
+          type: string
+          enum: [single_page, recursive_crawl]
+        runState:
+          type: string
+          enum: [accepted, discovering, processing, completed, completed_partial, failed, canceled]
+        asyncOperationId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        counts:
+          $ref: "#/components/schemas/WebRunCounts"
+        failureCode:
+          oneOf:
+            - $ref: "#/components/schemas/WebRunFailureCode"
+            - type: "null"
+        cancelRequestedAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+    WebRunCounts:
+      type: object
+      additionalProperties: false
+      required:
+        [discovered, eligible, processed, queued, processing, duplicates, excluded, blocked, failed, canceled]
+      properties:
+        discovered:
+          type: integer
+        eligible:
+          type: integer
+        processed:
+          type: integer
+        queued:
+          type: integer
+        processing:
+          type: integer
+        duplicates:
+          type: integer
+        excluded:
+          type: integer
+        blocked:
+          type: integer
+        failed:
+          type: integer
+        canceled:
+          type: integer
+    WebIngestRunSummary:
+      type: object
+      additionalProperties: false
+      required:
+        [runId, libraryId, mode, boundaryPolicy, maxDepth, maxPages, runState, seedUrl, counts]
+      properties:
+        runId:
+          type: string
+          format: uuid
+        libraryId:
+          type: string
+          format: uuid
+        mode:
+          type: string
+          enum: [single_page, recursive_crawl]
+        boundaryPolicy:
+          type: string
+          enum: [same_host, allow_external]
+        maxDepth:
+          type: integer
+        maxPages:
+          type: integer
+        runState:
+          type: string
+          enum: [accepted, discovering, processing, completed, completed_partial, failed, canceled]
+        seedUrl:
+          type: string
+          format: uri
+        counts:
+          $ref: "#/components/schemas/WebRunCounts"
+        lastActivityAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+    WebIngestRun:
+      type: object
+      additionalProperties: false
+      required:
+        [runId, mutationId, workspaceId, libraryId, mode, seedUrl, normalizedSeedUrl, boundaryPolicy, maxDepth, maxPages, runState, requestedAt, counts]
+      properties:
+        runId:
+          type: string
+          format: uuid
+        mutationId:
+          type: string
+          format: uuid
+        asyncOperationId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        workspaceId:
+          type: string
+          format: uuid
+        libraryId:
+          type: string
+          format: uuid
+        mode:
+          type: string
+          enum: [single_page, recursive_crawl]
+        seedUrl:
+          type: string
+          format: uri
+        normalizedSeedUrl:
+          type: string
+          format: uri
+        boundaryPolicy:
+          type: string
+          enum: [same_host, allow_external]
+        maxDepth:
+          type: integer
+        maxPages:
+          type: integer
+        runState:
+          type: string
+          enum: [accepted, discovering, processing, completed, completed_partial, failed, canceled]
+        requestedByPrincipalId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        requestedAt:
+          type: string
+          format: date-time
+        completedAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        failureCode:
+          oneOf:
+            - $ref: "#/components/schemas/WebRunFailureCode"
+            - type: "null"
+        cancelRequestedAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        counts:
+          $ref: "#/components/schemas/WebRunCounts"
+        lastActivityAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+    WebDiscoveredPage:
+      type: object
+      additionalProperties: false
+      required:
+        [candidateId, runId, normalizedUrl, depth, hostClassification, candidateState, discoveredAt, updatedAt]
+      properties:
+        candidateId:
+          type: string
+          format: uuid
+        runId:
+          type: string
+          format: uuid
+        discoveredUrl:
+          oneOf:
+            - type: string
+              format: uri
+            - type: "null"
+        normalizedUrl:
+          type: string
+          format: uri
+        finalUrl:
+          oneOf:
+            - type: string
+              format: uri
+            - type: "null"
+        canonicalUrl:
+          oneOf:
+            - type: string
+              format: uri
+            - type: "null"
+        depth:
+          type: integer
+        referrerCandidateId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        hostClassification:
+          type: string
+          enum: [same_host, external]
+        candidateState:
+          type: string
+          enum: [discovered, eligible, duplicate, excluded, blocked, queued, processing, processed, failed, canceled]
+        classificationReason:
+          oneOf:
+            - $ref: "#/components/schemas/WebClassificationReason"
+            - type: "null"
+        contentType:
+          oneOf:
+            - type: string
+            - type: "null"
+        httpStatus:
+          oneOf:
+            - type: integer
+            - type: "null"
+        discoveredAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        documentId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        resultRevisionId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        mutationItemId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+    WebPageProvenance:
+      type: object
+      additionalProperties: false
+      properties:
+        runId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        candidateId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        sourceUri:
+          oneOf:
+            - type: string
+              format: uri
+            - type: "null"
+        canonicalUrl:
+          oneOf:
+            - type: string
+              format: uri
+            - type: "null"
+    WebClassificationReason:
+      type: string
+      enum:
+        - seed_accepted
+        - duplicate_canonical_url
+        - outside_boundary_policy
+        - exceeded_max_depth
+        - exceeded_max_pages
+        - system_page
+        - unsupported_scheme
+        - invalid_url
+        - inaccessible
+        - unsupported_content
+        - cancel_requested
+    WebRunFailureCode:
+      type: string
+      enum:
+        - inaccessible
+        - invalid_url
+        - unsupported_content
+        - web_discovery_failed
+        - web_snapshot_persist_failed
+        - web_snapshot_missing
+        - web_snapshot_missing_final_url
+        - web_snapshot_unavailable
+        - web_capture_materialization_failed
+        - recursive_crawl_failed
+    PreparedSegmentListItem:
+      type: object
+      additionalProperties: true
+      required:
+        [segmentId, revisionId, ordinal, blockKind, headingTrail, sectionPath, excerpt]
+      properties:
+        segmentId:
+          type: string
+          format: uuid
+        revisionId:
+          type: string
+          format: uuid
+        ordinal:
+          type: integer
+        blockKind:
+          type: string
+        headingTrail:
+          type: array
+          items:
+            type: string
+        sectionPath:
+          type: array
+          items:
+            type: string
+        pageNumber:
+          oneOf:
+            - type: integer
+            - type: "null"
+        excerpt:
+          type: string
+    PreparedSegmentsPageResponse:
+      type: object
+      additionalProperties: true
+      required: [documentId, total, offset, limit, items]
+      properties:
+        documentId:
+          type: string
+          format: uuid
+        revisionId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        total:
+          type: integer
+        offset:
+          type: integer
+        limit:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PreparedSegmentDetail"
+    ProviderCatalogEntryResponse: *genericObject
+    ProviderCredentialResponse: *genericObject
+    RuntimeLifecycleState:
+      type: string
+      enum: [accepted, running, completed, recovered, failed, canceled]
+    RuntimeStageState:
+      type: string
+      enum: [pending, running, completed, recovered, failed, skipped, canceled]
+    RuntimeActionKind:
+      type: string
+      enum: [model_request, model_response, tool_request, tool_result, recovery_attempt, stage_annotation]
+    RuntimeActionState:
+      type: string
+      enum: [started, completed, rejected, terminated, failed]
+    RuntimeDecisionTargetKind:
+      type: string
+      enum: [model_request, tool_request, tool_result, stage_transition, final_response]
+    RuntimeDecisionKind:
+      type: string
+      enum: [allow, reject, terminate]
+    RuntimePolicyDecisionSummary:
+      type: object
+      additionalProperties: false
+      required: [targetKind, decisionKind, reasonCode, reasonSummaryRedacted]
+      properties:
+        targetKind:
+          $ref: "#/components/schemas/RuntimeDecisionTargetKind"
+        decisionKind:
+          $ref: "#/components/schemas/RuntimeDecisionKind"
+        reasonCode:
+          type: string
+        reasonSummaryRedacted:
+          type: string
+    RuntimePolicySummary:
+      type: object
+      additionalProperties: false
+      required: [allowCount, rejectCount, terminateCount, recentDecisions]
+      properties:
+        allowCount:
+          type: integer
+        rejectCount:
+          type: integer
+        terminateCount:
+          type: integer
+        recentDecisions:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimePolicyDecisionSummary"
+    RuntimeExecutionSummary:
+      type: object
+      additionalProperties: false
+      required:
+        [runtimeExecutionId, lifecycleState, turnBudget, turnCount, parallelActionLimit, policySummary, acceptedAt]
+      properties:
+        runtimeExecutionId:
+          type: string
+          format: uuid
+        lifecycleState:
+          $ref: "#/components/schemas/RuntimeLifecycleState"
+        activeStage:
+          oneOf:
+            - type: string
+            - type: "null"
+        turnBudget:
+          type: integer
+        turnCount:
+          type: integer
+        parallelActionLimit:
+          type: integer
+        failureCode:
+          oneOf:
+            - type: string
+            - type: "null"
+        failureSummaryRedacted:
+          oneOf:
+            - type: string
+            - type: "null"
+        policySummary:
+          $ref: "#/components/schemas/RuntimePolicySummary"
+        acceptedAt:
+          type: string
+          format: date-time
+        completedAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+    RuntimeExecutionResponse:
+      type: object
+      additionalProperties: false
+      required:
+        [executionId, ownerKind, ownerId, taskKind, surfaceKind, contractName, contractVersion, lifecycleState, turnBudget, turnCount, parallelActionLimit, policySummary, acceptedAt]
+      properties:
+        executionId:
+          type: string
+          format: uuid
+        ownerKind:
+          type: string
+          enum: [query_execution, graph_extraction_attempt, structured_preparation, technical_fact_extraction]
+        ownerId:
+          type: string
+          format: uuid
+        taskKind:
+          type: string
+        surfaceKind:
+          type: string
+          enum: [rest, stream, background, mcp, system]
+        contractName:
+          type: string
+        contractVersion:
+          type: string
+        lifecycleState:
+          $ref: "#/components/schemas/RuntimeLifecycleState"
+        activeStage:
+          oneOf:
+            - type: string
+            - type: "null"
+        turnBudget:
+          type: integer
+        turnCount:
+          type: integer
+        parallelActionLimit:
+          type: integer
+        failureCode:
+          oneOf:
+            - type: string
+            - type: "null"
+        failureSummary:
+          oneOf:
+            - type: string
+            - type: "null"
+        policySummary:
+          $ref: "#/components/schemas/RuntimePolicySummary"
+        acceptedAt:
+          type: string
+          format: date-time
+        completedAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+    RuntimeStageRecordResponse:
+      type: object
+      additionalProperties: false
+      required:
+        [stageRecordId, stageKind, stageOrdinal, attemptNo, stageState, deterministic, startedAt, inputSummary, outputSummary]
+      properties:
+        stageRecordId:
+          type: string
+          format: uuid
+        stageKind:
+          type: string
+        stageOrdinal:
+          type: integer
+        attemptNo:
+          type: integer
+        stageState:
+          $ref: "#/components/schemas/RuntimeStageState"
+        deterministic:
+          type: boolean
+        startedAt:
+          type: string
+          format: date-time
+        completedAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        failureCode:
+          oneOf:
+            - type: string
+            - type: "null"
+        inputSummary: *genericObject
+        outputSummary: *genericObject
+    RuntimeActionRecordResponse:
+      type: object
+      additionalProperties: false
+      required:
+        [actionId, stageRecordId, actionKind, actionOrdinal, actionState, summary, createdAt]
+      properties:
+        actionId:
+          type: string
+          format: uuid
+        stageRecordId:
+          type: string
+          format: uuid
+        actionKind:
+          $ref: "#/components/schemas/RuntimeActionKind"
+        actionOrdinal:
+          type: integer
+        actionState:
+          $ref: "#/components/schemas/RuntimeActionState"
+        providerBindingId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        toolName:
+          oneOf:
+            - type: string
+            - type: "null"
+        usage:
+          oneOf:
+            - *genericObject
+            - type: "null"
+        summary: *genericObject
+        createdAt:
+          type: string
+          format: date-time
+    RuntimePolicyDecisionResponse:
+      type: object
+      additionalProperties: false
+      required:
+        [decisionId, targetKind, decisionKind, reasonCode, reasonSummary, createdAt]
+      properties:
+        decisionId:
+          type: string
+          format: uuid
+        stageRecordId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        actionRecordId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        targetKind:
+          $ref: "#/components/schemas/RuntimeDecisionTargetKind"
+        decisionKind:
+          $ref: "#/components/schemas/RuntimeDecisionKind"
+        reasonCode:
+          type: string
+        reasonSummary:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+    RuntimeExecutionTraceResponse:
+      type: object
+      additionalProperties: false
+      required: [execution, stages, actions, policyDecisions]
+      properties:
+        execution:
+          $ref: "#/components/schemas/RuntimeExecutionResponse"
+        stages:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeStageRecordResponse"
+        actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeActionRecordResponse"
+        policyDecisions:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimePolicyDecisionResponse"
+    QueryConversation:
+      type: object
+      additionalProperties: false
+      required:
+        [id, workspaceId, libraryId, conversationState, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspaceId:
+          type: string
+          format: uuid
+        libraryId:
+          type: string
+          format: uuid
+        createdByPrincipalId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        title:
+          oneOf:
+            - type: string
+            - type: "null"
+        conversationState:
+          type: string
+          enum: [active, archived]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    QueryTurn:
+      type: object
+      additionalProperties: false
+      required: [id, conversationId, turnIndex, turnKind, contentText, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        conversationId:
+          type: string
+          format: uuid
+        turnIndex:
+          type: integer
+        turnKind:
+          type: string
+          enum: [user, assistant, system, tool]
+        authorPrincipalId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        contentText:
+          type: string
+        executionId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        createdAt:
+          type: string
+          format: date-time
+    QueryExecutionResponse:
+      type: object
+      additionalProperties: false
+      required:
+        [id, workspaceId, libraryId, conversationId, contextBundleId, lifecycleState, queryText, startedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspaceId:
+          type: string
+          format: uuid
+        libraryId:
+          type: string
+          format: uuid
+        conversationId:
+          type: string
+          format: uuid
+        contextBundleId:
+          type: string
+          format: uuid
+        requestTurnId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        responseTurnId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        bindingId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        runtimeExecutionId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        lifecycleState:
+          $ref: "#/components/schemas/RuntimeLifecycleState"
+        activeStage:
+          oneOf:
+            - type: string
+            - type: "null"
+        queryText:
+          type: string
+        failureCode:
+          oneOf:
+            - type: string
+            - type: "null"
+        startedAt:
+          type: string
+          format: date-time
+        completedAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+    ReprocessDocumentRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        idempotencyKey:
+          oneOf:
+            - type: string
+            - type: "null"
+    QueryRuntimeStageSummary:
+      type: object
+      additionalProperties: false
+      required: [stageKind, stageLabel]
+      properties:
+        stageKind:
+          type: string
+        stageLabel:
+          type: string
+    QueryConversationDetailResponse: *genericObject
+    QueryExecutionDetailResponse:
+      type: object
+      additionalProperties: true
+      required:
+        [contextBundleId, execution, runtimeSummary, runtimeStageSummaries, chunkReferences, preparedSegmentReferences, technicalFactReferences, entityReferences, relationReferences, verificationState, verificationWarnings]
+      properties:
+        contextBundleId:
+          type: string
+          format: uuid
+        execution:
+          $ref: "#/components/schemas/QueryExecutionResponse"
+        runtimeSummary:
+          $ref: "#/components/schemas/RuntimeExecutionSummary"
+        runtimeStageSummaries:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueryRuntimeStageSummary"
+        requestTurn:
+          oneOf:
+            - $ref: "#/components/schemas/QueryTurn"
+            - type: "null"
+        responseTurn:
+          oneOf:
+            - $ref: "#/components/schemas/QueryTurn"
+            - type: "null"
+        chunkReferences:
+          type: array
+          items: *genericObject
+        preparedSegmentReferences:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueryPreparedSegmentReference"
+        technicalFactReferences:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueryTechnicalFactReference"
+        entityReferences:
+          type: array
+          items: *genericObject
+        relationReferences:
+          type: array
+          items: *genericObject
+        verificationState:
+          type: string
+          enum: [not_run, verified, partially_supported, conflicting, insufficient_evidence, failed]
+        verificationWarnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueryVerificationWarning"
+    QueryPreparedSegmentReference:
+      type: object
+      additionalProperties: true
+      required:
+        [executionId, segmentId, revisionId, blockKind, rank, score, headingTrail, sectionPath]
+      properties:
+        executionId:
+          type: string
+          format: uuid
+        segmentId:
+          type: string
+          format: uuid
+        revisionId:
+          type: string
+          format: uuid
+        blockKind:
+          type: string
+        rank:
+          type: integer
+        score:
+          type: number
+        headingTrail:
+          type: array
+          items:
+            type: string
+        sectionPath:
+          type: array
+          items:
+            type: string
+    QueryTechnicalFactReference:
+      type: object
+      additionalProperties: true
+      required:
+        [executionId, factId, revisionId, factKind, canonicalValue, displayValue, rank, score]
+      properties:
+        executionId:
+          type: string
+          format: uuid
+        factId:
+          type: string
+          format: uuid
+        revisionId:
+          type: string
+          format: uuid
+        factKind:
+          type: string
+        canonicalValue:
+          type: string
+        displayValue:
+          type: string
+        rank:
+          type: integer
+        score:
+          type: number
+    QueryVerificationWarning:
+      type: object
+      additionalProperties: true
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        relatedSegmentId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        relatedFactId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+    QueryTurnExecutionResponse:
+      type: object
+      additionalProperties: true
+      required:
+        [contextBundleId, session, requestTurn, execution, runtimeSummary, runtimeStageSummaries, chunkReferences, preparedSegmentReferences, technicalFactReferences, entityReferences, relationReferences, verificationState, verificationWarnings]
+      properties:
+        contextBundleId:
+          type: string
+          format: uuid
+        session:
+          $ref: "#/components/schemas/QueryConversation"
+        requestTurn:
+          $ref: "#/components/schemas/QueryTurn"
+        responseTurn:
+          oneOf:
+            - $ref: "#/components/schemas/QueryTurn"
+            - type: "null"
+        execution:
+          $ref: "#/components/schemas/QueryExecutionResponse"
+        runtimeSummary:
+          $ref: "#/components/schemas/RuntimeExecutionSummary"
+        runtimeStageSummaries:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueryRuntimeStageSummary"
+        chunkReferences:
+          type: array
+          items: *genericObject
+        preparedSegmentReferences:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueryPreparedSegmentReference"
+        technicalFactReferences:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueryTechnicalFactReference"
+        entityReferences:
+          type: array
+          items: *genericObject
+        relationReferences:
+          type: array
+          items: *genericObject
+        verificationState:
+          type: string
+          enum: [not_run, verified, partially_supported, conflicting, insufficient_evidence, failed]
+        verificationWarnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueryVerificationWarning"
+    ReadinessResponse: *genericObject
+    ReplaceContentDocumentRequest: *genericObject
+    DocumentReadinessSummary:
+      type: object
+      additionalProperties: true
+      required:
+        [documentId, readinessKind, activityStatus, preparationState, graphCoverageKind, updatedAt]
+      properties:
+        documentId:
+          type: string
+          format: uuid
+        activeRevisionId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        readinessKind:
+          type: string
+        activityStatus:
+          type: string
+        stalledReason:
+          oneOf:
+            - type: string
+            - type: "null"
+        preparationState:
+          type: string
+        graphCoverageKind:
+          type: string
+        typedFactCoverage:
+          oneOf:
+            - type: number
+            - type: "null"
+        lastMutationId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        lastJobStage:
+          oneOf:
+            - type: string
+            - type: "null"
+        updatedAt:
+          type: string
+          format: date-time
+    SessionResponse: *genericObject
+    StructuredDocumentRevisionSummary:
+      type: object
+      additionalProperties: true
+      required:
+        [revisionId, documentId, workspaceId, libraryId, preparationState, normalizationProfile, sourceFormat, blockCount, chunkCount, typedFactCount, outline, preparedAt]
+      properties:
+        revisionId:
+          type: string
+          format: uuid
+        documentId:
+          type: string
+          format: uuid
+        workspaceId:
+          type: string
+          format: uuid
+        libraryId:
+          type: string
+          format: uuid
+        preparationState:
+          type: string
+        normalizationProfile:
+          type: string
+        sourceFormat:
+          type: string
+        languageCode:
+          oneOf:
+            - type: string
+            - type: "null"
+        blockCount:
+          type: integer
+        chunkCount:
+          type: integer
+        typedFactCount:
+          type: integer
+        outline:
+          type: array
+          items: *genericObject
+        preparedAt:
+          type: string
+          format: date-time
+    StructuredSourceSpan:
+      type: object
+      additionalProperties: true
+      required: [startOffset, endOffset]
+      properties:
+        startOffset:
+          type: integer
+        endOffset:
+          type: integer
+    StructuredTableCoordinates:
+      type: object
+      additionalProperties: true
+      required: [rowIndex, columnIndex, rowSpan, columnSpan]
+      properties:
+        rowIndex:
+          type: integer
+        columnIndex:
+          type: integer
+        rowSpan:
+          type: integer
+        columnSpan:
+          type: integer
+    TechnicalFactQualifier:
+      type: object
+      additionalProperties: true
+      required: [key, value]
+      properties:
+        key:
+          type: string
+        value:
+          type: string
+    TechnicalFactValue: *genericObject
+    TechnicalFactsPageResponse:
+      type: object
+      additionalProperties: true
+      required: [documentId, total, offset, limit, items]
+      properties:
+        documentId:
+          type: string
+          format: uuid
+        revisionId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        total:
+          type: integer
+        offset:
+          type: integer
+        limit:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/TypedTechnicalFact"
+    TypedTechnicalFact:
+      type: object
+      additionalProperties: true
+      required:
+        [factId, revisionId, documentId, workspaceId, libraryId, factKind, canonicalValue, displayValue, qualifiers, supportBlockIds, supportChunkIds, extractionKind, createdAt]
+      properties:
+        factId:
+          type: string
+          format: uuid
+        revisionId:
+          type: string
+          format: uuid
+        documentId:
+          type: string
+          format: uuid
+        workspaceId:
+          type: string
+          format: uuid
+        libraryId:
+          type: string
+          format: uuid
+        factKind:
+          type: string
+        canonicalValue:
+          $ref: "#/components/schemas/TechnicalFactValue"
+        displayValue:
+          type: string
+        qualifiers:
+          type: array
+          items:
+            $ref: "#/components/schemas/TechnicalFactQualifier"
+        supportBlockIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+        supportChunkIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+        confidence:
+          oneOf:
+            - type: number
+            - type: "null"
+        extractionKind:
+          type: string
+        conflictGroupId:
+          oneOf:
+            - type: string
+            - type: "null"
+        createdAt:
+          type: string
+          format: date-time
+    TokenResponse: *genericObject
+    Unauthorized: *genericObject
+    UpdateLibraryBindingRequest: *genericObject
+    UploadContentDocumentRequest: *genericObject
+    VersionResponse: *genericObject

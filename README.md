@@ -1,35 +1,71 @@
+<p align="center">
+  <img src="./docs/assets/readme-flow.gif" alt="RustRAG demo: dashboard, documents, grounded assistant, and graph exploration" width="960">
+</p>
 
+<h1 align="center">RustRAG</h1>
+<p align="center">One-click knowledge system for documents, internal bots, and AI agents</p>
 
-# RustRAG
+<p align="center">
+  <a href="https://github.com/mlimarenko/RustRAG/stargazers"><img src="https://img.shields.io/github/stars/mlimarenko/RustRAG?style=flat-square" alt="Stars"></a>
+  <a href="https://github.com/mlimarenko/RustRAG/releases"><img src="https://img.shields.io/github/v/release/mlimarenko/RustRAG?style=flat-square" alt="Release"></a>
+  <a href="https://hub.docker.com/r/pipingspace/rustrag-backend"><img src="https://img.shields.io/docker/pulls/pipingspace/rustrag-backend?style=flat-square" alt="Docker Pulls"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/github/license/mlimarenko/RustRAG?style=flat-square" alt="License"></a>
+</p>
 
-### One-click knowledge system for documents, internal bots, and AI agents
+<p align="center">
+  <a href="./README-RU.md">README-RU</a> &bull;
+  <a href="./MCP.md">MCP</a> &bull;
+  <a href="./MCP-RU.md">MCP-RU</a>
+</p>
+
+---
 
 Load files, links, and images into one knowledge base, turn them into searchable text, embeddings, and graph relations, then expose the same memory in the operator UI and over MCP.
 
-[README-RU](./README-RU.md) • [MCP](./MCP.md) • [MCP-RU](./MCP-RU.md)
-
-
-
-
-
-
-
 > RustRAG is a practical knowledge system for LLMs: one `docker compose up`, one web app, one MCP endpoint, and one canonical pipeline for internal assistants, support bots, and private agent workflows.
 
-## Why RustRAG
+## Architecture
 
-- Fast full-stack setup: ArangoDB, Postgres, Redis, Rust services, the UI, and MCP come up together on one stack.
-- Built for real knowledge workflows: ingest documents and sites once, then reuse the same canonical state for search, graph exploration, and agent access.
-- Practical access model: API tokens, grants, library scoping, and ready-made MCP client snippets are managed from the product.
-- Useful beyond demos: pick models, see spending by document, site, or library, and test grounded answers in the built-in assistant UI.
+One published port terminates at **nginx**. **`/`** is the **React + Vite** SPA (static assets from the frontend image); **`/v1/*`** is the **Rust / Axum** backend (**REST + MCP**; **`/mcp`** redirects to **`/v1/mcp`**). The **worker** is the same backend image with a queue consumer role.
+
+```text
+                         ┌─────────────────────────┐
+                         │   nginx (edge proxy)    │
+                         │   single host:port      │
+                         └───────────┬─────────────┘
+               ┌─────────────────────┴─────────────────────┐
+               │                                           │
+        GET /* (SPA)                                 /v1/* (API + MCP)
+               │                                           │
+      ┌────────▼─────────┐                       ┌─────────▼──────────┐
+      │    frontend      │                       │      backend       │
+      │  React + Vite    │                       │   Rust / Axum      │
+      │  static bundle   │                       │   API + MCP        │
+      └──────────────────┘                       └─────────┬──────────┘
+                                                           │
+                         ┌─────────────────────────────────┼─────────────────────────────┐
+                         │                                 │                             │
+                  ┌──────▼──────┐                  ┌───────▼───────┐             ┌───────▼───────┐
+                  │  ArangoDB   │                  │   Postgres    │             │    Redis      │
+                  │ graph+vector│                  │ IAM + control │             │ worker queue  │
+                  └─────────────┘                  └───────────────┘             └───────┬───────┘
+                                                                                         │
+                                                                                ┌────────▼────────┐
+                                                                                │     worker      │
+                                                                                │ (same image,    │
+                                                                                │  ingest jobs)   │
+                                                                                └─────────────────┘
+```
+
+Backend and worker both use Postgres, Redis, ArangoDB, and the shared content volume.
+
+**Ingestion pipeline:** upload → extract text → chunk → embed → merge entities/relations → graph + search → operator UI and MCP tools.
 
 ## Quick Start
 
 Prerequisite: Docker with Compose v2.
 
-Choose one startup path:
-
-### 1. Install the published release without cloning
+### Install the published release without cloning
 
 Latest release:
 
@@ -40,114 +76,136 @@ curl -fsSL https://raw.githubusercontent.com/mlimarenko/RustRAG/master/install.s
 Specific tag:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mlimarenko/RustRAG/master/install.sh | bash -s -- 0.0.3
+curl -fsSL https://raw.githubusercontent.com/mlimarenko/RustRAG/master/install.sh | bash -s -- 0.1.0
 ```
 
-This creates `./rustrag`, downloads the release `docker-compose.yml`, `.env.example`, and `docker/nginx/default.conf`, then starts the published Docker Hub images `pipingspace/rustrag-backend` and `pipingspace/rustrag-frontend`.
+Creates `./rustrag` from the release and starts the stack. First `.env`: random `RUSTRAG_POSTGRES_PASSWORD`, `RUSTRAG_ARANGODB_PASSWORD`, `RUSTRAG_BOOTSTRAP_TOKEN`; later runs keep them.
 
-### 2. Run prebuilt images from a cloned repository
+### Run prebuilt images from a cloned repository
 
 ```bash
 cp .env.example .env
 docker compose up -d
 ```
 
-### 3. Build from source from a cloned repository
+### Build from source
 
 ```bash
 cp .env.example .env
 docker compose -f docker-compose-local.yml up --build -d
 ```
 
-Open:
+### Remote host (Ansible)
+
+```bash
+ansible-playbook -i '203.0.113.10,' ansible/deploy.yml -b -u deploy \
+  -e rustrag_install_dir=/opt/rustrag \
+  -e rustrag_public_host=rag.example.com
+```
+
+### After startup
 
 - App + API: [http://127.0.0.1:19000](http://127.0.0.1:19000)
 - MCP JSON-RPC: `http://127.0.0.1:19000/v1/mcp`
 
-Use another port if needed:
+Use another port: `RUSTRAG_PORT=8080 docker compose up -d`
 
-```bash
-RUSTRAG_PORT=8080 docker compose up -d
-```
+On a fresh stack the first visit runs bootstrap: set the admin login and password. Optional: pre-provision admin with `RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN` / `RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD` in `.env`.
 
-On a fresh local stack, the first visit runs bootstrap: you set the admin login and password (no default portal password). The default `RUSTRAG_BOOTSTRAP_TOKEN` is `bootstrap-local` for API/bootstrap only, not the UI password. Optional: pre-provision admin with `RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN` / `RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD`.
+## Features
 
-## Configuration Model
+- **Document ingestion** -- text, code, PDF, DOCX, PPTX, HTML, images, and web links into one pipeline
+- **Graph knowledge base** -- entities and relations extracted and merged into a browsable graph
+- **Vector search** -- embeddings stored in ArangoDB for hybrid retrieval
+- **Grounded assistant** -- built-in chat UI scoped to a library for testing answers before wiring agents
+- **MCP server** -- HTTP MCP endpoint with tools for search, read, upload, and admin
+- **Access control** -- API tokens, grants, library scoping, and ready-made MCP client snippets
+- **Spending tracking** -- per-document and per-library cost visibility
+- **Model selection** -- configurable providers and models for each pipeline stage
+- **Multi-format support** -- `txt`, `md`, `csv`, `json`, `yaml`, `xml`, `pdf`, `docx`, `pptx`, `html`, `png`, `jpg`, `gif`, `webp`, `svg`, and 30+ more formats
 
-RustRAG uses one canonical application env style: `RUSTRAG_*`.
+## Tech Stack
 
-- Root `[.env.example](./.env.example)`: the simple Docker Compose surface. Copy it to `.env` for release installs, local builds, or internal deploys.
-- Backend `[backend/.env.example](./backend/.env.example)`: the fuller application reference for direct backend/worker runs and advanced overrides.
-- `[docker-compose.yml](./docker-compose.yml)`: the default prebuilt deployment surface using Docker Hub images.
-- `[docker-compose-local.yml](./docker-compose-local.yml)`: the source-build compose surface for manual local builds.
-- `[backend/src/app/config.rs](./backend/src/app/config.rs)`: built-in defaults when a variable is omitted.
+| Layer | Technology |
+|-------|-----------|
+| API + Worker | Rust, Axum, SQLx, async tasks |
+| Frontend | React, Vite, Tailwind CSS, shadcn/ui, Radix |
+| Graph + Vector | ArangoDB 3.12 with experimental vector indexes |
+| Control Plane | PostgreSQL 18 |
+| Worker Queue | Redis 8 |
+| Reverse Proxy | nginx 1.28 |
+| Deployment | Docker Compose, Ansible |
 
-Lower-case aliases and mixed env naming are not supported.
+## Configuration
 
-## Where To Inspect Variables
+RustRAG uses `RUSTRAG_*` environment variables.
 
-- Root `.env`: the active compose interpolation file.
-- `[./.env.example](./.env.example)`: the minimal compose-facing variable set.
-- `[./backend/.env.example](./backend/.env.example)`: the broader application config reference.
-- `[./docker-compose.yml](./docker-compose.yml)`: the default prebuilt deployment surface.
-- `[./docker-compose-local.yml](./docker-compose-local.yml)`: the local source-build surface.
-- `[./backend/src/app/config.rs](./backend/src/app/config.rs)`: the canonical defaults and setting names.
-- `docker compose config`: the fully rendered compose config after `.env` interpolation.
+- `.env.example` -- compose-level variables
+- `apps/api/.env.example` -- full application config reference
+- `apps/api/src/app/config.rs` -- built-in defaults
+
+See `docker compose config` for the fully rendered configuration after `.env` interpolation.
+
+## MCP Integration
+
+RustRAG ships with an HTTP MCP server. Create a token in **Admin > Access**, attach grants, then copy a ready-made client snippet from **Admin > MCP**.
+
+Tool surface: `list_workspaces`, `list_libraries`, `search_documents`, `read_document`, `upload_documents`, `update_document`, `get_mutation_status`, plus admin tools when grants allow.
+
+Full setup guide: [MCP.md](./MCP.md)
+
+## API Reference
+
+The API is served at `/v1/`. An interactive Swagger UI is available in the web app under the API docs section.
 
 ## Release Images
 
-- GitHub Releases publish `pipingspace/rustrag-backend:<tag>` and `pipingspace/rustrag-frontend:<tag>` to Docker Hub, plus refresh the `latest` tags.
-- `[docker-compose.yml](./docker-compose.yml)` follows that release channel by default.
-- Override `RUSTRAG_BACKEND_IMAGE` or `RUSTRAG_FRONTEND_IMAGE` in `.env` when you need to pin a different image tag.
+GitHub Releases publish `pipingspace/rustrag-backend:<tag>` and `pipingspace/rustrag-frontend:<tag>` to Docker Hub and refresh the `latest` tag.
 
-## Stack
+Override with `RUSTRAG_BACKEND_IMAGE` or `RUSTRAG_FRONTEND_IMAGE` in `.env`.
 
-- Rust backend + worker for ingestion, graph build, query, IAM, and MCP.
-- ArangoDB for graph storage, document memory, and vector-backed retrieval.
-- Postgres for the control plane, IAM, audit, billing, and async operation state.
-- Redis for worker coordination.
-- Vue 3 + Quasar frontend behind Nginx.
+## Roadmap
 
-## Pipeline
+### 0.2.0 — Quality & Performance
+- [ ] Hybrid search (BM25 + vector fusion) for better retrieval
+- [ ] Cross-encoder reranker for top-K chunk filtering
+- [ ] ArangoDB entity sync (write entities from graph extraction to ArangoDB)
+- [ ] SSE streaming for query answers
+- [ ] Conversation context in multi-turn queries
+- [ ] Incremental re-processing (diff-aware ingest for updated documents)
+- [ ] Parallel graph extraction (concurrent chunk processing)
+- [ ] Embedding cost tracking (currently only graph extraction tracked)
+- [ ] Export/import libraries
 
-```text
-upload -> text extraction -> chunking -> embeddings -> entity/relation merge -> graph + search -> UI and MCP
-```
+### Future
+- [ ] Video/audio extract support 
+- [ ] Language/format detection with per-type extraction strategies
+- [ ] Code-aware chunking (AST-based for Rust, TypeScript, SQL, Python)
+- [ ] Multi-tenant workspace isolation
+- [ ] RBAC with fine-grained document permissions
+- [ ] Custom extraction prompts per library
+- [ ] Plugin system for custom document processors
+- [ ] Ollama/local model support
+- [ ] Confluence, Notion, Google Drive connectors
 
-The same canonical document state powers search, read, update, and graph exploration instead of separate codepaths for different clients.
+## Star History
 
-## Supported Inputs
-
-- Text and text-like files: `txt`, `md`, `markdown`, `csv`, `json`, `yaml`, `yml`, `xml`, `log`, `rst`, `toml`, `ini`, `cfg`, `conf`
-- Code and technical text: `ts`, `tsx`, `js`, `jsx`, `mjs`, `cjs`, `py`, `rs`, `java`, `kt`, `go`, `sh`, `sql`, `css`, `scss`
-- Documents and pages: `pdf`, `docx`, `pptx`, `html`, `htm`
-- Images: `png`, `jpg`, `jpeg`, `gif`, `bmp`, `webp`, `svg`, `tif`, `tiff`, `heic`, `heif`
-- Links and web pages can be ingested directly into the same library as uploaded files.
-
-## Operations And Access
-
-- Model selection is configurable for different ingestion and query stages.
-- Spending is tracked so you can inspect how much processing cost was spent on a document, a site ingestion run, or a whole library.
-- Grants can be scoped so an agent sees only specific libraries.
-- Read-only MCP tokens can search and read; write-enabled tokens can upload and update content when you want an agent to maintain the knowledge base.
-- The built-in assistant lets you pick a library in the UI and test how grounded answers behave before wiring external agents.
-
-## MCP
-
-RustRAG ships with an HTTP MCP server out of the box. Create a token in `Admin -> Access`, attach grants, then copy a ready-made client snippet from `Admin -> MCP`.
-
-Tool surface includes `list_workspaces`, `list_libraries`, `search_documents`, `read_document`, `upload_documents`, `update_document`, and `get_mutation_status`, with admin tools exposed only when grants allow them.
-
-Quick client setup lives in [MCP.md](./MCP.md).
-
-## Direction
-
-- Graph editing in the UI is planned for finer manual tuning of the knowledge base.
-- Audio and video ingestion are planned as future formats for the same vector and graph pipeline.
-- A hosted SaaS option is planned in addition to the self-managed deployment model.
+<p align="center">
+  <a href="https://star-history.com/#mlimarenko/RustRAG&Date">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=mlimarenko/RustRAG&type=Date&theme=dark" />
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=mlimarenko/RustRAG&type=Date" />
+      <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=mlimarenko/RustRAG&type=Date" width="700" />
+    </picture>
+  </a>
+</p>
 
 ## Contributing
 
 PRs are welcome. Documentation improvements, UI polish, ingestion fixes, MCP integrations, tests, and cleanup all help.
 
 If you change behavior or structure, prefer the one canonical path instead of adding compatibility layers or duplicate flows.
+
+## License
+
+[MIT](./LICENSE)

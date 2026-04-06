@@ -10,7 +10,7 @@ x-rustrag-runtime-env: &rustrag-runtime-env
   RUSTRAG_ARANGODB_PASSWORD: ${RUSTRAG_ARANGODB_PASSWORD:-rustrag-dev}
   RUSTRAG_ARANGODB_REQUEST_TIMEOUT_SECONDS: ${RUSTRAG_ARANGODB_REQUEST_TIMEOUT_SECONDS:-15}
   RUSTRAG_LOG_FILTER: ${RUSTRAG_LOG_FILTER:-info}
-  RUSTRAG_FRONTEND_ORIGIN: ${RUSTRAG_FRONTEND_ORIGIN:-http://127.0.0.1:19000,http://localhost:19000,http://127.0.0.1:9000,http://localhost:9000,http://127.0.0.1:3000,http://localhost:3000}
+  RUSTRAG_FRONTEND_ORIGIN: ${RUSTRAG_FRONTEND_ORIGIN:-http://127.0.0.1:19000,http://localhost:19000}
   RUSTRAG_BOOTSTRAP_TOKEN: ${RUSTRAG_BOOTSTRAP_TOKEN:-bootstrap-local}
   RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN:-}
   RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD:-}
@@ -104,7 +104,7 @@ services:
     image: ${RUSTRAG_BACKEND_IMAGE:-rustrag-backend:local}
     build:
       context: .
-      dockerfile: backend/Dockerfile
+      dockerfile: apps/api/Dockerfile
     restart: unless-stopped
     stop_signal: SIGTERM
     stop_grace_period: 10m
@@ -139,7 +139,7 @@ services:
     image: ${RUSTRAG_BACKEND_IMAGE:-rustrag-backend:local}
     build:
       context: .
-      dockerfile: backend/Dockerfile
+      dockerfile: apps/api/Dockerfile
     restart: unless-stopped
     stop_signal: SIGTERM
     stop_grace_period: 10m
@@ -170,17 +170,16 @@ services:
   frontend:
     image: ${RUSTRAG_FRONTEND_IMAGE:-rustrag-frontend:local}
     build:
-      context: ./frontend
+      context: apps/web
       dockerfile: Dockerfile
     restart: unless-stopped
-    depends_on:
-      - backend
     expose:
-      - "3000"
-    deploy:
-      resources:
-        limits:
-          memory: 256M
+      - "80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/ >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   nginx:
     image: nginx:1.28-alpine

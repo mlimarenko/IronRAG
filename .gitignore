@@ -1,31 +1,28 @@
 # Rust
 /target
 **/target
-Cargo.lock
-!backend/Cargo.lock
-.cargo-target
 **/.cargo-target
+Cargo.lock
+!/Cargo.lock
+.cargo-*/
 
 # Env
 .env
 .env.*
 !.env.example
 
-# Node
+# Package manager residue
 node_modules
 .pnpm-store
 
-# Build artifacts
+# Build and QA artifacts
 dist
 coverage
 playwright-report
 test-results
-frontend/.quasar/
-frontend/.tmp-*.mjs
-frontend/public/figma-mockups/
 tmp-*
 
-# IDE
+# IDE / local metadata
 .vscode
 .idea
 .DS_Store
