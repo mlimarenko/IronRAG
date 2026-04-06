@@ -1,0 +1,422 @@
+// Core domain types for RustRAG
+
+export interface User {
+  id: string;
+  login: string;
+  displayName: string;
+  accessLabel: string;
+  role: 'admin' | 'operator' | 'viewer';
+}
+
+export interface Workspace {
+  id: string;
+  name: string;
+  createdAt: string;
+}
+
+export interface Library {
+  id: string;
+  workspaceId: string;
+  name: string;
+  createdAt: string;
+  ingestionReady: boolean;
+  queryReady: boolean;
+  missingBindingPurposes: AIPurpose[];
+}
+
+export type AIPurpose = 'extract_graph' | 'embed_chunk' | 'query_answer' | 'vision';
+
+export type DocumentStatus = 'queued' | 'processing' | 'ready' | 'ready_no_graph' | 'failed';
+export type DocumentReadiness = 'processing' | 'readable' | 'graph_sparse' | 'graph_ready' | 'failed';
+
+export interface DocumentItem {
+  id: string;
+  fileName: string;
+  fileType: string;
+  fileSize: number;
+  uploadedAt: string;
+  cost: number | null;
+  status: DocumentStatus;
+  readiness: DocumentReadiness;
+  stage?: string;
+  progressPercent?: number;
+  lastActivity?: string;
+  failureMessage?: string;
+  canRetry?: boolean;
+  sourceKind?: 'upload' | 'web_page' | 'append' | 'replace' | 'connector_sync' | 'import' | string;
+  sourceUri?: string;
+}
+
+export interface DocumentRevision {
+  revisionNumber: number;
+  mimeType: string;
+  byteSize: number;
+  title?: string;
+  language?: string;
+  sourceUri?: string;
+  checksum?: string;
+  storageKey?: string;
+}
+
+export interface DocumentDetail extends DocumentItem {
+  canonicalId: string;
+  activeRevision?: DocumentRevision;
+  readableRevision?: number;
+  latestMutation?: MutationRecord;
+  latestSuccessfulAttempt?: string;
+  webProvenance?: WebProvenance;
+  mutations: MutationRecord[];
+  attempts: ProcessingAttempt[];
+  stageEvents: StageEvent[];
+  preparationSummary?: PreparationSummary;
+  preparedSegments: PreparedSegment[];
+  technicalFacts: TechnicalFact[];
+}
+
+export interface MutationRecord {
+  id: string;
+  kind: string;
+  state: 'accepted' | 'reconciling' | 'completed' | 'failed';
+  createdAt: string;
+  completedAt?: string;
+  message?: string;
+}
+
+export interface ProcessingAttempt {
+  id: string;
+  stage: string;
+  state: string;
+  startedAt: string;
+  completedAt?: string;
+  error?: string;
+}
+
+export interface StageEvent {
+  stage: string;
+  state: string;
+  timestamp: string;
+  message?: string;
+}
+
+export interface PreparationSummary {
+  readinessKind: DocumentReadiness;
+  graphCoverageKind: string;
+  typedFactCoverage?: string;
+  lastProcessingStage?: string;
+  preparationState: string;
+  preparedSegmentCount: number;
+  technicalFactCount: number;
+  sourceFormat?: string;
+  normalizationProfile?: string;
+  updatedAt: string;
+}
+
+export interface PreparedSegment {
+  ordinal: number;
+  blockKind: string;
+  headingTrail?: string;
+  excerpt: string;
+  pageNumber?: number;
+  startOffset?: number;
+  endOffset?: number;
+  chunkCount: number;
+  codeLanguage?: string;
+  tableCoords?: string;
+}
+
+export interface TechnicalFact {
+  id: string;
+  factKind: string;
+  canonicalValue: string;
+  displayValue: string;
+  qualifiers?: string[];
+  supportSegments: number[];
+  chunkCount: number;
+  confidence: number;
+  extractionKinds: string[];
+  hasConflict: boolean;
+  occurrenceCount: number;
+  lastSeenAt: string;
+}
+
+export interface WebProvenance {
+  runId: string;
+  sourceUrl: string;
+  discoveredAt: string;
+}
+
+// Web ingest types
+export type WebIngestRunState = 'accepted' | 'discovering' | 'processing' | 'completed' | 'completed_partial' | 'failed' | 'canceled';
+export type WebIngestPageState = 'discovered' | 'eligible' | 'duplicate' | 'excluded' | 'blocked' | 'queued' | 'processing' | 'processed' | 'failed' | 'canceled';
+
+export interface WebIngestRun {
+  id: string;
+  seedUrl: string;
+  mode: 'single_page' | 'recursive_crawl';
+  boundaryPolicy: 'same_host' | 'allow_external';
+  maxDepth: number;
+  maxPages: number;
+  state: WebIngestRunState;
+  totalPages: number;
+  processedPages: number;
+  failedPages: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WebIngestPage {
+  id: string;
+  url: string;
+  state: WebIngestPageState;
+  depth: number;
+  discoveredAt: string;
+  processedAt?: string;
+  error?: string;
+}
+
+// Graph types
+export type GraphStatus = 'empty' | 'building' | 'rebuilding' | 'ready' | 'partial' | 'failed' | 'stale';
+export type GraphNodeType = 'document' | 'entity' | 'topic';
+
+export interface GraphNode {
+  id: string;
+  label: string;
+  type: GraphNodeType;
+  summary?: string;
+  canonicalSummary?: string;
+  properties: Record<string, string>;
+  edgeCount: number;
+  convergenceStatus?: string;
+  warnings?: string[];
+  sourceDocumentIds?: string[];
+}
+
+export interface GraphEdge {
+  id: string;
+  sourceId: string;
+  targetId: string;
+  label: string;
+  weight: number;
+}
+
+export interface GraphMetadata {
+  nodeCount: number;
+  edgeCount: number;
+  hiddenDisconnectedCount: number;
+  status: GraphStatus;
+  convergenceStatus: string;
+  recommendedLayout?: string;
+}
+
+// Assistant types
+export interface AssistantSession {
+  id: string;
+  libraryId: string;
+  title: string;
+  updatedAt: string;
+  turnCount: number;
+}
+
+export type AssistantStage = 'planning' | 'grounding' | 'response';
+
+export interface AssistantMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+  attachments?: FileAttachment[];
+  stage?: AssistantStage;
+  isStreaming?: boolean;
+  evidence?: EvidenceBundle;
+}
+
+export interface FileAttachment {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
+}
+
+export interface EvidenceBundle {
+  segmentRefs: SegmentReference[];
+  factRefs: FactReference[];
+  entityRefs: EntityReference[];
+  relationRefs: RelationReference[];
+  verificationState: VerificationState;
+  verificationWarnings: string[];
+  runtimeSummary?: RuntimeSummary;
+}
+
+export interface SegmentReference {
+  documentId: string;
+  documentName: string;
+  documentTitle: string | null;
+  sourceUri: string | null;
+  segmentOrdinal: number;
+  excerpt: string;
+  relevance: number;
+}
+
+export interface FactReference {
+  factKind: string;
+  value: string;
+  confidence: number;
+  documentName: string;
+}
+
+export interface EntityReference {
+  entityId: string;
+  label: string;
+  type: string;
+  relevance: number;
+}
+
+export interface RelationReference {
+  sourceLabel: string;
+  targetLabel: string;
+  relation: string;
+  weight: number;
+}
+
+export type VerificationState = 'passed' | 'partially_supported' | 'conflicting' | 'insufficient_evidence' | 'failed';
+
+export interface RuntimeSummary {
+  totalSegments: number;
+  totalFacts: number;
+  totalEntities: number;
+  totalRelations: number;
+  stages: RuntimeStageSummary[];
+  policyInterventions: PolicyIntervention[];
+}
+
+export interface RuntimeStageSummary {
+  stage: string;
+  durationMs: number;
+  itemCount: number;
+}
+
+export interface PolicyIntervention {
+  kind: 'rejected' | 'terminated' | 'blocked';
+  reason: string;
+  timestamp: string;
+}
+
+// Admin types
+export interface APIToken {
+  id: string;
+  label: string;
+  tokenPrefix: string;
+  status: 'active' | 'expired' | 'revoked';
+  expiresAt?: string;
+  revokedAt?: string;
+  issuedBy: string;
+  lastUsedAt?: string;
+  grants: TokenGrant[];
+  scopeSummary: string;
+  principalLabel: string;
+}
+
+export interface TokenGrant {
+  scope: 'workspace' | 'library';
+  permission: string;
+}
+
+export interface AIProvider {
+  id: string;
+  displayName: string;
+  kind: string;
+  apiStyle: string;
+  lifecycleState: 'active' | 'deprecated' | 'preview';
+  modelCount: number;
+  credentialCount: number;
+}
+
+export interface AICredential {
+  id: string;
+  providerId: string;
+  providerName: string;
+  label: string;
+  state: 'valid' | 'invalid' | 'unchecked';
+  createdAt: string;
+  updatedAt: string;
+  apiKeySummary: string;
+}
+
+export interface ModelPreset {
+  id: string;
+  providerId: string;
+  model: string;
+  presetName: string;
+  systemPrompt?: string;
+  temperature: number;
+  topP: number;
+  maxOutputTokens?: number;
+  extraParams?: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LibraryBinding {
+  id?: string;
+  purpose: AIPurpose;
+  credentialId?: string;
+  presetId?: string;
+  state: 'configured' | 'unconfigured' | 'invalid';
+  validation?: BindingValidation;
+}
+
+export interface BindingValidation {
+  state: 'valid' | 'invalid' | 'unchecked';
+  checkedAt?: string;
+  failureCode?: string;
+  message?: string;
+}
+
+export interface PricingRule {
+  id: string;
+  provider: string;
+  model: string;
+  billingUnit: string;
+  unitPrice: number;
+  currency: string;
+  effectiveFrom: string;
+  effectiveTo?: string;
+  priceVariant?: string;
+  inputTokenMin?: number;
+  inputTokenMax?: number;
+  sourceOrigin: string;
+}
+
+export interface OperationsSnapshot {
+  queueDepth: number;
+  runningAttempts: number;
+  readableDocCount: number;
+  failedDocCount: number;
+  healthState: 'healthy' | 'degraded' | 'critical';
+  knowledgeGenerationState: string;
+  lastRecomputedAt: string;
+  warnings: string[];
+}
+
+export interface AuditEvent {
+  id: string;
+  action: string;
+  result: 'success' | 'failure';
+  timestamp: string;
+  message: string;
+  subjectSummary: string;
+  actor: string;
+}
+
+export type Locale = string;
+
+export interface LocaleOption {
+  code: string;
+  label: string;
+  nativeLabel: string;
+}
+
+export const AVAILABLE_LOCALES: LocaleOption[] = [
+  { code: 'en', label: 'English', nativeLabel: 'English' },
+  { code: 'ru', label: 'Russian', nativeLabel: 'Русский' },
+];

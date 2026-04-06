@@ -6,22 +6,60 @@
 
 [README](./README.md) • [MCP](./MCP.md) • [MCP-RU](./MCP-RU.md)
 
-<p align="center">
-  <img src="./docs/assets/readme-flow.gif" alt="Демо RustRAG: dashboard, documents, grounded assistant и graph exploration" width="960">
-</p>
+
 
 > RustRAG даёт практическую систему знаний для LLM: один `docker compose up`, один веб-интерфейс, один MCP endpoint и один канонический пайплайн для внутренних ассистентов, саппорта и приватных агентных сценариев.
 
 ## Почему RustRAG
 
-- Поднимается быстро: ArangoDB, Postgres, Redis, Rust-сервисы, UI и MCP стартуют одним стеком.
+- Поднимается быстро: ArangoDB, Postgres, Redis, nginx, SPA на React/Vite и Rust API (Axum) с MCP поднимаются одним стеком.
 - Подходит для реальных knowledge-сценариев: документы и сайты ingest'ятся один раз, а дальше то же каноническое состояние используется для поиска, графа и агентного доступа.
 - Даёт нормальную модель доступа: токены, гранты, ограничение по библиотекам и готовые MCP-сниппеты управляются из продукта.
 - Полезен не только как демо: можно выбирать модели, смотреть затраты по документу, сайту или библиотеке и сразу проверять grounded-ответы во встроенном UI-ассистенте.
 
+## Архитектура
+
+Снаружи открыт **один порт** на **nginx**. `**/`** — SPA на **React + Vite** (статика из образа frontend); `**/v1/*`** — **Rust / Axum** (**REST + MCP**; запросы на `**/mcp`** перенаправляются на `**/v1/mcp**`). **Worker** — тот же образ backend, отдельная роль: потребитель очереди задач.
+
+```text
+                         ┌─────────────────────────┐
+                         │   nginx (edge proxy)    │
+                         │   single host:port      │
+                         └───────────┬─────────────┘
+               ┌─────────────────────┴─────────────────────┐
+               │                                           │
+        GET /* (SPA)                                 /v1/* (API + MCP)
+               │                                           │
+      ┌────────▼─────────┐                       ┌─────────▼──────────┐
+      │    frontend      │                       │      backend       │
+      │  React + Vite    │                       │   Rust / Axum      │
+      │  static bundle   │                       │   API + MCP        │
+      └──────────────────┘                       └─────────┬──────────┘
+                                                           │
+                         ┌─────────────────────────────────┼─────────────────────────────┐
+                         │                                 │                             │
+                  ┌──────▼──────┐                  ┌───────▼───────┐             ┌───────▼───────┐
+                  │  ArangoDB   │                  │   Postgres    │             │    Redis      │
+                  │ graph+vector│                  │ IAM + control │             │ worker queue  │
+                  └─────────────┘                  └───────────────┘             └───────┬───────┘
+                                                                                         │
+                                                                                ┌────────▼────────┐
+                                                                                │     worker      │
+                                                                                │ (same image,    │
+                                                                                │  ingest jobs)   │
+                                                                                └─────────────────┘
+```
+
+Backend и worker оба используют Postgres, Redis, ArangoDB и общий том с контентом.
+
+**Пайплайн ingestion:** загрузка → извлечение текста → чанкинг → эмбеддинги → слияние сущностей и связей → граф и поиск → UI оператора и инструменты MCP.
+
+Одно и то же каноническое состояние документа затем используется и для поиска, и для чтения, и для обновлений, и для навигации по графу.
+
 ## Быстрый старт
 
 Нужен Docker с Compose v2.
+Для локальной сборки используется `Rust 1.94` (`1.94-trixie` в контейнерах).
 
 Выберите один сценарий запуска:
 
@@ -36,10 +74,12 @@ curl -fsSL https://raw.githubusercontent.com/mlimarenko/RustRAG/master/install.s
 Конкретный тег:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mlimarenko/RustRAG/master/install.sh | bash -s -- 0.0.3
+curl -fsSL https://raw.githubusercontent.com/mlimarenko/RustRAG/master/install.sh | bash -s -- 0.1.0
 ```
 
-Скрипт создаёт каталог `./rustrag`, скачивает релизные `docker-compose.yml`, `.env.example` и `docker/nginx/default.conf`, затем поднимает опубликованные Docker Hub образы `pipingspace/rustrag-backend` и `pipingspace/rustrag-frontend`.
+Каталог `./rustrag` из релиза и старт стека. Первый `.env`: случайные `RUSTRAG_POSTGRES_PASSWORD`, `RUSTRAG_ARANGODB_PASSWORD`, `RUSTRAG_BOOTSTRAP_TOKEN`; следующие запуски их не меняют. В конце скрипта — кратко про админа и ключи LLM: в `.env` или в UI.
+
+Занят `19000`: `RUSTRAG_PORT=8080 curl -fsSL https://raw.githubusercontent.com/mlimarenko/RustRAG/master/install.sh | bash`.
 
 ### 2. Запустить готовые образы из клонированного репозитория
 
@@ -54,6 +94,24 @@ docker compose up -d
 cp .env.example .env
 docker compose -f docker-compose-local.yml up --build -d
 ```
+
+### 4. Удалённый хост (Ansible)
+
+Управляющая машина: Ansible. Цель: Docker, Compose v2, `curl`. Из клона:
+
+```bash
+ansible-playbook -i '203.0.113.10,' ansible/deploy.yml -b -u deploy \
+  -e rustrag_install_dir=/opt/rustrag \
+  -e rustrag_public_host=rag.example.com
+```
+
+Тег вместо `latest`:
+
+```bash
+ansible-playbook -i '203.0.113.10,' ansible/deploy.yml -b -e rustrag_release=0.1.0
+```
+
+На хосте выполняется [install.sh](./install.sh); повторный запуск — обновление. Доп. `-e`: `ansible/deploy.yml`.
 
 Откройте:
 
@@ -73,10 +131,10 @@ RUSTRAG_PORT=8080 docker compose up -d
 У RustRAG один канонический стиль переменных приложения: `RUSTRAG_*`.
 
 - `[.env.example](./.env.example)`: простой compose-ориентированный набор. Его копируют в `.env` для релизной установки, локальной сборки или внутреннего деплоя.
-- `[backend/.env.example](./backend/.env.example)`: более полный справочник переменных backend/worker для прямых запусков и тонкой настройки.
+- `[apps/api/.env.example](./apps/api/.env.example)`: более полный справочник переменных API/worker для прямых запусков и тонкой настройки.
 - `[docker-compose.yml](./docker-compose.yml)`: compose-поверхность по умолчанию на готовых Docker Hub образах.
 - `[docker-compose-local.yml](./docker-compose-local.yml)`: compose-поверхность для ручной локальной сборки из исходников.
-- `[backend/src/app/config.rs](./backend/src/app/config.rs)`: встроенные значения по умолчанию.
+- `[apps/api/src/app/config.rs](./apps/api/src/app/config.rs)`: встроенные значения по умолчанию.
 
 Нижний регистр, смешанные алиасы и ad-hoc варианты имён не поддерживаются.
 
@@ -84,33 +142,33 @@ RUSTRAG_PORT=8080 docker compose up -d
 
 - Root `.env`: активный файл интерполяции для compose.
 - `[./.env.example](./.env.example)`: минимальный compose-facing набор.
-- `[./backend/.env.example](./backend/.env.example)`: более полный справочник runtime-конфигурации.
+- `[./apps/api/.env.example](./apps/api/.env.example)`: более полный справочник runtime-конфигурации.
 - `[./docker-compose.yml](./docker-compose.yml)`: дефолтная compose-поверхность на готовых образах.
 - `[./docker-compose-local.yml](./docker-compose-local.yml)`: локальная compose-поверхность со сборкой из исходников.
-- `[./backend/src/app/config.rs](./backend/src/app/config.rs)`: канонические имена настроек и встроенные дефолты.
+- `[./apps/api/src/app/config.rs](./apps/api/src/app/config.rs)`: канонические имена настроек и встроенные дефолты.
 - `docker compose config`: итоговый отрендеренный compose после подстановки `.env`.
 
 ## Релизные образы
 
-- GitHub Releases публикуют `pipingspace/rustrag-backend:<tag>` и `pipingspace/rustrag-frontend:<tag>` в Docker Hub и обновляют теги `latest`.
+- GitHub Releases публикуют `pipingspace/rustrag-backend:<tag>`, собранный из `apps/api`, в Docker Hub и обновляют тег `latest`.
 - `[docker-compose.yml](./docker-compose.yml)` по умолчанию смотрит на этот релизный канал.
-- При необходимости можно зафиксировать другой тег через `RUSTRAG_BACKEND_IMAGE` и `RUSTRAG_FRONTEND_IMAGE` в `.env`.
+- При необходимости можно зафиксировать другой тег через `RUSTRAG_BACKEND_IMAGE` в `.env`.
 
 ## Стек
 
-- Rust backend + worker для ingestion, graph build, query, IAM и MCP.
-- ArangoDB для графа, документной памяти и vector-backed retrieval.
-- Postgres для control plane, IAM, аудита, биллинга и состояния операций.
-- Redis для координации воркеров.
-- Vue 3 + Quasar frontend за Nginx.
 
-## Как работает пайплайн
+| Слой             | Технологии                                                |
+| ---------------- | --------------------------------------------------------- |
+| API + worker     | Rust, Axum, SQLx, асинхронные задачи (`apps/api/`)        |
+| Фронтенд         | React, Vite, Tailwind CSS, shadcn/ui, Radix (`apps/web/`) |
+| Граф и векторы   | ArangoDB 3.12 с экспериментальными векторными индексами   |
+| Control plane    | PostgreSQL 18                                             |
+| Очередь воркеров | Redis 8                                                   |
+| Обратный прокси  | nginx 1.28                                                |
+| Деплой           | Docker Compose, Ansible                                   |
 
-```text
-upload -> text extraction -> chunking -> embeddings -> entity/relation merge -> graph + search -> UI and MCP
-```
 
-Одно и то же каноническое состояние документа затем используется и для поиска, и для чтения, и для обновлений, и для навигации по графу.
+Для локальной сборки из исходников: toolchain **Rust 1.94** (образ `rust:1.94-trixie`), корень workspace — `./` с единым `Cargo.toml`.
 
 ## Поддерживаемые входные данные
 
@@ -149,7 +207,7 @@ make benchmark-grounded-seed
 Что делает команда:
 
 - создаёт новую benchmark-библиотеку, если `RUSTRAG_BENCHMARK_LIBRARY_ID` не задан
-- загружает весь corpus из `backend/benchmarks/grounded_query/corpus`
+- загружает весь corpus из `apps/api/benchmarks/grounded_query/corpus`
 - ждёт, пока библиотека станет читаемой и очередь успокоится
 - пишет сводку в `tmp-grounded-benchmarks/upload.result.json`
 
@@ -171,7 +229,7 @@ make benchmark-grounded-seed
 # загрузить только multiformat fixtures в существующую библиотеку
 make benchmark-grounded-seed \
   RUSTRAG_BENCHMARK_LIBRARY_ID="library-uuid" \
-  RUSTRAG_BENCHMARK_SUITES="backend/benchmarks/grounded_query/multiformat_surface_suite.json"
+  RUSTRAG_BENCHMARK_SUITES="apps/api/benchmarks/grounded_query/multiformat_surface_suite.json"
 ```
 
 После загрузки прогон полного benchmark matrix:
@@ -180,7 +238,7 @@ make benchmark-grounded-seed \
 make benchmark-grounded-all
 ```
 
-Подробности по составу corpus и suite-файлам есть в [backend/benchmarks/grounded_query/README.md](./backend/benchmarks/grounded_query/README.md).
+Подробности по составу corpus и suite-файлам есть в [apps/api/benchmarks/grounded_query/README.md](./apps/api/benchmarks/grounded_query/README.md).
 
 ## MCP для агентов
 
@@ -190,11 +248,31 @@ HTTP MCP встроен в продукт из коробки. Создайте 
 
 Быстрое подключение клиентов описано в [MCP-RU.md](./MCP-RU.md).
 
-## Дальнейшее развитие
+## Дорожная карта
 
-- Планируется редактирование графа прямо в UI для более тонкой ручной настройки knowledge base.
-- В будущем планируется поддержка аудио и видео с включением их в тот же векторный и графовый пайплайн.
-- Также планируется SaaS-модель: систему можно будет либо разворачивать у себя, либо использовать как внешний сервис.
+### 0.2.0 — качество и производительность
+
+- Гибридный поиск (BM25 + слияние с вектором) для лучшего извлечения
+- Реранкер на cross-encoder для фильтрации top-K чанков
+- Синхронизация сущностей с ArangoDB (запись сущностей из графового извлечения в ArangoDB)
+- Стриминг ответов на запросы через SSE
+- Контекст диалога в многоходовых запросах
+- Инкрементальная переобработка (ingest с учётом diff для обновлённых документов)
+- Параллельное графовое извлечение (параллельная обработка чанков)
+- Учёт стоимости эмбеддингов (сейчас учитывается только графовое извлечение)
+- Экспорт и импорт библиотек
+
+### Дальше
+
+- Поддержка извлечения из видео и аудио
+- Определение языка и формата со стратегиями извлечения по типам
+- Чанкинг с учётом кода (на AST для Rust, TypeScript, SQL, Python)
+- Мультитенантная изоляция workspace
+- RBAC с детальными правами на документы
+- Пользовательские промпты извлечения на библиотеку
+- Плагины для своих процессоров документов
+- Поддержка Ollama и локальных моделей
+- Коннекторы Confluence, Notion, Google Drive
 
 ## Contributing
 

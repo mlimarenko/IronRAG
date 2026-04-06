@@ -48,6 +48,74 @@ resolve_release_tag() {
   printf '%s\n' "$tag"
 }
 
+# Hex secret, length in bytes (output is 2*n hex chars). Uses openssl when available.
+rand_hex_bytes() {
+  local nbytes="${1:-24}"
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex "$nbytes"
+    return
+  fi
+  LC_ALL=C tr -dc 'a-f0-9' </dev/urandom | head -c "$((nbytes * 2))"
+}
+
+env_file_set() {
+  local key="$1"
+  local val="$2"
+  local file="$3"
+  if grep -q "^${key}=" "$file" 2>/dev/null; then
+    sed -i "s|^${key}=.*|${key}=${val}|" "$file"
+  else
+    printf '\n%s=%s\n' "$key" "$val" >>"$file"
+  fi
+}
+
+# Value of KEY= from the last matching line (empty if missing).
+env_get() {
+  local key="$1"
+  local file="$2"
+  sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n1 | tr -d '\r'
+}
+
+env_value_nonempty() {
+  local v
+  v="$(env_get "$1" "$2")"
+  [ -n "${v//[[:space:]]/}" ]
+}
+
+sync_frontend_origin_to_port() {
+  local file="$1"
+  local port="$2"
+  local origin="http://127.0.0.1:${port},http://localhost:${port}"
+  env_file_set "RUSTRAG_FRONTEND_ORIGIN" "$origin" "$file"
+}
+
+print_configuration_summary() {
+  local env_file="$1"
+  echo ""
+  echo "---"
+  echo "Stack secrets:"
+  if [ "${RUSTRAG_NEW_ENV_SECRETS:-0}" = "1" ]; then
+    echo "  New .env: random Postgres, Arango, RUSTRAG_BOOTSTRAP_TOKEN (see .env; not printed)."
+  else
+    echo "  Existing .env: secrets unchanged."
+  fi
+  echo "Admin (UI):"
+  if env_value_nonempty "RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD" "$env_file"; then
+    echo "  Set in .env: RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN / _PASSWORD."
+  else
+    echo "  Not in .env: create admin in UI on first visit."
+  fi
+  echo "LLM keys:"
+  if env_value_nonempty "RUSTRAG_OPENAI_API_KEY" "$env_file" \
+    || env_value_nonempty "RUSTRAG_DEEPSEEK_API_KEY" "$env_file" \
+    || env_value_nonempty "RUSTRAG_QWEN_API_KEY" "$env_file"; then
+    echo "  At least one provider key in .env."
+  else
+    echo "  None in .env: set RUSTRAG_*_API_KEY or in UI."
+  fi
+  echo "---"
+}
+
 require_command docker
 docker compose version >/dev/null
 
@@ -67,9 +135,34 @@ download "${RAW_BASE_URL}/docker-compose.yml" "${INSTALL_DIR}/docker-compose.yml
 download "${RAW_BASE_URL}/.env.example" "${INSTALL_DIR}/.env.example"
 download "${RAW_BASE_URL}/docker/nginx/default.conf" "${INSTALL_DIR}/docker/nginx/default.conf"
 
+RUSTRAG_NEW_ENV_SECRETS=0
 if [ ! -f "${INSTALL_DIR}/.env" ]; then
   cp "${INSTALL_DIR}/.env.example" "${INSTALL_DIR}/.env"
+  RUSTRAG_NEW_ENV_SECRETS=1
+  pg_pass="$(rand_hex_bytes 24)"
+  arango_pass="$(rand_hex_bytes 24)"
+  boot_token="$(rand_hex_bytes 24)"
+  env_file_set "RUSTRAG_POSTGRES_PASSWORD" "$pg_pass" "${INSTALL_DIR}/.env"
+  env_file_set "RUSTRAG_ARANGODB_PASSWORD" "$arango_pass" "${INSTALL_DIR}/.env"
+  env_file_set "RUSTRAG_BOOTSTRAP_TOKEN" "$boot_token" "${INSTALL_DIR}/.env"
 fi
+
+# Optional: pin the published HTTP port (Ansible, CI, or manual: RUSTRAG_PORT=8080 install.sh …).
+if [ -n "${RUSTRAG_PORT:-}" ]; then
+  env_file="${INSTALL_DIR}/.env"
+  if grep -q '^RUSTRAG_PORT=' "$env_file" 2>/dev/null; then
+    sed -i "s/^RUSTRAG_PORT=.*/RUSTRAG_PORT=${RUSTRAG_PORT}/" "$env_file"
+  else
+    printf '\nRUSTRAG_PORT=%s\n' "${RUSTRAG_PORT}" >>"$env_file"
+  fi
+fi
+
+published_port="$(
+  sed -n 's/^RUSTRAG_PORT=//p' "${INSTALL_DIR}/.env" 2>/dev/null | tail -n1 | tr -d '\r'
+)"
+published_port="${published_port:-19000}"
+
+sync_frontend_origin_to_port "${INSTALL_DIR}/.env" "$published_port"
 
 (
   cd "$INSTALL_DIR"
@@ -80,6 +173,8 @@ fi
 cat <<EOF
 RustRAG ${VERSION} is starting.
 Directory: ${INSTALL_DIR}
-App: http://127.0.0.1:19000
-MCP: http://127.0.0.1:19000/v1/mcp
+App: http://127.0.0.1:${published_port}
+MCP: http://127.0.0.1:${published_port}/v1/mcp
 EOF
+
+print_configuration_summary "${INSTALL_DIR}/.env"

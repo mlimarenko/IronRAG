@@ -1,7 +1,13 @@
 .git
 .gitlab
-backend/target
-backend/.cargo-target
-frontend/node_modules
-frontend/dist
+.audit
+.env
+.env.*
+!.env.example
+.cargo-check-frontend
+.cargo-target-isolated
+target
+**/target
+**/.cargo-target
 **/.DS_Store
+tmp-*

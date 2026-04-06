@@ -1,0 +1,86 @@
+[package]
+name = "rustrag-backend"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+build = "build.rs"
+
+[features]
+default = []
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_lifetimes = "deny"
+unused_attributes = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "allow", priority = -1 }
+nursery = { level = "allow", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+result_large_err = "allow"
+clone_on_copy = "allow"
+collapsible_if = "allow"
+default_constructed_unit_structs = "allow"
+double_ended_iterator_last = "allow"
+large_enum_variant = "allow"
+let_unit_value = "allow"
+manual_inspect = "allow"
+manual_pattern_char_comparison = "allow"
+manual_contains = "allow"
+needless_borrow = "allow"
+needless_lifetimes = "allow"
+needless_question_mark = "allow"
+obfuscated_if_else = "allow"
+should_implement_trait = "allow"
+unnecessary_lazy_evaluations = "allow"
+
+[dependencies]
+axum = { version = "0.8", features = ["macros", "json", "multipart"] }
+chrono = { version = "0.4", features = ["serde"] }
+config = "0.15"
+http = "1"
+reqwest = { version = "0.13", features = ["json", "rustls"] }
+genai = "0.6.0-beta.14"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "migrate", "macros", "rust_decimal"] }
+thiserror = "2.0"
+tokio = { version = "1.51", features = ["macros", "rt-multi-thread", "signal", "sync", "net", "time"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "json", "env-filter"] }
+uuid = { version = "1.23", features = ["v5", "v7", "serde"] }
+redis = { version = "1.2", features = ["tokio-comp"] }
+anyhow = "1.0"
+futures = "0.3"
+http-body-util = "0.1"
+sha2 = "0.11"
+hex = "0.4"
+async-trait = "0.1"
+rust_decimal = { version = "1", features = ["serde"] }
+cookie = "0.18"
+argon2 = "0.5"
+lopdf = "0.40.0"
+roxmltree = "0.21.1"
+zip = { version = "8.5.0", default-features = false, features = ["deflate"] }
+base64 = "0.22.1"
+tempfile = "3.27.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff"] }
+png = "0.18.1"
+scraper = "0.26.0"
+encoding_rs = "0.8.35"
+unicode-normalization = "0.1"
+url = "2"
+rustrag-contracts = { path = "../../crates/contracts" }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
