@@ -3,12 +3,23 @@ name: Release Docker Images
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Docker tag for both images (e.g. v0.1.0)"
+        required: true
+        type: string
+      push_latest:
+        description: "Also push the latest tag"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-docker-images-${{ github.event.release.tag_name }}
+  group: release-docker-images-${{ github.event.release.tag_name || github.event.inputs.tag }}
   cancel-in-progress: false
 
 jobs:
@@ -48,8 +59,8 @@ jobs:
         with:
           images: ${{ matrix.image }}
           tags: |
-            type=raw,value=${{ github.event.release.tag_name }}
-            type=raw,value=latest,enable=${{ github.event.release.prerelease == false }}
+            type=raw,value=${{ github.event_name == 'release' && github.event.release.tag_name || github.event.inputs.tag }}
+            type=raw,value=latest,enable=${{ (github.event_name == 'release' && github.event.release.prerelease == false) || (github.event_name == 'workflow_dispatch' && github.event.inputs.push_latest) }}
 
       - name: Build and push ${{ matrix.name }} image
         uses: docker/build-push-action@v6
