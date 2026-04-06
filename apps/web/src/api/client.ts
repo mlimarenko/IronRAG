@@ -7,10 +7,20 @@ export class ApiError extends Error {
 }
 
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const mergedHeaders: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (init?.headers) {
+    const h = init.headers as Record<string, string>;
+    for (const [k, v] of Object.entries(h)) {
+      mergedHeaders[k] = v;
+    }
+  }
   const res = await fetch(`${API_BASE}${path}`, {
     credentials: "include",
-    headers: { "Content-Type": "application/json", ...init?.headers },
-    ...init,
+    method: init?.method,
+    body: init?.body,
+    headers: mergedHeaders,
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));

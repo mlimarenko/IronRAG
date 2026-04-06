@@ -40,7 +40,6 @@ export const authApi = {
   bootstrapSetup: (data: { login: string; password: string; displayName: string; aiSetup?: { credentials: Array<{ providerKind: string; apiKey?: string }>; bindingSelections: Array<{ bindingPurpose: string; providerKind: string; modelCatalogId: string }> } }) =>
     apiFetch<LoginResponse>("/iam/bootstrap/setup", {
       method: "POST",
-      headers: { "X-Bootstrap-Token": "bootstrap-local" },
       body: JSON.stringify(data),
     }),
 };
