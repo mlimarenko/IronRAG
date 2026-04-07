@@ -26,13 +26,13 @@ use crate::{
     mcp_types::{
         McpAskRequest, McpAuditActionKind, McpAuditScope, McpCancelWebIngestRunRequest,
         McpCapabilitySnapshot, McpCreateLibraryRequest, McpCreateWorkspaceRequest,
-        McpDeleteDocumentRequest, McpGetGraphTopologyRequest, McpGetMutationStatusRequest,
-        McpGetRuntimeExecutionRequest, McpGetRuntimeExecutionTraceRequest,
-        McpGetWebIngestRunRequest, McpListDocumentsRequest, McpListLibrariesRequest,
-        McpListRelationsRequest, McpListWebIngestRunPagesRequest, McpMutationReceipt,
-        McpReadDocumentRequest, McpSearchDocumentsRequest, McpSearchDocumentsResponse,
-        McpSearchEntitiesRequest, McpSubmitWebIngestRunRequest, McpUpdateDocumentRequest,
-        McpUploadDocumentsRequest,
+        McpDeleteDocumentRequest, McpGetCommunitiesRequest, McpGetGraphTopologyRequest,
+        McpGetMutationStatusRequest, McpGetRuntimeExecutionRequest,
+        McpGetRuntimeExecutionTraceRequest, McpGetWebIngestRunRequest, McpListDocumentsRequest,
+        McpListLibrariesRequest, McpListRelationsRequest, McpListWebIngestRunPagesRequest,
+        McpMutationReceipt, McpReadDocumentRequest, McpSearchDocumentsRequest,
+        McpSearchDocumentsResponse, McpSearchEntitiesRequest, McpSubmitWebIngestRunRequest,
+        McpUpdateDocumentRequest, McpUploadDocumentsRequest,
     },
     services::{
         audit_service::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
@@ -73,6 +73,7 @@ pub const MCP_CANONICAL_TOOL_NAMES: &[&str] = &[
     "search_entities",
     "get_graph_topology",
     "list_relations",
+    "get_communities",
 ];
 
 pub const MCP_CANONICAL_METHOD_NAMES: &[&str] =
@@ -211,6 +212,7 @@ fn visible_tool_names(auth: &AuthContext) -> Vec<String> {
         tools.push("search_entities".to_string());
         tools.push("get_graph_topology".to_string());
         tools.push("list_relations".to_string());
+        tools.push("get_communities".to_string());
     }
     tools
 }
@@ -1028,6 +1030,26 @@ async fn handle_tools_list(
                             "type": "integer",
                             "minimum": 1,
                             "description": "Optional limit on number of relations returned. Defaults to 100."
+                        }
+                    }
+                }),
+            }),
+            "get_communities" => Some(McpToolDescriptor {
+                name: "get_communities",
+                description: "Lists detected communities in the knowledge graph with their summaries, top entities, and sizes.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["libraryId"],
+                    "properties": {
+                        "libraryId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Target library UUID. Also accepts snake_case alias library_id."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Optional limit on number of communities returned. Defaults to 50."
                         }
                     }
                 }),
@@ -2705,6 +2727,86 @@ async fn handle_tools_call(
                     },
                     &error,
                     json!({ "tool": "list_relations" }),
+                )
+                .await;
+                tool_error_result(error)
+            }
+        },
+        "get_communities" => match parse_tool_args::<McpGetCommunitiesRequest>(parsed.arguments) {
+            Ok(args) => {
+                let library_id = args.library_id;
+                let limit = args.limit.unwrap_or(50).clamp(1, 500);
+                match mcp_access::authorize_library_for_mcp(auth, state, library_id).await {
+                    Ok(()) => match mcp_access::get_communities(state, library_id, limit).await {
+                        Ok(payload) => {
+                            record_success_audit(
+                                auth,
+                                state,
+                                request_id,
+                                McpAuditActionKind::GetCommunities,
+                                McpAuditScope {
+                                    workspace_id: auth.workspace_id,
+                                    library_id: Some(library_id),
+                                    document_id: None,
+                                },
+                                json!({
+                                    "tool": "get_communities",
+                                    "communityCount": payload.len(),
+                                }),
+                            )
+                            .await;
+                            ok_tool_result("Communities loaded.", json!({ "communities": payload }))
+                        }
+                        Err(error) => {
+                            record_error_audit(
+                                auth,
+                                state,
+                                request_id,
+                                McpAuditActionKind::GetCommunities,
+                                McpAuditScope {
+                                    workspace_id: auth.workspace_id,
+                                    library_id: Some(library_id),
+                                    document_id: None,
+                                },
+                                &error,
+                                json!({ "tool": "get_communities" }),
+                            )
+                            .await;
+                            tool_error_result(error)
+                        }
+                    },
+                    Err(error) => {
+                        record_error_audit(
+                            auth,
+                            state,
+                            request_id,
+                            McpAuditActionKind::GetCommunities,
+                            McpAuditScope {
+                                workspace_id: auth.workspace_id,
+                                library_id: Some(library_id),
+                                document_id: None,
+                            },
+                            &error,
+                            json!({ "tool": "get_communities" }),
+                        )
+                        .await;
+                        tool_error_result(error)
+                    }
+                }
+            }
+            Err(error) => {
+                record_error_audit(
+                    auth,
+                    state,
+                    request_id,
+                    McpAuditActionKind::GetCommunities,
+                    McpAuditScope {
+                        workspace_id: auth.workspace_id,
+                        library_id: None,
+                        document_id: None,
+                    },
+                    &error,
+                    json!({ "tool": "get_communities" }),
                 )
                 .await;
                 tool_error_result(error)

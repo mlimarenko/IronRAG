@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use serde::Deserialize;
 use serde_json::json;
+use sqlx;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -1691,6 +1692,41 @@ pub async fn list_relations(
         .collect();
 
     Ok(relations)
+}
+
+/// List communities with their summaries for a library.
+pub async fn get_communities(
+    state: &AppState,
+    library_id: Uuid,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>, ApiError> {
+    let communities = sqlx::query_as::<_, (i32, Option<String>, Vec<String>, i32, i32)>(
+        "SELECT community_id, summary, top_entities, node_count, edge_count
+         FROM runtime_graph_community
+         WHERE library_id = $1
+         ORDER BY node_count DESC
+         LIMIT $2",
+    )
+    .bind(library_id)
+    .bind(limit as i64)
+    .fetch_all(&state.persistence.postgres)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+
+    let result: Vec<serde_json::Value> = communities
+        .into_iter()
+        .map(|(cid, summary, top_entities, node_count, edge_count)| {
+            json!({
+                "communityId": cid,
+                "summary": summary,
+                "topEntities": top_entities,
+                "nodeCount": node_count,
+                "edgeCount": edge_count,
+            })
+        })
+        .collect();
+
+    Ok(result)
 }
 
 /// List documents for one library, optionally filtered by readiness status.

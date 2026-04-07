@@ -1063,6 +1063,26 @@ async fn run_canonical_ingest_pipeline(
         }
     }
 
+    // --- Community detection (post entity-resolution) ---
+    if graph_ready {
+        if let Err(error) =
+            crate::services::community_detection::detect_after_ingestion(state, job.library_id)
+                .await
+        {
+            tracing::warn!(library_id = %job.library_id, ?error, "community detection failed, continuing");
+        }
+
+        // Generate community summaries from top entities and relationships
+        if let Err(error) = crate::services::community_detection::generate_community_summaries(
+            state,
+            job.library_id,
+        )
+        .await
+        {
+            tracing::warn!(library_id = %job.library_id, ?error, "community summary generation failed, continuing");
+        }
+    }
+
     // --- Generate document summary from structured blocks ---------------------
     match generate_document_summary_from_blocks(state, revision_id).await {
         Ok(summary) if !summary.is_empty() => {

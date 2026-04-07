@@ -98,6 +98,8 @@ pub struct RuntimeQueryPlan {
     pub keywords: Vec<String>,
     pub high_level_keywords: Vec<String>,
     pub low_level_keywords: Vec<String>,
+    pub entity_keywords: Vec<String>,
+    pub concept_keywords: Vec<String>,
     pub expanded_keywords: Vec<String>,
     pub top_k: usize,
     pub context_budget_chars: usize,
@@ -220,6 +222,8 @@ pub fn build_query_plan(
     let planned_mode = choose_mode(explicit, question);
     let keywords = extract_keywords(question);
     let (high_level_keywords, low_level_keywords) = split_keywords(&keywords);
+    let case_preserving = extract_keywords_preserving_case(question);
+    let (entity_keywords, concept_keywords) = classify_keyword_levels(&case_preserving);
     let expanded_keywords = expand_keywords_with_synonyms(&keywords);
 
     RuntimeQueryPlan {
@@ -229,6 +233,8 @@ pub fn build_query_plan(
         keywords,
         high_level_keywords,
         low_level_keywords,
+        entity_keywords,
+        concept_keywords,
         expanded_keywords,
         top_k: top_k.unwrap_or(DEFAULT_TOP_K).clamp(1, MAX_TOP_K),
         context_budget_chars: DEFAULT_CONTEXT_BUDGET_CHARS,
@@ -249,6 +255,8 @@ pub fn build_query_plan_from_metadata(
     }
 
     let expanded_keywords = expand_keywords_with_synonyms(&keywords);
+    let case_preserving = extract_keywords_preserving_case(question);
+    let (entity_keywords, concept_keywords) = classify_keyword_levels(&case_preserving);
 
     RuntimeQueryPlan {
         requested_mode: metadata.requested_mode,
@@ -257,6 +265,8 @@ pub fn build_query_plan_from_metadata(
         keywords,
         high_level_keywords: metadata.keywords.high_level.clone(),
         low_level_keywords: metadata.keywords.low_level.clone(),
+        entity_keywords,
+        concept_keywords,
         expanded_keywords,
         top_k: top_k.unwrap_or(DEFAULT_TOP_K).clamp(1, MAX_TOP_K),
         context_budget_chars: DEFAULT_CONTEXT_BUDGET_CHARS,
@@ -331,6 +341,60 @@ fn is_multi_document_technical_question(question: &str) -> bool {
         "separately",
     ];
     markers.iter().any(|marker| question.contains(marker))
+}
+
+/// Extracts keywords from a question preserving original case.
+/// Used for entity-vs-concept classification where case matters.
+#[must_use]
+pub fn extract_keywords_preserving_case(question: &str) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    question
+        .split_whitespace()
+        .map(|token| token.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '.'))
+        .filter(|token| token.len() > 2)
+        .filter(|token| !STOP_WORDS.contains(&token.to_ascii_lowercase().as_str()))
+        .filter(|token| seen.insert(token.to_ascii_lowercase()))
+        .map(|token| token.to_string())
+        .collect()
+}
+
+/// Splits keywords into entity-level (specific names, technologies, functions)
+/// and concept-level (abstract themes, topics, patterns).
+#[must_use]
+pub fn classify_keyword_levels(keywords: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut entity_keywords = Vec::new();
+    let mut concept_keywords = Vec::new();
+
+    for keyword in keywords {
+        if is_entity_keyword(keyword) {
+            entity_keywords.push(keyword.to_ascii_lowercase());
+        } else {
+            concept_keywords.push(keyword.to_ascii_lowercase());
+        }
+    }
+
+    (entity_keywords, concept_keywords)
+}
+
+fn is_entity_keyword(keyword: &str) -> bool {
+    // Entity keywords: proper nouns, technical names, specific identifiers
+    // 1. Contains uppercase (likely proper noun): "PostgreSQL", "FastAPI", "OAuth"
+    let has_upper = keyword.chars().any(|c| c.is_ascii_uppercase());
+    // 2. Contains underscore/dot (technical identifier): "build_router", "app.config"
+    let has_technical_chars = keyword.contains('_') || keyword.contains('.');
+    // 3. Contains digits (version, port, ID): "v2.3", "8080", "HTTP2"
+    let has_digits = keyword.chars().any(|c| c.is_ascii_digit());
+    // 4. Starts with / (URL path): "/api/users"
+    let is_path = keyword.starts_with('/');
+    // 5. All caps with 2+ chars (acronym): "JWT", "API", "SQL"
+    let is_acronym =
+        keyword.len() >= 2 && keyword.chars().all(|c| c.is_ascii_uppercase() || c == '_');
+    // 6. CamelCase: "ClassificationPipeline", "UserRole"
+    let is_camel = keyword.len() > 2
+        && keyword.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        && keyword.chars().skip(1).any(|c| c.is_ascii_lowercase());
+
+    has_upper || has_technical_chars || has_digits || is_path || is_acronym || is_camel
 }
 
 fn split_keywords(keywords: &[String]) -> (Vec<String>, Vec<String>) {
@@ -489,5 +553,34 @@ mod tests {
         assert!(plan.keywords.contains(&"kubernetes".to_string()));
         assert!(plan.expanded_keywords.contains(&"k8s".to_string()));
         assert!(plan.expanded_keywords.contains(&"kubernetes".to_string()));
+    }
+
+    #[test]
+    fn classifies_entity_vs_concept_keywords() {
+        let (entities, concepts) = classify_keyword_levels(&[
+            "PostgreSQL".to_string(),
+            "authentication".to_string(),
+            "JWT".to_string(),
+            "security".to_string(),
+            "build_router".to_string(),
+            "performance".to_string(),
+        ]);
+        assert!(entities.contains(&"postgresql".to_string()));
+        assert!(entities.contains(&"jwt".to_string()));
+        assert!(entities.contains(&"build_router".to_string()));
+        assert!(concepts.contains(&"authentication".to_string()));
+        assert!(concepts.contains(&"security".to_string()));
+        assert!(concepts.contains(&"performance".to_string()));
+    }
+
+    #[test]
+    fn query_plan_populates_entity_and_concept_keywords() {
+        let plan =
+            build_query_plan("How does PostgreSQL handle JWT authentication?", None, None, None);
+
+        assert!(plan.entity_keywords.contains(&"postgresql".to_string()));
+        assert!(plan.entity_keywords.contains(&"jwt".to_string()));
+        assert!(plan.concept_keywords.contains(&"authentication".to_string()));
+        assert!(plan.concept_keywords.contains(&"handle".to_string()));
     }
 }
