@@ -83,7 +83,14 @@ impl StructuredPreparationService {
         &self,
         command: PrepareStructuredRevisionCommand,
     ) -> Result<PreparedStructuredRevision, StructuredPreparationError> {
-        let ordered_blocks = build_structured_blocks(&command)?;
+        let mut ordered_blocks = build_structured_blocks(&command)?;
+        // Filter out blocks with empty text — code files can produce empty lines/blocks
+        ordered_blocks
+            .retain(|b| !b.text.trim().is_empty() || !b.normalized_text.trim().is_empty());
+        // Re-number ordinals after filtering
+        for (i, block) in ordered_blocks.iter_mut().enumerate() {
+            block.ordinal = i32::try_from(i).unwrap_or(i32::MAX);
+        }
         let chunk_windows =
             build_structured_chunk_windows(&ordered_blocks, StructuredChunkingProfile::default());
         let prepared_revision = StructuredDocumentRevisionData {
