@@ -393,7 +393,7 @@
     "close": "Закрыть",
     "search": "Поиск",
     "noData": "Нет данных",
-    "version": "RustRAG v0.1.0",
+    "version": "RustRAG v0.1.1",
     "copyright": "\u00a9 {{year}} RustRAG"
   }
 }
