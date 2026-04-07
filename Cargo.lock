@@ -3077,7 +3077,7 @@ dependencies = [
 
 [[package]]
 name = "rustrag-backend"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3121,7 +3121,7 @@ dependencies = [
 
 [[package]]
 name = "rustrag-contracts"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "rust_decimal",

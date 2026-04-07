@@ -393,7 +393,7 @@
     "close": "Close",
     "search": "Search",
     "noData": "No data",
-    "version": "RustRAG v0.1.0",
+    "version": "RustRAG v0.1.1",
     "copyright": "\u00a9 {{year}} RustRAG"
   }
 }

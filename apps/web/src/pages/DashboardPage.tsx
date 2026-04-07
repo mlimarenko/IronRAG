@@ -221,7 +221,7 @@ export default function DashboardPage() {
     readable: overview.readyDocuments,
   };
 
-  const graphReadyPct = stats.total > 0 ? Math.round((stats.graphReady / stats.total) * 100) : 0;
+  const graphReadyPct = stats.total > 0 ? Math.min(100, Math.round((stats.graphReady / stats.total) * 100)) : 0;
 
   return (
     <div className="flex-1 flex flex-col overflow-auto ambient-bg">
@@ -303,10 +303,10 @@ export default function DashboardPage() {
             </div>
             <div className="space-y-4">
               {[
-                { label: t('dashboard.graphReady'), count: stats.graphReady, pct: stats.total > 0 ? (stats.graphReady / stats.total) * 100 : 0, color: 'ready' },
-                { label: t('dashboard.graphSparse'), count: stats.graphSparse, pct: stats.total > 0 ? (stats.graphSparse / stats.total) * 100 : 0, color: 'sparse' },
-                { label: t('dashboard.processing'), count: stats.processing, pct: stats.total > 0 ? (stats.processing / stats.total) * 100 : 0, color: 'processing' },
-                { label: t('dashboard.failed'), count: stats.failed, pct: stats.total > 0 ? (stats.failed / stats.total) * 100 : 0, color: 'failed' },
+                { label: t('dashboard.graphReady'), count: stats.graphReady, pct: stats.total > 0 ? Math.min(100, (stats.graphReady / stats.total) * 100) : 0, color: 'ready' },
+                { label: t('dashboard.graphSparse'), count: stats.graphSparse, pct: stats.total > 0 ? Math.min(100, (stats.graphSparse / stats.total) * 100) : 0, color: 'sparse' },
+                { label: t('dashboard.processing'), count: stats.processing, pct: stats.total > 0 ? Math.min(100, (stats.processing / stats.total) * 100) : 0, color: 'processing' },
+                { label: t('dashboard.failed'), count: stats.failed, pct: stats.total > 0 ? Math.min(100, (stats.failed / stats.total) * 100) : 0, color: 'failed' },
               ].map(d => (
                 <div key={d.label}>
                   <div className="flex justify-between text-xs mb-2">

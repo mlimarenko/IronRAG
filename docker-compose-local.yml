@@ -52,6 +52,7 @@ x-rustrag-worker-env: &rustrag-worker-env
 services:
   postgres:
     image: postgres:18-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_PASSWORD: ${RUSTRAG_POSTGRES_PASSWORD:-postgres}
       POSTGRES_USER: ${RUSTRAG_POSTGRES_USER:-postgres}
@@ -72,13 +73,16 @@ services:
 
   redis:
     image: redis:8.6
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 20
+
   arangodb:
     image: arangodb:3.12.4
+    restart: unless-stopped
     environment:
       ARANGO_ROOT_PASSWORD: ${RUSTRAG_ARANGODB_PASSWORD:-rustrag-dev}
     command:
