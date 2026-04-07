@@ -176,7 +176,7 @@ export interface WebIngestPage {
 
 // Graph types
 export type GraphStatus = 'empty' | 'building' | 'rebuilding' | 'ready' | 'partial' | 'failed' | 'stale';
-export type GraphNodeType = 'document' | 'entity' | 'topic';
+export type GraphNodeType = 'document' | 'person' | 'organization' | 'location' | 'event' | 'artifact' | 'natural' | 'process' | 'concept' | 'attribute' | 'entity';
 
 export interface GraphNode {
   id: string;

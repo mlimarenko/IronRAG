@@ -13,7 +13,8 @@ import {
 import {
   Upload, Link as LinkIcon, Search, FileText, Loader2, XCircle,
   RotateCw, Trash2, Download, Plus, AlertTriangle,
-  CheckCircle2, Clock, X, File, ArrowUpDown, Globe, ExternalLink
+  CheckCircle2, Clock, X, File, ArrowUpDown, Globe, ExternalLink,
+  CheckSquare
 } from 'lucide-react';
 import type { DocumentItem, DocumentReadiness, DocumentStatus } from '@/types';
 
@@ -123,11 +124,15 @@ export default function DocumentsPage() {
   const [inspectorFacts, setInspectorFacts] = useState<number | null>(null);
 
   const [seedUrl, setSeedUrl] = useState('');
-  const [crawlMode, setCrawlMode] = useState('single_page');
+  const [crawlMode, setCrawlMode] = useState('recursive_crawl');
   const [boundaryPolicy, setBoundaryPolicy] = useState('same_host');
   const [maxDepth, setMaxDepth] = useState('3');
   const [maxPages, setMaxPages] = useState('100');
   const [webIngestLoading, setWebIngestLoading] = useState(false);
+
+  // Bulk selection
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [selectionMode, setSelectionMode] = useState(false);
 
   // Web ingest runs
   const [webRuns, setWebRuns] = useState<any[]>([]);
@@ -323,10 +328,10 @@ export default function DocumentsPage() {
       toast.success(t('documents.webIngestStarted'));
       setAddLinkOpen(false);
       setSeedUrl('');
-      setCrawlMode('single_page');
+      setCrawlMode('recursive_crawl');
       setBoundaryPolicy('same_host');
       setMaxDepth('3');
-      setMaxPages('100');
+      setMaxPages('30');
       await fetchDocuments();
     } catch (err: any) {
       toast.error(err?.message || t('documents.webIngestFailed'));
@@ -334,6 +339,66 @@ export default function DocumentsPage() {
       setWebIngestLoading(false);
     }
   }, [activeLibrary, seedUrl, crawlMode, boundaryPolicy, maxDepth, maxPages, fetchDocuments, t]);
+
+  // --- Bulk selection helpers ---
+  const toggleSelection = (id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const clearSelection = () => {
+    setSelectedIds(new Set());
+    setSelectionMode(false);
+  };
+
+  const selectedCount = selectedIds.size;
+
+  // Escape exits selection mode
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && selectionMode) clearSelection();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [selectionMode]);
+
+  const handleBulkDelete = async () => {
+    if (!confirm(t('documents.confirmBulkDelete', { count: selectedCount }))) return;
+    try {
+      await documentsApi.batchDelete(Array.from(selectedIds));
+      toast.success(t('documents.bulkDeleteSuccess', { count: selectedCount }));
+      clearSelection();
+      await fetchDocuments();
+    } catch {
+      toast.error(t('documents.bulkDeleteFailed'));
+    }
+  };
+
+  const handleBulkCancel = async () => {
+    try {
+      await documentsApi.batchCancel(Array.from(selectedIds));
+      toast.success(t('documents.bulkCancelSuccess', { count: selectedCount }));
+      clearSelection();
+      await fetchDocuments();
+    } catch {
+      toast.error(t('documents.bulkCancelFailed'));
+    }
+  };
+
+  const handleBulkReprocess = async () => {
+    try {
+      await documentsApi.batchReprocess(Array.from(selectedIds));
+      toast.success(t('documents.bulkReprocessSuccess', { count: selectedCount }));
+      clearSelection();
+      await fetchDocuments();
+    } catch {
+      toast.error(t('documents.bulkReprocessFailed'));
+    }
+  };
 
   const filtered = documents.filter(d => {
     if (searchQuery && !d.fileName.toLowerCase().includes(searchQuery.toLowerCase())) return false;
@@ -390,7 +455,14 @@ export default function DocumentsPage() {
             <Button size="sm" onClick={() => fileInputRef.current?.click()}>
               <Upload className="h-3.5 w-3.5 mr-1.5" /> {t('documents.upload')}
             </Button>
-            <Button size="sm" variant="outline" onClick={() => setAddLinkOpen(true)}>
+            <Button size="sm" variant="outline" onClick={() => {
+              setSeedUrl('');
+              setCrawlMode('recursive_crawl');
+              setBoundaryPolicy('same_host');
+              setMaxDepth('3');
+              setMaxPages('30');
+              setAddLinkOpen(true);
+            }}>
               <LinkIcon className="h-3.5 w-3.5 mr-1.5" /> {t('documents.addLink')}
             </Button>
             <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
@@ -412,7 +484,15 @@ export default function DocumentsPage() {
           })()}
         </div>
 
-        {/* Web ingest activity strip — will be wired when web-runs API integration is added */}
+        {(() => {
+          const activeRuns = webRuns.filter((r: any) => r.runState !== 'completed' && r.runState !== 'failed');
+          return activeRuns.length > 0 ? (
+            <div className="mt-2 flex items-center gap-2 text-xs px-3 py-2 rounded-xl bg-card border shadow-soft">
+              <Loader2 className="h-3 w-3 animate-spin text-primary" />
+              <span className="font-semibold">{activeRuns.length} web ingest {activeRuns.length === 1 ? 'run' : 'runs'} in progress</span>
+            </div>
+          ) : null;
+        })()}
 
         {/* Upload queue */}
         {uploadQueue.length > 0 && (
@@ -446,6 +526,15 @@ export default function DocumentsPage() {
           ))}
         </div>
         <span className="text-xs text-muted-foreground font-semibold tabular-nums">{filtered.length} {t('documents.of')} {documents.length}</span>
+        <Button
+          size="sm"
+          variant={selectionMode ? 'default' : 'outline'}
+          className="ml-auto h-8 text-xs"
+          onClick={() => selectionMode ? clearSelection() : setSelectionMode(true)}
+        >
+          <CheckSquare className="h-3.5 w-3.5 mr-1.5" />
+          {selectionMode ? t('documents.cancelSelection') : t('documents.select')}
+        </Button>
       </div>
 
       {/* Main area */}
@@ -499,6 +588,22 @@ export default function DocumentsPage() {
                 backdropFilter: 'blur(8px)',
               }}>
                 <tr className="border-b text-left">
+                  {selectionMode && (
+                    <th className="px-4 py-3 w-10">
+                      <input
+                        type="checkbox"
+                        checked={filtered.length > 0 && filtered.every(d => selectedIds.has(d.id))}
+                        onChange={() => {
+                          if (filtered.every(d => selectedIds.has(d.id))) {
+                            setSelectedIds(new Set());
+                          } else {
+                            setSelectedIds(new Set(filtered.map(d => d.id)));
+                          }
+                        }}
+                        className="h-4 w-4 rounded border-gray-300"
+                      />
+                    </th>
+                  )}
                   {[
                     { key: 'fileName', label: t('documents.name') },
                     { key: 'fileType', label: t('documents.type') },
@@ -522,9 +627,23 @@ export default function DocumentsPage() {
                   return (
                     <tr
                       key={doc.id}
-                      className={`border-b cursor-pointer transition-all duration-150 ${selectedDoc?.id === doc.id ? 'bg-primary/5 border-l-2 border-l-primary' : 'hover:bg-accent/30'}`}
-                      onClick={() => handleSelectDoc(doc)}
+                      className={`border-b cursor-pointer transition-all duration-150 ${selectedIds.has(doc.id) ? 'bg-primary/10' : selectedDoc?.id === doc.id ? 'bg-primary/5 border-l-2 border-l-primary' : 'hover:bg-accent/30'}`}
+                      onClick={() => selectionMode ? toggleSelection(doc.id) : handleSelectDoc(doc)}
                     >
+                      {selectionMode && (
+                        <td className="px-4 py-3.5 w-10">
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.has(doc.id)}
+                            onChange={(e) => {
+                              e.stopPropagation();
+                              toggleSelection(doc.id);
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            className="h-4 w-4 rounded border-gray-300"
+                          />
+                        </td>
+                      )}
                       <td className="px-4 py-3.5">
                         <div className="flex items-center gap-3">
                           <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${doc.sourceKind === 'web_page' ? 'bg-blue-100 dark:bg-blue-900/30' : 'bg-surface-sunken'}`}>
@@ -595,8 +714,8 @@ export default function DocumentsPage() {
                         setSeedUrl(run.seedUrl);
                         setCrawlMode(run.mode);
                         setBoundaryPolicy(run.boundaryPolicy || 'same_host');
-                        setMaxDepth(String(run.maxDepth ?? 1));
-                        setMaxPages(String(run.maxPages ?? 10));
+                        setMaxDepth(String(run.maxDepth ?? 3));
+                        setMaxPages(String(run.maxPages ?? 100));
                         setAddLinkOpen(true);
                       }}>
                         <RotateCw className="h-3 w-3" />
@@ -626,7 +745,7 @@ export default function DocumentsPage() {
 
         {/* Inspector panel */}
         {selectedDoc && (
-          <div className="inspector-panel w-80 lg:w-96 shrink-0 hidden md:block overflow-y-auto animate-slide-in-right">
+          <div className={`inspector-panel w-80 lg:w-96 shrink-0 hidden md:block overflow-y-auto animate-slide-in-right ${selectionMode ? 'opacity-40 pointer-events-none' : ''}`}>
             <div className="p-4 border-b flex items-center justify-between">
               <h3 className="text-sm font-bold truncate tracking-tight">{selectedDoc.fileName}</h3>
               <button onClick={() => setSelectedDoc(null)} className="p-1.5 rounded-lg hover:bg-muted transition-colors" aria-label="Close inspector">
@@ -758,6 +877,28 @@ export default function DocumentsPage() {
         )}
       </div>
 
+      {/* Bulk action toolbar */}
+      {selectedCount > 0 && (
+        <div className="sticky bottom-0 z-10 flex items-center gap-3 border-t bg-background px-4 py-3 shadow-lg">
+          <span className="text-sm font-medium tabular-nums">
+            {t('documents.nSelected', { count: selectedCount })}
+          </span>
+          <Button variant="destructive" size="sm" onClick={handleBulkDelete}>
+            <Trash2 className="h-3.5 w-3.5 mr-1.5" /> {t('documents.deleteSelected')}
+          </Button>
+          <Button variant="outline" size="sm" onClick={handleBulkCancel}>
+            <XCircle className="h-3.5 w-3.5 mr-1.5" /> {t('documents.cancelProcessing')}
+          </Button>
+          <Button variant="outline" size="sm" onClick={handleBulkReprocess}>
+            <RotateCw className="h-3.5 w-3.5 mr-1.5" /> {t('documents.retrySelected')}
+          </Button>
+          <div className="flex-1" />
+          <Button variant="ghost" size="sm" onClick={clearSelection}>
+            {t('documents.clearSelection')}
+          </Button>
+        </div>
+      )}
+
       {/* Dialogs */}
       <Dialog open={addLinkOpen} onOpenChange={setAddLinkOpen}>
         <DialogContent className="max-w-md">
@@ -771,10 +912,10 @@ export default function DocumentsPage() {
               <div><Label>{t('documents.mode')}</Label><Select value={crawlMode} onValueChange={setCrawlMode}><SelectTrigger className="mt-2"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="single_page">{t('documents.singlePage')}</SelectItem><SelectItem value="recursive_crawl">{t('documents.recursiveCrawl')}</SelectItem></SelectContent></Select></div>
               <div><Label>{t('documents.boundary')}</Label><Select value={boundaryPolicy} onValueChange={setBoundaryPolicy}><SelectTrigger className="mt-2"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="same_host">{t('documents.sameHost')}</SelectItem><SelectItem value="allow_external">{t('documents.allowExternal')}</SelectItem></SelectContent></Select></div>
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            {crawlMode === 'recursive_crawl' && <div className="grid grid-cols-2 gap-3">
               <div><Label>{t('documents.maxDepth')}</Label><Input type="number" value={maxDepth} onChange={e => setMaxDepth(e.target.value)} min="1" max="10" className="mt-2" /></div>
               <div><Label>{t('documents.maxPages')}</Label><Input type="number" value={maxPages} onChange={e => setMaxPages(e.target.value)} min="1" max="500" className="mt-2" /></div>
-            </div>
+            </div>}
           </div>
           <DialogFooter><Button variant="outline" onClick={() => setAddLinkOpen(false)}>{t('documents.cancel')}</Button><Button disabled={!seedUrl.trim() || webIngestLoading} onClick={handleStartWebIngest}>{webIngestLoading ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> {t('documents.starting')}</> : t('documents.startIngest')}</Button></DialogFooter>
         </DialogContent>

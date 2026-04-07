@@ -2341,8 +2341,24 @@ fn canonical_label_from_node_key(canonical_key: &str) -> String {
 #[must_use]
 fn runtime_node_type_from_candidate_type(candidate_type: &str) -> RuntimeNodeType {
     match candidate_type.trim() {
-        "topic" => RuntimeNodeType::Topic,
         "document" => RuntimeNodeType::Document,
+        "person" => RuntimeNodeType::Person,
+        "organization" => RuntimeNodeType::Organization,
+        "location" => RuntimeNodeType::Location,
+        "event" => RuntimeNodeType::Event,
+        "artifact" => RuntimeNodeType::Artifact,
+        "natural" => RuntimeNodeType::Natural,
+        "process" => RuntimeNodeType::Process,
+        "concept" => RuntimeNodeType::Concept,
+        "attribute" => RuntimeNodeType::Attribute,
+        // Backward compatibility
+        "topic" => RuntimeNodeType::Concept,
+        "technology" => RuntimeNodeType::Artifact,
+        "api" => RuntimeNodeType::Artifact,
+        "code_symbol" => RuntimeNodeType::Artifact,
+        "natural_kind" => RuntimeNodeType::Natural,
+        "metric" => RuntimeNodeType::Attribute,
+        "regulation" => RuntimeNodeType::Artifact,
         _ => RuntimeNodeType::Entity,
     }
 }
@@ -2843,7 +2859,7 @@ mod tests {
     #[test]
     fn reconcile_entity_candidate_row_prefers_entity_for_label_type_collisions() {
         let mut entity_key_index = graph_identity::GraphLabelNodeTypeIndex::new();
-        entity_key_index.insert("Касса", RuntimeNodeType::Topic);
+        entity_key_index.insert("Касса", RuntimeNodeType::Concept);
         entity_key_index.insert("Касса", RuntimeNodeType::Entity);
         let row = KnowledgeEntityCandidateRow {
             key: Uuid::now_v7().to_string(),
@@ -3113,10 +3129,10 @@ mod tests {
         assert_eq!(relation.subject_label, "Первый печатный двор");
         assert_eq!(relation.object_label, "Касса");
         assert_eq!(relation.subject_candidate_key, "entity:первый_печатный_двор");
-        assert_eq!(relation.object_candidate_key, "topic:касса");
+        assert_eq!(relation.object_candidate_key, "concept:касса");
         assert_eq!(
             relation.normalized_assertion,
-            "entity:первый_печатный_двор--mentions--topic:касса"
+            "entity:первый_печатный_двор--mentions--concept:касса"
         );
     }
 
@@ -3130,13 +3146,13 @@ mod tests {
         };
         let topic = GraphEntityCandidate {
             label: "Первый печатный двор".to_string(),
-            node_type: RuntimeNodeType::Topic,
+            node_type: RuntimeNodeType::Concept,
             aliases: vec![],
             summary: None,
         };
 
         assert_eq!(canonical_entity_normalization_key(&entity), "entity:первый_печатный_двор");
-        assert_eq!(canonical_entity_normalization_key(&topic), "topic:первый_печатный_двор");
+        assert_eq!(canonical_entity_normalization_key(&topic), "concept:первый_печатный_двор");
     }
 
     #[test]
@@ -3182,6 +3198,7 @@ mod tests {
             chunk_state: "ready".to_string(),
             text_generation: Some(1),
             vector_generation: Some(1),
+            quality_score: None,
         };
         let fact = TypedTechnicalFact {
             fact_id,

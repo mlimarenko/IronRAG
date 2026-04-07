@@ -4,6 +4,7 @@ pub mod billing_service;
 pub mod catalog_service;
 pub mod content_service;
 pub mod content_storage;
+pub(crate) mod entity_resolution;
 pub mod extract_service;
 pub(crate) mod extraction_recovery;
 pub(crate) mod graph_extract;

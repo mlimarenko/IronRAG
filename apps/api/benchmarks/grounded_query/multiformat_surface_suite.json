@@ -3,14 +3,14 @@
   "description": "Strict benchmark for canonical upload and extraction behavior across synthetic PDF, DOCX, PPTX, PNG, and JPG fixtures.",
   "strictBlocking": true,
   "documents": [
-    "corpus/upload_smoke_fixture.pdf",
-    "corpus/upload_smoke_fixture.docx",
-    "corpus/upload_smoke_fixture.png",
-    "corpus/runtime_upload_check.pdf",
-    "corpus/runtime_upload_check.docx",
-    "corpus/runtime_upload_check.pptx",
-    "corpus/runtime_upload_check.png",
-    "corpus/runtime_upload_check.jpg"
+    "corpus/fixtures/upload_smoke_fixture.pdf",
+    "corpus/fixtures/upload_smoke_fixture.docx",
+    "corpus/fixtures/upload_smoke_fixture.png",
+    "corpus/fixtures/runtime_upload_check.pdf",
+    "corpus/fixtures/runtime_upload_check.docx",
+    "corpus/fixtures/runtime_upload_check.pptx",
+    "corpus/fixtures/runtime_upload_check.png",
+    "corpus/fixtures/runtime_upload_check.jpg"
   ],
   "cases": [
     {

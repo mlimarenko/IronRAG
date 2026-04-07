@@ -438,6 +438,15 @@ async fn execute_canonical_ingest_job(
         }
     });
 
+    // Check if the job was cancelled while queued
+    let current_job = ingest_repository::get_ingest_job_by_id(&state.persistence.postgres, job.id)
+        .await
+        .context("failed to reload ingest job for cancellation check")?;
+    if current_job.as_ref().is_some_and(|j| j.queue_state == "cancelled") {
+        info!(job_id = %job.id, "skipping cancelled ingest job");
+        return Ok(());
+    }
+
     let result = match job.job_kind.as_str() {
         "content_mutation" => {
             let revision_id = job
@@ -446,6 +455,17 @@ async fn execute_canonical_ingest_job(
             let document_id = job
                 .knowledge_document_id
                 .context("canonical ingest job is missing knowledge_document_id")?;
+
+            // Check if document was deleted while job was queued
+            let document =
+                content_repository::get_document_by_id(&state.persistence.postgres, document_id)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("failed to load document"))?;
+            if document.as_ref().is_some_and(|d| d.document_state == "deleted") {
+                info!(document_id = %document_id, "skipping deleted document");
+                return Ok(());
+            }
+
             run_canonical_ingest_pipeline(
                 &state,
                 worker_id,
@@ -1034,6 +1054,34 @@ async fn run_canonical_ingest_pipeline(
         }
     }
 
+    // --- Entity resolution (post-graph) ---
+    if graph_ready {
+        if let Err(error) =
+            crate::services::entity_resolution::resolve_after_ingestion(state, job.library_id).await
+        {
+            tracing::warn!(library_id = %job.library_id, ?error, "entity resolution failed, continuing");
+        }
+    }
+
+    // --- Generate document summary from structured blocks ---------------------
+    match generate_document_summary_from_blocks(state, revision_id).await {
+        Ok(summary) if !summary.is_empty() => {
+            if let Err(error) = content_repository::update_document_summary(
+                &state.persistence.postgres,
+                document_id,
+                &summary,
+            )
+            .await
+            {
+                tracing::warn!(document_id = %document_id, ?error, "failed to persist document summary");
+            }
+        }
+        Err(error) => {
+            tracing::warn!(document_id = %document_id, ?error, "failed to generate document summary");
+        }
+        _ => {}
+    }
+
     // --- Stage: finalize readiness --------------------------------------------
     let now = Utc::now();
     let _ = state
@@ -1081,7 +1129,7 @@ async fn run_canonical_ingest_pipeline(
     }
 
     // Promote the document head through the canonical service so Postgres and Arango stay aligned.
-    let _ = state
+    if let Err(error) = state
         .canonical_services
         .content
         .promote_document_head(
@@ -1094,7 +1142,10 @@ async fn run_canonical_ingest_pipeline(
                 latest_successful_attempt_id: Some(attempt_id),
             },
         )
-        .await;
+        .await
+    {
+        tracing::error!(document_id = %document_id, ?error, "failed to promote document head — Postgres/Arango may diverge");
+    }
     state
         .canonical_services
         .content
@@ -1195,4 +1246,54 @@ async fn resolve_canonical_extract_content(
             "storageRef": storage_ref,
         }),
     })
+}
+
+/// Generates a document summary from structured blocks without LLM calls.
+/// Extracts the document title (first heading) and leading paragraphs to build
+/// a concise summary of what the document contains.
+async fn generate_document_summary_from_blocks(
+    state: &AppState,
+    revision_id: Uuid,
+) -> anyhow::Result<String> {
+    let blocks = state
+        .arango_document_store
+        .list_structured_blocks_by_revision(revision_id)
+        .await
+        .unwrap_or_default();
+
+    if blocks.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut parts = Vec::new();
+    let mut chars_used = 0_usize;
+    let max_summary_chars = 600;
+
+    for block in &blocks {
+        if chars_used >= max_summary_chars {
+            break;
+        }
+
+        let text = block.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+
+        // Skip very short non-heading blocks
+        if text.len() < 10 && block.block_kind != "heading" {
+            continue;
+        }
+
+        let remaining = max_summary_chars.saturating_sub(chars_used);
+        let truncated = if text.len() > remaining {
+            &text[..text.floor_char_boundary(remaining)]
+        } else {
+            text
+        };
+
+        parts.push(truncated.to_string());
+        chars_used += truncated.len();
+    }
+
+    Ok(parts.join(" ").trim().to_string())
 }

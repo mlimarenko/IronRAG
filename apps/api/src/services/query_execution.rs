@@ -5,10 +5,7 @@ use futures::future::join_all;
 use uuid::Uuid;
 
 use crate::{
-    agent_runtime::{
-        pipeline::try_op::{run_async_try_op, run_try_op},
-        request::build_provider_request,
-    },
+    agent_runtime::{pipeline::try_op::run_async_try_op, request::build_provider_request},
     app::state::AppState,
     domains::{
         agent_runtime::RuntimeTaskKind,
@@ -177,6 +174,7 @@ struct AnswerGenerationStage {
 #[derive(Debug, Clone)]
 struct AnswerVerificationStage {
     generation: AnswerGenerationStage,
+    verification_warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -296,9 +294,10 @@ async fn execute_structured_query(
         retrieve_structured_query(state, library_id, question, planning_stage)
     })
     .await?;
-    let reranked_stage = run_try_op(retrieval_stage, |retrieval_stage| {
+    let reranked_stage = run_async_try_op(retrieval_stage, |retrieval_stage| {
         rerank_structured_query(state, question, retrieval_stage)
-    })?;
+    })
+    .await?;
     let assembled_stage = run_async_try_op(reranked_stage, |reranked_stage| {
         assemble_structured_query(state, question, reranked_stage, include_debug)
     })
@@ -503,7 +502,7 @@ async fn retrieve_structured_query(
     Ok(StructuredQueryRetrievalStage { planning, bundle })
 }
 
-fn rerank_structured_query(
+async fn rerank_structured_query(
     state: &AppState,
     question: &str,
     mut retrieval: StructuredQueryRetrievalStage,
@@ -672,8 +671,14 @@ pub(crate) async fn generate_answer_query(
     })
     .await?;
 
+    let mut answer = verified.generation.answer;
+    if !verified.verification_warnings.is_empty() {
+        let joined = verified.verification_warnings.join("; ");
+        answer.push_str(&format!("\n\n---\n\u{26a0}\u{fe0f} Verification notes: {joined}"));
+    }
+
     Ok(RuntimeAnswerQueryResult {
-        answer: verified.generation.answer,
+        answer,
         provider: verified.generation.provider,
         usage_json: verified.generation.usage_json,
     })
@@ -818,8 +823,9 @@ async fn verify_generated_answer(
     persist_query_verification(state, execution_id, &verification, &generation.canonical_evidence)
         .await?;
 
-    let _ = verification;
-    Ok(AnswerVerificationStage { generation })
+    let warnings: Vec<String> =
+        verification.warnings.iter().map(|warning| warning.message.clone()).collect();
+    Ok(AnswerVerificationStage { generation, verification_warnings: warnings })
 }
 
 async fn load_canonical_answer_chunks(
@@ -1056,6 +1062,10 @@ fn build_canonical_answer_context(
 
     if let Some(document_label) = focused_document_label.as_deref() {
         sections.push(format!("Focused grounded document\n- {document_label}"));
+        sections.push(
+            "When a document summary is available in the context, use it to frame the answer."
+                .to_string(),
+        );
     }
 
     let technical_fact_section = render_canonical_technical_fact_section(&filtered_technical_facts);
@@ -1753,6 +1763,12 @@ fn build_lexical_queries(question: &str, plan: &RuntimeQueryPlan) -> Vec<String>
     for keyword in plan.keywords.iter().take(8) {
         push_query(keyword.clone());
     }
+    // Add expanded synonyms as additional search queries for broader recall.
+    for expanded in plan.expanded_keywords.iter().take(12) {
+        if !plan.keywords.contains(expanded) {
+            push_query(expanded.clone());
+        }
+    }
 
     queries
 }
@@ -2228,6 +2244,7 @@ Do not combine parts from different snippets into a synthetic URL, endpoint, pat
 If a literal does not appear verbatim in Context, do not invent it; state that the exact value is not grounded in the active library.\n\
 If nearby snippets describe different examples or operations, answer only from the snippet that directly matches the user's condition and ignore unrelated adjacent error payloads or examples.\n\
 For definition questions, preserve concrete enumerations, examples, and listed categories from Context instead of collapsing them into a generic paraphrase.\n\
+When context includes a document summary, use it to understand the document's purpose before answering.\n\
 When Context includes a short title, report name, validation target, or formats-under-test line for the focused document, answer with that literal directly.\n\
 \n{}\nContext:\n{}\n\
 \nQuestion: {}",
@@ -5154,6 +5171,7 @@ fn sample_chunk_row(chunk_id: Uuid, document_id: Uuid, revision_id: Uuid) -> Kno
         chunk_state: "ready".to_string(),
         text_generation: Some(1),
         vector_generation: Some(1),
+        quality_score: None,
     }
 }
 
@@ -5322,18 +5340,45 @@ fn merge_chunks(
     right: Vec<RuntimeMatchedChunk>,
     top_k: usize,
 ) -> Vec<RuntimeMatchedChunk> {
-    let mut merged = HashMap::new();
-    for item in left.into_iter().chain(right) {
-        merged
-            .entry(item.chunk_id)
-            .and_modify(|existing: &mut RuntimeMatchedChunk| {
-                if score_value(item.score) > score_value(existing.score) {
-                    *existing = item.clone();
-                }
-            })
-            .or_insert(item);
+    rrf_merge_chunks(left, right, top_k)
+}
+
+/// Reciprocal Rank Fusion: merges two ranked lists into a single ranking.
+/// Each document's score is `1/(k + rank_in_list)` summed across both lists.
+/// This normalizes across different scoring scales (BM25 vs cosine similarity).
+fn rrf_merge_chunks(
+    vector_hits: Vec<RuntimeMatchedChunk>,
+    lexical_hits: Vec<RuntimeMatchedChunk>,
+    top_k: usize,
+) -> Vec<RuntimeMatchedChunk> {
+    const RRF_K: f32 = 60.0;
+
+    let mut rrf_scores: HashMap<Uuid, f32> = HashMap::new();
+    let mut chunks_by_id: HashMap<Uuid, RuntimeMatchedChunk> = HashMap::new();
+
+    // Score vector hits by their rank position
+    for (rank, chunk) in vector_hits.into_iter().enumerate() {
+        let rrf_score = 1.0 / (RRF_K + rank as f32 + 1.0);
+        *rrf_scores.entry(chunk.chunk_id).or_default() += rrf_score;
+        chunks_by_id.entry(chunk.chunk_id).or_insert(chunk);
     }
-    let mut values = merged.into_values().collect::<Vec<_>>();
+
+    // Score lexical hits by their rank position
+    for (rank, chunk) in lexical_hits.into_iter().enumerate() {
+        let rrf_score = 1.0 / (RRF_K + rank as f32 + 1.0);
+        *rrf_scores.entry(chunk.chunk_id).or_default() += rrf_score;
+        chunks_by_id.entry(chunk.chunk_id).or_insert(chunk);
+    }
+
+    // Apply RRF scores back to chunks
+    let mut values: Vec<RuntimeMatchedChunk> = chunks_by_id
+        .into_values()
+        .map(|mut chunk| {
+            chunk.score = rrf_scores.get(&chunk.chunk_id).copied();
+            chunk
+        })
+        .collect();
+
     values.sort_by(score_desc_chunks);
     values.truncate(top_k);
     values
@@ -6221,6 +6266,7 @@ Trailing details";
             keywords: vec!["rustrag".to_string(), "graph".to_string()],
             high_level_keywords: vec!["rustrag".to_string()],
             low_level_keywords: vec!["graph".to_string()],
+            expanded_keywords: vec!["rustrag".to_string(), "graph".to_string()],
             top_k: 8,
             context_budget_chars: 6_000,
         };
@@ -6938,6 +6984,7 @@ Trailing details";
                     chunk_state: "active".to_string(),
                     text_generation: Some(1),
                     vector_generation: Some(1),
+                    quality_score: None,
                 }],
                 structured_blocks: Vec::new(),
                 technical_facts: Vec::new(),
@@ -7150,6 +7197,12 @@ Trailing details";
             ],
             high_level_keywords: vec!["program".to_string(), "profile".to_string()],
             low_level_keywords: vec!["discount".to_string(), "tier".to_string()],
+            expanded_keywords: vec![
+                "discount".to_string(),
+                "profile".to_string(),
+                "program".to_string(),
+                "tier".to_string(),
+            ],
             top_k: 48,
             context_budget_chars: 22_000,
         };
@@ -7176,6 +7229,7 @@ Trailing details";
             keywords: Vec::new(),
             high_level_keywords: Vec::new(),
             low_level_keywords: Vec::new(),
+            expanded_keywords: Vec::new(),
             top_k: 8,
             context_budget_chars: 22_000,
         };
@@ -7348,6 +7402,7 @@ Trailing details";
                     chunk_state: "active".to_string(),
                     text_generation: Some(1),
                     vector_generation: Some(1),
+                    quality_score: None,
                 }],
                 structured_blocks: Vec::new(),
                 technical_facts: Vec::new(),

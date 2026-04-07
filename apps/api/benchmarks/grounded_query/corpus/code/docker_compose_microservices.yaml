@@ -1,0 +1,614 @@
+# =============================================================================
+# Docker Compose for a microservices architecture with 12 services.
+#
+# Architecture decisions:
+# - API Gateway (Kong) as the single entry point on port 8000/8443.
+# - Auth service handles JWT issuance, validation, and user sessions.
+# - User service manages profiles, preferences, and account settings.
+# - Order service handles order lifecycle with saga orchestration.
+# - Payment service integrates with Stripe and manages transactions.
+# - Notification service sends email (SMTP), SMS (Twilio), and push notifications.
+# - Inventory service tracks stock levels and reservations.
+# - PostgreSQL as the primary relational database on port 5432.
+# - Redis for caching, sessions, and pub/sub on port 6379.
+# - RabbitMQ for asynchronous messaging on ports 5672/15672.
+# - Elasticsearch for full-text search and logging on port 9200.
+# - Kibana for log visualization on port 5601.
+#
+# Networks:
+# - frontend: API gateway and external-facing services.
+# - backend: Inter-service communication.
+# - data: Database and cache connections.
+# - monitoring: Elasticsearch, Kibana, and metrics.
+#
+# All services include health checks, resource limits, and restart policies.
+# Configuration is driven by environment variables with .env file support.
+# =============================================================================
+
+version: "3.8"
+
+# ---------------------------------------------------------------------------
+# Networks
+# ---------------------------------------------------------------------------
+networks:
+  frontend:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+  backend:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.1.0/24
+  data:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.2.0/24
+  monitoring:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.3.0/24
+
+# ---------------------------------------------------------------------------
+# Volumes
+# ---------------------------------------------------------------------------
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  rabbitmq_data:
+    driver: local
+  elasticsearch_data:
+    driver: local
+  kong_data:
+    driver: local
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+services:
+  # =========================================================================
+  # Infrastructure: PostgreSQL
+  # Primary relational database for auth, user, order, payment, and inventory
+  # services. Each service uses a separate database within the same instance.
+  # Port: 5432
+  # =========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: microservices-postgres
+    restart: unless-stopped
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_in_production}
+      POSTGRES_DB: ${POSTGRES_DB:-app_main}
+      # Create multiple databases on init
+      POSTGRES_MULTIPLE_DATABASES: auth_db,user_db,order_db,payment_db,inventory_db
+      PGDATA: /var/lib/postgresql/data/pgdata
+      # Performance tuning
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+      # Custom postgresql.conf settings via environment
+      POSTGRES_SHARED_BUFFERS: ${POSTGRES_SHARED_BUFFERS:-256MB}
+      POSTGRES_WORK_MEM: ${POSTGRES_WORK_MEM:-4MB}
+      POSTGRES_MAX_CONNECTIONS: ${POSTGRES_MAX_CONNECTIONS:-200}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin} -d ${POSTGRES_DB:-app_main}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  # =========================================================================
+  # Infrastructure: Redis
+  # Used for session storage, caching, rate limiting, and pub/sub messaging.
+  # Port: 6379
+  # =========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: microservices-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:-changeme_redis}
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --appendfsync everysec
+    volumes:
+      - redis_data:/data
+    networks:
+      - data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-changeme_redis}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+
+  # =========================================================================
+  # Infrastructure: RabbitMQ
+  # Message broker for async communication between services.
+  # AMQP port: 5672, Management UI port: 15672
+  # =========================================================================
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: microservices-rabbitmq
+    restart: unless-stopped
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_MGMT_PORT:-15672}:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-rabbit_admin}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-changeme_rabbit}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/microservices}
+      RABBITMQ_VM_MEMORY_HIGH_WATERMARK: 0.6
+      RABBITMQ_DISK_FREE_LIMIT: 1GB
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - data
+      - backend
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  # =========================================================================
+  # Infrastructure: Elasticsearch
+  # Full-text search engine and centralized logging backend.
+  # HTTP port: 9200, Transport port: 9300
+  # =========================================================================
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.0
+    container_name: microservices-elasticsearch
+    restart: unless-stopped
+    ports:
+      - "${ELASTICSEARCH_PORT:-9200}:9200"
+      - "9300:9300"
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - cluster.name=microservices-logs
+      - bootstrap.memory_lock=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - monitoring
+      - data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\"\\|\"status\":\"yellow\"'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 1G
+
+  # =========================================================================
+  # Infrastructure: Kibana
+  # Log visualization and analytics dashboard.
+  # Port: 5601
+  # =========================================================================
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.12.0
+    container_name: microservices-kibana
+    restart: unless-stopped
+    ports:
+      - "${KIBANA_PORT:-5601}:5601"
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+      XPACK_SECURITY_ENABLED: "false"
+      SERVER_NAME: microservices-kibana
+      LOGGING_QUIET: "true"
+    networks:
+      - monitoring
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:5601/api/status | grep -q 'available'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 512M
+
+  # =========================================================================
+  # API Gateway: Kong
+  # Single entry point for all client requests. Handles routing, rate
+  # limiting, authentication forwarding, and request/response transformation.
+  # HTTP port: 8000, HTTPS port: 8443, Admin port: 8001
+  # =========================================================================
+  api-gateway:
+    image: kong:3.6-alpine
+    container_name: microservices-api-gateway
+    restart: unless-stopped
+    ports:
+      - "${API_GATEWAY_HTTP_PORT:-8000}:8000"
+      - "${API_GATEWAY_HTTPS_PORT:-8443}:8443"
+      - "${API_GATEWAY_ADMIN_PORT:-8001}:8001"
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/declarative/kong.yml
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_LISTEN: 0.0.0.0:8001
+      KONG_LOG_LEVEL: ${KONG_LOG_LEVEL:-info}
+      KONG_PLUGINS: bundled,jwt,rate-limiting,cors,request-transformer
+    volumes:
+      - kong_data:/kong/declarative
+    networks:
+      - frontend
+      - backend
+    depends_on:
+      auth-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+
+  # =========================================================================
+  # Auth Service
+  # Handles user authentication, JWT issuance, token refresh, session
+  # management, and OAuth2 provider integration.
+  # Internal port: 3001
+  # =========================================================================
+  auth-service:
+    image: ${REGISTRY:-localhost:5000}/auth-service:${AUTH_SERVICE_VERSION:-latest}
+    container_name: microservices-auth
+    restart: unless-stopped
+    expose:
+      - "3001"
+    environment:
+      PORT: 3001
+      NODE_ENV: ${NODE_ENV:-production}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-changeme_in_production}@postgres:5432/auth_db
+      REDIS_URL: redis://:${REDIS_PASSWORD:-changeme_redis}@redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-change_this_jwt_secret_in_production}
+      JWT_EXPIRY: ${JWT_EXPIRY:-3600}
+      REFRESH_TOKEN_EXPIRY: ${REFRESH_TOKEN_EXPIRY:-604800}
+      BCRYPT_ROUNDS: ${BCRYPT_ROUNDS:-12}
+      RATE_LIMIT_MAX: ${AUTH_RATE_LIMIT:-100}
+      RATE_LIMIT_WINDOW_MS: 60000
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-rabbit_admin}:${RABBITMQ_PASSWORD:-changeme_rabbit}@rabbitmq:5672/${RABBITMQ_VHOST:-/microservices}
+    networks:
+      - backend
+      - data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3001/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+
+  # =========================================================================
+  # User Service
+  # Manages user profiles, preferences, avatar uploads, and account settings.
+  # Internal port: 3002
+  # =========================================================================
+  user-service:
+    image: ${REGISTRY:-localhost:5000}/user-service:${USER_SERVICE_VERSION:-latest}
+    container_name: microservices-user
+    restart: unless-stopped
+    expose:
+      - "3002"
+    environment:
+      PORT: 3002
+      NODE_ENV: ${NODE_ENV:-production}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-changeme_in_production}@postgres:5432/user_db
+      REDIS_URL: redis://:${REDIS_PASSWORD:-changeme_redis}@redis:6379/1
+      AUTH_SERVICE_URL: http://auth-service:3001
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      S3_BUCKET: ${USER_AVATARS_BUCKET:-user-avatars}
+      S3_REGION: ${AWS_REGION:-us-east-1}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-rabbit_admin}:${RABBITMQ_PASSWORD:-changeme_rabbit}@rabbitmq:5672/${RABBITMQ_VHOST:-/microservices}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    networks:
+      - backend
+      - data
+      - monitoring
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3002/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+
+  # =========================================================================
+  # Order Service
+  # Handles order lifecycle management with saga orchestration for
+  # distributed transactions across payment and inventory services.
+  # Internal port: 3003
+  # =========================================================================
+  order-service:
+    image: ${REGISTRY:-localhost:5000}/order-service:${ORDER_SERVICE_VERSION:-latest}
+    container_name: microservices-order
+    restart: unless-stopped
+    expose:
+      - "3003"
+    environment:
+      PORT: 3003
+      NODE_ENV: ${NODE_ENV:-production}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-changeme_in_production}@postgres:5432/order_db
+      REDIS_URL: redis://:${REDIS_PASSWORD:-changeme_redis}@redis:6379/2
+      AUTH_SERVICE_URL: http://auth-service:3001
+      PAYMENT_SERVICE_URL: http://payment-service:3004
+      INVENTORY_SERVICE_URL: http://inventory-service:3006
+      NOTIFICATION_SERVICE_URL: http://notification-service:3005
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-rabbit_admin}:${RABBITMQ_PASSWORD:-changeme_rabbit}@rabbitmq:5672/${RABBITMQ_VHOST:-/microservices}
+      ORDER_TIMEOUT_SECONDS: ${ORDER_TIMEOUT_SECONDS:-3600}
+      MAX_RETRY_ATTEMPTS: ${MAX_RETRY_ATTEMPTS:-3}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    networks:
+      - backend
+      - data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3003/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+
+  # =========================================================================
+  # Payment Service
+  # Integrates with Stripe for payment processing. Handles charges, refunds,
+  # webhook events, and transaction history.
+  # Internal port: 3004
+  # =========================================================================
+  payment-service:
+    image: ${REGISTRY:-localhost:5000}/payment-service:${PAYMENT_SERVICE_VERSION:-latest}
+    container_name: microservices-payment
+    restart: unless-stopped
+    expose:
+      - "3004"
+    environment:
+      PORT: 3004
+      NODE_ENV: ${NODE_ENV:-production}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-changeme_in_production}@postgres:5432/payment_db
+      REDIS_URL: redis://:${REDIS_PASSWORD:-changeme_redis}@redis:6379/3
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-sk_test_placeholder}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-whsec_placeholder}
+      AUTH_SERVICE_URL: http://auth-service:3001
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-rabbit_admin}:${RABBITMQ_PASSWORD:-changeme_rabbit}@rabbitmq:5672/${RABBITMQ_VHOST:-/microservices}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    networks:
+      - backend
+      - data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3004/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+
+  # =========================================================================
+  # Notification Service
+  # Sends notifications via email (SMTP/SendGrid), SMS (Twilio), and push
+  # notifications (Firebase). Consumes events from RabbitMQ.
+  # Internal port: 3005
+  # =========================================================================
+  notification-service:
+    image: ${REGISTRY:-localhost:5000}/notification-service:${NOTIFICATION_SERVICE_VERSION:-latest}
+    container_name: microservices-notification
+    restart: unless-stopped
+    expose:
+      - "3005"
+    environment:
+      PORT: 3005
+      NODE_ENV: ${NODE_ENV:-production}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-changeme_redis}@redis:6379/4
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-rabbit_admin}:${RABBITMQ_PASSWORD:-changeme_rabbit}@rabbitmq:5672/${RABBITMQ_VHOST:-/microservices}
+      SMTP_HOST: ${SMTP_HOST:-smtp.sendgrid.net}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-apikey}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-noreply@example.com}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
+      NOTIFICATION_BATCH_SIZE: ${NOTIFICATION_BATCH_SIZE:-100}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    networks:
+      - backend
+      - data
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3005/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+
+  # =========================================================================
+  # Inventory Service
+  # Tracks product stock levels, reservations, and warehouse locations.
+  # Supports optimistic locking for concurrent stock updates.
+  # Internal port: 3006
+  # =========================================================================
+  inventory-service:
+    image: ${REGISTRY:-localhost:5000}/inventory-service:${INVENTORY_SERVICE_VERSION:-latest}
+    container_name: microservices-inventory
+    restart: unless-stopped
+    expose:
+      - "3006"
+    environment:
+      PORT: 3006
+      NODE_ENV: ${NODE_ENV:-production}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-changeme_in_production}@postgres:5432/inventory_db
+      REDIS_URL: redis://:${REDIS_PASSWORD:-changeme_redis}@redis:6379/5
+      AUTH_SERVICE_URL: http://auth-service:3001
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-rabbit_admin}:${RABBITMQ_PASSWORD:-changeme_rabbit}@rabbitmq:5672/${RABBITMQ_VHOST:-/microservices}
+      STOCK_RESERVATION_TTL_SECONDS: ${STOCK_RESERVATION_TTL:-900}
+      LOW_STOCK_THRESHOLD: ${LOW_STOCK_THRESHOLD:-10}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    networks:
+      - backend
+      - data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3006/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M

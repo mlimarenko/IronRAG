@@ -34,7 +34,7 @@ use crate::{
     shared::technical_facts::TechnicalFactQualifier,
 };
 
-const GRAPH_EXTRACTION_VERSION: &str = "graph_extract_v5";
+const GRAPH_EXTRACTION_VERSION: &str = "graph_extract_v6";
 const GRAPH_EXTRACTION_MAX_PROVIDER_ATTEMPTS: usize = 2;
 const GRAPH_EXTRACTION_REQUEST_OVERHEAD_BYTES: usize = 8 * 1024;
 const GRAPH_EXTRACTION_MAX_SEGMENTS: usize = 3;
@@ -287,7 +287,7 @@ fn unconfigured_graph_extraction_failure(
     error_message: impl Into<String>,
 ) -> GraphExtractionFailureOutcome {
     GraphExtractionFailureOutcome {
-        request_shape_key: "graph_extract_v5:unconfigured".to_string(),
+        request_shape_key: "graph_extract_v6:unconfigured".to_string(),
         request_size_bytes: 0,
         error_message: error_message.into(),
         provider_failure: None,
@@ -400,23 +400,75 @@ fn build_graph_extraction_prompt_plan(
     let mut sections: Vec<(String, String)> = Vec::new();
     sections.push((
         "task".to_string(),
-        "You extract graph-ready entities and relationships from one document chunk.".to_string(),
+        "You are a knowledge graph extraction expert. Your job is to extract structured entities and relationships from a document chunk to build a rich, queryable knowledge graph.\n\n\
+Extract ALL meaningful entities: named things (people, organizations, artifacts, natural phenomena), typed concepts (algorithms, patterns, paradigms), processes (methods, workflows), and measurable attributes (metrics, parameters, configuration values) that appear in the text.\n\n\
+For each entity, determine the single best type from the entity type reference below.\n\n\
+Extract ALL relationships between entities. Use the most specific relation type from the catalog. NEVER use \"mentions\" when a more specific type exists. For example:\n\
+- \"X uses Y\" → uses (not mentions)\n\
+- \"X depends on Y\" → depends_on (not mentions)\n\
+- \"X is built with Y\" → uses or builds_on (not mentions)\n\
+- \"X authenticates via Y\" → authenticates (not mentions)\n\
+- \"X returns Y\" → returns (not mentions)\n\
+- \"X implements Y\" → implements (not mentions)\n\
+- \"X contains Y\" → contains (not mentions)\n\
+- \"X is a type of Y\" → is_a (not mentions)\n\
+Only use \"mentions\" for truly tangential references where the text names something without describing any functional relationship.\n\n\
+Resolve coreferences: when the text says \"it\", \"this system\", \"the API\", \"the framework\", or uses abbreviations, resolve them to the full canonical entity name. Do not extract pronouns or abbreviations as separate entities.".to_string(),
+    ));
+    sections.push((
+        "entity_types".to_string(),
+        "Entity type reference (choose the single best type for each entity):\n\
+- person: A named individual human being (Linus Torvalds, Marie Curie, Warren Buffett, Hippocrates)\n\
+- organization: A company, institution, government body, team, or standards body (Google, WHO, SEC, IETF, Supreme Court, Red Cross)\n\
+- location: A named geographic place, region, facility, or site (Silicon Valley, Wall Street, Chernobyl, Amazon rainforest)\n\
+- event: A named occurrence, incident, milestone, or time-bounded happening (COVID-19 pandemic, Log4Shell, 2008 financial crisis, Roe v. Wade, Apollo 11)\n\
+- artifact: Anything created, built, or designed by humans — software, tools, products, drugs, devices, standards, protocols, laws, licenses, code functions, APIs, documents (PostgreSQL, Aspirin, TCP/IP, GDPR, MIT License, build_router(), GET /api/users, Basel III, React, insulin pump)\n\
+- natural: Anything existing in nature without human creation — species, organisms, diseases, genes, proteins, elements, minerals, natural phenomena (SARS-CoV-2, BRCA1 gene, malaria, silicon, photosynthesis, earthquake, DNA)\n\
+- process: A named procedure, method, algorithm, workflow, or repeatable sequence of steps (Agile methodology, PCR testing, IPO process, judicial review, gradient descent, fermentation)\n\
+- concept: An abstract idea, theory, principle, pattern, paradigm, theme, or field of study (dependency injection, herd immunity, supply and demand, due process, machine learning, oncology, relativity)\n\
+- attribute: A named measurable property, metric, indicator, parameter, status, threshold, or configuration value (p99 latency, blood pressure, GDP, APP_PORT, credit score, HTTP 200, melting point, pH level)\n\
+- entity: Catch-all for named things that do not fit any other type. Always prefer a more specific type above.".to_string(),
+    ));
+    sections.push((
+        "examples".to_string(),
+        "Example 1 - API documentation chunk:\n\
+Input: \"FastAPI uses Pydantic for data validation. When you declare a parameter with a type annotation, FastAPI automatically validates the input and returns a 422 status code if validation fails.\"\n\
+Output: {\"entities\":[{\"label\":\"FastAPI\",\"node_type\":\"artifact\",\"aliases\":[],\"summary\":\"Python web framework with automatic data validation\"},{\"label\":\"Pydantic\",\"node_type\":\"artifact\",\"aliases\":[],\"summary\":\"Data validation library used by FastAPI\"},{\"label\":\"422\",\"node_type\":\"attribute\",\"aliases\":[\"422 Unprocessable Entity\"],\"summary\":\"HTTP status code returned when validation fails\"}],\"relations\":[{\"source_label\":\"FastAPI\",\"target_label\":\"Pydantic\",\"relation_type\":\"uses\",\"summary\":\"FastAPI uses Pydantic for data validation\"},{\"source_label\":\"FastAPI\",\"target_label\":\"422\",\"relation_type\":\"returns\",\"summary\":\"Returns 422 when input validation fails\"}]}\n\n\
+Example 2 - Infrastructure chunk:\n\
+Input: \"The auth-service runs on port 8001 and depends on PostgreSQL for session storage. It authenticates users via JWT tokens signed with RS256.\"\n\
+Output: {\"entities\":[{\"label\":\"auth-service\",\"node_type\":\"artifact\",\"aliases\":[],\"summary\":\"Authentication service on port 8001\"},{\"label\":\"PostgreSQL\",\"node_type\":\"artifact\",\"aliases\":[\"Postgres\"],\"summary\":\"Database used for session storage\"},{\"label\":\"JWT\",\"node_type\":\"artifact\",\"aliases\":[\"JSON Web Token\"],\"summary\":\"Token format for authentication\"},{\"label\":\"RS256\",\"node_type\":\"artifact\",\"aliases\":[],\"summary\":\"RSA-SHA256 signing algorithm\"}],\"relations\":[{\"source_label\":\"auth-service\",\"target_label\":\"PostgreSQL\",\"relation_type\":\"depends_on\",\"summary\":\"Uses PostgreSQL for session storage\"},{\"source_label\":\"auth-service\",\"target_label\":\"JWT\",\"relation_type\":\"authenticates\",\"summary\":\"Authenticates users via JWT tokens\"},{\"source_label\":\"JWT\",\"target_label\":\"RS256\",\"relation_type\":\"uses\",\"summary\":\"Tokens signed with RS256 algorithm\"}]}".to_string(),
     ));
     sections.push((
         "schema".to_string(),
         format!(
-            "Return strict JSON with keys `entities` and `relations`. Each entity must include `label`, `node_type` (only `entity` or `topic`; omit the whole entity if any other value appears), `aliases`, and `summary`. Each relation must include `source_label`, `target_label`, `relation_type`, and `summary`. `relation_type` must be copied verbatim from this catalog: {}. Use lowercase ASCII snake_case only. Never translate, localize, paraphrase, or invent a new relation_type. If no concise summary is available, emit an empty string. If none fit exactly, omit the relation.",
+            "Return strict JSON with keys `entities` and `relations`. Each entity must include `label`, `node_type` (one of: `person`, `organization`, `location`, `event`, `artifact`, `natural`, `process`, `concept`, `attribute`, `entity`), `aliases`, and `summary`. Each relation must include `source_label`, `target_label`, `relation_type`, and `summary`. `relation_type` must be copied verbatim from this catalog: {}. Use lowercase ASCII snake_case only. Never translate, localize, paraphrase, or invent a new relation_type. If no concise summary is available, emit an empty string. If none fit exactly, omit the relation.",
             graph_identity::canonical_relation_type_catalog().join(", ")
         ),
     ));
     sections.push((
         "rules".to_string(),
-        "Do not include markdown fences or prose. If no grounded graph evidence exists, return {\"entities\":[],\"relations\":[]}.".to_string(),
+        "Do not include markdown fences or prose. If no grounded graph evidence exists, return {\"entities\":[],\"relations\":[]}.\n\
+Critical rules:\n\
+1. ALWAYS provide a non-empty summary for every entity and relation.\n\
+2. NEVER use 'mentions' when any specific relation type fits. Audit each relation: could it be uses, depends_on, contains, implements, returns, configures, extends, calls, or another specific type?\n\
+3. Extract the entity's PRIMARY role or purpose in the summary, not just its name.\n\
+4. When the text describes a capability, feature, or behavior, model it as a relation (enables, provides, supports) not just a mention.".to_string(),
     ));
     sections.push((
         "document".to_string(),
         format!("Document: {document_label}\nChunk ordinal: {}", request.chunk.ordinal),
     ));
+    {
+        let section_path_text = if request.structured_chunk.section_path.is_empty() {
+            String::new()
+        } else {
+            format!("\nSection: {}", request.structured_chunk.section_path.join(" > "))
+        };
+        sections.push((
+            "domain_context".to_string(),
+            format!("Document domain: {document_label}{section_path_text}"),
+        ));
+    }
     sections.push((
         "structured_chunk".to_string(),
         render_structured_chunk_context(&request.structured_chunk),
@@ -481,7 +533,7 @@ fn build_graph_extraction_prompt_plan(
         .join("\n\n");
     let request_size_bytes = prompt.len();
     let request_shape_key = format!(
-        "graph_extract_v5:{}:segments_{}:downgrade_{}:{}",
+        "graph_extract_v6:{}:segments_{}:downgrade_{}:{}",
         match variant {
             GraphExtractionPromptVariant::Initial => "initial",
             GraphExtractionPromptVariant::ProviderRetry => "provider_retry",
@@ -622,7 +674,7 @@ fn graph_extraction_response_format(provider_kind: &str) -> serde_json::Value {
                                 "label": { "type": "string" },
                                 "node_type": {
                                     "type": "string",
-                                    "enum": ["entity", "topic"]
+                                    "enum": ["person", "organization", "location", "event", "artifact", "natural_kind", "process", "concept", "topic", "metric", "regulation", "code_symbol", "entity"]
                                 },
                                 "aliases": {
                                     "type": "array",
@@ -1129,7 +1181,7 @@ fn graph_extraction_execution_error(
 ) -> GraphExtractionExecutionError {
     GraphExtractionExecutionError {
         message: message.into(),
-        request_shape_key: "graph_extract_v5:runtime".to_string(),
+        request_shape_key: "graph_extract_v6:runtime".to_string(),
         request_size_bytes: request.chunk.content.len(),
         provider_failure,
         recovery_summary,
@@ -1783,7 +1835,7 @@ async fn resolve_graph_extraction_with_gateway(
     }
 
     Err(GraphExtractionFailureOutcome {
-        request_shape_key: "graph_extract_v5:unknown".to_string(),
+        request_shape_key: "graph_extract_v6:unknown".to_string(),
         request_size_bytes: 0,
         recovery_summary: extraction_recovery.classify_outcome(
             trace.provider_attempt_count,
@@ -2082,6 +2134,24 @@ pub fn parse_graph_extraction_output(output_text: &str) -> Result<GraphExtractio
         .map(|items| items.iter().filter_map(parse_relation_candidate).collect::<Vec<_>>())
         .unwrap_or_default();
 
+    // Post-extraction: refine "mentions" relations using summary heuristics
+    let relations = relations
+        .into_iter()
+        .map(|mut rel| {
+            let refined = refine_mentions_relation(
+                &rel.relation_type,
+                rel.summary.as_deref(),
+                &RuntimeNodeType::Entity, // placeholder — full type-aware refinement in graph_merge
+                &RuntimeNodeType::Entity,
+            );
+            if refined != rel.relation_type && graph_identity::is_canonical_relation_type(&refined)
+            {
+                rel.relation_type = refined;
+            }
+            rel
+        })
+        .collect::<Vec<_>>();
+
     let candidate_set = GraphExtractionCandidateSet { entities, relations };
     validate_graph_extraction_candidate_set(&candidate_set)
         .map_err(|failure| anyhow!(failure.summary.clone()))?;
@@ -2108,6 +2178,81 @@ pub fn validate_graph_extraction_candidate_set(
     Ok(())
 }
 
+fn refine_entity_type(label: &str, current_type: RuntimeNodeType) -> RuntimeNodeType {
+    // Only refine generic "entity" types
+    if current_type != RuntimeNodeType::Entity {
+        return current_type;
+    }
+
+    let label_trimmed = label.trim();
+
+    // Environment variables: ALL_CAPS_WITH_UNDERSCORES → Attribute (configuration parameters)
+    if label_trimmed.len() > 2
+        && label_trimmed.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+        && label_trimmed.contains('_')
+    {
+        return RuntimeNodeType::Attribute;
+    }
+
+    // URL paths: /api/v1/users → Artifact (human-made endpoints)
+    if label_trimmed.starts_with('/') && label_trimmed.len() > 1 {
+        return RuntimeNodeType::Artifact;
+    }
+
+    // HTTP methods → Artifact
+    if matches!(label_trimmed, "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "OPTIONS" | "HEAD") {
+        return RuntimeNodeType::Artifact;
+    }
+
+    // HTTP status codes: 3 digits 100-599 → Attribute (status indicators)
+    if label_trimmed.len() == 3 {
+        if let Ok(code) = label_trimmed.parse::<u16>() {
+            if (100..600).contains(&code) {
+                return RuntimeNodeType::Attribute;
+            }
+        }
+    }
+
+    // File paths: ends with known extension → Artifact (human-made files)
+    if label_trimmed.contains('.') {
+        let ext = label_trimmed.rsplit('.').next().unwrap_or("");
+        if matches!(
+            ext,
+            "py" | "rs"
+                | "ts"
+                | "tsx"
+                | "js"
+                | "go"
+                | "java"
+                | "kt"
+                | "sql"
+                | "md"
+                | "json"
+                | "yaml"
+                | "yml"
+                | "toml"
+                | "xml"
+                | "html"
+                | "css"
+                | "tf"
+                | "pdf"
+                | "docx"
+                | "pptx"
+                | "pkl"
+                | "csv"
+        ) {
+            return RuntimeNodeType::Artifact;
+        }
+    }
+
+    // URLs → Artifact
+    if label_trimmed.starts_with("http://") || label_trimmed.starts_with("https://") {
+        return RuntimeNodeType::Artifact;
+    }
+
+    current_type
+}
+
 fn parse_entity_candidate(value: &serde_json::Value) -> Option<GraphEntityCandidate> {
     if let Some(label) = value.as_str().map(str::trim).filter(|value| !value.is_empty()) {
         return Some(GraphEntityCandidate {
@@ -2130,10 +2275,26 @@ fn parse_entity_candidate(value: &serde_json::Value) -> Option<GraphEntityCandid
                 RuntimeNodeType::Entity
             } else {
                 match trimmed.to_ascii_lowercase().as_str() {
-                    "entity" => RuntimeNodeType::Entity,
-                    "topic" => RuntimeNodeType::Topic,
                     "document" => RuntimeNodeType::Document,
-                    _ => return None,
+                    "person" => RuntimeNodeType::Person,
+                    "organization" => RuntimeNodeType::Organization,
+                    "location" => RuntimeNodeType::Location,
+                    "event" => RuntimeNodeType::Event,
+                    "artifact" => RuntimeNodeType::Artifact,
+                    "natural" => RuntimeNodeType::Natural,
+                    "process" => RuntimeNodeType::Process,
+                    "concept" => RuntimeNodeType::Concept,
+                    "attribute" => RuntimeNodeType::Attribute,
+                    "entity" => RuntimeNodeType::Entity,
+                    // Backward compatibility
+                    "topic" => RuntimeNodeType::Concept,
+                    "technology" => RuntimeNodeType::Artifact,
+                    "api" => RuntimeNodeType::Artifact,
+                    "code_symbol" => RuntimeNodeType::Artifact,
+                    "natural_kind" => RuntimeNodeType::Natural,
+                    "metric" => RuntimeNodeType::Attribute,
+                    "regulation" => RuntimeNodeType::Artifact,
+                    _ => RuntimeNodeType::Entity,
                 }
             }
         }
@@ -2151,6 +2312,8 @@ fn parse_entity_candidate(value: &serde_json::Value) -> Option<GraphEntityCandid
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+
+    let node_type = refine_entity_type(label, node_type);
 
     Some(GraphEntityCandidate {
         label: label.to_string(),
@@ -2216,6 +2379,69 @@ fn normalize_relation_candidate_type(relation_type: &str) -> Option<String> {
 
 fn relation_type_is_canonical_ascii(normalized_relation_type: &str) -> bool {
     normalized_relation_type.bytes().all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_'))
+}
+
+/// Post-extraction heuristic to reduce "mentions" overuse.
+/// When the LLM outputs "mentions" but the summary text suggests a more specific relation,
+/// upgrade to the more specific type.
+fn refine_mentions_relation(
+    relation_type: &str,
+    summary: Option<&str>,
+    source_type: &crate::domains::runtime_graph::RuntimeNodeType,
+    _target_type: &crate::domains::runtime_graph::RuntimeNodeType,
+) -> String {
+    if relation_type != "mentions" {
+        return relation_type.to_string();
+    }
+
+    // Check summary for action verbs that suggest a more specific relation
+    if let Some(summary) = summary {
+        let s = summary.to_ascii_lowercase();
+        if s.contains("depends on") || s.contains("requires") || s.contains("needs") {
+            return "depends_on".to_string();
+        }
+        if s.contains("uses") || s.contains("utilizes") || s.contains("leverages") {
+            return "uses".to_string();
+        }
+        if s.contains("contains") || s.contains("includes") || s.contains("consists of") {
+            return "contains".to_string();
+        }
+        if s.contains("implements") || s.contains("implementation of") {
+            return "implements".to_string();
+        }
+        if s.contains("extends") || s.contains("inherits") {
+            return "extends".to_string();
+        }
+        if s.contains("returns") || s.contains("produces") || s.contains("outputs") {
+            return "returns".to_string();
+        }
+        if s.contains("configures") || s.contains("configuration") {
+            return "configures".to_string();
+        }
+        if s.contains("calls") || s.contains("invokes") {
+            return "calls".to_string();
+        }
+        if s.contains("authenticat") || s.contains("authoriz") {
+            return "authenticates".to_string();
+        }
+        if s.contains("defines") || s.contains("declares") || s.contains("specifies") {
+            return "defines".to_string();
+        }
+        if s.contains("provides") || s.contains("exposes") || s.contains("offers") {
+            return "provides".to_string();
+        }
+        if s.contains("deployed") || s.contains("runs on") || s.contains("hosted") {
+            return "deployed_on".to_string();
+        }
+    }
+
+    // Type-based heuristic: document → entity/code_symbol is usually "describes" not "mentions"
+    use crate::domains::runtime_graph::RuntimeNodeType;
+    if *source_type == RuntimeNodeType::Document {
+        return "describes".to_string();
+    }
+
+    relation_type.to_string()
 }
 
 fn extract_json_payload(output_text: &str) -> Result<serde_json::Value> {
@@ -2473,17 +2699,36 @@ mod tests {
 
         assert_eq!(normalized.entities.len(), 2);
         assert_eq!(normalized.entities[0].label, "Annual report");
-        assert_eq!(normalized.entities[1].node_type, RuntimeNodeType::Topic);
+        assert_eq!(normalized.entities[1].node_type, RuntimeNodeType::Concept);
         assert_eq!(normalized.relations[0].relation_type, "mentions");
     }
 
     #[test]
-    fn drops_entities_with_invalid_node_type_values() {
+    fn accepts_expanded_node_type_values() {
         let normalized = parse_graph_extraction_output(
             r#"{
               "entities": [
                 { "label": "Valid", "node_type": "topic", "aliases": [], "summary": "" },
-                { "label": "Invalid", "node_type": "organization", "aliases": [], "summary": "" }
+                { "label": "Google", "node_type": "organization", "aliases": [], "summary": "" }
+              ],
+              "relations": []
+            }"#,
+        )
+        .expect("parse graph extraction");
+
+        assert_eq!(normalized.entities.len(), 2);
+        assert_eq!(normalized.entities[0].label, "Valid");
+        assert_eq!(normalized.entities[0].node_type, RuntimeNodeType::Concept);
+        assert_eq!(normalized.entities[1].label, "Google");
+        assert_eq!(normalized.entities[1].node_type, RuntimeNodeType::Organization);
+    }
+
+    #[test]
+    fn falls_back_unknown_node_type_to_entity() {
+        let normalized = parse_graph_extraction_output(
+            r#"{
+              "entities": [
+                { "label": "Something", "node_type": "invented_type", "aliases": [], "summary": "" }
               ],
               "relations": []
             }"#,
@@ -2491,7 +2736,8 @@ mod tests {
         .expect("parse graph extraction");
 
         assert_eq!(normalized.entities.len(), 1);
-        assert_eq!(normalized.entities[0].label, "Valid");
+        assert_eq!(normalized.entities[0].label, "Something");
+        assert_eq!(normalized.entities[0].node_type, RuntimeNodeType::Entity);
     }
 
     #[test]

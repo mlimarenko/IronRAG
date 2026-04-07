@@ -642,6 +642,7 @@ mod tests {
                 latest_mutation_id: None,
                 latest_successful_attempt_id: None,
                 head_updated_at: now,
+                document_summary: None,
             }),
             active_revision: None,
             readiness: Some(ContentRevisionReadiness {

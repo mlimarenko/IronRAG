@@ -1,0 +1,443 @@
+# Production deployment configuration for a microservices application.
+#
+# Architecture:
+#   - API Gateway (nginx): Routes traffic to backend services, handles TLS termination
+#   - Auth Service: JWT-based authentication and authorization (port 8001)
+#   - User Service: User management and profile operations (port 8002)
+#   - Notification Service: Email, SMS, and push notification delivery (port 8003)
+#   - Task Queue Worker: Async job processing via Redis queues
+#   - PostgreSQL 16: Primary relational database
+#   - Redis 7: Caching, session store, and job queue broker
+#   - MinIO: S3-compatible object storage for file uploads
+#   - Prometheus: Metrics collection
+#   - Grafana: Monitoring dashboards
+#
+# Network topology:
+#   - frontend: Public-facing network (gateway only)
+#   - backend: Internal service mesh
+#   - monitoring: Isolated monitoring network
+#
+# Volumes:
+#   - postgres_data: Persistent database storage
+#   - redis_data: Redis AOF persistence
+#   - minio_data: Object storage data
+#   - grafana_data: Dashboard configurations
+#
+# Environment variables (required in .env):
+#   POSTGRES_PASSWORD: Database superuser password
+#   JWT_SECRET: Secret for JWT token signing (min 32 chars)
+#   SMTP_HOST: SMTP server for email delivery
+#   SMTP_PORT: SMTP port (default: 587)
+#   SMTP_USER: SMTP authentication username
+#   SMTP_PASSWORD: SMTP authentication password
+#   MINIO_ROOT_USER: MinIO admin username
+#   MINIO_ROOT_PASSWORD: MinIO admin password (min 8 chars)
+#   DOMAIN: Public domain name for TLS certificates
+#   GRAFANA_ADMIN_PASSWORD: Grafana admin password
+
+version: "3.9"
+
+services:
+  # ─── API Gateway ───────────────────────────────────────────
+  gateway:
+    image: nginx:1.27-alpine
+    ports:
+      - "${GATEWAY_PORT:-443}:443"
+      - "${GATEWAY_HTTP_PORT:-80}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./certs:/etc/nginx/certs:ro
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+    networks:
+      - frontend
+      - backend
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.5"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # ─── Auth Service ──────────────────────────────────────────
+  # Handles user authentication, JWT token issuance/validation,
+  # OAuth2 provider integration, and role-based access control.
+  #
+  # Endpoints:
+  #   POST /auth/login        - Username/password authentication
+  #   POST /auth/register     - New user registration
+  #   POST /auth/refresh      - Refresh expired access token
+  #   POST /auth/logout       - Invalidate refresh token
+  #   GET  /auth/me           - Get current user profile
+  #   POST /auth/oauth/google - Google OAuth2 callback
+  #   POST /auth/oauth/github - GitHub OAuth2 callback
+  #
+  # Token configuration:
+  #   Access token lifetime: 15 minutes
+  #   Refresh token lifetime: 7 days
+  #   Token algorithm: RS256
+  auth-service:
+    build:
+      context: ./services/auth
+      dockerfile: Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://auth_user:${POSTGRES_PASSWORD}@postgres:5432/auth_db
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_ACCESS_TOKEN_EXPIRY=900
+      - JWT_REFRESH_TOKEN_EXPIRY=604800
+      - OAUTH_GOOGLE_CLIENT_ID=${OAUTH_GOOGLE_CLIENT_ID:-}
+      - OAUTH_GOOGLE_CLIENT_SECRET=${OAUTH_GOOGLE_CLIENT_SECRET:-}
+      - OAUTH_GITHUB_CLIENT_ID=${OAUTH_GITHUB_CLIENT_ID:-}
+      - OAUTH_GITHUB_CLIENT_SECRET=${OAUTH_GITHUB_CLIENT_SECRET:-}
+      - LOG_LEVEL=info
+      - SERVICE_PORT=8001
+    expose:
+      - "8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "1.0"
+      replicas: 2
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ─── User Service ──────────────────────────────────────────
+  # Manages user profiles, preferences, and account operations.
+  #
+  # Endpoints:
+  #   GET    /users              - List users (admin only, paginated)
+  #   GET    /users/:id          - Get user profile
+  #   PUT    /users/:id          - Update user profile
+  #   DELETE /users/:id          - Soft-delete user account
+  #   POST   /users/:id/avatar   - Upload avatar image (max 5MB, JPEG/PNG)
+  #   GET    /users/:id/activity - Get user activity log
+  #   POST   /users/search       - Search users by name/email
+  #
+  # Rate limits:
+  #   GET endpoints: 100 requests/minute per user
+  #   POST/PUT endpoints: 20 requests/minute per user
+  #   Avatar upload: 5 requests/hour per user
+  user-service:
+    build:
+      context: ./services/user
+      dockerfile: Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://user_svc:${POSTGRES_PASSWORD}@postgres:5432/user_db
+      - REDIS_URL=redis://redis:6379/1
+      - AUTH_SERVICE_URL=http://auth-service:8001
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER}
+      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD}
+      - MINIO_BUCKET=user-avatars
+      - MAX_AVATAR_SIZE_MB=5
+      - LOG_LEVEL=info
+      - SERVICE_PORT=8002
+    expose:
+      - "8002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "1.0"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ─── Notification Service ──────────────────────────────────
+  # Delivers notifications via email, SMS, and push channels.
+  #
+  # Endpoints:
+  #   POST /notifications/send     - Send a notification
+  #   GET  /notifications/:id      - Get notification status
+  #   GET  /notifications/history   - User notification history
+  #   PUT  /notifications/preferences - Update delivery preferences
+  #
+  # Supported channels:
+  #   - email: SMTP with TLS (supports HTML templates)
+  #   - sms: Twilio API integration
+  #   - push: Firebase Cloud Messaging (FCM)
+  #   - webhook: HTTP POST to custom endpoints
+  #
+  # Retry policy:
+  #   - Max retries: 3
+  #   - Backoff: exponential (1s, 4s, 16s)
+  #   - Dead letter queue after max retries
+  notification-service:
+    build:
+      context: ./services/notification
+      dockerfile: Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://notification_svc:${POSTGRES_PASSWORD}@postgres:5432/notification_db
+      - REDIS_URL=redis://redis:6379/2
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - SMTP_FROM_ADDRESS=noreply@${DOMAIN}
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID:-}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN:-}
+      - TWILIO_FROM_NUMBER=${TWILIO_FROM_NUMBER:-}
+      - FCM_SERVER_KEY=${FCM_SERVER_KEY:-}
+      - LOG_LEVEL=info
+      - SERVICE_PORT=8003
+    expose:
+      - "8003"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ─── Task Queue Worker ─────────────────────────────────────
+  # Processes async jobs from Redis queues.
+  #
+  # Queue names:
+  #   - notifications:email     - Email delivery jobs
+  #   - notifications:sms       - SMS delivery jobs
+  #   - notifications:push      - Push notification jobs
+  #   - users:cleanup           - Expired account cleanup
+  #   - users:export            - Data export requests (GDPR)
+  #   - analytics:aggregate     - Daily analytics aggregation
+  #
+  # Concurrency: 4 workers per container
+  # Job timeout: 300 seconds (5 minutes)
+  # Stale job reaper: checks every 60 seconds
+  worker:
+    build:
+      context: ./services/worker
+      dockerfile: Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://worker_svc:${POSTGRES_PASSWORD}@postgres:5432/app_db
+      - REDIS_URL=redis://redis:6379/3
+      - WORKER_CONCURRENCY=4
+      - JOB_TIMEOUT_SECONDS=300
+      - STALE_JOB_REAPER_INTERVAL=60
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - LOG_LEVEL=info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "2.0"
+      replicas: 2
+
+  # ─── PostgreSQL ────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=app_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    expose:
+      - "5432"
+    networks:
+      - backend
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "2.0"
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=200"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "effective_cache_size=768MB"
+      - "-c"
+      - "maintenance_work_mem=128MB"
+      - "-c"
+      - "checkpoint_completion_target=0.9"
+      - "-c"
+      - "wal_buffers=16MB"
+      - "-c"
+      - "default_statistics_target=100"
+      - "-c"
+      - "random_page_cost=1.1"
+      - "-c"
+      - "effective_io_concurrency=200"
+      - "-c"
+      - "log_min_duration_statement=1000"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ─── Redis ─────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    expose:
+      - "6379"
+    networks:
+      - backend
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 200mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1000
+      --save 300 10
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # ─── MinIO (S3-compatible storage) ─────────────────────────
+  minio:
+    image: minio/minio:latest
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data
+    expose:
+      - "9000"
+      - "9001"
+    networks:
+      - backend
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ─── Prometheus ────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    expose:
+      - "9090"
+    networks:
+      - backend
+      - monitoring
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+
+  # ─── Grafana ───────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.0
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - monitoring
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+    internal: true
+  monitoring:
+    driver: bridge
+    internal: true
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  grafana_data:

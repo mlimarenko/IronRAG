@@ -542,7 +542,7 @@ struct RuntimeKnowledgeRelationRow {
     relation_id: Uuid,
     workspace_id: Uuid,
     library_id: Uuid,
-    predicate: String,
+    relation_type: String,
     normalized_assertion: String,
     confidence: Option<f64>,
     support_count: i32,
@@ -1286,6 +1286,7 @@ async fn backfill_document_chunk_hits(
                     section_path: chunk.section_path,
                     heading_trail: chunk.heading_trail,
                     score,
+                    quality_score: chunk.quality_score,
                 })
             }),
     );
@@ -1864,7 +1865,7 @@ fn map_runtime_relation_to_graph_edge(row: RuntimeKnowledgeRelationRow) -> Graph
         canonical_key: row.key,
         source: row.subject_entity_id,
         target: row.object_entity_id,
-        relation_type: row.predicate,
+        relation_type: row.relation_type,
         support_count: row.support_count,
         filtered_artifact: row.relation_state != "active",
     }
@@ -1892,7 +1893,7 @@ async fn build_graph_node_detail(
                     .map(|candidate| GraphRelatedNode {
                         id: candidate.entity_id,
                         label: candidate.canonical_label.clone(),
-                        relation_type: relation.predicate.clone(),
+                        relation_type: relation.relation_type.clone(),
                     })
             } else if relation.object_entity_id == node_id {
                 entities
@@ -1901,7 +1902,7 @@ async fn build_graph_node_detail(
                     .map(|candidate| GraphRelatedNode {
                         id: candidate.entity_id,
                         label: candidate.canonical_label.clone(),
-                        relation_type: relation.predicate.clone(),
+                        relation_type: relation.relation_type.clone(),
                     })
             } else {
                 None
@@ -1974,8 +1975,27 @@ async fn build_graph_node_detail(
     }))
 }
 
-const fn map_graph_node_type(value: &str) -> GraphNodeType {
-    if value.eq_ignore_ascii_case("topic") { GraphNodeType::Topic } else { GraphNodeType::Entity }
+fn map_graph_node_type(value: &str) -> GraphNodeType {
+    match value.to_ascii_lowercase().as_str() {
+        "person" => GraphNodeType::Person,
+        "organization" => GraphNodeType::Organization,
+        "location" => GraphNodeType::Location,
+        "event" => GraphNodeType::Event,
+        "artifact" => GraphNodeType::Artifact,
+        "natural" => GraphNodeType::Natural,
+        "process" => GraphNodeType::Process,
+        "concept" => GraphNodeType::Concept,
+        "attribute" => GraphNodeType::Attribute,
+        // Backward compatibility
+        "topic" => GraphNodeType::Concept,
+        "technology" => GraphNodeType::Artifact,
+        "api" => GraphNodeType::Artifact,
+        "code_symbol" => GraphNodeType::Artifact,
+        "natural_kind" => GraphNodeType::Natural,
+        "metric" => GraphNodeType::Attribute,
+        "regulation" => GraphNodeType::Artifact,
+        _ => GraphNodeType::Entity,
+    }
 }
 
 fn humanize_graph_entity_state(value: &str) -> String {
@@ -2159,7 +2179,7 @@ fn map_runtime_graph_edge_to_relation_row(
         relation_id: row.id,
         workspace_id,
         library_id,
-        predicate: row.relation_type.clone(),
+        relation_type: row.relation_type.clone(),
         normalized_assertion: row.summary.clone().unwrap_or_else(|| row.canonical_key.clone()),
         confidence: row.weight,
         support_count: row.support_count,

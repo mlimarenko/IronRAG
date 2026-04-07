@@ -518,7 +518,13 @@ pub async fn upsert_runtime_graph_node(
          set label = excluded.label,
              node_type = excluded.node_type,
              aliases_json = excluded.aliases_json,
-             summary = excluded.summary,
+             summary = CASE
+                 WHEN excluded.summary IS NOT NULL AND excluded.summary != ''
+                      AND (runtime_graph_node.summary IS NULL OR runtime_graph_node.summary = ''
+                           OR length(excluded.summary) > length(runtime_graph_node.summary))
+                 THEN excluded.summary
+                 ELSE runtime_graph_node.summary
+             END,
              metadata_json = excluded.metadata_json,
              support_count = excluded.support_count,
              updated_at = now()

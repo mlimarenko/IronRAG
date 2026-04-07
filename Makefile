@@ -4,6 +4,8 @@ LOCAL_DOCKER_APP_SERVICES ?= backend
 LOCAL_DOCKER_ALL_SERVICES ?= postgres redis arangodb backend worker nginx
 RUSTRAG_BENCHMARK_BASE_URL ?= http://127.0.0.1:19000/v1
 RUSTRAG_BENCHMARK_SUITES ?= apps/api/benchmarks/grounded_query/api_baseline_suite.json apps/api/benchmarks/grounded_query/workflow_strict_suite.json apps/api/benchmarks/grounded_query/layout_noise_suite.json apps/api/benchmarks/grounded_query/graph_multihop_suite.json apps/api/benchmarks/grounded_query/multiformat_surface_suite.json
+RUSTRAG_GOLDEN_SUITES ?= apps/api/benchmarks/grounded_query/golden_programming_suite.json apps/api/benchmarks/grounded_query/golden_infrastructure_suite.json apps/api/benchmarks/grounded_query/golden_protocols_suite.json apps/api/benchmarks/grounded_query/golden_code_suite.json apps/api/benchmarks/grounded_query/golden_multiformat_suite.json
+RUSTRAG_GOLDEN_OUTPUT_DIR ?= tmp-golden-benchmarks
 RUSTRAG_BENCHMARK_OUTPUT_DIR ?= tmp-grounded-benchmarks
 RUSTRAG_BENCHMARK_CANONICALIZE_REUSED_LIBRARY ?= 1
 RUSTRAG_BENCHMARK_LIBRARY_NAME ?= Grounded Benchmark Seed
@@ -33,6 +35,8 @@ FRONTEND_CARGO_TARGET_DIR ?= $(CURDIR)/.cargo-target/web
 	benchmark-grounded-seed \
 	benchmark-grounded-noisy-layout \
 	benchmark-grounded-multihop \
+	benchmark-golden \
+	benchmark-golden-seed \
 	docker-local-build \
 	docker-local-rebuild \
 	docker-local-redeploy \
@@ -139,6 +143,12 @@ benchmark-grounded-noisy-layout:
 
 benchmark-grounded-multihop:
 	@$(MAKE) benchmark-grounded RUSTRAG_BENCHMARK_SUITES="apps/api/benchmarks/grounded_query/graph_multihop_suite.json"
+
+benchmark-golden:
+	@$(MAKE) benchmark-grounded RUSTRAG_BENCHMARK_SUITES="$(RUSTRAG_GOLDEN_SUITES)" RUSTRAG_BENCHMARK_OUTPUT_DIR="$(RUSTRAG_GOLDEN_OUTPUT_DIR)" RUSTRAG_BENCHMARK_LIBRARY_NAME="Golden Benchmark"
+
+benchmark-golden-seed:
+	@$(MAKE) benchmark-grounded-seed RUSTRAG_BENCHMARK_SUITES="$(RUSTRAG_GOLDEN_SUITES)" RUSTRAG_BENCHMARK_OUTPUT_DIR="$(RUSTRAG_GOLDEN_OUTPUT_DIR)" RUSTRAG_BENCHMARK_LIBRARY_NAME="Golden Benchmark Seed"
 
 docker-local-build:
 	$(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) build $(LOCAL_DOCKER_APP_SERVICES)

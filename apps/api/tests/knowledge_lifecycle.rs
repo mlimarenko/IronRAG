@@ -322,6 +322,7 @@ async fn write_chunk(
                 chunk_state: "ready".to_string(),
                 text_generation: Some(1),
                 vector_generation: Some(1),
+                quality_score: None,
             },
         )
         .await

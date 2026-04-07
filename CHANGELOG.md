@@ -1,5 +1,85 @@
 # Changelog
 
+## 0.1.1 — 2026-04-07
+
+### Highlights
+- **Universal entity taxonomy**: 10 domain-agnostic entity types (`person`, `organization`, `location`, `event`, `artifact`, `natural`, `process`, `concept`, `attribute`, `entity`) designed to work across any domain — programming, medicine, law, finance, biology, engineering, and beyond. Domain-specific granularity via `sub_type` metadata.
+- **Pipeline intelligence upgrade**: graph extraction v6 with few-shot examples, relation catalog expanded from 49 to 88 canonical types, semantic chunking (2800 chars, 10% overlap, heading-aware), boilerplate detection, quality scoring, entity resolution, document summaries, and post-extraction type refinement.
+- **Hybrid search**: BM25 + vector cosine similarity merged via Reciprocal Rank Fusion (RRF) with field-weighted scoring (heading boost 1.5x, quality score multiplier).
+- **21 MCP tools**: added `ask` (grounded Q&A), `search_entities`, `get_graph_topology`, `list_relations`, `list_documents`, `delete_document`. Token-efficient responses with `includeReferences=false` by default.
+- **Canvas2D graph renderer**: replaced SVG with Canvas2D for rendering 10K+ nodes and 50K+ edges. Zero React re-renders during pan/zoom. Viewport culling, level-of-detail labels, adaptive edge budget.
+- **Bulk document actions**: batch delete, cancel processing, and reprocess via UI selection mode and REST endpoints.
+
+### Pipeline
+- Graph extraction prompt v6 with comprehensive entity type guidance, coreference resolution rules, and 2 few-shot examples.
+- Relation catalog expanded from 49 to 88 canonical types: `calls`, `implements`, `extends`, `authenticates`, `contains`, `returns`, `validates`, `transforms`, `deployed_on`, `inherits_from`, `imports`, and 27 more.
+- Post-extraction type refinement: regex-based pass auto-reclassifies env vars, URL paths, HTTP methods, file paths, and status codes from generic `entity` to specific types.
+- Post-extraction mentions reduction: summary-based heuristic upgrades `mentions` to `uses`, `depends_on`, `contains`, `defines`, `provides`, `authenticates`, and other specific types when the summary text implies a concrete relationship.
+- Semantic chunking: increased default from 1,600 to 2,800 chars, added 10% overlap between adjacent chunks, heading-aware splitting (headings always start new chunks).
+- Boilerplate detection: nav links, breadcrumbs, cookie banners, copyright notices filtered from chunking.
+- Chunk quality scoring: 0.0-1.0 score based on text length, word diversity, heading/code/table presence.
+- SimHash near-duplicate detection for chunk deduplication.
+- Document-level summary generation from structured blocks during ingestion.
+- Entity resolution service: deterministic merge by exact alias, normalized prefix, and acronym detection.
+- Graph extraction parallelism bumped from max 4 to max 8 concurrent chunks.
+- Query expansion: 24 synonym groups for automatic search term broadening.
+- Extended technical fact extraction: 8 new fact kinds (environment variables, version numbers, database names, configuration keys, error codes, rate limits, dependency declarations, code identifiers).
+- Entity summary upsert changed from last-write-wins to longest-wins.
+- Verification feedback loop: warnings from answer verification now flow into the response instead of being silently discarded.
+- Error handling: replaced silent `let _ =` patterns in ingestion worker with proper error logging for `promote_document_head`, entity resolution, and document summary generation.
+
+### MCP
+- Added `ask` tool: grounded Q&A in a single call (replaces 3-call workflow of create_session + create_turn + get_execution).
+- Added `list_documents` tool: browse library contents with optional status filter.
+- Added `delete_document` tool: complete CRUD lifecycle for agents.
+- Added `search_entities` tool: search knowledge graph entities by label.
+- Added `get_graph_topology` tool: graph structure with truncation limits (default 200 entities / 500 relations).
+- Added `list_relations` tool: explore graph relationships ordered by support count.
+- `search_documents` and `read_document` responses now default to `includeReferences=false`, reducing token usage by ~80%.
+- Fixed `list_relations` description (was misleading about query parameter).
+- Updated MCP.md and MCP-RU.md with all 21 tools organized by category.
+
+### Frontend
+- **Graph page**: Canvas2D renderer replaces SVG. Handles 10K+ nodes at interactive frame rates. Edge labels for selected node connections. 10 distinct entity type colors with updated legend and type filter dropdown. Level-of-detail label rendering. Adaptive edge budget scaling with zoom.
+- **Graph page**: all pan/zoom/hover interactions use refs instead of React state — zero re-renders during interaction.
+- **Documents page**: selection mode with checkboxes, select-all, and sticky bulk action toolbar (delete, cancel processing, retry). i18n translations for en/ru.
+- **Assistant page**: Markdown renderer for answer messages (code blocks, tables, lists). Removed cosmetic attachment UI.
+- **Dashboard page**: renders API metrics; web ingest activity strip wired.
+- GraphNodeType contract: 10 universal entity types across contracts crate, API mapping, and frontend.
+
+### Backend
+- Batch document endpoints: `POST /content/documents/batch-delete`, `batch-cancel`, `batch-reprocess` (max 100 per call).
+- Ingestion worker: skip-deleted document guard, skip-cancelled job guard.
+- ArangoDB relation type bug fix: `predicate` field now correctly maps to `relationType` in REST API responses.
+- BM25 field-weighted scoring: heading_trail matches boosted 1.5x, section_path 1.3x, quality_score multiplier.
+- quality_score persisted to ArangoDB `KnowledgeChunkRow`.
+- Async reranking infrastructure (rerank_structured_query made async).
+- RRF hybrid search fusion in `merge_chunks`.
+
+### Benchmarks
+- Golden benchmark corpus: 72 files across 5 semantic directories (wikipedia, docs, code, documents, fixtures).
+- 10 benchmark suites with 102 test cases covering: Wikipedia recall, cross-document QA, noisy layouts, graph traversal, multiformat upload, programming docs, infrastructure docs, protocols, code comprehension, and PDF/DOCX/PPTX extraction.
+- Code-only dataset: 8 large real-world code files (Go, TypeScript, Python, Rust, Kubernetes operator, React, Terraform, Docker Compose) with 20 comprehension questions.
+- Multiformat dataset: 5 generated documents (2 DOCX, 1 PPTX, 2 PDF) with 12 extraction questions.
+- Compare benchmarks tool for side-by-side result analysis.
+- `make benchmark-golden` target runs all 5 golden suites.
+
+### Documentation
+- README.md and README-RU.md: updated pipeline diagram, features list, roadmap (0.1.1 done items), MCP tool table.
+- MCP.md and MCP-RU.md: all 21 tools documented with descriptions and required parameters.
+- Benchmark README: restructured corpus description with directory layout table.
+- `.env.example`: added Redis URL, rerank flags, web crawl defaults, fixed model names.
+
+### Schema
+- Migration `0002_document_summaries.sql`: added `content_document_head.document_summary` and `catalog_library.ai_summary` columns.
+
+### Gates (all green)
+- `cargo fmt --all` — pass
+- `cargo clippy -p rustrag-backend --all-targets -- -D warnings` — pass
+- `cargo test -p rustrag-backend` — 381 tests, 0 failures
+- `npx tsc --noEmit` (strict mode) — pass
+- `npx vite build` — pass
+
 ## 0.1.0 — 2026-04-06
 
 ### Highlights

@@ -81,6 +81,8 @@ pub struct McpSearchDocumentsRequest {
     #[serde(default, alias = "library_id")]
     pub library_id: Option<Uuid>,
     pub limit: Option<usize>,
+    #[serde(default, alias = "include_references")]
+    pub include_references: Option<bool>,
 }
 
 impl McpSearchDocumentsRequest {
@@ -226,6 +228,8 @@ pub struct McpReadDocumentRequest {
     pub length: Option<usize>,
     #[serde(default, alias = "continuation_token")]
     pub continuation_token: Option<String>,
+    #[serde(default, alias = "include_references")]
+    pub include_references: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -344,6 +348,69 @@ pub struct McpCancelWebIngestRunRequest {
     pub run_id: Uuid,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpAskRequest {
+    #[serde(alias = "library_id")]
+    pub library_id: Uuid,
+    pub question: String,
+    #[serde(default, alias = "top_k")]
+    pub top_k: Option<usize>,
+    #[serde(default, alias = "include_evidence")]
+    pub include_evidence: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpAskResponse {
+    pub answer: String,
+    pub verification_state: Option<String>,
+    pub source_count: usize,
+    pub entity_count: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpSearchEntitiesRequest {
+    #[serde(alias = "library_id")]
+    pub library_id: Uuid,
+    pub query: String,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpListDocumentsRequest {
+    #[serde(alias = "library_id")]
+    pub library_id: Uuid,
+    pub limit: Option<usize>,
+    #[serde(default, alias = "status_filter")]
+    pub status_filter: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpDeleteDocumentRequest {
+    #[serde(alias = "document_id")]
+    pub document_id: Uuid,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpGetGraphTopologyRequest {
+    #[serde(alias = "library_id")]
+    pub library_id: Uuid,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpListRelationsRequest {
+    #[serde(alias = "library_id")]
+    pub library_id: Uuid,
+    pub limit: Option<usize>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpMutationOperationKind {
@@ -370,6 +437,9 @@ pub enum McpAuditActionKind {
     ListLibraries,
     SearchDocuments,
     ReadDocument,
+    ListDocuments,
+    DeleteDocument,
+    Ask,
     CreateWorkspace,
     CreateLibrary,
     UploadDocuments,
@@ -381,6 +451,9 @@ pub enum McpAuditActionKind {
     GetWebIngestRun,
     ListWebIngestRunPages,
     CancelWebIngestRun,
+    SearchEntities,
+    GetGraphTopology,
+    ListRelations,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -276,6 +276,7 @@ impl QueryGroundingFixture {
                 chunk_state: "ready".to_string(),
                 text_generation: Some(1),
                 vector_generation: None,
+                quality_score: None,
             })
             .await
             .context("failed to insert grounding chunk")?;

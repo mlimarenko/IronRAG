@@ -238,7 +238,74 @@ fn build_structured_blocks(
         index += 1;
     }
 
+    for block in &mut blocks {
+        if detect_boilerplate(&block.text) {
+            block.is_boilerplate = true;
+        }
+    }
+
     Ok(blocks)
+}
+
+fn detect_boilerplate(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+
+    // 5+ HTTP links
+    let http_count = lower.matches("http://").count() + lower.matches("https://").count();
+    if http_count >= 5 {
+        return true;
+    }
+
+    // Breadcrumb patterns: contains " > " or " › " with 3+ segments
+    for sep in [" > ", " › "] {
+        if lower.contains(sep) {
+            let segment_count = lower.split(sep).count();
+            if segment_count >= 3 {
+                return true;
+            }
+        }
+    }
+
+    // Common boilerplate phrases
+    const BOILERPLATE_PHRASES: &[&str] = &[
+        "skip to content",
+        "cookie",
+        "accept cookies",
+        "privacy policy",
+        "terms of service",
+        "all rights reserved",
+        "copyright ©",
+        "powered by",
+        "follow us on",
+    ];
+    for phrase in BOILERPLATE_PHRASES {
+        if lower.contains(phrase) {
+            return true;
+        }
+    }
+
+    // Pure navigation: only short words separated by "|" or "•"
+    let trimmed = text.trim();
+    if !trimmed.is_empty() {
+        let is_nav = if trimmed.contains('|') {
+            trimmed
+                .split('|')
+                .all(|segment| !segment.trim().is_empty() && segment.trim().len() <= 20)
+                && trimmed.split('|').count() >= 3
+        } else if trimmed.contains('•') {
+            trimmed
+                .split('•')
+                .all(|segment| !segment.trim().is_empty() && segment.trim().len() <= 20)
+                && trimmed.split('•').count() >= 3
+        } else {
+            false
+        };
+        if is_nav {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn fallback_line_hints(content: &str) -> Vec<ExtractionLineHint> {
@@ -315,6 +382,7 @@ fn build_block(
             .then_some(parent_block_id.unwrap_or_else(Uuid::nil)),
         table_coordinates,
         code_language,
+        is_boilerplate: false,
     }
 }
 
@@ -498,5 +566,47 @@ mod tests {
         assert_eq!(prepared.prepared_revision.chunk_count, 0);
         assert!(prepared.ordered_blocks.is_empty());
         assert!(prepared.chunk_windows.is_empty());
+    }
+
+    #[test]
+    fn detect_boilerplate_catches_nav_links() {
+        assert!(
+            super::detect_boilerplate("Home | About | Contact | Blog | FAQ | Support"),
+            "pipe-separated nav links should be detected as boilerplate"
+        );
+    }
+
+    #[test]
+    fn detect_boilerplate_catches_breadcrumbs() {
+        assert!(
+            super::detect_boilerplate("Documentation > API Reference > Authentication > OAuth"),
+            "breadcrumb pattern should be detected as boilerplate"
+        );
+    }
+
+    #[test]
+    fn detect_boilerplate_catches_cookie_banner() {
+        assert!(
+            super::detect_boilerplate("We use cookies to improve your experience. Accept cookies"),
+            "cookie banner text should be detected as boilerplate"
+        );
+    }
+
+    #[test]
+    fn detect_boilerplate_skips_normal_text() {
+        assert!(
+            !super::detect_boilerplate(
+                "FastAPI is a modern, fast web framework for building APIs with Python."
+            ),
+            "normal technical text should not be detected as boilerplate"
+        );
+    }
+
+    #[test]
+    fn detect_boilerplate_catches_copyright() {
+        assert!(
+            super::detect_boilerplate("Copyright © 2024 Acme Inc. All rights reserved."),
+            "copyright notice should be detected as boilerplate"
+        );
     }
 }

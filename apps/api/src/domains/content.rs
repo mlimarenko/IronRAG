@@ -26,6 +26,7 @@ pub struct ContentDocumentHead {
     pub latest_mutation_id: Option<Uuid>,
     pub latest_successful_attempt_id: Option<Uuid>,
     pub head_updated_at: DateTime<Utc>,
+    pub document_summary: Option<String>,
 }
 
 impl ContentDocumentHead {

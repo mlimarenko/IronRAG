@@ -1764,3 +1764,24 @@ pub async fn recover_stale_canonical_leases(
     .await?;
     Ok(result.rows_affected())
 }
+
+pub async fn cancel_queued_jobs_for_document(
+    postgres: &PgPool,
+    document_id: Uuid,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE ingest_job
+         SET queue_state = 'cancelled', completed_at = now()
+         WHERE mutation_id IN (
+             SELECT m.id FROM content_mutation m
+             JOIN content_mutation_item mi ON mi.mutation_id = m.id
+             WHERE mi.document_id = $1
+         )
+         AND queue_state IN ('queued', 'available')
+         AND completed_at IS NULL",
+    )
+    .bind(document_id)
+    .execute(postgres)
+    .await?;
+    Ok(result.rows_affected())
+}

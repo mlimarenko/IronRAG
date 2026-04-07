@@ -451,8 +451,24 @@ fn prepare_materialized_edge_candidates(
 
 fn parse_materialized_node_type(node_kind: &str) -> RuntimeNodeType {
     match node_kind.trim().to_ascii_lowercase().as_str() {
-        "topic" => RuntimeNodeType::Topic,
         "document" => RuntimeNodeType::Document,
+        "person" => RuntimeNodeType::Person,
+        "organization" => RuntimeNodeType::Organization,
+        "location" => RuntimeNodeType::Location,
+        "event" => RuntimeNodeType::Event,
+        "artifact" => RuntimeNodeType::Artifact,
+        "natural" => RuntimeNodeType::Natural,
+        "process" => RuntimeNodeType::Process,
+        "concept" => RuntimeNodeType::Concept,
+        "attribute" => RuntimeNodeType::Attribute,
+        // Backward compatibility
+        "topic" => RuntimeNodeType::Concept,
+        "technology" => RuntimeNodeType::Artifact,
+        "api" => RuntimeNodeType::Artifact,
+        "code_symbol" => RuntimeNodeType::Artifact,
+        "natural_kind" => RuntimeNodeType::Natural,
+        "metric" => RuntimeNodeType::Attribute,
+        "regulation" => RuntimeNodeType::Artifact,
         _ => RuntimeNodeType::Entity,
     }
 }
@@ -518,10 +534,13 @@ mod tests {
         let prepared = prepare_materialized_edge_candidates(&nodes, &edges);
 
         assert_eq!(prepared.len(), 1);
-        assert_eq!(prepared[0].canonical_key, "entity:первый_печатный_двор--mentions--topic:касса");
+        assert_eq!(
+            prepared[0].canonical_key,
+            "entity:первый_печатный_двор--mentions--concept:касса"
+        );
         assert_eq!(prepared[0].edge_kind, "mentions");
         assert_eq!(prepared[0].from_canonical_key, "entity:первый_печатный_двор");
-        assert_eq!(prepared[0].to_canonical_key, "topic:касса");
+        assert_eq!(prepared[0].to_canonical_key, "concept:касса");
     }
 
     #[test]

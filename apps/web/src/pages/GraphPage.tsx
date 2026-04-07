@@ -14,13 +14,21 @@ import {
 } from 'lucide-react';
 import type { GraphNode, GraphNodeType, GraphMetadata, GraphStatus } from '@/types';
 
-const LAYOUTS = ['force', 'cloud', 'circle', 'rings', 'lanes', 'clusters', 'islands', 'spiral'] as const;
+const LAYOUTS = ['cloud', 'circle', 'rings', 'lanes', 'clusters', 'islands', 'spiral'] as const;
 type LayoutType = typeof LAYOUTS[number];
 
-const NODE_COLORS: Record<GraphNodeType, string> = {
-  document: 'hsl(var(--status-processing))',
-  entity: 'hsl(var(--status-ready))',
-  topic: 'hsl(var(--status-warning))',
+const NODE_COLORS: Record<string, string> = {
+  document: '#3b82f6',      // blue
+  person: '#ec4899',        // pink
+  organization: '#64748b',  // slate
+  location: '#84cc16',      // lime
+  event: '#f43f5e',         // rose
+  artifact: '#06b6d4',      // cyan
+  natural: '#22c55e',       // green
+  process: '#a855f7',       // purple
+  concept: '#f59e0b',       // amber
+  attribute: '#0ea5e9',     // sky
+  entity: '#78716c',        // stone
 };
 
 function scaledRadii(total: number): Record<GraphNodeType, { min: number; max: number }> {
@@ -28,123 +36,17 @@ function scaledRadii(total: number): Record<GraphNodeType, { min: number; max: n
   const s = total > 100 ? 0.4 : total > 50 ? 0.6 : total > 20 ? 0.8 : 1.0;
   return {
     document: { min: 1.5 * s, max: 2.8 * s },
+    person: { min: 1.0 * s, max: 1.8 * s },
+    organization: { min: 1.0 * s, max: 1.8 * s },
+    location: { min: 1.0 * s, max: 1.8 * s },
+    event: { min: 1.0 * s, max: 1.8 * s },
+    artifact: { min: 1.0 * s, max: 1.8 * s },
+    natural: { min: 1.0 * s, max: 1.8 * s },
+    process: { min: 1.0 * s, max: 1.8 * s },
+    concept: { min: 0.7 * s, max: 1.3 * s },
+    attribute: { min: 1.0 * s, max: 1.8 * s },
     entity: { min: 1.0 * s, max: 1.8 * s },
-    topic: { min: 0.7 * s, max: 1.3 * s },
   };
-}
-
-// ---------------------------------------------------------------------------
-// Force-directed layout simulation
-// ---------------------------------------------------------------------------
-
-interface ForceNode { id: string; x: number; y: number; vx: number; vy: number }
-
-function forceLayout(
-  nodeIds: string[],
-  edges: EdgeData[],
-  width: number,
-  height: number,
-  iterations = 120,
-): Map<string, { x: number; y: number }> {
-  const n = nodeIds.length;
-  const result = new Map<string, { x: number; y: number }>();
-  if (n === 0) return result;
-
-  const nodes: ForceNode[] = nodeIds.map((id, i) => {
-    const angle = (i / n) * Math.PI * 2;
-    const initR = Math.min(width, height) * 0.35;
-    return {
-      id,
-      x: width / 2 + initR * Math.cos(angle) + (Math.random() - 0.5) * 2,
-      y: height / 2 + initR * Math.sin(angle) + (Math.random() - 0.5) * 2,
-      vx: 0,
-      vy: 0,
-    };
-  });
-
-  const idxMap = new Map<string, number>();
-  nodes.forEach((nd, i) => idxMap.set(nd.id, i));
-
-  const cx = width / 2;
-  const cy = height / 2;
-  const repulsionStrength = 3000 + n * 40;
-  const attractionStrength = 0.004;
-  const centeringStrength = 0.003;
-  const damping = 0.78;
-  const maxSpeed = 6;
-
-  for (let iter = 0; iter < iterations; iter++) {
-    const temp = 1 - iter / iterations;
-
-    // Repulsion (Coulomb)
-    for (let i = 0; i < n; i++) {
-      for (let j = i + 1; j < n; j++) {
-        let dx = nodes[i].x - nodes[j].x;
-        let dy = nodes[i].y - nodes[j].y;
-        let dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < 0.5) { dist = 0.5; dx = Math.random() - 0.5; dy = Math.random() - 0.5; }
-        const force = (repulsionStrength * temp) / (dist * dist);
-        const fx = (dx / dist) * force;
-        const fy = (dy / dist) * force;
-        nodes[i].vx += fx; nodes[i].vy += fy;
-        nodes[j].vx -= fx; nodes[j].vy -= fy;
-      }
-    }
-
-    // Attraction along edges (Hooke)
-    for (const edge of edges) {
-      const si = idxMap.get(edge.sourceId);
-      const ti = idxMap.get(edge.targetId);
-      if (si == null || ti == null) continue;
-      const dx = nodes[ti].x - nodes[si].x;
-      const dy = nodes[ti].y - nodes[si].y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist < 0.1) continue;
-      const force = dist * attractionStrength;
-      const fx = (dx / dist) * force;
-      const fy = (dy / dist) * force;
-      nodes[si].vx += fx; nodes[si].vy += fy;
-      nodes[ti].vx -= fx; nodes[ti].vy -= fy;
-    }
-
-    // Centering
-    for (let i = 0; i < n; i++) {
-      nodes[i].vx += (cx - nodes[i].x) * centeringStrength;
-      nodes[i].vy += (cy - nodes[i].y) * centeringStrength;
-    }
-
-    // Apply velocity
-    for (let i = 0; i < n; i++) {
-      nodes[i].vx *= damping;
-      nodes[i].vy *= damping;
-      const speed = Math.sqrt(nodes[i].vx * nodes[i].vx + nodes[i].vy * nodes[i].vy);
-      if (speed > maxSpeed) {
-        nodes[i].vx = (nodes[i].vx / speed) * maxSpeed;
-        nodes[i].vy = (nodes[i].vy / speed) * maxSpeed;
-      }
-      nodes[i].x += nodes[i].vx;
-      nodes[i].y += nodes[i].vy;
-    }
-  }
-
-  // Normalize into [padding, width-padding]
-  const padding = 8;
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  for (const nd of nodes) {
-    if (nd.x < minX) minX = nd.x;
-    if (nd.x > maxX) maxX = nd.x;
-    if (nd.y < minY) minY = nd.y;
-    if (nd.y > maxY) maxY = nd.y;
-  }
-  const rangeX = maxX - minX || 1;
-  const rangeY = maxY - minY || 1;
-  for (const nd of nodes) {
-    result.set(nd.id, {
-      x: padding + ((nd.x - minX) / rangeX) * (width - 2 * padding),
-      y: padding + ((nd.y - minY) / rangeY) * (height - 2 * padding),
-    });
-  }
-  return result;
 }
 
 /** Map backend GraphWorkbenchSurface to frontend GraphNode[] + GraphMetadata */
@@ -173,9 +75,25 @@ function mapWorkbenchToUI(workbench: any): { nodes: GraphNode[]; meta: GraphMeta
 }
 
 function mapNodeType(t: string | undefined): GraphNodeType {
-  if (t === 'entity') return 'entity';
-  if (t === 'topic') return 'topic';
   if (t === 'document') return 'document';
+  if (t === 'person') return 'person';
+  if (t === 'organization') return 'organization';
+  if (t === 'location') return 'location';
+  if (t === 'event') return 'event';
+  if (t === 'artifact') return 'artifact';
+  if (t === 'natural') return 'natural';
+  if (t === 'process') return 'process';
+  if (t === 'concept') return 'concept';
+  if (t === 'attribute') return 'attribute';
+  if (t === 'entity') return 'entity';
+  // Backward compat for legacy type names
+  if (t === 'topic') return 'concept';
+  if (t === 'technology') return 'artifact';
+  if (t === 'api') return 'artifact';
+  if (t === 'code_symbol') return 'artifact';
+  if (t === 'natural_kind') return 'natural';
+  if (t === 'metric') return 'attribute';
+  if (t === 'regulation') return 'artifact';
   return 'entity';
 }
 
@@ -205,48 +123,51 @@ function mapEntityDetailToNode(detail: any): GraphNode {
 
 interface EdgeData { id: string; sourceId: string; targetId: string; label: string; weight: number }
 
-/** Compute a quadratic bezier control point offset perpendicular to the edge midpoint */
-function curvedEdgePath(x1: number, y1: number, x2: number, y2: number): string {
-  const mx = (x1 + x2) / 2;
-  const my = (y1 + y2) / 2;
-  const dx = x2 - x1;
-  const dy = y2 - y1;
-  const dist = Math.sqrt(dx * dx + dy * dy);
-  // Perpendicular offset proportional to distance
-  const offset = dist * 0.15;
-  // Normal direction (rotate 90 degrees)
-  const nx = -dy / (dist || 1);
-  const ny = dx / (dist || 1);
-  const cx = mx + nx * offset;
-  const cy = my + ny * offset;
-  return `M ${x1} ${y1} Q ${cx} ${cy} ${x2} ${y2}`;
-}
 
+/**
+ * High-performance Canvas2D graph renderer.
+ * ALL interaction state (pan, zoom, hover) lives in refs — zero React re-renders during drag/zoom.
+ * React only re-renders when nodes/edges/selectedId/layout change (data changes).
+ */
 function GraphCanvas({ nodes, edges, selectedId, onSelect, layout, zoom, onZoomChange, fitKey }: {
   nodes: GraphNode[]; edges: EdgeData[]; selectedId: string | null; onSelect: (id: string | null) => void; layout: LayoutType; zoom: number; onZoomChange: (z: number) => void; fitKey: number;
 }) {
-  const canvasRef = useRef<HTMLDivElement>(null);
-  const svgRef = useRef<SVGSVGElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const rafRef = useRef<number>(0);
   const dragStartRef = useRef({ x: 0, y: 0 });
   const panStartRef = useRef({ x: 0, y: 0 });
   const draggedRef = useRef(false);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
-  const [isDragging, setIsDragging] = useState(false);
+  const panRef = useRef({ x: 0, y: 0 });
   const isPanningRef = useRef(false);
-
-  // Node dragging state
-  const [dragNodeId, setDragNodeId] = useState<string | null>(null);
   const hoveredNodeRef = useRef<string | null>(null);
-  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [nodePositions, setNodePositions] = useState<Map<string, { x: number; y: number }>>(new Map());
+  const nodePositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
   const dragNodeRef = useRef<string | null>(null);
+  const zoomRef = useRef(zoom);
+  const selectedIdRef = useRef(selectedId);
+  const drawScheduled = useRef(false);
 
-  // Memoize viewBox
-  const viewBox = useMemo(() => {
-    const sz = Math.max(100, Math.ceil(Math.sqrt(nodes.length) * 14));
-    return `0 0 ${sz} ${sz}`;
-  }, [nodes.length]);
+  // Keep refs in sync with props
+  useEffect(() => { zoomRef.current = zoom; }, [zoom]);
+  useEffect(() => { selectedIdRef.current = selectedId; scheduleRedraw(); }, [selectedId]);
+
+  // Schedule a single redraw on next animation frame (coalesces multiple calls)
+  const scheduleRedraw = useCallback(() => {
+    if (drawScheduled.current) return;
+    drawScheduled.current = true;
+    rafRef.current = requestAnimationFrame(() => {
+      drawScheduled.current = false;
+      drawCanvas();
+    });
+  }, []);
+
+  // Placeholder — will be assigned after drawCanvas is defined
+  const drawCanvasRef = useRef<() => void>(() => {});
+  const drawCanvas = useCallback(() => drawCanvasRef.current(), []);
+
+  // Compute viewBox-equivalent size
+  const viewSize = useMemo(() => Math.max(100, Math.ceil(Math.sqrt(nodes.length) * 14)), [nodes.length]);
 
   // Pre-compute node index map for O(1) position lookups
   const nodeIndexMap = useMemo(() => {
@@ -255,7 +176,7 @@ function GraphCanvas({ nodes, edges, selectedId, onSelect, layout, zoom, onZoomC
     return m;
   }, [nodes]);
 
-  // Pre-compute adjacency map: nodeId → Set of connected nodeIds (O(E) once, then O(1) lookup)
+  // Pre-compute adjacency map: nodeId -> Set of connected nodeIds
   const adjacency = useMemo(() => {
     const adj = new Map<string, Set<string>>();
     for (const e of edges) {
@@ -276,10 +197,10 @@ function GraphCanvas({ nodes, edges, selectedId, onSelect, layout, zoom, onZoomC
     const sorted = nodes.map(nd => nd.edgeCount).sort((a, b) => b - a);
     const edgeThreshold = sorted[Math.min(labelBudget, sorted.length - 1)] ?? 0;
     const topNodeIds = new Set(nodes.filter(nd => nd.edgeCount >= edgeThreshold || nd.type === 'document').map(nd => nd.id));
-    return { maxChars, fontSize, topNodeIds };
+    return { maxChars, fontSize, edgeThreshold, topNodeIds };
   }, [nodes]);
 
-  // Pre-compute cluster/island metadata to avoid O(N²) in getPosition
+  // Pre-compute cluster/island metadata
   const clusterMeta = useMemo(() => {
     const typeGroup: Record<string, number> = { document: 0, entity: 1, topic: 2 };
     const clusterSizes: Record<number, number> = {};
@@ -305,153 +226,36 @@ function GraphCanvas({ nodes, edges, selectedId, onSelect, layout, zoom, onZoomC
     return Math.max(range.min, Math.min(range.max, range.min + node.edgeCount * 0.1));
   }, [radii]);
 
-  // Debounced hover — update state only after pointer rests 50ms to avoid re-render storms
-  const handleNodeEnter = useCallback((nodeId: string) => {
-    hoveredNodeRef.current = nodeId;
-    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
-    hoverTimerRef.current = setTimeout(() => {
-      if (hoveredNodeRef.current === nodeId) setHoveredNodeId(nodeId);
-    }, 50);
-  }, []);
-  const handleNodeLeave = useCallback((nodeId: string) => {
-    if (hoveredNodeRef.current === nodeId) hoveredNodeRef.current = null;
-    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
-    hoverTimerRef.current = setTimeout(() => {
-      if (hoveredNodeRef.current === null) setHoveredNodeId(null);
-    }, 50);
-  }, []);
-
-  // Compute force layout positions when layout === 'force' or recompute on node/edge changes
-  const forcePositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  useEffect(() => {
+    nodePositionsRef.current = new Map(); scheduleRedraw();
+  }, [nodes, edges, layout, viewSize]);
 
   useEffect(() => {
-    if (layout === 'force' && nodes.length > 0) {
-      const sz = Math.max(100, Math.ceil(Math.sqrt(nodes.length) * 14));
-      const iters = nodes.length > 80 ? 180 : 120;
-      const positions = forceLayout(nodes.map(n => n.id), edges, sz, sz, iters);
-      forcePositionsRef.current = positions;
-      setNodePositions(new Map(positions));
-    } else {
-      forcePositionsRef.current = new Map();
-      setNodePositions(new Map());
-    }
-  }, [nodes, edges, layout]);
-
-  useEffect(() => {
-    setPan({ x: 0, y: 0 });
+    panRef.current = { x: 0, y: 0 }; scheduleRedraw();
   }, [fitKey]);
 
+  // Wheel zoom — ref-only, no React re-render per wheel tick
   useEffect(() => {
-    const el = canvasRef.current;
+    const el = containerRef.current;
     if (!el) return;
     const handler = (e: WheelEvent) => {
       e.preventDefault();
       const delta = e.deltaY > 0 ? -0.1 : 0.1;
-      onZoomChange(Math.min(20, Math.max(0.1, zoom + delta)));
+      zoomRef.current = Math.min(20, Math.max(0.1, zoomRef.current + delta));
+      scheduleRedraw();
     };
     el.addEventListener('wheel', handler, { passive: false });
     return () => el.removeEventListener('wheel', handler);
   }, [zoom, onZoomChange]);
 
-  /** Convert a client (screen) coordinate to SVG viewBox coordinate */
-  const clientToSvg = useCallback((clientX: number, clientY: number): { x: number; y: number } => {
-    const svg = svgRef.current;
-    if (!svg) return { x: 0, y: 0 };
-    const pt = svg.createSVGPoint();
-    pt.x = clientX;
-    pt.y = clientY;
-    const ctm = svg.getScreenCTM();
-    if (!ctm) return { x: 0, y: 0 };
-    const svgPt = pt.matrixTransform(ctm.inverse());
-    return { x: svgPt.x, y: svgPt.y };
-  }, []);
-
-  const handlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0) return;
-    // If a node drag is active, ignore canvas panning
-    if (dragNodeRef.current) return;
-    draggedRef.current = false;
-    dragStartRef.current = { x: e.clientX, y: e.clientY };
-    panStartRef.current = pan;
-    isPanningRef.current = true;
-  };
-
-  const handlePointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
-    // Node dragging takes priority
-    if (dragNodeRef.current) {
-      const svgPos = clientToSvg(e.clientX, e.clientY);
-      setNodePositions(prev => {
-        const next = new Map(prev);
-        next.set(dragNodeRef.current!, { x: svgPos.x, y: svgPos.y });
-        return next;
-      });
-      draggedRef.current = true;
-      return;
-    }
-
-    if (!isPanningRef.current) return;
-    const deltaX = e.clientX - dragStartRef.current.x;
-    const deltaY = e.clientY - dragStartRef.current.y;
-    if (Math.abs(deltaX) > 3 || Math.abs(deltaY) > 3) {
-      draggedRef.current = true;
-      setIsDragging(true);
-    }
-    if (draggedRef.current) {
-      setPan({ x: panStartRef.current.x + deltaX, y: panStartRef.current.y + deltaY });
-    }
-  };
-
-  const handlePointerUp = (_e: ReactPointerEvent<HTMLDivElement>) => {
-    if (dragNodeRef.current) {
-      dragNodeRef.current = null;
-      setDragNodeId(null);
-      // Keep draggedRef true so the click handler knows not to select
-      return;
-    }
-    isPanningRef.current = false;
-    setIsDragging(false);
-  };
-
-  const handleCanvasClick = () => {
-    if (draggedRef.current) {
-      draggedRef.current = false;
-      return;
-    }
-    onSelect(null);
-  };
-
-  const handleNodePointerDown = useCallback((e: React.PointerEvent, nodeId: string) => {
-    e.stopPropagation();
-    e.preventDefault();
-    dragNodeRef.current = nodeId;
-    setDragNodeId(nodeId);
-    draggedRef.current = false;
-    // Initialize position if not already in the map (for non-force layouts)
-    setNodePositions(prev => {
-      if (prev.has(nodeId)) return prev;
-      // We need a position -- get it from the layout
-      return prev;
-    });
-  }, []);
-
-  const getPosition = useCallback((index: number, total: number, nodeId?: string) => {
-    // If we have an override position for this node (from dragging or force layout), use it
-    if (nodeId && nodePositions.has(nodeId)) {
-      return nodePositions.get(nodeId)!;
-    }
-
-    // Use viewBox-aware coordinates
+  // Layout position calculator (same logic as before, no nodePositions dependency — uses raw layout)
+  const getLayoutPosition = useCallback((index: number, total: number) => {
     const sz = Math.max(100, Math.ceil(Math.sqrt(total) * 14));
     const margin = sz * 0.06;
     const usable = sz - margin * 2;
     const cx = sz / 2, cy = sz / 2;
 
     switch (layout) {
-      case 'force': {
-        // Fallback initial positions for force — actual positions come from forceLayout
-        const angle = (index / total) * Math.PI * 2 - Math.PI / 2;
-        return { x: cx + (usable * 0.4) * Math.cos(angle), y: cy + (usable * 0.4) * Math.sin(angle) };
-      }
       case 'circle': {
         const angle = (index / total) * Math.PI * 2 - Math.PI / 2;
         return { x: cx + (usable * 0.45) * Math.cos(angle), y: cy + (usable * 0.45) * Math.sin(angle) };
@@ -482,7 +286,6 @@ function GraphCanvas({ nodes, edges, selectedId, onSelect, layout, zoom, onZoomC
       }
       case 'clusters':
       case 'islands': {
-        // Use precomputed cluster data (built in clusterMeta memo)
         const meta = clusterMeta;
         const nodeType = nodes[index]?.type ?? 'entity';
         const group = meta.typeGroup[nodeType] ?? 1;
@@ -509,31 +312,418 @@ function GraphCanvas({ nodes, edges, selectedId, onSelect, layout, zoom, onZoomC
         return { x: cx + r * Math.cos(seed) + (Math.sin(seed * 2) * usable * 0.03), y: cy + r * Math.sin(seed) + (Math.cos(seed * 3) * usable * 0.03) };
       }
     }
-  }, [layout, nodePositions]);
+  // clusterMeta and nodes are stable references per render
+  }, [layout, clusterMeta, nodes]);
 
   // Reset camera when layout changes
   useEffect(() => {
-    setPan({ x: 0, y: 0 });
+    panRef.current = { x: 0, y: 0 }; scheduleRedraw();
   }, [layout]);
 
-  // On first render for non-force layouts, seed nodePositions so dragging works
+  // Seed nodePositions so dragging works
   useEffect(() => {
-    if (layout === 'force') return; // force layout sets positions itself
     if (nodes.length === 0) return;
     const initial = new Map<string, { x: number; y: number }>();
-    nodes.forEach((node, i) => {
-      const pos = getPosition(i, nodes.length);
-      initial.set(node.id, pos);
+    nodes.forEach((_node, i) => {
+      const pos = getLayoutPosition(i, nodes.length);
+      initial.set(nodes[i].id, pos);
     });
-    setNodePositions(initial);
-    // Only run when layout or node list identity changes, not when getPosition ref changes during drag
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    nodePositionsRef.current = initial; scheduleRedraw();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layout, nodes]);
+
+  // ---------------------------------------------------------------------------
+  // Canvas2D draw loop
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    let cancelled = false;
+
+    const draw = () => {
+      if (cancelled) return;
+      const rect = container.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const w = rect.width;
+      const h = rect.height;
+
+      // Resize canvas if needed
+      if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+        canvas.width = Math.round(w * dpr);
+        canvas.height = Math.round(h * dpr);
+        canvas.style.width = `${w}px`;
+        canvas.style.height = `${h}px`;
+      }
+
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+
+      // Background — transparent to inherit page theme
+      ctx.clearRect(0, 0, w, h);
+
+      // Apply transform: center + pan + zoomRef.current, map viewBox coords to screen
+      ctx.save();
+      const scale = (Math.min(w, h) / viewSize) * zoomRef.current;
+      const offsetX = w / 2 + panRef.current.x - (viewSize / 2) * scale;
+      const offsetY = h / 2 + panRef.current.y - (viewSize / 2) * scale;
+
+      // Compute viewport bounds in viewBox coordinates for culling
+      const vpLeft = -offsetX / scale;
+      const vpTop = -offsetY / scale;
+      const vpRight = (w - offsetX) / scale;
+      const vpBottom = (h - offsetY) / scale;
+      const vpMargin = 10; // extra margin in viewBox units
+
+      // Helper to check if a point is in viewport
+      const inViewport = (x: number, y: number) =>
+        x >= vpLeft - vpMargin && x <= vpRight + vpMargin &&
+        y >= vpTop - vpMargin && y <= vpBottom + vpMargin;
+
+      // Transform to viewBox coordinate system
+      ctx.translate(offsetX, offsetY);
+      ctx.scale(scale, scale);
+
+      const positions = nodePositionsRef.current;
+      const total = nodes.length;
+
+      // Build position cache for this frame
+      const posCache = new Map<string, { x: number; y: number }>();
+      for (let i = 0; i < total; i++) {
+        const node = nodes[i];
+        const pos = positions.has(node.id) ? positions.get(node.id)! : getLayoutPosition(i, total);
+        posCache.set(node.id, pos);
+      }
+
+      // --- Draw edges ---
+      const baseEdgeWidth = 0.15 / Math.max(zoomRef.current, 0.3);
+      const isLargeGraph = total > 1000;
+      const showBgEdges = !isLargeGraph || zoomRef.current > 0.5;
+      // Curvature offset for quadratic bezier (perpendicular distance)
+      // Curvature scales with edge length for visible curves
+      const curvatureFactor = 0.15; // 15% of edge length as perpendicular offset
+
+      if (showBgEdges) {
+        ctx.strokeStyle = selectedIdRef.current ? 'rgba(148, 163, 184, 0.08)' : 'rgba(148, 163, 184, 0.3)';
+        ctx.lineWidth = selectedIdRef.current ? baseEdgeWidth * 0.4 : baseEdgeWidth * 0.9;
+        let edgesDrawn = 0;
+        const edgeBudget = isLargeGraph ? Math.round(2000 / Math.max(zoomRef.current, 0.5)) : edges.length;
+        ctx.beginPath();
+        for (const edge of edges) {
+          if (edgesDrawn >= edgeBudget) break;
+          const sp = posCache.get(edge.sourceId);
+          const tp = posCache.get(edge.targetId);
+          if (!sp || !tp) continue;
+          if (!inViewport(sp.x, sp.y) && !inViewport(tp.x, tp.y)) continue;
+          if (selectedIdRef.current && (selectedIdRef.current === edge.sourceId || selectedIdRef.current === edge.targetId)) continue;
+          // Quadratic bezier curve — control point offset perpendicular to the line
+          const mx = (sp.x + tp.x) / 2;
+          const my = (sp.y + tp.y) / 2;
+          const dx = tp.x - sp.x;
+          const dy = tp.y - sp.y;
+          const len = Math.sqrt(dx * dx + dy * dy);
+          const nx = len > 0 ? -dy / len : 0;
+          const ny = len > 0 ? dx / len : 0;
+          const curve = len * curvatureFactor;
+          const cpx = mx + nx * curve;
+          const cpy = my + ny * curve;
+          ctx.moveTo(sp.x, sp.y);
+          ctx.quadraticCurveTo(cpx, cpy, tp.x, tp.y);
+          edgesDrawn++;
+        }
+        ctx.stroke();
+      }
+
+      // Connected edges — always visible, curved, highlighted
+      if (selectedIdRef.current) {
+        ctx.beginPath();
+        ctx.strokeStyle = 'rgba(59, 130, 246, 0.9)';
+        ctx.lineWidth = baseEdgeWidth * 3;
+        const connectedEdges: EdgeData[] = [];
+        for (const edge of edges) {
+          if (selectedIdRef.current === edge.sourceId || selectedIdRef.current === edge.targetId) {
+            const sp = posCache.get(edge.sourceId);
+            const tp = posCache.get(edge.targetId);
+            if (!sp || !tp) continue;
+            const mx = (sp.x + tp.x) / 2;
+            const my = (sp.y + tp.y) / 2;
+            const dx = tp.x - sp.x;
+            const dy = tp.y - sp.y;
+            const len = Math.sqrt(dx * dx + dy * dy);
+            const nx = len > 0 ? -dy / len : 0;
+            const ny = len > 0 ? dx / len : 0;
+            const curve = len * curvatureFactor;
+            const cpx = mx + nx * curve;
+            const cpy = my + ny * curve;
+            ctx.moveTo(sp.x, sp.y);
+            ctx.quadraticCurveTo(cpx, cpy, tp.x, tp.y);
+            connectedEdges.push(edge);
+          }
+        }
+        ctx.stroke();
+
+        // Edge labels for connected edges at sufficient zoomRef.current
+        if (zoomRef.current > 0.6) {
+          ctx.fillStyle = '#9ca3af';
+          const eFontSize = labelConfig.fontSize * 0.65;
+          ctx.font = `${eFontSize}px sans-serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          for (const edge of connectedEdges) {
+            if (!edge.label) continue;
+            const sp = posCache.get(edge.sourceId);
+            const tp = posCache.get(edge.targetId);
+            if (!sp || !tp) continue;
+            // Bezier midpoint at t=0.5: (P0 + 2*CP + P2) / 4
+            const dx = tp.x - sp.x;
+            const dy = tp.y - sp.y;
+            const len = Math.sqrt(dx * dx + dy * dy);
+            const nx2 = len > 0 ? -dy / len : 0;
+            const ny2 = len > 0 ? dx / len : 0;
+            const curve2 = len * curvatureFactor;
+            const cpx2 = (sp.x + tp.x) / 2 + nx2 * curve2;
+            const cpy2 = (sp.y + tp.y) / 2 + ny2 * curve2;
+            const lx = (sp.x + 2 * cpx2 + tp.x) / 4;
+            const ly = (sp.y + 2 * cpy2 + tp.y) / 4;
+            ctx.save();
+            ctx.translate(lx, ly);
+            let angle = Math.atan2(tp.y - sp.y, tp.x - sp.x);
+            if (angle > Math.PI / 2) angle -= Math.PI;
+            if (angle < -Math.PI / 2) angle += Math.PI;
+            ctx.rotate(angle);
+            ctx.globalAlpha = 0.7;
+            ctx.fillText(edge.label, 0, -eFontSize * 0.7);
+            ctx.restore();
+          }
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      // --- Draw nodes ---
+      const selectedAdj = selectedIdRef.current ? adjacency.get(selectedIdRef.current) : undefined;
+      const hovered = hoveredNodeRef.current;
+
+      for (let i = 0; i < total; i++) {
+        const node = nodes[i];
+        const pos = posCache.get(node.id)!;
+        if (!inViewport(pos.x, pos.y)) continue;
+
+        const r = nodeRadius(node);
+        const color = NODE_COLORS[node.type] || NODE_COLORS.entity;
+        const isSelected = node.id === selectedIdRef.current;
+        const isConnectedToSelected = selectedAdj?.has(node.id) ?? false;
+        const dimmed = !!selectedIdRef.current && !isSelected && !isConnectedToSelected;
+        const isHovered = node.id === hovered;
+
+        // Glow for selected node
+        if (isSelected) {
+          const grad = ctx.createRadialGradient(pos.x, pos.y, 0, pos.x, pos.y, r * 2.5);
+          grad.addColorStop(0, color + '4d'); // 30% opacity
+          grad.addColorStop(1, color + '00');
+          ctx.beginPath();
+          ctx.arc(pos.x, pos.y, r * 2.5, 0, Math.PI * 2);
+          ctx.fillStyle = grad;
+          ctx.fill();
+        }
+
+        // Node circle
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, r, 0, Math.PI * 2);
+        ctx.globalAlpha = dimmed ? 0.15 : 0.9;
+        ctx.fillStyle = color;
+        ctx.fill();
+        if (isSelected) {
+          ctx.strokeStyle = '#e2e8f0';
+          ctx.lineWidth = r * 0.12;
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      // --- Draw labels (level-of-detail) ---
+      const showLabels = zoomRef.current > 0.4 || total < 200;
+      if (showLabels) {
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        for (let i = 0; i < total; i++) {
+          const node = nodes[i];
+          const pos = posCache.get(node.id)!;
+          if (!inViewport(pos.x, pos.y)) continue;
+
+          const isSelected = node.id === selectedIdRef.current;
+          const isConnectedToSelected = selectedAdj?.has(node.id) ?? false;
+          const isHovered = node.id === hovered;
+          const dimmed = !!selectedIdRef.current && !isSelected && !isConnectedToSelected;
+
+          // Determine if label should show
+          const showLabel = isSelected || isConnectedToSelected || isHovered || labelConfig.topNodeIds.has(node.id);
+          if (!showLabel) continue;
+          // At medium zoomRef.current, skip low-support nodes
+          if (zoomRef.current < 0.8 && !isSelected && !isConnectedToSelected && !isHovered && node.edgeCount < labelConfig.edgeThreshold) continue;
+
+          const r = nodeRadius(node);
+          const text = node.label.length > labelConfig.maxChars ? node.label.slice(0, labelConfig.maxChars - 1) + '\u2026' : node.label;
+          const weight = isSelected ? '700' : (isConnectedToSelected || isHovered) ? '600' : '500';
+          ctx.font = `${weight} ${labelConfig.fontSize}px sans-serif`;
+          ctx.globalAlpha = dimmed ? 0.15 : isSelected || isHovered ? 1 : 0.75;
+          ctx.fillStyle = '#94a3b8';
+          ctx.fillText(text, pos.x, pos.y + r + labelConfig.fontSize * 0.3);
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      ctx.restore();
+    };
+
+    // Store draw function for imperative redraws via scheduleRedraw
+    drawCanvasRef.current = draw;
+
+    // Initial draw
+    rafRef.current = requestAnimationFrame(draw);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(rafRef.current);
+    };
+  // Only re-create draw function when data/layout changes (not on pan/zoom/hover)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodes, edges, layout, viewSize, adjacency, labelConfig, nodeRadius, getLayoutPosition]);
+
+  // ---------------------------------------------------------------------------
+  // Hit testing: convert client coords to viewBox coords
+  // ---------------------------------------------------------------------------
+  const clientToViewBox = useCallback((clientX: number, clientY: number): { x: number; y: number } => {
+    const container = containerRef.current;
+    if (!container) return { x: 0, y: 0 };
+    const rect = container.getBoundingClientRect();
+    const w = rect.width;
+    const h = rect.height;
+    const scale = (Math.min(w, h) / viewSize) * zoomRef.current;
+    const offsetX = w / 2 + panRef.current.x - (viewSize / 2) * scale;
+    const offsetY = h / 2 + panRef.current.y - (viewSize / 2) * scale;
+    return {
+      x: (clientX - rect.left - offsetX) / scale,
+      y: (clientY - rect.top - offsetY) / scale,
+    };
+  }, [viewSize]);
+
+  // Find nearest node to a viewBox coordinate
+  const findNodeAt = useCallback((vx: number, vy: number): string | null => {
+    let bestId: string | null = null;
+    let bestDist = Infinity;
+    const hitRadius = Math.max(3, 8 / zoomRef.current); // generous hit area
+    for (let i = 0; i < nodes.length; i++) {
+      const node = nodes[i];
+      const pos = nodePositionsRef.current.has(node.id)
+        ? nodePositionsRef.current.get(node.id)!
+        : getLayoutPosition(i, nodes.length);
+      const dx = pos.x - vx;
+      const dy = pos.y - vy;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const r = nodeRadius(node);
+      if (dist < Math.max(r, hitRadius) && dist < bestDist) {
+        bestDist = dist;
+        bestId = node.id;
+      }
+    }
+    return bestId;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodes, nodeRadius, getLayoutPosition]);
+
+  // Debounced hover
+  const handlePointerMoveHover = useCallback((clientX: number, clientY: number) => {
+    const vb = clientToViewBox(clientX, clientY);
+    const nodeId = findNodeAt(vb.x, vb.y);
+    if (nodeId === hoveredNodeRef.current) return;
+    hoveredNodeRef.current = nodeId;
+    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+    hoverTimerRef.current = setTimeout(() => {
+      scheduleRedraw();
+    }, 50);
+  }, [clientToViewBox, findNodeAt]);
+
+  // ---------------------------------------------------------------------------
+  // Pointer event handlers
+  // ---------------------------------------------------------------------------
+  const handlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    if (dragNodeRef.current) return;
+
+    // Check if clicking on a node
+    const vb = clientToViewBox(e.clientX, e.clientY);
+    const hitNode = findNodeAt(vb.x, vb.y);
+    if (hitNode) {
+      // Start node drag
+      dragNodeRef.current = hitNode;
+      dragNodeRef.current = hitNode;
+      draggedRef.current = false;
+      return;
+    }
+
+    draggedRef.current = false;
+    dragStartRef.current = { x: e.clientX, y: e.clientY };
+    panStartRef.current = panRef.current;
+    isPanningRef.current = true;
+  };
+
+  const handlePointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    // Node dragging
+    if (dragNodeRef.current) {
+      const vb = clientToViewBox(e.clientX, e.clientY);
+      nodePositionsRef.current.set(dragNodeRef.current!, { x: vb.x, y: vb.y });
+      scheduleRedraw();
+      draggedRef.current = true;
+      return;
+    }
+
+    if (!isPanningRef.current) {
+      // Hover detection
+      handlePointerMoveHover(e.clientX, e.clientY);
+      return;
+    }
+
+    const deltaX = e.clientX - dragStartRef.current.x;
+    const deltaY = e.clientY - dragStartRef.current.y;
+    if (Math.abs(deltaX) > 3 || Math.abs(deltaY) > 3) {
+      draggedRef.current = true;
+      isPanningRef.current = true;
+    }
+    if (draggedRef.current) {
+      panRef.current = { x: panStartRef.current.x + deltaX, y: panStartRef.current.y + deltaY }; scheduleRedraw();
+    }
+  };
+
+  const handlePointerUp = (_e: ReactPointerEvent<HTMLDivElement>) => {
+    if (dragNodeRef.current) {
+      dragNodeRef.current = null;
+      dragNodeRef.current = null;
+      return;
+    }
+    isPanningRef.current = false;
+    isPanningRef.current = false;
+  };
+
+  const handleCanvasClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (draggedRef.current) {
+      draggedRef.current = false;
+      return;
+    }
+    // Check if clicking on a node
+    const vb = clientToViewBox(e.clientX, e.clientY);
+    const hitNode = findNodeAt(vb.x, vb.y);
+    if (hitNode) {
+      onSelect(hitNode);
+    } else {
+      onSelect(null);
+    }
+  };
 
   return (
     <div
-      ref={canvasRef}
-      className={`w-full h-full relative overflow-hidden ${dragNodeId ? 'cursor-grabbing' : isDragging ? 'cursor-grabbing' : 'cursor-grab'}`}
+      ref={containerRef}
+      className="w-full h-full relative overflow-hidden cursor-grab"
       onClick={handleCanvasClick}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
@@ -541,94 +731,7 @@ function GraphCanvas({ nodes, edges, selectedId, onSelect, layout, zoom, onZoomC
       onPointerCancel={handlePointerUp}
       style={{ touchAction: 'none' }}
     >
-      <svg
-        ref={svgRef}
-        className="w-full h-full"
-        viewBox={viewBox}
-        preserveAspectRatio="xMidYMid meet"
-        style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: 'center', transition: (isDragging || dragNodeId) ? 'none' : 'transform 0.3s cubic-bezier(0.16, 1, 0.3, 1)' }}
-      >
-        <defs>
-          {/* Dot grid pattern */}
-          <pattern id="dot-grid" width="5" height="5" patternUnits="userSpaceOnUse">
-            <circle cx="2.5" cy="2.5" r="0.15" fill="currentColor" opacity="0.12" />
-          </pattern>
-          <radialGradient id="glow-doc" cx="50%" cy="50%" r="50%"><stop offset="0%" stopColor="hsl(var(--status-processing))" stopOpacity="0.3"/><stop offset="100%" stopColor="hsl(var(--status-processing))" stopOpacity="0"/></radialGradient>
-          <radialGradient id="glow-entity" cx="50%" cy="50%" r="50%"><stop offset="0%" stopColor="hsl(var(--status-ready))" stopOpacity="0.3"/><stop offset="100%" stopColor="hsl(var(--status-ready))" stopOpacity="0"/></radialGradient>
-          <radialGradient id="glow-topic" cx="50%" cy="50%" r="50%"><stop offset="0%" stopColor="hsl(var(--status-warning))" stopOpacity="0.3"/><stop offset="100%" stopColor="hsl(var(--status-warning))" stopOpacity="0"/></radialGradient>
-        </defs>
-
-        {/* Grid background — oversized to cover panning/zooming */}
-        <rect x="-500" y="-500" width="2000" height="2000" fill="url(#dot-grid)" />
-
-        {/* Edges -- curved bezier paths (only between visible nodes) */}
-        {edges.map(edge => {
-          const si = nodeIndexMap.get(edge.sourceId);
-          const ti = nodeIndexMap.get(edge.targetId);
-          if (si == null || ti == null) return null;
-          const sp = getPosition(si, nodes.length, edge.sourceId);
-          const tp = getPosition(ti, nodes.length, edge.targetId);
-          const isConnected = selectedId === edge.sourceId || selectedId === edge.targetId;
-          // Scale stroke width with viewBox (larger graphs need thicker lines to be visible)
-          const baseStroke = Math.max(0.15, parseInt(viewBox.split(' ')[2]) * 0.0004);
-          return (
-            <path
-              key={`e-${edge.id}`}
-              d={curvedEdgePath(sp.x, sp.y, tp.x, tp.y)}
-              stroke={isConnected ? 'hsl(var(--primary))' : 'hsl(var(--muted-foreground))'}
-              strokeWidth={isConnected ? baseStroke * 2.5 : baseStroke}
-              opacity={selectedId ? (isConnected ? 0.9 : 0.1) : 0.3}
-              fill="none"
-            />
-          );
-        })}
-
-        {/* Nodes */}
-        {nodes.map((node, i) => {
-          const pos = getPosition(i, nodes.length, node.id);
-          const isSelected = selectedId === node.id;
-          const size = nodeRadius(node);
-          const isBeingDragged = dragNodeId === node.id;
-          // O(1) adjacency check instead of O(E) edges.some()
-          const isConnectedToSelected = selectedId ? (adjacency.get(selectedId)?.has(node.id) ?? false) : false;
-          const dimmed = selectedId && !isSelected && !isConnectedToSelected;
-          const isHovered = hoveredNodeId === node.id;
-          const showLabel = isSelected || isConnectedToSelected || isHovered || labelConfig.topNodeIds.has(node.id);
-          const text = node.label.length > labelConfig.maxChars ? node.label.slice(0, labelConfig.maxChars - 1) + '\u2026' : node.label;
-
-          return (
-            <g
-              key={node.id}
-              onPointerDown={e => handleNodePointerDown(e, node.id)}
-              onPointerEnter={() => handleNodeEnter(node.id)}
-              onPointerLeave={() => handleNodeLeave(node.id)}
-              onClick={e => { e.stopPropagation(); if (draggedRef.current) { draggedRef.current = false; return; } onSelect(node.id); }}
-              className="cursor-pointer"
-            >
-              {isSelected && <circle cx={pos.x} cy={pos.y} r={size * 1.8} fill={`url(#glow-${node.type === 'document' ? 'doc' : node.type})`} />}
-              <circle
-                cx={pos.x} cy={pos.y} r={size}
-                fill={NODE_COLORS[node.type]}
-                stroke={isSelected ? 'hsl(var(--foreground))' : 'transparent'}
-                strokeWidth={isSelected ? size * 0.12 : 0}
-                opacity={dimmed ? 0.15 : 0.9}
-              />
-              {showLabel && (
-                <text
-                  x={pos.x} y={pos.y + size + labelConfig.fontSize + 0.5}
-                  textAnchor="middle" fontSize={labelConfig.fontSize}
-                  fill="hsl(var(--muted-foreground))"
-                  className="select-none pointer-events-none"
-                  fontWeight={isSelected ? '700' : isConnectedToSelected || isHovered ? '600' : '500'}
-                  opacity={dimmed ? 0.15 : isSelected || isHovered ? 1 : 0.75}
-                >
-                  {text}
-                </text>
-              )}
-            </g>
-          );
-        })}
-      </svg>
+      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
     </div>
   );
 }
@@ -654,10 +757,9 @@ export default function GraphPage() {
 
   // UI controls
   const [searchQuery, setSearchQuery] = useState('');
-  const [nodeTypeFilter, setNodeTypeFilter] = useState<'all' | GraphNodeType>('all');
-  const [layout, setLayout] = useState<LayoutType>('force');
+  const [activeTypes, setActiveTypes] = useState<Set<GraphNodeType>>(new Set());
+  const [layout, setLayout] = useState<LayoutType>('cloud');
   const [zoom, setZoom] = useState(1);
-  const [showFiltered, setShowFiltered] = useState(true);
   const [fitKey, setFitKey] = useState(0);
 
   // Fetch graph workbench data, falling back to entities+relations endpoints
@@ -853,10 +955,12 @@ export default function GraphPage() {
   }, [activeLibrary, selectedNode, allNodes]);
 
   const filteredNodes = useMemo(() => allNodes.filter(n => {
-    if (nodeTypeFilter !== 'all' && n.type !== nodeTypeFilter) return false;
+    if (activeTypes.size > 0 && !activeTypes.has(n.type)) return false;
     if (searchQuery && !n.label.toLowerCase().includes(searchQuery.toLowerCase())) return false;
     return true;
-  }), [allNodes, nodeTypeFilter, searchQuery]);
+  }), [allNodes, activeTypes, searchQuery]);
+
+  const effectiveLayout = layout;
 
   const selected = selectedDetail ?? allNodes.find(n => n.id === selectedNode) ?? null;
 
@@ -886,15 +990,40 @@ export default function GraphPage() {
           <Input className="h-8 pl-8 text-xs" placeholder={t('graph.searchPlaceholder')} value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
         </div>
 
-        <Select value={nodeTypeFilter} onValueChange={v => setNodeTypeFilter(v as typeof nodeTypeFilter)}>
-          <SelectTrigger className="h-8 w-28 text-xs"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">{t('graph.allTypes')}</SelectItem>
-            <SelectItem value="document">{t('graph.documents')}</SelectItem>
-            <SelectItem value="entity">{t('graph.entities')}</SelectItem>
-            <SelectItem value="topic">{t('graph.topics')}</SelectItem>
-          </SelectContent>
-        </Select>
+        <div className="relative">
+          <Button variant="outline" size="sm" className="h-8 text-xs gap-1.5" onClick={() => {
+            const el = document.getElementById('type-filter-popover');
+            if (el) el.classList.toggle('hidden');
+          }}>
+            <Filter className="h-3 w-3" />
+            {activeTypes.size === 0 ? t('graph.allTypes') : `${activeTypes.size} ${activeTypes.size === 1 ? 'type' : 'types'}`}
+          </Button>
+          <div id="type-filter-popover" className="hidden absolute top-full left-0 mt-1 z-50 bg-popover border rounded-lg shadow-lg p-2 space-y-0.5 min-w-[160px]">
+            <button className="w-full text-left px-2 py-1 text-xs rounded hover:bg-muted" onClick={() => setActiveTypes(new Set())}>
+              {t('graph.allTypes')}
+            </button>
+            <div className="border-t my-1" />
+            {(Object.keys(NODE_COLORS) as GraphNodeType[]).map(type => (
+              <label key={type} className="flex items-center gap-2 px-2 py-1 text-xs rounded hover:bg-muted cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="h-3.5 w-3.5 rounded"
+                  checked={activeTypes.has(type)}
+                  onChange={() => {
+                    setActiveTypes(prev => {
+                      const next = new Set(prev);
+                      if (next.has(type)) next.delete(type);
+                      else next.add(type);
+                      return next;
+                    });
+                  }}
+                />
+                <span className="inline-block w-2.5 h-2.5 rounded-full" style={{ backgroundColor: NODE_COLORS[type] }} />
+                {type === 'natural' ? 'Natural' : type === 'code_symbol' ? 'Code' : type.charAt(0).toUpperCase() + type.slice(1)}
+              </label>
+            ))}
+          </div>
+        </div>
 
         <Select value={layout} onValueChange={v => setLayout(v as LayoutType)}>
           <SelectTrigger className="h-8 w-28 text-xs"><SelectValue /></SelectTrigger>
@@ -908,10 +1037,6 @@ export default function GraphPage() {
           <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-7 w-7 rounded-[9px]" onClick={() => setZoom(z => Math.max(0.1, z / 1.3))}><ZoomOut className="h-3.5 w-3.5" /></Button></TooltipTrigger><TooltipContent side="bottom" className="text-xs">{t('graph.zoomOut')}</TooltipContent></Tooltip>
           <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-7 w-7 rounded-[9px]" onClick={() => { setZoom(1); setFitKey(k => k + 1); }}><Maximize2 className="h-3.5 w-3.5" /></Button></TooltipTrigger><TooltipContent side="bottom" className="text-xs">{t('graph.fit')}</TooltipContent></Tooltip>
         </div>
-
-        <button className="h-7 px-2.5 text-xs flex items-center gap-1.5 rounded-lg hover:bg-muted transition-all duration-200 font-semibold" onClick={() => setShowFiltered(!showFiltered)}>
-          {showFiltered ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />} {t('graph.artifacts')}
-        </button>
 
         {selectedNode && (
           <button className="h-7 px-2.5 text-xs flex items-center gap-1.5 rounded-lg hover:bg-muted transition-all duration-200 font-semibold" onClick={() => setSelectedNode(null)}>
@@ -962,14 +1087,17 @@ export default function GraphPage() {
               )}
             </div>
           ) : (
-            <GraphCanvas nodes={filteredNodes} edges={edgesRef.current} selectedId={selectedNode} onSelect={setSelectedNode} layout={layout} zoom={zoom} onZoomChange={setZoom} fitKey={fitKey} />
+            <GraphCanvas nodes={filteredNodes} edges={edgesRef.current} selectedId={selectedNode} onSelect={setSelectedNode} layout={effectiveLayout} zoom={zoom} onZoomChange={setZoom} fitKey={fitKey} />
           )}
 
           {/* Legend */}
           <div className="absolute bottom-3 left-3 flex items-center gap-3 text-xs glass-panel rounded-xl px-4 py-2.5 shadow-lifted">
-            <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full" style={{ background: NODE_COLORS.document }} /> {t('graph.document')}</span>
-            <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full" style={{ background: NODE_COLORS.entity }} /> {t('graph.entity')}</span>
-            <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full" style={{ background: NODE_COLORS.topic }} /> {t('graph.topic')}</span>
+            {Object.entries(NODE_COLORS).map(([type, color]) => (
+              <span key={type} className="flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-full" style={{ background: color }} />
+                {type.charAt(0).toUpperCase() + type.slice(1)}
+              </span>
+            ))}
           </div>
 
           {graphMeta?.recommendedLayout && layout !== graphMeta.recommendedLayout && (
@@ -991,7 +1119,7 @@ export default function GraphPage() {
             .slice(0, 20);
           const connectedDocs = connectedNodes.filter(n => n.type === 'document');
           const connectedEntities = connectedNodes.filter(n => n.type === 'entity');
-          const connectedTopics = connectedNodes.filter(n => n.type === 'topic');
+          const connectedConcepts = connectedNodes.filter(n => n.type === 'concept');
 
           return (
             <div className="absolute top-0 right-0 h-full w-80 lg:w-96 bg-card border-l shadow-xl z-20 overflow-y-auto animate-slide-in-right">
@@ -1038,11 +1166,18 @@ export default function GraphPage() {
                     </Button>
                   )}
                   <Button variant="outline" size="sm" className="text-xs h-7" onClick={() => {
-                    setNodeTypeFilter('all');
-                    setSearchQuery(selected.label.split(' ')[0]);
+                    setSearchQuery(selected.label);
                   }}>
                     <Search className="h-3 w-3 mr-1" /> {t('graph.findSimilar')}
                   </Button>
+                  {searchQuery && (
+                    <Button variant="ghost" size="sm" className="text-xs h-7" onClick={() => {
+                      setSearchQuery('');
+                      setActiveTypes(new Set());
+                    }}>
+                      <X className="h-3 w-3 mr-1" /> {t('graph.resetFilter') || 'Reset'}
+                    </Button>
+                  )}
                 </div>
 
                 {/* Connected Documents */}
@@ -1077,14 +1212,14 @@ export default function GraphPage() {
                   </div>
                 )}
 
-                {/* Connected Topics */}
-                {connectedTopics.length > 0 && (
+                {/* Connected Concepts */}
+                {connectedConcepts.length > 0 && (
                   <div>
-                    <div className="section-label mb-1.5">{t('graph.connectedTopics')} ({connectedTopics.length})</div>
+                    <div className="section-label mb-1.5">{t('graph.connectedConcepts')} ({connectedConcepts.length})</div>
                     <div className="space-y-0.5">
-                      {connectedTopics.slice(0, 10).map(n => (
+                      {connectedConcepts.slice(0, 10).map(n => (
                         <button key={n.id} className="w-full flex items-center gap-2 p-2 rounded-lg hover:bg-accent/50 text-left text-xs transition-colors" onClick={() => setSelectedNode(n.id)}>
-                          <span className="w-2 h-2 rounded-full shrink-0" style={{ background: NODE_COLORS.topic }} />
+                          <span className="w-2 h-2 rounded-full shrink-0" style={{ background: NODE_COLORS.concept }} />
                           <span className="truncate">{n.label}</span>
                         </button>
                       ))}

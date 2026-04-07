@@ -20,6 +20,7 @@ use crate::{
     },
     domains::ingest::{WebDiscoveredPage, WebIngestRun, WebIngestRunReceipt, WebIngestRunSummary},
     domains::knowledge::{PreparedSegmentDetail, StructuredDocumentRevision, TypedTechnicalFact},
+    infra::repositories::ingest_repository,
     interfaces::http::{
         auth::AuthContext,
         authorization::{
@@ -201,6 +202,78 @@ pub struct TechnicalFactsPageResponse {
     pub items: Vec<TypedTechnicalFact>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchDeleteRequest {
+    pub document_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchDeleteResponse {
+    pub deleted_count: usize,
+    pub failed_count: usize,
+    pub results: Vec<BatchDeleteResult>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchDeleteResult {
+    pub document_id: Uuid,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchCancelRequest {
+    pub document_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchCancelResponse {
+    pub cancelled_count: usize,
+    pub failed_count: usize,
+    pub results: Vec<BatchCancelResult>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchCancelResult {
+    pub document_id: Uuid,
+    pub jobs_cancelled: u64,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchReprocessRequest {
+    pub document_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchReprocessResponse {
+    pub reprocessed_count: usize,
+    pub failed_count: usize,
+    pub results: Vec<BatchReprocessResult>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchReprocessResult {
+    pub document_id: Uuid,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mutation: Option<ContentMutationDetailResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/chunks", get(list_chunks))
@@ -208,6 +281,9 @@ pub fn router() -> Router<AppState> {
         .route("/content/web-runs/{run_id}", get(get_web_ingest_run))
         .route("/content/web-runs/{run_id}/pages", get(list_web_ingest_run_pages))
         .route("/content/web-runs/{run_id}/cancel", post(cancel_web_ingest_run))
+        .route("/content/documents/batch-delete", post(batch_delete_documents))
+        .route("/content/documents/batch-cancel", post(batch_cancel_documents))
+        .route("/content/documents/batch-reprocess", post(batch_reprocess_documents))
         .route("/content/documents", get(list_documents).post(create_document))
         .route("/content/documents/upload", axum::routing::post(upload_document))
         .route("/content/documents/{document_id}", get(get_document).delete(delete_document))
@@ -1016,6 +1092,234 @@ fn map_content_multipart_file_body_error(
 fn normalize_optional_text(value: String) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+const BATCH_MAX_DOCUMENTS: usize = 100;
+
+async fn batch_delete_documents(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Json(request): Json<BatchDeleteRequest>,
+) -> Result<Json<BatchDeleteResponse>, ApiError> {
+    if request.document_ids.len() > BATCH_MAX_DOCUMENTS {
+        return Err(ApiError::BadRequest(format!(
+            "batch size exceeds maximum of {BATCH_MAX_DOCUMENTS} documents"
+        )));
+    }
+
+    let mut results = Vec::with_capacity(request.document_ids.len());
+    let mut deleted_count = 0usize;
+    let mut failed_count = 0usize;
+
+    for document_id in &request.document_ids {
+        match load_content_document_and_authorize(
+            &auth,
+            &state,
+            *document_id,
+            POLICY_DOCUMENTS_WRITE,
+        )
+        .await
+        {
+            Ok(document) => {
+                match state
+                    .canonical_services
+                    .content
+                    .admit_mutation(
+                        &state,
+                        AdmitMutationCommand {
+                            workspace_id: document.workspace_id,
+                            library_id: document.library_id,
+                            document_id: *document_id,
+                            operation_kind: "delete".to_string(),
+                            idempotency_key: None,
+                            requested_by_principal_id: Some(auth.principal_id),
+                            request_surface: "rest".to_string(),
+                            source_identity: None,
+                            revision: None,
+                        },
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        deleted_count += 1;
+                        results.push(BatchDeleteResult {
+                            document_id: *document_id,
+                            success: true,
+                            error: None,
+                        });
+                    }
+                    Err(error) => {
+                        failed_count += 1;
+                        results.push(BatchDeleteResult {
+                            document_id: *document_id,
+                            success: false,
+                            error: Some(error.to_string()),
+                        });
+                    }
+                }
+            }
+            Err(error) => {
+                failed_count += 1;
+                results.push(BatchDeleteResult {
+                    document_id: *document_id,
+                    success: false,
+                    error: Some(error.to_string()),
+                });
+            }
+        }
+    }
+
+    Ok(Json(BatchDeleteResponse { deleted_count, failed_count, results }))
+}
+
+async fn batch_cancel_documents(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Json(request): Json<BatchCancelRequest>,
+) -> Result<Json<BatchCancelResponse>, ApiError> {
+    if request.document_ids.len() > BATCH_MAX_DOCUMENTS {
+        return Err(ApiError::BadRequest(format!(
+            "batch size exceeds maximum of {BATCH_MAX_DOCUMENTS} documents"
+        )));
+    }
+
+    let mut results = Vec::with_capacity(request.document_ids.len());
+    let mut cancelled_count = 0usize;
+    let mut failed_count = 0usize;
+
+    for document_id in &request.document_ids {
+        match load_content_document_and_authorize(
+            &auth,
+            &state,
+            *document_id,
+            POLICY_DOCUMENTS_WRITE,
+        )
+        .await
+        {
+            Ok(_) => {
+                match ingest_repository::cancel_queued_jobs_for_document(
+                    &state.persistence.postgres,
+                    *document_id,
+                )
+                .await
+                {
+                    Ok(jobs_cancelled) => {
+                        cancelled_count += 1;
+                        results.push(BatchCancelResult {
+                            document_id: *document_id,
+                            jobs_cancelled,
+                            success: true,
+                            error: None,
+                        });
+                    }
+                    Err(error) => {
+                        failed_count += 1;
+                        results.push(BatchCancelResult {
+                            document_id: *document_id,
+                            jobs_cancelled: 0,
+                            success: false,
+                            error: Some(error.to_string()),
+                        });
+                    }
+                }
+            }
+            Err(error) => {
+                failed_count += 1;
+                results.push(BatchCancelResult {
+                    document_id: *document_id,
+                    jobs_cancelled: 0,
+                    success: false,
+                    error: Some(error.to_string()),
+                });
+            }
+        }
+    }
+
+    Ok(Json(BatchCancelResponse { cancelled_count, failed_count, results }))
+}
+
+async fn batch_reprocess_documents(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Json(request): Json<BatchReprocessRequest>,
+) -> Result<Json<BatchReprocessResponse>, ApiError> {
+    if request.document_ids.len() > BATCH_MAX_DOCUMENTS {
+        return Err(ApiError::BadRequest(format!(
+            "batch size exceeds maximum of {BATCH_MAX_DOCUMENTS} documents"
+        )));
+    }
+
+    let mut results = Vec::with_capacity(request.document_ids.len());
+    let mut reprocessed_count = 0usize;
+    let mut failed_count = 0usize;
+
+    for document_id in &request.document_ids {
+        match reprocess_single_document(&auth, &state, *document_id).await {
+            Ok(admission) => {
+                reprocessed_count += 1;
+                results.push(BatchReprocessResult {
+                    document_id: *document_id,
+                    success: true,
+                    mutation: Some(map_mutation_admission(admission)),
+                    error: None,
+                });
+            }
+            Err(error) => {
+                failed_count += 1;
+                results.push(BatchReprocessResult {
+                    document_id: *document_id,
+                    success: false,
+                    mutation: None,
+                    error: Some(error.to_string()),
+                });
+            }
+        }
+    }
+
+    Ok(Json(BatchReprocessResponse { reprocessed_count, failed_count, results }))
+}
+
+async fn reprocess_single_document(
+    auth: &AuthContext,
+    state: &AppState,
+    document_id: Uuid,
+) -> Result<ContentMutationAdmission, ApiError> {
+    let document =
+        load_content_document_and_authorize(auth, state, document_id, POLICY_DOCUMENTS_WRITE)
+            .await?;
+    let summary = state.canonical_services.content.get_document(state, document_id).await?;
+    let active_revision = summary.active_revision.ok_or_else(|| {
+        ApiError::BadRequest("document has no active revision to reprocess".to_string())
+    })?;
+    let resolved_storage_key = state
+        .canonical_services
+        .content
+        .resolve_revision_storage_key(state, active_revision.id)
+        .await?;
+    if active_revision.storage_key.is_none() && resolved_storage_key.is_none() {
+        return Err(ApiError::BadRequest("document has no stored source to reprocess".to_string()));
+    }
+    state
+        .canonical_services
+        .content
+        .admit_mutation(
+            state,
+            AdmitMutationCommand {
+                workspace_id: document.workspace_id,
+                library_id: document.library_id,
+                document_id,
+                operation_kind: "reprocess".to_string(),
+                idempotency_key: None,
+                requested_by_principal_id: Some(auth.principal_id),
+                request_surface: "rest".to_string(),
+                source_identity: None,
+                revision: Some(build_reprocess_revision_metadata(
+                    &active_revision,
+                    resolved_storage_key,
+                )),
+            },
+        )
+        .await
 }
 
 fn map_mutation_admission(admission: ContentMutationAdmission) -> ContentMutationDetailResponse {

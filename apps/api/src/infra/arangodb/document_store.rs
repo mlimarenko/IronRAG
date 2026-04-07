@@ -107,6 +107,8 @@ pub struct KnowledgeChunkRow {
     pub chunk_state: String,
     pub text_generation: Option<i64>,
     pub vector_generation: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality_score: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -711,7 +713,8 @@ impl ArangoDocumentStore {
                     literal_digest: @literal_digest,
                     chunk_state: @chunk_state,
                     text_generation: @text_generation,
-                    vector_generation: @vector_generation
+                    vector_generation: @vector_generation,
+                    quality_score: @quality_score
                  }
                  UPDATE {
                     chunk_kind: @chunk_kind,
@@ -726,7 +729,8 @@ impl ArangoDocumentStore {
                     literal_digest: @literal_digest,
                     chunk_state: @chunk_state,
                     text_generation: @text_generation,
-                    vector_generation: @vector_generation
+                    vector_generation: @vector_generation,
+                    quality_score: @quality_score
                  }
                  IN @@collection
                  RETURN NEW",
@@ -752,6 +756,7 @@ impl ArangoDocumentStore {
                     "chunk_state": row.chunk_state,
                     "text_generation": row.text_generation,
                     "vector_generation": row.vector_generation,
+                    "quality_score": row.quality_score,
                 }),
             )
             .await
@@ -791,6 +796,7 @@ impl ArangoDocumentStore {
                     "chunk_state": row.chunk_state,
                     "text_generation": row.text_generation,
                     "vector_generation": row.vector_generation,
+                    "quality_score": row.quality_score,
                 })
             })
             .collect::<Vec<_>>();
