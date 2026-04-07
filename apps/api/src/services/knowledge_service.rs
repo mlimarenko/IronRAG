@@ -91,6 +91,7 @@ pub struct CreateKnowledgeChunkCommand {
     pub chunk_state: String,
     pub text_generation: Option<i64>,
     pub vector_generation: Option<i64>,
+    pub quality_score: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -324,6 +325,7 @@ impl KnowledgeService {
                 chunk_state: command.chunk_state,
                 text_generation: command.text_generation,
                 vector_generation: command.vector_generation,
+                quality_score: command.quality_score,
             })
             .await
             .map_err(|_| ApiError::Internal)?;
@@ -369,6 +371,7 @@ impl KnowledgeService {
                 chunk_state: command.chunk_state.clone(),
                 text_generation: command.text_generation,
                 vector_generation: command.vector_generation,
+                quality_score: command.quality_score,
             })
             .collect::<Vec<_>>();
 

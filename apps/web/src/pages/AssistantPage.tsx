@@ -3,14 +3,15 @@ import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { useApp } from '@/contexts/AppContext';
 import { useNavigate } from 'react-router-dom';
+import ReactMarkdown from 'react-markdown';
 import { queryApi } from '@/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import {
-  Send, Plus, Search, Paperclip, X, Loader2, FileText, Share2,
+  Send, Plus, Search, Loader2, FileText, Share2,
   AlertTriangle, CheckCircle2, ChevronRight, MessageSquare,
-  Brain, Target, Zap, Shield, XCircle, ImageIcon
+  Brain, Target, Zap, Shield, XCircle
 } from 'lucide-react';
 import type { AssistantSession, AssistantMessage, VerificationState, EvidenceBundle } from '@/types';
 
@@ -120,14 +121,12 @@ export default function AssistantPage() {
   const [activeSession, setActiveSession] = useState<string | null>(null);
   const [messages, setMessages] = useState<AssistantMessage[]>([]);
   const [inputText, setInputText] = useState('');
-  const [attachments, setAttachments] = useState<{ id: string; name: string; size: number }[]>([]);
   const [isExecuting, setIsExecuting] = useState(false);
   const [executionStage, setExecutionStage] = useState<string | null>(null);
   const [sessionSearch, setSessionSearch] = useState('');
   const [showEvidence, setShowEvidence] = useState(true);
   const [showSessionRail, setShowSessionRail] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const workspaceId = activeWorkspace?.id ?? activeLibrary?.workspaceId;
   const libraryId = activeLibrary?.id;
@@ -173,18 +172,16 @@ export default function AssistantPage() {
 
   /* ── Send a question ─────────────────────────────────────────── */
   const handleSend = async () => {
-    if (!inputText.trim() && attachments.length === 0) return;
+    if (!inputText.trim()) return;
     if (!workspaceId || !libraryId) return;
 
     const questionText = inputText.trim();
     const userMsg: AssistantMessage = {
       id: `m-${Date.now()}`, role: 'user', content: questionText,
       timestamp: new Date().toISOString(),
-      attachments: attachments.map(a => ({ ...a, type: 'file' })),
     };
     setMessages(prev => [...prev, userMsg]);
     setInputText('');
-    setAttachments([]);
     setIsExecuting(true);
     setExecutionStage('planning');
 
@@ -232,15 +229,6 @@ export default function AssistantPage() {
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
-  };
-
-  const handlePaste = (e: React.ClipboardEvent) => {
-    const items = Array.from(e.clipboardData.items);
-    const imageItem = items.find(i => i.type.startsWith('image/'));
-    if (imageItem) {
-      const file = imageItem.getAsFile();
-      if (file) setAttachments(prev => [...prev, { id: `att-${Date.now()}`, name: file.name || 'pasted-image.png', size: file.size }]);
-    }
   };
 
   const latestEvidence = [...messages].reverse().find(m => m.role === 'assistant' && m.evidence)?.evidence;
@@ -349,21 +337,37 @@ export default function AssistantPage() {
                       </div>
                     )}
                     <div className={`text-sm leading-relaxed ${msg.role === 'assistant' ? 'bg-card border rounded-2xl rounded-bl-sm px-4 py-3 shadow-soft' : ''}`}>
-                      {msg.content.split('\n').map((line, i) => (
-                        <p key={i} className={i > 0 ? 'mt-2' : ''}>
-                          {line.split('**').map((part, j) => j % 2 === 1 ? <strong key={j}>{part}</strong> : part)}
-                        </p>
-                      ))}
+                      {msg.role === 'assistant' ? (
+                        <ReactMarkdown
+                          className="prose prose-sm dark:prose-invert max-w-none"
+                          components={{
+                            code: ({ className, children, ...props }) => {
+                              const isInline = !className;
+                              return isInline ? (
+                                <code className="bg-muted px-1 py-0.5 rounded text-xs" {...props}>{children}</code>
+                              ) : (
+                                <pre className="bg-muted rounded-md p-3 overflow-x-auto text-xs">
+                                  <code className={className} {...props}>{children}</code>
+                                </pre>
+                              );
+                            },
+                            table: ({ children }) => (
+                              <div className="overflow-x-auto">
+                                <table className="min-w-full text-xs border-collapse">{children}</table>
+                              </div>
+                            ),
+                            th: ({ children }) => <th className="border border-border px-2 py-1 bg-muted font-medium text-left">{children}</th>,
+                            td: ({ children }) => <td className="border border-border px-2 py-1">{children}</td>,
+                          }}
+                        >
+                          {msg.content}
+                        </ReactMarkdown>
+                      ) : (
+                        msg.content.split('\n').map((line, i) => (
+                          <p key={i} className={i > 0 ? 'mt-2' : ''}>{line}</p>
+                        ))
+                      )}
                     </div>
-                    {msg.attachments && msg.attachments.length > 0 && (
-                      <div className="flex flex-wrap gap-1.5 mt-1.5">
-                        {msg.attachments.map(a => (
-                          <span key={a.id} className="inline-flex items-center gap-1 text-xs bg-muted/80 px-2.5 py-1 rounded-lg font-medium">
-                            <Paperclip className="h-3 w-3" /> {a.name}
-                          </span>
-                        ))}
-                      </div>
-                    )}
                   </div>
                 </div>
               ))
@@ -389,35 +393,16 @@ export default function AssistantPage() {
           <div className="border-t p-3" style={{
             background: 'linear-gradient(180deg, hsl(var(--card)), hsl(var(--card)))',
           }}>
-            {attachments.length > 0 && (
-              <div className="flex flex-wrap gap-1.5 mb-2.5">
-                {attachments.map(a => (
-                  <span key={a.id} className="inline-flex items-center gap-1.5 text-xs bg-muted px-3 py-1.5 rounded-xl font-medium">
-                    <Paperclip className="h-3 w-3" /> {a.name}
-                    <button onClick={() => setAttachments(prev => prev.filter(x => x.id !== a.id))} className="ml-0.5 hover:text-destructive transition-colors" aria-label="Remove attachment"><X className="h-3 w-3" /></button>
-                  </span>
-                ))}
-              </div>
-            )}
             <div className="flex items-end gap-2">
-              <button className="p-2.5 rounded-xl hover:bg-muted shrink-0 transition-all duration-200" onClick={() => fileInputRef.current?.click()} aria-label="Attach file">
-                <Paperclip className="h-4 w-4 text-muted-foreground" />
-              </button>
-              <input ref={fileInputRef} type="file" multiple className="hidden" onChange={e => {
-                const files = Array.from(e.target.files ?? []);
-                setAttachments(prev => [...prev, ...files.map(f => ({ id: `att-${Date.now()}-${f.name}`, name: f.name, size: f.size }))]);
-                e.target.value = '';
-              }} />
               <Textarea
                 value={inputText}
                 onChange={e => setInputText(e.target.value)}
                 onKeyDown={handleKeyDown}
-                onPaste={handlePaste}
                 placeholder={t('assistant.askPlaceholder')}
                 className="min-h-[44px] max-h-[120px] resize-none text-sm rounded-xl"
                 rows={1}
               />
-              <Button size="icon" className="shrink-0 rounded-xl h-10 w-10" onClick={handleSend} disabled={isExecuting || (!inputText.trim() && attachments.length === 0)}>
+              <Button size="icon" className="shrink-0 rounded-xl h-10 w-10" onClick={handleSend} disabled={isExecuting || !inputText.trim()}>
                 <Send className="h-4 w-4" />
               </Button>
             </div>

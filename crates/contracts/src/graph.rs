@@ -8,7 +8,15 @@ use crate::diagnostics::OperatorWarning;
 #[serde(rename_all = "snake_case")]
 pub enum GraphNodeType {
     Entity,
-    Topic,
+    Person,
+    Organization,
+    Location,
+    Event,
+    Artifact,
+    Natural,
+    Process,
+    Concept,
+    Attribute,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

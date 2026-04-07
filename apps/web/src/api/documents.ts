@@ -48,6 +48,21 @@ export const documentsApi = {
   getPreparedSegments: (documentId: string) => apiFetch<any>(`/content/documents/${documentId}/prepared-segments`),
   getTechnicalFacts: (documentId: string) => apiFetch<any>(`/content/documents/${documentId}/technical-facts`),
   getRevisions: (documentId: string) => apiFetch<any>(`/content/documents/${documentId}/revisions`),
+  batchDelete: (documentIds: string[]) =>
+    apiFetch<any>(`/content/documents/batch-delete`, {
+      method: 'POST',
+      body: JSON.stringify({ documentIds }),
+    }),
+  batchCancel: (documentIds: string[]) =>
+    apiFetch<any>(`/content/documents/batch-cancel`, {
+      method: 'POST',
+      body: JSON.stringify({ documentIds }),
+    }),
+  batchReprocess: (documentIds: string[]) =>
+    apiFetch<any>(`/content/documents/batch-reprocess`, {
+      method: 'POST',
+      body: JSON.stringify({ documentIds }),
+    }),
 };
 
 export interface DocumentCostSummary {

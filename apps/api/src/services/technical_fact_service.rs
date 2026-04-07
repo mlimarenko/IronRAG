@@ -115,6 +115,11 @@ impl TechnicalFactService {
                 candidates.extend(extract_auth_rule_candidates(block, line));
                 candidates.extend(extract_catalog_link_identifier_candidates(block, line));
                 candidates.extend(extract_branded_identifier_candidates(block, line));
+                candidates.extend(extract_environment_variable_candidates(block, line));
+                candidates.extend(extract_version_candidates(block, line));
+                candidates.extend(extract_code_identifier_candidates(block, line));
+                candidates.extend(extract_config_key_candidates(block, line));
+                candidates.extend(extract_error_code_candidates(block, line));
             }
         }
 
@@ -483,6 +488,413 @@ fn extract_branded_identifier_candidates(
         .collect()
 }
 
+fn extract_environment_variable_candidates(
+    block: &StructuredBlockData,
+    line: &str,
+) -> Vec<FactCandidate> {
+    let mut env_vars = BTreeSet::<String>::new();
+
+    let tokens = technical_tokens(line);
+    let lower = line.to_ascii_lowercase();
+    let has_env_context = matches_any_substring(
+        &lower,
+        &["environment", "env", "variable", "export", "getenv", "environ"],
+    );
+
+    for token in &tokens {
+        // $VARIABLE_NAME
+        if token.starts_with('$') {
+            let name = token.trim_start_matches('$').trim_start_matches('{').trim_end_matches('}');
+            if is_env_var_name(name) {
+                let _ = env_vars.insert(name.to_string());
+            }
+        }
+
+        // process.env.VARIABLE_NAME (Node.js)
+        if let Some(rest) = token.strip_prefix("process.env.") {
+            let name = trim_technical_token(rest);
+            if is_env_var_name(name) {
+                let _ = env_vars.insert(name.to_string());
+            }
+        }
+    }
+
+    // os.getenv("VAR") / os.environ["VAR"] (Python)
+    for pattern in &["os.getenv(", "os.environ["] {
+        if let Some(pos) = lower.find(pattern) {
+            let after = &line[pos + pattern.len()..];
+            if let Some(name) = extract_quoted_argument(after) {
+                if is_env_var_name(&name) {
+                    let _ = env_vars.insert(name);
+                }
+            }
+        }
+    }
+
+    // env::var("VAR") / std::env::var("VAR") (Rust)
+    for pattern in &["env::var(", "std::env::var("] {
+        if let Some(pos) = line.find(pattern) {
+            let after = &line[pos + pattern.len()..];
+            if let Some(name) = extract_quoted_argument(after) {
+                if is_env_var_name(&name) {
+                    let _ = env_vars.insert(name);
+                }
+            }
+        }
+    }
+
+    // ENV["VAR"] (Ruby)
+    if let Some(pos) = line.find("ENV[") {
+        let after = &line[pos + 4..];
+        if let Some(name) = extract_quoted_argument(after) {
+            if is_env_var_name(&name) {
+                let _ = env_vars.insert(name);
+            }
+        }
+    }
+
+    // Tokens matching ^[A-Z][A-Z0-9_]{2,}$ near env keywords
+    if has_env_context {
+        for token in &tokens {
+            let candidate = trim_technical_token(token);
+            if is_env_var_name(candidate) {
+                let _ = env_vars.insert(candidate.to_string());
+            }
+        }
+    }
+
+    env_vars
+        .into_iter()
+        .filter_map(|var| {
+            build_candidate(
+                block,
+                TechnicalFactKind::EnvironmentVariable,
+                &var,
+                Vec::new(),
+                line,
+                "environment_variable",
+            )
+        })
+        .collect()
+}
+
+fn is_env_var_name(candidate: &str) -> bool {
+    if candidate.len() < 3 {
+        return false;
+    }
+    let mut chars = candidate.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_uppercase()
+        && chars.all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
+}
+
+fn extract_quoted_argument(after: &str) -> Option<String> {
+    let trimmed = after.trim_start();
+    let quote = trimmed.chars().next()?;
+    if !matches!(quote, '"' | '\'') {
+        return None;
+    }
+    let rest = &trimmed[1..];
+    let end = rest.find(quote)?;
+    Some(rest[..end].to_string())
+}
+
+fn extract_version_candidates(block: &StructuredBlockData, line: &str) -> Vec<FactCandidate> {
+    let lower = line.to_ascii_lowercase();
+    let has_version_context = matches_any_substring(&lower, &["version", "release", " v.", " v "]);
+
+    let mut versions = BTreeSet::<String>::new();
+    let tokens = technical_tokens(line);
+
+    for token in &tokens {
+        let candidate = trim_technical_token(token);
+
+        // Prefixed: v1.2.3 or v1.2
+        if let Some(rest) = candidate.strip_prefix('v').or_else(|| candidate.strip_prefix('V')) {
+            if is_semver_like(rest) {
+                let _ = versions.insert(candidate.to_string());
+            }
+        }
+
+        // Bare semver near version keywords
+        if has_version_context && is_semver_like(candidate) {
+            let _ = versions.insert(candidate.to_string());
+        }
+
+        // Date-based versions near version context: 2024.1.0
+        if has_version_context && is_date_version(candidate) {
+            let _ = versions.insert(candidate.to_string());
+        }
+    }
+
+    versions
+        .into_iter()
+        .filter_map(|version| {
+            build_candidate(
+                block,
+                TechnicalFactKind::VersionNumber,
+                &version,
+                Vec::new(),
+                line,
+                "version_number",
+            )
+        })
+        .collect()
+}
+
+fn is_semver_like(candidate: &str) -> bool {
+    let parts: Vec<&str> = candidate.splitn(2, |ch: char| ch == '-' || ch == '+').collect();
+    let core = parts[0];
+    let segments: Vec<&str> = core.split('.').collect();
+    if segments.len() < 2 || segments.len() > 3 {
+        return false;
+    }
+    segments.iter().all(|seg| !seg.is_empty() && seg.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+fn is_date_version(candidate: &str) -> bool {
+    let segments: Vec<&str> = candidate.split('.').collect();
+    if segments.len() < 2 || segments.len() > 3 {
+        return false;
+    }
+    let Some(year) = segments[0].parse::<u32>().ok() else {
+        return false;
+    };
+    if !(2000..=2099).contains(&year) {
+        return false;
+    }
+    segments[1..]
+        .iter()
+        .all(|seg| !seg.is_empty() && seg.len() <= 2 && seg.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+fn extract_code_identifier_candidates(
+    block: &StructuredBlockData,
+    line: &str,
+) -> Vec<FactCandidate> {
+    if !matches!(block.block_kind, StructuredBlockKind::CodeBlock) {
+        return Vec::new();
+    }
+
+    let mut identifiers = BTreeSet::<String>::new();
+
+    // Rust patterns
+    for keyword in &["fn ", "struct ", "enum ", "impl ", "trait ", "mod "] {
+        if let Some(name) = extract_keyword_identifier(line, keyword) {
+            let _ = identifiers.insert(name);
+        }
+    }
+
+    // Python patterns
+    for keyword in &["def ", "class "] {
+        if let Some(name) = extract_keyword_identifier(line, keyword) {
+            let _ = identifiers.insert(name);
+        }
+    }
+    // async def
+    if let Some(pos) = line.find("async def ") {
+        let after = &line[pos + "async def ".len()..];
+        if let Some(name) = extract_word_identifier(after) {
+            let _ = identifiers.insert(name);
+        }
+    }
+
+    // JS/TS patterns
+    if let Some(name) = extract_keyword_identifier(line, "function ") {
+        let _ = identifiers.insert(name);
+    }
+
+    // const NAME = (only in code blocks)
+    if let Some(pos) = line.find("const ") {
+        let after = &line[pos + "const ".len()..];
+        if let Some(name) = extract_word_identifier(after) {
+            // Verify followed by `=` (possibly with spaces)
+            let rest = line[pos + "const ".len() + name.len()..].trim_start();
+            if rest.starts_with('=') {
+                let _ = identifiers.insert(name);
+            }
+        }
+    }
+
+    // export (default)? (function|class|const) NAME
+    if let Some(pos) = line.find("export ") {
+        let after = &line[pos + "export ".len()..];
+        let after = after.strip_prefix("default ").unwrap_or(after);
+        for keyword in &["function ", "class ", "const "] {
+            if let Some(rest) = after.strip_prefix(keyword) {
+                if let Some(name) = extract_word_identifier(rest) {
+                    let _ = identifiers.insert(name);
+                }
+            }
+        }
+    }
+
+    identifiers
+        .into_iter()
+        .filter_map(|ident| {
+            build_candidate(
+                block,
+                TechnicalFactKind::CodeIdentifier,
+                &ident,
+                Vec::new(),
+                line,
+                "code_identifier",
+            )
+        })
+        .collect()
+}
+
+fn extract_keyword_identifier(line: &str, keyword: &str) -> Option<String> {
+    let pos = line.find(keyword)?;
+    let after = &line[pos + keyword.len()..];
+    extract_word_identifier(after)
+}
+
+fn extract_word_identifier(text: &str) -> Option<String> {
+    let trimmed = text.trim_start();
+    let name: String =
+        trimmed.chars().take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_').collect();
+    if name.is_empty() || name.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    Some(name)
+}
+
+fn extract_config_key_candidates(block: &StructuredBlockData, line: &str) -> Vec<FactCandidate> {
+    let mut keys = BTreeSet::<String>::new();
+
+    let trimmed = line.trim();
+
+    // TOML section headers: [section.name]
+    if trimmed.starts_with('[') && trimmed.ends_with(']') && !trimmed.starts_with("[[") {
+        let inner = &trimmed[1..trimmed.len() - 1];
+        if is_config_key_name(inner) {
+            let _ = keys.insert(inner.to_string());
+        }
+    }
+
+    // YAML-style: key: value (at line start)
+    if let Some((left, _right)) = trimmed.split_once(':') {
+        let key = left.trim();
+        if is_config_key_name(key) && !key.contains(' ') {
+            let _ = keys.insert(key.to_string());
+        }
+    }
+
+    // TOML-style key = value (at line start)
+    if let Some((left, _right)) = trimmed.split_once('=') {
+        let key = left.trim();
+        if is_config_key_name(key) && !key.contains(' ') {
+            let _ = keys.insert(key.to_string());
+        }
+    }
+
+    // JSON-style: "key": value
+    if let Some(pos) = trimmed.find("\":") {
+        // Walk backwards from pos to find the opening quote
+        let before = &trimmed[..pos];
+        if let Some(quote_start) = before.rfind('"') {
+            let key = &before[quote_start + 1..];
+            if is_config_key_name(key) {
+                let _ = keys.insert(key.to_string());
+            }
+        }
+    }
+
+    // Only emit if the block looks like configuration context
+    if keys.is_empty() {
+        return Vec::new();
+    }
+
+    let is_config_block = matches!(
+        block.block_kind,
+        StructuredBlockKind::CodeBlock | StructuredBlockKind::MetadataBlock
+    ) || has_config_context(block);
+
+    if !is_config_block {
+        return Vec::new();
+    }
+
+    keys.into_iter()
+        .filter_map(|key| {
+            build_candidate(
+                block,
+                TechnicalFactKind::ConfigurationKey,
+                &key,
+                Vec::new(),
+                line,
+                "config_key",
+            )
+        })
+        .collect()
+}
+
+fn is_config_key_name(candidate: &str) -> bool {
+    if candidate.is_empty() || candidate.len() > 64 {
+        return false;
+    }
+    candidate.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+        && candidate.chars().any(|ch| ch.is_ascii_alphabetic())
+}
+
+fn has_config_context(block: &StructuredBlockData) -> bool {
+    let lower_heading = block.heading_trail.join(" ").to_ascii_lowercase();
+    matches_any_substring(&lower_heading, &["config", "setting", "параметр", "настройк", "конфиг"])
+        || block.code_language.as_deref().is_some_and(|lang| {
+            matches!(lang, "yaml" | "yml" | "toml" | "json" | "ini" | "properties")
+        })
+}
+
+fn extract_error_code_candidates(block: &StructuredBlockData, line: &str) -> Vec<FactCandidate> {
+    let lower = line.to_ascii_lowercase();
+    if !matches_any_substring(&lower, &["error", "code", "exception", "ошибк"]) {
+        return Vec::new();
+    }
+
+    let mut codes = BTreeSet::<String>::new();
+
+    for token in technical_tokens(line) {
+        let candidate = trim_technical_token(&token);
+
+        // E001 .. E99999
+        if candidate.starts_with('E')
+            && candidate.len() >= 4
+            && candidate.len() <= 6
+            && candidate[1..].chars().all(|ch| ch.is_ascii_digit())
+        {
+            let _ = codes.insert(candidate.to_string());
+            continue;
+        }
+
+        // ERR_SOMETHING or ERROR_SOMETHING
+        if (candidate.starts_with("ERR_") || candidate.starts_with("ERROR_"))
+            && candidate.len() > 4
+            && candidate
+                .chars()
+                .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
+        {
+            // Exclude HTTP status codes (already handled)
+            let _ = codes.insert(candidate.to_string());
+        }
+    }
+
+    codes
+        .into_iter()
+        .filter_map(|code| {
+            build_candidate(
+                block,
+                TechnicalFactKind::ErrorCode,
+                &code,
+                Vec::new(),
+                line,
+                "error_code",
+            )
+        })
+        .collect()
+}
+
 fn finalize_candidates(
     command: &ExtractTechnicalFactsCommand,
     candidates: Vec<FactCandidate>,
@@ -663,6 +1075,14 @@ fn normalize_scope_anchor(
         TechnicalFactKind::Protocol => "<protocol>",
         TechnicalFactKind::AuthRule => "<auth>",
         TechnicalFactKind::Identifier => "<identifier>",
+        TechnicalFactKind::EnvironmentVariable => "<envvar>",
+        TechnicalFactKind::VersionNumber => "<version>",
+        TechnicalFactKind::DatabaseName => "<database>",
+        TechnicalFactKind::ConfigurationKey => "<configkey>",
+        TechnicalFactKind::ErrorCode => "<errorcode>",
+        TechnicalFactKind::RateLimit => "<ratelimit>",
+        TechnicalFactKind::DependencyDeclaration => "<dependency>",
+        TechnicalFactKind::CodeIdentifier => "<codeident>",
     };
     let raw_lower = canonical_value.to_ascii_lowercase();
     if !raw_lower.is_empty() {
@@ -1102,6 +1522,7 @@ mod tests {
                     parent_block_id: None,
                     table_coordinates: None,
                     code_language: None,
+                    is_boilerplate: false,
                 },
                 StructuredBlockData {
                     block_id: Uuid::now_v7(),
@@ -1121,6 +1542,7 @@ mod tests {
                     parent_block_id: None,
                     table_coordinates: None,
                     code_language: None,
+                    is_boilerplate: false,
                 },
                 StructuredBlockData {
                     block_id: Uuid::now_v7(),
@@ -1138,6 +1560,7 @@ mod tests {
                     parent_block_id: None,
                     table_coordinates: None,
                     code_language: None,
+                    is_boilerplate: false,
                 },
             ],
         });
@@ -1175,6 +1598,7 @@ mod tests {
                 parent_block_id: None,
                 table_coordinates: None,
                 code_language: None,
+                is_boilerplate: false,
             }],
         });
 
@@ -1192,5 +1616,117 @@ mod tests {
         assert!(fact_kinds.contains(&("endpoint_path".to_string(), "/orders".to_string())));
         assert!(fact_kinds.contains(&("parameter_name".to_string(), "pageNumber".to_string())));
         assert!(fact_kinds.contains(&("parameter_name".to_string(), "pageSize".to_string())));
+    }
+
+    fn make_test_block(
+        kind: StructuredBlockKind,
+        text: &str,
+        code_language: Option<&str>,
+    ) -> StructuredBlockData {
+        StructuredBlockData {
+            block_id: Uuid::now_v7(),
+            ordinal: 0,
+            block_kind: kind,
+            text: text.to_string(),
+            normalized_text: text.to_string(),
+            heading_trail: Vec::new(),
+            section_path: Vec::new(),
+            page_number: None,
+            source_span: None,
+            parent_block_id: None,
+            table_coordinates: None,
+            code_language: code_language.map(str::to_string),
+            is_boilerplate: false,
+        }
+    }
+
+    fn extract_facts(
+        blocks: Vec<StructuredBlockData>,
+    ) -> Vec<crate::domains::knowledge::TypedTechnicalFact> {
+        TechnicalFactService::new()
+            .extract_from_blocks(ExtractTechnicalFactsCommand {
+                revision_id: Uuid::now_v7(),
+                document_id: Uuid::now_v7(),
+                workspace_id: Uuid::now_v7(),
+                library_id: Uuid::now_v7(),
+                blocks,
+            })
+            .facts
+    }
+
+    #[test]
+    fn extracts_environment_variables() {
+        let facts = extract_facts(vec![make_test_block(
+            StructuredBlockKind::Paragraph,
+            "Set $DATABASE_URL and process.env.API_KEY before starting",
+            None,
+        )]);
+
+        let env_vars: Vec<_> =
+            facts.iter().filter(|f| f.fact_kind.as_str() == "environment_variable").collect();
+
+        assert!(
+            env_vars.len() >= 2,
+            "expected at least 2 environment variables, found {}: {:?}",
+            env_vars.len(),
+            env_vars.iter().map(|f| &f.display_value).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn extracts_version_numbers() {
+        let facts = extract_facts(vec![make_test_block(
+            StructuredBlockKind::Paragraph,
+            "Requires version v2.3.1 or later",
+            None,
+        )]);
+
+        let versions: Vec<_> =
+            facts.iter().filter(|f| f.fact_kind.as_str() == "version_number").collect();
+
+        assert!(!versions.is_empty(), "expected at least one VersionNumber fact");
+        assert!(
+            versions.iter().any(|f| f.display_value.contains("2.3.1")),
+            "expected a version containing '2.3.1', got: {:?}",
+            versions.iter().map(|f| &f.display_value).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn extracts_code_identifiers_from_code_blocks() {
+        let facts = extract_facts(vec![make_test_block(
+            StructuredBlockKind::CodeBlock,
+            "fn build_router(state: AppState) -> Router {",
+            Some("rust"),
+        )]);
+
+        let code_idents: Vec<_> =
+            facts.iter().filter(|f| f.fact_kind.as_str() == "code_identifier").collect();
+
+        assert!(
+            code_idents.iter().any(|f| f.display_value == "build_router"),
+            "expected CodeIdentifier for 'build_router', got: {:?}",
+            code_idents.iter().map(|f| &f.display_value).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn extracts_config_keys() {
+        let facts = extract_facts(vec![make_test_block(
+            StructuredBlockKind::CodeBlock,
+            "max_connections: 200\nshared_buffers: 256MB",
+            Some("yaml"),
+        )]);
+
+        let config_keys: Vec<_> =
+            facts.iter().filter(|f| f.fact_kind.as_str() == "configuration_key").collect();
+
+        assert!(!config_keys.is_empty(), "expected at least one ConfigurationKey fact, got none");
+        let key_names: Vec<_> = config_keys.iter().map(|f| f.display_value.as_str()).collect();
+        assert!(
+            key_names.contains(&"max_connections") || key_names.contains(&"shared_buffers"),
+            "expected config keys like 'max_connections' or 'shared_buffers', got: {:?}",
+            key_names
+        );
     }
 }

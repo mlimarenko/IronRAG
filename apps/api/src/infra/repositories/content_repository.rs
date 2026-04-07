@@ -22,6 +22,7 @@ pub struct ContentDocumentHeadRow {
     pub latest_mutation_id: Option<Uuid>,
     pub latest_successful_attempt_id: Option<Uuid>,
     pub head_updated_at: DateTime<Utc>,
+    pub document_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -303,7 +304,8 @@ pub async fn get_document_head(
             readable_revision_id,
             latest_mutation_id,
             latest_successful_attempt_id,
-            head_updated_at
+            head_updated_at,
+            document_summary
          from content_document_head
          where document_id = $1",
     )
@@ -327,7 +329,8 @@ pub async fn list_document_heads_by_document_ids(
             readable_revision_id,
             latest_mutation_id,
             latest_successful_attempt_id,
-            head_updated_at
+            head_updated_at,
+            document_summary
          from content_document_head
          where document_id = any($1)",
     )
@@ -362,7 +365,8 @@ pub async fn upsert_document_head(
             readable_revision_id,
             latest_mutation_id,
             latest_successful_attempt_id,
-            head_updated_at",
+            head_updated_at,
+            document_summary",
     )
     .bind(new_head.document_id)
     .bind(new_head.active_revision_id)
@@ -371,6 +375,23 @@ pub async fn upsert_document_head(
     .bind(new_head.latest_successful_attempt_id)
     .fetch_one(postgres)
     .await
+}
+
+pub async fn update_document_summary(
+    postgres: &PgPool,
+    document_id: Uuid,
+    summary: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "update content_document_head
+         set document_summary = $2
+         where document_id = $1",
+    )
+    .bind(document_id)
+    .bind(summary)
+    .execute(postgres)
+    .await?;
+    Ok(())
 }
 
 pub async fn list_revisions_by_document(

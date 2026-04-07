@@ -36,12 +36,58 @@ If your RustRAG instance is behind another domain or TLS terminator, replace the
 
 `tools/list` is grant-filtered. If a token cannot do something, the tool is not advertised.
 
-## What agents can do
+## Tools
 
-- `list_workspaces`, `list_libraries`
-- `search_documents`, `read_document`
-- `upload_documents`, `update_document`, `get_mutation_status`
-- `create_workspace`, `create_library` when admin grants allow it
+### Discovery
+
+| Tool | Description | Required parameters |
+|------|-------------|---------------------|
+| `list_workspaces` | List workspaces visible to the current token. | (none) |
+| `list_libraries` | List visible libraries, optionally filtered to one workspace. | `workspaceId` (optional) |
+
+### Admin
+
+| Tool | Description | Required parameters |
+|------|-------------|---------------------|
+| `create_workspace` | Create a workspace (system-admin only). | `name` |
+| `create_library` | Create a library inside one workspace. | `workspaceId`, `name` |
+
+### Documents
+
+| Tool | Description | Required parameters |
+|------|-------------|---------------------|
+| `search_documents` | Search library memory and return document-level candidates. | `query` |
+| `read_document` | Read one document in full or as an excerpt. | `documentId` |
+| `list_documents` | List documents in a library, optionally filtered by processing status. | `libraryId` |
+| `upload_documents` | Create one or more new documents in a library. | `libraryId`, `documents` |
+| `update_document` | Append to or replace an existing document. | `libraryId`, `documentId`, `operationKind` |
+| `delete_document` | Delete a document and its revisions, chunks, and graph contributions. | `documentId` |
+| `get_mutation_status` | Check the lifecycle of a mutation receipt from upload/update/delete. | `receiptId` |
+
+### Knowledge Graph
+
+| Tool | Description | Required parameters |
+|------|-------------|---------------------|
+| `ask` | Ask a grounded question against a library. Returns a synthesized answer. | `libraryId`, `question` |
+| `search_entities` | Search knowledge graph entities by name or label. | `libraryId`, `query` |
+| `get_graph_topology` | Get the graph topology (entities, relations, document links) with truncation. | `libraryId` |
+| `list_relations` | List knowledge graph relations ordered by support count. | `libraryId` |
+
+### Web Crawl
+
+| Tool | Description | Required parameters |
+|------|-------------|---------------------|
+| `submit_web_ingest_run` | Submit a web ingest run for a seed URL. | `libraryId`, `seedUrl`, `mode` |
+| `get_web_ingest_run` | Load one web ingest run and its current state. | `runId` |
+| `list_web_ingest_run_pages` | List candidate pages and outcomes for a web ingest run. | `runId` |
+| `cancel_web_ingest_run` | Request cancellation for an active web ingest run. | `runId` |
+
+### Runtime
+
+| Tool | Description | Required parameters |
+|------|-------------|---------------------|
+| `get_runtime_execution` | Load the runtime lifecycle summary for one execution. | `executionId` |
+| `get_runtime_execution_trace` | Load the full stage, action, and policy trace for one execution. | `executionId` |
 
 Under the hood, MCP calls the same canonical services as the web app: Postgres for control state, ArangoDB for graph and document truth, and Redis-backed workers for ingestion.
 

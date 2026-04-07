@@ -126,7 +126,7 @@ impl RuntimeStageUsageSummary {
         })
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn finalized_clone(&self) -> Self {
         let mut clone = self.clone();
         clone.finalize();

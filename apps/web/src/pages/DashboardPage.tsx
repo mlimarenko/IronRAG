@@ -210,7 +210,7 @@ export default function DashboardPage() {
     );
   }
 
-  const { overview, graph, recentDocuments, attention } = data;
+  const { overview, graph, recentDocuments, attention, metrics } = data;
 
   const stats = {
     total: overview.totalDocuments,
@@ -279,6 +279,20 @@ export default function DashboardPage() {
             </div>
           ))}
         </div>
+
+        {metrics.length > 0 && (
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+            {metrics.map(m => (
+              <div key={m.key} className="stat-tile">
+                <div className="flex items-center gap-2">
+                  <TrendingUp className={`h-3.5 w-3.5 ${m.level === 'error' ? 'text-status-failed' : m.level === 'warning' ? 'text-status-warning' : 'text-muted-foreground'}`} />
+                  <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">{m.label}</span>
+                </div>
+                <div className="text-lg font-bold tracking-tight tabular-nums mt-2">{m.value}</div>
+              </div>
+            ))}
+          </div>
+        )}
 
         <div className="grid lg:grid-cols-3 gap-4">
           {/* Status distribution */}

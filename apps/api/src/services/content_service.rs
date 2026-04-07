@@ -315,6 +315,7 @@ struct PendingChunkInsert {
     section_path: Vec<String>,
     heading_trail: Vec<String>,
     literal_digest: Option<String>,
+    quality_score: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -626,7 +627,8 @@ impl ContentService {
             latest_successful_attempt_id: row
                 .as_ref()
                 .and_then(|head| head.latest_successful_attempt_id),
-            head_updated_at: row.map_or(document.updated_at, |head| head.head_updated_at),
+            head_updated_at: row.as_ref().map_or(document.updated_at, |head| head.head_updated_at),
+            document_summary: row.and_then(|head| head.document_summary),
         }))
     }
 
@@ -1597,6 +1599,7 @@ impl ContentService {
             latest_mutation_id: row.latest_mutation_id,
             latest_successful_attempt_id: row.latest_successful_attempt_id,
             head_updated_at: row.head_updated_at,
+            document_summary: row.document_summary,
         })
     }
 
@@ -2494,7 +2497,7 @@ impl ContentService {
             .list_typed_technical_facts(state, command.revision_id)
             .await?;
         let chunk_count = chunks.len();
-        let graph_extract_parallelism = state.settings.ingestion_worker_concurrency.clamp(1, 4);
+        let graph_extract_parallelism = state.settings.ingestion_worker_concurrency.clamp(1, 8);
 
         let _ = state
             .arango_graph_store
@@ -2777,6 +2780,7 @@ impl ContentService {
                 section_path: chunk.section_path.clone(),
                 heading_trail: chunk.heading_trail.clone(),
                 literal_digest: chunk.literal_digest.clone(),
+                quality_score: Some(chunk.quality_score),
             });
         }
         let postgres_chunks = pending_chunks
@@ -2820,6 +2824,7 @@ impl ContentService {
                 chunk_state: "ready".to_string(),
                 text_generation: Some(revision.revision_number),
                 vector_generation: None,
+                quality_score: pending_chunk.quality_score,
             });
         }
         let _ = state.canonical_services.knowledge.write_chunks(state, knowledge_chunks).await?;
@@ -3169,6 +3174,7 @@ impl ContentService {
                 .and_then(|row| row.latest_successful_attempt_id),
             head_updated_at: content_head
                 .map_or(document_row.updated_at, |row| row.head_updated_at),
+            document_summary: content_head.and_then(|row| row.document_summary.clone()),
         });
         let readiness_summary =
             Some(state.canonical_services.ops.derive_document_readiness_summary(

@@ -74,6 +74,8 @@ pub struct KnowledgeChunkSearchRow {
     pub section_path: Vec<String>,
     pub heading_trail: Vec<String>,
     pub score: f64,
+    #[serde(default)]
+    pub quality_score: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -423,7 +425,17 @@ impl ArangoSearchStore {
                         OR ANALYZER(PHRASE(doc.normalized_text, @query, 'text_ru'), 'text_ru')
                         OR ANALYZER(PHRASE(doc.content_text, @query, 'text_ru'), 'text_ru')
                    )
-                 LET score = BM25(doc)
+                 LET base_score = BM25(doc)
+                 LET heading_boost = (
+                   LENGTH(doc.heading_trail) > 0
+                   AND TOKENS(@query, 'text_en') ANY IN doc.heading_trail
+                 ) ? 1.5 : 1.0
+                 LET section_boost = (
+                   LENGTH(doc.section_path) > 0
+                   AND TOKENS(@query, 'text_en') ANY IN doc.section_path
+                 ) ? 1.3 : 1.0
+                 LET quality_boost = doc.quality_score != null ? doc.quality_score : 1.0
+                 LET score = base_score * heading_boost * section_boost * quality_boost
                  SORT score DESC, doc.chunk_id ASC
                  LIMIT @limit
                  RETURN {
@@ -435,7 +447,8 @@ impl ArangoSearchStore {
                     normalized_text: doc.normalized_text,
                     section_path: doc.section_path,
                     heading_trail: doc.heading_trail,
-                    score: score
+                    score: score,
+                    quality_score: doc.quality_score
                  }",
                 serde_json::json!({
                     "@view": KNOWLEDGE_SEARCH_VIEW,
@@ -622,7 +635,8 @@ impl ArangoSearchStore {
                         OR ANALYZER(PHRASE(doc.display_value, @query, 'text_ru'), 'text_ru')
                    )
                  LET exact_match = doc.canonical_value_exact == @query_exact
-                 LET score = (exact_match ? 1000000 : 0) + BM25(doc)
+                 LET quality_boost = doc.quality_score != null ? doc.quality_score : 1.0
+                 LET score = ((exact_match ? 1000000 : 0) + BM25(doc)) * quality_boost
                  SORT score DESC, doc.fact_id ASC
                  LIMIT @limit
                  RETURN {

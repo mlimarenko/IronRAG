@@ -9,7 +9,39 @@ const DEFAULT_TOP_K: usize = 8;
 const DEFAULT_CONTEXT_BUDGET_CHARS: usize = 22_000;
 const STOP_WORDS: &[&str] = &[
     "a", "an", "and", "are", "for", "from", "into", "that", "the", "this", "what", "which", "with",
-    "your", "about", "there", "their", "have", "will", "would", "should", "could",
+    "your", "about", "there", "their", "have", "will", "would", "should", "could", "does", "how",
+    "when", "where", "why", "can", "not", "all", "each", "every", "than", "then", "also", "but",
+    "only", "just", "like", "such", "its", "been", "being", "between", "both", "same", "other",
+    "more", "most", "very", "some", "any", "many", "much", "own", "out", "here", "one", "two",
+];
+
+/// Known synonym groups for query expansion. Each group maps related terms so that
+/// searching for one term also considers the others.
+const SYNONYM_GROUPS: &[&[&str]] = &[
+    &["authentication", "auth", "login", "signin", "oauth", "oidc"],
+    &["authorization", "authz", "permission", "rbac", "acl"],
+    &["database", "db", "datastore", "storage"],
+    &["kubernetes", "k8s"],
+    &["postgresql", "postgres", "pg"],
+    &["javascript", "js", "ecmascript"],
+    &["typescript", "ts"],
+    &["container", "docker", "containerization"],
+    &["endpoint", "route", "path", "url", "uri"],
+    &["api", "rest", "restful", "web service"],
+    &["configuration", "config", "settings", "setup"],
+    &["deployment", "deploy", "rollout", "release"],
+    &["environment", "env", "environment variable"],
+    &["dependency", "dependencies", "dep", "deps"],
+    &["function", "method", "procedure", "fn"],
+    &["error", "exception", "failure", "fault"],
+    &["monitor", "monitoring", "observability", "metrics"],
+    &["secret", "credential", "password", "token", "key"],
+    &["network", "networking", "connectivity", "dns"],
+    &["volume", "storage", "persistent", "disk"],
+    &["scaling", "autoscaling", "autoscaler", "replica"],
+    &["encryption", "tls", "ssl", "https", "cipher"],
+    &["message", "messaging", "queue", "broker", "kafka", "rabbitmq"],
+    &["cache", "caching", "redis", "memcached"],
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +98,7 @@ pub struct RuntimeQueryPlan {
     pub keywords: Vec<String>,
     pub high_level_keywords: Vec<String>,
     pub low_level_keywords: Vec<String>,
+    pub expanded_keywords: Vec<String>,
     pub top_k: usize,
     pub context_budget_chars: usize,
 }
@@ -187,6 +220,7 @@ pub fn build_query_plan(
     let planned_mode = choose_mode(explicit, question);
     let keywords = extract_keywords(question);
     let (high_level_keywords, low_level_keywords) = split_keywords(&keywords);
+    let expanded_keywords = expand_keywords_with_synonyms(&keywords);
 
     RuntimeQueryPlan {
         requested_mode,
@@ -195,6 +229,7 @@ pub fn build_query_plan(
         keywords,
         high_level_keywords,
         low_level_keywords,
+        expanded_keywords,
         top_k: top_k.unwrap_or(DEFAULT_TOP_K).clamp(1, MAX_TOP_K),
         context_budget_chars: DEFAULT_CONTEXT_BUDGET_CHARS,
     }
@@ -213,6 +248,8 @@ pub fn build_query_plan_from_metadata(
         }
     }
 
+    let expanded_keywords = expand_keywords_with_synonyms(&keywords);
+
     RuntimeQueryPlan {
         requested_mode: metadata.requested_mode,
         planned_mode: metadata.planned_mode,
@@ -220,6 +257,7 @@ pub fn build_query_plan_from_metadata(
         keywords,
         high_level_keywords: metadata.keywords.high_level.clone(),
         low_level_keywords: metadata.keywords.low_level.clone(),
+        expanded_keywords,
         top_k: top_k.unwrap_or(DEFAULT_TOP_K).clamp(1, MAX_TOP_K),
         context_budget_chars: DEFAULT_CONTEXT_BUDGET_CHARS,
     }
@@ -232,7 +270,7 @@ fn classify_query_intent_profile(question: &str, keywords: &[String]) -> QueryIn
         exact_literal_technical,
         unsupported_capability: classify_unsupported_capability(&lowered),
         multi_document_technical: exact_literal_technical
-            && is_multi_document_technical_question(&lowered, keywords),
+            && is_multi_document_technical_question(&lowered),
     }
 }
 
@@ -275,7 +313,7 @@ fn classify_unsupported_capability(question: &str) -> Option<UnsupportedCapabili
     question.contains("graphql").then_some(UnsupportedCapabilityIntent::GraphQlApi)
 }
 
-fn is_multi_document_technical_question(question: &str, keywords: &[String]) -> bool {
+fn is_multi_document_technical_question(question: &str) -> bool {
     let markers = [
         "compare",
         "сравни",
@@ -292,7 +330,6 @@ fn is_multi_document_technical_question(question: &str, keywords: &[String]) -> 
         "отдельно",
         "separately",
     ];
-    let _ = keywords;
     markers.iter().any(|marker| question.contains(marker))
 }
 
@@ -300,6 +337,31 @@ fn split_keywords(keywords: &[String]) -> (Vec<String>, Vec<String>) {
     let high_level_keywords = keywords.iter().take(3).cloned().collect::<Vec<_>>();
     let low_level_keywords = keywords.iter().skip(3).cloned().collect::<Vec<_>>();
     (high_level_keywords, low_level_keywords)
+}
+
+/// Expands the keyword set with synonyms from known synonym groups.
+#[must_use]
+pub fn expand_keywords_with_synonyms(keywords: &[String]) -> Vec<String> {
+    let mut expanded = BTreeSet::new();
+    for keyword in keywords {
+        expanded.insert(keyword.clone());
+    }
+
+    for keyword in keywords {
+        let lowered = keyword.to_ascii_lowercase();
+        for group in SYNONYM_GROUPS {
+            if group.iter().any(|syn| *syn == lowered) {
+                for synonym in *group {
+                    let syn_str = (*synonym).to_string();
+                    if !keywords.iter().any(|k| k.to_ascii_lowercase() == syn_str) {
+                        expanded.insert(syn_str);
+                    }
+                }
+            }
+        }
+    }
+
+    expanded.into_iter().collect()
 }
 
 fn contains_any(question: &str, fragments: &[&str]) -> bool {
@@ -393,5 +455,39 @@ mod tests {
             plan.intent_profile.unsupported_capability,
             Some(UnsupportedCapabilityIntent::GraphQlApi)
         );
+    }
+
+    #[test]
+    fn expand_keywords_adds_synonyms() {
+        let keywords = vec!["auth".to_string(), "database".to_string()];
+        let expanded = expand_keywords_with_synonyms(&keywords);
+
+        assert!(expanded.contains(&"auth".to_string()));
+        assert!(expanded.contains(&"database".to_string()));
+        // Auth synonyms
+        assert!(expanded.contains(&"authentication".to_string()));
+        assert!(expanded.contains(&"login".to_string()));
+        // Database synonyms
+        assert!(expanded.contains(&"db".to_string()));
+        assert!(expanded.contains(&"datastore".to_string()));
+    }
+
+    #[test]
+    fn expand_keywords_preserves_originals_without_synonyms() {
+        let keywords = vec!["foobar".to_string(), "xyzzy".to_string()];
+        let expanded = expand_keywords_with_synonyms(&keywords);
+
+        assert_eq!(expanded.len(), 2);
+        assert!(expanded.contains(&"foobar".to_string()));
+        assert!(expanded.contains(&"xyzzy".to_string()));
+    }
+
+    #[test]
+    fn query_plan_includes_expanded_keywords() {
+        let plan = build_query_plan("How does Kubernetes handle secrets?", None, None, None);
+
+        assert!(plan.keywords.contains(&"kubernetes".to_string()));
+        assert!(plan.expanded_keywords.contains(&"k8s".to_string()));
+        assert!(plan.expanded_keywords.contains(&"kubernetes".to_string()));
     }
 }

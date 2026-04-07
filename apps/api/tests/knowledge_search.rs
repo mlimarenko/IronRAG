@@ -530,6 +530,7 @@ impl KnowledgeSearchHttpFixture {
                 chunk_state: "ready".to_string(),
                 text_generation: Some(1),
                 vector_generation: Some(1),
+                quality_score: None,
             })
             .await
             .context("failed to insert knowledge search chunk")?;
@@ -973,6 +974,7 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
                 chunk_state: "ready".to_string(),
                 text_generation: Some(1),
                 vector_generation: None,
+                quality_score: None,
             })
             .await
             .context("failed to insert target chunk")?;
@@ -1055,6 +1057,7 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
                 chunk_state: "ready".to_string(),
                 text_generation: Some(1),
                 vector_generation: None,
+                quality_score: None,
             })
             .await
             .context("failed to insert distractor chunk")?;
@@ -1174,6 +1177,7 @@ async fn chunk_and_entity_vectors_roundtrip_with_generation_order() -> Result<()
                 chunk_state: "ready".to_string(),
                 text_generation: Some(1),
                 vector_generation: Some(1),
+                quality_score: None,
             })
             .await
             .context("failed to insert vector test chunk")?;
@@ -1411,6 +1415,7 @@ async fn revision_replacement_updates_readiness_generation_and_chunk_search_surf
                 chunk_state: "ready".to_string(),
                 text_generation: Some(1),
                 vector_generation: None,
+                quality_score: None,
             })
             .await
             .context("failed to insert revision one chunk")?;
@@ -1514,6 +1519,7 @@ async fn revision_replacement_updates_readiness_generation_and_chunk_search_surf
                 chunk_state: "ready".to_string(),
                 text_generation: Some(2),
                 vector_generation: Some(2),
+                quality_score: None,
             })
             .await
             .context("failed to insert revision two chunk")?;

@@ -132,9 +132,9 @@ fn shell_and_feature_surfaces_roundtrip() -> JsonResult {
         updated_at: None,
         nodes: vec![GraphNode {
             id: Uuid::from_u128(20),
-            canonical_key: "topic:cutover".to_string(),
+            canonical_key: "concept:cutover".to_string(),
             label: "Cutover".to_string(),
-            node_type: GraphNodeType::Topic,
+            node_type: GraphNodeType::Concept,
             secondary_label: None,
             support_count: 2,
             summary: None,

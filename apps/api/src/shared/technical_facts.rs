@@ -13,6 +13,14 @@ pub enum TechnicalFactKind {
     Protocol,
     AuthRule,
     Identifier,
+    EnvironmentVariable,
+    VersionNumber,
+    DatabaseName,
+    ConfigurationKey,
+    ErrorCode,
+    RateLimit,
+    DependencyDeclaration,
+    CodeIdentifier,
 }
 
 impl TechnicalFactKind {
@@ -28,6 +36,14 @@ impl TechnicalFactKind {
             Self::Protocol => "protocol",
             Self::AuthRule => "auth_rule",
             Self::Identifier => "identifier",
+            Self::EnvironmentVariable => "environment_variable",
+            Self::VersionNumber => "version_number",
+            Self::DatabaseName => "database_name",
+            Self::ConfigurationKey => "configuration_key",
+            Self::ErrorCode => "error_code",
+            Self::RateLimit => "rate_limit",
+            Self::DependencyDeclaration => "dependency_declaration",
+            Self::CodeIdentifier => "code_identifier",
         }
     }
 }
@@ -46,6 +62,14 @@ impl std::str::FromStr for TechnicalFactKind {
             "protocol" => Ok(Self::Protocol),
             "auth_rule" => Ok(Self::AuthRule),
             "identifier" => Ok(Self::Identifier),
+            "environment_variable" => Ok(Self::EnvironmentVariable),
+            "version_number" => Ok(Self::VersionNumber),
+            "database_name" => Ok(Self::DatabaseName),
+            "configuration_key" => Ok(Self::ConfigurationKey),
+            "error_code" => Ok(Self::ErrorCode),
+            "rate_limit" => Ok(Self::RateLimit),
+            "dependency_declaration" => Ok(Self::DependencyDeclaration),
+            "code_identifier" => Ok(Self::CodeIdentifier),
             other => Err(format!("unsupported technical fact kind: {other}")),
         }
     }
@@ -121,8 +145,18 @@ pub fn normalize_technical_fact_value(
         | TechnicalFactKind::EndpointPath
         | TechnicalFactKind::ParameterName
         | TechnicalFactKind::AuthRule
-        | TechnicalFactKind::Identifier => {
+        | TechnicalFactKind::Identifier
+        | TechnicalFactKind::EnvironmentVariable
+        | TechnicalFactKind::DatabaseName
+        | TechnicalFactKind::ConfigurationKey
+        | TechnicalFactKind::ErrorCode
+        | TechnicalFactKind::DependencyDeclaration
+        | TechnicalFactKind::CodeIdentifier => {
             let normalized = compact_technical_literal(raw_value);
+            (!normalized.is_empty()).then_some(TechnicalFactValue::Text(normalized))
+        }
+        TechnicalFactKind::VersionNumber | TechnicalFactKind::RateLimit => {
+            let normalized = collapse_literal_whitespace(raw_value);
             (!normalized.is_empty()).then_some(TechnicalFactValue::Text(normalized))
         }
     }

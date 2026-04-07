@@ -1,4 +1,7 @@
+use std::collections::HashSet;
+
 use serde::Deserialize;
+use serde_json::json;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -12,6 +15,7 @@ use crate::{
         content::revision_text_state_is_readable,
     },
     infra::repositories::{
+        self,
         catalog_repository::{self, CatalogLibraryRow, CatalogWorkspaceRow},
         runtime_repository,
     },
@@ -21,7 +25,8 @@ use crate::{
         authorization::{
             POLICY_LIBRARY_WRITE, POLICY_MCP_MEMORY_READ, POLICY_RUNTIME_READ,
             POLICY_WORKSPACE_ADMIN, authorize_library_discovery, authorize_workspace_discovery,
-            authorize_workspace_permission, load_runtime_execution_and_authorize,
+            authorize_workspace_permission, load_library_and_authorize,
+            load_runtime_execution_and_authorize,
         },
         router_support::{
             ApiError, map_library_create_error, map_runtime_execution_row, map_runtime_trace_view,
@@ -29,8 +34,8 @@ use crate::{
         },
     },
     mcp_types::{
-        McpChunkReference, McpCreateLibraryRequest, McpCreateWorkspaceRequest, McpDocumentHit,
-        McpEntityReference, McpEvidenceReference, McpLibraryDescriptor,
+        McpAskResponse, McpChunkReference, McpCreateLibraryRequest, McpCreateWorkspaceRequest,
+        McpDocumentHit, McpEntityReference, McpEvidenceReference, McpLibraryDescriptor,
         McpLibraryIngestionReadiness, McpReadDocumentRequest, McpReadDocumentResponse,
         McpReadabilityState, McpRelationReference, McpRuntimeActionSummary,
         McpRuntimeExecutionSummary, McpRuntimeExecutionTrace, McpRuntimePolicySummary,
@@ -247,6 +252,7 @@ pub async fn search_documents(
 ) -> Result<McpSearchDocumentsResponse, ApiError> {
     auth.require_any_scope(POLICY_MCP_MEMORY_READ)?;
     let settings = &state.mcp_memory;
+    let include_references = request.include_references.unwrap_or(false);
     let query = request.query.trim();
     if query.is_empty() {
         return Err(ApiError::BadRequest("query must not be empty".into()));
@@ -370,6 +376,7 @@ pub async fn search_documents(
                             section_path: chunk.section_path.clone(),
                             heading_trail: chunk.heading_trail.clone(),
                             score: hit.score,
+                            quality_score: chunk.quality_score,
                         },
                     )
                 });
@@ -427,6 +434,16 @@ pub async fn search_documents(
     }
     hits.sort_by(|left, right| right.score.total_cmp(&left.score));
     hits.truncate(limit);
+
+    if !include_references {
+        for hit in &mut hits {
+            hit.chunk_references.clear();
+            hit.technical_fact_references.clear();
+            hit.entity_references.clear();
+            hit.relation_references.clear();
+            hit.evidence_references.clear();
+        }
+    }
 
     Ok(McpSearchDocumentsResponse { query: query.to_string(), limit, library_ids, hits })
 }
@@ -524,6 +541,7 @@ pub async fn read_document(
     request: McpReadDocumentRequest,
 ) -> Result<McpReadDocumentResponse, ApiError> {
     auth.require_any_scope(POLICY_MCP_MEMORY_READ)?;
+    let include_references = request.include_references.unwrap_or(false);
     let settings = &state.mcp_memory;
     let normalized = normalize_read_request(
         auth,
@@ -599,11 +617,27 @@ pub async fn read_document(
         total_content_length: Some(total_content_length),
         continuation_token,
         has_more,
-        chunk_references: state_view.chunk_references,
-        technical_fact_references: state_view.technical_fact_references,
-        entity_references: state_view.entity_references,
-        relation_references: state_view.relation_references,
-        evidence_references: state_view.evidence_references,
+        chunk_references: if include_references { state_view.chunk_references } else { Vec::new() },
+        technical_fact_references: if include_references {
+            state_view.technical_fact_references
+        } else {
+            Vec::new()
+        },
+        entity_references: if include_references {
+            state_view.entity_references
+        } else {
+            Vec::new()
+        },
+        relation_references: if include_references {
+            state_view.relation_references
+        } else {
+            Vec::new()
+        },
+        evidence_references: if include_references {
+            state_view.evidence_references
+        } else {
+            Vec::new()
+        },
     })
 }
 
@@ -1374,4 +1408,392 @@ fn technical_fact_support_score(
         fact.support_chunk_ids.len(),
         fact.support_block_ids.len(),
     )
+}
+
+/// Authorize that the current token has MCP memory-read access to the given library.
+pub async fn authorize_library_for_mcp(
+    auth: &AuthContext,
+    state: &AppState,
+    library_id: Uuid,
+) -> Result<(), ApiError> {
+    load_library_and_authorize(auth, state, library_id, POLICY_MCP_MEMORY_READ).await?;
+    Ok(())
+}
+
+/// Execute a grounded question against a library and return a minimal answer.
+pub async fn ask_library_question(
+    auth: &AuthContext,
+    state: &AppState,
+    library_id: Uuid,
+    question: &str,
+    top_k: Option<usize>,
+) -> Result<McpAskResponse, ApiError> {
+    auth.require_any_scope(POLICY_MCP_MEMORY_READ)?;
+    load_library_and_authorize(auth, state, library_id, POLICY_MCP_MEMORY_READ).await?;
+
+    let library = state.canonical_services.catalog.get_library(state, library_id).await?;
+    let workspace_id = library.workspace_id;
+
+    let conversation = state
+        .canonical_services
+        .query
+        .create_conversation(
+            state,
+            crate::services::query_service::CreateConversationCommand {
+                workspace_id,
+                library_id,
+                created_by_principal_id: Some(auth.principal_id),
+                title: Some("MCP ask".to_string()),
+            },
+        )
+        .await?;
+
+    let effective_top_k = top_k.unwrap_or(8).clamp(1, 48);
+    let result = state
+        .canonical_services
+        .query
+        .execute_turn(
+            state,
+            crate::services::query_service::ExecuteConversationTurnCommand {
+                conversation_id: conversation.id,
+                author_principal_id: Some(auth.principal_id),
+                content_text: question.to_string(),
+                top_k: effective_top_k,
+                include_debug: false,
+            },
+        )
+        .await?;
+
+    let answer = result
+        .response_turn
+        .map(|turn| turn.content_text)
+        .unwrap_or_else(|| "No answer could be generated.".to_string());
+
+    let verification_state = Some(format!("{:?}", result.verification_state));
+    let source_count = result.chunk_references.len();
+    let entity_count = result.graph_node_references.len();
+
+    Ok(McpAskResponse { answer, verification_state, source_count, entity_count })
+}
+
+/// Load the full graph topology for one library as a JSON value.
+pub async fn get_graph_topology(
+    state: &AppState,
+    library_id: Uuid,
+    limit: Option<usize>,
+) -> Result<serde_json::Value, ApiError> {
+    let library = state
+        .canonical_services
+        .catalog
+        .get_library(state, library_id)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    let workspace_id = library.workspace_id;
+
+    let Some(snapshot) =
+        repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
+            .await
+            .map_err(|_| ApiError::Internal)?
+    else {
+        return Ok(json!({
+            "documents": [],
+            "entities": [],
+            "relations": [],
+            "documentLinks": [],
+        }));
+    };
+
+    if snapshot.graph_status == "empty" || snapshot.projection_version <= 0 {
+        return Ok(json!({
+            "documents": [],
+            "entities": [],
+            "relations": [],
+            "documentLinks": [],
+        }));
+    }
+
+    let projection_version = snapshot.projection_version;
+    let node_rows = repositories::list_admitted_runtime_graph_nodes_by_library(
+        &state.persistence.postgres,
+        library_id,
+        projection_version,
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    let edge_rows = repositories::list_admitted_runtime_graph_edges_by_library(
+        &state.persistence.postgres,
+        library_id,
+        projection_version,
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    let document_link_rows = repositories::list_runtime_graph_document_links_by_library(
+        &state.persistence.postgres,
+        library_id,
+        projection_version,
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?;
+
+    let document_node_ids: HashSet<Uuid> =
+        node_rows.iter().filter(|row| row.node_type == "document").map(|row| row.id).collect();
+
+    let document_ids: Vec<Uuid> = node_rows
+        .iter()
+        .filter(|row| row.node_type == "document")
+        .filter_map(|row| {
+            row.metadata_json
+                .get("document_id")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|s| s.parse::<Uuid>().ok())
+        })
+        .collect();
+
+    let documents = state
+        .arango_document_store
+        .list_documents_by_ids(&document_ids)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+
+    let entities: Vec<serde_json::Value> = node_rows
+        .iter()
+        .filter(|row| row.node_type != "document")
+        .map(|row| {
+            json!({
+                "entityId": row.id,
+                "label": row.label,
+                "entityType": row.node_type,
+                "summary": row.summary,
+                "supportCount": row.support_count,
+            })
+        })
+        .collect();
+
+    let relations: Vec<serde_json::Value> = edge_rows
+        .iter()
+        .filter(|row| {
+            !document_node_ids.contains(&row.from_node_id)
+                && !document_node_ids.contains(&row.to_node_id)
+        })
+        .map(|row| {
+            json!({
+                "relationId": row.id,
+                "sourceEntityId": row.from_node_id,
+                "targetEntityId": row.to_node_id,
+                "relationType": row.relation_type,
+                "summary": row.summary,
+                "supportCount": row.support_count,
+            })
+        })
+        .collect();
+
+    let document_links: Vec<serde_json::Value> = document_link_rows
+        .iter()
+        .map(|row| {
+            json!({
+                "documentId": row.document_id,
+                "targetNodeId": row.target_node_id,
+                "targetNodeType": row.target_node_type,
+                "relationType": row.relation_type,
+                "supportCount": row.support_count,
+            })
+        })
+        .collect();
+
+    let entity_limit = limit.unwrap_or(200).clamp(1, 10000);
+    let relation_limit = entity_limit.saturating_mul(5).div_ceil(2).clamp(1, 25000);
+    let total_entities = entities.len();
+    let total_relations = relations.len();
+    let entities_truncated = total_entities > entity_limit;
+    let relations_truncated = total_relations > relation_limit;
+    let entities: Vec<serde_json::Value> = entities.into_iter().take(entity_limit).collect();
+    let relations: Vec<serde_json::Value> = relations.into_iter().take(relation_limit).collect();
+
+    Ok(json!({
+        "documents": documents.iter().map(|doc| json!({
+            "documentId": doc.document_id,
+            "workspaceId": workspace_id,
+            "libraryId": library_id,
+            "title": doc.title,
+        })).collect::<Vec<_>>(),
+        "entities": entities,
+        "relations": relations,
+        "documentLinks": document_links,
+        "truncation": {
+            "entityLimit": entity_limit,
+            "relationLimit": relation_limit,
+            "totalEntities": total_entities,
+            "totalRelations": total_relations,
+            "entitiesTruncated": entities_truncated,
+            "relationsTruncated": relations_truncated,
+        },
+    }))
+}
+
+/// List relations for one library via the runtime graph projection.
+pub async fn list_relations(
+    state: &AppState,
+    library_id: Uuid,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>, ApiError> {
+    let Some(snapshot) =
+        repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
+            .await
+            .map_err(|_| ApiError::Internal)?
+    else {
+        return Ok(Vec::new());
+    };
+
+    if snapshot.graph_status == "empty" || snapshot.projection_version <= 0 {
+        return Ok(Vec::new());
+    }
+
+    let projection_version = snapshot.projection_version;
+    let node_rows = repositories::list_admitted_runtime_graph_nodes_by_library(
+        &state.persistence.postgres,
+        library_id,
+        projection_version,
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    let edge_rows = repositories::list_admitted_runtime_graph_edges_by_library(
+        &state.persistence.postgres,
+        library_id,
+        projection_version,
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?;
+
+    let document_node_ids: HashSet<Uuid> =
+        node_rows.iter().filter(|row| row.node_type == "document").map(|row| row.id).collect();
+
+    let node_labels: std::collections::HashMap<Uuid, &str> =
+        node_rows.iter().map(|row| (row.id, row.label.as_str())).collect();
+
+    let relations: Vec<serde_json::Value> = edge_rows
+        .iter()
+        .filter(|row| {
+            !document_node_ids.contains(&row.from_node_id)
+                && !document_node_ids.contains(&row.to_node_id)
+        })
+        .take(limit)
+        .map(|row| {
+            let source_label = node_labels.get(&row.from_node_id).copied().unwrap_or("unknown");
+            let target_label = node_labels.get(&row.to_node_id).copied().unwrap_or("unknown");
+            json!({
+                "relationId": row.id,
+                "sourceLabel": source_label,
+                "targetLabel": target_label,
+                "relationType": row.relation_type,
+                "summary": row.summary,
+            })
+        })
+        .collect();
+
+    Ok(relations)
+}
+
+/// List documents for one library, optionally filtered by readiness status.
+pub async fn list_documents(
+    auth: &AuthContext,
+    state: &AppState,
+    library_id: Uuid,
+    limit: usize,
+    status_filter: Option<&str>,
+) -> Result<serde_json::Value, ApiError> {
+    auth.require_any_scope(POLICY_MCP_MEMORY_READ)?;
+    let _library =
+        load_library_and_authorize(auth, state, library_id, POLICY_MCP_MEMORY_READ).await?;
+
+    let summaries = state.canonical_services.content.list_documents(state, library_id).await?;
+
+    let filtered: Vec<_> = summaries
+        .into_iter()
+        .filter(|summary| summary.document.document_state != "deleted")
+        .filter(|summary| match status_filter {
+            Some(filter) => {
+                summary.readiness_summary.as_ref().is_some_and(|r| r.readiness_kind == filter)
+            }
+            None => true,
+        })
+        .take(limit)
+        .collect();
+
+    let documents: Vec<serde_json::Value> = filtered
+        .iter()
+        .map(|summary| {
+            let readiness_kind = summary
+                .readiness_summary
+                .as_ref()
+                .map(|r| r.readiness_kind.as_str())
+                .unwrap_or("unknown");
+            let source_uri = summary.active_revision.as_ref().and_then(|r| r.source_uri.as_deref());
+            let byte_size = summary.active_revision.as_ref().map(|r| r.byte_size);
+            let title = summary
+                .active_revision
+                .as_ref()
+                .and_then(|r| r.title.as_deref())
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or(&summary.document.external_key);
+            json!({
+                "documentId": summary.document.id,
+                "title": title,
+                "readinessKind": readiness_kind,
+                "sourceUri": source_uri,
+                "byteSize": byte_size,
+                "createdAt": summary.document.created_at,
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "libraryId": library_id,
+        "documents": documents,
+        "count": documents.len(),
+        "limit": limit,
+    }))
+}
+
+/// Delete a document by calling the canonical mutation admission service.
+pub async fn delete_document(
+    auth: &AuthContext,
+    state: &AppState,
+    document_id: Uuid,
+) -> Result<serde_json::Value, ApiError> {
+    let document = state
+        .arango_document_store
+        .get_document(document_id)
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .ok_or_else(|| ApiError::resource_not_found("document", document_id))?;
+
+    authorize_library_discovery(auth, document.workspace_id, document.library_id)?;
+    auth.require_any_scope(crate::interfaces::http::authorization::POLICY_MCP_MEMORY_WRITE)?;
+
+    let admission = state
+        .canonical_services
+        .content
+        .admit_mutation(
+            state,
+            crate::services::content_service::AdmitMutationCommand {
+                workspace_id: document.workspace_id,
+                library_id: document.library_id,
+                document_id,
+                operation_kind: "delete".to_string(),
+                idempotency_key: None,
+                requested_by_principal_id: Some(auth.principal_id),
+                request_surface: "mcp".to_string(),
+                source_identity: None,
+                revision: None,
+            },
+        )
+        .await?;
+
+    Ok(json!({
+        "documentId": document_id,
+        "libraryId": document.library_id,
+        "workspaceId": document.workspace_id,
+        "mutationId": admission.mutation.id,
+        "status": "accepted",
+    }))
 }

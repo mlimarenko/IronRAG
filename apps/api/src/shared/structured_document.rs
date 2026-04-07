@@ -96,9 +96,10 @@ pub struct StructuredBlockData {
     pub parent_block_id: Option<Uuid>,
     pub table_coordinates: Option<StructuredTableCoordinates>,
     pub code_language: Option<String>,
+    pub is_boilerplate: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuredChunkWindow {
     pub chunk_index: i32,
@@ -110,9 +111,12 @@ pub struct StructuredChunkWindow {
     pub section_path: Vec<String>,
     pub token_count: Option<i32>,
     pub literal_digest: Option<String>,
+    pub quality_score: f32,
+    pub simhash_fingerprint: Option<u64>,
+    pub is_near_duplicate: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuredDocumentRevisionData {
     pub revision_id: Uuid,
@@ -320,6 +324,7 @@ mod tests {
             parent_block_id: None,
             table_coordinates: None,
             code_language: None,
+            is_boilerplate: false,
         }
     }
 
@@ -360,6 +365,9 @@ mod tests {
                 section_path: Vec::new(),
                 token_count: None,
                 literal_digest: None,
+                quality_score: 1.0,
+                simhash_fingerprint: None,
+                is_near_duplicate: false,
             }],
             prepared_at: Utc::now(),
         };

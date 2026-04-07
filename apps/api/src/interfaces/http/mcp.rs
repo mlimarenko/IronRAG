@@ -24,12 +24,14 @@ use crate::{
         router_support::{ApiError, attach_request_id_header, ensure_or_generate_request_id},
     },
     mcp_types::{
-        McpAuditActionKind, McpAuditScope, McpCancelWebIngestRunRequest, McpCapabilitySnapshot,
-        McpCreateLibraryRequest, McpCreateWorkspaceRequest, McpGetMutationStatusRequest,
+        McpAskRequest, McpAuditActionKind, McpAuditScope, McpCancelWebIngestRunRequest,
+        McpCapabilitySnapshot, McpCreateLibraryRequest, McpCreateWorkspaceRequest,
+        McpDeleteDocumentRequest, McpGetGraphTopologyRequest, McpGetMutationStatusRequest,
         McpGetRuntimeExecutionRequest, McpGetRuntimeExecutionTraceRequest,
-        McpGetWebIngestRunRequest, McpListLibrariesRequest, McpListWebIngestRunPagesRequest,
-        McpMutationReceipt, McpReadDocumentRequest, McpSearchDocumentsRequest,
-        McpSearchDocumentsResponse, McpSubmitWebIngestRunRequest, McpUpdateDocumentRequest,
+        McpGetWebIngestRunRequest, McpListDocumentsRequest, McpListLibrariesRequest,
+        McpListRelationsRequest, McpListWebIngestRunPagesRequest, McpMutationReceipt,
+        McpReadDocumentRequest, McpSearchDocumentsRequest, McpSearchDocumentsResponse,
+        McpSearchEntitiesRequest, McpSubmitWebIngestRunRequest, McpUpdateDocumentRequest,
         McpUploadDocumentsRequest,
     },
     services::{
@@ -56,8 +58,11 @@ pub const MCP_CANONICAL_TOOL_NAMES: &[&str] = &[
     "create_library",
     "search_documents",
     "read_document",
+    "list_documents",
+    "ask",
     "upload_documents",
     "update_document",
+    "delete_document",
     "get_mutation_status",
     "get_runtime_execution",
     "get_runtime_execution_trace",
@@ -65,6 +70,9 @@ pub const MCP_CANONICAL_TOOL_NAMES: &[&str] = &[
     "get_web_ingest_run",
     "list_web_ingest_run_pages",
     "cancel_web_ingest_run",
+    "search_entities",
+    "get_graph_topology",
+    "list_relations",
 ];
 
 pub const MCP_CANONICAL_METHOD_NAMES: &[&str] =
@@ -173,11 +181,18 @@ fn visible_tool_names(auth: &AuthContext) -> Vec<String> {
     if auth.can_read_any_document_memory(POLICY_MCP_MEMORY_READ) {
         tools.push("read_document".to_string());
     }
+    if auth.can_read_any_library_memory(POLICY_MCP_MEMORY_READ) {
+        tools.push("list_documents".to_string());
+    }
+    if auth.can_read_any_library_memory(POLICY_MCP_MEMORY_READ) {
+        tools.push("ask".to_string());
+    }
     if auth.can_write_any_document_memory(POLICY_DOCUMENTS_WRITE) {
         tools.push("upload_documents".to_string());
     }
     if auth.can_write_any_document_memory(POLICY_DOCUMENTS_WRITE) {
         tools.push("update_document".to_string());
+        tools.push("delete_document".to_string());
         tools.push("get_mutation_status".to_string());
     }
     if auth.can_read_any_document_memory(POLICY_RUNTIME_READ) {
@@ -191,6 +206,11 @@ fn visible_tool_names(auth: &AuthContext) -> Vec<String> {
     if auth.can_read_any_library_memory(POLICY_LIBRARY_READ) {
         tools.push("get_web_ingest_run".to_string());
         tools.push("list_web_ingest_run_pages".to_string());
+    }
+    if auth.can_read_any_library_memory(POLICY_MCP_MEMORY_READ) {
+        tools.push("search_entities".to_string());
+        tools.push("get_graph_topology".to_string());
+        tools.push("list_relations".to_string());
     }
     tools
 }
@@ -584,6 +604,10 @@ async fn handle_tools_list(
                             "type": "integer",
                             "minimum": 1,
                             "description": "Optional hit limit. Small values such as 3-10 keep the candidate set focused."
+                        },
+                        "includeReferences": {
+                            "type": "boolean",
+                            "description": "Include chunk/entity/relation/evidence reference arrays (default: false to reduce response size). Also accepts snake_case alias include_references."
                         }
                     }
                 }),
@@ -617,6 +641,65 @@ async fn handle_tools_list(
                         "continuationToken": {
                             "type": "string",
                             "description": "Opaque token returned by a previous read when hasMore is true. Also accepts snake_case alias continuation_token."
+                        },
+                        "includeReferences": {
+                            "type": "boolean",
+                            "description": "Include chunk/entity/relation/evidence reference arrays (default: false to reduce response size). Also accepts snake_case alias include_references."
+                        }
+                    }
+                }),
+            }),
+            "list_documents" => Some(McpToolDescriptor {
+                name: "list_documents",
+                description: "List documents in a knowledge library. Optionally filter by processing status.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["libraryId"],
+                    "properties": {
+                        "libraryId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Target library UUID. Also accepts snake_case alias library_id."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 200,
+                            "description": "Maximum number of documents to return. Defaults to 50."
+                        },
+                        "statusFilter": {
+                            "type": "string",
+                            "enum": ["processing", "readable", "failed", "graph_ready"],
+                            "description": "Optional readiness status filter. Also accepts snake_case alias status_filter."
+                        }
+                    }
+                }),
+            }),
+            "ask" => Some(McpToolDescriptor {
+                name: "ask",
+                description: "Ask a grounded question against a knowledge library. Returns the answer synthesized from library documents, entities, and relations. Use this to get factual answers grounded in the library's content.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["libraryId", "question"],
+                    "properties": {
+                        "libraryId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Target library UUID. Also accepts snake_case alias library_id."
+                        },
+                        "question": {
+                            "type": "string",
+                            "description": "The question to ask."
+                        },
+                        "topK": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 48,
+                            "description": "Number of chunks to consider (default: 8). Also accepts snake_case alias top_k."
+                        },
+                        "includeEvidence": {
+                            "type": "boolean",
+                            "description": "Include source excerpts in response (default: false). Also accepts snake_case alias include_evidence."
                         }
                     }
                 }),
@@ -732,6 +815,21 @@ async fn handle_tools_list(
                         "replacementMimeType": {
                             "type": "string",
                             "description": "Optional for replace. Also accepts snake_case alias replacement_mime_type."
+                        }
+                    }
+                }),
+            }),
+            "delete_document" => Some(McpToolDescriptor {
+                name: "delete_document",
+                description: "Delete a document from its library. This removes the document, its revisions, chunks, and graph contributions.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["documentId"],
+                    "properties": {
+                        "documentId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Document UUID to delete. Also accepts snake_case alias document_id."
                         }
                     }
                 }),
@@ -866,6 +964,70 @@ async fn handle_tools_list(
                             "type": "string",
                             "format": "uuid",
                             "description": "Run UUID returned by submit_web_ingest_run. Also accepts snake_case alias run_id."
+                        }
+                    }
+                }),
+            }),
+            "search_entities" => Some(McpToolDescriptor {
+                name: "search_entities",
+                description: "Search knowledge graph entities by name or label within one library. Returns scored entity matches ordered by relevance.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["libraryId", "query"],
+                    "properties": {
+                        "libraryId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Target library UUID. Also accepts snake_case alias library_id."
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "Natural-language or keyword query to match against entity labels and summaries."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Optional hit limit. Defaults to 20."
+                        }
+                    }
+                }),
+            }),
+            "get_graph_topology" => Some(McpToolDescriptor {
+                name: "get_graph_topology",
+                description: "Get the knowledge graph topology for one library, including documents, entities, relations, and document-entity links. Results are truncated by default (200 entities, 500 relations); use limit to control the entity cap.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["libraryId"],
+                    "properties": {
+                        "libraryId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Target library UUID. Also accepts snake_case alias library_id."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Maximum number of entities to return. Relations are capped at 2.5x the entity limit. Defaults to 200."
+                        }
+                    }
+                }),
+            }),
+            "list_relations" => Some(McpToolDescriptor {
+                name: "list_relations",
+                description: "Returns relations from the knowledge graph, ordered by support count.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["libraryId"],
+                    "properties": {
+                        "libraryId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Target library UUID. Also accepts snake_case alias library_id."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Optional limit on number of relations returned. Defaults to 100."
                         }
                     }
                 }),
@@ -1352,6 +1514,175 @@ async fn handle_tools_call(
                 tool_error_result(error)
             }
         },
+        "ask" => match parse_tool_args::<McpAskRequest>(parsed.arguments) {
+            Ok(args) => {
+                let library_id = args.library_id;
+                let question = args.question.clone();
+                match mcp_access::ask_library_question(
+                    auth,
+                    state,
+                    library_id,
+                    &args.question,
+                    args.top_k,
+                )
+                .await
+                {
+                    Ok(payload) => {
+                        record_canonical_mcp_audit(
+                            state,
+                            auth,
+                            request_id,
+                            "agent.memory.ask",
+                            "succeeded",
+                            Some(format!(
+                                "MCP ask completed with {} source(s)",
+                                payload.source_count
+                            )),
+                            Some(format!(
+                                "principal {} asked library {} via MCP",
+                                auth.principal_id, library_id
+                            )),
+                            Vec::new(),
+                        )
+                        .await;
+                        record_success_audit(
+                            auth,
+                            state,
+                            request_id,
+                            McpAuditActionKind::Ask,
+                            McpAuditScope {
+                                workspace_id: auth.workspace_id,
+                                library_id: Some(library_id),
+                                document_id: None,
+                            },
+                            json!({
+                                "tool": "ask",
+                                "sourceCount": payload.source_count,
+                            }),
+                        )
+                        .await;
+                        ok_tool_result("Question answered.", json!(payload))
+                    }
+                    Err(error) => {
+                        record_error_audit(
+                            auth,
+                            state,
+                            request_id,
+                            McpAuditActionKind::Ask,
+                            McpAuditScope {
+                                workspace_id: auth.workspace_id,
+                                library_id: Some(library_id),
+                                document_id: None,
+                            },
+                            &error,
+                            json!({
+                                "tool": "ask",
+                                "question": question,
+                            }),
+                        )
+                        .await;
+                        tool_error_result(error)
+                    }
+                }
+            }
+            Err(error) => {
+                record_error_audit(
+                    auth,
+                    state,
+                    request_id,
+                    McpAuditActionKind::Ask,
+                    McpAuditScope {
+                        workspace_id: auth.workspace_id,
+                        library_id: None,
+                        document_id: None,
+                    },
+                    &error,
+                    json!({ "tool": "ask" }),
+                )
+                .await;
+                tool_error_result(error)
+            }
+        },
+        "list_documents" => match parse_tool_args::<McpListDocumentsRequest>(parsed.arguments) {
+            Ok(args) => {
+                let library_id = args.library_id;
+                let limit = args.limit.unwrap_or(50).clamp(1, 200);
+                match mcp_access::list_documents(
+                    auth,
+                    state,
+                    library_id,
+                    limit,
+                    args.status_filter.as_deref(),
+                )
+                .await
+                {
+                    Ok(payload) => {
+                        record_canonical_mcp_audit(
+                            state,
+                            auth,
+                            request_id,
+                            "agent.memory.list_documents",
+                            "succeeded",
+                            Some("listed library documents".to_string()),
+                            Some(format!(
+                                "principal {} listed documents for library {}",
+                                auth.principal_id, library_id
+                            )),
+                            Vec::new(),
+                        )
+                        .await;
+                        record_success_audit(
+                            auth,
+                            state,
+                            request_id,
+                            McpAuditActionKind::ListDocuments,
+                            McpAuditScope {
+                                workspace_id: auth.workspace_id,
+                                library_id: Some(library_id),
+                                document_id: None,
+                            },
+                            json!({ "tool": "list_documents" }),
+                        )
+                        .await;
+                        ok_tool_result("Documents listed.", payload)
+                    }
+                    Err(error) => {
+                        record_error_audit(
+                            auth,
+                            state,
+                            request_id,
+                            McpAuditActionKind::ListDocuments,
+                            McpAuditScope {
+                                workspace_id: auth.workspace_id,
+                                library_id: Some(library_id),
+                                document_id: None,
+                            },
+                            &error,
+                            json!({ "tool": "list_documents" }),
+                        )
+                        .await;
+                        tool_error_result(error)
+                    }
+                }
+            }
+            Err(error) => {
+                record_error_audit(
+                    auth,
+                    state,
+                    request_id,
+                    McpAuditActionKind::ListDocuments,
+                    McpAuditScope {
+                        workspace_id: auth.workspace_id,
+                        library_id: None,
+                        document_id: None,
+                    },
+                    &error,
+                    json!({ "tool": "list_documents" }),
+                )
+                .await;
+                tool_error_result(error)
+            }
+        },
         "upload_documents" => {
             match parse_tool_args::<McpUploadDocumentsRequest>(parsed.arguments) {
                 Ok(args) => {
@@ -1505,6 +1836,77 @@ async fn handle_tools_call(
                     },
                     &error,
                     json!({ "tool": "update_document" }),
+                )
+                .await;
+                tool_error_result(error)
+            }
+        },
+        "delete_document" => match parse_tool_args::<McpDeleteDocumentRequest>(parsed.arguments) {
+            Ok(args) => {
+                let document_id = args.document_id;
+                match mcp_access::delete_document(auth, state, document_id).await {
+                    Ok(payload) => {
+                        record_canonical_mcp_audit(
+                            state,
+                            auth,
+                            request_id,
+                            "agent.memory.delete_document",
+                            "succeeded",
+                            Some(format!("deleted document {document_id}")),
+                            Some(format!(
+                                "principal {} deleted document {} via MCP",
+                                auth.principal_id, document_id
+                            )),
+                            Vec::new(),
+                        )
+                        .await;
+                        record_success_audit(
+                            auth,
+                            state,
+                            request_id,
+                            McpAuditActionKind::DeleteDocument,
+                            McpAuditScope {
+                                workspace_id: auth.workspace_id,
+                                library_id: None,
+                                document_id: Some(document_id),
+                            },
+                            json!({ "tool": "delete_document" }),
+                        )
+                        .await;
+                        ok_tool_result("Document deletion accepted.", payload)
+                    }
+                    Err(error) => {
+                        record_error_audit(
+                            auth,
+                            state,
+                            request_id,
+                            McpAuditActionKind::DeleteDocument,
+                            McpAuditScope {
+                                workspace_id: auth.workspace_id,
+                                library_id: None,
+                                document_id: Some(document_id),
+                            },
+                            &error,
+                            json!({ "tool": "delete_document" }),
+                        )
+                        .await;
+                        tool_error_result(error)
+                    }
+                }
+            }
+            Err(error) => {
+                record_error_audit(
+                    auth,
+                    state,
+                    request_id,
+                    McpAuditActionKind::DeleteDocument,
+                    McpAuditScope {
+                        workspace_id: auth.workspace_id,
+                        library_id: None,
+                        document_id: None,
+                    },
+                    &error,
+                    json!({ "tool": "delete_document" }),
                 )
                 .await;
                 tool_error_result(error)
@@ -2016,6 +2418,298 @@ async fn handle_tools_call(
                 }
             }
         }
+        "search_entities" => match parse_tool_args::<McpSearchEntitiesRequest>(parsed.arguments) {
+            Ok(args) => {
+                let library_id = args.library_id;
+                let limit = args.limit.unwrap_or(20).clamp(1, 200);
+                match mcp_access::authorize_library_for_mcp(auth, state, library_id).await {
+                    Ok(()) => {
+                        match state
+                            .arango_search_store
+                            .search_entities(library_id, &args.query, limit)
+                            .await
+                        {
+                            Ok(hits) => {
+                                let entities: Vec<Value> = hits
+                                    .iter()
+                                    .map(|hit| {
+                                        json!({
+                                            "entityId": hit.entity_id,
+                                            "label": hit.canonical_label,
+                                            "entityType": hit.entity_type,
+                                            "summary": hit.summary,
+                                            "score": hit.score,
+                                        })
+                                    })
+                                    .collect();
+                                record_canonical_mcp_audit(
+                                    state,
+                                    auth,
+                                    request_id,
+                                    "agent.graph.search_entities",
+                                    "succeeded",
+                                    Some(format!(
+                                        "entity search returned {} hit(s)",
+                                        entities.len()
+                                    )),
+                                    Some(format!(
+                                        "principal {} searched entities in library {}",
+                                        auth.principal_id, library_id
+                                    )),
+                                    Vec::new(),
+                                )
+                                .await;
+                                record_success_audit(
+                                    auth,
+                                    state,
+                                    request_id,
+                                    McpAuditActionKind::SearchEntities,
+                                    McpAuditScope {
+                                        workspace_id: auth.workspace_id,
+                                        library_id: Some(library_id),
+                                        document_id: None,
+                                    },
+                                    json!({
+                                        "tool": "search_entities",
+                                        "hitCount": entities.len(),
+                                    }),
+                                )
+                                .await;
+                                ok_tool_result(
+                                    "Entity search completed.",
+                                    json!({ "entities": entities }),
+                                )
+                            }
+                            Err(_) => tool_error_result(ApiError::Internal),
+                        }
+                    }
+                    Err(error) => {
+                        record_error_audit(
+                            auth,
+                            state,
+                            request_id,
+                            McpAuditActionKind::SearchEntities,
+                            McpAuditScope {
+                                workspace_id: auth.workspace_id,
+                                library_id: Some(library_id),
+                                document_id: None,
+                            },
+                            &error,
+                            json!({ "tool": "search_entities" }),
+                        )
+                        .await;
+                        tool_error_result(error)
+                    }
+                }
+            }
+            Err(error) => {
+                record_error_audit(
+                    auth,
+                    state,
+                    request_id,
+                    McpAuditActionKind::SearchEntities,
+                    McpAuditScope {
+                        workspace_id: auth.workspace_id,
+                        library_id: None,
+                        document_id: None,
+                    },
+                    &error,
+                    json!({ "tool": "search_entities" }),
+                )
+                .await;
+                tool_error_result(error)
+            }
+        },
+        "get_graph_topology" => {
+            match parse_tool_args::<McpGetGraphTopologyRequest>(parsed.arguments) {
+                Ok(args) => {
+                    let library_id = args.library_id;
+                    match mcp_access::authorize_library_for_mcp(auth, state, library_id).await {
+                        Ok(()) => {
+                            match mcp_access::get_graph_topology(state, library_id, args.limit)
+                                .await
+                            {
+                                Ok(payload) => {
+                                    record_canonical_mcp_audit(
+                                        state,
+                                        auth,
+                                        request_id,
+                                        "agent.graph.topology",
+                                        "succeeded",
+                                        Some("graph topology loaded".to_string()),
+                                        Some(format!(
+                                            "principal {} loaded graph topology for library {}",
+                                            auth.principal_id, library_id
+                                        )),
+                                        Vec::new(),
+                                    )
+                                    .await;
+                                    record_success_audit(
+                                        auth,
+                                        state,
+                                        request_id,
+                                        McpAuditActionKind::GetGraphTopology,
+                                        McpAuditScope {
+                                            workspace_id: auth.workspace_id,
+                                            library_id: Some(library_id),
+                                            document_id: None,
+                                        },
+                                        json!({ "tool": "get_graph_topology" }),
+                                    )
+                                    .await;
+                                    ok_tool_result("Graph topology loaded.", payload)
+                                }
+                                Err(error) => {
+                                    record_error_audit(
+                                        auth,
+                                        state,
+                                        request_id,
+                                        McpAuditActionKind::GetGraphTopology,
+                                        McpAuditScope {
+                                            workspace_id: auth.workspace_id,
+                                            library_id: Some(library_id),
+                                            document_id: None,
+                                        },
+                                        &error,
+                                        json!({ "tool": "get_graph_topology" }),
+                                    )
+                                    .await;
+                                    tool_error_result(error)
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            record_error_audit(
+                                auth,
+                                state,
+                                request_id,
+                                McpAuditActionKind::GetGraphTopology,
+                                McpAuditScope {
+                                    workspace_id: auth.workspace_id,
+                                    library_id: Some(library_id),
+                                    document_id: None,
+                                },
+                                &error,
+                                json!({ "tool": "get_graph_topology" }),
+                            )
+                            .await;
+                            tool_error_result(error)
+                        }
+                    }
+                }
+                Err(error) => {
+                    record_error_audit(
+                        auth,
+                        state,
+                        request_id,
+                        McpAuditActionKind::GetGraphTopology,
+                        McpAuditScope {
+                            workspace_id: auth.workspace_id,
+                            library_id: None,
+                            document_id: None,
+                        },
+                        &error,
+                        json!({ "tool": "get_graph_topology" }),
+                    )
+                    .await;
+                    tool_error_result(error)
+                }
+            }
+        }
+        "list_relations" => match parse_tool_args::<McpListRelationsRequest>(parsed.arguments) {
+            Ok(args) => {
+                let library_id = args.library_id;
+                let limit = args.limit.unwrap_or(100).clamp(1, 500);
+                match mcp_access::authorize_library_for_mcp(auth, state, library_id).await {
+                    Ok(()) => match mcp_access::list_relations(state, library_id, limit).await {
+                        Ok(payload) => {
+                            record_canonical_mcp_audit(
+                                state,
+                                auth,
+                                request_id,
+                                "agent.graph.list_relations",
+                                "succeeded",
+                                Some(format!("listed {} relation(s)", payload.len())),
+                                Some(format!(
+                                    "principal {} listed relations for library {}",
+                                    auth.principal_id, library_id
+                                )),
+                                Vec::new(),
+                            )
+                            .await;
+                            record_success_audit(
+                                auth,
+                                state,
+                                request_id,
+                                McpAuditActionKind::ListRelations,
+                                McpAuditScope {
+                                    workspace_id: auth.workspace_id,
+                                    library_id: Some(library_id),
+                                    document_id: None,
+                                },
+                                json!({
+                                    "tool": "list_relations",
+                                    "relationCount": payload.len(),
+                                }),
+                            )
+                            .await;
+                            ok_tool_result("Relations loaded.", json!({ "relations": payload }))
+                        }
+                        Err(error) => {
+                            record_error_audit(
+                                auth,
+                                state,
+                                request_id,
+                                McpAuditActionKind::ListRelations,
+                                McpAuditScope {
+                                    workspace_id: auth.workspace_id,
+                                    library_id: Some(library_id),
+                                    document_id: None,
+                                },
+                                &error,
+                                json!({ "tool": "list_relations" }),
+                            )
+                            .await;
+                            tool_error_result(error)
+                        }
+                    },
+                    Err(error) => {
+                        record_error_audit(
+                            auth,
+                            state,
+                            request_id,
+                            McpAuditActionKind::ListRelations,
+                            McpAuditScope {
+                                workspace_id: auth.workspace_id,
+                                library_id: Some(library_id),
+                                document_id: None,
+                            },
+                            &error,
+                            json!({ "tool": "list_relations" }),
+                        )
+                        .await;
+                        tool_error_result(error)
+                    }
+                }
+            }
+            Err(error) => {
+                record_error_audit(
+                    auth,
+                    state,
+                    request_id,
+                    McpAuditActionKind::ListRelations,
+                    McpAuditScope {
+                        workspace_id: auth.workspace_id,
+                        library_id: None,
+                        document_id: None,
+                    },
+                    &error,
+                    json!({ "tool": "list_relations" }),
+                )
+                .await;
+                tool_error_result(error)
+            }
+        },
         _ => tool_error_result(ApiError::invalid_mcp_tool_call(format!(
             "unsupported MCP tool '{}'",
             parsed.name

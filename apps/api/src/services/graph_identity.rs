@@ -8,52 +8,91 @@ use crate::domains::runtime_graph::RuntimeNodeType;
 const CANONICAL_RELATION_TYPES: &[&str] = &[
     "accepts_from",
     "accepts_receipts_from",
+    "aliases",
     "applies_to",
     "assists",
     "attached_to",
+    "authenticates",
+    "authorizes",
     "awards",
     "belongs_to",
     "builds_on",
+    "calls",
     "can_be",
     "complies_with",
+    "composed_of",
     "configures",
     "connects_to",
     "consists_of",
+    "consumes",
+    "contains",
+    "created_by",
     "defined_by",
     "defines",
+    "delegates_to",
+    "deployed_on",
     "depends_on",
+    "deprecated_by",
     "described_in",
     "describes",
     "developed_by",
     "documents",
+    "emits",
     "enables",
     "exchanges_data_with",
+    "extends",
+    "followed_by",
     "has_mode",
     "has_property",
+    "hosted_by",
+    "implements",
+    "imports",
     "includes",
+    "inherits_from",
+    "instance_of",
     "integrates_with",
     "intended_for",
+    "invokes",
     "is_a",
+    "located_in",
+    "logs",
+    "maintained_by",
     "manages",
     "may_include",
     "mentions",
     "mentions_in",
+    "migrated_to",
     "monitored_by",
     "monitors",
     "notifies",
     "offered_by",
     "operates_in",
+    "overrides",
+    "owned_by",
     "part_of",
+    "preceded_by",
     "produces",
     "provides",
+    "proxies",
+    "replaces",
     "requires",
+    "returns",
+    "routes_to",
     "runs_on",
+    "scales_to",
+    "serializes",
     "services",
+    "stores",
     "supports",
+    "tested_by",
+    "transforms",
     "updates",
     "used_by",
     "used_for",
     "uses",
+    "validates",
+    "version_of",
+    "wraps",
 ];
 
 /// Slugs from [`normalize_graph_identity_component`] for relation text that should not be stored
@@ -156,8 +195,16 @@ pub fn is_canonical_relation_type(relation_type: &str) -> bool {
 pub fn runtime_node_type_slug(node_type: &RuntimeNodeType) -> &'static str {
     match node_type {
         RuntimeNodeType::Document => "document",
+        RuntimeNodeType::Person => "person",
+        RuntimeNodeType::Organization => "organization",
+        RuntimeNodeType::Location => "location",
+        RuntimeNodeType::Event => "event",
+        RuntimeNodeType::Artifact => "artifact",
+        RuntimeNodeType::Natural => "natural",
+        RuntimeNodeType::Process => "process",
+        RuntimeNodeType::Concept => "concept",
+        RuntimeNodeType::Attribute => "attribute",
         RuntimeNodeType::Entity => "entity",
-        RuntimeNodeType::Topic => "topic",
     }
 }
 
@@ -168,8 +215,24 @@ pub fn runtime_node_type_from_key(canonical_node_key: &str) -> RuntimeNodeType {
         .map(|(node_type, _)| node_type)
         .and_then(|node_type| match node_type {
             "document" => Some(RuntimeNodeType::Document),
-            "topic" => Some(RuntimeNodeType::Topic),
+            "person" => Some(RuntimeNodeType::Person),
+            "organization" => Some(RuntimeNodeType::Organization),
+            "location" => Some(RuntimeNodeType::Location),
+            "event" => Some(RuntimeNodeType::Event),
+            "artifact" => Some(RuntimeNodeType::Artifact),
+            "natural" => Some(RuntimeNodeType::Natural),
+            "process" => Some(RuntimeNodeType::Process),
+            "concept" => Some(RuntimeNodeType::Concept),
+            "attribute" => Some(RuntimeNodeType::Attribute),
             "entity" => Some(RuntimeNodeType::Entity),
+            // Backward compatibility
+            "topic" => Some(RuntimeNodeType::Concept),
+            "technology" => Some(RuntimeNodeType::Artifact),
+            "api" => Some(RuntimeNodeType::Artifact),
+            "code_symbol" => Some(RuntimeNodeType::Artifact),
+            "natural_kind" => Some(RuntimeNodeType::Natural),
+            "metric" => Some(RuntimeNodeType::Attribute),
+            "regulation" => Some(RuntimeNodeType::Artifact),
             _ => None,
         })
         .unwrap_or(RuntimeNodeType::Entity)
@@ -232,16 +295,32 @@ fn expand_compound_identity_segment(segment: &str) -> Vec<String> {
 fn node_type_slug(node_type: RuntimeNodeType) -> &'static str {
     match node_type {
         RuntimeNodeType::Document => "document",
+        RuntimeNodeType::Person => "person",
+        RuntimeNodeType::Organization => "organization",
+        RuntimeNodeType::Location => "location",
+        RuntimeNodeType::Event => "event",
+        RuntimeNodeType::Artifact => "artifact",
+        RuntimeNodeType::Natural => "natural",
+        RuntimeNodeType::Process => "process",
+        RuntimeNodeType::Concept => "concept",
+        RuntimeNodeType::Attribute => "attribute",
         RuntimeNodeType::Entity => "entity",
-        RuntimeNodeType::Topic => "topic",
     }
 }
 
 #[must_use]
 const fn node_type_priority(node_type: &RuntimeNodeType) -> u8 {
     match node_type {
-        RuntimeNodeType::Entity => 2,
-        RuntimeNodeType::Topic => 1,
+        RuntimeNodeType::Person
+        | RuntimeNodeType::Organization
+        | RuntimeNodeType::Location
+        | RuntimeNodeType::Event
+        | RuntimeNodeType::Artifact
+        | RuntimeNodeType::Natural
+        | RuntimeNodeType::Process
+        | RuntimeNodeType::Attribute
+        | RuntimeNodeType::Entity => 2,
+        RuntimeNodeType::Concept => 1,
         RuntimeNodeType::Document => 0,
     }
 }
@@ -305,7 +384,7 @@ mod tests {
     #[test]
     fn label_node_type_index_prefers_entity_for_ambiguous_labels() {
         let mut index = GraphLabelNodeTypeIndex::new();
-        index.insert("Касса", RuntimeNodeType::Topic);
+        index.insert("Касса", RuntimeNodeType::Concept);
         index.insert("Касса", RuntimeNodeType::Entity);
 
         assert_eq!(index.canonical_node_key_for_label("Касса"), "entity:касса");
@@ -314,7 +393,7 @@ mod tests {
     #[test]
     fn label_node_type_index_prefers_entity_for_alias_collisions() {
         let mut index = GraphLabelNodeTypeIndex::new();
-        index.insert_aliases("Acme POS", &["Касса".to_string()], RuntimeNodeType::Topic);
+        index.insert_aliases("Acme POS", &["Касса".to_string()], RuntimeNodeType::Concept);
         index.insert("Касса", RuntimeNodeType::Entity);
 
         assert_eq!(index.canonical_node_key_for_label("Касса"), "entity:касса");
@@ -329,6 +408,7 @@ mod tests {
     }
 
     #[test]
+    /// "contains" is now a canonical relation type, so it must be accepted.
     fn normalize_relation_type_rejects_localized_and_paraphrased_predicates() {
         assert!(normalize_relation_type("использует").is_empty());
         assert!(normalize_relation_type("управляет").is_empty());
@@ -336,7 +416,7 @@ mod tests {
         assert!(normalize_relation_type("разработан компанией").is_empty());
         assert!(normalize_relation_type("предназначен для").is_empty());
         assert!(normalize_relation_type("содержит").is_empty());
-        assert!(normalize_relation_type("contains").is_empty());
+        assert_eq!(normalize_relation_type("contains"), "contains");
         assert!(normalize_relation_type("contains section").is_empty());
         assert!(normalize_relation_type("based on").is_empty());
         assert!(normalize_relation_type("documented on").is_empty());
@@ -353,7 +433,9 @@ mod tests {
 
     #[test]
     fn runtime_node_type_from_key_uses_canonical_prefix() {
-        assert_eq!(runtime_node_type_from_key("topic:поставка"), RuntimeNodeType::Topic);
+        assert_eq!(runtime_node_type_from_key("concept:поставка"), RuntimeNodeType::Concept);
         assert_eq!(runtime_node_type_from_key("entity:касса"), RuntimeNodeType::Entity);
+        // Backward compat: legacy "topic:" prefix maps to Concept
+        assert_eq!(runtime_node_type_from_key("topic:поставка"), RuntimeNodeType::Concept);
     }
 }

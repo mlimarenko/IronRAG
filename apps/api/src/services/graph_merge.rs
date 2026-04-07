@@ -757,7 +757,7 @@ mod tests {
             entities: vec![
                 GraphEntityCandidate {
                     label: "Касса".to_string(),
-                    node_type: RuntimeNodeType::Topic,
+                    node_type: RuntimeNodeType::Concept,
                     aliases: vec![],
                     summary: None,
                 },
