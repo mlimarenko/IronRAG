@@ -62,7 +62,7 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
         y: Math.random() * 100,
         size,
         color,
-        type: node.type,
+        nodeType: node.type,
       });
     }
 
@@ -151,7 +151,7 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
     if (!sigma || !graph) return;
 
     graph.forEachNode((node) => {
-      const type = graph.getNodeAttribute(node, 'type') as string;
+      const type = graph.getNodeAttribute(node, 'nodeType') as string;
       const baseColor = NODE_COLORS[type] || NODE_COLORS.entity;
       if (selectedId) {
         const isSelected = node === selectedId;
