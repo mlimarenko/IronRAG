@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { useApp } from '@/contexts/AppContext';
 import { adminApi, apiFetch } from '@/api';
+import { BUILD_VERSION_LABEL } from '@/lib/build-version';
 import {
   Home, FileText, Share2, MessageSquare, Settings, Code2,
   ChevronDown, Globe, LogOut, Menu, X, Plus, Trash2, AlertTriangle
@@ -329,7 +330,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <footer className="h-8 flex items-center justify-center px-4 gap-4 shrink-0 text-[11px] text-muted-foreground border-t" style={{
         background: 'linear-gradient(180deg, hsl(var(--background)), hsl(var(--muted) / 0.3))',
       }}>
-        <span className="font-medium">{t('common.version')}</span>
+        <span className="font-medium">{BUILD_VERSION_LABEL}</span>
         <span className="hidden sm:inline">{t('common.copyright', { year: new Date().getFullYear() })}</span>
         <a
           href="https://github.com/mlimarenko/RustRAG"

@@ -2,6 +2,7 @@
 
 FROM rust:1.94.0-trixie AS builder
 WORKDIR /workspace
+ARG APP_VERSION
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates mold \
@@ -16,6 +17,7 @@ COPY crates/contracts/Cargo.toml ./crates/contracts/
 COPY crates/contracts/src ./crates/contracts/src
 
 ENV RUSTFLAGS="-C link-arg=-fuse-ld=mold"
+ENV APP_VERSION=${APP_VERSION}
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,id=rustrag-cargo-reg \
     --mount=type=cache,target=/usr/local/cargo/git,id=rustrag-cargo-git \
