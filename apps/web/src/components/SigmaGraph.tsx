@@ -77,7 +77,7 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
         graph.addEdge(edge.sourceId, edge.targetId, {
           label: edge.label || '',
           size: 0.3,
-          color: '#64748b40',
+          color: 'rgba(100,116,139,0.25)',
         });
       } catch { /* skip parallel */ }
     }
@@ -104,7 +104,7 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
       labelWeight: '500',
       labelColor: { color: '#94a3b8' },
       defaultNodeColor: '#78716c',
-      defaultEdgeColor: '#64748b40',
+      defaultEdgeColor: 'rgba(100,116,139,0.25)',
       defaultEdgeType: 'curvedArrow',
       edgeProgramClasses: {
         curvedArrow: EdgeCurvedArrowProgram,
@@ -193,10 +193,10 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
       const source = graph.source(edge);
       const target = graph.target(edge);
       if (selectedId && (source === selectedId || target === selectedId)) {
-        graph.setEdgeAttribute(edge, 'color', '#3b82f6a0');
+        graph.setEdgeAttribute(edge, 'color', 'rgba(59,130,246,0.6)');
         graph.setEdgeAttribute(edge, 'size', 0.8);
       } else {
-        graph.setEdgeAttribute(edge, 'color', selectedId ? '#64748b08' : '#64748b40');
+        graph.setEdgeAttribute(edge, 'color', selectedId ? 'rgba(100,116,139,0.03)' : 'rgba(100,116,139,0.25)');
         graph.setEdgeAttribute(edge, 'size', 0.3);
       }
     });
