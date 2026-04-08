@@ -344,12 +344,18 @@ export default function GraphPage() {
 
         {/* Type filter moved to clickable legend below */}
 
-        <Select value={layout} onValueChange={v => setLayout(v as LayoutType)}>
-          <SelectTrigger className="h-8 w-28 text-xs"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            {LAYOUTS.map(l => <SelectItem key={l} value={l} className="capitalize">{l}</SelectItem>)}
-          </SelectContent>
-        </Select>
+        <div className="flex items-center gap-0.5 bg-muted/50 rounded-lg p-0.5">
+          {LAYOUTS.map(l => (
+            <button
+              key={l}
+              onClick={() => setLayout(l)}
+              className={`px-2 py-1 text-xs rounded-md transition-all ${layout === l ? 'bg-background shadow-sm font-semibold' : 'text-muted-foreground hover:text-foreground'}`}
+              title={l.charAt(0).toUpperCase() + l.slice(1)}
+            >
+              {l === 'cloud' ? '☁' : l === 'circle' ? '◯' : l === 'rings' ? '◎' : l === 'lanes' ? '☰' : l === 'clusters' ? '⬡' : l === 'islands' ? '🏝' : '🌀'}
+            </button>
+          ))}
+        </div>
 
         {/* Sigma.js handles zoom via mouse wheel / pinch */}
 

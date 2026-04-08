@@ -192,12 +192,15 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
     graph.forEachEdge((edge) => {
       const source = graph.source(edge);
       const target = graph.target(edge);
-      if (selectedId && (source === selectedId || target === selectedId)) {
-        graph.setEdgeAttribute(edge, 'color', '#6b9df7');
-        graph.setEdgeAttribute(edge, 'size', 0.8);
+      const isConnected = selectedId && (source === selectedId || target === selectedId);
+      if (isConnected) {
+        graph.setEdgeAttribute(edge, 'color', '#3b82f6');
+        graph.setEdgeAttribute(edge, 'size', 0.5);
+        graph.setEdgeAttribute(edge, 'zIndex', 10);
       } else {
-        graph.setEdgeAttribute(edge, 'color', selectedId ? '#ebedef' : '#c8cdd3');
+        graph.setEdgeAttribute(edge, 'color', selectedId ? '#f1f1f1' : '#c8cdd3');
         graph.setEdgeAttribute(edge, 'size', 0.3);
+        graph.setEdgeAttribute(edge, 'zIndex', 0);
       }
     });
 
