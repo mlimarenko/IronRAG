@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import {
-  Search, X, Filter, Loader2,
+  Search, X, Loader2,
   FileText, Share2, AlertTriangle,
 } from 'lucide-react';
 import type { GraphNode, GraphNodeType, GraphMetadata, GraphStatus } from '@/types';
@@ -127,7 +127,7 @@ export default function GraphPage() {
 
   // UI controls
   const [searchQuery, setSearchQuery] = useState('');
-  const [activeTypes, setActiveTypes] = useState<Set<GraphNodeType>>(new Set());
+  const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set());
   const [layout, setLayout] = useState<LayoutType>('cloud');
 
   // Fetch graph workbench data, falling back to entities+relations endpoints
@@ -323,10 +323,10 @@ export default function GraphPage() {
   }, [activeLibrary, selectedNode, allNodes]);
 
   const filteredNodes = useMemo(() => allNodes.filter(n => {
-    if (activeTypes.size > 0 && !activeTypes.has(n.type)) return false;
+    if (hiddenTypes.has(n.type)) return false;
     if (searchQuery && !n.label.toLowerCase().includes(searchQuery.toLowerCase())) return false;
     return true;
-  }), [allNodes, activeTypes, searchQuery]);
+  }), [allNodes, hiddenTypes, searchQuery]);
 
   const effectiveLayout = layout;
 
@@ -358,40 +358,7 @@ export default function GraphPage() {
           <Input className="h-8 pl-8 text-xs" placeholder={t('graph.searchPlaceholder')} value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
         </div>
 
-        <div className="relative">
-          <Button variant="outline" size="sm" className="h-8 text-xs gap-1.5" onClick={() => {
-            const el = document.getElementById('type-filter-popover');
-            if (el) el.classList.toggle('hidden');
-          }}>
-            <Filter className="h-3 w-3" />
-            {activeTypes.size === 0 ? t('graph.allTypes') : `${activeTypes.size} ${activeTypes.size === 1 ? 'type' : 'types'}`}
-          </Button>
-          <div id="type-filter-popover" className="hidden absolute top-full left-0 mt-1 z-50 bg-popover border rounded-lg shadow-lg p-2 space-y-0.5 min-w-[160px]">
-            <button className="w-full text-left px-2 py-1 text-xs rounded hover:bg-muted" onClick={() => setActiveTypes(new Set())}>
-              {t('graph.allTypes')}
-            </button>
-            <div className="border-t my-1" />
-            {(Object.keys(NODE_COLORS) as GraphNodeType[]).map(type => (
-              <label key={type} className="flex items-center gap-2 px-2 py-1 text-xs rounded hover:bg-muted cursor-pointer">
-                <input
-                  type="checkbox"
-                  className="h-3.5 w-3.5 rounded"
-                  checked={activeTypes.has(type)}
-                  onChange={() => {
-                    setActiveTypes(prev => {
-                      const next = new Set(prev);
-                      if (next.has(type)) next.delete(type);
-                      else next.add(type);
-                      return next;
-                    });
-                  }}
-                />
-                <span className="inline-block w-2.5 h-2.5 rounded-full" style={{ backgroundColor: NODE_COLORS[type] }} />
-                {type === 'natural' ? 'Natural' : type === 'code_symbol' ? 'Code' : type.charAt(0).toUpperCase() + type.slice(1)}
-              </label>
-            ))}
-          </div>
-        </div>
+        {/* Type filter moved to clickable legend below */}
 
         <Select value={layout} onValueChange={v => setLayout(v as LayoutType)}>
           <SelectTrigger className="h-8 w-28 text-xs"><SelectValue /></SelectTrigger>
@@ -458,18 +425,34 @@ export default function GraphPage() {
                 selectedId={selectedNode}
                 onSelect={setSelectedNode}
                 layout={effectiveLayout}
+                hiddenTypes={hiddenTypes}
               />
             </Suspense>
           )}
 
-          {/* Legend */}
-          <div className="absolute bottom-3 left-3 flex items-center gap-3 text-xs glass-panel rounded-xl px-4 py-2.5 shadow-lifted">
-            {Object.entries(NODE_COLORS).map(([type, color]) => (
-              <span key={type} className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-full" style={{ background: color }} />
-                {type.charAt(0).toUpperCase() + type.slice(1)}
-              </span>
-            ))}
+          {/* Clickable legend — toggle type visibility */}
+          <div className="absolute bottom-3 left-3 flex items-center gap-2 text-xs glass-panel rounded-xl px-3 py-2 shadow-lifted">
+            {Object.entries(NODE_COLORS).map(([type, color]) => {
+              const isHidden = hiddenTypes.has(type);
+              return (
+                <button
+                  key={type}
+                  className={`flex items-center gap-1.5 px-1.5 py-0.5 rounded-md transition-all ${isHidden ? 'opacity-30 line-through' : 'hover:bg-white/10'}`}
+                  onClick={() => {
+                    setHiddenTypes(prev => {
+                      const next = new Set(prev);
+                      if (next.has(type)) next.delete(type);
+                      else next.add(type);
+                      return next;
+                    });
+                  }}
+                  title={isHidden ? `Show ${type}` : `Hide ${type}`}
+                >
+                  <span className="w-2.5 h-2.5 rounded-full" style={{ background: color }} />
+                  {type.charAt(0).toUpperCase() + type.slice(1)}
+                </button>
+              );
+            })}
           </div>
 
           {graphMeta?.recommendedLayout && layout !== graphMeta.recommendedLayout && (
@@ -545,7 +528,7 @@ export default function GraphPage() {
                   {searchQuery && (
                     <Button variant="ghost" size="sm" className="text-xs h-7" onClick={() => {
                       setSearchQuery('');
-                      setActiveTypes(new Set());
+                      setHiddenTypes(new Set());
                     }}>
                       <X className="h-3 w-3 mr-1" /> {t('graph.resetFilter') || 'Reset'}
                     </Button>
