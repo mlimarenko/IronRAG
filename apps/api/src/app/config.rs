@@ -170,6 +170,8 @@ pub struct Settings {
     pub mcp_memory_max_search_limit: usize,
     pub mcp_memory_idempotency_retention_hours: u64,
     pub mcp_memory_audit_enabled: bool,
+    pub chunking_max_chars: usize,
+    pub chunking_overlap_chars: usize,
 }
 
 impl Settings {
@@ -458,7 +460,9 @@ fn settings_config_builder()
         .set_default("mcp_memory_default_search_limit", 10)?
         .set_default("mcp_memory_max_search_limit", 25)?
         .set_default("mcp_memory_idempotency_retention_hours", 72)?
-        .set_default("mcp_memory_audit_enabled", true)
+        .set_default("mcp_memory_audit_enabled", true)?
+        .set_default("chunking_max_chars", 2800)?
+        .set_default("chunking_overlap_chars", 280)
 }
 
 fn validate_service_role(settings: &Settings) -> Result<(), String> {
@@ -698,6 +702,8 @@ mod tests {
             mcp_memory_max_search_limit: 25,
             mcp_memory_idempotency_retention_hours: 72,
             mcp_memory_audit_enabled: true,
+            chunking_max_chars: 2800,
+            chunking_overlap_chars: 280,
         }
     }
 

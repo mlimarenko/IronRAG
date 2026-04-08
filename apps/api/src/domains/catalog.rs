@@ -35,6 +35,7 @@ pub struct CatalogLibrary {
     pub slug: String,
     pub display_name: String,
     pub description: Option<String>,
+    pub extraction_prompt: Option<String>,
     pub lifecycle_state: CatalogLifecycleState,
     pub ingestion_readiness: CatalogLibraryIngestionReadiness,
     pub created_at: DateTime<Utc>,

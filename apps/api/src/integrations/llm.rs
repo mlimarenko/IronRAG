@@ -554,7 +554,14 @@ impl UnifiedGateway {
                     .unwrap_or("https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
                     .to_string(),
             )),
-            other => Err(anyhow!("unsupported provider kind: {other}")),
+            // Any OpenAI-compatible provider (Ollama, vLLM, llama.cpp, LM Studio, etc.)
+            // works when a custom base URL is configured.
+            _ => match base_url_override {
+                Some(url) => Ok((api_key, url.to_string())),
+                None => Err(anyhow!(
+                    "unsupported provider kind without base_url_override: {provider_kind}"
+                )),
+            },
         }
     }
 }

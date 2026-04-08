@@ -433,8 +433,11 @@ async fn execute_canonical_ingest_job(
             if !heartbeat_flag.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
             }
-            let _ =
-                ingest_repository::touch_attempt_heartbeat(&heartbeat_pg, attempt_id, None).await;
+            if let Err(e) =
+                ingest_repository::touch_attempt_heartbeat(&heartbeat_pg, attempt_id, None).await
+            {
+                tracing::warn!(?e, %attempt_id, "failed to touch attempt heartbeat");
+            }
         }
     });
 
@@ -520,7 +523,7 @@ async fn execute_canonical_ingest_job(
         Err(error) => {
             let message = format!("{error:#}");
             let extract_error = error.downcast_ref::<CanonicalExtractContentError>();
-            let _ = state
+            if let Err(e) = state
                 .canonical_services
                 .ingest
                 .finalize_attempt(
@@ -553,7 +556,10 @@ async fn execute_canonical_ingest_job(
                         retryable: extract_error.map(|failure| failure.retryable).unwrap_or(true),
                     },
                 )
-                .await;
+                .await
+            {
+                tracing::warn!(%attempt_id, ?e, "failed to finalize attempt as failed");
+            }
             Err(error).context(message)
         }
     }
@@ -743,12 +749,15 @@ async fn run_canonical_ingest_pipeline(
         Err(error) => {
             let failure_message = error.to_string();
             let failure_code = error.failure_code.clone();
-            let _ = state
+            if let Err(e) = state
                 .canonical_services
                 .knowledge
                 .set_revision_extract_state(state, revision_id, "failed", None, None)
-                .await;
-            let _ = state
+                .await
+            {
+                tracing::warn!(%revision_id, ?e, "failed to set revision extract state to failed");
+            }
+            if let Err(e) = state
                 .canonical_services
                 .ingest
                 .record_stage_event(
@@ -763,7 +772,10 @@ async fn run_canonical_ingest_pipeline(
                         }),
                     },
                 )
-                .await;
+                .await
+            {
+                tracing::warn!(%attempt_id, ?e, "failed to record extract_content stage failure event");
+            }
             return Err(anyhow::Error::new(error));
         }
     };
@@ -1126,7 +1138,7 @@ async fn run_canonical_ingest_pipeline(
                 .await
                 .unwrap_or_default();
         if let Some(item) = items.first() {
-            let _ = content_repository::update_mutation_item(
+            if let Err(e) = content_repository::update_mutation_item(
                 &state.persistence.postgres,
                 item.id,
                 Some(document_id),
@@ -1135,9 +1147,12 @@ async fn run_canonical_ingest_pipeline(
                 "applied",
                 Some("mutation applied by canonical worker"),
             )
-            .await;
+            .await
+            {
+                tracing::warn!(%mutation_id, ?e, "failed to update mutation item to applied");
+            }
         }
-        let _ = content_repository::update_mutation_status(
+        if let Err(e) = content_repository::update_mutation_status(
             &state.persistence.postgres,
             mutation_id,
             "applied",
@@ -1145,7 +1160,10 @@ async fn run_canonical_ingest_pipeline(
             None,
             None,
         )
-        .await;
+        .await
+        {
+            tracing::warn!(%mutation_id, ?e, "failed to update mutation status to applied");
+        }
     }
 
     // Promote the document head through the canonical service so Postgres and Arango stay aligned.

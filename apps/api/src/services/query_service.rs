@@ -117,6 +117,7 @@ const PREPARED_SEGMENT_FOCUS_STOPWORDS: &[&str] = &[
 struct ConversationRuntimeContext {
     effective_query_text: String,
     prompt_history_text: Option<String>,
+    coreference_entities: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -432,10 +433,14 @@ impl QueryService {
                 );
                 make_query_terminal_failure_outcome(failure.clone())
             } else {
+                let enriched_query_text = enrich_query_with_coreference_entities(
+                    &conversation_context.effective_query_text,
+                    &conversation_context.coreference_entities,
+                );
                 let prepared = match prepare_answer_query(
                     state,
                     library.id,
-                    conversation_context.effective_query_text.clone(),
+                    enriched_query_text,
                     CANONICAL_QUERY_MODE,
                     top_k,
                     command.include_debug,
@@ -2744,6 +2749,7 @@ fn build_conversation_runtime_context(
         return ConversationRuntimeContext {
             effective_query_text: String::new(),
             prompt_history_text: None,
+            coreference_entities: Vec::new(),
         };
     }
     let current_index = turns
@@ -2764,13 +2770,89 @@ fn build_conversation_runtime_context(
         MAX_PROMPT_HISTORY_TURN_CHARS,
     );
 
+    let coreference_entities = previous_turns
+        .iter()
+        .rev()
+        .find(|turn| matches!(turn.turn_kind, QueryTurnKind::Assistant))
+        .map(|turn| extract_entities_from_previous_answer(&turn.content_text))
+        .unwrap_or_default();
+
     let effective_query_text = if is_context_dependent_follow_up(&current_text) {
         render_effective_query_text(&previous_turns, &current_text).unwrap_or(current_text)
     } else {
         current_text
     };
 
-    ConversationRuntimeContext { effective_query_text, prompt_history_text }
+    ConversationRuntimeContext { effective_query_text, prompt_history_text, coreference_entities }
+}
+
+/// Enriches a follow-up query with entity keywords extracted from the previous answer.
+/// Appends relevant entities as a parenthetical hint so the query planner picks them up
+/// as keywords for graph and vector retrieval.
+fn enrich_query_with_coreference_entities(query: &str, entities: &[String]) -> String {
+    if entities.is_empty() {
+        return query.to_string();
+    }
+    // Only add entities that are not already mentioned in the query
+    let query_lower = query.to_lowercase();
+    let novel: Vec<&str> = entities
+        .iter()
+        .filter(|entity| !query_lower.contains(&entity.to_lowercase()))
+        .map(String::as_str)
+        .take(10)
+        .collect();
+    if novel.is_empty() {
+        return query.to_string();
+    }
+    format!("{query} (context entities: {})", novel.join(", "))
+}
+
+/// Extracts entity-like terms from a previous answer to help resolve coreferences
+/// in follow-up questions.
+fn extract_entities_from_previous_answer(answer: &str) -> Vec<String> {
+    const COMMON_WORDS: &[&str] = &[
+        "The", "This", "That", "These", "Those", "When", "Where", "What", "Which", "How", "And",
+        "For", "But", "Not", "With", "From", "Into", "Also", "Here", "There", "Each", "Every",
+        "Some", "Any", "All", "Both", "More", "Most", "Other", "Such", "Than", "Then", "Only",
+        "Very", "Just", "About", "After", "Before", "Between", "Through", "During", "Without",
+        "However", "Because", "Since", "While", "Although", "Yes", "No",
+    ];
+
+    let mut entities = Vec::new();
+
+    // Extract backtick-enclosed terms: `PostgreSQL`, `build_router`
+    let mut search_from = 0;
+    while let Some(start) = answer[search_from..].find('`') {
+        let abs_start = search_from + start + 1;
+        if abs_start >= answer.len() {
+            break;
+        }
+        if let Some(end) = answer[abs_start..].find('`') {
+            let term = &answer[abs_start..abs_start + end];
+            if term.len() > 1 && term.len() < 50 && !term.contains('\n') {
+                entities.push(term.to_string());
+            }
+            search_from = abs_start + end + 1;
+        } else {
+            break;
+        }
+    }
+
+    // Extract capitalized multi-word sequences that look like entity names
+    for word in answer.split_whitespace() {
+        let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
+        if clean.len() > 2
+            && clean.chars().next().map_or(false, |c| c.is_uppercase())
+            && !COMMON_WORDS.contains(&clean)
+        {
+            entities.push(clean.to_string());
+        }
+    }
+
+    entities.sort();
+    entities.dedup();
+    entities.truncate(20);
+    entities
 }
 
 fn render_effective_query_text(

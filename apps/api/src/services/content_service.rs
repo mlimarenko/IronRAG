@@ -2496,6 +2496,14 @@ impl ContentService {
             .knowledge
             .list_typed_technical_facts(state, command.revision_id)
             .await?;
+        let library_extraction_prompt = repositories::catalog_repository::get_library_by_id(
+            &state.persistence.postgres,
+            command.library_id,
+        )
+        .await
+        .ok()
+        .flatten()
+        .and_then(|row| row.extraction_prompt);
         let chunk_count = all_chunks.len();
         let graph_extract_parallelism = state.settings.ingestion_worker_concurrency.clamp(1, 8);
 
@@ -2538,6 +2546,7 @@ impl ContentService {
             let revision = revision.clone();
             let command = command.clone();
             let revision_facts = revision_facts.clone();
+            let library_extraction_prompt = library_extraction_prompt.clone();
 
             async move {
                 let chunk_facts = revision_facts
@@ -2554,6 +2563,7 @@ impl ContentService {
                         &chunk,
                         &chunk_facts,
                         command.attempt_id,
+                        library_extraction_prompt,
                     ),
                 )
                 .await
@@ -3711,6 +3721,7 @@ fn build_canonical_graph_extraction_request(
     chunk: &KnowledgeChunkRow,
     technical_facts: &[TypedTechnicalFact],
     attempt_id: Option<Uuid>,
+    library_extraction_prompt: Option<String>,
 ) -> GraphExtractionRequest {
     GraphExtractionRequest {
         library_id: revision.library_id,
@@ -3768,6 +3779,7 @@ fn build_canonical_graph_extraction_request(
         revision_id: Some(revision.revision_id),
         activated_by_attempt_id: attempt_id,
         resume_hint: None,
+        library_extraction_prompt,
     }
 }
 

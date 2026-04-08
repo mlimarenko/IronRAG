@@ -333,7 +333,10 @@ impl AppState {
             content: ContentService::new(),
             ingest: IngestService::new(),
             extract: ExtractService::new(),
-            structured_preparation: StructuredPreparationService::new(),
+            structured_preparation: StructuredPreparationService::with_chunking(
+                settings.chunking_max_chars,
+                settings.chunking_overlap_chars,
+            ),
             technical_facts: TechnicalFactService::new(),
             web_ingest: WebIngestService::new(
                 crate::services::web_ingest_service::WebIngestRuntimeSettings {

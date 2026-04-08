@@ -71,12 +71,22 @@ pub struct StructuredPreparationFailure {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct StructuredPreparationService;
+pub struct StructuredPreparationService {
+    chunking_profile: StructuredChunkingProfile,
+}
 
 impl StructuredPreparationService {
     #[must_use]
     pub const fn new() -> Self {
-        Self
+        Self {
+            chunking_profile: StructuredChunkingProfile { max_chars: 2_800, overlap_chars: 280 },
+        }
+    }
+
+    /// Create a service with chunking parameters sourced from application config.
+    #[must_use]
+    pub const fn with_chunking(max_chars: usize, overlap_chars: usize) -> Self {
+        Self { chunking_profile: StructuredChunkingProfile { max_chars, overlap_chars } }
     }
 
     pub fn prepare_revision(
@@ -91,8 +101,7 @@ impl StructuredPreparationService {
         for (i, block) in ordered_blocks.iter_mut().enumerate() {
             block.ordinal = i32::try_from(i).unwrap_or(i32::MAX);
         }
-        let chunk_windows =
-            build_structured_chunk_windows(&ordered_blocks, StructuredChunkingProfile::default());
+        let chunk_windows = build_structured_chunk_windows(&ordered_blocks, self.chunking_profile);
         let prepared_revision = StructuredDocumentRevisionData {
             revision_id: command.revision_id,
             document_id: command.document_id,

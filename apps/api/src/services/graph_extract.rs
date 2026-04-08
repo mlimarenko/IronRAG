@@ -74,6 +74,7 @@ pub struct GraphExtractionRequest {
     pub revision_id: Option<uuid::Uuid>,
     pub activated_by_attempt_id: Option<uuid::Uuid>,
     pub resume_hint: Option<GraphExtractionResumeHint>,
+    pub library_extraction_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -468,6 +469,12 @@ Critical rules:\n\
             "domain_context".to_string(),
             format!("Document domain: {document_label}{section_path_text}"),
         ));
+    }
+    if let Some(library_prompt) = request.library_extraction_prompt.as_deref() {
+        let trimmed = library_prompt.trim();
+        if !trimmed.is_empty() {
+            sections.push(("library_context".to_string(), trimmed.to_string()));
+        }
     }
     sections.push((
         "structured_chunk".to_string(),
@@ -2607,6 +2614,7 @@ mod tests {
             revision_id: None,
             activated_by_attempt_id: None,
             resume_hint: None,
+            library_extraction_prompt: None,
         }
     }
 

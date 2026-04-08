@@ -20,6 +20,7 @@ pub struct CatalogLibraryRow {
     pub slug: String,
     pub display_name: String,
     pub description: Option<String>,
+    pub extraction_prompt: Option<String>,
     pub lifecycle_state: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -159,7 +160,7 @@ pub async fn list_libraries(
     match workspace_id {
         Some(workspace_id) => {
             sqlx::query_as::<_, CatalogLibraryRow>(
-                "select id, workspace_id, slug, display_name, description, lifecycle_state::text as lifecycle_state, created_at, updated_at
+                "select id, workspace_id, slug, display_name, description, extraction_prompt, lifecycle_state::text as lifecycle_state, created_at, updated_at
                  from catalog_library
                  where workspace_id = $1
                  order by created_at desc",
@@ -170,7 +171,7 @@ pub async fn list_libraries(
         }
         None => {
             sqlx::query_as::<_, CatalogLibraryRow>(
-                "select id, workspace_id, slug, display_name, description, lifecycle_state::text as lifecycle_state, created_at, updated_at
+                "select id, workspace_id, slug, display_name, description, extraction_prompt, lifecycle_state::text as lifecycle_state, created_at, updated_at
                  from catalog_library
                  order by created_at desc",
             )
@@ -185,7 +186,7 @@ pub async fn get_library_by_id(
     library_id: Uuid,
 ) -> Result<Option<CatalogLibraryRow>, sqlx::Error> {
     sqlx::query_as::<_, CatalogLibraryRow>(
-        "select id, workspace_id, slug, display_name, description, lifecycle_state::text as lifecycle_state, created_at, updated_at
+        "select id, workspace_id, slug, display_name, description, extraction_prompt, lifecycle_state::text as lifecycle_state, created_at, updated_at
          from catalog_library
          where id = $1",
     )
@@ -215,7 +216,7 @@ pub async fn create_library(
             updated_at
         )
         values ($1, $2, $3, $4, $5, 'active', $6, now(), now())
-        returning id, workspace_id, slug, display_name, description, lifecycle_state::text as lifecycle_state, created_at, updated_at",
+        returning id, workspace_id, slug, display_name, description, extraction_prompt, lifecycle_state::text as lifecycle_state, created_at, updated_at",
     )
     .bind(Uuid::now_v7())
     .bind(workspace_id)
@@ -233,6 +234,7 @@ pub async fn update_library(
     slug: &str,
     display_name: &str,
     description: Option<&str>,
+    extraction_prompt: Option<&str>,
     lifecycle_state: &str,
 ) -> Result<Option<CatalogLibraryRow>, sqlx::Error> {
     sqlx::query_as::<_, CatalogLibraryRow>(
@@ -240,15 +242,17 @@ pub async fn update_library(
          set slug = $2,
              display_name = $3,
              description = $4,
-             lifecycle_state = $5::catalog_library_lifecycle_state,
+             extraction_prompt = $5,
+             lifecycle_state = $6::catalog_library_lifecycle_state,
              updated_at = now()
          where id = $1
-         returning id, workspace_id, slug, display_name, description, lifecycle_state::text as lifecycle_state, created_at, updated_at",
+         returning id, workspace_id, slug, display_name, description, extraction_prompt, lifecycle_state::text as lifecycle_state, created_at, updated_at",
     )
     .bind(library_id)
     .bind(slug)
     .bind(display_name)
     .bind(description)
+    .bind(extraction_prompt)
     .bind(lifecycle_state)
     .fetch_optional(postgres)
     .await
@@ -263,7 +267,7 @@ pub async fn archive_library(
          set lifecycle_state = 'archived',
              updated_at = now()
          where id = $1
-         returning id, workspace_id, slug, display_name, description, lifecycle_state::text as lifecycle_state, created_at, updated_at",
+         returning id, workspace_id, slug, display_name, description, extraction_prompt, lifecycle_state::text as lifecycle_state, created_at, updated_at",
     )
     .bind(library_id)
     .fetch_optional(postgres)

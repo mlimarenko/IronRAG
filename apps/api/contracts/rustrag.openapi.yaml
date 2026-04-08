@@ -1312,6 +1312,78 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/documents/batch-delete:
+    post:
+      tags: [content]
+      summary: Delete multiple canonical content documents in a single batch
+      operationId: batchDeleteContentDocuments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchDocumentIdsRequest"
+      responses:
+        "200":
+          description: Batch delete accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchDocumentActionResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/documents/batch-cancel:
+    post:
+      tags: [content]
+      summary: Cancel processing for multiple canonical content documents in a single batch
+      operationId: batchCancelContentDocuments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchDocumentIdsRequest"
+      responses:
+        "200":
+          description: Batch cancel accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchDocumentActionResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/documents/batch-reprocess:
+    post:
+      tags: [content]
+      summary: Reprocess multiple canonical content documents in a single batch
+      operationId: batchReprocessContentDocuments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchDocumentIdsRequest"
+      responses:
+        "200":
+          description: Batch reprocess accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchDocumentActionResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
   /v1/content/documents/{documentId}:
     get:
       tags: [content]
@@ -2999,6 +3071,39 @@ components:
     ApiErrorBody: *genericObject
     AppendContentDocumentRequest: *genericObject
     AuditEventResponse: *genericObject
+    BatchDocumentIdsRequest:
+      type: object
+      additionalProperties: false
+      required: [documentIds]
+      properties:
+        documentIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          minItems: 1
+          maxItems: 500
+    BatchDocumentActionResponse:
+      type: object
+      additionalProperties: false
+      required: [accepted, rejected]
+      properties:
+        accepted:
+          type: integer
+        rejected:
+          type: integer
+        errors:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [documentId, reason]
+            properties:
+              documentId:
+                type: string
+                format: uuid
+              reason:
+                type: string
     BillingCharge: *genericObject
     BillingExecutionCost: *genericObject
     BillingProviderCall: *genericObject
