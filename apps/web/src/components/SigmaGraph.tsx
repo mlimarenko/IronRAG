@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import Graph from 'graphology';
 import Sigma from 'sigma';
+import { EdgeCurvedArrowProgram } from '@sigma/edge-curve';
 import circular from 'graphology-layout/circular';
 import type { GraphNode } from '@/types';
 
@@ -39,23 +40,21 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
   const containerRef = useRef<HTMLDivElement>(null);
   const sigmaRef = useRef<Sigma | null>(null);
   const graphRef = useRef<Graph | null>(null);
+  const dragStateRef = useRef<{ dragging: boolean; node: string | null }>({ dragging: false, node: null });
 
-  // Build graph when data or filter changes
   useEffect(() => {
     if (!containerRef.current || nodes.length === 0) return;
 
     const graph = new Graph();
 
-    // Filter by hidden types
     const visibleNodes = hiddenTypes.size > 0
       ? nodes.filter(n => !hiddenTypes.has(n.type))
       : nodes;
-
     const visibleNodeIds = new Set(visibleNodes.map(n => n.id));
 
     for (const node of visibleNodes) {
       const color = NODE_COLORS[node.type] || NODE_COLORS.entity;
-      const size = Math.max(2, Math.min(15, 2 + Math.sqrt(node.edgeCount) * 0.8));
+      const size = Math.max(3, Math.min(12, 3 + Math.sqrt(node.edgeCount) * 0.6));
       graph.addNode(node.id, {
         label: node.label,
         x: Math.random() * 100,
@@ -77,12 +76,10 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
       try {
         graph.addEdge(edge.sourceId, edge.targetId, {
           label: edge.label || '',
-          size: 1,
-          color: 'rgba(148, 163, 184, 0.35)',
+          size: 0.3,
+          color: '#64748b40',
         });
-      } catch {
-        // Skip parallel edges
-      }
+      } catch { /* skip parallel */ }
     }
 
     if (layout === 'circle') {
@@ -97,10 +94,7 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
     }
 
     graphRef.current = graph;
-
-    if (sigmaRef.current) {
-      sigmaRef.current.kill();
-    }
+    if (sigmaRef.current) sigmaRef.current.kill();
 
     const sigma = new Sigma(graph, containerRef.current, {
       renderLabels: true,
@@ -110,30 +104,63 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
       labelWeight: '500',
       labelColor: { color: '#94a3b8' },
       defaultNodeColor: '#78716c',
-      defaultEdgeColor: 'rgba(148, 163, 184, 0.35)',
-      defaultEdgeType: 'line',
+      defaultEdgeColor: '#64748b40',
+      defaultEdgeType: 'curvedArrow',
+      edgeProgramClasses: {
+        curvedArrow: EdgeCurvedArrowProgram,
+      },
       labelDensity: 0.07,
       labelGridCellSize: 100,
       zIndex: true,
       minCameraRatio: 0.01,
       maxCameraRatio: 50,
-      zoomToSizeRatioFunction: (x: number) => x,
+      allowInvalidContainer: true,
     });
 
-    // Faster zoom: override wheel handler sensitivity
+    // Faster zoom
     const camera = sigma.getCamera();
-    containerRef.current.addEventListener('wheel', (e) => {
+    const container = containerRef.current;
+    container.addEventListener('wheel', (e) => {
       e.preventDefault();
-      const factor = e.deltaY > 0 ? 1.15 : 0.85; // faster zoom steps
+      const factor = e.deltaY > 0 ? 1.2 : 0.83;
       const newRatio = camera.ratio * factor;
       camera.animate({ ratio: Math.max(0.01, Math.min(50, newRatio)) }, { duration: 50 });
     }, { passive: false });
 
+    // Node dragging
+    let draggedNode: string | null = null;
+
+    sigma.on('downNode', ({ node }) => {
+      draggedNode = node;
+      dragStateRef.current = { dragging: true, node };
+      graph.setNodeAttribute(node, 'highlighted', true);
+      sigma.getCamera().disable();
+    });
+
+    sigma.getMouseCaptor().on('mousemovebody', (e: any) => {
+      if (!draggedNode) return;
+      const pos = sigma.viewportToGraph(e);
+      graph.setNodeAttribute(draggedNode, 'x', pos.x);
+      graph.setNodeAttribute(draggedNode, 'y', pos.y);
+      e.preventSigmaDefault();
+      e.original.preventDefault();
+      e.original.stopPropagation();
+    });
+
+    sigma.getMouseCaptor().on('mouseup', () => {
+      if (draggedNode) {
+        graph.removeNodeAttribute(draggedNode, 'highlighted');
+        sigma.getCamera().enable();
+        draggedNode = null;
+        dragStateRef.current = { dragging: false, node: null };
+      }
+    });
+
     sigma.on('clickNode', ({ node }) => {
-      onSelect(node);
+      if (!dragStateRef.current.dragging) onSelect(node);
     });
     sigma.on('clickStage', () => {
-      onSelect(null);
+      if (!dragStateRef.current.dragging) onSelect(null);
     });
 
     sigmaRef.current = sigma;
@@ -144,7 +171,7 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
     };
   }, [nodes, edges, layout, onSelect, hiddenTypes]);
 
-  // Handle selection highlighting
+  // Selection highlighting
   useEffect(() => {
     const sigma = sigmaRef.current;
     const graph = graphRef.current;
@@ -156,11 +183,9 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
       if (selectedId) {
         const isSelected = node === selectedId;
         const isNeighbor = graph.hasNode(selectedId) && graph.areNeighbors(node, selectedId);
-        graph.setNodeAttribute(node, 'color', isSelected || isNeighbor ? baseColor : baseColor + '25');
-        graph.setNodeAttribute(node, 'zIndex', isSelected ? 2 : isNeighbor ? 1 : 0);
+        graph.setNodeAttribute(node, 'color', isSelected || isNeighbor ? baseColor : baseColor + '20');
       } else {
         graph.setNodeAttribute(node, 'color', baseColor);
-        graph.setNodeAttribute(node, 'zIndex', 0);
       }
     });
 
@@ -168,11 +193,11 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
       const source = graph.source(edge);
       const target = graph.target(edge);
       if (selectedId && (source === selectedId || target === selectedId)) {
-        graph.setEdgeAttribute(edge, 'color', 'rgba(59, 130, 246, 0.85)');
-        graph.setEdgeAttribute(edge, 'size', 2.5);
+        graph.setEdgeAttribute(edge, 'color', '#3b82f6a0');
+        graph.setEdgeAttribute(edge, 'size', 0.8);
       } else {
-        graph.setEdgeAttribute(edge, 'color', selectedId ? 'rgba(148, 163, 184, 0.06)' : 'rgba(148, 163, 184, 0.35)');
-        graph.setEdgeAttribute(edge, 'size', 1);
+        graph.setEdgeAttribute(edge, 'color', selectedId ? '#64748b08' : '#64748b40');
+        graph.setEdgeAttribute(edge, 'size', 0.3);
       }
     });
 
