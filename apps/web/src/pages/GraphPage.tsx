@@ -141,19 +141,13 @@ export default function GraphPage() {
     setSelectedNode(null);
     setSelectedDetail(null);
 
-    knowledgeApi.getGraphWorkbench(activeLibrary.id)
-      .then(async workbench => {
-        if (cancelled) return;
-        const { nodes, meta } = mapWorkbenchToUI(workbench);
-
-        // If workbench returned no nodes, fall back to entities + relations endpoints
-        if (nodes.length === 0) {
-          const [entitiesRes, relationsRes, documentsRes, topologyRes] = await Promise.all([
-            knowledgeApi.listEntities(activeLibrary.id),
-            knowledgeApi.listRelations(activeLibrary.id),
-            knowledgeApi.listDocuments(activeLibrary.id),
-            knowledgeApi.getGraphTopology(activeLibrary.id).catch(() => null),
-          ]);
+    // Load graph data from fast individual endpoints (not slow graph-workbench)
+    Promise.all([
+      knowledgeApi.listEntities(activeLibrary.id),
+      knowledgeApi.listRelations(activeLibrary.id),
+      knowledgeApi.listDocuments(activeLibrary.id),
+      knowledgeApi.getGraphTopology(activeLibrary.id).catch(() => null),
+    ]).then(([entitiesRes, relationsRes, documentsRes, topologyRes]) => {
           if (cancelled) return;
 
           const entities: any[] = Array.isArray(entitiesRes) ? entitiesRes : (entitiesRes.items ?? []);
@@ -225,16 +219,6 @@ export default function GraphPage() {
           setAllNodes(fallbackNodes);
           setGraphMeta(fallbackMeta);
           setGraphStatus(fallbackMeta.status);
-          return;
-        }
-
-        edgesRef.current = [];
-        setAllNodes(nodes);
-        setGraphMeta(meta);
-        setGraphStatus(meta.status);
-        if (meta.recommendedLayout) {
-          setLayout(meta.recommendedLayout as LayoutType);
-        }
       })
       .catch(err => {
         if (cancelled) return;
