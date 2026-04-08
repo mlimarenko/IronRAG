@@ -607,7 +607,9 @@ async fn governance_actions_and_denials_append_expected_audit_subjects() -> Resu
             .rest_get(&workspace_admin, &format!("/v1/audit/events?libraryId={created_library_id}"))
             .await?;
         assert_eq!(status, StatusCode::OK);
-        let events = body.as_array().context("audit events response must be an array")?;
+        let events = body["items"]
+            .as_array()
+            .context("audit events response must include items")?;
         let library_event_response = events
             .iter()
             .find(|event| event["id"] == json!(library_event.id))
@@ -738,7 +740,9 @@ async fn canonical_audit_subjects_surface_query_and_knowledge_ids_through_http()
                 .rest_get(&system_admin, &format!("/v1/audit/events?{query_param}={subject_id}"))
                 .await?;
             assert_eq!(status, StatusCode::OK);
-            let events = body.as_array().context("audit events response must be an array")?;
+            let events = body["items"]
+                .as_array()
+                .context("audit events response must include items")?;
             assert_eq!(events.len(), 1, "expected one audit event for {query_param}");
 
             let event = &events[0];
@@ -757,7 +761,9 @@ async fn canonical_audit_subjects_surface_query_and_knowledge_ids_through_http()
 
         let (status, body) = fixture.rest_get(&system_admin, "/v1/audit/events").await?;
         assert_eq!(status, StatusCode::OK);
-        let events = body.as_array().context("audit events response must be an array")?;
+        let events = body["items"]
+            .as_array()
+            .context("audit events response must include items")?;
         assert!(
             events.iter().any(|event| event["id"] == json!(audit_event_id)),
             "canonical audit proof event must be visible in the audit feed"
@@ -817,7 +823,9 @@ async fn canonical_agent_memory_audit_subjects_surface_knowledge_and_async_opera
             )
             .await?;
         assert_eq!(status, StatusCode::OK);
-        let events = body.as_array().context("audit events response must be an array")?;
+        let events = body["items"]
+            .as_array()
+            .context("audit events response must include items")?;
         let event = events
             .iter()
             .find(|event| event["id"] == json!(audit_event_id))
@@ -838,7 +846,9 @@ async fn canonical_agent_memory_audit_subjects_surface_knowledge_and_async_opera
             )
             .await?;
         assert_eq!(status, StatusCode::OK);
-        let events = body.as_array().context("audit events response must be an array")?;
+        let events = body["items"]
+            .as_array()
+            .context("audit events response must include items")?;
         let event = events
             .iter()
             .find(|event| event["id"] == json!(audit_event_id))

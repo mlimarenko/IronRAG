@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./docs/assets/readme-flow.gif" alt="RustRAG demo: dashboard, documents, grounded assistant, and graph exploration" width="960">
+  <img src="./docs/assets/readme-flow.gif" alt="RustRAG demo: dashboard, documents, grounded assistant, and graph exploration" width="840">
 </p>
 
 <h1 align="center">RustRAG</h1>

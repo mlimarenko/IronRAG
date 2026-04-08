@@ -649,6 +649,13 @@ impl GraphService {
                     )
                     .to_string()
                 });
+            let entity_sub_type = rows
+                .iter()
+                .find_map(|candidate| {
+                    candidate.row.candidate_sub_type.as_deref()
+                        .filter(|s| !s.trim().is_empty())
+                        .map(|s| s.trim().to_string())
+                });
             let alias_rows = rows.iter().map(|candidate| candidate.row.clone()).collect::<Vec<_>>();
             let aliases = self.collect_entity_aliases(
                 &alias_rows,
@@ -669,6 +676,7 @@ impl GraphService {
                 canonical_label,
                 aliases: aliases.into_iter().collect(),
                 entity_type,
+                entity_sub_type,
                 summary: None,
                 confidence,
                 support_count: rows.len() as i64,
@@ -752,6 +760,7 @@ impl GraphService {
                             aliases: vec![canonical_label.clone()],
                             entity_type: graph_identity::runtime_node_type_slug(&node_type)
                                 .to_string(),
+                            entity_sub_type: None,
                             summary: None,
                             confidence: None,
                             support_count: 0,
@@ -1041,6 +1050,7 @@ impl GraphService {
             candidate_label: entity.label.trim().to_string(),
             candidate_type: graph_identity::runtime_node_type_slug(&canonical_node_type)
                 .to_string(),
+            candidate_sub_type: entity.sub_type.clone(),
             normalization_key,
             confidence: None,
             extraction_method: "graph_extract".to_string(),
@@ -1140,6 +1150,7 @@ impl GraphService {
             canonical_label: canonical_label.to_string(),
             aliases: merged_aliases,
             entity_type: entity_type.to_string(),
+            entity_sub_type: None,
             summary,
             confidence,
             support_count,
@@ -2395,6 +2406,7 @@ fn build_materialized_extract_candidates(
                 chunk_id: Some(chunk_result.chunk_id),
                 candidate_label: display_label,
                 candidate_type,
+                candidate_sub_type: None,
                 normalization_key,
                 confidence: None,
                 extraction_method: "extract_chunk_result".to_string(),
@@ -2778,6 +2790,7 @@ mod tests {
             chunk_id: Some(Uuid::now_v7()),
             candidate_label: "Первый печатный двор".to_string(),
             candidate_type: "entity".to_string(),
+            candidate_sub_type: None,
             normalization_key: "entity:".to_string(),
             confidence: None,
             extraction_method: "extract_chunk_result".to_string(),
@@ -2872,6 +2885,7 @@ mod tests {
             chunk_id: Some(Uuid::now_v7()),
             candidate_label: "Касса".to_string(),
             candidate_type: "topic".to_string(),
+            candidate_sub_type: None,
             normalization_key: "topic:касса".to_string(),
             confidence: None,
             extraction_method: "graph_extract".to_string(),
@@ -2902,6 +2916,7 @@ mod tests {
                 chunk_id: Some(Uuid::now_v7()),
                 candidate_label: "Acme Control Center".to_string(),
                 candidate_type: "entity".to_string(),
+                candidate_sub_type: None,
                 normalization_key: "entity:acme_control_center".to_string(),
                 confidence: None,
                 extraction_method: "graph_extract".to_string(),
@@ -2923,6 +2938,7 @@ mod tests {
                 chunk_id: Some(Uuid::now_v7()),
                 candidate_label: "Control Center".to_string(),
                 candidate_type: "entity".to_string(),
+                candidate_sub_type: None,
                 normalization_key: "entity:control_center".to_string(),
                 confidence: None,
                 extraction_method: "graph_extract".to_string(),
@@ -3141,12 +3157,14 @@ mod tests {
         let entity = GraphEntityCandidate {
             label: "Первый печатный двор".to_string(),
             node_type: RuntimeNodeType::Entity,
+            sub_type: None,
             aliases: vec![],
             summary: None,
         };
         let topic = GraphEntityCandidate {
             label: "Первый печатный двор".to_string(),
             node_type: RuntimeNodeType::Concept,
+            sub_type: None,
             aliases: vec![],
             summary: None,
         };

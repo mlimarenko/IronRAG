@@ -1622,6 +1622,7 @@ async fn entity_neighborhood_filters_out_context_bundle_vertices() -> Result<()>
                 canonical_label: "Paging Parameter".to_string(),
                 aliases: vec!["pageSize".to_string()],
                 entity_type: "parameter".to_string(),
+                entity_sub_type: None,
                 summary: Some("Pagination parameter surfaced for regression coverage.".to_string()),
                 confidence: Some(0.99),
                 support_count: 1,

@@ -38,10 +38,47 @@ use rustrag_contracts::{
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct OpsLibraryStateSummaryResponse {
+    pub library_id: Uuid,
+    pub queue_depth: i64,
+    pub running_attempts: i64,
+    pub readable_document_count: i64,
+    pub failed_document_count: i64,
+    pub degraded_state: String,
+    pub latest_knowledge_generation_id: Option<Uuid>,
+    pub knowledge_generation_state: Option<String>,
+    pub last_recomputed_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpsLibraryWarningResponse {
+    pub id: Uuid,
+    pub library_id: Uuid,
+    pub warning_kind: String,
+    pub severity: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub resolved_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct KnowledgeGenerationResponse {
+    pub id: Uuid,
+    pub library_id: Uuid,
+    pub generation_kind: String,
+    pub generation_state: String,
+    pub source_revision_id: Option<Uuid>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct OpsLibraryStateResponse {
-    pub state: OpsLibraryState,
-    pub knowledge_generations: Vec<KnowledgeLibraryGeneration>,
-    pub warnings: Vec<OpsLibraryWarning>,
+    pub state: OpsLibraryStateSummaryResponse,
+    pub knowledge_generations: Vec<KnowledgeGenerationResponse>,
+    pub warnings: Vec<OpsLibraryWarningResponse>,
 }
 
 pub fn router() -> Router<AppState> {
@@ -72,9 +109,13 @@ async fn get_library_state(
         state.canonical_services.ops.get_library_state_snapshot(&state, library_id).await?;
     let warnings = state.canonical_services.ops.list_library_warnings(&state, library_id).await?;
     Ok(Json(OpsLibraryStateResponse {
-        state: snapshot.state,
-        knowledge_generations: snapshot.knowledge_generations,
-        warnings,
+        state: map_ops_library_state(&snapshot.state),
+        knowledge_generations: snapshot
+            .knowledge_generations
+            .iter()
+            .map(map_knowledge_generation)
+            .collect(),
+        warnings: warnings.iter().map(map_ops_warning).collect(),
     }))
 }
 
@@ -92,18 +133,18 @@ async fn get_library_dashboard(
         state.canonical_services.ops.list_library_warnings(&state, library_id),
     )?;
 
-    let recent_documents =
-        sort_recent_documents(documents.iter().map(map_document_summary).collect());
-    let overview = build_documents_overview(&recent_documents);
+    let document_summaries = documents.iter().map(map_document_summary).collect::<Vec<_>>();
+    let overview = build_documents_overview(&document_summaries);
     let warnings = map_operator_warnings(&ops_warnings, &ops_snapshot.state);
     let graph = map_graph_surface(&knowledge_summary, &ops_snapshot.state, warnings.first());
-    let metrics = build_dashboard_metrics(&overview, &ops_snapshot.state, &graph, warnings.len());
     let attention = build_attention_items(
         &ops_snapshot.state,
         &ops_warnings,
         &graph,
-        recent_documents.as_slice(),
+        document_summaries.as_slice(),
     );
+    let metrics = build_dashboard_metrics(&overview, &ops_snapshot.state, &graph, attention.len());
+    let recent_documents = sort_recent_documents(document_summaries.clone());
 
     Ok(Json(DashboardSurface {
         overview,
@@ -122,6 +163,45 @@ fn sort_recent_documents(mut documents: Vec<DocumentSummary>) -> Vec<DocumentSum
     });
     documents.truncate(6);
     documents
+}
+
+fn map_ops_library_state(state: &OpsLibraryState) -> OpsLibraryStateSummaryResponse {
+    OpsLibraryStateSummaryResponse {
+        library_id: state.library_id,
+        queue_depth: state.queue_depth,
+        running_attempts: state.running_attempts,
+        readable_document_count: state.readable_document_count,
+        failed_document_count: state.failed_document_count,
+        degraded_state: state.degraded_state.clone(),
+        latest_knowledge_generation_id: state.latest_knowledge_generation_id,
+        knowledge_generation_state: state.knowledge_generation_state.clone(),
+        last_recomputed_at: state.last_recomputed_at,
+    }
+}
+
+fn map_knowledge_generation(
+    generation: &KnowledgeLibraryGeneration,
+) -> KnowledgeGenerationResponse {
+    KnowledgeGenerationResponse {
+        id: generation.id,
+        library_id: generation.library_id,
+        generation_kind: generation.generation_kind.clone(),
+        generation_state: generation.generation_state.clone(),
+        source_revision_id: generation.source_revision_id,
+        created_at: generation.created_at,
+        completed_at: generation.completed_at,
+    }
+}
+
+fn map_ops_warning(warning: &OpsLibraryWarning) -> OpsLibraryWarningResponse {
+    OpsLibraryWarningResponse {
+        id: warning.id,
+        library_id: warning.library_id,
+        warning_kind: warning.warning_kind.clone(),
+        severity: warning.severity.clone(),
+        created_at: warning.created_at,
+        resolved_at: warning.resolved_at,
+    }
 }
 
 fn build_documents_overview(documents: &[DocumentSummary]) -> DocumentsOverview {
@@ -162,11 +242,10 @@ fn build_dashboard_metrics(
     overview: &DocumentsOverview,
     ops_state: &OpsLibraryState,
     graph: &GraphSurface,
-    warning_count: usize,
+    attention_count: usize,
 ) -> Vec<DashboardMetric> {
     let in_flight = ops_state.queue_depth.saturating_add(ops_state.running_attempts);
-    let warning_count = i64::try_from(warning_count).unwrap_or(i64::MAX);
-    let attention = i64::from(overview.failed_documents).saturating_add(warning_count);
+    let attention = i64::try_from(attention_count).unwrap_or(i64::MAX);
 
     vec![
         DashboardMetric {
@@ -207,6 +286,12 @@ fn build_attention_items(
     documents: &[DocumentSummary],
 ) -> Vec<DashboardAttentionItem> {
     let mut attention = Vec::new();
+    let readable_without_graph_count = documents
+        .iter()
+        .filter(|document| matches!(document.readiness, DocumentReadiness::Readable))
+        .count();
+    let graph_coverage_gap_count = readable_without_graph_count
+        .saturating_add(usize::try_from(graph.graph_sparse_document_count).unwrap_or(usize::MAX));
 
     if ops_state.failed_document_count > 0 {
         attention.push(DashboardAttentionItem {
@@ -221,15 +306,19 @@ fn build_attention_items(
         });
     }
 
-    if graph.graph_sparse_document_count > 0 {
+    if graph_coverage_gap_count > 0 {
         attention.push(DashboardAttentionItem {
-            code: "graph_sparse".to_string(),
+            code: "graph_coverage_gap".to_string(),
             title: "Graph coverage remains partial".to_string(),
             detail: format!(
-                "{} documents are readable but still graph-sparse.",
-                graph.graph_sparse_document_count
+                "{} readable documents still do not contribute to the graph.",
+                graph_coverage_gap_count
             ),
-            route_path: "/graph".to_string(),
+            route_path: if readable_without_graph_count > 0 {
+                "/documents?readiness=readable".to_string()
+            } else {
+                "/documents?readiness=graph_sparse".to_string()
+            },
             level: MessageLevel::Warning,
         });
     }
@@ -348,6 +437,11 @@ fn map_graph_surface(
     first_warning: Option<&OperatorWarning>,
 ) -> GraphSurface {
     let total_documents = summary.document_counts_by_readiness.values().copied().sum::<i64>();
+    let readable_without_graph_count = summary
+        .document_counts_by_readiness
+        .get("readable")
+        .copied()
+        .unwrap_or(0);
     let status = if total_documents == 0 {
         GraphStatus::Empty
     } else if ops_state.degraded_state == "rebuilding" || ops_state.running_attempts > 0 {
@@ -356,9 +450,15 @@ fn map_graph_surface(
         } else {
             GraphStatus::Building
         }
-    } else if summary.graph_ready_document_count > 0 && summary.graph_sparse_document_count == 0 {
+    } else if summary.graph_ready_document_count > 0
+        && summary.graph_sparse_document_count == 0
+        && readable_without_graph_count == 0
+    {
         GraphStatus::Ready
-    } else if summary.graph_ready_document_count > 0 || summary.graph_sparse_document_count > 0 {
+    } else if summary.graph_ready_document_count > 0
+        || summary.graph_sparse_document_count > 0
+        || readable_without_graph_count > 0
+    {
         GraphStatus::Partial
     } else if ops_state.failed_document_count > 0 {
         GraphStatus::Failed
@@ -380,9 +480,9 @@ fn map_graph_surface(
         status,
         convergence_status,
         warning: first_warning.map(|warning| warning.detail.clone()),
-        node_count: 0,
-        relation_count: 0,
-        edge_count: 0,
+        node_count: saturating_i32_from_i64(summary.node_count),
+        relation_count: saturating_i32_from_i64(summary.edge_count),
+        edge_count: saturating_i32_from_i64(summary.edge_count),
         graph_ready_document_count: saturating_i32_from_i64(summary.graph_ready_document_count),
         graph_sparse_document_count: saturating_i32_from_i64(summary.graph_sparse_document_count),
         typed_fact_document_count: saturating_i32_from_i64(summary.typed_fact_document_count),

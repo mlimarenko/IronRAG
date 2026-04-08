@@ -171,6 +171,7 @@ pub async fn merge_chunk_graph_candidates(
             canonical_node_type,
             &aliases,
             entity.summary.as_deref(),
+            entity.sub_type.as_deref(),
             extraction_recovery,
         )
         .await?;
@@ -335,6 +336,7 @@ async fn merge_relation_candidate(
         graph_identity::runtime_node_type_from_key(&source_node_key),
         std::slice::from_ref(&relation.source_label),
         None,
+        None,
         extraction_recovery,
     )
     .await?;
@@ -344,6 +346,7 @@ async fn merge_relation_candidate(
         &relation.target_label,
         graph_identity::runtime_node_type_from_key(&target_node_key),
         std::slice::from_ref(&relation.target_label),
+        None,
         None,
         extraction_recovery,
     )
@@ -458,6 +461,7 @@ async fn upsert_graph_node(
     node_type: RuntimeNodeType,
     aliases: &[String],
     summary: Option<&str>,
+    sub_type: Option<&str>,
     extraction_recovery: Option<&ExtractionRecoverySummary>,
 ) -> Result<RuntimeGraphNodeRow> {
     let canonical_key = graph_identity::canonical_node_key(node_type.clone(), label);
@@ -470,6 +474,17 @@ async fn upsert_graph_node(
     .await?;
     let support_count = existing.as_ref().map_or(1, |row| row.support_count.max(1));
 
+    let mut metadata = merge_graph_quality_metadata(
+        existing.as_ref().map(|row| &row.metadata_json),
+        extraction_recovery,
+        summary,
+    );
+    if let Some(st) = sub_type {
+        metadata.as_object_mut().map(|obj| {
+            obj.insert("sub_type".to_string(), serde_json::Value::String(st.to_string()))
+        });
+    }
+
     repositories::upsert_runtime_graph_node(
         pool,
         scope.library_id,
@@ -479,11 +494,7 @@ async fn upsert_graph_node(
         serde_json::to_value(normalize_graph_aliases(label, aliases))
             .unwrap_or_else(|_| serde_json::json!([])),
         summary,
-        merge_graph_quality_metadata(
-            existing.as_ref().map(|row| &row.metadata_json),
-            extraction_recovery,
-            summary,
-        ),
+        metadata,
         support_count,
         scope.projection_version,
     )
@@ -758,12 +769,14 @@ mod tests {
                 GraphEntityCandidate {
                     label: "Касса".to_string(),
                     node_type: RuntimeNodeType::Concept,
+                    sub_type: None,
                     aliases: vec![],
                     summary: None,
                 },
                 GraphEntityCandidate {
                     label: "Касса".to_string(),
                     node_type: RuntimeNodeType::Entity,
+                    sub_type: None,
                     aliases: vec![],
                     summary: None,
                 },

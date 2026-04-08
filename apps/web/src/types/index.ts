@@ -182,6 +182,7 @@ export interface GraphNode {
   id: string;
   label: string;
   type: GraphNodeType;
+  subType?: string;
   summary?: string;
   canonicalSummary?: string;
   properties: Record<string, string>;
@@ -392,20 +393,36 @@ export interface OperationsSnapshot {
   runningAttempts: number;
   readableDocCount: number;
   failedDocCount: number;
-  healthState: 'healthy' | 'degraded' | 'critical';
+  status: 'healthy' | 'processing' | 'rebuilding' | 'degraded';
   knowledgeGenerationState: string;
   lastRecomputedAt: string;
-  warnings: string[];
+  warnings: OperationsWarning[];
+}
+
+export interface OperationsWarning {
+  id: string;
+  warningKind: string;
+  severity: string;
+  createdAt: string;
+  resolvedAt?: string;
 }
 
 export interface AuditEvent {
   id: string;
   action: string;
-  result: 'success' | 'failure';
+  resultKind: 'succeeded' | 'rejected' | 'failed';
+  surfaceKind: string;
   timestamp: string;
   message: string;
   subjectSummary: string;
   actor: string;
+}
+
+export interface AuditEventPage {
+  items: AuditEvent[];
+  total: number;
+  limit: number;
+  offset: number;
 }
 
 export type Locale = string;

@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import {
   Search, X, Loader2,
   FileText, Share2, AlertTriangle,
+  Eye, EyeOff, RotateCcw, Layers,
 } from 'lucide-react';
 import type { GraphNode, GraphNodeType, GraphMetadata, GraphStatus } from '@/types';
 
@@ -128,7 +129,9 @@ export default function GraphPage() {
   // UI controls
   const [searchQuery, setSearchQuery] = useState('');
   const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set());
+  const [hiddenSubTypes, setHiddenSubTypes] = useState<Set<string>>(new Set());
   const [layout, setLayout] = useState<LayoutType>('cloud');
+  const [legendOpen, setLegendOpen] = useState(true);
 
   // Fetch graph workbench data, falling back to entities+relations endpoints
   useEffect(() => {
@@ -161,15 +164,20 @@ export default function GraphPage() {
             docEdgeCounts.set(link.documentId, (docEdgeCounts.get(link.documentId) ?? 0) + 1);
           });
 
-          const entityNodes: GraphNode[] = entities.map((e: any) => ({
-            id: e.entityId ?? e.id,
-            label: e.canonicalLabel ?? e.label ?? e.key ?? 'unknown',
-            type: mapNodeType(e.entityType),
-            summary: e.summary ?? undefined,
-            edgeCount: e.supportCount ?? 0,
-            properties: {},
-            sourceDocumentIds: [],
-          }));
+          const entityNodes: GraphNode[] = entities.map((e: any) => {
+            const canonical = mapNodeType(e.entityType);
+            const raw = (e.entityType ?? '').toLowerCase();
+            return {
+              id: e.entityId ?? e.id,
+              label: e.canonicalLabel ?? e.label ?? e.key ?? 'unknown',
+              type: canonical,
+              subType: e.entitySubType ?? (raw !== canonical ? raw : undefined),
+              summary: e.summary ?? undefined,
+              edgeCount: e.supportCount ?? 0,
+              properties: {},
+              sourceDocumentIds: [],
+            };
+          });
 
           const documentNodes: GraphNode[] = documents.map((d: any) => {
             const docId = d.document_id ?? d.documentId ?? d.id;
@@ -276,10 +284,13 @@ export default function GraphPage() {
       .then(detail => {
         if (cancelled) return;
         const entity = detail.entity ?? detail;
+        const canonicalType = mapNodeType(entity.entityType ?? entity.nodeType);
+        const rawType = (entity.entityType ?? '').toLowerCase();
         const enriched: GraphNode = {
           id: entity.entityId ?? entity.id ?? selectedNode,
           label: entity.canonicalLabel ?? entity.label ?? basic?.label ?? '',
-          type: mapNodeType(entity.entityType ?? entity.nodeType),
+          type: canonicalType,
+          subType: rawType !== canonicalType ? rawType : undefined,
           summary: entity.summary ?? basic?.summary,
           edgeCount: entity.supportCount ?? basic?.edgeCount ?? 0,
           properties: {},
@@ -308,11 +319,26 @@ export default function GraphPage() {
 
   const filteredNodes = useMemo(() => allNodes.filter(n => {
     if (hiddenTypes.has(n.type)) return false;
+    if (n.subType && hiddenSubTypes.has(`${n.type}:${n.subType}`)) return false;
     if (searchQuery && !n.label.toLowerCase().includes(searchQuery.toLowerCase())) return false;
     return true;
-  }), [allNodes, hiddenTypes, searchQuery]);
+  }), [allNodes, hiddenTypes, hiddenSubTypes, searchQuery]);
 
   const effectiveLayout = layout;
+
+  // Compute type → { count, subTypes: { name, count }[] } for legend
+  const typeLegend = useMemo(() => {
+    const map = new Map<string, { count: number; subs: Map<string, number> }>();
+    for (const n of allNodes) {
+      let entry = map.get(n.type);
+      if (!entry) { entry = { count: 0, subs: new Map() }; map.set(n.type, entry); }
+      entry.count++;
+      if (n.subType) {
+        entry.subs.set(n.subType, (entry.subs.get(n.subType) ?? 0) + 1);
+      }
+    }
+    return map;
+  }, [allNodes]);
 
   const selected = selectedDetail ?? allNodes.find(n => n.id === selectedNode) ?? null;
 
@@ -346,12 +372,13 @@ export default function GraphPage() {
 
         <div className="flex items-center gap-0.5 bg-muted/50 rounded-lg p-0.5">
           {LAYOUTS.map(l => {
-            const icons: Record<string, string> = { cloud: '☁', circle: '◯', rings: '◎', lanes: '☰', clusters: '⬡', islands: '🏝', spiral: '🌀' };
+            const icons: Record<string, string> = { cloud: '⬡', circle: '○', rings: '◎', lanes: '≡', clusters: '⬢', islands: '◇', spiral: '✺' };
+            const isActive = layout === l;
             return (
               <button
                 key={l}
                 onClick={() => setLayout(l)}
-                className={`px-2 py-1 text-sm rounded-md transition-all ${layout === l ? 'bg-background shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+                className={`px-2 py-1 text-sm rounded-md transition-all font-mono ${isActive ? 'bg-primary text-primary-foreground shadow-sm font-bold' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}`}
                 title={t(`graph.layouts.${l}`)}
               >
                 {icons[l] || l}
@@ -423,30 +450,117 @@ export default function GraphPage() {
             </Suspense>
           )}
 
-          {/* Clickable legend — toggle type visibility */}
-          <div className="absolute bottom-3 left-3 flex items-center gap-2 text-xs glass-panel rounded-xl px-3 py-2 shadow-lifted">
-            {Object.entries(NODE_COLORS).map(([type, color]) => {
-              const isHidden = hiddenTypes.has(type);
-              return (
+          {/* Legend toggle button — always visible */}
+          {!legendOpen && (
+            <button
+              onClick={() => setLegendOpen(true)}
+              className="absolute top-3 left-3 glass-panel rounded-xl p-2 shadow-lifted cursor-pointer hover:bg-white/10 transition-all"
+              title={t('graph.showLegend')}
+            >
+              <Layers className="h-4 w-4 text-muted-foreground" />
+            </button>
+          )}
+
+          {/* Vertical legend — left side */}
+          {legendOpen && (
+            <div className="absolute top-3 left-3 bottom-3 max-h-[calc(100%-24px)] overflow-y-auto text-xs glass-panel rounded-xl shadow-lifted min-w-[150px] max-w-[250px] flex flex-col">
+              {/* Legend header with controls */}
+              <div className="flex items-center gap-1 px-3 py-2 border-b border-white/10">
+                <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider flex-1">{t('graph.legend')}</span>
                 <button
-                  key={type}
-                  className={`flex items-center gap-1.5 px-1.5 py-0.5 rounded-md transition-all ${isHidden ? 'opacity-30 line-through' : 'hover:bg-white/10'}`}
+                  onClick={() => { setHiddenTypes(new Set()); setHiddenSubTypes(new Set()); }}
+                  className="p-1 rounded hover:bg-white/10 cursor-pointer transition-colors"
+                  title={t('graph.showAll')}
+                >
+                  <Eye className="h-3.5 w-3.5 text-muted-foreground" />
+                </button>
+                <button
                   onClick={() => {
                     setHiddenTypes(prev => {
-                      const next = new Set(prev);
-                      if (next.has(type)) next.delete(type);
-                      else next.add(type);
+                      const allTypes = Object.keys(NODE_COLORS);
+                      const next = new Set<string>();
+                      for (const tp of allTypes) {
+                        if (!prev.has(tp)) next.add(tp);
+                      }
                       return next;
                     });
                   }}
-                  title={t(`graph.nodeTypes.${type}`)}
+                  className="p-1 rounded hover:bg-white/10 cursor-pointer transition-colors"
+                  title={t('graph.invert')}
                 >
-                  <span className="w-2.5 h-2.5 rounded-full" style={{ background: color }} />
-                  {t(`graph.nodeTypes.${type}`)}
+                  <RotateCcw className="h-3.5 w-3.5 text-muted-foreground" />
                 </button>
-              );
-            })}
-          </div>
+                <button
+                  onClick={() => setLegendOpen(false)}
+                  className="p-1 rounded hover:bg-white/10 cursor-pointer transition-colors"
+                  title={t('graph.hideLegend')}
+                >
+                  <EyeOff className="h-3.5 w-3.5 text-muted-foreground" />
+                </button>
+              </div>
+
+              {/* Type list */}
+              <div className="px-2 py-1.5 flex-1 overflow-y-auto">
+                {Object.entries(NODE_COLORS).map(([type, color]) => {
+                  const isHidden = hiddenTypes.has(type);
+                  const stats = typeLegend.get(type);
+                  const count = stats?.count ?? 0;
+                  if (count === 0 && type !== 'document') return null;
+                  const subs = stats?.subs ? Array.from(stats.subs.entries()).sort((a, b) => b[1] - a[1]) : [];
+                  return (
+                    <div key={type} className={`mb-0.5 ${isHidden ? 'opacity-35' : ''}`}>
+                      <button
+                        className={`flex items-center gap-1.5 w-full px-2 py-1 rounded-md transition-all cursor-pointer ${isHidden ? 'line-through' : 'hover:bg-white/10'}`}
+                        onClick={() => {
+                          setHiddenTypes(prev => {
+                            const next = new Set(prev);
+                            if (next.has(type)) next.delete(type);
+                            else next.add(type);
+                            return next;
+                          });
+                        }}
+                        title={t(`graph.nodeTypes.${type}`)}
+                      >
+                        <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: color }} />
+                        <span className="font-semibold truncate">{t(`graph.nodeTypes.${type}`)}</span>
+                        <span className="ml-auto tabular-nums text-muted-foreground">{count}</span>
+                      </button>
+                      {subs.length > 0 && !isHidden && (
+                        <div className="flex flex-wrap gap-x-1.5 gap-y-0.5 pl-6 pr-1 mt-0.5 mb-1">
+                          {subs.slice(0, 12).map(([sub, subCount]) => {
+                            const subKey = `${type}:${sub}`;
+                            const isSubHidden = hiddenSubTypes.has(subKey);
+                            return (
+                              <button
+                                key={sub}
+                                className={`text-[10px] whitespace-nowrap cursor-pointer rounded px-1 py-0.5 transition-colors ${isSubHidden ? 'opacity-35 line-through text-muted-foreground' : 'text-muted-foreground hover:bg-white/10'}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setHiddenSubTypes(prev => {
+                                    const next = new Set(prev);
+                                    if (next.has(subKey)) next.delete(subKey);
+                                    else next.add(subKey);
+                                    return next;
+                                  });
+                                }}
+                                title={sub}
+                              >
+                                <span className="inline-block w-1.5 h-1.5 rounded-full mr-0.5 align-middle" style={{ background: color, opacity: 0.6 }} />
+                                {sub} <span className="tabular-nums">{subCount}</span>
+                              </button>
+                            );
+                          })}
+                          {subs.length > 12 && (
+                            <span className="text-[10px] text-muted-foreground px-1">+{subs.length - 12}</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {graphMeta?.recommendedLayout && layout !== graphMeta.recommendedLayout && (
             <div className="absolute top-3 left-3 text-xs glass-panel rounded-xl px-4 py-2.5 shadow-lifted flex items-center gap-1.5">
@@ -482,7 +596,12 @@ export default function GraphPage() {
                 {/* Type & connections header */}
                 <div className="flex items-center gap-2.5">
                   <span className="w-3 h-3 rounded-full" style={{ background: NODE_COLORS[selected.type] }} />
-                  <span className="text-sm font-semibold capitalize">{selected.type}</span>
+                  <div className="flex flex-col">
+                    <span className="text-sm font-semibold capitalize">{t(`graph.nodeTypes.${selected.type}`)}</span>
+                    {selected.subType && (
+                      <span className="text-[11px] text-muted-foreground capitalize">{selected.subType}</span>
+                    )}
+                  </div>
                   <span className="text-xs text-muted-foreground ml-auto tabular-nums font-medium">{connectedIds.length} {t('graph.connections')}</span>
                 </div>
 
@@ -522,8 +641,9 @@ export default function GraphPage() {
                     <Button variant="ghost" size="sm" className="text-xs h-7" onClick={() => {
                       setSearchQuery('');
                       setHiddenTypes(new Set());
+                      setHiddenSubTypes(new Set());
                     }}>
-                      <X className="h-3 w-3 mr-1" /> {t('graph.resetFilter') || 'Reset'}
+                      <X className="h-3 w-3 mr-1" /> {t('graph.resetFilter')}
                     </Button>
                   )}
                 </div>

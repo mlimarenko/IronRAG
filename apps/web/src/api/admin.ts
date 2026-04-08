@@ -1,5 +1,29 @@
 import { apiFetch } from "./client";
 
+type ListAuditEventsParams = {
+  workspaceId?: string;
+  libraryId?: string;
+  search?: string;
+  surfaceKind?: string;
+  resultKind?: string;
+  limit?: number;
+  offset?: number;
+  internal?: boolean;
+};
+
+function buildQuery(params: Record<string, string | number | boolean | undefined>) {
+  const searchParams = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === "") {
+      continue;
+    }
+    searchParams.set(key, String(value));
+  }
+
+  const query = searchParams.toString();
+  return query ? `?${query}` : "";
+}
+
 export const adminApi = {
   // Tokens
   listTokens: () => apiFetch<any>("/iam/tokens"),
@@ -23,7 +47,19 @@ export const adminApi = {
   getAdminSurface: () => apiFetch<any>("/admin/surface"),
 
   // Audit
-  listAuditEvents: () => apiFetch<any>("/audit/events"),
+  listAuditEvents: (params: ListAuditEventsParams = {}) =>
+    apiFetch<any>(
+      `/audit/events${buildQuery({
+        workspaceId: params.workspaceId,
+        libraryId: params.libraryId,
+        search: params.search,
+        surfaceKind: params.surfaceKind,
+        resultKind: params.resultKind,
+        limit: params.limit,
+        offset: params.offset,
+        internal: params.internal,
+      })}`,
+    ),
 
   // Catalog
   listWorkspaces: () => apiFetch<any>("/catalog/workspaces"),

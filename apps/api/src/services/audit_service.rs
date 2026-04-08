@@ -42,6 +42,27 @@ pub struct ListAuditEventSubjectFilter {
     pub async_operation_id: Option<Uuid>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ListAuditEventsQuery {
+    pub actor_principal_id: Option<Uuid>,
+    pub workspace_id: Option<Uuid>,
+    pub library_id: Option<Uuid>,
+    pub subject_filter: ListAuditEventSubjectFilter,
+    pub surface_kind: Option<String>,
+    pub result_kind: Option<String>,
+    pub search: Option<String>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuditEventPage<T> {
+    pub items: Vec<T>,
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
+}
+
 #[derive(Clone, Default)]
 pub struct AuditService;
 
@@ -98,21 +119,18 @@ impl AuditService {
     pub async fn list_redacted_events(
         &self,
         state: &AppState,
-        actor_principal_id: Option<Uuid>,
-        workspace_id: Option<Uuid>,
-        library_id: Option<Uuid>,
-        subject_filter: &ListAuditEventSubjectFilter,
-    ) -> Result<Vec<AuditEventRedactedView>, ApiError> {
-        let rows = audit_repository::list_audit_events(
-            &state.persistence.postgres,
-            actor_principal_id,
-            workspace_id,
-            library_id,
-            &map_subject_filter(subject_filter),
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?;
-        Ok(rows.into_iter().map(map_redacted_event).collect())
+        query: &ListAuditEventsQuery,
+    ) -> Result<AuditEventPage<AuditEventRedactedView>, ApiError> {
+        let page =
+            audit_repository::list_audit_events(&state.persistence.postgres, &map_list_query(query))
+                .await
+                .map_err(|_| ApiError::Internal)?;
+        Ok(AuditEventPage {
+            items: page.items.into_iter().map(map_redacted_event).collect(),
+            total: page.total,
+            limit: query.limit,
+            offset: query.offset,
+        })
     }
 
     /// Lists internal audit events visible to the caller and optional workspace scope.
@@ -123,21 +141,18 @@ impl AuditService {
     pub async fn list_internal_events(
         &self,
         state: &AppState,
-        actor_principal_id: Option<Uuid>,
-        workspace_id: Option<Uuid>,
-        library_id: Option<Uuid>,
-        subject_filter: &ListAuditEventSubjectFilter,
-    ) -> Result<Vec<AuditEventInternalView>, ApiError> {
-        let rows = audit_repository::list_audit_events(
-            &state.persistence.postgres,
-            actor_principal_id,
-            workspace_id,
-            library_id,
-            &map_subject_filter(subject_filter),
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?;
-        Ok(rows.into_iter().map(map_internal_event).collect())
+        query: &ListAuditEventsQuery,
+    ) -> Result<AuditEventPage<AuditEventInternalView>, ApiError> {
+        let page =
+            audit_repository::list_audit_events(&state.persistence.postgres, &map_list_query(query))
+                .await
+                .map_err(|_| ApiError::Internal)?;
+        Ok(AuditEventPage {
+            items: page.items.into_iter().map(map_internal_event).collect(),
+            total: page.total,
+            limit: query.limit,
+            offset: query.offset,
+        })
     }
 
     /// Lists all subjects attached to a previously recorded audit event.
@@ -167,21 +182,18 @@ impl AuditService {
     pub async fn list_events(
         &self,
         state: &AppState,
-        actor_principal_id: Option<Uuid>,
-        workspace_id: Option<Uuid>,
-        library_id: Option<Uuid>,
-        subject_filter: &ListAuditEventSubjectFilter,
-    ) -> Result<Vec<AuditEvent>, ApiError> {
-        let rows = audit_repository::list_audit_events(
-            &state.persistence.postgres,
-            actor_principal_id,
-            workspace_id,
-            library_id,
-            &map_subject_filter(subject_filter),
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?;
-        Ok(rows.into_iter().map(map_event).collect())
+        query: &ListAuditEventsQuery,
+    ) -> Result<AuditEventPage<AuditEvent>, ApiError> {
+        let page =
+            audit_repository::list_audit_events(&state.persistence.postgres, &map_list_query(query))
+                .await
+                .map_err(|_| ApiError::Internal)?;
+        Ok(AuditEventPage {
+            items: page.items.into_iter().map(map_event).collect(),
+            total: page.total,
+            limit: query.limit,
+            offset: query.offset,
+        })
     }
 
     #[must_use]
@@ -292,6 +304,20 @@ const fn map_subject_filter(
         query_execution_id: filter.query_execution_id,
         runtime_execution_id: filter.runtime_execution_id,
         async_operation_id: filter.async_operation_id,
+    }
+}
+
+fn map_list_query(query: &ListAuditEventsQuery) -> audit_repository::ListAuditEventsQuery {
+    audit_repository::ListAuditEventsQuery {
+        actor_principal_id: query.actor_principal_id,
+        workspace_id: query.workspace_id,
+        library_id: query.library_id,
+        subject_filter: map_subject_filter(&query.subject_filter),
+        surface_kind: query.surface_kind.clone(),
+        result_kind: query.result_kind.clone(),
+        search: query.search.clone(),
+        limit: query.limit,
+        offset: query.offset,
     }
 }
 

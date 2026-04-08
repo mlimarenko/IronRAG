@@ -60,6 +60,25 @@ pub struct AuditEventSubjectFilter {
     pub async_operation_id: Option<Uuid>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ListAuditEventsQuery {
+    pub actor_principal_id: Option<Uuid>,
+    pub workspace_id: Option<Uuid>,
+    pub library_id: Option<Uuid>,
+    pub subject_filter: AuditEventSubjectFilter,
+    pub surface_kind: Option<String>,
+    pub result_kind: Option<String>,
+    pub search: Option<String>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuditEventPage {
+    pub items: Vec<AuditEventRow>,
+    pub total: i64,
+}
+
 pub async fn append_audit_event(
     postgres: &PgPool,
     event: NewAuditEvent,
@@ -130,11 +149,16 @@ pub async fn append_audit_event(
 
 pub async fn list_audit_events(
     postgres: &PgPool,
-    actor_principal_id: Option<Uuid>,
-    workspace_id: Option<Uuid>,
-    library_id: Option<Uuid>,
-    subject_filter: &AuditEventSubjectFilter,
-) -> Result<Vec<AuditEventRow>, sqlx::Error> {
+    query: &ListAuditEventsQuery,
+) -> Result<AuditEventPage, sqlx::Error> {
+    let mut count_builder = QueryBuilder::<Postgres>::new(
+        "select count(*)::bigint
+         from audit_event ae
+         where 1 = 1",
+    );
+    push_list_audit_event_filters(&mut count_builder, query);
+    let total = count_builder.build_query_scalar::<i64>().fetch_one(postgres).await?;
+
     let mut builder = QueryBuilder::<Postgres>::new(
         "select
             ae.id,
@@ -150,13 +174,26 @@ pub async fn list_audit_events(
          from audit_event ae
          where 1 = 1",
     );
+    push_list_audit_event_filters(&mut builder, query);
+    builder.push(" order by ae.created_at desc, ae.id desc limit ");
+    builder.push_bind(query.limit);
+    builder.push(" offset ");
+    builder.push_bind(query.offset);
 
-    if let Some(actor_principal_id) = actor_principal_id {
+    let items = builder.build_query_as::<AuditEventRow>().fetch_all(postgres).await?;
+    Ok(AuditEventPage { items, total })
+}
+
+fn push_list_audit_event_filters(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    query: &ListAuditEventsQuery,
+) {
+    if let Some(actor_principal_id) = query.actor_principal_id {
         builder.push(" and ae.actor_principal_id = ");
         builder.push_bind(actor_principal_id);
     }
 
-    if let Some(workspace_id) = workspace_id {
+    if let Some(workspace_id) = query.workspace_id {
         builder.push(
             " and exists (
                 select 1
@@ -168,7 +205,7 @@ pub async fn list_audit_events(
         builder.push(")");
     }
 
-    if let Some(library_id) = library_id {
+    if let Some(library_id) = query.library_id {
         builder.push(
             " and exists (
                 select 1
@@ -180,7 +217,7 @@ pub async fn list_audit_events(
         builder.push(")");
     }
 
-    if let Some(knowledge_document_id) = subject_filter.knowledge_document_id {
+    if let Some(knowledge_document_id) = query.subject_filter.knowledge_document_id {
         builder.push(
             " and exists (
                 select 1
@@ -203,32 +240,90 @@ pub async fn list_audit_events(
         );
     }
 
-    if let Some(knowledge_revision_id) = subject_filter.knowledge_revision_id {
-        push_exact_subject_filter(&mut builder, "knowledge_revision", knowledge_revision_id);
+    if let Some(knowledge_revision_id) = query.subject_filter.knowledge_revision_id {
+        push_exact_subject_filter(builder, "knowledge_revision", knowledge_revision_id);
     }
 
-    if let Some(context_bundle_id) = subject_filter.context_bundle_id {
-        push_exact_subject_filter(&mut builder, "knowledge_bundle", context_bundle_id);
+    if let Some(context_bundle_id) = query.subject_filter.context_bundle_id {
+        push_exact_subject_filter(builder, "knowledge_bundle", context_bundle_id);
     }
 
-    if let Some(query_session_id) = subject_filter.query_session_id {
-        push_exact_subject_filter(&mut builder, "query_session", query_session_id);
+    if let Some(query_session_id) = query.subject_filter.query_session_id {
+        push_exact_subject_filter(builder, "query_session", query_session_id);
     }
 
-    if let Some(query_execution_id) = subject_filter.query_execution_id {
-        push_exact_subject_filter(&mut builder, "query_execution", query_execution_id);
+    if let Some(query_execution_id) = query.subject_filter.query_execution_id {
+        push_exact_subject_filter(builder, "query_execution", query_execution_id);
     }
 
-    if let Some(runtime_execution_id) = subject_filter.runtime_execution_id {
-        push_exact_subject_filter(&mut builder, "runtime_execution", runtime_execution_id);
+    if let Some(runtime_execution_id) = query.subject_filter.runtime_execution_id {
+        push_exact_subject_filter(builder, "runtime_execution", runtime_execution_id);
     }
 
-    if let Some(async_operation_id) = subject_filter.async_operation_id {
-        push_exact_subject_filter(&mut builder, "async_operation", async_operation_id);
+    if let Some(async_operation_id) = query.subject_filter.async_operation_id {
+        push_exact_subject_filter(builder, "async_operation", async_operation_id);
     }
 
-    builder.push(" order by ae.created_at desc");
-    builder.build_query_as::<AuditEventRow>().fetch_all(postgres).await
+    if let Some(surface_kind) = query.surface_kind.as_ref() {
+        builder.push(" and ae.surface_kind::text = ");
+        builder.push_bind(surface_kind.clone());
+    }
+
+    if let Some(result_kind) = query.result_kind.as_ref() {
+        builder.push(" and ae.result_kind::text = ");
+        builder.push_bind(result_kind.clone());
+    }
+
+    if let Some(search) = query.search.as_ref() {
+        let pattern = format!("%{search}%");
+        builder.push(
+            " and (
+                ae.action_kind ilike ",
+        );
+        builder.push_bind(pattern.clone());
+        builder.push(
+            " or coalesce(ae.redacted_message, '') ilike ",
+        );
+        builder.push_bind(pattern.clone());
+        builder.push(
+            " or coalesce(ae.internal_message, '') ilike ",
+        );
+        builder.push_bind(pattern.clone());
+        builder.push(
+            " or coalesce(ae.actor_principal_id::text, '') ilike ",
+        );
+        builder.push_bind(pattern.clone());
+        builder.push(
+            " or exists (
+                    select 1
+                    from audit_event_subject aes
+                    where aes.audit_event_id = ae.id
+                      and (
+                            aes.subject_kind ilike ",
+        );
+        builder.push_bind(pattern.clone());
+        builder.push(
+            "       or aes.subject_id::text ilike ",
+        );
+        builder.push_bind(pattern.clone());
+        builder.push(
+            "       or coalesce(aes.workspace_id::text, '') ilike ",
+        );
+        builder.push_bind(pattern.clone());
+        builder.push(
+            "       or coalesce(aes.library_id::text, '') ilike ",
+        );
+        builder.push_bind(pattern.clone());
+        builder.push(
+            "       or coalesce(aes.document_id::text, '') ilike ",
+        );
+        builder.push_bind(pattern);
+        builder.push(
+            "      )
+                )
+            )",
+        );
+    }
 }
 
 fn push_exact_subject_filter(

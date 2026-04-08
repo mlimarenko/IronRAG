@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.1.2 — 2026-04-08
+
+### Highlights
+- **Sigma.js WebGL graph renderer**: replaced Canvas2D with Sigma.js for rendering 11K+ nodes and 54K+ edges via WebGL. 7 layout algorithms (cloud, circle, rings, lanes, clusters, islands, spiral), node dragging, connected-edge overlay, pointer cursor on hover.
+- **Entity sub-type extraction**: LLM pipeline now extracts freeform `sub_type` for entities (e.g., person→engineer, artifact→framework). Flows through ArangoDB storage, API, and frontend legend.
+- **Vertical graph legend**: left-side collapsible legend with clickable types and sub-types, counts, show-all/invert/hide controls.
+- **Documents page tabs**: split into Documents and Web Ingest tabs with independent views, filter bar with status icons and counts, total cost inline.
+- **Full dependency upgrade**: React 18→19, TypeScript 5→6, Vite 5→8, Tailwind CSS 3→4, Zod 3→4, ESLint 9→10, plus 50+ other packages updated.
+- **Dashboard cleanup**: removed duplicated status layers, consolidated the main library overview, and made dashboard tiles actionable with direct deep-links into filtered documents and graph views.
+- **Truthful operational metrics**: fixed dashboard totals and graph counters so document counts, failed counts, nodes, and edges reflect the full active library instead of truncated recent slices.
+- **Admin operations clarity**: replaced raw `degraded` signaling with explicit operator guidance, recommended next actions, and direct navigation to failed documents or graph troubleshooting paths.
+- **Audit usability upgrade**: added server-backed audit pagination, result/surface filters, and free-text search in the admin panel.
+
+### Graph
+- **Sigma.js WebGL renderer**: replaces Canvas2D. Handles 11K nodes / 54K edges at interactive frame rates via GPU-accelerated rendering.
+- **7 layout algorithms**: cloud (force-directed jitter), circle (scaled), rings (concentric by type), lanes (horizontal rows by type), clusters (Vogel-disc per type), islands (BFS connected components), spiral (golden-angle, degree-sorted).
+- **Connected-edge overlay**: selected node's edges render on a separate Canvas2D overlay on top of all other edges, with curved arrows and blue highlight.
+- **Edge z-index**: `zIndex: 2` for connected edges in Sigma's edge reducer ensures visual priority.
+- **Node dragging**: `downNode` + `mousemovebody` + `mouseup` events with camera lock during drag.
+- **Pointer cursor**: cursor changes to pointer on node hover via `enterNode`/`leaveNode` events.
+- **Vertical legend**: collapsible left-side panel with type counts, clickable sub-types, show-all/invert/hide-legend buttons.
+- **Layout toolbar**: monochrome icon buttons (⬡○◎≡⬢◇✺) with active state highlight using `bg-primary`.
+
+### Pipeline
+- **Entity sub-type extraction**: added `sub_type: Option<String>` to `GraphEntityCandidate`. LLM prompt updated with sub_type in schema and few-shot examples (framework, database, microservice, http_status_code, etc.).
+- **Sub-type storage**: `candidate_sub_type` / `entity_sub_type` fields added to ArangoDB entity documents. Schema-less — no migration needed, `#[serde(default)]` handles old documents.
+- **Sub-type API**: `entitySubType` returned in entity list/detail HTTP responses via `metadata_json`.
+
+### Frontend
+- **Documents page tabs**: split into Documents tab (table + filters + pagination + upload) and Web Ingest tab (run list + add link). Independent views, shared inspector panel.
+- **Filter bar redesign**: status filter buttons now include icons (⏱ processing, ✓ ready, ⚠ sparse, ✕ failed) and count badges. Total cost moved inline into the filter bar.
+- **Web ingest status fix**: `COMPLETED_PARTIAL` now treated as terminal state, no longer triggers "in progress" banner.
+- **Graph sub-type filtering**: `hiddenSubTypes` state allows hiding individual sub-types from the graph. Sub-type badges are clickable in the legend.
+- **Node inspector**: shows sub-type below the canonical type with translated label.
+- **i18n**: added 8 new keys (showLegend, hideLegend, showAll, invert, resetFilter, subType, tabs.documents, tabs.webIngest) in both en.json and ru.json.
+
+### Dependencies
+- **React** 18.3 → 19.2, **TypeScript** 5.8 → 6.0, **Vite** 5.4 → 8.0
+- **Tailwind CSS** 3.4 → 4.2 (migrated from JS config to CSS-based `@theme`, PostCSS removed, `@tailwindcss/vite` plugin)
+- **Zod** 3.25 → 4.3, **ESLint** 9.32 → 10.2, **react-router-dom** 6.30 → 7.14
+- **recharts** 2.15 → 3.8, **sonner** 1.7 → 2.0, **lucide-react** 0.462 → 1.7
+- **Rust**: tokio 1.51.0→1.51.1, zip 8.5.0→8.5.1 (minor patches)
+- 50+ other npm packages updated to latest versions
+
+### Backend
+- Batch document endpoints, audit pagination, URL-backed document pagination.
+- Dashboard totals and graph counters fixed to reflect full active library.
+
 ## 0.1.1 — 2026-04-07
 
 ### Highlights

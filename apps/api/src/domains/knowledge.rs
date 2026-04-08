@@ -73,6 +73,8 @@ pub struct KnowledgeLibraryGeneration {
 pub struct KnowledgeLibrarySummary {
     pub library_id: Uuid,
     pub document_counts_by_readiness: BTreeMap<String, i64>,
+    pub node_count: i64,
+    pub edge_count: i64,
     pub graph_ready_document_count: i64,
     pub graph_sparse_document_count: i64,
     pub typed_fact_document_count: i64,

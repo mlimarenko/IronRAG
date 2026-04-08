@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
+import { useSearchParams } from 'react-router-dom';
 import { useApp } from '@/contexts/AppContext';
 import { documentsApi, billingApi, apiFetch } from '@/api';
 import { Button } from '@/components/ui/button';
@@ -16,10 +17,51 @@ import {
   CheckCircle2, Clock, X, File, ArrowUpDown, Globe, ExternalLink,
   CheckSquare
 } from 'lucide-react';
+import { humanizeDocumentFailure, humanizeDocumentStage } from '@/lib/document-processing';
 import type { DocumentItem, DocumentReadiness, DocumentStatus } from '@/types';
 
+type DocumentsStatusFilter = 'all' | 'in_progress' | 'ready' | 'failed';
+const PAGE_SIZE_OPTIONS = [50, 100, 250, 1000] as const;
+
+function parseStatusFilter(value: string | null): DocumentsStatusFilter {
+  if (value === 'in_progress' || value === 'ready' || value === 'failed') {
+    return value;
+  }
+
+  return 'all';
+}
+
+function parseReadinessFilter(value: string | null): DocumentReadiness | null {
+  if (
+    value === 'processing' ||
+    value === 'readable' ||
+    value === 'graph_sparse' ||
+    value === 'graph_ready' ||
+    value === 'failed'
+  ) {
+    return value;
+  }
+
+  return null;
+}
+
+function parsePageSize(value: string | null): (typeof PAGE_SIZE_OPTIONS)[number] {
+  const parsed = Number.parseInt(value ?? '', 10);
+
+  if (PAGE_SIZE_OPTIONS.includes(parsed as (typeof PAGE_SIZE_OPTIONS)[number])) {
+    return parsed as (typeof PAGE_SIZE_OPTIONS)[number];
+  }
+
+  return PAGE_SIZE_OPTIONS[0];
+}
+
+function parsePage(value: string | null): number {
+  const parsed = Number.parseInt(value ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+}
+
 /** Map a single API response item to the UI's DocumentItem shape. */
-function mapApiDocument(raw: any): DocumentItem {
+function mapApiDocument(raw: any, t: ReturnType<typeof useTranslation>['t']): DocumentItem {
   const fileName: string = raw.fileName ?? raw.document?.external_key ?? 'unknown';
   const ext = fileName.includes('.') ? fileName.split('.').pop()!.toLowerCase() : '';
   const mimeType: string = raw.activeRevision?.mime_type ?? raw.active_revision?.mime_type ?? '';
@@ -52,7 +94,11 @@ function mapApiDocument(raw: any): DocumentItem {
 
   let failureMessage: string | undefined;
   if (readiness === 'failed') {
-    failureMessage = failureCode ?? raw.readinessSummary?.stalledReason ?? raw.readiness_summary?.stalled_reason ?? 'Processing failed';
+    failureMessage = humanizeDocumentFailure({
+      failureCode,
+      stalledReason: raw.readinessSummary?.stalledReason ?? raw.readiness_summary?.stalled_reason,
+      stage: jobStage,
+    }, t);
   }
 
   const rev = raw.activeRevision ?? raw.active_revision;
@@ -68,7 +114,7 @@ function mapApiDocument(raw: any): DocumentItem {
     cost: null,
     status,
     readiness,
-    stage: jobStage,
+    stage: humanizeDocumentStage(jobStage, t),
     failureMessage,
     canRetry: readiness === 'failed' ? retryable : undefined,
     sourceKind,
@@ -86,23 +132,14 @@ function formatDate(iso: string) {
   return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
-const readinessConfig: Record<DocumentReadiness, { label: string; cls: string }> = {
-  processing: { label: 'Processing', cls: 'status-processing' },
-  readable: { label: 'Readable', cls: 'status-processing' },
-  graph_sparse: { label: 'Graph Sparse', cls: 'status-warning' },
-  graph_ready: { label: 'Graph Ready', cls: 'status-ready' },
-  failed: { label: 'Failed', cls: 'status-failed' },
-};
-
 export default function DocumentsPage() {
   const { t } = useTranslation();
   const { activeLibrary } = useApp();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedDoc, setSelectedDoc] = useState<DocumentItem | null>(null);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState('all');
   const [sortField, setSortField] = useState<string>('uploadedAt');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
 
@@ -130,6 +167,9 @@ export default function DocumentsPage() {
   const [maxPages, setMaxPages] = useState('100');
   const [webIngestLoading, setWebIngestLoading] = useState(false);
 
+  // Tab state
+  const [activeTab, setActiveTab] = useState<'documents' | 'web'>('documents');
+
   // Bulk selection
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [selectionMode, setSelectionMode] = useState(false);
@@ -138,6 +178,34 @@ export default function DocumentsPage() {
   const [webRuns, setWebRuns] = useState<any[]>([]);
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
   const [runPages, setRunPages] = useState<any[]>([]);
+
+  const searchQuery = searchParams.get('q') ?? '';
+  const statusFilter = parseStatusFilter(searchParams.get('status'));
+  const readinessFilter = parseReadinessFilter(searchParams.get('readiness'));
+  const selectedDocumentId = searchParams.get('documentId');
+  const pageSize = parsePageSize(searchParams.get('pageSize'));
+  const requestedPage = parsePage(searchParams.get('page'));
+  const readinessConfig: Record<DocumentReadiness, { label: string; cls: string }> = {
+    processing: { label: t('dashboard.readinessLabels.processing'), cls: 'status-processing' },
+    readable: { label: t('dashboard.readinessLabels.readable'), cls: 'status-warning' },
+    graph_sparse: { label: t('dashboard.readinessLabels.graph_sparse'), cls: 'status-warning' },
+    graph_ready: { label: t('dashboard.readinessLabels.graph_ready'), cls: 'status-ready' },
+    failed: { label: t('dashboard.readinessLabels.failed'), cls: 'status-failed' },
+  };
+
+  const updateSearchParamState = useCallback((updates: Record<string, string | null>) => {
+    const next = new URLSearchParams(searchParams);
+
+    for (const [key, value] of Object.entries(updates)) {
+      if (value == null || value === '') {
+        next.delete(key);
+      } else {
+        next.set(key, value);
+      }
+    }
+
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
 
   const fetchDocuments = useCallback(async () => {
     if (!activeLibrary) return;
@@ -153,7 +221,7 @@ export default function DocumentsPage() {
         costMap.set(c.documentId, parseFloat(c.totalCost));
       }
       const items = (Array.isArray(raw) ? raw : []).map((r: any) => {
-        const doc = mapApiDocument(r);
+        const doc = mapApiDocument(r, t);
         const cost = costMap.get(doc.id);
         if (cost != null && !isNaN(cost)) {
           doc.cost = cost;
@@ -173,7 +241,7 @@ export default function DocumentsPage() {
     } finally {
       setLoading(false);
     }
-  }, [activeLibrary]);
+  }, [activeLibrary, t]);
 
   useEffect(() => {
     fetchDocuments();
@@ -215,12 +283,13 @@ export default function DocumentsPage() {
       await documentsApi.delete(selectedDoc.id);
       setDeleteDocOpen(false);
       setSelectedDoc(null);
+      updateSearchParamState({ documentId: null });
       await fetchDocuments();
     } catch (err: any) {
       console.error('Delete failed:', err);
       toast.error(err?.message || "Failed to delete document");
     }
-  }, [selectedDoc, fetchDocuments]);
+  }, [selectedDoc, fetchDocuments, updateSearchParamState]);
 
   const handleRetry = useCallback(async () => {
     if (!selectedDoc) return;
@@ -229,20 +298,23 @@ export default function DocumentsPage() {
       await fetchDocuments();
       // Refresh the selected doc
       const raw = await documentsApi.get(selectedDoc.id);
-      setSelectedDoc(mapApiDocument(raw));
+      setSelectedDoc(mapApiDocument(raw, t));
     } catch (err: any) {
       console.error('Reprocess failed:', err);
       toast.error(err?.message || "Failed to reprocess document");
     }
-  }, [selectedDoc, fetchDocuments]);
+  }, [selectedDoc, fetchDocuments, t]);
 
-  const handleSelectDoc = useCallback(async (doc: DocumentItem) => {
+  const handleSelectDoc = useCallback(async (doc: DocumentItem, syncQuery = true) => {
+    if (syncQuery) {
+      updateSearchParamState({ documentId: doc.id });
+    }
     setSelectedDoc(doc);
     setInspectorSegments(null);
     setInspectorFacts(null);
     try {
       const raw = await documentsApi.get(doc.id);
-      setSelectedDoc(mapApiDocument(raw));
+      setSelectedDoc(mapApiDocument(raw, t));
     } catch {
       // Keep the list-level data if detail fetch fails
     }
@@ -254,7 +326,30 @@ export default function DocumentsPage() {
       setInspectorSegments(Array.isArray(segments) ? segments.length : 0);
       setInspectorFacts(Array.isArray(facts) ? facts.length : 0);
     });
-  }, []);
+  }, [t, updateSearchParamState]);
+
+  useEffect(() => {
+    if (!selectedDocumentId) {
+      setSelectedDoc(null);
+      setInspectorSegments(null);
+      setInspectorFacts(null);
+      return;
+    }
+
+    if (selectedDoc?.id === selectedDocumentId) {
+      return;
+    }
+
+    const matched = documents.find(doc => doc.id === selectedDocumentId);
+    if (matched) {
+      void handleSelectDoc(matched, false);
+      return;
+    }
+
+    setSelectedDoc(null);
+    setInspectorSegments(null);
+    setInspectorFacts(null);
+  }, [documents, handleSelectDoc, selectedDoc?.id, selectedDocumentId]);
 
   const handleDownloadText = useCallback(async () => {
     if (!selectedDoc) return;
@@ -400,8 +495,9 @@ export default function DocumentsPage() {
     }
   };
 
-  const filtered = documents.filter(d => {
+  const filteredDocuments = documents.filter(d => {
     if (searchQuery && !d.fileName.toLowerCase().includes(searchQuery.toLowerCase())) return false;
+    if (readinessFilter && d.readiness !== readinessFilter) return false;
     if (statusFilter === 'in_progress') return d.readiness === 'processing';
     if (statusFilter === 'ready') return d.readiness === 'graph_ready' || d.readiness === 'readable' || d.readiness === 'graph_sparse';
     if (statusFilter === 'failed') return d.readiness === 'failed';
@@ -413,10 +509,43 @@ export default function DocumentsPage() {
     if (sortField === 'cost') return ((a.cost ?? 0) - (b.cost ?? 0)) * dir;
     return (new Date(a.uploadedAt).getTime() - new Date(b.uploadedAt).getTime()) * dir;
   });
+  const selectedDocPage = selectedDocumentId
+    ? (() => {
+        const index = filteredDocuments.findIndex(doc => doc.id === selectedDocumentId);
+        return index >= 0 ? Math.floor(index / pageSize) + 1 : null;
+      })()
+    : null;
+  const totalPages = Math.max(1, Math.ceil(filteredDocuments.length / pageSize));
+  const currentPage = selectedDocPage ?? Math.min(requestedPage, totalPages);
+  const pageStart = (currentPage - 1) * pageSize;
+  const pagedDocuments = filteredDocuments.slice(pageStart, pageStart + pageSize);
+  const visibleRangeStart = filteredDocuments.length > 0 ? pageStart + 1 : 0;
+  const visibleRangeEnd = filteredDocuments.length > 0 ? pageStart + pagedDocuments.length : 0;
+
+  useEffect(() => {
+    if (selectedDocPage == null || selectedDocPage === requestedPage) {
+      return;
+    }
+
+    updateSearchParamState({
+      page: selectedDocPage > 1 ? String(selectedDocPage) : null,
+    });
+  }, [requestedPage, selectedDocPage, updateSearchParamState]);
+
+  useEffect(() => {
+    if (selectedDocPage != null || requestedPage <= totalPages) {
+      return;
+    }
+
+    updateSearchParamState({
+      page: totalPages > 1 ? String(totalPages) : null,
+    });
+  }, [requestedPage, selectedDocPage, totalPages, updateSearchParamState]);
 
   const statCounts = {
     total: documents.length,
-    graphReady: documents.filter(d => d.readiness === 'graph_ready').length,
+    ready: documents.filter(d => d.readiness === 'graph_ready' || d.readiness === 'readable' || d.readiness === 'graph_sparse').length,
+    readable: documents.filter(d => d.readiness === 'readable').length,
     graphSparse: documents.filter(d => d.readiness === 'graph_sparse').length,
     processing: documents.filter(d => d.readiness === 'processing').length,
     failed: documents.filter(d => d.readiness === 'failed').length,
@@ -426,6 +555,14 @@ export default function DocumentsPage() {
     if (sortField === field) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
     else { setSortField(field); setSortDir('desc'); }
   };
+
+  const readinessFilterLabel = readinessFilter
+    ? t(`dashboard.readinessLabels.${readinessFilter}`)
+    : null;
+  const hasActiveFilters = Boolean(searchQuery || statusFilter !== 'all' || readinessFilter);
+  const showReadinessChip = Boolean(
+    readinessFilter && readinessFilter !== 'graph_sparse' && readinessFilter !== 'readable',
+  );
 
   if (!activeLibrary) {
     return (
@@ -451,48 +588,47 @@ export default function DocumentsPage() {
             <h1 className="text-lg font-bold tracking-tight">{t('documents.title')}</h1>
             <p className="text-sm text-muted-foreground">{activeLibrary.name} — {t('documents.subtitle')}</p>
           </div>
+
+          {/* Tab switcher */}
+          <div className="flex gap-0.5 p-1 bg-muted rounded-xl border border-border/50">
+            <button
+              className={`px-3 py-1.5 text-xs rounded-[9px] transition-all duration-200 font-medium flex items-center gap-1.5 ${activeTab === 'documents' ? 'bg-primary text-primary-foreground font-semibold' : 'text-muted-foreground hover:text-foreground'}`}
+              onClick={() => setActiveTab('documents')}
+            >
+              {t('documents.tabs.documents')}
+              <span className={`text-[10px] tabular-nums px-1.5 py-0.5 rounded-md ${activeTab === 'documents' ? 'bg-primary-foreground/20' : 'bg-background/60'}`}>{documents.length}</span>
+            </button>
+            <button
+              className={`px-3 py-1.5 text-xs rounded-[9px] transition-all duration-200 font-medium flex items-center gap-1.5 ${activeTab === 'web' ? 'bg-primary text-primary-foreground font-semibold' : 'text-muted-foreground hover:text-foreground'}`}
+              onClick={() => setActiveTab('web')}
+            >
+              {t('documents.tabs.webIngest')}
+              <span className={`text-[10px] tabular-nums px-1.5 py-0.5 rounded-md ${activeTab === 'web' ? 'bg-primary-foreground/20' : 'bg-background/60'}`}>{webRuns.length}</span>
+            </button>
+          </div>
+
           <div className="flex gap-2">
-            <Button size="sm" onClick={() => fileInputRef.current?.click()}>
-              <Upload className="h-3.5 w-3.5 mr-1.5" /> {t('documents.upload')}
-            </Button>
-            <Button size="sm" variant="outline" onClick={() => {
-              setSeedUrl('');
-              setCrawlMode('recursive_crawl');
-              setBoundaryPolicy('same_host');
-              setMaxDepth('3');
-              setMaxPages('30');
-              setAddLinkOpen(true);
-            }}>
-              <LinkIcon className="h-3.5 w-3.5 mr-1.5" /> {t('documents.addLink')}
-            </Button>
+            {activeTab === 'documents' && (
+              <Button size="sm" onClick={() => fileInputRef.current?.click()}>
+                <Upload className="h-3.5 w-3.5 mr-1.5" /> {t('documents.upload')}
+              </Button>
+            )}
+            {activeTab === 'web' && (
+              <Button size="sm" variant="outline" onClick={() => {
+                setSeedUrl('');
+                setCrawlMode('recursive_crawl');
+                setBoundaryPolicy('same_host');
+                setMaxDepth('3');
+                setMaxPages('30');
+                setAddLinkOpen(true);
+              }}>
+                <LinkIcon className="h-3.5 w-3.5 mr-1.5" /> {t('documents.addLink')}
+              </Button>
+            )}
             <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
           </div>
         </div>
 
-        {/* Stats */}
-        <div className="flex flex-wrap gap-4 mt-3 text-xs">
-          <span className="text-muted-foreground font-semibold">{statCounts.total} {t('documents.total')}</span>
-          <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3 text-status-ready" /><span className="font-semibold">{statCounts.graphReady}</span> {t('documents.graphReady')}</span>
-          <span className="flex items-center gap-1.5"><AlertTriangle className="h-3 w-3 text-status-sparse" /><span className="font-semibold">{statCounts.graphSparse}</span> {t('documents.sparse')}</span>
-          <span className="flex items-center gap-1.5"><Clock className="h-3 w-3 text-status-processing" /><span className="font-semibold">{statCounts.processing}</span> {t('documents.processing')}</span>
-          <span className="flex items-center gap-1.5"><XCircle className="h-3 w-3 text-status-failed" /><span className="font-semibold">{statCounts.failed}</span> {t('documents.failed')}</span>
-          {(() => {
-            const totalCost = documents.reduce((sum, d) => sum + (d.cost ?? 0), 0);
-            return totalCost > 0 ? (
-              <span className="flex items-center gap-1.5 ml-auto"><span className="text-muted-foreground">{t('documents.totalCost')}:</span> <span className="font-bold tabular-nums">${totalCost.toFixed(3)}</span></span>
-            ) : null;
-          })()}
-        </div>
-
-        {(() => {
-          const activeRuns = webRuns.filter((r: any) => r.runState !== 'completed' && r.runState !== 'failed');
-          return activeRuns.length > 0 ? (
-            <div className="mt-2 flex items-center gap-2 text-xs px-3 py-2 rounded-xl bg-card border shadow-soft">
-              <Loader2 className="h-3 w-3 animate-spin text-primary" />
-              <span className="font-semibold">{activeRuns.length} web ingest {activeRuns.length === 1 ? 'run' : 'runs'} in progress</span>
-            </div>
-          ) : null;
-        })()}
 
         {/* Upload queue */}
         {uploadQueue.length > 0 && (
@@ -508,44 +644,121 @@ export default function DocumentsPage() {
         )}
       </div>
 
-      {/* Filters */}
-      <div className="px-6 py-3 border-b flex flex-wrap items-center gap-3 bg-surface-sunken/50">
+      {/* Filters — documents tab only */}
+      {activeTab === 'documents' && <div className="px-6 py-3 border-b flex flex-wrap items-center gap-3 bg-surface-sunken/50">
         <div className="relative flex-1 min-w-[200px] max-w-sm">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-          <Input className="h-9 pl-9 text-sm" placeholder={t('documents.searchPlaceholder')} value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
+          <Input
+            className="h-9 pl-9 text-sm"
+            placeholder={t('documents.searchPlaceholder')}
+            value={searchQuery}
+            onChange={e => updateSearchParamState({
+              q: e.target.value || null,
+              documentId: null,
+              page: null,
+            })}
+          />
         </div>
         <div className="flex gap-0.5 p-1 bg-muted rounded-xl border border-border/50">
-          {['all', 'in_progress', 'ready', 'failed'].map(f => (
+          {[
+            {
+              key: 'all',
+              label: t('documents.all'),
+              count: statCounts.total,
+              icon: null,
+              active: statusFilter === 'all' && !readinessFilter,
+              updates: { status: null, readiness: null, documentId: null, page: null },
+            },
+            {
+              key: 'in_progress',
+              label: t('documents.inProgress'),
+              count: statCounts.processing,
+              icon: <Clock className="h-3 w-3 text-status-processing" />,
+              active: statusFilter === 'in_progress',
+              updates: { status: 'in_progress', readiness: null, documentId: null, page: null },
+            },
+            {
+              key: 'ready',
+              label: t('documents.ready'),
+              count: statCounts.ready,
+              icon: <CheckCircle2 className="h-3 w-3 text-status-ready" />,
+              active: statusFilter === 'ready',
+              updates: { status: 'ready', readiness: null, documentId: null, page: null },
+            },
+            {
+              key: 'readable',
+              label: t('dashboard.readableNoGraph'),
+              count: statCounts.readable,
+              icon: <AlertTriangle className="h-3 w-3 text-status-warning" />,
+              active: readinessFilter === 'readable',
+              updates: { status: null, readiness: 'readable', documentId: null, page: null },
+            },
+            {
+              key: 'graph_sparse',
+              label: t('documents.sparseTab'),
+              count: statCounts.graphSparse,
+              icon: <AlertTriangle className="h-3 w-3 text-status-sparse" />,
+              active: readinessFilter === 'graph_sparse',
+              updates: { status: null, readiness: 'graph_sparse', documentId: null, page: null },
+            },
+            {
+              key: 'failed',
+              label: t('documents.failedTab'),
+              count: statCounts.failed,
+              icon: <XCircle className="h-3 w-3 text-status-failed" />,
+              active: statusFilter === 'failed',
+              updates: { status: 'failed', readiness: null, documentId: null, page: null },
+            },
+          ].map(filter => (
             <button
-              key={f}
-              className={`px-3 py-1.5 text-xs rounded-[9px] transition-all duration-200 font-medium ${statusFilter === f ? 'bg-card shadow-soft font-semibold text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
-              onClick={() => setStatusFilter(f)}
+              key={filter.key}
+              className={`px-3 py-1.5 text-xs rounded-[9px] transition-all duration-200 font-medium flex items-center gap-1.5 ${filter.active ? 'bg-card shadow-soft font-semibold text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+              onClick={() => updateSearchParamState(filter.updates)}
             >
-              {f === 'all' ? t('documents.all') : f === 'in_progress' ? t('documents.inProgress') : f === 'ready' ? t('documents.ready') : t('documents.failedTab')}
+              {filter.icon}
+              {filter.label}
+              {filter.count > 0 && <span className="tabular-nums text-[10px] opacity-70">{filter.count}</span>}
             </button>
           ))}
         </div>
-        <span className="text-xs text-muted-foreground font-semibold tabular-nums">{filtered.length} {t('documents.of')} {documents.length}</span>
+        {showReadinessChip && readinessFilter && readinessFilterLabel && (
+          <button
+            className={`h-8 inline-flex items-center gap-2 px-3 text-xs rounded-full font-semibold ${readinessConfig[readinessFilter].cls}`}
+            onClick={() => updateSearchParamState({ readiness: null, documentId: null, page: null })}
+          >
+            <span>{readinessFilterLabel}</span>
+            <X className="h-3 w-3" />
+          </button>
+        )}
+        <span className="text-xs text-muted-foreground font-semibold tabular-nums">{filteredDocuments.length} {t('documents.of')} {documents.length}</span>
+        {(() => {
+          const totalCost = documents.reduce((sum, d) => sum + (d.cost ?? 0), 0);
+          return totalCost > 0 ? (
+            <span className="text-xs text-muted-foreground ml-auto mr-2">{t('documents.totalCost')}: <span className="font-bold tabular-nums">${totalCost.toFixed(3)}</span></span>
+          ) : null;
+        })()}
         <Button
           size="sm"
           variant={selectionMode ? 'default' : 'outline'}
-          className="ml-auto h-8 text-xs"
+          className={`${documents.reduce((s, d) => s + (d.cost ?? 0), 0) > 0 ? '' : 'ml-auto'} h-8 text-xs`}
           onClick={() => selectionMode ? clearSelection() : setSelectionMode(true)}
         >
           <CheckSquare className="h-3.5 w-3.5 mr-1.5" />
           {selectionMode ? t('documents.cancelSelection') : t('documents.select')}
         </Button>
-      </div>
+      </div>}
 
       {/* Main area */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Drop zone + table */}
+        {/* Content area */}
         <div
-          className={`flex-1 overflow-auto ${dragOver ? 'ring-2 ring-primary ring-inset bg-primary/5' : ''}`}
-          onDragOver={e => { e.preventDefault(); setDragOver(true); }}
-          onDragLeave={() => setDragOver(false)}
-          onDrop={handleDrop}
+          className={`flex-1 min-w-0 overflow-hidden ${activeTab === 'documents' && dragOver ? 'ring-2 ring-primary ring-inset bg-primary/5' : ''}`}
+          onDragOver={activeTab === 'documents' ? (e => { e.preventDefault(); setDragOver(true); }) : undefined}
+          onDragLeave={activeTab === 'documents' ? (() => setDragOver(false)) : undefined}
+          onDrop={activeTab === 'documents' ? handleDrop : undefined}
         >
+          {activeTab === 'documents' ? (
+          <>
           {dragOver && (
             <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
               <div className="p-8 rounded-2xl border-2 border-dashed border-primary bg-card shadow-elevated">
@@ -571,114 +784,208 @@ export default function DocumentsPage() {
                 <RotateCw className="h-3.5 w-3.5 mr-1.5" /> {t('documents.retry')}
               </Button>
             </div>
-          ) : filtered.length === 0 ? (
+          ) : filteredDocuments.length === 0 ? (
             <div className="empty-state py-20">
               <div className="w-14 h-14 rounded-2xl bg-muted flex items-center justify-center mb-4">
                 <FileText className="h-7 w-7 text-muted-foreground" />
               </div>
-              <h2 className="text-base font-bold tracking-tight">{searchQuery || statusFilter !== 'all' ? t('documents.noMatchingDocs') : t('documents.noDocs')}</h2>
+              <h2 className="text-base font-bold tracking-tight">{hasActiveFilters ? t('documents.noMatchingDocs') : t('documents.noDocs')}</h2>
               <p className="text-sm text-muted-foreground mt-2">
-                {searchQuery || statusFilter !== 'all' ? t('documents.noMatchingDocsDesc') : t('documents.noDocsDesc')}
+                {hasActiveFilters ? t('documents.noMatchingDocsDesc') : t('documents.noDocsDesc')}
               </p>
             </div>
           ) : (
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 z-10" style={{
-                background: 'linear-gradient(180deg, hsl(var(--card)), hsl(var(--card) / 0.95))',
-                backdropFilter: 'blur(8px)',
-              }}>
-                <tr className="border-b text-left">
-                  {selectionMode && (
-                    <th className="px-4 py-3 w-10">
-                      <input
-                        type="checkbox"
-                        checked={filtered.length > 0 && filtered.every(d => selectedIds.has(d.id))}
-                        onChange={() => {
-                          if (filtered.every(d => selectedIds.has(d.id))) {
-                            setSelectedIds(new Set());
-                          } else {
-                            setSelectedIds(new Set(filtered.map(d => d.id)));
-                          }
-                        }}
-                        className="h-4 w-4 rounded border-gray-300"
-                      />
-                    </th>
-                  )}
-                  {[
-                    { key: 'fileName', label: t('documents.name') },
-                    { key: 'fileType', label: t('documents.type') },
-                    { key: 'fileSize', label: t('documents.size') },
-                    { key: 'uploadedAt', label: t('documents.uploaded') },
-                    { key: 'cost', label: t('documents.cost') },
-                    { key: 'status', label: t('documents.status') },
-                  ].map(col => (
-                    <th key={col.key} className="px-4 py-3 section-label">
-                      <button className="flex items-center gap-1 hover:text-foreground transition-colors" onClick={() => toggleSort(col.key)}>
-                        {col.label}
-                        {sortField === col.key && <ArrowUpDown className="h-3 w-3" />}
-                      </button>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map(doc => {
-                  const rc = readinessConfig[doc.readiness];
-                  return (
-                    <tr
-                      key={doc.id}
-                      className={`border-b cursor-pointer transition-all duration-150 ${selectedIds.has(doc.id) ? 'bg-primary/10' : selectedDoc?.id === doc.id ? 'bg-primary/5 border-l-2 border-l-primary' : 'hover:bg-accent/30'}`}
-                      onClick={() => selectionMode ? toggleSelection(doc.id) : handleSelectDoc(doc)}
-                    >
+            <div className="flex h-full min-h-0 flex-col">
+              <div className="min-h-0 flex-1 overflow-auto">
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 z-10" style={{
+                    background: 'linear-gradient(180deg, hsl(var(--card)), hsl(var(--card) / 0.95))',
+                    backdropFilter: 'blur(8px)',
+                  }}>
+                    <tr className="border-b text-left">
                       {selectionMode && (
-                        <td className="px-4 py-3.5 w-10">
+                        <th className="px-4 py-3 w-10">
                           <input
                             type="checkbox"
-                            checked={selectedIds.has(doc.id)}
-                            onChange={(e) => {
-                              e.stopPropagation();
-                              toggleSelection(doc.id);
+                            checked={pagedDocuments.length > 0 && pagedDocuments.every(d => selectedIds.has(d.id))}
+                            onChange={() => {
+                              const pageFullySelected =
+                                pagedDocuments.length > 0 && pagedDocuments.every(d => selectedIds.has(d.id));
+
+                              setSelectedIds(prev => {
+                                const next = new Set(prev);
+
+                                for (const doc of pagedDocuments) {
+                                  if (pageFullySelected) {
+                                    next.delete(doc.id);
+                                  } else {
+                                    next.add(doc.id);
+                                  }
+                                }
+
+                                return next;
+                              });
                             }}
-                            onClick={(e) => e.stopPropagation()}
                             className="h-4 w-4 rounded border-gray-300"
                           />
-                        </td>
+                        </th>
                       )}
-                      <td className="px-4 py-3.5">
-                        <div className="flex items-center gap-3">
-                          <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${doc.sourceKind === 'web_page' ? 'bg-blue-100 dark:bg-blue-900/30' : 'bg-surface-sunken'}`}>
-                            {doc.sourceKind === 'web_page' ? <Globe className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" /> : <File className="h-3.5 w-3.5 text-muted-foreground" />}
-                          </div>
-                          <div className="min-w-0">
-                            <span className="truncate block max-w-[200px] font-semibold">{doc.fileName}</span>
-                            {doc.sourceKind === 'web_page' && doc.sourceUri && (
-                              <span className="truncate block max-w-[200px] text-[10px] text-muted-foreground">{doc.sourceUri}</span>
-                            )}
-                          </div>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3.5 text-muted-foreground uppercase text-[10px] font-bold tracking-widest">{doc.fileType}</td>
-                      <td className="px-4 py-3.5 text-muted-foreground tabular-nums text-xs">{formatSize(doc.fileSize)}</td>
-                      <td className="px-4 py-3.5 text-muted-foreground text-xs">{formatDate(doc.uploadedAt)}</td>
-                      <td className="px-4 py-3.5 text-muted-foreground tabular-nums text-xs">{doc.cost != null ? `$${doc.cost.toFixed(3)}` : '—'}</td>
-                      <td className="px-4 py-3.5">
-                        <div className="flex items-center gap-2">
-                          <span className={`status-badge ${rc.cls}`}>{rc.label}</span>
-                          {doc.progressPercent != null && (
-                            <span className="text-xs text-muted-foreground tabular-nums font-medium">{doc.progressPercent}%</span>
-                          )}
-                        </div>
-                      </td>
+                      {[
+                        { key: 'fileName', label: t('documents.name') },
+                        { key: 'fileType', label: t('documents.type') },
+                        { key: 'fileSize', label: t('documents.size') },
+                        { key: 'uploadedAt', label: t('documents.uploaded') },
+                        { key: 'cost', label: t('documents.cost') },
+                        { key: 'status', label: t('documents.status') },
+                      ].map(col => (
+                        <th key={col.key} className="px-4 py-3 section-label">
+                          <button className="flex items-center gap-1 hover:text-foreground transition-colors" onClick={() => toggleSort(col.key)}>
+                            {col.label}
+                            {sortField === col.key && <ArrowUpDown className="h-3 w-3" />}
+                          </button>
+                        </th>
+                      ))}
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                  </thead>
+                  <tbody>
+                    {pagedDocuments.map(doc => {
+                      const rc = readinessConfig[doc.readiness];
+                      return (
+                        <tr
+                          key={doc.id}
+                          className={`border-b cursor-pointer transition-all duration-150 ${selectedIds.has(doc.id) ? 'bg-primary/10' : selectedDoc?.id === doc.id ? 'bg-primary/5 border-l-2 border-l-primary' : 'hover:bg-accent/30'}`}
+                          onClick={() => selectionMode ? toggleSelection(doc.id) : handleSelectDoc(doc)}
+                        >
+                          {selectionMode && (
+                            <td className="px-4 py-3.5 w-10">
+                              <input
+                                type="checkbox"
+                                checked={selectedIds.has(doc.id)}
+                                onChange={(e) => {
+                                  e.stopPropagation();
+                                  toggleSelection(doc.id);
+                                }}
+                                onClick={(e) => e.stopPropagation()}
+                                className="h-4 w-4 rounded border-gray-300"
+                              />
+                            </td>
+                          )}
+                          <td className="px-4 py-3.5">
+                            <div className="flex items-center gap-3">
+                              <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${doc.sourceKind === 'web_page' ? 'bg-blue-100 dark:bg-blue-900/30' : 'bg-surface-sunken'}`}>
+                                {doc.sourceKind === 'web_page' ? <Globe className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" /> : <File className="h-3.5 w-3.5 text-muted-foreground" />}
+                              </div>
+                              <div className="min-w-0">
+                                <span className="truncate block max-w-[200px] font-semibold">{doc.fileName}</span>
+                                {doc.sourceKind === 'web_page' && doc.sourceUri && (
+                                  <span className="truncate block max-w-[200px] text-[10px] text-muted-foreground">{doc.sourceUri}</span>
+                                )}
+                              </div>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3.5 text-muted-foreground uppercase text-[10px] font-bold tracking-widest">{doc.fileType}</td>
+                          <td className="px-4 py-3.5 text-muted-foreground tabular-nums text-xs">{formatSize(doc.fileSize)}</td>
+                          <td className="px-4 py-3.5 text-muted-foreground text-xs">{formatDate(doc.uploadedAt)}</td>
+                          <td className="px-4 py-3.5 text-muted-foreground tabular-nums text-xs">{doc.cost != null ? `$${doc.cost.toFixed(3)}` : '—'}</td>
+                          <td className="px-4 py-3.5">
+                            <div className="flex items-center gap-2">
+                              <span className={`status-badge ${rc.cls}`}>{rc.label}</span>
+                              {doc.progressPercent != null && (
+                                <span className="text-xs text-muted-foreground tabular-nums font-medium">{doc.progressPercent}%</span>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="shrink-0 border-t bg-background/95 px-4 py-3 shadow-[0_-8px_24px_hsl(var(--background)/0.9)] backdrop-blur supports-[backdrop-filter]:bg-background/85">
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className="text-xs font-medium text-muted-foreground tabular-nums">
+                    {t('documents.paginationSummary', {
+                      from: visibleRangeStart,
+                      to: visibleRangeEnd,
+                      total: filteredDocuments.length,
+                    })}
+                  </span>
+
+                  <div className="flex items-center gap-2 md:ml-auto">
+                    <span className="text-xs text-muted-foreground">{t('documents.pageSize')}</span>
+                    <Select
+                      value={String(pageSize)}
+                      onValueChange={value => updateSearchParamState({
+                        pageSize: value === String(PAGE_SIZE_OPTIONS[0]) ? null : value,
+                        page: null,
+                      })}
+                    >
+                      <SelectTrigger className="h-8 w-[92px] text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {PAGE_SIZE_OPTIONS.map(option => (
+                          <SelectItem key={option} value={String(option)}>
+                            {option}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-8 text-xs"
+                      disabled={currentPage <= 1}
+                      onClick={() => updateSearchParamState({
+                        page: currentPage - 1 > 1 ? String(currentPage - 1) : null,
+                        documentId: null,
+                      })}
+                    >
+                      {t('documents.previous')}
+                    </Button>
+
+                    <span className="min-w-[112px] text-center text-xs font-medium text-muted-foreground tabular-nums">
+                      {t('documents.pageLabel', { page: currentPage, total: totalPages })}
+                    </span>
+
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-8 text-xs"
+                      disabled={currentPage >= totalPages}
+                      onClick={() => updateSearchParamState({
+                        page: String(currentPage + 1),
+                        documentId: null,
+                      })}
+                    >
+                      {t('documents.next')}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </div>
           )}
 
-          {/* Web Ingest Runs */}
-          {webRuns.length > 0 && (
-            <div className="mt-4 border rounded-xl">
+          </>
+          ) : (
+          <>
+          {/* Web Ingest Runs — web tab */}
+          {(() => {
+            const terminalStates = new Set(['completed', 'completed_partial', 'failed']);
+            const activeRuns = webRuns.filter((r: any) => !terminalStates.has(r.runState?.toLowerCase()));
+            return activeRuns.length > 0 ? (
+              <div className="mx-4 mt-4 flex items-center gap-2 text-xs px-3 py-2 rounded-xl bg-card border shadow-soft">
+                <Loader2 className="h-3 w-3 animate-spin text-primary" />
+                <span className="font-semibold">{activeRuns.length} web ingest {activeRuns.length === 1 ? 'run' : 'runs'} in progress</span>
+              </div>
+            ) : null;
+          })()}
+          {webRuns.length > 0 ? (
+            <div className="m-4 border rounded-xl">
               <div className="px-4 py-3 border-b flex items-center gap-2">
                 <Globe className="h-4 w-4 text-muted-foreground" />
                 <span className="text-sm font-semibold">{t('documents.webIngestRuns')}</span>
@@ -740,6 +1047,16 @@ export default function DocumentsPage() {
                 ))}
               </div>
             </div>
+          ) : (
+            <div className="empty-state py-20">
+              <div className="w-14 h-14 rounded-2xl bg-muted flex items-center justify-center mb-4">
+                <Globe className="h-7 w-7 text-muted-foreground" />
+              </div>
+              <h2 className="text-base font-bold tracking-tight">{t('documents.webIngestRuns')}</h2>
+              <p className="text-sm text-muted-foreground mt-2">{t('documents.noDocsDesc')}</p>
+            </div>
+          )}
+          </>
           )}
         </div>
 
@@ -748,7 +1065,7 @@ export default function DocumentsPage() {
           <div className={`inspector-panel w-80 lg:w-96 shrink-0 hidden md:block overflow-y-auto animate-slide-in-right ${selectionMode ? 'opacity-40 pointer-events-none' : ''}`}>
             <div className="p-4 border-b flex items-center justify-between">
               <h3 className="text-sm font-bold truncate tracking-tight">{selectedDoc.fileName}</h3>
-              <button onClick={() => setSelectedDoc(null)} className="p-1.5 rounded-lg hover:bg-muted transition-colors" aria-label="Close inspector">
+              <button onClick={() => updateSearchParamState({ documentId: null })} className="p-1.5 rounded-lg hover:bg-muted transition-colors" aria-label="Close inspector">
                 <X className="h-4 w-4" />
               </button>
             </div>
@@ -763,7 +1080,7 @@ export default function DocumentsPage() {
               {selectedDoc.failureMessage && (
                 <div className="inline-error">
                   <div className="flex items-center gap-1.5 font-bold text-destructive mb-1.5">
-                    <XCircle className="h-3.5 w-3.5" /> Error
+                    <XCircle className="h-3.5 w-3.5" /> {t('documents.error')}
                   </div>
                   {selectedDoc.failureMessage}
                 </div>
@@ -877,8 +1194,8 @@ export default function DocumentsPage() {
         )}
       </div>
 
-      {/* Bulk action toolbar */}
-      {selectedCount > 0 && (
+      {/* Bulk action toolbar — documents tab only */}
+      {activeTab === 'documents' && selectedCount > 0 && (
         <div className="sticky bottom-0 z-10 flex items-center gap-3 border-t bg-background px-4 py-3 shadow-lg">
           <span className="text-sm font-medium tabular-nums">
             {t('documents.nSelected', { count: selectedCount })}

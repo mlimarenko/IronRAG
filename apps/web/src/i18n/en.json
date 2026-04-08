@@ -41,7 +41,11 @@
     "title": "Dashboard",
     "subtitle": "Library overview and activity summary",
     "total": "Total",
+    "graphCoverage": "Graph Coverage",
+    "inFlight": "In Flight",
+    "attention": "Attention",
     "graphReady": "Graph Ready",
+    "readableNoGraph": "No Graph Yet",
     "graphSparse": "Graph Sparse",
     "processing": "Processing",
     "readable": "Readable",
@@ -60,17 +64,93 @@
     "unexpectedError": "An unexpected error occurred.",
     "documents": "Documents",
     "graph": "Graph",
-    "noDocs": "No documents yet"
+    "noDocs": "No documents yet",
+    "headerSummary": "{{total}} docs · {{coverage}}% graph coverage · attention: {{attention}}",
+    "documentsReadySummary": "Readable now: {{count}}",
+    "graphCoverageSummary": "Graph-ready: {{ready}} / {{total}}",
+    "readableNoGraphSummary": "No graph yet: {{count}}",
+    "inFlightSummary": "Active operations: {{count}}",
+    "pipelineIdle": "Queue is clear and no rebuild is running",
+    "attentionSummary": "Actionable items: {{count}}",
+    "failedSummary": "Failed documents: {{count}}",
+    "libraryHealth": "Library Health",
+    "updated": "Updated",
+    "nodes": "Nodes",
+    "edges": "Edges",
+    "factDocs": "Fact Docs",
+    "latestIngest": "Latest Web Ingest",
+    "noRecentRuns": "No web ingest activity yet",
+    "lastActivity": "Last Activity",
+    "processed": "Processed",
+    "queued": "Queued",
+    "openDocuments": "Open Documents",
+    "noFailedDesc": "There are no failed documents in this library right now.",
+    "noAttentionDesc": "No failed documents, stale rebuilds, or partial graph warnings are active right now.",
+    "recentDocsSummary": "Showing {{count}} recent items out of {{total}}",
+    "segmentsSummary": "Segments: {{count}}",
+    "factsSummary": "Facts: {{count}}",
+    "retryAvailable": "Retry available",
+    "notAvailable": "Not available",
+    "attentionTitles": {
+      "failed_documents": "Failed documents need review",
+      "graph_coverage_gap": "Graph coverage remains partial",
+      "graph_sparse": "Graph coverage remains partial",
+      "retryable_document": "A document can be retried",
+      "stale_vectors": "Vector rebuild is still running",
+      "stale_relations": "Graph rebuild is still running",
+      "failed_rebuilds": "Recent rebuild failed",
+      "bundle_assembly_failures": "Context bundle assembly failed"
+    },
+    "attentionDetails": {
+      "failed_documents": "Some documents are currently failed in the active library and need operator review.",
+      "graph_coverage_gap": "Some readable documents are available already but still have not reached graph-ready coverage.",
+      "graph_sparse": "A small set of readable documents still lacks graph extraction.",
+      "retryable_document": "A failed or stalled document can be retried from the documents workspace.",
+      "stale_vectors": "Readable documents have not converged onto the current vector state yet.",
+      "stale_relations": "The graph is still behind the readable document set for this library.",
+      "failed_rebuilds": "At least one recent rebuild failed and needs review.",
+      "bundle_assembly_failures": "Recent bundle assembly failed and graph context may be incomplete."
+    },
+    "graphStatusLabels": {
+      "empty": "Empty",
+      "building": "Building",
+      "rebuilding": "Rebuilding",
+      "ready": "Ready",
+      "partial": "Partial",
+      "failed": "Failed",
+      "stale": "Stale"
+    },
+    "runStateLabels": {
+      "accepted": "Accepted",
+      "discovering": "Discovering",
+      "processing": "Processing",
+      "completed": "Completed",
+      "completed_partial": "Completed Partial",
+      "failed": "Failed",
+      "canceled": "Canceled"
+    },
+    "readinessLabels": {
+      "processing": "Processing",
+      "readable": "No Graph Yet",
+      "graph_sparse": "Graph Sparse",
+      "graph_ready": "Graph Ready",
+      "failed": "Failed"
+    }
   },
   "documents": {
     "title": "Documents",
     "subtitle": "Manage ingestion and monitor processing",
+    "tabs": {
+      "documents": "Documents",
+      "webIngest": "Web Ingest"
+    },
     "upload": "Upload",
     "addLink": "Add Link",
     "searchPlaceholder": "Search documents...",
     "all": "All",
     "inProgress": "In Progress",
     "ready": "Ready",
+    "sparseTab": "Graph Sparse",
     "failedTab": "Failed",
     "of": "of",
     "failedToLoad": "Failed to load documents",
@@ -159,7 +239,57 @@
     "bulkCancelSuccess": "Cancelled processing for {{count}} documents",
     "bulkCancelFailed": "Bulk cancel failed",
     "bulkReprocessSuccess": "Reprocessing {{count}} documents",
-    "bulkReprocessFailed": "Bulk reprocess failed"
+    "bulkReprocessFailed": "Bulk reprocess failed",
+    "paginationSummary": "Showing {{from}}-{{to}} of {{total}}",
+    "pageSize": "Per page",
+    "pageLabel": "Page {{page}} of {{total}}",
+    "previous": "Previous",
+    "next": "Next",
+    "stageLabels": {
+      "extract_content": "Extracting text",
+      "prepare_structure": "Preparing structure",
+      "chunk_content": "Chunking content",
+      "embed_chunk": "Embedding chunks",
+      "extract_technical_facts": "Extracting technical facts",
+      "extract_graph": "Extracting graph",
+      "verify_query_answer": "Verifying answer",
+      "finalizing": "Finalizing",
+      "web_discovery": "Discovering pages",
+      "web_materialize_page": "Materializing web page"
+    },
+    "failureMessages": {
+      "generic": "Document processing failed.",
+      "unknownCode": "Processing failed: {{code}}.",
+      "byCode": {
+        "canonical_pipeline_failed": "Document processing failed.",
+        "web_discovery_failed": "The crawler could not discover pages from the source site.",
+        "graph_extract_failed": "The system could not extract entities and relations into the graph.",
+        "invalid_url": "The source URL is invalid.",
+        "inaccessible": "The source is inaccessible or not responding.",
+        "unsupported_content": "The source returned an unsupported content type.",
+        "timeout": "Processing exceeded the time limit.",
+        "lease_lost": "The background worker lost its lease and stopped processing.",
+        "web_snapshot_persist_failed": "The web page snapshot could not be saved.",
+        "web_snapshot_missing": "The web page snapshot was not found.",
+        "web_snapshot_missing_final_url": "The web page snapshot is missing its final URL.",
+        "web_snapshot_unavailable": "The web page snapshot is unavailable.",
+        "web_capture_materialization_failed": "The captured web page could not be materialized for storage.",
+        "recursive_crawl_failed": "The recursive crawl failed before completion.",
+        "knowledge_context_bundle_failed": "The system could not assemble the graph context bundle."
+      },
+      "byStage": {
+        "extract_content": "Text could not be extracted from the document. Check the file and retry processing.",
+        "prepare_structure": "The structured representation could not be prepared.",
+        "chunk_content": "The document could not be split into segments.",
+        "embed_chunk": "The segments could not be sent to embedding.",
+        "extract_technical_facts": "Technical facts could not be extracted from the document.",
+        "extract_graph": "The graph could not be updated from this document.",
+        "verify_query_answer": "The answer verification stage failed.",
+        "finalizing": "The document could not be finalized.",
+        "web_discovery": "The source site could not be crawled for pages.",
+        "web_materialize_page": "The web page could not be loaded and stored."
+      }
+    }
   },
   "graph": {
     "title": "Knowledge Graph",
@@ -205,6 +335,12 @@
     "hidden": "hidden",
     "clear": "Clear",
     "recommended": "Recommended:",
+    "showLegend": "Show legend",
+    "hideLegend": "Hide legend",
+    "showAll": "Show all",
+    "invert": "Invert",
+    "resetFilter": "Reset filter",
+    "subType": "Sub-type",
     "nodeTypes": {
       "document": "Document",
       "person": "Person",
@@ -373,7 +509,81 @@
     "expires": "Expires",
     "lastUsed": "Last used",
     "bindingsMissing": "binding missing",
-    "bindingsMissingPlural": "bindings missing"
+    "bindingsMissingPlural": "bindings missing",
+    "opsGuidanceTitle": "What to check",
+    "opsNoActionTitle": "No operator action is required right now",
+    "opsNoActionDesc": "The queue is idle and there are no obvious failures or stuck rebuilds.",
+    "opsSignals": "Signals",
+    "opsStatusLabels": {
+      "healthy": "Healthy",
+      "processing": "Processing",
+      "rebuilding": "Rebuilding",
+      "degraded": "Needs review"
+    },
+    "opsStatusDescriptions": {
+      "healthy": "The queue is clear and no active failures are visible.",
+      "processing": "New or retried documents are still moving through the processing queue.",
+      "rebuilding": "Documents are readable, but vectors or graph state are still catching up.",
+      "degraded": "Some documents or rebuild jobs failed and need operator review.",
+      "empty": "This library has no readable documents yet, so knowledge generation has not run."
+    },
+    "opsGenerationStates": {
+      "unknown": "Not started yet",
+      "text_readable": "Text layer ready",
+      "vector_ready": "Vectors ready",
+      "graph_ready": "Graph ready"
+    },
+    "opsActions": {
+      "failedDocuments": {
+        "title": "Failed documents need review",
+        "detail": "{{count}} documents need inspection or a retry.",
+        "action": "Open failures"
+      },
+      "processingQueue": {
+        "title": "There is active work in the queue",
+        "detail": "{{count}} jobs are still running or waiting to run.",
+        "action": "Open processing"
+      },
+      "staleVectors": {
+        "title": "Vector rebuild is still catching up",
+        "detail": "Readable documents have not reached the latest vector state yet.",
+        "action": "Open documents"
+      },
+      "staleRelations": {
+        "title": "Graph rebuild is still catching up",
+        "detail": "Graph relations are behind the current readable document set.",
+        "action": "Open graph"
+      },
+      "failedRebuilds": {
+        "title": "A recent rebuild failed",
+        "detail": "The latest rebuild did not complete successfully and needs review.",
+        "action": "Open failures"
+      },
+      "bundleFailures": {
+        "title": "Context bundle assembly failed",
+        "detail": "Graph context may stay incomplete until the failed bundle is fixed.",
+        "action": "Open graph"
+      }
+    },
+    "auditSearchPlaceholder": "Search action, message, subject, or actor...",
+    "auditResultAll": "All results",
+    "auditSurfaceAll": "All surfaces",
+    "auditPageSizeOption": "{{count}} per page",
+    "auditSummary": "Showing {{from}}-{{to}} of {{total}}",
+    "auditPageLabel": "Page {{page}} of {{total}}",
+    "previous": "Previous",
+    "next": "Next",
+    "auditResultLabels": {
+      "succeeded": "Succeeded",
+      "rejected": "Rejected",
+      "failed": "Failed"
+    },
+    "auditSurfaceLabels": {
+      "rest": "REST",
+      "mcp": "MCP",
+      "worker": "Worker",
+      "bootstrap": "Bootstrap"
+    }
   },
   "shell": {
     "noWorkspace": "No workspace",
