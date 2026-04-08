@@ -69,7 +69,11 @@ pub async fn readiness(State(state): State<AppState>) -> (StatusCode, Json<Readi
 pub async fn version(State(state): State<AppState>) -> Json<VersionResponse> {
     Json(VersionResponse {
         service: state.settings.service_name,
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: option_env!("APP_VERSION")
+            .unwrap_or(env!("CARGO_PKG_VERSION"))
+            .trim()
+            .trim_start_matches('v')
+            .to_string(),
         environment: state.settings.environment,
     })
 }

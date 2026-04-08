@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: RustRAG API
-  version: 0.1.0
+  version: 0.1.2
   description: |
     Public HTTP API for the ArangoDB-backed RustRAG API service (`apps/api/src/interfaces/http`).
     Operation paths include the `/v1` prefix. `servers.url` is only the origin (e.g. `/` or `https://api.example.com`).

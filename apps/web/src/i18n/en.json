@@ -622,7 +622,6 @@
     "close": "Close",
     "search": "Search",
     "noData": "No data",
-    "version": "RustRAG v0.1.1",
     "copyright": "© {{year}} RustRAG"
   }
 }
