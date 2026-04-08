@@ -411,6 +411,14 @@ pub struct McpListRelationsRequest {
     pub limit: Option<usize>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpGetCommunitiesRequest {
+    #[serde(alias = "library_id")]
+    pub library_id: Uuid,
+    pub limit: Option<usize>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpMutationOperationKind {
@@ -454,6 +462,7 @@ pub enum McpAuditActionKind {
     SearchEntities,
     GetGraphTopology,
     ListRelations,
+    GetCommunities,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

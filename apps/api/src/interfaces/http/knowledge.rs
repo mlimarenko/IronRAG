@@ -186,6 +186,8 @@ struct KnowledgeGraphTopologyResponse {
 struct KnowledgeLibrarySummaryResponse {
     library_id: Uuid,
     document_counts_by_readiness: BTreeMap<String, i64>,
+    node_count: i64,
+    edge_count: i64,
     graph_ready_document_count: i64,
     graph_sparse_document_count: i64,
     typed_fact_document_count: i64,
@@ -526,6 +528,7 @@ struct RuntimeKnowledgeEntityRow {
     canonical_label: String,
     aliases: Vec<String>,
     entity_type: String,
+    entity_sub_type: Option<String>,
     summary: Option<String>,
     confidence: Option<f64>,
     support_count: i32,
@@ -648,6 +651,8 @@ async fn get_library_summary(
     Ok(Json(KnowledgeLibrarySummaryResponse {
         library_id: summary.library_id,
         document_counts_by_readiness: summary.document_counts_by_readiness,
+        node_count: summary.node_count,
+        edge_count: summary.edge_count,
         graph_ready_document_count: summary.graph_ready_document_count,
         graph_sparse_document_count: summary.graph_sparse_document_count,
         typed_fact_document_count: summary.typed_fact_document_count,
@@ -1781,6 +1786,12 @@ fn graph_workbench_status(
     summary: &crate::domains::knowledge::KnowledgeLibrarySummary,
     snapshot: Option<&repositories::RuntimeGraphSnapshotRow>,
 ) -> GraphStatus {
+    let readable_without_graph_count = summary
+        .document_counts_by_readiness
+        .get("readable")
+        .copied()
+        .unwrap_or(0);
+
     if let Some(snapshot) = snapshot {
         return match snapshot.graph_status.as_str() {
             "empty" => GraphStatus::Empty,
@@ -1794,7 +1805,7 @@ fn graph_workbench_status(
             }
             "rebuilding" => GraphStatus::Rebuilding,
             "ready" => {
-                if summary.graph_sparse_document_count > 0 {
+                if summary.graph_sparse_document_count > 0 || readable_without_graph_count > 0 {
                     GraphStatus::Partial
                 } else {
                     GraphStatus::Ready
@@ -1814,11 +1825,22 @@ fn graph_workbench_status_from_summary(
     summary: &crate::domains::knowledge::KnowledgeLibrarySummary,
 ) -> GraphStatus {
     let total_documents = summary.document_counts_by_readiness.values().copied().sum::<i64>();
+    let readable_without_graph_count = summary
+        .document_counts_by_readiness
+        .get("readable")
+        .copied()
+        .unwrap_or(0);
     if total_documents == 0 {
         GraphStatus::Empty
-    } else if summary.graph_ready_document_count > 0 && summary.graph_sparse_document_count == 0 {
+    } else if summary.graph_ready_document_count > 0
+        && summary.graph_sparse_document_count == 0
+        && readable_without_graph_count == 0
+    {
         GraphStatus::Ready
-    } else if summary.graph_ready_document_count > 0 || summary.graph_sparse_document_count > 0 {
+    } else if summary.graph_ready_document_count > 0
+        || summary.graph_sparse_document_count > 0
+        || readable_without_graph_count > 0
+    {
         GraphStatus::Partial
     } else {
         GraphStatus::Building
@@ -2159,6 +2181,7 @@ fn map_runtime_graph_node_to_entity_row(
         canonical_label: row.label,
         aliases: runtime_graph_aliases(&row.aliases_json),
         entity_type: row.node_type,
+        entity_sub_type: row.metadata_json.get("sub_type").and_then(serde_json::Value::as_str).map(ToString::to_string),
         summary: row.summary,
         confidence: runtime_graph_confidence(&row.metadata_json),
         support_count: row.support_count,

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo, type PointerEvent as ReactPointerEvent } from 'react';
+import { useState, useEffect, useRef, useMemo, lazy, Suspense } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { useApp } from '@/contexts/AppContext';
@@ -7,12 +7,14 @@ import { knowledgeApi } from '@/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
-  Search, ZoomIn, ZoomOut, Maximize2, X, Filter, Loader2,
-  FileText, Share2, AlertTriangle, Eye, EyeOff, ExternalLink
+  Search, X, Loader2,
+  FileText, Share2, AlertTriangle,
+  Eye, EyeOff, RotateCcw, Layers,
 } from 'lucide-react';
 import type { GraphNode, GraphNodeType, GraphMetadata, GraphStatus } from '@/types';
+
+const SigmaGraph = lazy(() => import('@/components/SigmaGraph'));
 
 const LAYOUTS = ['cloud', 'circle', 'rings', 'lanes', 'clusters', 'islands', 'spiral'] as const;
 type LayoutType = typeof LAYOUTS[number];
@@ -30,24 +32,6 @@ const NODE_COLORS: Record<string, string> = {
   attribute: '#0ea5e9',     // sky
   entity: '#78716c',        // stone
 };
-
-function scaledRadii(total: number): Record<GraphNodeType, { min: number; max: number }> {
-  // Scale node sizes down as count grows — prevent overlapping
-  const s = total > 100 ? 0.4 : total > 50 ? 0.6 : total > 20 ? 0.8 : 1.0;
-  return {
-    document: { min: 1.5 * s, max: 2.8 * s },
-    person: { min: 1.0 * s, max: 1.8 * s },
-    organization: { min: 1.0 * s, max: 1.8 * s },
-    location: { min: 1.0 * s, max: 1.8 * s },
-    event: { min: 1.0 * s, max: 1.8 * s },
-    artifact: { min: 1.0 * s, max: 1.8 * s },
-    natural: { min: 1.0 * s, max: 1.8 * s },
-    process: { min: 1.0 * s, max: 1.8 * s },
-    concept: { min: 0.7 * s, max: 1.3 * s },
-    attribute: { min: 1.0 * s, max: 1.8 * s },
-    entity: { min: 1.0 * s, max: 1.8 * s },
-  };
-}
 
 /** Map backend GraphWorkbenchSurface to frontend GraphNode[] + GraphMetadata */
 function mapWorkbenchToUI(workbench: any): { nodes: GraphNode[]; meta: GraphMetadata; recommendedLayout?: string; selectedDetail: any | null } {
@@ -123,619 +107,6 @@ function mapEntityDetailToNode(detail: any): GraphNode {
 
 interface EdgeData { id: string; sourceId: string; targetId: string; label: string; weight: number }
 
-
-/**
- * High-performance Canvas2D graph renderer.
- * ALL interaction state (pan, zoom, hover) lives in refs — zero React re-renders during drag/zoom.
- * React only re-renders when nodes/edges/selectedId/layout change (data changes).
- */
-function GraphCanvas({ nodes, edges, selectedId, onSelect, layout, zoom, onZoomChange, fitKey }: {
-  nodes: GraphNode[]; edges: EdgeData[]; selectedId: string | null; onSelect: (id: string | null) => void; layout: LayoutType; zoom: number; onZoomChange: (z: number) => void; fitKey: number;
-}) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const rafRef = useRef<number>(0);
-  const dragStartRef = useRef({ x: 0, y: 0 });
-  const panStartRef = useRef({ x: 0, y: 0 });
-  const draggedRef = useRef(false);
-  const panRef = useRef({ x: 0, y: 0 });
-  const isPanningRef = useRef(false);
-  const hoveredNodeRef = useRef<string | null>(null);
-  const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const nodePositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
-  const dragNodeRef = useRef<string | null>(null);
-  const zoomRef = useRef(zoom);
-  const selectedIdRef = useRef(selectedId);
-  const drawScheduled = useRef(false);
-
-  // Keep refs in sync with props
-  useEffect(() => { zoomRef.current = zoom; }, [zoom]);
-  useEffect(() => { selectedIdRef.current = selectedId; scheduleRedraw(); }, [selectedId]);
-
-  // Schedule a single redraw on next animation frame (coalesces multiple calls)
-  const scheduleRedraw = useCallback(() => {
-    if (drawScheduled.current) return;
-    drawScheduled.current = true;
-    rafRef.current = requestAnimationFrame(() => {
-      drawScheduled.current = false;
-      drawCanvas();
-    });
-  }, []);
-
-  // Placeholder — will be assigned after drawCanvas is defined
-  const drawCanvasRef = useRef<() => void>(() => {});
-  const drawCanvas = useCallback(() => drawCanvasRef.current(), []);
-
-  // Compute viewBox-equivalent size
-  const viewSize = useMemo(() => Math.max(100, Math.ceil(Math.sqrt(nodes.length) * 14)), [nodes.length]);
-
-  // Pre-compute node index map for O(1) position lookups
-  const nodeIndexMap = useMemo(() => {
-    const m = new Map<string, number>();
-    nodes.forEach((n, i) => m.set(n.id, i));
-    return m;
-  }, [nodes]);
-
-  // Pre-compute adjacency map: nodeId -> Set of connected nodeIds
-  const adjacency = useMemo(() => {
-    const adj = new Map<string, Set<string>>();
-    for (const e of edges) {
-      if (!adj.has(e.sourceId)) adj.set(e.sourceId, new Set());
-      if (!adj.has(e.targetId)) adj.set(e.targetId, new Set());
-      adj.get(e.sourceId)!.add(e.targetId);
-      adj.get(e.targetId)!.add(e.sourceId);
-    }
-    return adj;
-  }, [edges]);
-
-  // Pre-compute label visibility threshold
-  const labelConfig = useMemo(() => {
-    const n = nodes.length;
-    const maxChars = n > 120 ? 10 : n > 60 ? 13 : n > 30 ? 16 : 20;
-    const fontSize = n > 120 ? 1.8 : n > 60 ? 2.0 : n > 30 ? 2.2 : 2.5;
-    const labelBudget = Math.max(15, Math.min(n, Math.ceil(n * 0.3)));
-    const sorted = nodes.map(nd => nd.edgeCount).sort((a, b) => b - a);
-    const edgeThreshold = sorted[Math.min(labelBudget, sorted.length - 1)] ?? 0;
-    const topNodeIds = new Set(nodes.filter(nd => nd.edgeCount >= edgeThreshold || nd.type === 'document').map(nd => nd.id));
-    return { maxChars, fontSize, edgeThreshold, topNodeIds };
-  }, [nodes]);
-
-  // Pre-compute cluster/island metadata
-  const clusterMeta = useMemo(() => {
-    const typeGroup: Record<string, number> = { document: 0, entity: 1, topic: 2 };
-    const clusterSizes: Record<number, number> = {};
-    const clusterCounters: Record<number, number> = {};
-    const nodeClusterIndex: number[] = [];
-    for (const node of nodes) {
-      const g = typeGroup[node.type] ?? 1;
-      clusterSizes[g] = (clusterSizes[g] ?? 0) + 1;
-    }
-    for (const node of nodes) {
-      const g = typeGroup[node.type] ?? 1;
-      const ci = clusterCounters[g] ?? 0;
-      nodeClusterIndex.push(ci);
-      clusterCounters[g] = ci + 1;
-    }
-    return { typeGroup, clusterSizes, nodeClusterIndex };
-  }, [nodes]);
-
-  // Scale node sizes based on total count
-  const radii = useMemo(() => scaledRadii(nodes.length), [nodes.length]);
-  const nodeRadius = useCallback((node: GraphNode) => {
-    const range = radii[node.type];
-    return Math.max(range.min, Math.min(range.max, range.min + node.edgeCount * 0.1));
-  }, [radii]);
-
-  useEffect(() => {
-    nodePositionsRef.current = new Map(); scheduleRedraw();
-  }, [nodes, edges, layout, viewSize]);
-
-  useEffect(() => {
-    panRef.current = { x: 0, y: 0 }; scheduleRedraw();
-  }, [fitKey]);
-
-  // Wheel zoom — ref-only, no React re-render per wheel tick
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const handler = (e: WheelEvent) => {
-      e.preventDefault();
-      const delta = e.deltaY > 0 ? -0.1 : 0.1;
-      zoomRef.current = Math.min(20, Math.max(0.1, zoomRef.current + delta));
-      scheduleRedraw();
-    };
-    el.addEventListener('wheel', handler, { passive: false });
-    return () => el.removeEventListener('wheel', handler);
-  }, [zoom, onZoomChange]);
-
-  // Layout position calculator (same logic as before, no nodePositions dependency — uses raw layout)
-  const getLayoutPosition = useCallback((index: number, total: number) => {
-    const sz = Math.max(100, Math.ceil(Math.sqrt(total) * 14));
-    const margin = sz * 0.06;
-    const usable = sz - margin * 2;
-    const cx = sz / 2, cy = sz / 2;
-
-    switch (layout) {
-      case 'circle': {
-        const angle = (index / total) * Math.PI * 2 - Math.PI / 2;
-        return { x: cx + (usable * 0.45) * Math.cos(angle), y: cy + (usable * 0.45) * Math.sin(angle) };
-      }
-      case 'spiral': {
-        const turns = Math.max(3, Math.ceil(total / 15));
-        const angle = (index / total) * Math.PI * 2 * turns;
-        const r = usable * 0.03 + (index / total) * usable * 0.45;
-        return { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) };
-      }
-      case 'rings': {
-        const ringCount = Math.max(2, Math.ceil(Math.sqrt(total / 8)));
-        const ring = Math.min(Math.floor(index / Math.ceil(total / ringCount)), ringCount - 1);
-        const nodesInRing = Math.ceil(total / ringCount);
-        const ringIndex = index - ring * nodesInRing;
-        const angle = (ringIndex / nodesInRing) * Math.PI * 2;
-        const r = usable * 0.1 + (ring / (ringCount - 1 || 1)) * usable * 0.38;
-        return { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) };
-      }
-      case 'lanes': {
-        const cols = Math.max(4, Math.ceil(Math.sqrt(total * 1.5)));
-        const rows = Math.ceil(total / cols);
-        const colW = usable / cols;
-        const rowH = usable / Math.max(rows, 1);
-        const row = Math.floor(index / cols);
-        const col = index % cols;
-        return { x: margin + col * colW + colW / 2, y: margin + row * rowH + rowH / 2 };
-      }
-      case 'clusters':
-      case 'islands': {
-        const meta = clusterMeta;
-        const nodeType = nodes[index]?.type ?? 'entity';
-        const group = meta.typeGroup[nodeType] ?? 1;
-        const ci = meta.nodeClusterIndex[index] ?? 0;
-        const ct = meta.clusterSizes[group] ?? 1;
-        const isIslands = layout === 'islands';
-        const centers = isIslands
-          ? [{ x: cx, y: margin + usable * 0.15 }, { x: margin + usable * 0.2, y: cy + usable * 0.2 }, { x: cx + usable * 0.25, y: cy + usable * 0.2 }]
-          : [{ x: cx - usable * 0.25, y: cy - usable * 0.2 }, { x: cx + usable * 0.2, y: cy }, { x: cx - usable * 0.1, y: cy + usable * 0.25 }];
-        const cc = centers[group] ?? centers[1];
-        if (isIslands) {
-          const spiralAngle = (ci / Math.max(ct, 1)) * Math.PI * 6;
-          const r = 2 + (ci / Math.max(ct, 1)) * usable * 0.2;
-          return { x: cc.x + r * Math.cos(spiralAngle), y: cc.y + r * Math.sin(spiralAngle) };
-        } else {
-          const angle = (ci / Math.max(ct, 1)) * Math.PI * 2;
-          const r = Math.min(usable * 0.22, 3 + Math.sqrt(ct) * usable * 0.015);
-          return { x: cc.x + r * Math.cos(angle), y: cc.y + r * Math.sin(angle) };
-        }
-      }
-      default: { // cloud
-        const seed = index * 137.508;
-        const r = usable * 0.06 + (index / total) * usable * 0.4;
-        return { x: cx + r * Math.cos(seed) + (Math.sin(seed * 2) * usable * 0.03), y: cy + r * Math.sin(seed) + (Math.cos(seed * 3) * usable * 0.03) };
-      }
-    }
-  // clusterMeta and nodes are stable references per render
-  }, [layout, clusterMeta, nodes]);
-
-  // Reset camera when layout changes
-  useEffect(() => {
-    panRef.current = { x: 0, y: 0 }; scheduleRedraw();
-  }, [layout]);
-
-  // Seed nodePositions so dragging works
-  useEffect(() => {
-    if (nodes.length === 0) return;
-    const initial = new Map<string, { x: number; y: number }>();
-    nodes.forEach((_node, i) => {
-      const pos = getLayoutPosition(i, nodes.length);
-      initial.set(nodes[i].id, pos);
-    });
-    nodePositionsRef.current = initial; scheduleRedraw();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layout, nodes]);
-
-  // ---------------------------------------------------------------------------
-  // Canvas2D draw loop
-  // ---------------------------------------------------------------------------
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const container = containerRef.current;
-    if (!canvas || !container) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    let cancelled = false;
-
-    const draw = () => {
-      if (cancelled) return;
-      const rect = container.getBoundingClientRect();
-      const dpr = window.devicePixelRatio || 1;
-      const w = rect.width;
-      const h = rect.height;
-
-      // Resize canvas if needed
-      if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
-        canvas.width = Math.round(w * dpr);
-        canvas.height = Math.round(h * dpr);
-        canvas.style.width = `${w}px`;
-        canvas.style.height = `${h}px`;
-      }
-
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.clearRect(0, 0, w, h);
-
-      // Background — transparent to inherit page theme
-      ctx.clearRect(0, 0, w, h);
-
-      // Apply transform: center + pan + zoomRef.current, map viewBox coords to screen
-      ctx.save();
-      const scale = (Math.min(w, h) / viewSize) * zoomRef.current;
-      const offsetX = w / 2 + panRef.current.x - (viewSize / 2) * scale;
-      const offsetY = h / 2 + panRef.current.y - (viewSize / 2) * scale;
-
-      // Compute viewport bounds in viewBox coordinates for culling
-      const vpLeft = -offsetX / scale;
-      const vpTop = -offsetY / scale;
-      const vpRight = (w - offsetX) / scale;
-      const vpBottom = (h - offsetY) / scale;
-      const vpMargin = 10; // extra margin in viewBox units
-
-      // Helper to check if a point is in viewport
-      const inViewport = (x: number, y: number) =>
-        x >= vpLeft - vpMargin && x <= vpRight + vpMargin &&
-        y >= vpTop - vpMargin && y <= vpBottom + vpMargin;
-
-      // Transform to viewBox coordinate system
-      ctx.translate(offsetX, offsetY);
-      ctx.scale(scale, scale);
-
-      const positions = nodePositionsRef.current;
-      const total = nodes.length;
-
-      // Build position cache for this frame
-      const posCache = new Map<string, { x: number; y: number }>();
-      for (let i = 0; i < total; i++) {
-        const node = nodes[i];
-        const pos = positions.has(node.id) ? positions.get(node.id)! : getLayoutPosition(i, total);
-        posCache.set(node.id, pos);
-      }
-
-      // --- Draw edges ---
-      const baseEdgeWidth = 0.15 / Math.max(zoomRef.current, 0.3);
-      const isLargeGraph = total > 1000;
-      const showBgEdges = !isLargeGraph || zoomRef.current > 0.5;
-      // Curvature offset for quadratic bezier (perpendicular distance)
-      // Curvature scales with edge length for visible curves
-      const curvatureFactor = 0.15; // 15% of edge length as perpendicular offset
-
-      if (showBgEdges) {
-        ctx.strokeStyle = selectedIdRef.current ? 'rgba(148, 163, 184, 0.08)' : 'rgba(148, 163, 184, 0.3)';
-        ctx.lineWidth = selectedIdRef.current ? baseEdgeWidth * 0.4 : baseEdgeWidth * 0.9;
-        let edgesDrawn = 0;
-        const edgeBudget = isLargeGraph ? Math.round(2000 / Math.max(zoomRef.current, 0.5)) : edges.length;
-        ctx.beginPath();
-        for (const edge of edges) {
-          if (edgesDrawn >= edgeBudget) break;
-          const sp = posCache.get(edge.sourceId);
-          const tp = posCache.get(edge.targetId);
-          if (!sp || !tp) continue;
-          if (!inViewport(sp.x, sp.y) && !inViewport(tp.x, tp.y)) continue;
-          if (selectedIdRef.current && (selectedIdRef.current === edge.sourceId || selectedIdRef.current === edge.targetId)) continue;
-          // Quadratic bezier curve — control point offset perpendicular to the line
-          const mx = (sp.x + tp.x) / 2;
-          const my = (sp.y + tp.y) / 2;
-          const dx = tp.x - sp.x;
-          const dy = tp.y - sp.y;
-          const len = Math.sqrt(dx * dx + dy * dy);
-          const nx = len > 0 ? -dy / len : 0;
-          const ny = len > 0 ? dx / len : 0;
-          const curve = len * curvatureFactor;
-          const cpx = mx + nx * curve;
-          const cpy = my + ny * curve;
-          ctx.moveTo(sp.x, sp.y);
-          ctx.quadraticCurveTo(cpx, cpy, tp.x, tp.y);
-          edgesDrawn++;
-        }
-        ctx.stroke();
-      }
-
-      // Connected edges — always visible, curved, highlighted
-      if (selectedIdRef.current) {
-        ctx.beginPath();
-        ctx.strokeStyle = 'rgba(59, 130, 246, 0.9)';
-        ctx.lineWidth = baseEdgeWidth * 3;
-        const connectedEdges: EdgeData[] = [];
-        for (const edge of edges) {
-          if (selectedIdRef.current === edge.sourceId || selectedIdRef.current === edge.targetId) {
-            const sp = posCache.get(edge.sourceId);
-            const tp = posCache.get(edge.targetId);
-            if (!sp || !tp) continue;
-            const mx = (sp.x + tp.x) / 2;
-            const my = (sp.y + tp.y) / 2;
-            const dx = tp.x - sp.x;
-            const dy = tp.y - sp.y;
-            const len = Math.sqrt(dx * dx + dy * dy);
-            const nx = len > 0 ? -dy / len : 0;
-            const ny = len > 0 ? dx / len : 0;
-            const curve = len * curvatureFactor;
-            const cpx = mx + nx * curve;
-            const cpy = my + ny * curve;
-            ctx.moveTo(sp.x, sp.y);
-            ctx.quadraticCurveTo(cpx, cpy, tp.x, tp.y);
-            connectedEdges.push(edge);
-          }
-        }
-        ctx.stroke();
-
-        // Edge labels for connected edges at sufficient zoomRef.current
-        if (zoomRef.current > 0.6) {
-          ctx.fillStyle = '#9ca3af';
-          const eFontSize = labelConfig.fontSize * 0.65;
-          ctx.font = `${eFontSize}px sans-serif`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          for (const edge of connectedEdges) {
-            if (!edge.label) continue;
-            const sp = posCache.get(edge.sourceId);
-            const tp = posCache.get(edge.targetId);
-            if (!sp || !tp) continue;
-            // Bezier midpoint at t=0.5: (P0 + 2*CP + P2) / 4
-            const dx = tp.x - sp.x;
-            const dy = tp.y - sp.y;
-            const len = Math.sqrt(dx * dx + dy * dy);
-            const nx2 = len > 0 ? -dy / len : 0;
-            const ny2 = len > 0 ? dx / len : 0;
-            const curve2 = len * curvatureFactor;
-            const cpx2 = (sp.x + tp.x) / 2 + nx2 * curve2;
-            const cpy2 = (sp.y + tp.y) / 2 + ny2 * curve2;
-            const lx = (sp.x + 2 * cpx2 + tp.x) / 4;
-            const ly = (sp.y + 2 * cpy2 + tp.y) / 4;
-            ctx.save();
-            ctx.translate(lx, ly);
-            let angle = Math.atan2(tp.y - sp.y, tp.x - sp.x);
-            if (angle > Math.PI / 2) angle -= Math.PI;
-            if (angle < -Math.PI / 2) angle += Math.PI;
-            ctx.rotate(angle);
-            ctx.globalAlpha = 0.7;
-            ctx.fillText(edge.label, 0, -eFontSize * 0.7);
-            ctx.restore();
-          }
-          ctx.globalAlpha = 1;
-        }
-      }
-
-      // --- Draw nodes ---
-      const selectedAdj = selectedIdRef.current ? adjacency.get(selectedIdRef.current) : undefined;
-      const hovered = hoveredNodeRef.current;
-
-      for (let i = 0; i < total; i++) {
-        const node = nodes[i];
-        const pos = posCache.get(node.id)!;
-        if (!inViewport(pos.x, pos.y)) continue;
-
-        const r = nodeRadius(node);
-        const color = NODE_COLORS[node.type] || NODE_COLORS.entity;
-        const isSelected = node.id === selectedIdRef.current;
-        const isConnectedToSelected = selectedAdj?.has(node.id) ?? false;
-        const dimmed = !!selectedIdRef.current && !isSelected && !isConnectedToSelected;
-        const isHovered = node.id === hovered;
-
-        // Glow for selected node
-        if (isSelected) {
-          const grad = ctx.createRadialGradient(pos.x, pos.y, 0, pos.x, pos.y, r * 2.5);
-          grad.addColorStop(0, color + '4d'); // 30% opacity
-          grad.addColorStop(1, color + '00');
-          ctx.beginPath();
-          ctx.arc(pos.x, pos.y, r * 2.5, 0, Math.PI * 2);
-          ctx.fillStyle = grad;
-          ctx.fill();
-        }
-
-        // Node circle
-        ctx.beginPath();
-        ctx.arc(pos.x, pos.y, r, 0, Math.PI * 2);
-        ctx.globalAlpha = dimmed ? 0.15 : 0.9;
-        ctx.fillStyle = color;
-        ctx.fill();
-        if (isSelected) {
-          ctx.strokeStyle = '#e2e8f0';
-          ctx.lineWidth = r * 0.12;
-          ctx.stroke();
-        }
-        ctx.globalAlpha = 1;
-      }
-
-      // --- Draw labels (level-of-detail) ---
-      const showLabels = zoomRef.current > 0.4 || total < 200;
-      if (showLabels) {
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'top';
-        for (let i = 0; i < total; i++) {
-          const node = nodes[i];
-          const pos = posCache.get(node.id)!;
-          if (!inViewport(pos.x, pos.y)) continue;
-
-          const isSelected = node.id === selectedIdRef.current;
-          const isConnectedToSelected = selectedAdj?.has(node.id) ?? false;
-          const isHovered = node.id === hovered;
-          const dimmed = !!selectedIdRef.current && !isSelected && !isConnectedToSelected;
-
-          // Determine if label should show
-          const showLabel = isSelected || isConnectedToSelected || isHovered || labelConfig.topNodeIds.has(node.id);
-          if (!showLabel) continue;
-          // At medium zoomRef.current, skip low-support nodes
-          if (zoomRef.current < 0.8 && !isSelected && !isConnectedToSelected && !isHovered && node.edgeCount < labelConfig.edgeThreshold) continue;
-
-          const r = nodeRadius(node);
-          const text = node.label.length > labelConfig.maxChars ? node.label.slice(0, labelConfig.maxChars - 1) + '\u2026' : node.label;
-          const weight = isSelected ? '700' : (isConnectedToSelected || isHovered) ? '600' : '500';
-          ctx.font = `${weight} ${labelConfig.fontSize}px sans-serif`;
-          ctx.globalAlpha = dimmed ? 0.15 : isSelected || isHovered ? 1 : 0.75;
-          ctx.fillStyle = '#94a3b8';
-          ctx.fillText(text, pos.x, pos.y + r + labelConfig.fontSize * 0.3);
-        }
-        ctx.globalAlpha = 1;
-      }
-
-      ctx.restore();
-    };
-
-    // Store draw function for imperative redraws via scheduleRedraw
-    drawCanvasRef.current = draw;
-
-    // Initial draw
-    rafRef.current = requestAnimationFrame(draw);
-    return () => {
-      cancelled = true;
-      cancelAnimationFrame(rafRef.current);
-    };
-  // Only re-create draw function when data/layout changes (not on pan/zoom/hover)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, edges, layout, viewSize, adjacency, labelConfig, nodeRadius, getLayoutPosition]);
-
-  // ---------------------------------------------------------------------------
-  // Hit testing: convert client coords to viewBox coords
-  // ---------------------------------------------------------------------------
-  const clientToViewBox = useCallback((clientX: number, clientY: number): { x: number; y: number } => {
-    const container = containerRef.current;
-    if (!container) return { x: 0, y: 0 };
-    const rect = container.getBoundingClientRect();
-    const w = rect.width;
-    const h = rect.height;
-    const scale = (Math.min(w, h) / viewSize) * zoomRef.current;
-    const offsetX = w / 2 + panRef.current.x - (viewSize / 2) * scale;
-    const offsetY = h / 2 + panRef.current.y - (viewSize / 2) * scale;
-    return {
-      x: (clientX - rect.left - offsetX) / scale,
-      y: (clientY - rect.top - offsetY) / scale,
-    };
-  }, [viewSize]);
-
-  // Find nearest node to a viewBox coordinate
-  const findNodeAt = useCallback((vx: number, vy: number): string | null => {
-    let bestId: string | null = null;
-    let bestDist = Infinity;
-    const hitRadius = Math.max(3, 8 / zoomRef.current); // generous hit area
-    for (let i = 0; i < nodes.length; i++) {
-      const node = nodes[i];
-      const pos = nodePositionsRef.current.has(node.id)
-        ? nodePositionsRef.current.get(node.id)!
-        : getLayoutPosition(i, nodes.length);
-      const dx = pos.x - vx;
-      const dy = pos.y - vy;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      const r = nodeRadius(node);
-      if (dist < Math.max(r, hitRadius) && dist < bestDist) {
-        bestDist = dist;
-        bestId = node.id;
-      }
-    }
-    return bestId;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, nodeRadius, getLayoutPosition]);
-
-  // Debounced hover
-  const handlePointerMoveHover = useCallback((clientX: number, clientY: number) => {
-    const vb = clientToViewBox(clientX, clientY);
-    const nodeId = findNodeAt(vb.x, vb.y);
-    if (nodeId === hoveredNodeRef.current) return;
-    hoveredNodeRef.current = nodeId;
-    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
-    hoverTimerRef.current = setTimeout(() => {
-      scheduleRedraw();
-    }, 50);
-  }, [clientToViewBox, findNodeAt]);
-
-  // ---------------------------------------------------------------------------
-  // Pointer event handlers
-  // ---------------------------------------------------------------------------
-  const handlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0) return;
-    if (dragNodeRef.current) return;
-
-    // Check if clicking on a node
-    const vb = clientToViewBox(e.clientX, e.clientY);
-    const hitNode = findNodeAt(vb.x, vb.y);
-    if (hitNode) {
-      // Start node drag
-      dragNodeRef.current = hitNode;
-      dragNodeRef.current = hitNode;
-      draggedRef.current = false;
-      return;
-    }
-
-    draggedRef.current = false;
-    dragStartRef.current = { x: e.clientX, y: e.clientY };
-    panStartRef.current = panRef.current;
-    isPanningRef.current = true;
-  };
-
-  const handlePointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
-    // Node dragging
-    if (dragNodeRef.current) {
-      const vb = clientToViewBox(e.clientX, e.clientY);
-      nodePositionsRef.current.set(dragNodeRef.current!, { x: vb.x, y: vb.y });
-      scheduleRedraw();
-      draggedRef.current = true;
-      return;
-    }
-
-    if (!isPanningRef.current) {
-      // Hover detection
-      handlePointerMoveHover(e.clientX, e.clientY);
-      return;
-    }
-
-    const deltaX = e.clientX - dragStartRef.current.x;
-    const deltaY = e.clientY - dragStartRef.current.y;
-    if (Math.abs(deltaX) > 3 || Math.abs(deltaY) > 3) {
-      draggedRef.current = true;
-      isPanningRef.current = true;
-    }
-    if (draggedRef.current) {
-      panRef.current = { x: panStartRef.current.x + deltaX, y: panStartRef.current.y + deltaY }; scheduleRedraw();
-    }
-  };
-
-  const handlePointerUp = (_e: ReactPointerEvent<HTMLDivElement>) => {
-    if (dragNodeRef.current) {
-      dragNodeRef.current = null;
-      dragNodeRef.current = null;
-      return;
-    }
-    isPanningRef.current = false;
-    isPanningRef.current = false;
-  };
-
-  const handleCanvasClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (draggedRef.current) {
-      draggedRef.current = false;
-      return;
-    }
-    // Check if clicking on a node
-    const vb = clientToViewBox(e.clientX, e.clientY);
-    const hitNode = findNodeAt(vb.x, vb.y);
-    if (hitNode) {
-      onSelect(hitNode);
-    } else {
-      onSelect(null);
-    }
-  };
-
-  return (
-    <div
-      ref={containerRef}
-      className="w-full h-full relative overflow-hidden cursor-grab"
-      onClick={handleCanvasClick}
-      onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
-      onPointerUp={handlePointerUp}
-      onPointerCancel={handlePointerUp}
-      style={{ touchAction: 'none' }}
-    >
-      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
-    </div>
-  );
-}
-
 export default function GraphPage() {
   const { t } = useTranslation();
   const { activeLibrary } = useApp();
@@ -757,10 +128,10 @@ export default function GraphPage() {
 
   // UI controls
   const [searchQuery, setSearchQuery] = useState('');
-  const [activeTypes, setActiveTypes] = useState<Set<GraphNodeType>>(new Set());
+  const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set());
+  const [hiddenSubTypes, setHiddenSubTypes] = useState<Set<string>>(new Set());
   const [layout, setLayout] = useState<LayoutType>('cloud');
-  const [zoom, setZoom] = useState(1);
-  const [fitKey, setFitKey] = useState(0);
+  const [legendOpen, setLegendOpen] = useState(true);
 
   // Fetch graph workbench data, falling back to entities+relations endpoints
   useEffect(() => {
@@ -773,19 +144,13 @@ export default function GraphPage() {
     setSelectedNode(null);
     setSelectedDetail(null);
 
-    knowledgeApi.getGraphWorkbench(activeLibrary.id)
-      .then(async workbench => {
-        if (cancelled) return;
-        const { nodes, meta } = mapWorkbenchToUI(workbench);
-
-        // If workbench returned no nodes, fall back to entities + relations endpoints
-        if (nodes.length === 0) {
-          const [entitiesRes, relationsRes, documentsRes, topologyRes] = await Promise.all([
-            knowledgeApi.listEntities(activeLibrary.id),
-            knowledgeApi.listRelations(activeLibrary.id),
-            knowledgeApi.listDocuments(activeLibrary.id),
-            knowledgeApi.getGraphTopology(activeLibrary.id).catch(() => null),
-          ]);
+    // Load graph data from fast individual endpoints (not slow graph-workbench)
+    Promise.all([
+      knowledgeApi.listEntities(activeLibrary.id),
+      knowledgeApi.listRelations(activeLibrary.id),
+      knowledgeApi.listDocuments(activeLibrary.id),
+      knowledgeApi.getGraphTopology(activeLibrary.id).catch(() => null),
+    ]).then(([entitiesRes, relationsRes, documentsRes, topologyRes]) => {
           if (cancelled) return;
 
           const entities: any[] = Array.isArray(entitiesRes) ? entitiesRes : (entitiesRes.items ?? []);
@@ -799,15 +164,20 @@ export default function GraphPage() {
             docEdgeCounts.set(link.documentId, (docEdgeCounts.get(link.documentId) ?? 0) + 1);
           });
 
-          const entityNodes: GraphNode[] = entities.map((e: any) => ({
-            id: e.entityId ?? e.id,
-            label: e.canonicalLabel ?? e.label ?? e.key ?? 'unknown',
-            type: mapNodeType(e.entityType),
-            summary: e.summary ?? undefined,
-            edgeCount: e.supportCount ?? 0,
-            properties: {},
-            sourceDocumentIds: [],
-          }));
+          const entityNodes: GraphNode[] = entities.map((e: any) => {
+            const canonical = mapNodeType(e.entityType);
+            const raw = (e.entityType ?? '').toLowerCase();
+            return {
+              id: e.entityId ?? e.id,
+              label: e.canonicalLabel ?? e.label ?? e.key ?? 'unknown',
+              type: canonical,
+              subType: e.entitySubType ?? (raw !== canonical ? raw : undefined),
+              summary: e.summary ?? undefined,
+              edgeCount: e.supportCount ?? 0,
+              properties: {},
+              sourceDocumentIds: [],
+            };
+          });
 
           const documentNodes: GraphNode[] = documents.map((d: any) => {
             const docId = d.document_id ?? d.documentId ?? d.id;
@@ -857,16 +227,6 @@ export default function GraphPage() {
           setAllNodes(fallbackNodes);
           setGraphMeta(fallbackMeta);
           setGraphStatus(fallbackMeta.status);
-          return;
-        }
-
-        edgesRef.current = [];
-        setAllNodes(nodes);
-        setGraphMeta(meta);
-        setGraphStatus(meta.status);
-        if (meta.recommendedLayout) {
-          setLayout(meta.recommendedLayout as LayoutType);
-        }
       })
       .catch(err => {
         if (cancelled) return;
@@ -924,10 +284,13 @@ export default function GraphPage() {
       .then(detail => {
         if (cancelled) return;
         const entity = detail.entity ?? detail;
+        const canonicalType = mapNodeType(entity.entityType ?? entity.nodeType);
+        const rawType = (entity.entityType ?? '').toLowerCase();
         const enriched: GraphNode = {
           id: entity.entityId ?? entity.id ?? selectedNode,
           label: entity.canonicalLabel ?? entity.label ?? basic?.label ?? '',
-          type: mapNodeType(entity.entityType ?? entity.nodeType),
+          type: canonicalType,
+          subType: rawType !== canonicalType ? rawType : undefined,
           summary: entity.summary ?? basic?.summary,
           edgeCount: entity.supportCount ?? basic?.edgeCount ?? 0,
           properties: {},
@@ -955,12 +318,27 @@ export default function GraphPage() {
   }, [activeLibrary, selectedNode, allNodes]);
 
   const filteredNodes = useMemo(() => allNodes.filter(n => {
-    if (activeTypes.size > 0 && !activeTypes.has(n.type)) return false;
+    if (hiddenTypes.has(n.type)) return false;
+    if (n.subType && hiddenSubTypes.has(`${n.type}:${n.subType}`)) return false;
     if (searchQuery && !n.label.toLowerCase().includes(searchQuery.toLowerCase())) return false;
     return true;
-  }), [allNodes, activeTypes, searchQuery]);
+  }), [allNodes, hiddenTypes, hiddenSubTypes, searchQuery]);
 
   const effectiveLayout = layout;
+
+  // Compute type → { count, subTypes: { name, count }[] } for legend
+  const typeLegend = useMemo(() => {
+    const map = new Map<string, { count: number; subs: Map<string, number> }>();
+    for (const n of allNodes) {
+      let entry = map.get(n.type);
+      if (!entry) { entry = { count: 0, subs: new Map() }; map.set(n.type, entry); }
+      entry.count++;
+      if (n.subType) {
+        entry.subs.set(n.subType, (entry.subs.get(n.subType) ?? 0) + 1);
+      }
+    }
+    return map;
+  }, [allNodes]);
 
   const selected = selectedDetail ?? allNodes.find(n => n.id === selectedNode) ?? null;
 
@@ -990,53 +368,26 @@ export default function GraphPage() {
           <Input className="h-8 pl-8 text-xs" placeholder={t('graph.searchPlaceholder')} value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
         </div>
 
-        <div className="relative">
-          <Button variant="outline" size="sm" className="h-8 text-xs gap-1.5" onClick={() => {
-            const el = document.getElementById('type-filter-popover');
-            if (el) el.classList.toggle('hidden');
-          }}>
-            <Filter className="h-3 w-3" />
-            {activeTypes.size === 0 ? t('graph.allTypes') : `${activeTypes.size} ${activeTypes.size === 1 ? 'type' : 'types'}`}
-          </Button>
-          <div id="type-filter-popover" className="hidden absolute top-full left-0 mt-1 z-50 bg-popover border rounded-lg shadow-lg p-2 space-y-0.5 min-w-[160px]">
-            <button className="w-full text-left px-2 py-1 text-xs rounded hover:bg-muted" onClick={() => setActiveTypes(new Set())}>
-              {t('graph.allTypes')}
-            </button>
-            <div className="border-t my-1" />
-            {(Object.keys(NODE_COLORS) as GraphNodeType[]).map(type => (
-              <label key={type} className="flex items-center gap-2 px-2 py-1 text-xs rounded hover:bg-muted cursor-pointer">
-                <input
-                  type="checkbox"
-                  className="h-3.5 w-3.5 rounded"
-                  checked={activeTypes.has(type)}
-                  onChange={() => {
-                    setActiveTypes(prev => {
-                      const next = new Set(prev);
-                      if (next.has(type)) next.delete(type);
-                      else next.add(type);
-                      return next;
-                    });
-                  }}
-                />
-                <span className="inline-block w-2.5 h-2.5 rounded-full" style={{ backgroundColor: NODE_COLORS[type] }} />
-                {type === 'natural' ? 'Natural' : type === 'code_symbol' ? 'Code' : type.charAt(0).toUpperCase() + type.slice(1)}
-              </label>
-            ))}
-          </div>
+        {/* Type filter moved to clickable legend below */}
+
+        <div className="flex items-center gap-0.5 bg-muted/50 rounded-lg p-0.5">
+          {LAYOUTS.map(l => {
+            const icons: Record<string, string> = { cloud: '⬡', circle: '○', rings: '◎', lanes: '≡', clusters: '⬢', islands: '◇', spiral: '✺' };
+            const isActive = layout === l;
+            return (
+              <button
+                key={l}
+                onClick={() => setLayout(l)}
+                className={`px-2 py-1 text-sm rounded-md transition-all font-mono ${isActive ? 'bg-primary text-primary-foreground shadow-sm font-bold' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}`}
+                title={t(`graph.layouts.${l}`)}
+              >
+                {icons[l] || l}
+              </button>
+            );
+          })}
         </div>
 
-        <Select value={layout} onValueChange={v => setLayout(v as LayoutType)}>
-          <SelectTrigger className="h-8 w-28 text-xs"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            {LAYOUTS.map(l => <SelectItem key={l} value={l} className="capitalize">{l}</SelectItem>)}
-          </SelectContent>
-        </Select>
-
-        <div className="flex items-center gap-0.5 bg-muted rounded-xl p-0.5 border border-border/50">
-          <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-7 w-7 rounded-[9px]" onClick={() => setZoom(z => Math.min(20, z * 1.3))}><ZoomIn className="h-3.5 w-3.5" /></Button></TooltipTrigger><TooltipContent side="bottom" className="text-xs">{t('graph.zoomIn')}</TooltipContent></Tooltip>
-          <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-7 w-7 rounded-[9px]" onClick={() => setZoom(z => Math.max(0.1, z / 1.3))}><ZoomOut className="h-3.5 w-3.5" /></Button></TooltipTrigger><TooltipContent side="bottom" className="text-xs">{t('graph.zoomOut')}</TooltipContent></Tooltip>
-          <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-7 w-7 rounded-[9px]" onClick={() => { setZoom(1); setFitKey(k => k + 1); }}><Maximize2 className="h-3.5 w-3.5" /></Button></TooltipTrigger><TooltipContent side="bottom" className="text-xs">{t('graph.fit')}</TooltipContent></Tooltip>
-        </div>
+        {/* Sigma.js handles zoom via mouse wheel / pinch */}
 
         {selectedNode && (
           <button className="h-7 px-2.5 text-xs flex items-center gap-1.5 rounded-lg hover:bg-muted transition-all duration-200 font-semibold" onClick={() => setSelectedNode(null)}>
@@ -1087,18 +438,129 @@ export default function GraphPage() {
               )}
             </div>
           ) : (
-            <GraphCanvas nodes={filteredNodes} edges={edgesRef.current} selectedId={selectedNode} onSelect={setSelectedNode} layout={effectiveLayout} zoom={zoom} onZoomChange={setZoom} fitKey={fitKey} />
+            <Suspense fallback={<div className="flex-1 flex items-center justify-center"><Loader2 className="h-6 w-6 animate-spin" /></div>}>
+              <SigmaGraph
+                nodes={filteredNodes}
+                edges={edgesRef.current}
+                selectedId={selectedNode}
+                onSelect={setSelectedNode}
+                layout={effectiveLayout}
+                hiddenTypes={hiddenTypes}
+              />
+            </Suspense>
           )}
 
-          {/* Legend */}
-          <div className="absolute bottom-3 left-3 flex items-center gap-3 text-xs glass-panel rounded-xl px-4 py-2.5 shadow-lifted">
-            {Object.entries(NODE_COLORS).map(([type, color]) => (
-              <span key={type} className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-full" style={{ background: color }} />
-                {type.charAt(0).toUpperCase() + type.slice(1)}
-              </span>
-            ))}
-          </div>
+          {/* Legend toggle button — always visible */}
+          {!legendOpen && (
+            <button
+              onClick={() => setLegendOpen(true)}
+              className="absolute top-3 left-3 glass-panel rounded-xl p-2 shadow-lifted cursor-pointer hover:bg-white/10 transition-all"
+              title={t('graph.showLegend')}
+            >
+              <Layers className="h-4 w-4 text-muted-foreground" />
+            </button>
+          )}
+
+          {/* Vertical legend — left side */}
+          {legendOpen && (
+            <div className="absolute top-3 left-3 bottom-3 max-h-[calc(100%-24px)] overflow-y-auto text-xs glass-panel rounded-xl shadow-lifted min-w-[150px] max-w-[250px] flex flex-col">
+              {/* Legend header with controls */}
+              <div className="flex items-center gap-1 px-3 py-2 border-b border-white/10">
+                <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider flex-1">{t('graph.legend')}</span>
+                <button
+                  onClick={() => { setHiddenTypes(new Set()); setHiddenSubTypes(new Set()); }}
+                  className="p-1 rounded hover:bg-white/10 cursor-pointer transition-colors"
+                  title={t('graph.showAll')}
+                >
+                  <Eye className="h-3.5 w-3.5 text-muted-foreground" />
+                </button>
+                <button
+                  onClick={() => {
+                    setHiddenTypes(prev => {
+                      const allTypes = Object.keys(NODE_COLORS);
+                      const next = new Set<string>();
+                      for (const tp of allTypes) {
+                        if (!prev.has(tp)) next.add(tp);
+                      }
+                      return next;
+                    });
+                  }}
+                  className="p-1 rounded hover:bg-white/10 cursor-pointer transition-colors"
+                  title={t('graph.invert')}
+                >
+                  <RotateCcw className="h-3.5 w-3.5 text-muted-foreground" />
+                </button>
+                <button
+                  onClick={() => setLegendOpen(false)}
+                  className="p-1 rounded hover:bg-white/10 cursor-pointer transition-colors"
+                  title={t('graph.hideLegend')}
+                >
+                  <EyeOff className="h-3.5 w-3.5 text-muted-foreground" />
+                </button>
+              </div>
+
+              {/* Type list */}
+              <div className="px-2 py-1.5 flex-1 overflow-y-auto">
+                {Object.entries(NODE_COLORS).map(([type, color]) => {
+                  const isHidden = hiddenTypes.has(type);
+                  const stats = typeLegend.get(type);
+                  const count = stats?.count ?? 0;
+                  if (count === 0 && type !== 'document') return null;
+                  const subs = stats?.subs ? Array.from(stats.subs.entries()).sort((a, b) => b[1] - a[1]) : [];
+                  return (
+                    <div key={type} className={`mb-0.5 ${isHidden ? 'opacity-35' : ''}`}>
+                      <button
+                        className={`flex items-center gap-1.5 w-full px-2 py-1 rounded-md transition-all cursor-pointer ${isHidden ? 'line-through' : 'hover:bg-white/10'}`}
+                        onClick={() => {
+                          setHiddenTypes(prev => {
+                            const next = new Set(prev);
+                            if (next.has(type)) next.delete(type);
+                            else next.add(type);
+                            return next;
+                          });
+                        }}
+                        title={t(`graph.nodeTypes.${type}`)}
+                      >
+                        <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: color }} />
+                        <span className="font-semibold truncate">{t(`graph.nodeTypes.${type}`)}</span>
+                        <span className="ml-auto tabular-nums text-muted-foreground">{count}</span>
+                      </button>
+                      {subs.length > 0 && !isHidden && (
+                        <div className="flex flex-wrap gap-x-1.5 gap-y-0.5 pl-6 pr-1 mt-0.5 mb-1">
+                          {subs.slice(0, 12).map(([sub, subCount]) => {
+                            const subKey = `${type}:${sub}`;
+                            const isSubHidden = hiddenSubTypes.has(subKey);
+                            return (
+                              <button
+                                key={sub}
+                                className={`text-[10px] whitespace-nowrap cursor-pointer rounded px-1 py-0.5 transition-colors ${isSubHidden ? 'opacity-35 line-through text-muted-foreground' : 'text-muted-foreground hover:bg-white/10'}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setHiddenSubTypes(prev => {
+                                    const next = new Set(prev);
+                                    if (next.has(subKey)) next.delete(subKey);
+                                    else next.add(subKey);
+                                    return next;
+                                  });
+                                }}
+                                title={sub}
+                              >
+                                <span className="inline-block w-1.5 h-1.5 rounded-full mr-0.5 align-middle" style={{ background: color, opacity: 0.6 }} />
+                                {sub} <span className="tabular-nums">{subCount}</span>
+                              </button>
+                            );
+                          })}
+                          {subs.length > 12 && (
+                            <span className="text-[10px] text-muted-foreground px-1">+{subs.length - 12}</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {graphMeta?.recommendedLayout && layout !== graphMeta.recommendedLayout && (
             <div className="absolute top-3 left-3 text-xs glass-panel rounded-xl px-4 py-2.5 shadow-lifted flex items-center gap-1.5">
@@ -1134,7 +596,12 @@ export default function GraphPage() {
                 {/* Type & connections header */}
                 <div className="flex items-center gap-2.5">
                   <span className="w-3 h-3 rounded-full" style={{ background: NODE_COLORS[selected.type] }} />
-                  <span className="text-sm font-semibold capitalize">{selected.type}</span>
+                  <div className="flex flex-col">
+                    <span className="text-sm font-semibold capitalize">{t(`graph.nodeTypes.${selected.type}`)}</span>
+                    {selected.subType && (
+                      <span className="text-[11px] text-muted-foreground capitalize">{selected.subType}</span>
+                    )}
+                  </div>
                   <span className="text-xs text-muted-foreground ml-auto tabular-nums font-medium">{connectedIds.length} {t('graph.connections')}</span>
                 </div>
 
@@ -1173,9 +640,10 @@ export default function GraphPage() {
                   {searchQuery && (
                     <Button variant="ghost" size="sm" className="text-xs h-7" onClick={() => {
                       setSearchQuery('');
-                      setActiveTypes(new Set());
+                      setHiddenTypes(new Set());
+                      setHiddenSubTypes(new Set());
                     }}>
-                      <X className="h-3 w-3 mr-1" /> {t('graph.resetFilter') || 'Reset'}
+                      <X className="h-3 w-3 mr-1" /> {t('graph.resetFilter')}
                     </Button>
                   )}
                 </div>

@@ -16,8 +16,11 @@ use crate::{
         },
         router_support::ApiError,
     },
-    services::audit_service::ListAuditEventSubjectFilter,
+    services::audit_service::{AuditEventPage, ListAuditEventSubjectFilter, ListAuditEventsQuery},
 };
+
+const DEFAULT_AUDIT_LIMIT: u32 = 50;
+const MAX_AUDIT_LIMIT: u32 = 1000;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,6 +35,11 @@ pub struct AuditEventsQuery {
     pub query_execution_id: Option<Uuid>,
     pub runtime_execution_id: Option<Uuid>,
     pub async_operation_id: Option<Uuid>,
+    pub surface_kind: Option<String>,
+    pub result_kind: Option<String>,
+    pub search: Option<String>,
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
     pub internal: Option<bool>,
 }
 
@@ -70,6 +78,15 @@ pub struct AuditEventResponse {
     pub subjects: Vec<AuditEventSubjectResponse>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditEventPageResponse {
+    pub items: Vec<AuditEventResponse>,
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new().route("/audit/events", get(list_audit_events))
 }
@@ -78,7 +95,7 @@ async fn list_audit_events(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<AuditEventsQuery>,
-) -> Result<Json<Vec<AuditEventResponse>>, ApiError> {
+) -> Result<Json<AuditEventPageResponse>, ApiError> {
     let internal = query.internal.unwrap_or(false);
     if internal && !auth.is_system_admin {
         return Err(ApiError::forbidden(
@@ -116,61 +133,111 @@ async fn list_audit_events(
         runtime_execution_id: query.runtime_execution_id,
         async_operation_id: query.async_operation_id,
     };
+    let list_query = ListAuditEventsQuery {
+        actor_principal_id: query.actor_principal_id,
+        workspace_id: workspace_filter,
+        library_id: library_filter,
+        subject_filter,
+        surface_kind: query.surface_kind.filter(|value| !value.trim().is_empty()),
+        result_kind: query.result_kind.filter(|value| !value.trim().is_empty()),
+        search: query.search.filter(|value| !value.trim().is_empty()),
+        limit: i64::from(query.limit.unwrap_or(DEFAULT_AUDIT_LIMIT).clamp(1, MAX_AUDIT_LIMIT)),
+        offset: i64::from(query.offset.unwrap_or_default()),
+    };
 
     let mut response_items = Vec::new();
-    if internal {
+    let total = if internal {
         let events = state
             .canonical_services
             .audit
-            .list_internal_events(
-                &state,
-                query.actor_principal_id,
-                workspace_filter,
-                library_filter,
-                &subject_filter,
-            )
+            .list_internal_events(&state, &list_query)
             .await?;
-        for event in events {
-            let subjects = visible_subjects(
-                &state,
-                event.id,
-                auth.is_system_admin,
-                workspace_filter,
-                library_filter,
-            )
-            .await?;
-            if auth.is_system_admin || !subjects.is_empty() {
-                response_items.push(map_internal_event(event, subjects));
-            }
-        }
+        let total = events.total;
+        push_internal_response_items(
+            &state,
+            &auth,
+            workspace_filter,
+            library_filter,
+            &mut response_items,
+            events,
+        )
+        .await?;
+        total
     } else {
         let events = state
             .canonical_services
             .audit
-            .list_redacted_events(
-                &state,
-                query.actor_principal_id,
-                workspace_filter,
-                library_filter,
-                &subject_filter,
-            )
+            .list_redacted_events(&state, &list_query)
             .await?;
-        for event in events {
-            let subjects = visible_subjects(
-                &state,
-                event.id,
-                auth.is_system_admin,
-                workspace_filter,
-                library_filter,
-            )
-            .await?;
-            if auth.is_system_admin || !subjects.is_empty() {
-                response_items.push(map_redacted_event(event, subjects));
-            }
+        let total = events.total;
+        push_redacted_response_items(
+            &state,
+            &auth,
+            workspace_filter,
+            library_filter,
+            &mut response_items,
+            events,
+        )
+        .await?;
+        total
+    };
+
+    Ok(Json(AuditEventPageResponse {
+        items: response_items,
+        total,
+        limit: list_query.limit,
+        offset: list_query.offset,
+    }))
+}
+
+async fn push_internal_response_items(
+    state: &AppState,
+    auth: &AuthContext,
+    workspace_filter: Option<Uuid>,
+    library_filter: Option<Uuid>,
+    response_items: &mut Vec<AuditEventResponse>,
+    page: AuditEventPage<AuditEventInternalView>,
+) -> Result<(), ApiError> {
+    for event in page.items {
+        let subjects = visible_subjects(
+            state,
+            event.id,
+            auth.is_system_admin,
+            workspace_filter,
+            library_filter,
+        )
+        .await?;
+        if auth.is_system_admin || !subjects.is_empty() {
+            response_items.push(map_internal_event(event, subjects));
         }
     }
 
-    Ok(Json(response_items))
+    Ok(())
+}
+
+async fn push_redacted_response_items(
+    state: &AppState,
+    auth: &AuthContext,
+    workspace_filter: Option<Uuid>,
+    library_filter: Option<Uuid>,
+    response_items: &mut Vec<AuditEventResponse>,
+    page: AuditEventPage<AuditEventRedactedView>,
+) -> Result<(), ApiError> {
+    for event in page.items {
+        let subjects = visible_subjects(
+            state,
+            event.id,
+            auth.is_system_admin,
+            workspace_filter,
+            library_filter,
+        )
+        .await?;
+        if auth.is_system_admin || !subjects.is_empty() {
+            response_items.push(map_redacted_event(event, subjects));
+        }
+    }
+
+    Ok(())
 }
 
 async fn visible_subjects(

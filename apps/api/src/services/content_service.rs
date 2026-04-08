@@ -2486,7 +2486,7 @@ impl ContentService {
             .ok_or_else(|| {
                 ApiError::resource_not_found("knowledge_document", revision.document_id)
             })?;
-        let chunks = state
+        let all_chunks = state
             .arango_document_store
             .list_chunks_by_revision(command.revision_id)
             .await
@@ -2496,8 +2496,37 @@ impl ContentService {
             .knowledge
             .list_typed_technical_facts(state, command.revision_id)
             .await?;
-        let chunk_count = chunks.len();
+        let library_extraction_prompt = repositories::catalog_repository::get_library_by_id(
+            &state.persistence.postgres,
+            command.library_id,
+        )
+        .await
+        .ok()
+        .flatten()
+        .and_then(|row| row.extraction_prompt);
+        let chunk_count = all_chunks.len();
         let graph_extract_parallelism = state.settings.ingestion_worker_concurrency.clamp(1, 8);
+
+        // Incremental graph update: skip chunks whose content has not changed
+        // compared to the parent revision.
+        let unchanged_chunk_ids =
+            find_unchanged_chunks_for_revision(state, command.revision_id).await;
+        let chunks: Vec<_> = if unchanged_chunk_ids.is_empty() {
+            all_chunks
+        } else {
+            let to_process: Vec<_> = all_chunks
+                .into_iter()
+                .filter(|c| !unchanged_chunk_ids.contains(&c.chunk_id))
+                .collect();
+            tracing::info!(
+                revision_id = %command.revision_id,
+                total_chunks = chunk_count,
+                unchanged = unchanged_chunk_ids.len(),
+                to_process = to_process.len(),
+                "incremental graph update: skipping unchanged chunks"
+            );
+            to_process
+        };
 
         let _ = state
             .arango_graph_store
@@ -2517,6 +2546,7 @@ impl ContentService {
             let revision = revision.clone();
             let command = command.clone();
             let revision_facts = revision_facts.clone();
+            let library_extraction_prompt = library_extraction_prompt.clone();
 
             async move {
                 let chunk_facts = revision_facts
@@ -2533,6 +2563,7 @@ impl ContentService {
                         &chunk,
                         &chunk_facts,
                         command.attempt_id,
+                        library_extraction_prompt,
                     ),
                 )
                 .await
@@ -3690,6 +3721,7 @@ fn build_canonical_graph_extraction_request(
     chunk: &KnowledgeChunkRow,
     technical_facts: &[TypedTechnicalFact],
     attempt_id: Option<Uuid>,
+    library_extraction_prompt: Option<String>,
 ) -> GraphExtractionRequest {
     GraphExtractionRequest {
         library_id: revision.library_id,
@@ -3747,7 +3779,59 @@ fn build_canonical_graph_extraction_request(
         revision_id: Some(revision.revision_id),
         activated_by_attempt_id: attempt_id,
         resume_hint: None,
+        library_extraction_prompt,
     }
+}
+
+/// For document updates, find chunks that haven't changed by comparing `literal_digest`.
+/// Returns the set of `chunk_id`s that can skip graph extraction.
+async fn find_unchanged_chunks_for_revision(
+    state: &AppState,
+    current_revision_id: Uuid,
+) -> HashSet<Uuid> {
+    // Look up the content revision to find a parent revision.
+    let content_revision = match repositories::content_repository::get_revision_by_id(
+        &state.persistence.postgres,
+        current_revision_id,
+    )
+    .await
+    {
+        Ok(Some(rev)) => rev,
+        _ => return HashSet::new(),
+    };
+
+    let parent_revision_id = match content_revision.parent_revision_id {
+        Some(id) => id,
+        None => return HashSet::new(),
+    };
+
+    // Load chunks from both revisions.
+    let current_chunks =
+        match state.arango_document_store.list_chunks_by_revision(current_revision_id).await {
+            Ok(chunks) => chunks,
+            Err(_) => return HashSet::new(),
+        };
+
+    let parent_chunks =
+        match state.arango_document_store.list_chunks_by_revision(parent_revision_id).await {
+            Ok(chunks) => chunks,
+            Err(_) => return HashSet::new(),
+        };
+
+    // Build digest set for parent chunks.
+    let parent_digests: HashSet<String> =
+        parent_chunks.iter().filter_map(|c| c.literal_digest.clone()).collect();
+
+    // Find current chunks whose digest matches a parent chunk.
+    current_chunks
+        .iter()
+        .filter_map(|c| {
+            c.literal_digest
+                .as_ref()
+                .filter(|d| parent_digests.contains(d.as_str()))
+                .map(|_| c.chunk_id)
+        })
+        .collect()
 }
 
 fn typed_fact_supports_chunk(fact: &TypedTechnicalFact, chunk: &KnowledgeChunkRow) -> bool {

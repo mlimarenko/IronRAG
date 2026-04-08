@@ -74,6 +74,7 @@ pub struct GraphExtractionRequest {
     pub revision_id: Option<uuid::Uuid>,
     pub activated_by_attempt_id: Option<uuid::Uuid>,
     pub resume_hint: Option<GraphExtractionResumeHint>,
+    pub library_extraction_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -116,6 +117,7 @@ pub struct GraphExtractionResumeState {
 pub struct GraphEntityCandidate {
     pub label: String,
     pub node_type: RuntimeNodeType,
+    pub sub_type: Option<String>,
     pub aliases: Vec<String>,
     pub summary: Option<String>,
 }
@@ -433,15 +435,15 @@ Resolve coreferences: when the text says \"it\", \"this system\", \"the API\", \
         "examples".to_string(),
         "Example 1 - API documentation chunk:\n\
 Input: \"FastAPI uses Pydantic for data validation. When you declare a parameter with a type annotation, FastAPI automatically validates the input and returns a 422 status code if validation fails.\"\n\
-Output: {\"entities\":[{\"label\":\"FastAPI\",\"node_type\":\"artifact\",\"aliases\":[],\"summary\":\"Python web framework with automatic data validation\"},{\"label\":\"Pydantic\",\"node_type\":\"artifact\",\"aliases\":[],\"summary\":\"Data validation library used by FastAPI\"},{\"label\":\"422\",\"node_type\":\"attribute\",\"aliases\":[\"422 Unprocessable Entity\"],\"summary\":\"HTTP status code returned when validation fails\"}],\"relations\":[{\"source_label\":\"FastAPI\",\"target_label\":\"Pydantic\",\"relation_type\":\"uses\",\"summary\":\"FastAPI uses Pydantic for data validation\"},{\"source_label\":\"FastAPI\",\"target_label\":\"422\",\"relation_type\":\"returns\",\"summary\":\"Returns 422 when input validation fails\"}]}\n\n\
+Output: {\"entities\":[{\"label\":\"FastAPI\",\"node_type\":\"artifact\",\"sub_type\":\"framework\",\"aliases\":[],\"summary\":\"Python web framework with automatic data validation\"},{\"label\":\"Pydantic\",\"node_type\":\"artifact\",\"sub_type\":\"library\",\"aliases\":[],\"summary\":\"Data validation library used by FastAPI\"},{\"label\":\"422\",\"node_type\":\"attribute\",\"sub_type\":\"http_status_code\",\"aliases\":[\"422 Unprocessable Entity\"],\"summary\":\"HTTP status code returned when validation fails\"}],\"relations\":[{\"source_label\":\"FastAPI\",\"target_label\":\"Pydantic\",\"relation_type\":\"uses\",\"summary\":\"FastAPI uses Pydantic for data validation\"},{\"source_label\":\"FastAPI\",\"target_label\":\"422\",\"relation_type\":\"returns\",\"summary\":\"Returns 422 when input validation fails\"}]}\n\n\
 Example 2 - Infrastructure chunk:\n\
 Input: \"The auth-service runs on port 8001 and depends on PostgreSQL for session storage. It authenticates users via JWT tokens signed with RS256.\"\n\
-Output: {\"entities\":[{\"label\":\"auth-service\",\"node_type\":\"artifact\",\"aliases\":[],\"summary\":\"Authentication service on port 8001\"},{\"label\":\"PostgreSQL\",\"node_type\":\"artifact\",\"aliases\":[\"Postgres\"],\"summary\":\"Database used for session storage\"},{\"label\":\"JWT\",\"node_type\":\"artifact\",\"aliases\":[\"JSON Web Token\"],\"summary\":\"Token format for authentication\"},{\"label\":\"RS256\",\"node_type\":\"artifact\",\"aliases\":[],\"summary\":\"RSA-SHA256 signing algorithm\"}],\"relations\":[{\"source_label\":\"auth-service\",\"target_label\":\"PostgreSQL\",\"relation_type\":\"depends_on\",\"summary\":\"Uses PostgreSQL for session storage\"},{\"source_label\":\"auth-service\",\"target_label\":\"JWT\",\"relation_type\":\"authenticates\",\"summary\":\"Authenticates users via JWT tokens\"},{\"source_label\":\"JWT\",\"target_label\":\"RS256\",\"relation_type\":\"uses\",\"summary\":\"Tokens signed with RS256 algorithm\"}]}".to_string(),
+Output: {\"entities\":[{\"label\":\"auth-service\",\"node_type\":\"artifact\",\"sub_type\":\"microservice\",\"aliases\":[],\"summary\":\"Authentication service on port 8001\"},{\"label\":\"PostgreSQL\",\"node_type\":\"artifact\",\"sub_type\":\"database\",\"aliases\":[\"Postgres\"],\"summary\":\"Database used for session storage\"},{\"label\":\"JWT\",\"node_type\":\"artifact\",\"sub_type\":\"token_format\",\"aliases\":[\"JSON Web Token\"],\"summary\":\"Token format for authentication\"},{\"label\":\"RS256\",\"node_type\":\"artifact\",\"sub_type\":\"signing_algorithm\",\"aliases\":[],\"summary\":\"RSA-SHA256 signing algorithm\"}],\"relations\":[{\"source_label\":\"auth-service\",\"target_label\":\"PostgreSQL\",\"relation_type\":\"depends_on\",\"summary\":\"Uses PostgreSQL for session storage\"},{\"source_label\":\"auth-service\",\"target_label\":\"JWT\",\"relation_type\":\"authenticates\",\"summary\":\"Authenticates users via JWT tokens\"},{\"source_label\":\"JWT\",\"target_label\":\"RS256\",\"relation_type\":\"uses\",\"summary\":\"Tokens signed with RS256 algorithm\"}]}".to_string(),
     ));
     sections.push((
         "schema".to_string(),
         format!(
-            "Return strict JSON with keys `entities` and `relations`. Each entity must include `label`, `node_type` (one of: `person`, `organization`, `location`, `event`, `artifact`, `natural`, `process`, `concept`, `attribute`, `entity`), `aliases`, and `summary`. Each relation must include `source_label`, `target_label`, `relation_type`, and `summary`. `relation_type` must be copied verbatim from this catalog: {}. Use lowercase ASCII snake_case only. Never translate, localize, paraphrase, or invent a new relation_type. If no concise summary is available, emit an empty string. If none fit exactly, omit the relation.",
+            "Return strict JSON with keys `entities` and `relations`. Each entity must include `label`, `node_type` (one of: `person`, `organization`, `location`, `event`, `artifact`, `natural`, `process`, `concept`, `attribute`, `entity`), `aliases`, `summary`, and optionally `sub_type` (a freeform specialization within the type, e.g. framework, database, algorithm, enzyme, microservice, protocol). Each relation must include `source_label`, `target_label`, `relation_type`, and `summary`. `relation_type` must be copied verbatim from this catalog: {}. Use lowercase ASCII snake_case only. Never translate, localize, paraphrase, or invent a new relation_type. If no concise summary is available, emit an empty string. If none fit exactly, omit the relation.",
             graph_identity::canonical_relation_type_catalog().join(", ")
         ),
     ));
@@ -468,6 +470,12 @@ Critical rules:\n\
             "domain_context".to_string(),
             format!("Document domain: {document_label}{section_path_text}"),
         ));
+    }
+    if let Some(library_prompt) = request.library_extraction_prompt.as_deref() {
+        let trimmed = library_prompt.trim();
+        if !trimmed.is_empty() {
+            sections.push(("library_context".to_string(), trimmed.to_string()));
+        }
     }
     sections.push((
         "structured_chunk".to_string(),
@@ -2258,6 +2266,7 @@ fn parse_entity_candidate(value: &serde_json::Value) -> Option<GraphEntityCandid
         return Some(GraphEntityCandidate {
             label: label.to_string(),
             node_type: RuntimeNodeType::Entity,
+            sub_type: None,
             aliases: Vec::new(),
             summary: None,
         });
@@ -2314,10 +2323,17 @@ fn parse_entity_candidate(value: &serde_json::Value) -> Option<GraphEntityCandid
         .unwrap_or_default();
 
     let node_type = refine_entity_type(label, node_type);
+    let sub_type = value
+        .get("sub_type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
 
     Some(GraphEntityCandidate {
         label: label.to_string(),
         node_type,
+        sub_type,
         aliases,
         summary: value
             .get("summary")
@@ -2607,6 +2623,7 @@ mod tests {
             revision_id: None,
             activated_by_attempt_id: None,
             resume_hint: None,
+            library_extraction_prompt: None,
         }
     }
 

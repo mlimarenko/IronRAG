@@ -23,7 +23,7 @@ use crate::{
     },
     services::{
         audit_service::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
-        catalog_service::{CreateLibraryCommand, CreateWorkspaceCommand},
+        catalog_service::{CreateLibraryCommand, CreateWorkspaceCommand, UpdateLibraryCommand},
     },
 };
 
@@ -51,6 +51,7 @@ pub struct CatalogLibraryResponse {
     pub slug: String,
     pub display_name: String,
     pub description: Option<String>,
+    pub extraction_prompt: Option<String>,
     pub lifecycle_state: String,
     pub ingestion_readiness: CatalogLibraryIngestionReadinessResponse,
 }
@@ -70,6 +71,16 @@ pub struct CreateCatalogLibraryRequest {
     pub description: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCatalogLibraryRequest {
+    pub slug: Option<String>,
+    pub display_name: String,
+    pub description: Option<String>,
+    pub extraction_prompt: Option<String>,
+    pub lifecycle_state: Option<String>,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/catalog/workspaces", get(list_workspaces).post(create_workspace))
@@ -79,7 +90,7 @@ pub fn router() -> Router<AppState> {
             get(list_libraries).post(create_library),
         )
         .route("/catalog/workspaces/{workspace_id}/libraries/{library_id}", delete(delete_library))
-        .route("/catalog/libraries/{library_id}", get(get_library))
+        .route("/catalog/libraries/{library_id}", get(get_library).put(update_library))
 }
 
 async fn list_workspaces(
@@ -321,6 +332,61 @@ async fn get_library(
     Ok(Json(map_library(library)))
 }
 
+async fn update_library(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Path(library_id): Path<Uuid>,
+    Json(payload): Json<UpdateCatalogLibraryRequest>,
+) -> Result<Json<CatalogLibraryResponse>, ApiError> {
+    let existing = state.canonical_services.catalog.get_library(&state, library_id).await?;
+    load_workspace_and_authorize(&auth, &state, existing.workspace_id, POLICY_WORKSPACE_ADMIN)
+        .await?;
+
+    let lifecycle_state = payload
+        .lifecycle_state
+        .as_deref()
+        .unwrap_or(lifecycle_state_label(&existing.lifecycle_state));
+    let library = state
+        .canonical_services
+        .catalog
+        .update_library(
+            &state,
+            UpdateLibraryCommand {
+                library_id,
+                slug: payload.slug,
+                display_name: payload.display_name,
+                description: payload.description,
+                extraction_prompt: payload.extraction_prompt,
+                lifecycle_state: parse_lifecycle_state_input(lifecycle_state)?,
+            },
+        )
+        .await?;
+
+    record_catalog_audit_event(
+        &state,
+        &auth,
+        request_id.map(|value| value.0.0),
+        "catalog.library.update",
+        "succeeded",
+        Some(format!("library {} updated", library.display_name)),
+        Some(format!(
+            "principal {} updated library {} in workspace {}",
+            auth.principal_id, library.id, library.workspace_id
+        )),
+        vec![AppendAuditEventSubjectCommand {
+            subject_kind: "library".to_string(),
+            subject_id: library.id,
+            workspace_id: Some(library.workspace_id),
+            library_id: Some(library.id),
+            document_id: None,
+        }],
+    )
+    .await;
+
+    Ok(Json(map_library(library)))
+}
+
 fn map_workspace(workspace: CatalogWorkspace) -> CatalogWorkspaceResponse {
     CatalogWorkspaceResponse {
         id: workspace.id,
@@ -337,11 +403,20 @@ fn map_library(library: CatalogLibrary) -> CatalogLibraryResponse {
         slug: library.slug,
         display_name: library.display_name,
         description: library.description,
+        extraction_prompt: library.extraction_prompt,
         lifecycle_state: lifecycle_state_label(&library.lifecycle_state).to_string(),
         ingestion_readiness: CatalogLibraryIngestionReadinessResponse {
             ready: library.ingestion_readiness.ready,
             missing_binding_purposes: library.ingestion_readiness.missing_binding_purposes,
         },
+    }
+}
+
+fn parse_lifecycle_state_input(value: &str) -> Result<CatalogLifecycleState, ApiError> {
+    match value {
+        "active" => Ok(CatalogLifecycleState::Active),
+        "archived" => Ok(CatalogLifecycleState::Archived),
+        other => Err(ApiError::BadRequest(format!("invalid lifecycle state: {other}"))),
     }
 }
 

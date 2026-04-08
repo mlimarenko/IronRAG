@@ -1335,7 +1335,9 @@ async fn workspace_audit_reader_gets_redacted_visible_events_only() -> Result<()
         let visible_path = format!("/v1/audit/events?workspaceId={}", fixture.workspace_id);
         let (status, body) = fixture.rest_get(&token, &visible_path).await?;
         assert_eq!(status, StatusCode::OK);
-        let events = body.as_array().context("/v1/audit/events must return an array")?;
+        let events = body["items"]
+            .as_array()
+            .context("/v1/audit/events must return items")?;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["requestId"], json!("governance-audit-visible"));
         assert_eq!(events[0]["redactedMessage"], json!("visible workspace event"));

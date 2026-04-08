@@ -50,6 +50,7 @@ pub struct UpdateLibraryCommand {
     pub slug: Option<String>,
     pub display_name: String,
     pub description: Option<String>,
+    pub extraction_prompt: Option<String>,
     pub lifecycle_state: CatalogLifecycleState,
 }
 
@@ -348,12 +349,15 @@ impl CatalogService {
         let display_name = normalize_display_name(&command.display_name, "displayName")?;
         let slug = normalize_optional_slug(command.slug.as_deref(), &display_name);
         let description = normalize_optional_text(command.description.as_deref());
+        let extraction_prompt =
+            command.extraction_prompt.as_deref().map(str::trim).filter(|value| !value.is_empty());
         let row = catalog_repository::update_library(
             &state.persistence.postgres,
             command.library_id,
             &slug,
             &display_name,
             description.as_deref(),
+            extraction_prompt,
             lifecycle_state_as_str(&command.lifecycle_state)
                 .map_err(CatalogLifecycleError::into_request_error)?,
         )
@@ -639,6 +643,7 @@ fn map_library_row(
         slug: row.slug,
         display_name: row.display_name,
         description: row.description,
+        extraction_prompt: row.extraction_prompt,
         lifecycle_state: parse_lifecycle_state(&row.lifecycle_state)
             .map_err(CatalogLifecycleError::into_persisted_error)?,
         ingestion_readiness,

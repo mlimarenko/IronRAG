@@ -1,0 +1,486 @@
+use std::collections::HashMap;
+
+use anyhow::Result;
+use sqlx::PgPool;
+use tracing::info;
+use uuid::Uuid;
+
+use crate::{
+    app::state::AppState,
+    infra::repositories::{self, RuntimeGraphEdgeRow, RuntimeGraphNodeRow},
+};
+
+/// Result summary of a community detection run.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct CommunityDetectionResult {
+    pub community_count: usize,
+    pub largest_community_size: usize,
+}
+
+/// Stateless community detection service using label propagation.
+pub struct CommunityDetectionService;
+
+impl CommunityDetectionService {
+    /// Run community detection on a library's graph.
+    ///
+    /// Uses label propagation: each node starts in its own community, then
+    /// iteratively adopts the most common community among its weighted
+    /// neighbours. Convergence usually happens within a handful of iterations.
+    pub async fn detect_communities(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+    ) -> Result<CommunityDetectionResult> {
+        let pool = &state.persistence.postgres;
+
+        let snapshot = repositories::get_runtime_graph_snapshot(pool, library_id).await?;
+        let projection_version = match snapshot {
+            Some(s) => s.projection_version,
+            None => {
+                return Ok(CommunityDetectionResult {
+                    community_count: 0,
+                    largest_community_size: 0,
+                });
+            }
+        };
+
+        let nodes =
+            repositories::list_runtime_graph_nodes_by_library(pool, library_id, projection_version)
+                .await?;
+        let edges =
+            repositories::list_runtime_graph_edges_by_library(pool, library_id, projection_version)
+                .await?;
+
+        if nodes.is_empty() {
+            return Ok(CommunityDetectionResult { community_count: 0, largest_community_size: 0 });
+        }
+
+        let mut community = run_label_propagation(&nodes, &edges);
+
+        // Renumber communities to contiguous 0..N
+        let mut comm_map: HashMap<usize, usize> = HashMap::new();
+        let mut next_id = 0usize;
+        for comm in community.values() {
+            comm_map.entry(*comm).or_insert_with(|| {
+                let id = next_id;
+                next_id += 1;
+                id
+            });
+        }
+        for comm in community.values_mut() {
+            *comm = comm_map[comm];
+        }
+
+        // Compute community sizes
+        let mut sizes: HashMap<usize, usize> = HashMap::new();
+        for &comm in community.values() {
+            *sizes.entry(comm).or_default() += 1;
+        }
+
+        // Find top entities per community (by support_count)
+        let mut comm_entities: HashMap<usize, Vec<(String, i32)>> = HashMap::new();
+        for node in &nodes {
+            let comm = community[&node.id];
+            comm_entities.entry(comm).or_default().push((node.label.clone(), node.support_count));
+        }
+        for entities in comm_entities.values_mut() {
+            entities.sort_by(|a, b| b.1.cmp(&a.1));
+            entities.truncate(10);
+        }
+
+        // Count edges per community
+        let mut comm_edge_counts: HashMap<usize, usize> = HashMap::new();
+        for edge in &edges {
+            let from_comm = community.get(&edge.from_node_id);
+            let to_comm = community.get(&edge.to_node_id);
+            if let (Some(&fc), Some(&tc)) = (from_comm, to_comm) {
+                if fc == tc {
+                    *comm_edge_counts.entry(fc).or_default() += 1;
+                }
+            }
+        }
+
+        // Persist results
+        persist_community_assignments(pool, &community, &nodes).await?;
+        persist_communities(pool, library_id, &sizes, &comm_entities, &comm_edge_counts).await?;
+
+        let largest = sizes.values().max().copied().unwrap_or(0);
+
+        info!(
+            library_id = %library_id,
+            communities = next_id,
+            largest = largest,
+            "community detection complete"
+        );
+
+        Ok(CommunityDetectionResult { community_count: next_id, largest_community_size: largest })
+    }
+}
+
+/// Run community detection after ingestion, mirroring the entity resolution
+/// pattern. Skips libraries with fewer than 10 nodes.
+pub async fn detect_after_ingestion(
+    state: &AppState,
+    library_id: Uuid,
+) -> Result<CommunityDetectionResult> {
+    let pool = &state.persistence.postgres;
+    let snapshot = repositories::get_runtime_graph_snapshot(pool, library_id).await?;
+    let node_count = snapshot.as_ref().map_or(0, |s| s.node_count);
+    if node_count < 10 {
+        return Ok(CommunityDetectionResult { community_count: 0, largest_community_size: 0 });
+    }
+    CommunityDetectionService.detect_communities(state, library_id).await
+}
+
+// ---------------------------------------------------------------------------
+// Label propagation algorithm
+// ---------------------------------------------------------------------------
+
+fn run_label_propagation(
+    nodes: &[RuntimeGraphNodeRow],
+    edges: &[RuntimeGraphEdgeRow],
+) -> HashMap<Uuid, usize> {
+    // Build adjacency list: node_id -> [(neighbour_id, weight)]
+    let mut adj: HashMap<Uuid, Vec<(Uuid, i32)>> = HashMap::new();
+    for edge in edges {
+        adj.entry(edge.from_node_id).or_default().push((edge.to_node_id, edge.support_count));
+        adj.entry(edge.to_node_id).or_default().push((edge.from_node_id, edge.support_count));
+    }
+
+    // Initialize: each node in its own community
+    let mut community: HashMap<Uuid, usize> = HashMap::new();
+    for (i, node) in nodes.iter().enumerate() {
+        community.insert(node.id, i);
+    }
+
+    // Iterate
+    let max_iterations: u64 = 20;
+    let mut node_ids: Vec<Uuid> = nodes.iter().map(|n| n.id).collect();
+
+    for iteration in 0..max_iterations {
+        let mut changed = false;
+
+        // Deterministic shuffle based on node id bytes + iteration
+        node_ids.sort_by_key(|id| {
+            let bytes = id.as_bytes();
+            u64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ])
+            .wrapping_add(iteration)
+        });
+
+        for &node_id in &node_ids {
+            let neighbours = match adj.get(&node_id) {
+                Some(n) if !n.is_empty() => n,
+                _ => continue,
+            };
+
+            // Count weighted votes for each community among neighbours
+            let mut votes: HashMap<usize, i32> = HashMap::new();
+            for &(neighbour_id, weight) in neighbours {
+                if let Some(&comm) = community.get(&neighbour_id) {
+                    *votes.entry(comm).or_default() += weight;
+                }
+            }
+
+            // Pick community with most weighted votes
+            if let Some((&best_comm, _)) = votes.iter().max_by_key(|&(_, &v)| v) {
+                let current = community[&node_id];
+                if best_comm != current {
+                    community.insert(node_id, best_comm);
+                    changed = true;
+                }
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    community
+}
+
+// ---------------------------------------------------------------------------
+// Persistence helpers
+// ---------------------------------------------------------------------------
+
+async fn persist_community_assignments(
+    pool: &PgPool,
+    community: &HashMap<Uuid, usize>,
+    nodes: &[RuntimeGraphNodeRow],
+) -> Result<()> {
+    // Batch updates in chunks of 500
+    let updates: Vec<(Uuid, i32)> = nodes
+        .iter()
+        .filter_map(|node| community.get(&node.id).map(|&comm| (node.id, comm as i32)))
+        .collect();
+
+    for chunk in updates.chunks(500) {
+        let mut ids: Vec<Uuid> = Vec::with_capacity(chunk.len());
+        let mut comms: Vec<i32> = Vec::with_capacity(chunk.len());
+        for &(id, comm) in chunk {
+            ids.push(id);
+            comms.push(comm);
+        }
+
+        sqlx::query(
+            "UPDATE runtime_graph_node
+             SET community_id = data.community_id,
+                 community_level = 0,
+                 updated_at = now()
+             FROM unnest($1::uuid[], $2::integer[]) AS data(id, community_id)
+             WHERE runtime_graph_node.id = data.id",
+        )
+        .bind(&ids)
+        .bind(&comms)
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn persist_communities(
+    pool: &PgPool,
+    library_id: Uuid,
+    sizes: &HashMap<usize, usize>,
+    comm_entities: &HashMap<usize, Vec<(String, i32)>>,
+    comm_edge_counts: &HashMap<usize, usize>,
+) -> Result<()> {
+    // Delete stale community records for this library, then insert fresh ones
+    sqlx::query("DELETE FROM runtime_graph_community WHERE library_id = $1")
+        .bind(library_id)
+        .execute(pool)
+        .await?;
+
+    for (&comm_id, &node_count) in sizes {
+        let edge_count = comm_edge_counts.get(&comm_id).copied().unwrap_or(0);
+        let top_entities: Vec<String> = comm_entities
+            .get(&comm_id)
+            .map(|entities| entities.iter().map(|(name, _)| name.clone()).collect())
+            .unwrap_or_default();
+
+        sqlx::query(
+            "INSERT INTO runtime_graph_community
+                (library_id, community_id, level, node_count, edge_count, top_entities)
+             VALUES ($1, $2, 0, $3, $4, $5)",
+        )
+        .bind(library_id)
+        .bind(comm_id as i32)
+        .bind(node_count as i32)
+        .bind(edge_count as i32)
+        .bind(&top_entities)
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Community summary generation
+// ---------------------------------------------------------------------------
+
+/// Generate deterministic summaries for detected communities using top entities
+/// and the relationships between them. Returns the number of communities updated.
+pub async fn generate_community_summaries(state: &AppState, library_id: Uuid) -> Result<usize> {
+    let pool = &state.persistence.postgres;
+
+    let communities = sqlx::query_as::<_, (i32, Vec<String>, i32, i32)>(
+        "SELECT community_id, top_entities, node_count, edge_count
+         FROM runtime_graph_community
+         WHERE library_id = $1
+         ORDER BY node_count DESC",
+    )
+    .bind(library_id)
+    .fetch_all(pool)
+    .await?;
+
+    if communities.is_empty() {
+        return Ok(0);
+    }
+
+    let snapshot = repositories::get_runtime_graph_snapshot(pool, library_id).await?;
+    let projection_version = match snapshot {
+        Some(s) => s.projection_version,
+        None => return Ok(0),
+    };
+
+    let nodes =
+        repositories::list_runtime_graph_nodes_by_library(pool, library_id, projection_version)
+            .await?;
+    let edges =
+        repositories::list_runtime_graph_edges_by_library(pool, library_id, projection_version)
+            .await?;
+
+    // Build node label lookup and community membership
+    let node_label: HashMap<Uuid, &str> = nodes.iter().map(|n| (n.id, n.label.as_str())).collect();
+    let node_comm_rows = sqlx::query_as::<_, (Uuid, Option<i32>)>(
+        "SELECT id, community_id FROM runtime_graph_node
+         WHERE library_id = $1 AND projection_version = $2",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .fetch_all(pool)
+    .await?;
+    let node_community: HashMap<Uuid, i32> =
+        node_comm_rows.into_iter().filter_map(|(id, comm)| comm.map(|c| (id, c))).collect();
+
+    let mut updated = 0usize;
+    for (community_id, top_entities, node_count, _edge_count) in &communities {
+        // Find edges where both endpoints belong to this community
+        let intra_edges: Vec<_> = edges
+            .iter()
+            .filter(|e| {
+                node_community.get(&e.from_node_id) == Some(community_id)
+                    && node_community.get(&e.to_node_id) == Some(community_id)
+            })
+            .take(5)
+            .collect();
+
+        let top_display: Vec<&str> = top_entities.iter().take(3).map(|s| s.as_str()).collect();
+        let entity_list = top_display.join(", ");
+
+        let mut summary =
+            format!("Community of {node_count} entities centered around {entity_list}.",);
+
+        if !intra_edges.is_empty() {
+            let rel_descriptions: Vec<String> = intra_edges
+                .iter()
+                .map(|e| {
+                    let from = node_label.get(&e.from_node_id).copied().unwrap_or("?");
+                    let to = node_label.get(&e.to_node_id).copied().unwrap_or("?");
+                    format!("{from} {} {to}", e.relation_type)
+                })
+                .collect();
+            summary.push_str(&format!(" Key relationships: {}.", rel_descriptions.join(", ")));
+        }
+
+        sqlx::query(
+            "UPDATE runtime_graph_community SET summary = $1
+             WHERE library_id = $2 AND community_id = $3",
+        )
+        .bind(&summary)
+        .bind(library_id)
+        .bind(community_id)
+        .execute(pool)
+        .await?;
+
+        updated += 1;
+    }
+
+    info!(
+        library_id = %library_id,
+        updated = updated,
+        "community summaries generated"
+    );
+
+    Ok(updated)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn make_node(id: Uuid, label: &str, support_count: i32) -> RuntimeGraphNodeRow {
+        RuntimeGraphNodeRow {
+            id,
+            library_id: Uuid::nil(),
+            canonical_key: label.to_lowercase(),
+            label: label.to_string(),
+            node_type: "concept".to_string(),
+            aliases_json: serde_json::json!([]),
+            summary: None,
+            metadata_json: serde_json::json!({}),
+            support_count,
+            projection_version: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn make_edge(from: Uuid, to: Uuid, support_count: i32) -> RuntimeGraphEdgeRow {
+        RuntimeGraphEdgeRow {
+            id: Uuid::new_v4(),
+            library_id: Uuid::nil(),
+            from_node_id: from,
+            to_node_id: to,
+            relation_type: "related_to".to_string(),
+            canonical_key: format!("{from}|{to}"),
+            summary: None,
+            weight: Some(1.0),
+            support_count,
+            metadata_json: serde_json::json!({}),
+            projection_version: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn triangle_forms_single_community() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let c = Uuid::new_v4();
+
+        let nodes =
+            vec![make_node(a, "Node A", 3), make_node(b, "Node B", 2), make_node(c, "Node C", 1)];
+        let edges = vec![make_edge(a, b, 5), make_edge(b, c, 5), make_edge(a, c, 5)];
+
+        let community = run_label_propagation(&nodes, &edges);
+
+        // All three nodes should be in the same community
+        assert_eq!(community[&a], community[&b]);
+        assert_eq!(community[&b], community[&c]);
+    }
+
+    #[test]
+    fn disconnected_components_get_different_communities() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let c = Uuid::new_v4();
+        let d = Uuid::new_v4();
+
+        let nodes = vec![
+            make_node(a, "Node A", 1),
+            make_node(b, "Node B", 1),
+            make_node(c, "Node C", 1),
+            make_node(d, "Node D", 1),
+        ];
+        // Two disconnected edges: a-b and c-d
+        let edges = vec![make_edge(a, b, 1), make_edge(c, d, 1)];
+
+        let community = run_label_propagation(&nodes, &edges);
+
+        // a and b in one community, c and d in another
+        assert_eq!(community[&a], community[&b]);
+        assert_eq!(community[&c], community[&d]);
+        assert_ne!(community[&a], community[&c]);
+    }
+
+    #[test]
+    fn isolated_nodes_stay_in_own_community() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+
+        let nodes = vec![make_node(a, "Node A", 1), make_node(b, "Node B", 1)];
+        let edges: Vec<RuntimeGraphEdgeRow> = vec![];
+
+        let community = run_label_propagation(&nodes, &edges);
+
+        assert_ne!(community[&a], community[&b]);
+    }
+
+    #[test]
+    fn empty_graph_returns_empty() {
+        let community = run_label_propagation(&[], &[]);
+        assert!(community.is_empty());
+    }
+}

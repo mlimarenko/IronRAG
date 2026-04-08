@@ -1312,6 +1312,78 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/documents/batch-delete:
+    post:
+      tags: [content]
+      summary: Delete multiple canonical content documents in a single batch
+      operationId: batchDeleteContentDocuments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchDocumentIdsRequest"
+      responses:
+        "200":
+          description: Batch delete accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchDocumentActionResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/documents/batch-cancel:
+    post:
+      tags: [content]
+      summary: Cancel processing for multiple canonical content documents in a single batch
+      operationId: batchCancelContentDocuments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchDocumentIdsRequest"
+      responses:
+        "200":
+          description: Batch cancel accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchDocumentActionResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/documents/batch-reprocess:
+    post:
+      tags: [content]
+      summary: Reprocess multiple canonical content documents in a single batch
+      operationId: batchReprocessContentDocuments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchDocumentIdsRequest"
+      responses:
+        "200":
+          description: Batch reprocess accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchDocumentActionResponse"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
   /v1/content/documents/{documentId}:
     get:
       tags: [content]
@@ -2904,15 +2976,38 @@ paths:
           required: false
           schema:
             type: boolean
+        - in: query
+          name: surfaceKind
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: resultKind
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: search
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+        - in: query
+          name: offset
+          required: false
+          schema:
+            type: integer
       responses:
         "200":
           description: Canonical audit events with visible subjects
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/AuditEventResponse"
+                $ref: "#/components/schemas/AuditEventPageResponse"
         "401":
           description: Missing or insufficient authorization
           content:
@@ -2999,6 +3094,40 @@ components:
     ApiErrorBody: *genericObject
     AppendContentDocumentRequest: *genericObject
     AuditEventResponse: *genericObject
+    AuditEventPageResponse: *genericObject
+    BatchDocumentIdsRequest:
+      type: object
+      additionalProperties: false
+      required: [documentIds]
+      properties:
+        documentIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          minItems: 1
+          maxItems: 500
+    BatchDocumentActionResponse:
+      type: object
+      additionalProperties: false
+      required: [accepted, rejected]
+      properties:
+        accepted:
+          type: integer
+        rejected:
+          type: integer
+        errors:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [documentId, reason]
+            properties:
+              documentId:
+                type: string
+                format: uuid
+              reason:
+                type: string
     BillingCharge: *genericObject
     BillingExecutionCost: *genericObject
     BillingProviderCall: *genericObject
@@ -3288,6 +3417,8 @@ components:
         [
           libraryId,
           documentCountsByReadiness,
+          nodeCount,
+          edgeCount,
           graphReadyDocumentCount,
           graphSparseDocumentCount,
           typedFactDocumentCount,
@@ -3301,6 +3432,10 @@ components:
           type: object
           additionalProperties:
             type: integer
+        nodeCount:
+          type: integer
+        edgeCount:
+          type: integer
         graphReadyDocumentCount:
           type: integer
         graphSparseDocumentCount:

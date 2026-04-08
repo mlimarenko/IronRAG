@@ -1,6 +1,124 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme inline {
+  /* Colors — mapped from CSS custom properties */
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+
+  --color-sidebar: hsl(var(--sidebar-background));
+  --color-sidebar-foreground: hsl(var(--sidebar-foreground));
+  --color-sidebar-primary: hsl(var(--sidebar-primary));
+  --color-sidebar-primary-foreground: hsl(var(--sidebar-primary-foreground));
+  --color-sidebar-accent: hsl(var(--sidebar-accent));
+  --color-sidebar-accent-foreground: hsl(var(--sidebar-accent-foreground));
+  --color-sidebar-border: hsl(var(--sidebar-border));
+  --color-sidebar-ring: hsl(var(--sidebar-ring));
+
+  --color-shell: hsl(var(--shell-bg));
+  --color-shell-foreground: hsl(var(--shell-foreground));
+  --color-shell-muted: hsl(var(--shell-muted));
+  --color-shell-active: hsl(var(--shell-active));
+  --color-shell-hover: hsl(var(--shell-hover));
+  --color-shell-border: hsl(var(--shell-border));
+
+  --color-surface: hsl(var(--surface));
+  --color-surface-raised: hsl(var(--surface-raised));
+  --color-surface-sunken: hsl(var(--surface-sunken));
+  --color-surface-overlay: hsl(var(--surface-overlay));
+
+  --color-status-ready: hsl(var(--status-ready));
+  --color-status-ready-bg: hsl(var(--status-ready-bg));
+  --color-status-processing: hsl(var(--status-processing));
+  --color-status-processing-bg: hsl(var(--status-processing-bg));
+  --color-status-warning: hsl(var(--status-warning));
+  --color-status-warning-bg: hsl(var(--status-warning-bg));
+  --color-status-failed: hsl(var(--status-failed));
+  --color-status-failed-bg: hsl(var(--status-failed-bg));
+  --color-status-sparse: hsl(var(--status-sparse));
+  --color-status-sparse-bg: hsl(var(--status-sparse-bg));
+
+  /* Border radius */
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+
+  /* Box shadows */
+  --shadow-soft: 0 1px 2px 0 hsl(var(--foreground) / 0.04), 0 0 0 1px hsl(var(--border) / 0.5);
+  --shadow-lifted: 0 4px 16px -4px hsl(var(--foreground) / 0.1), 0 2px 4px -2px hsl(var(--foreground) / 0.04), 0 0 0 1px hsl(var(--border) / 0.4);
+  --shadow-elevated: 0 12px 32px -8px hsl(var(--foreground) / 0.14), 0 4px 8px -4px hsl(var(--foreground) / 0.06), 0 0 0 1px hsl(var(--border) / 0.3);
+  --shadow-glow-primary: 0 0 20px -4px hsl(var(--primary) / 0.2);
+  --shadow-inner-top: inset 0 1px 0 hsl(0 0% 100% / 0.06);
+
+  /* Keyframes */
+  --animate-accordion-down: accordion-down 0.2s ease-out;
+  --animate-accordion-up: accordion-up 0.2s ease-out;
+  --animate-pulse-slow: pulse-slow 2s ease-in-out infinite;
+  --animate-spin-slow: spin-slow 3s linear infinite;
+  --animate-fade-in: fade-in 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-slide-in-right: slide-in-right 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-scale-in: scale-in 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-float: float 3s ease-in-out infinite;
+
+  @keyframes accordion-down {
+    from { height: 0; }
+    to { height: var(--radix-accordion-content-height); }
+  }
+  @keyframes accordion-up {
+    from { height: var(--radix-accordion-content-height); }
+    to { height: 0; }
+  }
+  @keyframes pulse-slow {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+  @keyframes spin-slow {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+  @keyframes fade-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes slide-in-right {
+    from { opacity: 0; transform: translateX(12px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+  @keyframes scale-in {
+    from { opacity: 0; transform: scale(0.96); }
+    to { opacity: 1; transform: scale(1); }
+  }
+  @keyframes float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-4px); }
+  }
+}
 
 @layer base {
   :root {
@@ -34,7 +152,7 @@
 
     --radius: 0.625rem;
 
-    /* Status colors — richer, more saturated */
+    /* Status colors */
     --status-ready: 152 62% 36%;
     --status-ready-bg: 152 55% 94%;
     --status-ready-ring: 152 55% 82%;
@@ -51,7 +169,7 @@
     --status-sparse-bg: 26 60% 95%;
     --status-sparse-ring: 26 50% 84%;
 
-    /* Shell — deeper, richer */
+    /* Shell */
     --shell-bg: 225 32% 10%;
     --shell-foreground: 224 20% 94%;
     --shell-muted: 224 14% 50%;
@@ -163,7 +281,7 @@
 }
 
 @layer components {
-  /* Workbench surface — the workhorse panel */
+  /* Workbench surface */
   .workbench-surface {
     @apply bg-card rounded-xl border;
     box-shadow:
@@ -172,13 +290,13 @@
       0 1px 2px -1px hsl(var(--foreground) / 0.03);
   }
 
-  /* Page header — subtle gradient strip */
+  /* Page header */
   .page-header {
     @apply px-6 py-4 border-b;
     background: linear-gradient(180deg, hsl(var(--card)), hsl(var(--background)));
   }
 
-  /* Status badges — layered with ring + bg + subtle inner glow */
+  /* Status badges */
   .status-badge {
     @apply inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold tracking-wide uppercase;
     box-shadow: inset 0 1px 0 hsl(0 0% 100% / 0.15);
@@ -242,7 +360,7 @@
     background: hsl(var(--status-failed-bg));
   }
 
-  /* Section label — editorial */
+  /* Section label */
   .section-label {
     @apply text-[10px] font-bold uppercase tracking-[0.1em];
     color: hsl(var(--muted-foreground));

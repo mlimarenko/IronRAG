@@ -1,8 +1,23 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::sync::Mutex;
 
 use anyhow::Context;
 use futures::future::join_all;
+use sqlx;
 use uuid::Uuid;
+
+const EMBEDDING_CACHE_MAX_ENTRIES: usize = 1000;
+
+static EMBEDDING_CACHE: std::sync::LazyLock<Mutex<HashMap<u64, Vec<f32>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn embedding_cache_key(question: &str, model: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    question.hash(&mut hasher);
+    model.hash(&mut hasher);
+    hasher.finish()
+}
 
 use crate::{
     agent_runtime::{pipeline::try_op::run_async_try_op, request::build_provider_request},
@@ -624,7 +639,9 @@ pub(crate) async fn prepare_answer_query(
         library_context.as_ref().and_then(|context| context.warning.as_ref()),
     );
     apply_query_execution_library_summary(&mut structured.diagnostics, library_context.as_ref());
-    let answer_context = library_context.as_ref().map_or_else(
+    let community_matches = search_community_summaries(state, library_id, &question, 3).await;
+    let community_context_text = format_community_context(&community_matches);
+    let mut answer_context = library_context.as_ref().map_or_else(
         || structured.context_text.clone(),
         |context| {
             assemble_answer_context(
@@ -636,6 +653,9 @@ pub(crate) async fn prepare_answer_query(
             )
         },
     );
+    if let Some(community_text) = &community_context_text {
+        answer_context = format!("{community_text}\n\n{answer_context}");
+    }
 
     let embedding_usage = structured.embedding_usage.clone();
     Ok(PreparedAnswerQueryResult { structured, answer_context, embedding_usage })
@@ -710,12 +730,16 @@ async fn generate_answer_stage(
     )
     .await?;
     let canonical_evidence = load_canonical_answer_evidence(state, execution_id).await?;
+    let community_matches =
+        search_community_summaries(state, library_id, effective_question, 3).await;
+    let community_context_text = format_community_context(&community_matches);
     let canonical_answer_context = build_canonical_answer_context(
         effective_question,
         &prepared.structured,
         &canonical_evidence,
         &canonical_answer_chunks,
         &prepared.answer_context,
+        community_context_text.as_deref(),
     );
     let (answer, provider, usage_json) = if canonical_answer_context.trim().is_empty() {
         let answer = "No grounded evidence is available in the active library yet.".to_string();
@@ -1006,12 +1030,68 @@ fn selected_fact_ids_for_canonical_evidence(
     fact_ids
 }
 
+async fn search_community_summaries(
+    state: &AppState,
+    library_id: Uuid,
+    question: &str,
+    limit: usize,
+) -> Vec<(i32, String, String)> {
+    let communities = sqlx::query_as::<_, (i32, Option<String>, Vec<String>, i32)>(
+        "SELECT community_id, summary, top_entities, node_count
+         FROM runtime_graph_community
+         WHERE library_id = $1 AND summary IS NOT NULL
+         ORDER BY node_count DESC",
+    )
+    .bind(library_id)
+    .fetch_all(&state.persistence.postgres)
+    .await
+    .unwrap_or_default();
+
+    let question_lower = question.to_ascii_lowercase();
+    let question_words: Vec<&str> = question_lower.split_whitespace().collect();
+
+    let mut scored: Vec<_> = communities
+        .into_iter()
+        .filter_map(|(cid, summary, entities, _)| {
+            let summary = summary?;
+            let summary_lower = summary.to_ascii_lowercase();
+            let entity_text = entities.join(" ").to_ascii_lowercase();
+
+            let score: usize = question_words
+                .iter()
+                .filter(|w| {
+                    w.len() > 2 && (summary_lower.contains(**w) || entity_text.contains(**w))
+                })
+                .count();
+
+            if score > 0 { Some((score, cid, summary, entities.join(", "))) } else { None }
+        })
+        .collect();
+
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.truncate(limit);
+
+    scored.into_iter().map(|(_, cid, summary, entities)| (cid, summary, entities)).collect()
+}
+
+fn format_community_context(matches: &[(i32, String, String)]) -> Option<String> {
+    if matches.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = matches
+        .iter()
+        .map(|(_, summary, entities)| format!("- {summary} (key entities: {entities})"))
+        .collect();
+    Some(format!("Knowledge graph communities:\n{}", lines.join("\n")))
+}
+
 fn build_canonical_answer_context(
     question: &str,
     structured: &RuntimeStructuredQueryResult,
     evidence: &CanonicalAnswerEvidence,
     canonical_answer_chunks: &[RuntimeMatchedChunk],
     fallback_context: &str,
+    community_context: Option<&str>,
 ) -> String {
     let focused_document_id = focused_answer_document_id(question, canonical_answer_chunks);
     let focused_document_label = focused_document_id.and_then(|document_id| {
@@ -1071,6 +1151,12 @@ fn build_canonical_answer_context(
     let technical_fact_section = render_canonical_technical_fact_section(&filtered_technical_facts);
     if !technical_fact_section.is_empty() {
         sections.push(technical_fact_section);
+    }
+
+    if let Some(community_text) = community_context {
+        if !community_text.is_empty() {
+            sections.push(community_text.to_string());
+        }
     }
 
     let prepared_segment_section = render_prepared_segment_section(&filtered_structured_blocks);
@@ -1384,17 +1470,43 @@ async fn embed_question(
         .ok_or_else(|| {
             anyhow::anyhow!("active embedding binding is not configured for this library")
         })?;
+
+    let trimmed_input = question.trim().to_string();
+    let cache_key = embedding_cache_key(&trimmed_input, &embedding_binding.model_name);
+
+    if let Ok(cache) = EMBEDDING_CACHE.lock() {
+        if let Some(cached_embedding) = cache.get(&cache_key) {
+            return Ok(QuestionEmbeddingResult {
+                embedding: cached_embedding.clone(),
+                provider_kind: embedding_binding.provider_kind,
+                model_name: embedding_binding.model_name,
+                usage_json: serde_json::json!({"cached": true}),
+            });
+        }
+    }
+
     let response = state
         .llm_gateway
         .embed(EmbeddingRequest {
             provider_kind: embedding_binding.provider_kind,
             model_name: embedding_binding.model_name,
-            input: question.trim().to_string(),
+            input: trimmed_input,
             api_key_override: Some(embedding_binding.api_key),
             base_url_override: embedding_binding.provider_base_url,
         })
         .await
         .context("failed to embed runtime query")?;
+
+    if let Ok(mut cache) = EMBEDDING_CACHE.lock() {
+        if cache.len() >= EMBEDDING_CACHE_MAX_ENTRIES {
+            // Evict an arbitrary entry when the cache is full.
+            if let Some(&evict_key) = cache.keys().next() {
+                cache.remove(&evict_key);
+            }
+        }
+        cache.insert(cache_key, response.embedding.clone());
+    }
+
     Ok(QuestionEmbeddingResult {
         embedding: response.embedding,
         provider_kind: response.provider_kind,
@@ -1468,60 +1580,67 @@ async fn retrieve_document_chunks(
     question_embedding: &[f32],
     document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
 ) -> anyhow::Result<Vec<RuntimeMatchedChunk>> {
-    let vector_hits = if let Some(context) =
-        resolve_runtime_vector_search_context(state, library_id, provider_profile).await?
-    {
-        join_all(
-            state
-                .arango_search_store
-                .search_chunk_vectors_by_similarity(
-                    library_id,
-                    &context.model_catalog_id.to_string(),
-                    context.freshness_generation,
-                    question_embedding,
-                    limit.max(1),
-                    Some(16),
-                )
-                .await
-                .context("failed to search canonical chunk vectors for runtime query")?
-                .into_iter()
-                .map(|hit| async move {
-                    load_runtime_knowledge_chunk(state, hit.chunk_id).await.ok().and_then(|chunk| {
-                        map_chunk_hit(chunk, hit.score as f32, document_index, &plan.keywords)
-                    })
-                }),
-        )
-        .await
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-
-    let mut lexical_hits = Vec::new();
+    let lexical_queries = build_lexical_queries(question, plan);
     let lexical_limit = limit.saturating_mul(2).max(24);
-    for lexical_query in build_lexical_queries(question, plan) {
-        let hits = state
+    let plan_keywords = &plan.keywords;
+
+    let vector_future = async {
+        let context =
+            resolve_runtime_vector_search_context(state, library_id, provider_profile).await?;
+        let Some(context) = context else {
+            return Ok::<Vec<RuntimeMatchedChunk>, anyhow::Error>(Vec::new());
+        };
+        let raw_hits = state
             .arango_search_store
-            .search_chunks(library_id, &lexical_query, lexical_limit)
+            .search_chunk_vectors_by_similarity(
+                library_id,
+                &context.model_catalog_id.to_string(),
+                context.freshness_generation,
+                question_embedding,
+                limit.max(1),
+                Some(16),
+            )
             .await
-            .with_context(|| {
-                format!(
-                    "failed to run lexical Arango chunk search for runtime query: {lexical_query}"
-                )
-            })?;
-        let query_hits = join_all(hits.into_iter().map(|hit| async move {
+            .context("failed to search canonical chunk vectors for runtime query")?;
+        let hits = join_all(raw_hits.into_iter().map(|hit| async move {
             load_runtime_knowledge_chunk(state, hit.chunk_id).await.ok().and_then(|chunk| {
-                map_chunk_hit(chunk, hit.score as f32, document_index, &plan.keywords)
+                map_chunk_hit(chunk, hit.score as f32, document_index, plan_keywords)
             })
         }))
         .await
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
-        lexical_hits = merge_chunks(lexical_hits, query_hits, lexical_limit);
-    }
+        Ok(hits)
+    };
+
+    let lexical_future = async {
+        let mut lexical_hits = Vec::new();
+        for lexical_query in lexical_queries {
+            let hits = state
+                .arango_search_store
+                .search_chunks(library_id, &lexical_query, lexical_limit)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to run lexical Arango chunk search for runtime query: {lexical_query}"
+                    )
+                })?;
+            let query_hits = join_all(hits.into_iter().map(|hit| async move {
+                load_runtime_knowledge_chunk(state, hit.chunk_id).await.ok().and_then(|chunk| {
+                    map_chunk_hit(chunk, hit.score as f32, document_index, plan_keywords)
+                })
+            }))
+            .await
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+            lexical_hits = merge_chunks(lexical_hits, query_hits, lexical_limit);
+        }
+        Ok::<Vec<RuntimeMatchedChunk>, anyhow::Error>(lexical_hits)
+    };
+
+    let (vector_hits, lexical_hits) = tokio::try_join!(vector_future, lexical_future)?;
 
     Ok(merge_chunks(vector_hits, lexical_hits, limit))
 }
@@ -1757,6 +1876,10 @@ fn build_lexical_queries(question: &str, plan: &RuntimeQueryPlan) -> Vec<String>
     if !plan.low_level_keywords.is_empty() {
         push_query(plan.low_level_keywords.join(" "));
     }
+    // Use concept_keywords for broader text search when available.
+    if !plan.concept_keywords.is_empty() {
+        push_query(plan.concept_keywords.join(" "));
+    }
     if plan.keywords.len() > 1 {
         push_query(plan.keywords.join(" "));
     }
@@ -1930,12 +2053,15 @@ fn lexical_entity_hits(
     plan: &RuntimeQueryPlan,
     graph_index: &QueryGraphIndex,
 ) -> Vec<RuntimeMatchedEntity> {
+    // Prefer entity_keywords for entity search when available; fall back to all keywords.
+    let search_keywords: &[String] =
+        if plan.entity_keywords.is_empty() { &plan.keywords } else { &plan.entity_keywords };
     let mut hits = graph_index
         .nodes
         .values()
         .filter(|node| node.node_type != "document")
         .filter(|node| {
-            plan.keywords.iter().any(|keyword| {
+            search_keywords.iter().any(|keyword| {
                 node.label.to_ascii_lowercase().contains(keyword)
                     || node.aliases.iter().any(|alias| alias.to_ascii_lowercase().contains(keyword))
             })
@@ -6266,6 +6392,8 @@ Trailing details";
             keywords: vec!["rustrag".to_string(), "graph".to_string()],
             high_level_keywords: vec!["rustrag".to_string()],
             low_level_keywords: vec!["graph".to_string()],
+            entity_keywords: vec!["rustrag".to_string()],
+            concept_keywords: vec!["graph".to_string()],
             expanded_keywords: vec!["rustrag".to_string(), "graph".to_string()],
             top_k: 8,
             context_budget_chars: 6_000,
@@ -6780,6 +6908,7 @@ Trailing details";
                 },
             ],
             "",
+            None,
         );
 
         assert!(context.contains("Focused grounded document\n- knowledge_graph_wikipedia.md"));
@@ -7197,6 +7326,8 @@ Trailing details";
             ],
             high_level_keywords: vec!["program".to_string(), "profile".to_string()],
             low_level_keywords: vec!["discount".to_string(), "tier".to_string()],
+            entity_keywords: vec![],
+            concept_keywords: vec![],
             expanded_keywords: vec![
                 "discount".to_string(),
                 "profile".to_string(),
@@ -7229,6 +7360,8 @@ Trailing details";
             keywords: Vec::new(),
             high_level_keywords: Vec::new(),
             low_level_keywords: Vec::new(),
+            entity_keywords: Vec::new(),
+            concept_keywords: Vec::new(),
             expanded_keywords: Vec::new(),
             top_k: 8,
             context_budget_chars: 22_000,

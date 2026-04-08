@@ -20,6 +20,7 @@ use crate::{
             StructuredDocumentRevision, TypedTechnicalFact,
         },
     },
+    infra::repositories,
     interfaces::http::router_support::ApiError,
     shared::technical_facts::{TechnicalFactKind, TechnicalFactQualifier, TechnicalFactValue},
 };
@@ -562,9 +563,14 @@ impl KnowledgeService {
         state: &AppState,
         library_id: Uuid,
     ) -> Result<KnowledgeLibrarySummary, ApiError> {
-        let (summaries, generations) = tokio::try_join!(
+        let (summaries, generations, graph_snapshot) = tokio::try_join!(
             state.canonical_services.content.list_documents(state, library_id),
             self.list_library_generations(state, library_id),
+            async {
+                repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
+                    .await
+                    .map_err(|_| ApiError::Internal)
+            },
         )?;
         let latest_generation = generations.into_iter().next();
         let coverage = state.canonical_services.ops.derive_library_knowledge_coverage(
@@ -575,6 +581,8 @@ impl KnowledgeService {
         Ok(KnowledgeLibrarySummary {
             library_id: coverage.library_id,
             document_counts_by_readiness: coverage.document_counts_by_readiness,
+            node_count: graph_snapshot.as_ref().map_or(0, |snapshot| i64::from(snapshot.node_count)),
+            edge_count: graph_snapshot.as_ref().map_or(0, |snapshot| i64::from(snapshot.edge_count)),
             graph_ready_document_count: coverage.graph_ready_document_count,
             graph_sparse_document_count: coverage.graph_sparse_document_count,
             typed_fact_document_count: coverage.typed_fact_document_count,

@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
+import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
+import { useNavigate } from 'react-router-dom';
 import { useApp } from '@/contexts/AppContext';
 import { adminApi, dashboardApi } from '@/api';
 import { AVAILABLE_LOCALES } from '@/types';
@@ -23,8 +25,31 @@ import {
 } from 'lucide-react';
 import type {
   APIToken, AIProvider, AICredential, ModelPreset, LibraryBinding,
-  PricingRule, OperationsSnapshot, AuditEvent, AIPurpose
+  PricingRule, OperationsSnapshot, OperationsWarning, AuditEvent, AuditEventPage, AIPurpose
 } from '@/types';
+
+const AUDIT_PAGE_SIZE_OPTIONS = [50, 100, 250, 1000] as const;
+const AUDIT_SURFACE_OPTIONS = ['all', 'rest', 'mcp', 'worker', 'bootstrap'] as const;
+const AUDIT_RESULT_OPTIONS = ['all', 'succeeded', 'rejected', 'failed'] as const;
+
+type AuditResultFilter = (typeof AUDIT_RESULT_OPTIONS)[number];
+type AuditSurfaceFilter = (typeof AUDIT_SURFACE_OPTIONS)[number];
+type OperationsActionItemTone = 'ready' | 'warning' | 'failed';
+
+type OperationsActionItem = {
+  key: string;
+  tone: OperationsActionItemTone;
+  title: string;
+  detail: string;
+  actionLabel?: string;
+  actionPath?: string;
+};
+
+type OperationsStatusMeta = {
+  label: string;
+  badgeClass: string;
+  description: string;
+};
 
 // ── Response mappers ──
 
@@ -112,29 +137,250 @@ function mapPricing(raw: any, providers: AIProvider[], models: any[]): PricingRu
 }
 
 function mapOps(raw: any): OperationsSnapshot {
-  const state = raw.state ?? raw;
+  const state = raw.state ?? {};
+  const degradedState =
+    state.degradedState === 'processing' ||
+    state.degradedState === 'rebuilding' ||
+    state.degradedState === 'degraded' ||
+    state.degradedState === 'healthy'
+      ? state.degradedState
+      : 'healthy';
   return {
     queueDepth: state.queueDepth ?? 0,
     runningAttempts: state.runningAttempts ?? 0,
     readableDocCount: state.readableDocumentCount ?? 0,
     failedDocCount: state.failedDocumentCount ?? 0,
-    healthState: state.degradedState === 'healthy' ? 'healthy' : state.degradedState === 'critical' ? 'critical' : 'degraded',
+    status: degradedState,
     knowledgeGenerationState: state.knowledgeGenerationState ?? 'unknown',
     lastRecomputedAt: state.lastRecomputedAt ?? '',
-    warnings: (raw.warnings ?? []).map((w: any) => w.warningKind ?? String(w)),
+    warnings: (raw.warnings ?? []).map((warning: any): OperationsWarning => ({
+      id: warning.id ?? crypto.randomUUID(),
+      warningKind: warning.warningKind ?? 'unknown',
+      severity: warning.severity ?? 'warning',
+      createdAt: warning.createdAt ?? '',
+      resolvedAt: warning.resolvedAt ?? undefined,
+    })),
   };
 }
 
 function mapAudit(raw: any): AuditEvent {
+  const resultKind =
+    raw.resultKind === 'rejected' || raw.resultKind === 'failed' ? raw.resultKind : 'succeeded';
   return {
     id: raw.id,
     action: raw.actionKind ?? '',
-    result: raw.resultKind === 'success' ? 'success' : 'failure',
+    resultKind,
+    surfaceKind: raw.surfaceKind ?? 'rest',
     timestamp: raw.createdAt ?? '',
     message: raw.redactedMessage ?? raw.actionKind ?? '',
     subjectSummary: (raw.subjects ?? []).map((s: any) => `${s.subjectKind}:${s.subjectId}`).join(', ') || '',
     actor: raw.actorPrincipalId ?? 'system',
   };
+}
+
+function mapAuditPage(raw: any): AuditEventPage {
+  return {
+    items: Array.isArray(raw.items) ? raw.items.map(mapAudit) : [],
+    total: typeof raw.total === 'number' ? raw.total : 0,
+    limit: typeof raw.limit === 'number' ? raw.limit : AUDIT_PAGE_SIZE_OPTIONS[0],
+    offset: typeof raw.offset === 'number' ? raw.offset : 0,
+  };
+}
+
+function buildDocumentsPath(params: Record<string, string | null | undefined>) {
+  const searchParams = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value) {
+      searchParams.set(key, value);
+    }
+  }
+
+  const query = searchParams.toString();
+  return query ? `/documents?${query}` : '/documents';
+}
+
+function getOperationsStatusMeta(
+  ops: OperationsSnapshot,
+  t: TFunction,
+): OperationsStatusMeta {
+  if (
+    ops.status === 'healthy' &&
+    ops.readableDocCount === 0 &&
+    ops.failedDocCount === 0 &&
+    ops.queueDepth === 0 &&
+    ops.runningAttempts === 0
+  ) {
+    return {
+      label: t('admin.opsStatusLabels.healthy'),
+      badgeClass: 'status-ready',
+      description: t('admin.opsStatusDescriptions.empty'),
+    };
+  }
+
+  switch (ops.status) {
+    case 'processing':
+      return {
+        label: t('admin.opsStatusLabels.processing'),
+        badgeClass: 'status-processing',
+        description: t('admin.opsStatusDescriptions.processing'),
+      };
+    case 'rebuilding':
+      return {
+        label: t('admin.opsStatusLabels.rebuilding'),
+        badgeClass: 'status-warning',
+        description: t('admin.opsStatusDescriptions.rebuilding'),
+      };
+    case 'degraded':
+      return {
+        label: t('admin.opsStatusLabels.degraded'),
+        badgeClass: 'status-failed',
+        description: t('admin.opsStatusDescriptions.degraded'),
+      };
+    default:
+      return {
+        label: t('admin.opsStatusLabels.healthy'),
+        badgeClass: 'status-ready',
+        description: t('admin.opsStatusDescriptions.healthy'),
+      };
+  }
+}
+
+function getOperationsActionItems(
+  ops: OperationsSnapshot,
+  t: TFunction,
+): OperationsActionItem[] {
+  const items: OperationsActionItem[] = [];
+
+  if (ops.failedDocCount > 0) {
+    items.push({
+      key: 'failed_documents',
+      tone: 'failed',
+      title: t('admin.opsActions.failedDocuments.title'),
+      detail: t('admin.opsActions.failedDocuments.detail', { count: ops.failedDocCount }),
+      actionLabel: t('admin.opsActions.failedDocuments.action'),
+      actionPath: buildDocumentsPath({ status: 'failed' }),
+    });
+  }
+
+  const queuedOrRunning = ops.queueDepth + ops.runningAttempts;
+  if (queuedOrRunning > 0) {
+    items.push({
+      key: 'processing_queue',
+      tone: 'warning',
+      title: t('admin.opsActions.processingQueue.title'),
+      detail: t('admin.opsActions.processingQueue.detail', { count: queuedOrRunning }),
+      actionLabel: t('admin.opsActions.processingQueue.action'),
+      actionPath: buildDocumentsPath({ status: 'in_progress' }),
+    });
+  }
+
+  for (const warning of ops.warnings) {
+    switch (warning.warningKind) {
+      case 'stale_vectors':
+        items.push({
+          key: warning.warningKind,
+          tone: 'warning',
+          title: t('admin.opsActions.staleVectors.title'),
+          detail: t('admin.opsActions.staleVectors.detail'),
+          actionLabel: t('admin.opsActions.staleVectors.action'),
+          actionPath: buildDocumentsPath({ status: 'in_progress' }),
+        });
+        break;
+      case 'stale_relations':
+        items.push({
+          key: warning.warningKind,
+          tone: 'warning',
+          title: t('admin.opsActions.staleRelations.title'),
+          detail: t('admin.opsActions.staleRelations.detail'),
+          actionLabel: t('admin.opsActions.staleRelations.action'),
+          actionPath: '/graph',
+        });
+        break;
+      case 'failed_rebuilds':
+        items.push({
+          key: warning.warningKind,
+          tone: 'failed',
+          title: t('admin.opsActions.failedRebuilds.title'),
+          detail: t('admin.opsActions.failedRebuilds.detail'),
+          actionLabel: t('admin.opsActions.failedRebuilds.action'),
+          actionPath: buildDocumentsPath({ status: 'failed' }),
+        });
+        break;
+      case 'bundle_assembly_failures':
+        items.push({
+          key: warning.warningKind,
+          tone: 'failed',
+          title: t('admin.opsActions.bundleFailures.title'),
+          detail: t('admin.opsActions.bundleFailures.detail'),
+          actionLabel: t('admin.opsActions.bundleFailures.action'),
+          actionPath: '/graph',
+        });
+        break;
+      default:
+        break;
+    }
+  }
+
+  const deduped = new Map<string, OperationsActionItem>();
+  for (const item of items) {
+    deduped.set(item.key, item);
+  }
+
+  return Array.from(deduped.values()).sort((left, right) => {
+    const priority = (tone: OperationsActionItemTone) =>
+      tone === 'failed' ? 2 : tone === 'warning' ? 1 : 0;
+    return priority(right.tone) - priority(left.tone);
+  });
+}
+
+function getOperationsActionToneClass(tone: OperationsActionItemTone) {
+  if (tone === 'failed') return 'text-status-failed border-status-failed/15 bg-status-failed/5';
+  if (tone === 'warning') return 'text-status-warning border-status-warning/15 bg-status-warning/5';
+  return 'text-status-ready border-status-ready/15 bg-status-ready/5';
+}
+
+function getAuditResultBadgeClass(resultKind: AuditEvent['resultKind']) {
+  if (resultKind === 'failed') return 'status-failed';
+  if (resultKind === 'rejected') return 'status-warning';
+  return 'status-ready';
+}
+
+function getAuditResultIcon(resultKind: AuditEvent['resultKind']) {
+  if (resultKind === 'failed') return XCircle;
+  if (resultKind === 'rejected') return AlertTriangle;
+  return CheckCircle2;
+}
+
+function humanizeGenerationState(state: string, t: TFunction) {
+  switch (state) {
+    case 'graph_ready':
+      return t('admin.opsGenerationStates.graph_ready');
+    case 'vector_ready':
+      return t('admin.opsGenerationStates.vector_ready');
+    case 'text_readable':
+      return t('admin.opsGenerationStates.text_readable');
+    case 'accepted':
+    case 'unknown':
+      return t('admin.opsGenerationStates.unknown');
+    default:
+      return state;
+  }
+}
+
+function humanizeAuditSurface(surfaceKind: string, t: TFunction) {
+  switch (surfaceKind) {
+    case 'mcp':
+    case 'worker':
+    case 'bootstrap':
+    case 'rest':
+      return t(`admin.auditSurfaceLabels.${surfaceKind}`);
+    default:
+      return surfaceKind;
+  }
+}
+
+function humanizeAuditResult(resultKind: AuditEvent['resultKind'], t: TFunction) {
+  return t(`admin.auditResultLabels.${resultKind}`);
 }
 
 // ── Static data ──
@@ -157,6 +403,7 @@ function getMcpConfigs(origin: string) {
 
 export default function AdminPage() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const { activeWorkspace, activeLibrary, locale, setLocale } = useApp();
   const [activeTab, setActiveTab] = useState('access');
 
@@ -225,8 +472,20 @@ export default function AdminPage() {
   const [opsError, setOpsError] = useState<string | null>(null);
 
   // Audit state
-  const [audit, setAudit] = useState<AuditEvent[]>([]);
+  const [audit, setAudit] = useState<AuditEventPage>({
+    items: [],
+    total: 0,
+    limit: AUDIT_PAGE_SIZE_OPTIONS[0],
+    offset: 0,
+  });
   const [auditLoading, setAuditLoading] = useState(false);
+  const [auditSearch, setAuditSearch] = useState('');
+  const [auditResultFilter, setAuditResultFilter] = useState<AuditResultFilter>('all');
+  const [auditSurfaceFilter, setAuditSurfaceFilter] = useState<AuditSurfaceFilter>('all');
+  const [auditPageSize, setAuditPageSize] = useState<(typeof AUDIT_PAGE_SIZE_OPTIONS)[number]>(
+    AUDIT_PAGE_SIZE_OPTIONS[0],
+  );
+  const [auditPage, setAuditPage] = useState(1);
 
   // Raw model catalog for pricing resolution
   const [rawModels, setRawModels] = useState<any[]>([]);
@@ -279,7 +538,10 @@ export default function AdminPage() {
   }, [providers, rawModels]);
 
   const loadOps = useCallback(() => {
-    if (!activeLibrary) return;
+    if (!activeLibrary) {
+      setOps(null);
+      return;
+    }
     setOpsLoading(true);
     setOpsError(null);
     dashboardApi.getLibraryState(activeLibrary.id)
@@ -289,15 +551,46 @@ export default function AdminPage() {
   }, [activeLibrary]);
 
   const loadAudit = useCallback(() => {
+    if (!activeWorkspace && !activeLibrary) {
+      setAudit({
+        items: [],
+        total: 0,
+        limit: auditPageSize,
+        offset: 0,
+      });
+      return;
+    }
+
     setAuditLoading(true);
-    adminApi.listAuditEvents()
+    adminApi.listAuditEvents({
+      workspaceId: activeLibrary ? undefined : activeWorkspace?.id,
+      libraryId: activeLibrary?.id,
+      search: auditSearch || undefined,
+      surfaceKind: auditSurfaceFilter === 'all' ? undefined : auditSurfaceFilter,
+      resultKind: auditResultFilter === 'all' ? undefined : auditResultFilter,
+      limit: auditPageSize,
+      offset: (auditPage - 1) * auditPageSize,
+    })
       .then((data: any) => {
-        const list = Array.isArray(data) ? data : [];
-        setAudit(list.map(mapAudit));
+        const pageData = mapAuditPage(data);
+        const totalPages = Math.max(1, Math.ceil(pageData.total / auditPageSize));
+        if (pageData.total > 0 && auditPage > totalPages) {
+          setAuditPage(totalPages);
+          return;
+        }
+        setAudit(pageData);
       })
       .catch((err: any) => toast.error(err?.message || "Failed to load audit events"))
       .finally(() => setAuditLoading(false));
-  }, []);
+  }, [
+    activeLibrary,
+    activeWorkspace,
+    auditPage,
+    auditPageSize,
+    auditResultFilter,
+    auditSearch,
+    auditSurfaceFilter,
+  ]);
 
   // ── Load data per tab ──
 
@@ -333,6 +626,10 @@ export default function AdminPage() {
       loadAudit();
     }
   }, [activeTab, loadOps, loadAudit]);
+
+  useEffect(() => {
+    setAuditPage(1);
+  }, [activeLibrary?.id, activeWorkspace?.id]);
 
   // ── Actions ──
 
@@ -455,6 +752,11 @@ export default function AdminPage() {
     if (pricingSearch && !p.model.toLowerCase().includes(pricingSearch.toLowerCase())) return false;
     return true;
   });
+  const opsStatusMeta = ops ? getOperationsStatusMeta(ops, t) : null;
+  const opsActionItems = ops ? getOperationsActionItems(ops, t) : [];
+  const auditTotalPages = Math.max(1, Math.ceil(audit.total / auditPageSize));
+  const auditFrom = audit.total === 0 ? 0 : (auditPage - 1) * auditPageSize + 1;
+  const auditTo = audit.total === 0 ? 0 : Math.min(audit.total, auditFrom + audit.items.length - 1);
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
@@ -604,19 +906,28 @@ export default function AdminPage() {
 
           {/* OPERATIONS TAB */}
           <TabsContent value="operations" className="mt-0 p-6 animate-fade-in">
-            <div className="mb-5 flex items-center justify-between">
-              <h2 className="text-base font-bold tracking-tight">{t('admin.operations')}</h2>
-              {opsLoading ? (
-                <span className="text-xs text-muted-foreground flex items-center gap-1.5"><Loader2 className="h-3 w-3 animate-spin" /> Loading...</span>
-              ) : opsError ? (
-                <span className="text-xs text-status-failed">{opsError}</span>
-              ) : ops ? (
-                <span className={`status-badge ${ops.healthState === 'healthy' ? 'status-ready' : ops.healthState === 'degraded' ? 'status-warning' : 'status-failed'}`}>
-                  {ops.healthState}
-                </span>
-              ) : !activeLibrary ? (
-                <span className="text-xs text-muted-foreground">Select a library</span>
-              ) : null}
+            <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <h2 className="text-base font-bold tracking-tight">{t('admin.operations')}</h2>
+                {opsStatusMeta && (
+                  <p className="text-sm text-muted-foreground mt-1">{opsStatusMeta.description}</p>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <Button size="sm" variant="outline" onClick={() => { loadOps(); loadAudit(); }}>
+                  <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${opsLoading || auditLoading ? 'animate-spin' : ''}`} />
+                  {t('dashboard.refresh')}
+                </Button>
+                {opsLoading ? (
+                  <span className="text-xs text-muted-foreground flex items-center gap-1.5"><Loader2 className="h-3 w-3 animate-spin" /> {t('admin.loading')}</span>
+                ) : opsError ? (
+                  <span className="text-xs text-status-failed">{opsError}</span>
+                ) : opsStatusMeta ? (
+                  <span className={`status-badge ${opsStatusMeta.badgeClass}`}>{opsStatusMeta.label}</span>
+                ) : !activeLibrary ? (
+                  <span className="text-xs text-muted-foreground">{t('admin.selectLibraryOps')}</span>
+                ) : null}
+              </div>
             </div>
             {ops ? (
               <>
@@ -633,36 +944,217 @@ export default function AdminPage() {
                     </div>
                   ))}
                 </div>
-                <div className="workbench-surface p-5 mb-6 text-sm space-y-2.5">
-                  <div className="flex justify-between"><span className="text-muted-foreground">Knowledge Generation</span><span className="font-bold">{ops.knowledgeGenerationState}</span></div>
-                  <div className="flex justify-between"><span className="text-muted-foreground">Last Recomputed</span><span className="font-bold">{ops.lastRecomputedAt ? new Date(ops.lastRecomputedAt).toLocaleString() : 'Never'}</span></div>
+                <div className="grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)] mb-8">
+                  <div className="workbench-surface p-5">
+                    <div className="flex items-start justify-between gap-3 mb-4">
+                      <div>
+                        <div className="text-sm font-bold">{t('admin.opsGuidanceTitle')}</div>
+                        {opsStatusMeta && (
+                          <p className="text-sm text-muted-foreground mt-1">{opsStatusMeta.description}</p>
+                        )}
+                      </div>
+                      {opsStatusMeta && (
+                        <span className={`status-badge ${opsStatusMeta.badgeClass}`}>{opsStatusMeta.label}</span>
+                      )}
+                    </div>
+
+                    {opsActionItems.length === 0 ? (
+                      <div className="rounded-xl border border-status-ready/15 bg-status-ready/5 p-4">
+                        <div className="text-sm font-semibold text-status-ready">{t('admin.opsNoActionTitle')}</div>
+                        <p className="text-sm text-muted-foreground mt-1">{t('admin.opsNoActionDesc')}</p>
+                        <Button className="mt-3" variant="outline" size="sm" onClick={() => navigate('/documents')}>
+                          {t('dashboard.openDocuments')}
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        {opsActionItems.map(item => (
+                          <div key={item.key} className={`rounded-xl border p-4 ${getOperationsActionToneClass(item.tone)}`}>
+                            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                              <div className="min-w-0">
+                                <div className="text-sm font-semibold">{item.title}</div>
+                                <p className="text-sm text-muted-foreground mt-1">{item.detail}</p>
+                              </div>
+                              {item.actionPath && item.actionLabel && (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="shrink-0"
+                                  onClick={() => navigate(item.actionPath!)}
+                                >
+                                  <ExternalLink className="h-3.5 w-3.5 mr-1.5" />
+                                  {item.actionLabel}
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="workbench-surface p-5 space-y-4">
+                    <div>
+                      <div className="section-label mb-1.5">{t('admin.knowledgeGeneration')}</div>
+                      <div className="text-lg font-bold tracking-tight">
+                        {humanizeGenerationState(ops.knowledgeGenerationState, t)}
+                      </div>
+                    </div>
+                    <div className="text-sm space-y-2.5">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-muted-foreground">{t('admin.lastRecomputed')}</span>
+                        <span className="font-semibold text-right">
+                          {ops.lastRecomputedAt ? new Date(ops.lastRecomputedAt).toLocaleString() : t('admin.never')}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-muted-foreground">{t('admin.readableDocs')}</span>
+                        <span className="font-semibold tabular-nums">{ops.readableDocCount}</span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-muted-foreground">{t('admin.opsSignals')}</span>
+                        <span className="font-semibold tabular-nums">{opsActionItems.length}</span>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </>
             ) : !opsLoading && !opsError && (
               <div className="text-sm text-muted-foreground text-center p-8 border rounded-xl bg-surface-sunken">
-                {activeLibrary ? 'No operations data available.' : 'Select a library to view operations.'}
+                {activeLibrary ? t('admin.noOpsData') : t('admin.selectLibraryOps')}
               </div>
             )}
 
             <h3 className="text-sm font-bold tracking-tight mb-3">{t('admin.auditLog')}</h3>
-            {auditLoading ? (
-              <div className="flex items-center gap-2 text-sm text-muted-foreground p-4"><Loader2 className="h-4 w-4 animate-spin" /> Loading audit events...</div>
-            ) : audit.length === 0 ? (
-              <div className="text-sm text-muted-foreground text-center p-8 border rounded-xl bg-surface-sunken">No audit events found.</div>
-            ) : (
-              <div className="workbench-surface divide-y">
-                {audit.slice(0, 20).map(evt => (
-                  <div key={evt.id} className="p-4 flex items-start gap-3 transition-colors hover:bg-accent/30">
-                    <div className={`mt-0.5 ${evt.result === 'success' ? 'text-status-ready' : 'text-status-failed'}`}>
-                      {evt.result === 'success' ? <CheckCircle2 className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm font-semibold">{evt.message}</div>
-                      <div className="text-xs text-muted-foreground mt-0.5 font-medium">{evt.action} · {evt.actor} · {new Date(evt.timestamp).toLocaleString()}</div>
-                    </div>
-                  </div>
-                ))}
+            <div className="workbench-surface p-4 mb-4 flex flex-col gap-3 xl:flex-row xl:items-center">
+              <div className="relative flex-1">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                <Input
+                  className="h-9 pl-9 text-sm"
+                  placeholder={t('admin.auditSearchPlaceholder')}
+                  value={auditSearch}
+                  onChange={e => {
+                    setAuditSearch(e.target.value);
+                    setAuditPage(1);
+                  }}
+                />
               </div>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                <Select
+                  value={auditResultFilter}
+                  onValueChange={value => {
+                    setAuditResultFilter(value as AuditResultFilter);
+                    setAuditPage(1);
+                  }}
+                >
+                  <SelectTrigger className="h-9 w-full sm:w-40 text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {AUDIT_RESULT_OPTIONS.map(option => (
+                      <SelectItem key={option} value={option}>
+                        {option === 'all' ? t('admin.auditResultAll') : humanizeAuditResult(option, t)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Select
+                  value={auditSurfaceFilter}
+                  onValueChange={value => {
+                    setAuditSurfaceFilter(value as AuditSurfaceFilter);
+                    setAuditPage(1);
+                  }}
+                >
+                  <SelectTrigger className="h-9 w-full sm:w-40 text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {AUDIT_SURFACE_OPTIONS.map(option => (
+                      <SelectItem key={option} value={option}>
+                        {option === 'all' ? t('admin.auditSurfaceAll') : humanizeAuditSurface(option, t)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Select
+                  value={String(auditPageSize)}
+                  onValueChange={value => {
+                    setAuditPageSize(Number(value) as (typeof AUDIT_PAGE_SIZE_OPTIONS)[number]);
+                    setAuditPage(1);
+                  }}
+                >
+                  <SelectTrigger className="h-9 w-full sm:w-32 text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {AUDIT_PAGE_SIZE_OPTIONS.map(option => (
+                      <SelectItem key={option} value={String(option)}>
+                        {t('admin.auditPageSizeOption', { count: option })}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            {auditLoading ? (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground p-4"><Loader2 className="h-4 w-4 animate-spin" /> {t('admin.loadingAudit')}</div>
+            ) : audit.items.length === 0 ? (
+              <div className="text-sm text-muted-foreground text-center p-8 border rounded-xl bg-surface-sunken">{t('admin.noAuditEvents')}</div>
+            ) : (
+              <>
+                <div className="workbench-surface divide-y">
+                  {audit.items.map(evt => {
+                    const ResultIcon = getAuditResultIcon(evt.resultKind);
+                    return (
+                    <div key={evt.id} className="p-4 flex items-start gap-3 transition-colors hover:bg-accent/30">
+                      <div className={`mt-0.5 ${evt.resultKind === 'failed' ? 'text-status-failed' : evt.resultKind === 'rejected' ? 'text-status-warning' : 'text-status-ready'}`}>
+                        <ResultIcon className="h-4 w-4" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
+                          <div className="min-w-0">
+                            <div className="text-sm font-semibold">{evt.message}</div>
+                            <div className="text-xs text-muted-foreground mt-1 font-medium flex flex-wrap items-center gap-x-2 gap-y-1">
+                              <span>{evt.action}</span>
+                              <span>&middot;</span>
+                              <span>{humanizeAuditSurface(evt.surfaceKind, t)}</span>
+                              <span>&middot;</span>
+                              <span>{evt.actor}</span>
+                              <span>&middot;</span>
+                              <span>{new Date(evt.timestamp).toLocaleString()}</span>
+                            </div>
+                            {evt.subjectSummary && (
+                              <div className="text-xs text-muted-foreground mt-1 font-medium truncate">
+                                {evt.subjectSummary}
+                              </div>
+                            )}
+                          </div>
+                          <span className={`status-badge shrink-0 ${getAuditResultBadgeClass(evt.resultKind)}`}>
+                            {humanizeAuditResult(evt.resultKind, t)}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                    );
+                  })}
+                </div>
+                <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="text-xs text-muted-foreground">
+                    {t('admin.auditSummary', { from: auditFrom, to: auditTo, total: audit.total })}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button size="sm" variant="outline" disabled={auditPage <= 1} onClick={() => setAuditPage(current => Math.max(1, current - 1))}>
+                      {t('admin.previous')}
+                    </Button>
+                    <span className="text-xs text-muted-foreground min-w-24 text-center">
+                      {t('admin.auditPageLabel', { page: auditPage, total: auditTotalPages })}
+                    </span>
+                    <Button size="sm" variant="outline" disabled={auditPage >= auditTotalPages} onClick={() => setAuditPage(current => Math.min(auditTotalPages, current + 1))}>
+                      {t('admin.next')}
+                    </Button>
+                  </div>
+                </div>
+              </>
             )}
           </TabsContent>
 

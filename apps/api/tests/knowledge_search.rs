@@ -1190,6 +1190,7 @@ async fn chunk_and_entity_vectors_roundtrip_with_generation_order() -> Result<()
                 canonical_label: "VectorEntity".to_string(),
                 aliases: vec!["Entity Alias".to_string()],
                 entity_type: "concept".to_string(),
+                entity_sub_type: None,
                 summary: Some("Entity vector anchor".to_string()),
                 confidence: Some(0.9),
                 support_count: 2,
