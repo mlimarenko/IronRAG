@@ -345,16 +345,19 @@ export default function GraphPage() {
         {/* Type filter moved to clickable legend below */}
 
         <div className="flex items-center gap-0.5 bg-muted/50 rounded-lg p-0.5">
-          {LAYOUTS.map(l => (
-            <button
-              key={l}
-              onClick={() => setLayout(l)}
-              className={`px-2 py-1 text-xs rounded-md transition-all ${layout === l ? 'bg-background shadow-sm font-semibold' : 'text-muted-foreground hover:text-foreground'}`}
-              title={l.charAt(0).toUpperCase() + l.slice(1)}
-            >
-              {l === 'cloud' ? '☁' : l === 'circle' ? '◯' : l === 'rings' ? '◎' : l === 'lanes' ? '☰' : l === 'clusters' ? '⬡' : l === 'islands' ? '🏝' : '🌀'}
-            </button>
-          ))}
+          {LAYOUTS.map(l => {
+            const icons: Record<string, string> = { cloud: '☁', circle: '◯', rings: '◎', lanes: '☰', clusters: '⬡', islands: '🏝', spiral: '🌀' };
+            return (
+              <button
+                key={l}
+                onClick={() => setLayout(l)}
+                className={`px-2 py-1 text-sm rounded-md transition-all ${layout === l ? 'bg-background shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+                title={t(`graph.layouts.${l}`)}
+              >
+                {icons[l] || l}
+              </button>
+            );
+          })}
         </div>
 
         {/* Sigma.js handles zoom via mouse wheel / pinch */}
@@ -436,10 +439,10 @@ export default function GraphPage() {
                       return next;
                     });
                   }}
-                  title={isHidden ? `Show ${type}` : `Hide ${type}`}
+                  title={t(`graph.nodeTypes.${type}`)}
                 >
                   <span className="w-2.5 h-2.5 rounded-full" style={{ background: color }} />
-                  {type.charAt(0).toUpperCase() + type.slice(1)}
+                  {t(`graph.nodeTypes.${type}`)}
                 </button>
               );
             })}

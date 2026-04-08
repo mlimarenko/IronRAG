@@ -171,38 +171,41 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
     };
   }, [nodes, edges, layout, onSelect, hiddenTypes]);
 
-  // Selection highlighting
+  // Selection highlighting via reducers (edges on top guaranteed)
   useEffect(() => {
     const sigma = sigmaRef.current;
     const graph = graphRef.current;
     if (!sigma || !graph) return;
 
-    graph.forEachNode((node) => {
-      const type = graph.getNodeAttribute(node, 'nodeType') as string;
-      const baseColor = NODE_COLORS[type] || NODE_COLORS.entity;
-      if (selectedId) {
-        const isSelected = node === selectedId;
-        const isNeighbor = graph.hasNode(selectedId) && graph.areNeighbors(node, selectedId);
-        graph.setNodeAttribute(node, 'color', isSelected || isNeighbor ? baseColor : '#d4d4d8');
-      } else {
-        graph.setNodeAttribute(node, 'color', baseColor);
-      }
-    });
+    if (selectedId && graph.hasNode(selectedId)) {
+      const neighbors = new Set(graph.neighbors(selectedId));
 
-    graph.forEachEdge((edge) => {
-      const source = graph.source(edge);
-      const target = graph.target(edge);
-      const isConnected = selectedId && (source === selectedId || target === selectedId);
-      if (isConnected) {
-        graph.setEdgeAttribute(edge, 'color', '#3b82f6');
-        graph.setEdgeAttribute(edge, 'size', 0.5);
-        graph.setEdgeAttribute(edge, 'zIndex', 10);
-      } else {
-        graph.setEdgeAttribute(edge, 'color', selectedId ? '#f1f1f1' : '#c8cdd3');
-        graph.setEdgeAttribute(edge, 'size', 0.3);
-        graph.setEdgeAttribute(edge, 'zIndex', 0);
-      }
-    });
+      sigma.setSetting('nodeReducer', (node: string, data: any) => {
+        const isSelected = node === selectedId;
+        const isNeighbor = neighbors.has(node);
+        return {
+          ...data,
+          color: isSelected || isNeighbor ? data.color : '#d4d4d8',
+          zIndex: isSelected ? 2 : isNeighbor ? 1 : 0,
+          label: isSelected || isNeighbor ? data.label : '',
+        };
+      });
+
+      sigma.setSetting('edgeReducer', (edge: string, data: any) => {
+        const source = graph.source(edge);
+        const target = graph.target(edge);
+        const isConnected = source === selectedId || target === selectedId;
+        return {
+          ...data,
+          color: isConnected ? '#3b82f6' : '#f0f0f0',
+          size: isConnected ? 0.6 : 0.15,
+          hidden: false,
+        };
+      });
+    } else {
+      sigma.setSetting('nodeReducer', null);
+      sigma.setSetting('edgeReducer', null);
+    }
 
     sigma.refresh();
   }, [selectedId]);

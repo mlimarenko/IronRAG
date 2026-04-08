@@ -55,7 +55,7 @@
     "retry": "Retry",
     "noLibrary": "No library selected",
     "noLibraryDesc": "Select or create a library from the shell to view your operational dashboard.",
-    "loadingDashboard": "Loading dashboard\u2026",
+    "loadingDashboard": "Loading dashboard…",
     "failedToLoad": "Failed to load dashboard",
     "unexpectedError": "An unexpected error occurred.",
     "documents": "Documents",
@@ -145,10 +145,7 @@
     "totalCost": "Total cost",
     "webIngestRuns": "Web Ingest Runs",
     "pages": "pages",
-    "retryProcessing": "Retry Processing",
     "reIngest": "Re-ingest from URL",
-    "actions": "Actions",
-    "starting": "Starting...",
     "select": "Select",
     "cancelSelection": "Cancel",
     "nSelected": "{{count}} selected",
@@ -207,7 +204,29 @@
     "edges": "edges",
     "hidden": "hidden",
     "clear": "Clear",
-    "recommended": "Recommended:"
+    "recommended": "Recommended:",
+    "nodeTypes": {
+      "document": "Document",
+      "person": "Person",
+      "organization": "Organization",
+      "location": "Location",
+      "event": "Event",
+      "artifact": "Artifact",
+      "natural": "Natural",
+      "process": "Process",
+      "concept": "Concept",
+      "attribute": "Attribute",
+      "entity": "Entity"
+    },
+    "layouts": {
+      "cloud": "Cloud",
+      "circle": "Circle",
+      "rings": "Rings",
+      "lanes": "Grid",
+      "clusters": "Clusters",
+      "islands": "Islands",
+      "spiral": "Spiral"
+    }
   },
   "assistant": {
     "title": "AI Assistant",
@@ -235,14 +254,14 @@
     "entityRefs": "Entities",
     "relationRefs": "Relation References",
     "runtime": "Runtime",
-    "planning": "Planning query\u2026",
-    "grounding": "Searching library\u2026",
-    "generating": "Generating response\u2026",
+    "planning": "Planning query…",
+    "grounding": "Searching library…",
+    "generating": "Generating response…",
     "noLibrary": "No library selected",
     "noLibraryDesc": "Select a library to start asking questions grounded in your documents.",
     "goToDocuments": "Go to Documents",
     "queryNotConfigured": "Query answering not configured",
-    "queryNotConfiguredDesc": "Configure the query_answer AI binding in Admin \u2192 AI to enable the assistant.",
+    "queryNotConfiguredDesc": "Configure the query_answer AI binding in Admin → AI to enable the assistant.",
     "goToAdmin": "Go to Admin AI Settings",
     "openDocuments": "Open Documents",
     "openGraph": "Open Graph",
@@ -300,7 +319,7 @@
     "noOpsData": "No operations data available.",
     "noAuditEvents": "No audit events found.",
     "noPricingData": "No pricing data found.",
-    "notConfiguredHint": "Not configured \u2014 click Configure to select a credential and model preset",
+    "notConfiguredHint": "Not configured — click Configure to select a credential and model preset",
     "mcpTitle": "MCP Integration",
     "mcpDesc": "Connect RustRAG to your development tools via Model Context Protocol.",
     "mcpServerUrl": "MCP Server URL",
@@ -394,6 +413,6 @@
     "search": "Search",
     "noData": "No data",
     "version": "RustRAG v0.1.1",
-    "copyright": "\u00a9 {{year}} RustRAG"
+    "copyright": "© {{year}} RustRAG"
   }
 }

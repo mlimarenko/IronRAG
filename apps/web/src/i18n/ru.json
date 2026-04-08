@@ -55,7 +55,7 @@
     "retry": "Повторить",
     "noLibrary": "Библиотека не выбрана",
     "noLibraryDesc": "Выберите или создайте библиотеку для просмотра панели управления.",
-    "loadingDashboard": "Загрузка панели\u2026",
+    "loadingDashboard": "Загрузка панели…",
     "failedToLoad": "Не удалось загрузить панель",
     "unexpectedError": "Произошла непредвиденная ошибка.",
     "documents": "Документы",
@@ -145,10 +145,7 @@
     "totalCost": "Общая стоимость",
     "webIngestRuns": "Запуски веб-загрузки",
     "pages": "стр.",
-    "retryProcessing": "Повторить обработку",
     "reIngest": "Повторить загрузку из URL",
-    "actions": "Действия",
-    "starting": "Запуск...",
     "select": "Выбрать",
     "cancelSelection": "Отмена",
     "nSelected": "{{count}} выбрано",
@@ -207,7 +204,29 @@
     "edges": "рёбер",
     "hidden": "скрыто",
     "clear": "Сбросить",
-    "recommended": "Рекомендуется:"
+    "recommended": "Рекомендуется:",
+    "nodeTypes": {
+      "document": "Документ",
+      "person": "Персона",
+      "organization": "Организация",
+      "location": "Место",
+      "event": "Событие",
+      "artifact": "Артефакт",
+      "natural": "Природный",
+      "process": "Процесс",
+      "concept": "Концепция",
+      "attribute": "Атрибут",
+      "entity": "Сущность"
+    },
+    "layouts": {
+      "cloud": "Облако",
+      "circle": "Круг",
+      "rings": "Кольца",
+      "lanes": "Сетка",
+      "clusters": "Кластеры",
+      "islands": "Острова",
+      "spiral": "Спираль"
+    }
   },
   "assistant": {
     "title": "AI Ассистент",
@@ -235,9 +254,9 @@
     "entityRefs": "Сущности",
     "relationRefs": "Связи",
     "runtime": "Среда выполнения",
-    "planning": "Планирование запроса\u2026",
-    "grounding": "Поиск в документах\u2026",
-    "generating": "Генерация ответа\u2026",
+    "planning": "Планирование запроса…",
+    "grounding": "Поиск в документах…",
+    "generating": "Генерация ответа…",
     "noLibrary": "Библиотека не выбрана",
     "noLibraryDesc": "Выберите библиотеку для вопросов с опорой на документы.",
     "goToDocuments": "Перейти к документам",
@@ -394,6 +413,6 @@
     "search": "Поиск",
     "noData": "Нет данных",
     "version": "RustRAG v0.1.1",
-    "copyright": "\u00a9 {{year}} RustRAG"
+    "copyright": "© {{year}} RustRAG"
   }
 }
