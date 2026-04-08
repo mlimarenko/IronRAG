@@ -4,7 +4,8 @@ use axum::{
         Path, Query, State,
         multipart::{Field, Multipart},
     },
-    http::StatusCode,
+    http::{StatusCode, header},
+    response::IntoResponse,
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -302,6 +303,8 @@ pub fn router() -> Router<AppState> {
         .route("/content/documents/{document_id}/revisions", get(list_revisions))
         .route("/content/mutations", get(list_mutations).post(create_mutation))
         .route("/content/mutations/{mutation_id}", get(get_mutation))
+        .route("/content/libraries/{library_id}/export", get(export_library))
+        .route("/content/libraries/{library_id}/import", post(import_library))
 }
 
 async fn create_web_ingest_run(
@@ -1320,6 +1323,128 @@ async fn reprocess_single_document(
             },
         )
         .await
+}
+
+async fn export_library(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(library_id): Path<Uuid>,
+) -> Result<impl IntoResponse, ApiError> {
+    let library =
+        load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_READ).await?;
+
+    let summaries = state.canonical_services.content.list_documents(&state, library.id).await?;
+
+    let mut export_docs = Vec::new();
+    for summary in &summaries {
+        if summary.document.document_state == "deleted" {
+            continue;
+        }
+        let revision_id = summary.head.as_ref().and_then(|h| h.effective_revision_id());
+        let Some(revision_id) = revision_id else {
+            continue;
+        };
+
+        let arango_rev = state.arango_document_store.get_revision(revision_id).await.ok().flatten();
+        let content = arango_rev.and_then(|r| r.normalized_text).unwrap_or_default();
+        if content.is_empty() {
+            continue;
+        }
+
+        let title = summary
+            .active_revision
+            .as_ref()
+            .and_then(|rev| rev.title.clone())
+            .unwrap_or_else(|| summary.document.external_key.clone());
+        let source_uri = summary.active_revision.as_ref().and_then(|rev| rev.source_uri.clone());
+        let mime_type =
+            summary.active_revision.as_ref().map(|rev| rev.mime_type.clone()).unwrap_or_default();
+
+        export_docs.push(serde_json::json!({
+            "title": title,
+            "sourceUri": source_uri,
+            "mimeType": mime_type,
+            "content": content,
+        }));
+    }
+
+    let export = serde_json::json!({
+        "version": "1.0",
+        "exportedAt": chrono::Utc::now().to_rfc3339(),
+        "library": {
+            "displayName": library.display_name,
+            "description": library.description,
+            "extractionPrompt": library.extraction_prompt,
+        },
+        "documentCount": export_docs.len(),
+        "documents": export_docs,
+    });
+
+    let filename = format!("{}.json", library.slug);
+    let disposition = format!("attachment; filename=\"{filename}\"");
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/json".to_string()),
+            (header::CONTENT_DISPOSITION, disposition),
+        ],
+        Json(export),
+    ))
+}
+
+async fn import_library(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(library_id): Path<Uuid>,
+    Json(payload): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let library =
+        load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_WRITE).await?;
+
+    let docs = payload
+        .get("documents")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| ApiError::BadRequest("missing documents array".to_string()))?;
+
+    let mut imported = 0;
+    for doc in docs {
+        let title = doc.get("title").and_then(|v| v.as_str()).unwrap_or("Imported document");
+        let content = doc.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        if content.is_empty() {
+            continue;
+        }
+        let mime_type = doc.get("mimeType").and_then(|v| v.as_str()).unwrap_or("text/plain");
+
+        let file_bytes = content.as_bytes().to_vec();
+        let file_name = format!("{title}.txt");
+
+        state
+            .canonical_services
+            .content
+            .upload_inline_document(
+                &state,
+                UploadInlineDocumentCommand {
+                    workspace_id: library.workspace_id,
+                    library_id: library.id,
+                    external_key: None,
+                    idempotency_key: None,
+                    requested_by_principal_id: Some(auth.principal_id),
+                    request_surface: "rest-import".to_string(),
+                    source_identity: None,
+                    file_name,
+                    title: Some(title.to_string()),
+                    mime_type: Some(mime_type.to_string()),
+                    file_bytes,
+                },
+            )
+            .await?;
+
+        imported += 1;
+    }
+
+    Ok(Json(serde_json::json!({
+        "importedDocuments": imported,
+        "libraryId": library_id,
+    })))
 }
 
 fn map_mutation_admission(admission: ContentMutationAdmission) -> ContentMutationDetailResponse {

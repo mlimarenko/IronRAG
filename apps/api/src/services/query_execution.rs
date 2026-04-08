@@ -1,9 +1,23 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::sync::Mutex;
 
 use anyhow::Context;
 use futures::future::join_all;
 use sqlx;
 use uuid::Uuid;
+
+const EMBEDDING_CACHE_MAX_ENTRIES: usize = 1000;
+
+static EMBEDDING_CACHE: std::sync::LazyLock<Mutex<HashMap<u64, Vec<f32>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn embedding_cache_key(question: &str, model: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    question.hash(&mut hasher);
+    model.hash(&mut hasher);
+    hasher.finish()
+}
 
 use crate::{
     agent_runtime::{pipeline::try_op::run_async_try_op, request::build_provider_request},
@@ -1456,17 +1470,43 @@ async fn embed_question(
         .ok_or_else(|| {
             anyhow::anyhow!("active embedding binding is not configured for this library")
         })?;
+
+    let trimmed_input = question.trim().to_string();
+    let cache_key = embedding_cache_key(&trimmed_input, &embedding_binding.model_name);
+
+    if let Ok(cache) = EMBEDDING_CACHE.lock() {
+        if let Some(cached_embedding) = cache.get(&cache_key) {
+            return Ok(QuestionEmbeddingResult {
+                embedding: cached_embedding.clone(),
+                provider_kind: embedding_binding.provider_kind,
+                model_name: embedding_binding.model_name,
+                usage_json: serde_json::json!({"cached": true}),
+            });
+        }
+    }
+
     let response = state
         .llm_gateway
         .embed(EmbeddingRequest {
             provider_kind: embedding_binding.provider_kind,
             model_name: embedding_binding.model_name,
-            input: question.trim().to_string(),
+            input: trimmed_input,
             api_key_override: Some(embedding_binding.api_key),
             base_url_override: embedding_binding.provider_base_url,
         })
         .await
         .context("failed to embed runtime query")?;
+
+    if let Ok(mut cache) = EMBEDDING_CACHE.lock() {
+        if cache.len() >= EMBEDDING_CACHE_MAX_ENTRIES {
+            // Evict an arbitrary entry when the cache is full.
+            if let Some(&evict_key) = cache.keys().next() {
+                cache.remove(&evict_key);
+            }
+        }
+        cache.insert(cache_key, response.embedding.clone());
+    }
+
     Ok(QuestionEmbeddingResult {
         embedding: response.embedding,
         provider_kind: response.provider_kind,
@@ -1540,60 +1580,67 @@ async fn retrieve_document_chunks(
     question_embedding: &[f32],
     document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
 ) -> anyhow::Result<Vec<RuntimeMatchedChunk>> {
-    let vector_hits = if let Some(context) =
-        resolve_runtime_vector_search_context(state, library_id, provider_profile).await?
-    {
-        join_all(
-            state
-                .arango_search_store
-                .search_chunk_vectors_by_similarity(
-                    library_id,
-                    &context.model_catalog_id.to_string(),
-                    context.freshness_generation,
-                    question_embedding,
-                    limit.max(1),
-                    Some(16),
-                )
-                .await
-                .context("failed to search canonical chunk vectors for runtime query")?
-                .into_iter()
-                .map(|hit| async move {
-                    load_runtime_knowledge_chunk(state, hit.chunk_id).await.ok().and_then(|chunk| {
-                        map_chunk_hit(chunk, hit.score as f32, document_index, &plan.keywords)
-                    })
-                }),
-        )
-        .await
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-
-    let mut lexical_hits = Vec::new();
+    let lexical_queries = build_lexical_queries(question, plan);
     let lexical_limit = limit.saturating_mul(2).max(24);
-    for lexical_query in build_lexical_queries(question, plan) {
-        let hits = state
+    let plan_keywords = &plan.keywords;
+
+    let vector_future = async {
+        let context =
+            resolve_runtime_vector_search_context(state, library_id, provider_profile).await?;
+        let Some(context) = context else {
+            return Ok::<Vec<RuntimeMatchedChunk>, anyhow::Error>(Vec::new());
+        };
+        let raw_hits = state
             .arango_search_store
-            .search_chunks(library_id, &lexical_query, lexical_limit)
+            .search_chunk_vectors_by_similarity(
+                library_id,
+                &context.model_catalog_id.to_string(),
+                context.freshness_generation,
+                question_embedding,
+                limit.max(1),
+                Some(16),
+            )
             .await
-            .with_context(|| {
-                format!(
-                    "failed to run lexical Arango chunk search for runtime query: {lexical_query}"
-                )
-            })?;
-        let query_hits = join_all(hits.into_iter().map(|hit| async move {
+            .context("failed to search canonical chunk vectors for runtime query")?;
+        let hits = join_all(raw_hits.into_iter().map(|hit| async move {
             load_runtime_knowledge_chunk(state, hit.chunk_id).await.ok().and_then(|chunk| {
-                map_chunk_hit(chunk, hit.score as f32, document_index, &plan.keywords)
+                map_chunk_hit(chunk, hit.score as f32, document_index, plan_keywords)
             })
         }))
         .await
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
-        lexical_hits = merge_chunks(lexical_hits, query_hits, lexical_limit);
-    }
+        Ok(hits)
+    };
+
+    let lexical_future = async {
+        let mut lexical_hits = Vec::new();
+        for lexical_query in lexical_queries {
+            let hits = state
+                .arango_search_store
+                .search_chunks(library_id, &lexical_query, lexical_limit)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to run lexical Arango chunk search for runtime query: {lexical_query}"
+                    )
+                })?;
+            let query_hits = join_all(hits.into_iter().map(|hit| async move {
+                load_runtime_knowledge_chunk(state, hit.chunk_id).await.ok().and_then(|chunk| {
+                    map_chunk_hit(chunk, hit.score as f32, document_index, plan_keywords)
+                })
+            }))
+            .await
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+            lexical_hits = merge_chunks(lexical_hits, query_hits, lexical_limit);
+        }
+        Ok::<Vec<RuntimeMatchedChunk>, anyhow::Error>(lexical_hits)
+    };
+
+    let (vector_hits, lexical_hits) = tokio::try_join!(vector_future, lexical_future)?;
 
     Ok(merge_chunks(vector_hits, lexical_hits, limit))
 }
