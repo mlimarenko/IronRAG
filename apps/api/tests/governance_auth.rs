@@ -117,12 +117,7 @@ impl GovernanceAuthFixture {
             Settings::from_env().context("failed to load settings for governance auth test")?;
         let temp_database = TempDatabase::create(&settings.database_url).await?;
         settings.database_url = temp_database.database_url.clone();
-        settings.bootstrap_token = Some("governance-auth-bootstrap".to_string());
-        settings.bootstrap_claim_enabled = true;
-        settings.legacy_ui_bootstrap_enabled = false;
-        settings.legacy_bootstrap_token_endpoint_enabled = false;
         settings.destructive_fresh_bootstrap_required = true;
-        settings.destructive_allow_legacy_startup_side_effects = false;
 
         let postgres = PgPoolOptions::new()
             .max_connections(4)
@@ -458,29 +453,29 @@ fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppState> {
     };
     let arango_client = Arc::new(ArangoClient::from_settings(&settings)?);
 
-    Ok(AppState::from_dependencies(
+    AppState::from_dependencies(
         Settings {
             ui_bootstrap_admin_login: bootstrap_settings
-                .legacy_ui_bootstrap_admin
+                .ui_bootstrap_admin
                 .as_ref()
                 .map(|admin| admin.login.clone()),
             ui_bootstrap_admin_email: bootstrap_settings
-                .legacy_ui_bootstrap_admin
+                .ui_bootstrap_admin
                 .as_ref()
                 .map(|admin| admin.email.clone()),
             ui_bootstrap_admin_name: bootstrap_settings
-                .legacy_ui_bootstrap_admin
+                .ui_bootstrap_admin
                 .as_ref()
                 .map(|admin| admin.display_name.clone()),
             ui_bootstrap_admin_password: bootstrap_settings
-                .legacy_ui_bootstrap_admin
+                .ui_bootstrap_admin
                 .as_ref()
                 .map(|admin| admin.password.clone()),
             ..settings
         },
         persistence,
         arango_client,
-    ))
+    )
 }
 
 fn replace_database_name(database_url: &str, new_database: &str) -> Result<String> {
@@ -1026,10 +1021,13 @@ async fn library_scoped_binding_admin_can_create_library_binding() -> Result<()>
 
         let credential = ai_repository::create_provider_credential(
             fixture.pool(),
-            fixture.workspace_id,
+            "workspace",
+            Some(fixture.workspace_id),
+            None,
             fixture.provider_catalog_id,
             TEST_PROVIDER_CREDENTIAL_LABEL,
-            "secret://governance/provider-credential",
+            Some("secret://governance/provider-credential"),
+            None,
             None,
         )
         .await
@@ -1037,7 +1035,9 @@ async fn library_scoped_binding_admin_can_create_library_binding() -> Result<()>
 
         let preset = ai_repository::create_model_preset(
             fixture.pool(),
-            fixture.workspace_id,
+            "workspace",
+            Some(fixture.workspace_id),
+            None,
             fixture.model_catalog_id,
             TEST_MODEL_PRESET_NAME,
             None,
@@ -1071,13 +1071,17 @@ async fn library_scoped_binding_admin_can_create_library_binding() -> Result<()>
         assert_eq!(body["modelPresetId"], json!(preset.id));
         assert_eq!(body["bindingState"], json!("active"));
 
-        let library_bindings =
-            ai_repository::list_library_bindings(fixture.pool(), fixture.library_id)
-                .await
-                .context("failed to reload library bindings after create")?;
+        let library_bindings = ai_repository::list_binding_assignments_exact(
+            fixture.pool(),
+            "library",
+            Some(fixture.workspace_id),
+            Some(fixture.library_id),
+        )
+        .await
+        .context("failed to reload library bindings after create")?;
         assert_eq!(library_bindings.len(), 1);
-        assert_eq!(library_bindings[0].workspace_id, fixture.workspace_id);
-        assert_eq!(library_bindings[0].library_id, fixture.library_id);
+        assert_eq!(library_bindings[0].workspace_id, Some(fixture.workspace_id));
+        assert_eq!(library_bindings[0].library_id, Some(fixture.library_id));
 
         Ok(())
     }
@@ -1335,9 +1339,7 @@ async fn workspace_audit_reader_gets_redacted_visible_events_only() -> Result<()
         let visible_path = format!("/v1/audit/events?workspaceId={}", fixture.workspace_id);
         let (status, body) = fixture.rest_get(&token, &visible_path).await?;
         assert_eq!(status, StatusCode::OK);
-        let events = body["items"]
-            .as_array()
-            .context("/v1/audit/events must return items")?;
+        let events = body["items"].as_array().context("/v1/audit/events must return items")?;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["requestId"], json!("governance-audit-visible"));
         assert_eq!(events[0]["redactedMessage"], json!("visible workspace event"));

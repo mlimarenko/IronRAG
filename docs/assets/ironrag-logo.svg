@@ -1,0 +1,51 @@
+<svg width="566" height="686" viewBox="292 204 566 686" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="silverFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#F4F7FA"/>
+      <stop offset="18%" stop-color="#DCE4EB"/>
+      <stop offset="40%" stop-color="#A8B4C0"/>
+      <stop offset="65%" stop-color="#E6EDF3"/>
+      <stop offset="100%" stop-color="#7E8B97"/>
+    </linearGradient>
+    <linearGradient id="steelFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#8A97A5"/>
+      <stop offset="22%" stop-color="#5D6975"/>
+      <stop offset="48%" stop-color="#2F3943"/>
+      <stop offset="72%" stop-color="#66717D"/>
+      <stop offset="100%" stop-color="#1E2730"/>
+    </linearGradient>
+    <linearGradient id="copperFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#F1B287"/>
+      <stop offset="18%" stop-color="#D98A58"/>
+      <stop offset="45%" stop-color="#A95F36"/>
+      <stop offset="70%" stop-color="#E5A078"/>
+      <stop offset="100%" stop-color="#7A3F22"/>
+    </linearGradient>
+    <pattern id="brushed" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(135)">
+      <rect width="8" height="8" fill="transparent"/>
+      <rect x="0" y="0" width="1" height="8" fill="#FFFFFF" opacity="0.08"/>
+      <rect x="2" y="0" width="1" height="8" fill="#FFFFFF" opacity="0.04"/>
+      <rect x="5" y="0" width="1" height="8" fill="#000000" opacity="0.05"/>
+      <rect x="7" y="0" width="1" height="8" fill="#FFFFFF" opacity="0.03"/>
+    </pattern>
+    <mask id="cutoutMask" maskUnits="userSpaceOnUse" x="292" y="204" width="566" height="686">
+      <rect x="292" y="204" width="566" height="686" fill="#fff"/>
+      <rect x="336" y="414" width="96" height="314" rx="9" fill="#000"/>
+      <path
+        d="M560.116 418.836L659.800 418.836Q777.376 418.836 777.376 508.722L777.376 508.722Q777.376 564.102 731.794 590.514L731.794 590.514L814.438 723L715.606 723L659.374 612.240L647.020 612.240L647.020 723L560.116 723L560.116 418.836ZM660.226 481.032L660.226 481.032L647.020 481.032L647.020 550.470L658.522 550.470Q665.764 550.470 673.006 546.849Q680.248 543.228 685.147 534.921Q690.046 526.614 690.046 512.556L690.046 512.556Q690.046 497.646 683.230 489.339Q676.414 481.032 660.226 481.032Z"
+        fill="#000"
+        stroke="#000"
+        stroke-width="10"
+        stroke-linejoin="round"
+        stroke-linecap="round"/>
+    </mask>
+  </defs>
+  <g mask="url(#cutoutMask)">
+    <polygon points="292,342 468,204 468,760 292,890" fill="url(#silverFill)"/>
+    <polygon points="292,342 468,204 468,760 292,890" fill="url(#brushed)" opacity="0.55"/>
+    <polygon points="487,342 663,204 663,760 487,890" fill="url(#steelFill)"/>
+    <polygon points="487,342 663,204 663,760 487,890" fill="url(#brushed)" opacity="0.4"/>
+    <polygon points="682,342 858,204 858,760 682,890" fill="url(#copperFill)"/>
+    <polygon points="682,342 858,204 858,760 682,890" fill="url(#brushed)" opacity="0.3"/>
+  </g>
+</svg>

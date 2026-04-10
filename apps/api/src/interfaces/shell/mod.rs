@@ -7,10 +7,13 @@ use crate::{
         authorization::{authorize_library_discovery, authorize_workspace_discovery},
         router_support::ApiError,
     },
-    services::iam_service::BootstrapStatusOutcome,
+    services::iam::service::BootstrapStatusOutcome,
 };
 use rustrag_contracts::{
-    auth::{BootstrapBindingPurpose, BootstrapStatus, UiLocale},
+    auth::{
+        BootstrapAiSetup, BootstrapBindingPurpose, BootstrapCredentialSource,
+        BootstrapProviderPreset, BootstrapProviderPresetBundle, BootstrapStatus, UiLocale,
+    },
     shell::{LibrarySummary, ShellBootstrap, ShellViewer, WorkspaceSummary},
 };
 
@@ -117,8 +120,48 @@ pub(crate) fn parse_ui_locale(locale: &str) -> UiLocale {
     }
 }
 
-pub(crate) const fn to_bootstrap_contract(value: &BootstrapStatusOutcome) -> BootstrapStatus {
-    BootstrapStatus { setup_required: value.setup_required, ai_setup: None }
+pub(crate) fn to_bootstrap_contract(value: &BootstrapStatusOutcome) -> BootstrapStatus {
+    let ai_setup = value.ai_setup.as_ref().map(|descriptor| BootstrapAiSetup {
+        preset_bundles: descriptor
+            .preset_bundles
+            .iter()
+            .map(|bundle| BootstrapProviderPresetBundle {
+                provider_catalog_id: bundle.provider_catalog_id,
+                provider_kind: bundle.provider_kind.clone(),
+                display_name: bundle.display_name.clone(),
+                credential_source: match bundle.credential_source {
+                    crate::services::ai_catalog_service::BootstrapAiCredentialSource::Missing => {
+                        BootstrapCredentialSource::Missing
+                    }
+                    crate::services::ai_catalog_service::BootstrapAiCredentialSource::Env => {
+                        BootstrapCredentialSource::Env
+                    }
+                },
+                default_base_url: bundle.default_base_url.clone(),
+                api_key_required: bundle.api_key_required,
+                base_url_required: bundle.base_url_required,
+                presets: bundle
+                    .presets
+                    .iter()
+                    .filter_map(|preset| {
+                        map_bootstrap_binding_purpose(preset.binding_purpose).map(
+                            |binding_purpose| BootstrapProviderPreset {
+                                binding_purpose,
+                                model_catalog_id: preset.model_catalog_id,
+                                model_name: preset.model_name.clone(),
+                                preset_name: preset.preset_name.clone(),
+                                system_prompt: preset.system_prompt.clone(),
+                                temperature: preset.temperature,
+                                top_p: preset.top_p,
+                                max_output_tokens_override: preset.max_output_tokens_override,
+                            },
+                        )
+                    })
+                    .collect(),
+            })
+            .collect(),
+    });
+    BootstrapStatus { setup_required: value.setup_required, ai_setup }
 }
 
 const fn catalog_lifecycle_label(value: &CatalogLifecycleState) -> &'static str {

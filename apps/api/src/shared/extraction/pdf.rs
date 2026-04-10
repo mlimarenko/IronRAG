@@ -1,11 +1,19 @@
 use std::{fs, path::Path, process::Command};
 
 use anyhow::{Context, Result, anyhow};
-use lopdf::Document;
+use lopdf::{Document, Object, ObjectId};
 
 use crate::shared::extraction::{
-    ExtractionOutput, ExtractionSourceMetadata, RawExtractionPage, build_text_layout,
+    ExtractedImage, ExtractionOutput, ExtractionSourceMetadata, RawExtractionPage,
+    build_text_layout,
 };
+
+/// Minimum consecutive spaces to consider as a column separator in table detection.
+const TABLE_DETECTION_MIN_SPACES: usize = 3;
+/// Minimum rows required to recognize a table.
+const TABLE_MIN_ROWS: usize = 2;
+/// Minimum columns required to recognize a table.
+const TABLE_MIN_COLUMNS: usize = 2;
 
 #[derive(Debug)]
 struct PopplerPdfExtraction {
@@ -55,7 +63,19 @@ pub fn extract_pdf(file_bytes: &[u8]) -> Result<ExtractionOutput> {
             (fallback.pages, page_numbers, fallback.page_count)
         }
     };
+    let pages = apply_table_heuristics(pages);
     let layout = build_text_layout(&pages);
+
+    let extracted_images = match Document::load_mem(file_bytes) {
+        Ok(document) => {
+            let images = extract_pdf_images(&document);
+            if !images.is_empty() {
+                tracing::info!(count = images.len(), "extracted images from pdf");
+            }
+            images
+        }
+        Err(_) => Vec::new(),
+    };
 
     Ok(ExtractionOutput {
         extraction_kind: "pdf_text".into(),
@@ -70,9 +90,11 @@ pub fn extract_pdf(file_bytes: &[u8]) -> Result<ExtractionOutput> {
         structure_hints: layout.structure_hints,
         source_map: serde_json::json!({
             "pages": page_numbers,
+            "extracted_image_count": extracted_images.len(),
         }),
         provider_kind: None,
         model_name: None,
+        extracted_images,
     })
 }
 
@@ -165,6 +187,362 @@ fn extract_pdf_page_count_with_pdfinfo(pdf_path: &Path) -> Option<u32> {
         let (label, value) = line.split_once(':')?;
         (label.trim() == "Pages").then(|| value.trim().parse::<u32>().ok()).flatten()
     })
+}
+
+/// Extracts embedded images from a PDF document by traversing page XObject resources.
+fn extract_pdf_images(document: &Document) -> Vec<ExtractedImage> {
+    let mut images = Vec::new();
+    let pages = document.get_pages();
+    let mut skipped_count: usize = 0;
+
+    for (&page_number, &page_id) in &pages {
+        match extract_images_from_page(
+            document,
+            page_id,
+            page_number,
+            &mut images,
+            &mut skipped_count,
+        ) {
+            Ok(()) => {}
+            Err(error) => {
+                tracing::warn!(stage = "pdf_images", page = page_number, error = %error, "page image extraction failed, continuing");
+            }
+        }
+    }
+
+    tracing::info!(
+        stage = "pdf_images",
+        images_extracted = images.len(),
+        images_skipped = skipped_count,
+        "PDF image extraction complete"
+    );
+
+    images
+}
+
+fn extract_images_from_page(
+    document: &Document,
+    page_id: ObjectId,
+    page_number: u32,
+    images: &mut Vec<ExtractedImage>,
+    skipped_count: &mut usize,
+) -> Result<()> {
+    let page_obj = document.get_object(page_id).context("page object not found")?;
+    let page_dict = page_obj.as_dict().map_err(|_| anyhow!("page object is not a dictionary"))?;
+
+    let resources_ref = match page_dict.get(b"Resources") {
+        Ok(r) => r,
+        Err(_) => return Ok(()),
+    };
+    let (_, resources_obj) = match document.dereference(resources_ref) {
+        Ok(pair) => pair,
+        Err(_) => return Ok(()),
+    };
+    let resources = match resources_obj.as_dict() {
+        Ok(d) => d,
+        Err(_) => return Ok(()),
+    };
+
+    let xobj_ref = match resources.get(b"XObject") {
+        Ok(r) => r,
+        Err(_) => return Ok(()),
+    };
+    let (_, xobj_obj) = match document.dereference(xobj_ref) {
+        Ok(pair) => pair,
+        Err(_) => return Ok(()),
+    };
+    let xobjects = match xobj_obj.as_dict() {
+        Ok(d) => d,
+        Err(_) => return Ok(()),
+    };
+
+    for (_name, xobj_ref) in xobjects.iter() {
+        let resolved = match document.dereference(xobj_ref) {
+            Ok((_, obj)) => obj,
+            Err(_) => continue,
+        };
+        let stream = match resolved.as_stream() {
+            Ok(stream) => stream,
+            Err(_) => continue,
+        };
+
+        let subtype = stream
+            .dict
+            .get(b"Subtype")
+            .ok()
+            .and_then(|v| v.as_name().ok())
+            .map(|n| std::str::from_utf8(n).unwrap_or_default().to_string())
+            .unwrap_or_default();
+
+        if subtype != "Image" {
+            continue;
+        }
+
+        let width =
+            stream.dict.get(b"Width").ok().and_then(|v| v.as_i64().ok()).unwrap_or(0) as u32;
+        let height =
+            stream.dict.get(b"Height").ok().and_then(|v| v.as_i64().ok()).unwrap_or(0) as u32;
+
+        if width == 0 || height == 0 {
+            tracing::debug!(
+                stage = "pdf_images",
+                page = page_number,
+                reason = "zero_dimensions",
+                "image skipped"
+            );
+            *skipped_count += 1;
+            continue;
+        }
+
+        let filter = stream
+            .dict
+            .get(b"Filter")
+            .ok()
+            .and_then(|v| match v {
+                Object::Name(name) => std::str::from_utf8(name).ok().map(str::to_string),
+                Object::Array(arr) => arr.first().and_then(|item| {
+                    if let Object::Name(name) = item {
+                        std::str::from_utf8(name).ok().map(str::to_string)
+                    } else {
+                        None
+                    }
+                }),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        let raw_bytes = match stream.decompressed_content() {
+            Ok(bytes) => bytes,
+            Err(_) => stream.content.clone(),
+        };
+
+        if raw_bytes.is_empty() {
+            continue;
+        }
+
+        let (image_bytes, mime_type) = match filter.as_str() {
+            "DCTDecode" => (raw_bytes, "image/jpeg".to_string()),
+            "JPXDecode" => (raw_bytes, "image/jp2".to_string()),
+            _ => {
+                let bits_per_component = stream
+                    .dict
+                    .get(b"BitsPerComponent")
+                    .ok()
+                    .and_then(|v| v.as_i64().ok())
+                    .unwrap_or(8) as u32;
+                let color_space = stream
+                    .dict
+                    .get(b"ColorSpace")
+                    .ok()
+                    .and_then(|v| match v {
+                        Object::Name(name) => std::str::from_utf8(name).ok().map(str::to_string),
+                        Object::Array(arr) => arr.first().and_then(|item| {
+                            if let Object::Name(name) = item {
+                                std::str::from_utf8(name).ok().map(str::to_string)
+                            } else {
+                                None
+                            }
+                        }),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "DeviceRGB".to_string());
+
+                match reconstruct_png_from_raw(
+                    &raw_bytes,
+                    width,
+                    height,
+                    bits_per_component,
+                    &color_space,
+                ) {
+                    Some(png_bytes) => (png_bytes, "image/png".to_string()),
+                    None => {
+                        tracing::debug!(
+                            stage = "pdf_images",
+                            page = page_number,
+                            reason = "unsupported_colorspace",
+                            "image skipped"
+                        );
+                        *skipped_count += 1;
+                        continue;
+                    }
+                }
+            }
+        };
+
+        images.push(ExtractedImage {
+            page: usize::try_from(page_number).unwrap_or(0),
+            image_bytes,
+            mime_type,
+            width,
+            height,
+        });
+    }
+
+    Ok(())
+}
+
+fn reconstruct_png_from_raw(
+    raw_bytes: &[u8],
+    width: u32,
+    height: u32,
+    bits_per_component: u32,
+    color_space: &str,
+) -> Option<Vec<u8>> {
+    let channels: u32 = match color_space {
+        "DeviceGray" | "CalGray" => 1,
+        "DeviceRGB" | "CalRGB" => 3,
+        "DeviceCMYK" => 4,
+        _ => 3,
+    };
+
+    if bits_per_component != 8 {
+        return None;
+    }
+
+    let expected_len = (width * height * channels) as usize;
+    if raw_bytes.len() < expected_len {
+        return None;
+    }
+
+    let pixel_bytes = if color_space == "DeviceCMYK" {
+        let mut rgb = Vec::with_capacity((width * height * 3) as usize);
+        for pixel in raw_bytes[..expected_len].chunks_exact(4) {
+            let c = f32::from(pixel[0]) / 255.0;
+            let m = f32::from(pixel[1]) / 255.0;
+            let y = f32::from(pixel[2]) / 255.0;
+            let k = f32::from(pixel[3]) / 255.0;
+            rgb.push(((1.0 - c) * (1.0 - k) * 255.0) as u8);
+            rgb.push(((1.0 - m) * (1.0 - k) * 255.0) as u8);
+            rgb.push(((1.0 - y) * (1.0 - k) * 255.0) as u8);
+        }
+        rgb
+    } else {
+        raw_bytes[..expected_len].to_vec()
+    };
+
+    let color_type = match color_space {
+        "DeviceGray" | "CalGray" => image::ColorType::L8,
+        _ => image::ColorType::Rgb8,
+    };
+
+    let mut png_buf = std::io::Cursor::new(Vec::new());
+    image::write_buffer_with_format(
+        &mut png_buf,
+        &pixel_bytes,
+        width,
+        height,
+        color_type,
+        image::ImageFormat::Png,
+    )
+    .ok()?;
+    Some(png_buf.into_inner())
+}
+
+/// Applies table-detection heuristics to extracted PDF pages.
+///
+/// If a sequence of lines shows consistent multi-column alignment (text segments
+/// separated by 3+ spaces), the lines are wrapped in a markdown table.
+fn apply_table_heuristics(pages: Vec<RawExtractionPage>) -> Vec<RawExtractionPage> {
+    pages
+        .into_iter()
+        .map(|page| RawExtractionPage {
+            page_number: page.page_number,
+            lines: detect_and_format_tables(page.lines),
+        })
+        .collect()
+}
+
+fn detect_and_format_tables(lines: Vec<String>) -> Vec<String> {
+    let mut result = Vec::with_capacity(lines.len());
+    let mut table_buffer: Vec<Vec<String>> = Vec::new();
+    let mut in_table = false;
+
+    for line in &lines {
+        let columns = split_tabular_columns(line);
+        let is_tabular = columns.len() >= 2;
+
+        if is_tabular {
+            if !in_table {
+                in_table = true;
+                table_buffer.clear();
+            }
+            table_buffer.push(columns);
+        } else {
+            if in_table {
+                flush_table_buffer(&table_buffer, &mut result);
+                table_buffer.clear();
+                in_table = false;
+            }
+            result.push(line.clone());
+        }
+    }
+
+    if in_table {
+        flush_table_buffer(&table_buffer, &mut result);
+    }
+
+    result
+}
+
+/// Splits a line into columns based on runs of 3+ whitespace characters.
+fn split_tabular_columns(line: &str) -> Vec<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let mut columns = Vec::new();
+    let mut current = String::new();
+    let mut space_run = 0usize;
+
+    for ch in trimmed.chars() {
+        if ch == ' ' {
+            space_run += 1;
+        } else {
+            if space_run >= TABLE_DETECTION_MIN_SPACES && !current.trim().is_empty() {
+                columns.push(current.trim().to_string());
+                current = String::new();
+            } else {
+                for _ in 0..space_run {
+                    current.push(' ');
+                }
+            }
+            space_run = 0;
+            current.push(ch);
+        }
+    }
+    if !current.trim().is_empty() {
+        columns.push(current.trim().to_string());
+    }
+
+    columns
+}
+
+fn flush_table_buffer(rows: &[Vec<String>], output: &mut Vec<String>) {
+    if rows.len() < TABLE_MIN_ROWS {
+        for row in rows {
+            output.push(row.join("   "));
+        }
+        return;
+    }
+
+    let max_cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    if max_cols < TABLE_MIN_COLUMNS {
+        for row in rows {
+            output.push(row.join("   "));
+        }
+        return;
+    }
+
+    for (row_index, row) in rows.iter().enumerate() {
+        let mut padded = row.clone();
+        padded.resize(max_cols, String::new());
+        output.push(format!("| {} |", padded.join(" | ")));
+        if row_index == 0 {
+            let separator = (0..max_cols).map(|_| "---").collect::<Vec<_>>();
+            output.push(format!("| {} |", separator.join(" | ")));
+        }
+    }
 }
 
 fn split_pdf_page_lines(content: &str) -> Vec<String> {

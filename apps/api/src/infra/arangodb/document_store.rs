@@ -34,6 +34,8 @@ pub struct KnowledgeDocumentRow {
     pub workspace_id: Uuid,
     pub library_id: Uuid,
     pub external_key: String,
+    #[serde(default)]
+    pub file_name: Option<String>,
     pub title: Option<String>,
     pub document_state: String,
     pub active_revision_id: Option<Uuid>,
@@ -240,6 +242,7 @@ impl ArangoDocumentStore {
                     workspace_id: @workspace_id,
                     library_id: @library_id,
                     external_key: @external_key,
+                    file_name: @file_name,
                     title: @title,
                     document_state: @document_state,
                     active_revision_id: @active_revision_id,
@@ -253,6 +256,7 @@ impl ArangoDocumentStore {
                     workspace_id: @workspace_id,
                     library_id: @library_id,
                     external_key: @external_key,
+                    file_name: @file_name,
                     title: @title,
                     document_state: @document_state,
                     active_revision_id: @active_revision_id,
@@ -270,6 +274,7 @@ impl ArangoDocumentStore {
                     "workspace_id": row.workspace_id,
                     "library_id": row.library_id,
                     "external_key": row.external_key,
+                    "file_name": row.file_name,
                     "title": row.title,
                     "document_state": row.document_state,
                     "active_revision_id": row.active_revision_id,
@@ -337,6 +342,7 @@ impl ArangoDocumentStore {
         &self,
         workspace_id: Uuid,
         library_id: Uuid,
+        include_deleted: bool,
     ) -> anyhow::Result<Vec<KnowledgeDocumentRow>> {
         let cursor = self
             .client
@@ -344,12 +350,14 @@ impl ArangoDocumentStore {
                 "FOR doc IN @@collection
                  FILTER doc.workspace_id == @workspace_id
                    AND doc.library_id == @library_id
+                   AND (@include_deleted OR doc.document_state != 'deleted')
                  SORT doc.updated_at DESC, doc.document_id DESC
                  RETURN doc",
                 serde_json::json!({
                     "@collection": KNOWLEDGE_DOCUMENT_COLLECTION,
                     "workspace_id": workspace_id,
                     "library_id": library_id,
+                    "include_deleted": include_deleted,
                 }),
             )
             .await
@@ -369,6 +377,7 @@ impl ArangoDocumentStore {
             .query_json(
                 "FOR doc IN @@collection
                  FILTER doc.document_id IN @document_ids
+                   AND doc.document_state != 'deleted'
                  SORT doc.updated_at DESC, doc.document_id DESC
                  RETURN doc",
                 serde_json::json!({

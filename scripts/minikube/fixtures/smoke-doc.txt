@@ -1,0 +1,3 @@
+RustRAG packaged Kubernetes deployment uses a startup job for migrations and bootstrap.
+Bundled clustered object storage is provided by s4core.
+Filesystem storage is supported only for single-node topology.

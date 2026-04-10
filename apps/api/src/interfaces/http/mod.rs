@@ -66,11 +66,16 @@ mod ui_support;
 
 use axum::{Router, routing::get};
 
-pub fn router() -> Router<crate::app::state::AppState> {
+pub fn probe_router() -> Router<crate::app::state::AppState> {
     Router::new()
         .route("/health", get(health::health))
         .route("/ready", get(health::readiness))
         .route("/version", get(health::version))
+}
+
+pub fn router() -> Router<crate::app::state::AppState> {
+    probe_router()
+        .route("/version/update", get(health::release_update))
         .merge(openapi::router())
         .merge(iam::router())
         .merge(catalog::router())

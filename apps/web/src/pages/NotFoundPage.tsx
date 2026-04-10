@@ -1,8 +1,10 @@
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Home } from 'lucide-react';
 
 export default function NotFoundPage() {
+  const { t } = useTranslation();
   const navigate = useNavigate();
 
   return (
@@ -13,10 +15,10 @@ export default function NotFoundPage() {
           WebkitBackgroundClip: 'text',
           WebkitTextFillColor: 'transparent',
         }}>404</div>
-        <h1 className="text-lg font-bold tracking-tight">Page not found</h1>
-        <p className="text-sm text-muted-foreground mt-2 mb-6">The page you're looking for doesn't exist.</p>
+        <h1 className="text-lg font-bold tracking-tight">{t('common.pageNotFoundTitle')}</h1>
+        <p className="text-sm text-muted-foreground mt-2 mb-6">{t('common.pageNotFoundDescription')}</p>
         <Button variant="outline" onClick={() => navigate('/dashboard')}>
-          <Home className="h-4 w-4 mr-2" /> Back to Home
+          <Home className="h-4 w-4 mr-2" /> {t('common.backToHome')}
         </Button>
       </div>
     </div>

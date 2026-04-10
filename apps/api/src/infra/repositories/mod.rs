@@ -3378,8 +3378,10 @@ pub async fn delete_query_execution_references_by_document(
            and exists (
                select 1
                from content_chunk
+               join content_revision
+                 on content_revision.id = content_chunk.revision_id
                where content_chunk.id = reference.chunk_id
-                 and content_chunk.document_id = $2
+                 and content_revision.document_id = $2
            )",
     )
     .bind(library_id)
@@ -3407,8 +3409,10 @@ pub async fn delete_query_execution_references_by_content_revision(
            and exists (
                select 1
                from content_chunk
+               join content_revision
+                 on content_revision.id = content_chunk.revision_id
                where content_chunk.id = reference.chunk_id
-                 and content_chunk.document_id = $2
+                 and content_revision.document_id = $2
                  and content_chunk.revision_id = $3
            )",
     )

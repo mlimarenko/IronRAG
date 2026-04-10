@@ -22,7 +22,7 @@ use rustrag_backend::{
         repositories::{ai_repository, audit_repository, catalog_repository, iam_repository},
     },
     interfaces::http::{auth::hash_token, router},
-    services::audit_service::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
+    services::iam::audit::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
 };
 
 const TEST_TOKEN_PREFIX: &str = "audit-events";
@@ -102,12 +102,7 @@ impl AuditEventsFixture {
             Settings::from_env().context("failed to load settings for audit events test")?;
         let temp_database = TempDatabase::create(&settings.database_url).await?;
         settings.database_url = temp_database.database_url.clone();
-        settings.bootstrap_token = Some("audit-events-bootstrap".to_string());
-        settings.bootstrap_claim_enabled = true;
-        settings.legacy_ui_bootstrap_enabled = false;
-        settings.legacy_bootstrap_token_endpoint_enabled = false;
         settings.destructive_fresh_bootstrap_required = true;
-        settings.destructive_allow_legacy_startup_side_effects = false;
 
         let postgres = PgPoolOptions::new()
             .max_connections(4)
@@ -369,7 +364,7 @@ fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppState> {
             .context("failed to create redis client for audit events state")?,
     };
     let arango_client = Arc::new(ArangoClient::from_settings(&settings)?);
-    Ok(AppState::from_dependencies(settings, persistence, arango_client))
+    AppState::from_dependencies(settings, persistence, arango_client)
 }
 
 fn replace_database_name(database_url: &str, new_database: &str) -> Result<String> {
@@ -534,7 +529,9 @@ async fn governance_actions_and_denials_append_expected_audit_subjects() -> Resu
 
         let preset = ai_repository::create_model_preset(
             fixture.pool(),
-            fixture.workspace_id,
+            "workspace",
+            Some(fixture.workspace_id),
+            None,
             fixture.model_catalog_id,
             TEST_MODEL_PRESET_NAME,
             None,
@@ -607,9 +604,8 @@ async fn governance_actions_and_denials_append_expected_audit_subjects() -> Resu
             .rest_get(&workspace_admin, &format!("/v1/audit/events?libraryId={created_library_id}"))
             .await?;
         assert_eq!(status, StatusCode::OK);
-        let events = body["items"]
-            .as_array()
-            .context("audit events response must include items")?;
+        let events =
+            body["items"].as_array().context("audit events response must include items")?;
         let library_event_response = events
             .iter()
             .find(|event| event["id"] == json!(library_event.id))
@@ -740,9 +736,8 @@ async fn canonical_audit_subjects_surface_query_and_knowledge_ids_through_http()
                 .rest_get(&system_admin, &format!("/v1/audit/events?{query_param}={subject_id}"))
                 .await?;
             assert_eq!(status, StatusCode::OK);
-            let events = body["items"]
-                .as_array()
-                .context("audit events response must include items")?;
+            let events =
+                body["items"].as_array().context("audit events response must include items")?;
             assert_eq!(events.len(), 1, "expected one audit event for {query_param}");
 
             let event = &events[0];
@@ -761,9 +756,8 @@ async fn canonical_audit_subjects_surface_query_and_knowledge_ids_through_http()
 
         let (status, body) = fixture.rest_get(&system_admin, "/v1/audit/events").await?;
         assert_eq!(status, StatusCode::OK);
-        let events = body["items"]
-            .as_array()
-            .context("audit events response must include items")?;
+        let events =
+            body["items"].as_array().context("audit events response must include items")?;
         assert!(
             events.iter().any(|event| event["id"] == json!(audit_event_id)),
             "canonical audit proof event must be visible in the audit feed"
@@ -823,9 +817,8 @@ async fn canonical_agent_memory_audit_subjects_surface_knowledge_and_async_opera
             )
             .await?;
         assert_eq!(status, StatusCode::OK);
-        let events = body["items"]
-            .as_array()
-            .context("audit events response must include items")?;
+        let events =
+            body["items"].as_array().context("audit events response must include items")?;
         let event = events
             .iter()
             .find(|event| event["id"] == json!(audit_event_id))
@@ -846,9 +839,8 @@ async fn canonical_agent_memory_audit_subjects_surface_knowledge_and_async_opera
             )
             .await?;
         assert_eq!(status, StatusCode::OK);
-        let events = body["items"]
-            .as_array()
-            .context("audit events response must include items")?;
+        let events =
+            body["items"].as_array().context("audit events response must include items")?;
         let event = events
             .iter()
             .find(|event| event["id"] == json!(audit_event_id))

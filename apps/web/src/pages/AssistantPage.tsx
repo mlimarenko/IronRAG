@@ -8,14 +8,36 @@ import { queryApi } from '@/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
+import { mapSourceAccess } from '@/lib/source-access';
 import {
   Send, Plus, Search, Loader2, FileText, Share2,
-  AlertTriangle, CheckCircle2, ChevronRight, MessageSquare,
-  Brain, Target, Zap, Shield, XCircle
+  AlertTriangle, CheckCircle2, MessageSquare,
+  Brain, Target, Zap, XCircle
 } from 'lucide-react';
 import type { AssistantSession, AssistantMessage, VerificationState, EvidenceBundle } from '@/types';
+import type {
+  RawAssistantTurnResponse,
+  RawAssistantSession,
+  RawAssistantMessage,
+} from '@/types/api-responses';
+
+const STARTER_PROMPT_KEYS = [
+  'assistant.starterPrompts.technologies',
+  'assistant.starterPrompts.deployment',
+  'assistant.starterPrompts.security',
+  'assistant.starterPrompts.storage',
+] as const;
 
 /* ── API response → UI mapping ─────────────────────────────────── */
+
+function errorMessage(err: unknown, fallback: string): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'object' && err !== null && 'message' in err) {
+    const msg = (err as { message?: unknown }).message;
+    if (typeof msg === 'string') return msg;
+  }
+  return fallback;
+}
 
 function mapVerificationState(apiState: string): VerificationState {
   const map: Record<string, VerificationState> = {
@@ -29,47 +51,48 @@ function mapVerificationState(apiState: string): VerificationState {
   return map[apiState] ?? 'failed';
 }
 
-function mapTurnResponseToEvidence(resp: any): EvidenceBundle {
+function mapTurnResponseToEvidence(resp: RawAssistantTurnResponse): EvidenceBundle {
   return {
-    segmentRefs: (resp.preparedSegmentReferences ?? []).map((r: any) => {
-      const trail = Array.isArray(r.headingTrail) ? r.headingTrail.filter((h: any) => typeof h === 'string') : [];
-      const path = Array.isArray(r.sectionPath) ? r.sectionPath.filter((p: any) => typeof p === 'string') : [];
+    segmentRefs: (resp.preparedSegmentReferences ?? []).map(r => {
+      const trail = Array.isArray(r.headingTrail) ? r.headingTrail.filter((h): h is string => typeof h === 'string') : [];
+      const path = Array.isArray(r.sectionPath) ? r.sectionPath.filter((p): p is string => typeof p === 'string') : [];
       return {
-        documentId: r.documentId ?? r.segmentId,
+        documentId: r.documentId ?? r.segmentId ?? '',
         documentName: trail.length > 0 ? trail[trail.length - 1] : path.join(' / ') || r.blockKind || 'Segment',
         documentTitle: r.documentTitle ?? null,
         sourceUri: r.sourceUri ?? null,
-        segmentOrdinal: r.rank,
+        sourceAccess: mapSourceAccess(r.sourceAccess) ?? null,
+        segmentOrdinal: r.rank ?? 0,
         excerpt: trail.join(' > ') || path.join(' > ') || '',
         relevance: r.score ?? 0,
       };
     }),
-    factRefs: (resp.technicalFactReferences ?? []).map((r: any) => ({
+    factRefs: (resp.technicalFactReferences ?? []).map(r => ({
       factKind: r.factKind,
       value: typeof r.displayValue === 'string' ? r.displayValue : typeof r.canonicalValue === 'string' ? r.canonicalValue : String(r.displayValue ?? r.canonicalValue ?? ''),
       confidence: r.score ?? 0,
       documentName: '',
     })),
-    entityRefs: (resp.entityReferences ?? []).map((r: any) => ({
+    entityRefs: (resp.entityReferences ?? []).map(r => ({
       entityId: r.nodeId,
       label: typeof r.label === 'string' ? r.label : 'Entity',
       type: r.entityType || 'unknown',
       relevance: r.score ?? 0,
     })),
-    relationRefs: (resp.relationReferences ?? []).map((r: any) => ({
+    relationRefs: (resp.relationReferences ?? []).map(r => ({
       sourceLabel: r.predicate || '',
       targetLabel: r.normalizedAssertion || '',
       relation: r.predicate || '',
       weight: r.score ?? 0,
     })),
     verificationState: mapVerificationState(resp.verificationState),
-    verificationWarnings: (resp.verificationWarnings ?? []).map((w: any) => w.message ?? w.code ?? ''),
+    verificationWarnings: (resp.verificationWarnings ?? []).map(w => w.message ?? w.code ?? ''),
     runtimeSummary: {
       totalSegments: (resp.preparedSegmentReferences ?? []).length,
       totalFacts: (resp.technicalFactReferences ?? []).length,
       totalEntities: (resp.entityReferences ?? []).length,
       totalRelations: (resp.relationReferences ?? []).length,
-      stages: (resp.runtimeStageSummaries ?? []).map((s: any) => ({
+      stages: (resp.runtimeStageSummaries ?? []).map(s => ({
         stage: s.stageKind,
         durationMs: 0,
         itemCount: 0,
@@ -79,17 +102,17 @@ function mapTurnResponseToEvidence(resp: any): EvidenceBundle {
   };
 }
 
-function mapApiSession(s: any): AssistantSession {
+function mapApiSession(s: RawAssistantSession): AssistantSession {
   return {
     id: s.id,
     libraryId: s.libraryId,
-    title: s.title || 'Untitled session',
+    title: s.title || '',
     updatedAt: s.updatedAt,
     turnCount: s.turnCount ?? 0,
   };
 }
 
-function mapApiMessage(m: any): AssistantMessage {
+function mapApiMessage(m: RawAssistantMessage): AssistantMessage {
   return {
     id: m.id,
     role: m.role === 'user' ? 'user' : 'assistant',
@@ -97,13 +120,6 @@ function mapApiMessage(m: any): AssistantMessage {
     timestamp: m.timestamp,
   };
 }
-
-const STARTER_PROMPTS = [
-  'What technologies are used in the system?',
-  'Summarize the deployment process',
-  'What are the main security concerns?',
-  'How is data stored and accessed?',
-];
 
 const verificationConfig: Record<VerificationState, { icon: typeof CheckCircle2; labelKey: string; cls: string }> = {
   passed: { icon: CheckCircle2, labelKey: 'assistant.verified', cls: 'text-status-ready' },
@@ -115,7 +131,7 @@ const verificationConfig: Record<VerificationState, { icon: typeof CheckCircle2;
 
 export default function AssistantPage() {
   const { t } = useTranslation();
-  const { activeLibrary, activeWorkspace } = useApp();
+  const { activeLibrary, activeWorkspace, locale } = useApp();
   const navigate = useNavigate();
   const [sessions, setSessions] = useState<AssistantSession[]>([]);
   const [activeSession, setActiveSession] = useState<string | null>(null);
@@ -136,12 +152,12 @@ export default function AssistantPage() {
     if (!workspaceId || !libraryId) return;
     try {
       const data = await queryApi.listSessions({ workspaceId, libraryId });
-      setSessions((data as any[]).map(mapApiSession));
-    } catch (err) {
+      setSessions(data.map(mapApiSession));
+    } catch (err: unknown) {
       console.error("Failed to load sessions:", err);
-      toast.error((err as any)?.message || "Failed to load sessions");
+      toast.error(errorMessage(err, t('assistant.loadSessionsFailed')));
     }
-  }, [workspaceId, libraryId]);
+  }, [libraryId, t, workspaceId]);
 
   useEffect(() => { loadSessions(); }, [loadSessions]);
 
@@ -149,7 +165,7 @@ export default function AssistantPage() {
   const loadSessionMessages = useCallback(async (sessionId: string) => {
     try {
       const data = await queryApi.getSession(sessionId);
-      setMessages((data.messages as any[] ?? []).map(mapApiMessage));
+      setMessages((data.messages ?? []).map(mapApiMessage));
     } catch {
       setMessages([]);
     }
@@ -201,7 +217,7 @@ export default function AssistantPage() {
 
       setExecutionStage('response');
 
-      const answerText = result.responseTurn?.contentText ?? 'No response was generated.';
+      const answerText = result.responseTurn?.contentText ?? t('assistant.noResponseGenerated');
       const evidence = mapTurnResponseToEvidence(result);
 
       setMessages(prev => [...prev, {
@@ -214,11 +230,11 @@ export default function AssistantPage() {
 
       // Refresh session list to pick up new/updated session
       loadSessions();
-    } catch (err: any) {
+    } catch (err: unknown) {
       setMessages(prev => [...prev, {
         id: `m-err-${Date.now()}`,
         role: 'assistant',
-        content: `An error occurred: ${err?.message ?? 'Unknown error'}`,
+        content: t('assistant.sendError', { error: errorMessage(err, t('assistant.unknownError')) }),
         timestamp: new Date().toISOString(),
       }]);
     } finally {
@@ -263,7 +279,8 @@ export default function AssistantPage() {
     );
   }
 
-  const filteredSessions = sessions.filter(s => !sessionSearch || s.title.toLowerCase().includes(sessionSearch.toLowerCase()));
+  const sessionTitle = (title: string) => title || t('assistant.untitledSession');
+  const filteredSessions = sessions.filter(s => !sessionSearch || sessionTitle(s.title).toLowerCase().includes(sessionSearch.toLowerCase()));
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
@@ -294,8 +311,8 @@ export default function AssistantPage() {
                 onClick={() => handleSelectSession(s.id)}
                 className={`w-full text-left px-3 py-2.5 rounded-xl text-sm transition-all duration-200 ${activeSession === s.id ? 'bg-card shadow-soft font-semibold border border-border/50' : 'hover:bg-accent/50'}`}
               >
-                <div className="truncate">{s.title}</div>
-                <div className="text-[11px] text-muted-foreground mt-0.5">{new Date(s.updatedAt).toLocaleDateString()}</div>
+                <div className="truncate">{sessionTitle(s.title)}</div>
+                <div className="text-[11px] text-muted-foreground mt-0.5">{new Intl.DateTimeFormat(locale).format(new Date(s.updatedAt))}</div>
               </button>
             ))}
           </div>
@@ -315,11 +332,14 @@ export default function AssistantPage() {
                 <h2 className="text-base font-bold tracking-tight">{t('assistant.askQuestion')}</h2>
                 <p className="text-sm text-muted-foreground mt-1.5 mb-6">{t('assistant.askQuestionDesc')}</p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-w-md w-full">
-                  {STARTER_PROMPTS.map(p => (
-                    <button key={p} className="text-left p-4 rounded-xl border hover:bg-accent/50 hover:shadow-soft transition-all duration-200 text-sm font-medium" onClick={() => setInputText(p)}>
-                      {p}
+                  {STARTER_PROMPT_KEYS.map(key => {
+                    const prompt = t(key);
+                    return (
+                    <button key={key} className="text-left p-4 rounded-xl border hover:bg-accent/50 hover:shadow-soft transition-all duration-200 text-sm font-medium" onClick={() => setInputText(prompt)}>
+                      {prompt}
                     </button>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             ) : (
@@ -338,8 +358,8 @@ export default function AssistantPage() {
                     )}
                     <div className={`text-sm leading-relaxed ${msg.role === 'assistant' ? 'bg-card border rounded-2xl rounded-bl-sm px-4 py-3 shadow-soft' : ''}`}>
                       {msg.role === 'assistant' ? (
+                        <div className="prose prose-sm dark:prose-invert max-w-none">
                         <ReactMarkdown
-                          className="prose prose-sm dark:prose-invert max-w-none"
                           components={{
                             code: ({ className, children, ...props }) => {
                               const isInline = !className;
@@ -362,6 +382,7 @@ export default function AssistantPage() {
                         >
                           {msg.content}
                         </ReactMarkdown>
+                        </div>
                       ) : (
                         msg.content.split('\n').map((line, i) => (
                           <p key={i} className={i > 0 ? 'mt-2' : ''}>{line}</p>
@@ -434,10 +455,10 @@ export default function AssistantPage() {
                   <div className="section-label mb-2">{t('assistant.runtime')}</div>
                   <div className="grid grid-cols-2 gap-2 text-xs">
                     {[
-                      { label: 'Segments', value: latestEvidence.runtimeSummary.totalSegments },
-                      { label: 'Facts', value: latestEvidence.runtimeSummary.totalFacts },
-                      { label: 'Entities', value: latestEvidence.runtimeSummary.totalEntities },
-                      { label: 'Relations', value: latestEvidence.runtimeSummary.totalRelations },
+                      { label: t('assistant.segmentRefs'), value: latestEvidence.runtimeSummary.totalSegments },
+                      { label: t('assistant.factRefs'), value: latestEvidence.runtimeSummary.totalFacts },
+                      { label: t('assistant.entityRefs'), value: latestEvidence.runtimeSummary.totalEntities },
+                      { label: t('assistant.relationRefs'), value: latestEvidence.runtimeSummary.totalRelations },
                     ].map(m => (
                       <div key={m.label} className="p-3 bg-surface-sunken rounded-xl">
                         <div className="text-muted-foreground text-[10px] font-bold uppercase tracking-wider">{m.label}</div>
@@ -455,8 +476,17 @@ export default function AssistantPage() {
                     {latestEvidence.segmentRefs.map((ref, i) => (
                       <div key={i} className="p-3.5 border rounded-xl text-xs bg-card shadow-soft">
                         <div className="flex items-center gap-1.5 font-bold"><FileText className="h-3 w-3" /> {ref.documentTitle || ref.documentName}</div>
-                        {ref.sourceUri && (
-                          <a href={ref.sourceUri} target="_blank" rel="noopener noreferrer" className="text-primary text-[10px] hover:underline truncate block mt-0.5">{ref.sourceUri}</a>
+                        {(ref.sourceAccess?.href || ref.sourceUri) && (
+                          <a
+                            href={ref.sourceAccess?.href ?? ref.sourceUri ?? '#'}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-primary text-[10px] hover:underline truncate block mt-0.5"
+                          >
+                            {ref.sourceAccess?.kind === 'stored_document'
+                              ? t('assistant.openSourceDocument')
+                              : (ref.sourceUri ?? t('assistant.openSourceLink'))}
+                          </a>
                         )}
                         <p className="mt-1.5 text-muted-foreground line-clamp-2 leading-relaxed">{ref.excerpt}</p>
                         <div className="mt-1.5 text-muted-foreground">{t('assistant.relevance')}: <span className="font-bold text-foreground">{ref.relevance > 100 ? Math.round(ref.relevance).toLocaleString() : (ref.relevance * 100).toFixed(0) + '%'}</span></div>

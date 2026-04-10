@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="./docs/assets/readme-flow.gif" alt="RustRAG demo: dashboard, documents, grounded assistant, and graph exploration" width="960">
+  <img src="./docs/assets/ironrag-logo.svg" alt="IronRAG logo" width="180">
+</p>
+
+<p align="center">
+  <img src="./docs/assets/readme-flow.gif" alt="RustRAG demo: dashboard, documents, grounded assistant, and graph exploration" width="840">
 </p>
 
 <h1 align="center">RustRAG</h1>
@@ -24,11 +28,11 @@ Load files, links, and images into one knowledge base, turn them into searchable
 
 ## Architecture
 
-One port on **nginx**. `/` serves the **React + Vite** SPA; `/v1/*` routes to the **Rust / Axum** backend (REST + MCP). The **worker** is the same image running as a queue consumer.
+One public port on **web**. The frontend container serves the **React + Vite** SPA and proxies `/v1/*` to the **Rust / Axum** API. The same backend image also runs as the **worker** and the one-shot **startup authority** responsible for migrations, Arango bootstrap, and storage initialization. `s4core` is optional and is only used by the S3 compose/Helm profiles.
 
 ```text
                          ┌─────────────────────────┐
-                         │   nginx (edge proxy)    │
+                         │    web (SPA + /v1)      │
                          └───────────┬─────────────┘
                ┌─────────────────────┴─────────────────────┐
         GET /* (SPA)                                 /v1/* (API + MCP)
@@ -41,9 +45,11 @@ One port on **nginx**. `/` serves the **React + Vite** SPA; `/v1/*` routes to th
                   │  ArangoDB   │                  │   Postgres    │    │    Redis      │
                   │ graph+vector│                  │ IAM + control │    │ worker queue  │
                   └─────────────┘                  └───────────────┘    └───────┬───────┘
-                                                                        ┌───────▼───────┐
-                                                                        │    worker     │
-                                                                        └───────────────┘
+                                           ┌────────────────────────────┴───────┬───────────────┐
+                                           │                                    │               │
+                                     ┌─────▼─────┐                        ┌─────▼─────┐   ┌────▼────┐
+                                     │  startup  │                        │  worker   │   │ s4core  │
+                                     └───────────┘                        └───────────┘   └─────────┘
 ```
 
 ## Pipeline
@@ -56,9 +62,9 @@ upload / URL → extract text → structured blocks → boilerplate filter
   → quality scoring → hybrid index (BM25 + vector) → UI + MCP + API
 ```
 
-## Quick Start
+## Deploy
 
-Prerequisite: Docker with Compose v2.
+Prerequisite: Docker with Compose v2, or Kubernetes with Helm.
 
 ```bash
 # Install without cloning
@@ -66,13 +72,58 @@ curl -fsSL https://raw.githubusercontent.com/mlimarenko/RustRAG/master/install.s
 
 # Or from a cloned repo
 cp .env.example .env
-docker compose up -d          # prebuilt images
-# docker compose -f docker-compose-local.yml up --build -d  # build from source
+docker compose up -d
 ```
 
-After startup: [http://127.0.0.1:19000](http://127.0.0.1:19000). First visit runs bootstrap — set admin login and password.
+Compose profiles:
 
-Different port: `RUSTRAG_PORT=8080 docker compose up -d`
+- `docker-compose.yml` — bundled Postgres/Redis/ArangoDB + filesystem storage
+- `docker-compose-s4.yml` — bundled Postgres/Redis/ArangoDB + bundled `s4core` + S3 storage
+- `docker-compose-local.yml` — source build for local development
+
+Examples:
+
+```bash
+docker compose up -d
+docker compose -f docker-compose-s4.yml up -d
+docker compose -f docker-compose-local.yml up --build -d
+```
+
+Default UI URL: [http://127.0.0.1:19000](http://127.0.0.1:19000)
+
+Helm:
+
+```bash
+OPENAI_API_KEY=... \
+helm upgrade --install rustrag charts/rustrag \
+  --namespace rustrag \
+  --create-namespace \
+  --values charts/rustrag/values/examples/bundled-s3.yaml \
+  --set-string app.frontendOrigin=https://rustrag.example.com \
+  --set-string app.providerSecrets.openaiApiKey="${OPENAI_API_KEY}" \
+  --wait \
+  --wait-for-jobs \
+  --timeout 20m
+```
+
+External dependencies:
+
+```bash
+helm upgrade --install rustrag charts/rustrag \
+  --namespace rustrag \
+  --create-namespace \
+  --values charts/rustrag/values/examples/external-services.yaml
+```
+
+Chart profiles:
+
+- `bundled-s3.yaml` — bundled Postgres/Redis/ArangoDB + bundled `s4core`
+- `external-services.yaml` — external Postgres/Redis/ArangoDB/S3
+- `filesystem-single-node.yaml` — single-node filesystem mode only
+
+Minikube is used only for local chart validation. It is not a deployment profile.
+
+Full runtime reference: [apps/api/.env.example](./apps/api/.env.example)
 
 ## Features
 
@@ -109,8 +160,8 @@ Search and read responses default to `includeReferences=false` to minimize token
 | Graph + Vector | ArangoDB 3.12 |
 | Control Plane | PostgreSQL 18 |
 | Worker Queue | Redis 8 |
-| Reverse Proxy | nginx 1.28 |
-| Deployment | Docker Compose, Ansible |
+| Edge / SPA | nginx 1.28 inside `web` |
+| Deployment | Helm, Docker Compose, Ansible |
 
 ## Configuration
 
@@ -149,7 +200,8 @@ make benchmark-golden          # golden dataset
 - [ ] Conversation context in multi-turn queries
 - [ ] Incremental re-processing (diff-aware ingest)
 - [ ] Export/import libraries
-- [ ] Ollama/local model support
+- [x] Ollama/local model support
+  Verified live with Ollama `qwen3:4b`; stale-model detection verified against missing `qwen3:0.6b`.
 - [ ] Confluence, Notion, Google Drive connectors
 
 ## Star History

@@ -1,0 +1,225 @@
+x-rustrag-runtime-env: &rustrag-runtime-env
+  RUSTRAG_BIND_ADDR: 0.0.0.0:8080
+  RUSTRAG_ENVIRONMENT: ${RUSTRAG_ENVIRONMENT:-production}
+  RUSTRAG_DATABASE_URL: ${RUSTRAG_DATABASE_URL:-postgres://${RUSTRAG_POSTGRES_USER:-postgres}:${RUSTRAG_POSTGRES_PASSWORD:-postgres}@${RUSTRAG_POSTGRES_HOST:-postgres}:5432/${RUSTRAG_POSTGRES_DB:-rustrag}}
+  RUSTRAG_DATABASE_MAX_CONNECTIONS: ${RUSTRAG_DATABASE_MAX_CONNECTIONS:-20}
+  RUSTRAG_REDIS_URL: ${RUSTRAG_REDIS_URL:-redis://redis:6379}
+  RUSTRAG_ARANGODB_URL: ${RUSTRAG_ARANGODB_URL:-http://arangodb:8529}
+  RUSTRAG_ARANGODB_DATABASE: ${RUSTRAG_ARANGODB_DATABASE:-rustrag}
+  RUSTRAG_ARANGODB_USERNAME: ${RUSTRAG_ARANGODB_USERNAME:-root}
+  RUSTRAG_ARANGODB_PASSWORD: ${RUSTRAG_ARANGODB_PASSWORD:-rustrag-dev}
+  RUSTRAG_ARANGODB_REQUEST_TIMEOUT_SECONDS: ${RUSTRAG_ARANGODB_REQUEST_TIMEOUT_SECONDS:-15}
+  RUSTRAG_LOG_FILTER: ${RUSTRAG_LOG_FILTER:-info}
+  RUSTRAG_FRONTEND_ORIGIN: ${RUSTRAG_FRONTEND_ORIGIN:-http://127.0.0.1:19000,http://localhost:19000}
+  RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN:-}
+  RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD:-}
+  RUSTRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN:-}
+  RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_PROVIDER_KIND: ${RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_PROVIDER_KIND:-openai}
+  RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_MODEL_NAME: ${RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_MODEL_NAME:-gpt-5.4-nano}
+  RUSTRAG_UI_BOOTSTRAP_EMBED_CHUNK_PROVIDER_KIND: ${RUSTRAG_UI_BOOTSTRAP_EMBED_CHUNK_PROVIDER_KIND:-openai}
+  RUSTRAG_UI_BOOTSTRAP_EMBED_CHUNK_MODEL_NAME: ${RUSTRAG_UI_BOOTSTRAP_EMBED_CHUNK_MODEL_NAME:-text-embedding-3-large}
+  RUSTRAG_UI_BOOTSTRAP_QUERY_ANSWER_PROVIDER_KIND: ${RUSTRAG_UI_BOOTSTRAP_QUERY_ANSWER_PROVIDER_KIND:-openai}
+  RUSTRAG_UI_BOOTSTRAP_QUERY_ANSWER_MODEL_NAME: ${RUSTRAG_UI_BOOTSTRAP_QUERY_ANSWER_MODEL_NAME:-gpt-5.4-mini}
+  RUSTRAG_UI_BOOTSTRAP_VISION_PROVIDER_KIND: ${RUSTRAG_UI_BOOTSTRAP_VISION_PROVIDER_KIND:-openai}
+  RUSTRAG_UI_BOOTSTRAP_VISION_MODEL_NAME: ${RUSTRAG_UI_BOOTSTRAP_VISION_MODEL_NAME:-gpt-5.4-mini}
+  RUSTRAG_OPENAI_API_KEY: ${RUSTRAG_OPENAI_API_KEY:-}
+  RUSTRAG_DEEPSEEK_API_KEY: ${RUSTRAG_DEEPSEEK_API_KEY:-}
+  RUSTRAG_QWEN_API_KEY: ${RUSTRAG_QWEN_API_KEY:-}
+  RUSTRAG_RUNTIME_POLICY_REJECT_TASK_KINDS: ${RUSTRAG_RUNTIME_POLICY_REJECT_TASK_KINDS:-}
+  RUSTRAG_RUNTIME_POLICY_REJECT_TARGET_KINDS: ${RUSTRAG_RUNTIME_POLICY_REJECT_TARGET_KINDS:-}
+  RUSTRAG_UI_DEFAULT_LOCALE: ${RUSTRAG_UI_DEFAULT_LOCALE:-ru}
+  RUSTRAG_STARTUP_AUTHORITY_MODE: compose_one_shot
+  RUSTRAG_DEPENDENCY_POSTGRES_MODE: bundled
+  RUSTRAG_DEPENDENCY_REDIS_MODE: bundled
+  RUSTRAG_DEPENDENCY_ARANGODB_MODE: bundled
+  RUSTRAG_DEPENDENCY_OBJECT_STORAGE_MODE: bundled
+  RUSTRAG_CONTENT_STORAGE_PROVIDER: s3
+  RUSTRAG_CONTENT_STORAGE_TOPOLOGY: shared_cluster
+  RUSTRAG_CONTENT_STORAGE_KEY_PREFIX: ${RUSTRAG_CONTENT_STORAGE_KEY_PREFIX:-}
+  RUSTRAG_CONTENT_STORAGE_S3_BUCKET: ${RUSTRAG_CONTENT_STORAGE_S3_BUCKET:-rustrag}
+  RUSTRAG_CONTENT_STORAGE_S3_ENDPOINT: http://s4core:9000
+  RUSTRAG_CONTENT_STORAGE_S3_REGION: ${RUSTRAG_CONTENT_STORAGE_S3_REGION:-us-east-1}
+  RUSTRAG_CONTENT_STORAGE_S3_ACCESS_KEY_ID: ${RUSTRAG_CONTENT_STORAGE_S3_ACCESS_KEY_ID:-rustrag}
+  RUSTRAG_CONTENT_STORAGE_S3_SECRET_ACCESS_KEY: ${RUSTRAG_CONTENT_STORAGE_S3_SECRET_ACCESS_KEY:-rustrag-dev-secret}
+  RUSTRAG_CONTENT_STORAGE_S3_SESSION_TOKEN: ${RUSTRAG_CONTENT_STORAGE_S3_SESSION_TOKEN:-}
+  RUSTRAG_CONTENT_STORAGE_S3_FORCE_PATH_STYLE: "true"
+  RUST_BACKTRACE: full
+
+x-rustrag-app-env: &rustrag-app-env
+  <<: *rustrag-runtime-env
+  RUSTRAG_ARANGODB_BOOTSTRAP_COLLECTIONS: ${RUSTRAG_ARANGODB_BOOTSTRAP_COLLECTIONS:-true}
+  RUSTRAG_ARANGODB_BOOTSTRAP_VIEWS: ${RUSTRAG_ARANGODB_BOOTSTRAP_VIEWS:-true}
+  RUSTRAG_ARANGODB_BOOTSTRAP_GRAPH: ${RUSTRAG_ARANGODB_BOOTSTRAP_GRAPH:-true}
+  RUSTRAG_ARANGODB_BOOTSTRAP_VECTOR_INDEXES: ${RUSTRAG_ARANGODB_BOOTSTRAP_VECTOR_INDEXES:-true}
+
+services:
+  postgres:
+    image: ${RUSTRAG_POSTGRES_IMAGE:-postgres:18-alpine}
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${RUSTRAG_POSTGRES_PASSWORD:-postgres}
+      POSTGRES_USER: ${RUSTRAG_POSTGRES_USER:-postgres}
+      POSTGRES_DB: ${RUSTRAG_POSTGRES_DB:-rustrag}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${RUSTRAG_POSTGRES_USER:-postgres} -d ${RUSTRAG_POSTGRES_DB:-rustrag}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - postgres_data:/var/lib/postgresql
+
+  redis:
+    image: ${RUSTRAG_REDIS_IMAGE:-redis:8.6}
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  arangodb:
+    image: ${RUSTRAG_ARANGODB_IMAGE:-arangodb:3.12.4}
+    restart: unless-stopped
+    environment:
+      ARANGO_ROOT_PASSWORD: ${RUSTRAG_ARANGODB_PASSWORD:-rustrag-dev}
+    command:
+      - arangod
+      - --server.authentication=true
+      - --experimental-vector-index=true
+      - --database.directory=/var/lib/arangodb3
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "arangosh --server.endpoint tcp://127.0.0.1:8529 --server.username root --server.password \"$$ARANGO_ROOT_PASSWORD\" --javascript.execute-string \"db._version()\" >/dev/null 2>&1 || exit 1",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    expose:
+      - "8529"
+    volumes:
+      - arangodb_data:/var/lib/arangodb3
+
+  s4core:
+    image: ${RUSTRAG_S4CORE_IMAGE:-s4core/s4core:latest}
+    restart: unless-stopped
+    environment:
+      S4_BIND: 0.0.0.0:9000
+      S4_ACCESS_KEY_ID: ${RUSTRAG_CONTENT_STORAGE_S3_ACCESS_KEY_ID:-rustrag}
+      S4_SECRET_ACCESS_KEY: ${RUSTRAG_CONTENT_STORAGE_S3_SECRET_ACCESS_KEY:-rustrag-dev-secret}
+      S4_DATA_DIR: /data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:9000/metrics >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    expose:
+      - "9000"
+    volumes:
+      - s4core_data:/data
+
+  startup:
+    image: ${RUSTRAG_BACKEND_IMAGE:-pipingspace/rustrag-backend:latest}
+    restart: on-failure
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      arangodb:
+        condition: service_healthy
+      s4core:
+        condition: service_healthy
+    stop_signal: SIGTERM
+    stop_grace_period: 10m
+    environment:
+      <<: *rustrag-app-env
+      RUSTRAG_SERVICE_ROLE: startup
+      RUSTRAG_SERVICE_NAME: rustrag-startup
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  backend:
+    image: ${RUSTRAG_BACKEND_IMAGE:-pipingspace/rustrag-backend:latest}
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 10m
+    depends_on:
+      startup:
+        condition: service_completed_successfully
+    environment:
+      <<: *rustrag-app-env
+      RUSTRAG_SERVICE_ROLE: api
+      RUSTRAG_SERVICE_NAME: rustrag-backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/v1/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    expose:
+      - "8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+
+  worker:
+    image: ${RUSTRAG_BACKEND_IMAGE:-pipingspace/rustrag-backend:latest}
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 10m
+    depends_on:
+      startup:
+        condition: service_completed_successfully
+    environment:
+      <<: *rustrag-app-env
+      RUSTRAG_SERVICE_ROLE: worker
+      RUSTRAG_SERVICE_NAME: rustrag-worker
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/v1/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    expose:
+      - "8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+
+  frontend:
+    image: ${RUSTRAG_FRONTEND_IMAGE:-pipingspace/rustrag-frontend:latest}
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      RUSTRAG_API_UPSTREAM: http://backend:8080
+    ports:
+      - "${RUSTRAG_PORT:-19000}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/ >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  arangodb_data:
+  s4core_data:

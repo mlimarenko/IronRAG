@@ -37,7 +37,7 @@ use rustrag_backend::{
     infra::repositories::{self, ai_repository, iam_repository},
     integrations::llm::{EmbeddingRequest, EmbeddingResponse, LlmGateway},
     interfaces::http::{auth::hash_token, authorization::PERMISSION_LIBRARY_READ, router},
-    services::search_service::SearchService,
+    services::query::search::SearchService,
 };
 
 const SEARCH_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -405,17 +405,22 @@ impl KnowledgeSearchHttpFixture {
         .context("expected seeded embedding model catalog row")?;
         let credential = ai_repository::create_provider_credential(
             &state.persistence.postgres,
-            workspace.id,
+            "workspace",
+            Some(workspace.id),
+            None,
             provider_catalog.id,
             "knowledge-search-provider-credential",
-            "secret://knowledge-search/provider",
+            Some("secret://knowledge-search/provider"),
+            None,
             None,
         )
         .await
         .context("failed to create knowledge search provider credential")?;
         let preset = ai_repository::create_model_preset(
             &state.persistence.postgres,
-            workspace.id,
+            "workspace",
+            Some(workspace.id),
+            None,
             model_catalog.id,
             "knowledge-search-model-preset",
             None,
@@ -427,10 +432,11 @@ impl KnowledgeSearchHttpFixture {
         )
         .await
         .context("failed to create knowledge search model preset")?;
-        ai_repository::create_library_binding(
+        ai_repository::create_binding_assignment(
             &state.persistence.postgres,
-            workspace.id,
-            library.id,
+            "library",
+            Some(workspace.id),
+            Some(library.id),
             "embed_chunk",
             credential.id,
             preset.id,
@@ -462,6 +468,7 @@ impl KnowledgeSearchHttpFixture {
                 workspace_id: workspace.id,
                 library_id: library.id,
                 external_key: "search-document".to_string(),
+                file_name: None,
                 title: Some("Search Document".to_string()),
                 document_state: "active".to_string(),
                 active_revision_id: Some(revision_id),
@@ -790,7 +797,7 @@ impl KnowledgeSearchHttpFixture {
         &self,
         query: &str,
         expected_fact_id: Uuid,
-    ) -> Result<rustrag_backend::services::search_service::QueryEvidenceSearchResult> {
+    ) -> Result<rustrag_backend::services::query::search::QueryEvidenceSearchResult> {
         let deadline = Instant::now() + SEARCH_WAIT_TIMEOUT;
         loop {
             let result = SearchService::new()
@@ -906,6 +913,7 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
                 workspace_id,
                 library_id: target_library_id,
                 external_key: "lexical-target".to_string(),
+                file_name: None,
                 title: Some("Target".to_string()),
                 document_state: "active".to_string(),
                 active_revision_id: Some(target_revision_id),
@@ -989,6 +997,7 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
                 workspace_id,
                 library_id: distractor_library_id,
                 external_key: "lexical-distractor".to_string(),
+                file_name: None,
                 title: Some("Distractor".to_string()),
                 document_state: "active".to_string(),
                 active_revision_id: Some(distractor_revision_id),
@@ -1109,6 +1118,7 @@ async fn chunk_and_entity_vectors_roundtrip_with_generation_order() -> Result<()
                 workspace_id,
                 library_id,
                 external_key: "vector-doc".to_string(),
+                file_name: None,
                 title: Some("Vector Doc".to_string()),
                 document_state: "active".to_string(),
                 active_revision_id: Some(revision_id),
@@ -1348,6 +1358,7 @@ async fn revision_replacement_updates_readiness_generation_and_chunk_search_surf
                 workspace_id,
                 library_id,
                 external_key: "replacement-doc".to_string(),
+                file_name: None,
                 title: Some("Replacement Doc".to_string()),
                 document_state: "active".to_string(),
                 active_revision_id: Some(revision_one_id),

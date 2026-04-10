@@ -1,11 +1,26 @@
 use serde::{Deserialize, Serialize};
 
+pub mod chunking;
 pub mod docx;
+pub mod file_extract;
 pub mod html_main_content;
 pub mod image;
 pub mod pdf;
 pub mod pptx;
+pub mod structured_document;
+pub mod technical_facts;
 pub mod text_like;
+pub mod text_render;
+
+/// An image extracted from a document (PDF, DOCX) during content parsing.
+#[derive(Debug, Clone)]
+pub struct ExtractedImage {
+    pub page: usize,
+    pub image_bytes: Vec<u8>,
+    pub mime_type: String,
+    pub width: u32,
+    pub height: u32,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -57,6 +72,9 @@ pub struct ExtractionOutput {
     pub source_map: serde_json::Value,
     pub provider_kind: Option<String>,
     pub model_name: Option<String>,
+    /// Images extracted from the document (PDF, DOCX). Empty for non-document formats.
+    #[serde(skip)]
+    pub extracted_images: Vec<ExtractedImage>,
 }
 
 #[derive(Debug, Clone)]

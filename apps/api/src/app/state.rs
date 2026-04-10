@@ -12,31 +12,40 @@ use crate::{
     domains::agent_runtime::{RuntimeDecisionTargetKind, RuntimeTaskKind},
     infra::{
         arangodb::{
-            bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
-            client::ArangoClient,
-            context_store::ArangoContextStore,
-            document_store::ArangoDocumentStore,
-            graph_store::ArangoGraphStore,
+            client::ArangoClient, context_store::ArangoContextStore,
+            document_store::ArangoDocumentStore, graph_store::ArangoGraphStore,
             search_store::ArangoSearchStore,
         },
         persistence::Persistence,
     },
     integrations::llm::{LlmGateway, UnifiedGateway},
     services::{
-        ai_catalog_service::AiCatalogService, audit_service::AuditService,
-        billing_service::BillingService, catalog_service::CatalogService,
-        content_service::ContentService, content_storage::ContentStorageService,
-        extract_service::ExtractService, extraction_recovery::ExtractionRecoveryService,
-        graph_projection_guard::GraphWriteGuardService,
-        graph_quality_guard::GraphQualityGuardService,
-        graph_reconciliation_scope::GraphReconciliationScopeService, graph_service::GraphService,
-        graph_summary::GraphSummaryService, iam_service::IamService,
-        ingest_activity::IngestActivityService, ingest_service::IngestService,
-        knowledge_service::KnowledgeService, ops_service::OpsService,
-        provider_failure_classification::ProviderFailureClassificationService,
-        query_service::QueryService, search_service::SearchService,
-        structured_preparation_service::StructuredPreparationService,
-        technical_fact_service::TechnicalFactService, web_ingest_service::WebIngestService,
+        ai_catalog_service::AiCatalogService,
+        catalog_service::CatalogService,
+        content::service::ContentService,
+        content::storage::ContentStorageService,
+        graph::projection_guard::GraphWriteGuardService,
+        graph::quality_guard::GraphQualityGuardService,
+        graph::reconciliation_scope::GraphReconciliationScopeService,
+        graph::service::GraphService,
+        graph::summary::GraphSummaryService,
+        iam::audit::AuditService,
+        iam::service::IamService,
+        ingest::activity::IngestActivityService,
+        ingest::extract::ExtractService,
+        ingest::extraction_recovery::ExtractionRecoveryService,
+        ingest::service::IngestService,
+        ingest::structured_preparation::StructuredPreparationService,
+        ingest::technical_facts::TechnicalFactService,
+        ingest::web::WebIngestService,
+        knowledge::service::KnowledgeService,
+        ops::billing::BillingService,
+        ops::deployment_diagnostics::{DeploymentDiagnosticsService, WorkerRuntimeState},
+        ops::provider_failure::ProviderFailureClassificationService,
+        ops::release_monitor::ReleaseMonitorService,
+        ops::service::OpsService,
+        query::search::SearchService,
+        query::service::QueryService,
     },
 };
 
@@ -211,6 +220,8 @@ pub struct AppState {
     pub agent_runtime: AgentRuntime,
     pub llm_gateway: Arc<dyn LlmGateway>,
     pub content_storage: ContentStorageService,
+    pub deployment_diagnostics: DeploymentDiagnosticsService,
+    pub worker_runtime: WorkerRuntimeState,
     pub arango_client: Arc<ArangoClient>,
     pub ui_runtime: UiRuntimeSettings,
     pub ui_bootstrap_admin: Option<UiBootstrapAdmin>,
@@ -230,22 +241,24 @@ pub struct AppState {
     pub bulk_ingest_hardening_services: BulkIngestHardeningServices,
     pub mcp_memory: McpMemorySettings,
     pub canonical_services: CanonicalServices,
+    pub release_monitor: ReleaseMonitorService,
     pub pipeline_hardening: PipelineHardeningSettings,
     pub resolve_settle_blockers: ResolveSettleBlockersSettings,
     pub resolve_settle_blockers_services: ResolveSettleBlockersServices,
 }
 
 impl AppState {
-    #[must_use]
     pub fn from_dependencies(
         settings: Settings,
         persistence: Persistence,
         arango_client: Arc<ArangoClient>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let bootstrap_settings = settings.bootstrap_settings();
         let public_origin_settings = settings.public_origin_settings();
-        let content_storage = ContentStorageService::new(settings.content_storage_root.clone());
-        let ui_bootstrap_admin = bootstrap_settings.legacy_ui_bootstrap_admin;
+        let content_storage = ContentStorageService::from_settings(&settings)?;
+        let deployment_diagnostics = DeploymentDiagnosticsService::new();
+        let worker_runtime = WorkerRuntimeState::default();
+        let ui_bootstrap_admin = bootstrap_settings.ui_bootstrap_admin;
         let ui_bootstrap_ai_setup = settings.resolved_ui_bootstrap_ai_setup();
         let ui_runtime = UiRuntimeSettings {
             frontend_origin: public_origin_settings.raw_frontend_origin,
@@ -325,6 +338,10 @@ impl AppState {
             audit_enabled: settings.mcp_memory_audit_enabled,
             upload_max_size_mb: settings.upload_max_size_mb,
         };
+        let release_monitor = ReleaseMonitorService::new(
+            settings.release_check_repository.clone(),
+            settings.release_check_interval_hours,
+        );
         let canonical_services = CanonicalServices {
             catalog: CatalogService::new(),
             iam: IamService::new(),
@@ -339,7 +356,7 @@ impl AppState {
             ),
             technical_facts: TechnicalFactService::new(),
             web_ingest: WebIngestService::new(
-                crate::services::web_ingest_service::WebIngestRuntimeSettings {
+                crate::services::ingest::web::WebIngestRuntimeSettings {
                     request_timeout_seconds: web_ingest_runtime.request_timeout_seconds,
                     max_redirects: web_ingest_runtime.max_redirects,
                     user_agent: web_ingest_runtime.user_agent.clone(),
@@ -398,10 +415,12 @@ impl AppState {
             )),
             agent_runtime.hooks(),
         );
-        Self {
+        Ok(Self {
             agent_runtime,
             llm_gateway: Arc::new(UnifiedGateway::from_settings(&settings)),
             content_storage,
+            deployment_diagnostics,
+            worker_runtime,
             arango_client,
             settings,
             persistence,
@@ -423,10 +442,11 @@ impl AppState {
             bulk_ingest_hardening_services,
             mcp_memory,
             canonical_services,
+            release_monitor,
             pipeline_hardening,
             resolve_settle_blockers,
             resolve_settle_blockers_services,
-        }
+        })
     }
 
     /// Creates shared application state and initializes persistence/gateway dependencies.
@@ -436,24 +456,7 @@ impl AppState {
     pub async fn new(settings: Settings) -> anyhow::Result<Self> {
         let persistence = Persistence::connect(&settings).await?;
         let arango_client = Arc::new(ArangoClient::from_settings(&settings)?);
-        arango_client.ensure_database().await?;
-        let bootstrap_options = ArangoBootstrapOptions {
-            collections: settings.arangodb_bootstrap_collections,
-            views: settings.arangodb_bootstrap_views,
-            graph: settings.arangodb_bootstrap_graph,
-            vector_indexes: settings.arangodb_bootstrap_vector_indexes,
-            vector_dimensions: settings.arangodb_vector_dimensions,
-            vector_index_n_lists: settings.arangodb_vector_index_n_lists,
-            vector_index_default_n_probe: settings.arangodb_vector_index_default_n_probe,
-            vector_index_training_iterations: settings.arangodb_vector_index_training_iterations,
-        };
-        if bootstrap_options.any_enabled() {
-            bootstrap_knowledge_plane(&arango_client, &bootstrap_options).await?;
-        }
-        crate::infra::persistence::validate_arango_bootstrap_state(&arango_client, &settings)
-            .await?;
-        ArangoGraphStore::new(Arc::clone(&arango_client)).ping().await?;
-        Ok(Self::from_dependencies(settings, persistence, arango_client))
+        Self::from_dependencies(settings, persistence, arango_client)
     }
 }
 

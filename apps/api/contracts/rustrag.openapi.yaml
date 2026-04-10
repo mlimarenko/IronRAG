@@ -54,7 +54,6 @@ x-greenfield-scaffold:
     - /v1/openapi/rustrag.openapi.yaml
     - /v1/iam/bootstrap/status
     - /v1/iam/bootstrap/setup
-    - /v1/iam/bootstrap/claim
   scaffoldStatus: canonical-cutover
 paths:
   /v1/health:
@@ -83,6 +82,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ReadinessResponse"
+        "503":
+          description: Readiness probe failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessResponse"
   /v1/version:
     get:
       tags: [system]
@@ -96,6 +101,19 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/VersionResponse"
+  /v1/version/update:
+    get:
+      tags: [system]
+      summary: Resolve release update status
+      operationId: getReleaseUpdate
+      security: []
+      responses:
+        "200":
+          description: Release update metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReleaseUpdateResponse"
   /v1/openapi/rustrag.openapi.yaml:
     get:
       tags: [system]
@@ -109,53 +127,6 @@ paths:
             application/yaml:
               schema:
                 type: string
-  /v1/iam/bootstrap/claim:
-    post:
-      tags: [iam]
-      summary: Claim the first administrator for a fresh deployment
-      operationId: postBootstrapClaim
-      security: []
-      description: |
-        One-time bootstrap route for destructive fresh deployments. This route is expected to
-        succeed exactly once, create the first `iam_principal` plus `iam_user`, and emit one
-        canonical `audit_event`.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/BootstrapClaimRequest"
-      responses:
-        "200":
-          description: Bootstrap claim succeeded
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/BootstrapClaimResponse"
-        "400":
-          description: Invalid bootstrap payload
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiErrorBody"
-        "401":
-          description: Invalid bootstrap secret
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiErrorBody"
-        "403":
-          description: Bootstrap claim disabled
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiErrorBody"
-        "409":
-          description: Bootstrap was already claimed
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiErrorBody"
   /v1/iam/bootstrap/status:
     get:
       tags: [iam]
@@ -775,11 +746,29 @@ paths:
   /v1/ai/models:
     get:
       tags: [ai]
-      summary: List seeded AI models
+      summary: List AI models with runtime availability
       operationId: listAiModels
       parameters:
         - in: query
           name: providerCatalogId
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: libraryId
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: credentialId
           required: false
           schema:
             type: string
@@ -1439,8 +1428,48 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiErrorBody"
+  /v1/content/documents/{documentId}/source:
+    get:
+      tags: [content]
+      summary: Open or download the original source material for a document revision
+      operationId: getContentDocumentSource
+      parameters:
+        - in: path
+          name: documentId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: revisionId
+          required: false
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The original source payload is streamed directly by the application.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "307":
+          description: Temporary redirect to the canonical external source or a presigned object-storage URL.
+        "400":
+          description: The document has no downloadable source.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
         "404":
-          description: Document not found
+          description: Document or revision not found
           content:
             application/json:
               schema:
@@ -3138,12 +3167,40 @@ components:
     BootstrapCredentialSource:
       type: string
       enum: [missing, env]
-    BootstrapClaimRequest: *genericObject
-    BootstrapClaimResponse: *genericObject
-    BootstrapProviderCatalogEntryResponse:
+    BootstrapProviderPresetResponse:
       type: object
       additionalProperties: false
-      required: [id, providerKind, displayName, apiStyle, lifecycleState, credentialSource]
+      required: [bindingPurpose, modelCatalogId, modelName, presetName]
+      properties:
+        bindingPurpose:
+          $ref: "#/components/schemas/BootstrapBindingPurpose"
+        modelCatalogId:
+          type: string
+          format: uuid
+        modelName:
+          type: string
+        presetName:
+          type: string
+        systemPrompt:
+          oneOf:
+            - type: string
+            - type: "null"
+        temperature:
+          oneOf:
+            - type: number
+            - type: "null"
+        topP:
+          oneOf:
+            - type: number
+            - type: "null"
+        maxOutputTokensOverride:
+          oneOf:
+            - type: integer
+            - type: "null"
+    BootstrapProviderPresetBundleResponse:
+      type: object
+      additionalProperties: false
+      required: [id, providerKind, displayName, credentialSource, apiKeyRequired, baseUrlRequired, presets]
       properties:
         id:
           type: string
@@ -3152,85 +3209,30 @@ components:
           type: string
         displayName:
           type: string
-        apiStyle:
-          type: string
-        lifecycleState:
-          type: string
         credentialSource:
           $ref: "#/components/schemas/BootstrapCredentialSource"
-    BootstrapModelCatalogEntryResponse:
-      type: object
-      additionalProperties: false
-      required:
-        [
-          id,
-          providerCatalogId,
-          modelName,
-          capabilityKind,
-          modalityKind,
-          allowedBindingPurposes,
-        ]
-      properties:
-        id:
-          type: string
-          format: uuid
-        providerCatalogId:
-          type: string
-          format: uuid
-        modelName:
-          type: string
-        capabilityKind:
-          type: string
-        modalityKind:
-          type: string
-        allowedBindingPurposes:
+        defaultBaseUrl:
+          oneOf:
+            - type: string
+            - type: "null"
+        apiKeyRequired:
+          type: boolean
+        baseUrlRequired:
+          type: boolean
+        presets:
           type: array
           items:
-            $ref: "#/components/schemas/BootstrapBindingPurpose"
-        contextWindow:
-          oneOf:
-            - type: integer
-            - type: "null"
-        maxOutputTokens:
-          oneOf:
-            - type: integer
-            - type: "null"
-    BootstrapBindingSelectionResponse:
-      type: object
-      additionalProperties: false
-      required: [bindingPurpose, configured]
-      properties:
-        bindingPurpose:
-          $ref: "#/components/schemas/BootstrapBindingPurpose"
-        providerKind:
-          oneOf:
-            - type: string
-            - type: "null"
-        modelCatalogId:
-          oneOf:
-            - type: string
-              format: uuid
-            - type: "null"
-        configured:
-          type: boolean
+            $ref: "#/components/schemas/BootstrapProviderPresetResponse"
     BootstrapAiSetupResponse:
       type: object
       additionalProperties: false
-      required: [providers, models, bindingSelections]
+      required: [presetBundles]
       properties:
-        providers:
+        presetBundles:
           type: array
           items:
-            $ref: "#/components/schemas/BootstrapProviderCatalogEntryResponse"
-        models:
-          type: array
-          items:
-            $ref: "#/components/schemas/BootstrapModelCatalogEntryResponse"
-        bindingSelections:
-          type: array
-          items:
-            $ref: "#/components/schemas/BootstrapBindingSelectionResponse"
-    BootstrapCredentialInputRequest:
+            $ref: "#/components/schemas/BootstrapProviderPresetBundleResponse"
+    BootstrapSetupAiRequest:
       type: object
       additionalProperties: false
       required: [providerKind]
@@ -3241,31 +3243,10 @@ components:
           oneOf:
             - type: string
             - type: "null"
-    BootstrapBindingSelectionRequest:
-      type: object
-      additionalProperties: false
-      required: [bindingPurpose, providerKind, modelCatalogId]
-      properties:
-        bindingPurpose:
-          $ref: "#/components/schemas/BootstrapBindingPurpose"
-        providerKind:
-          type: string
-        modelCatalogId:
-          type: string
-          format: uuid
-    BootstrapSetupAiRequest:
-      type: object
-      additionalProperties: false
-      required: [credentials, bindingSelections]
-      properties:
-        credentials:
-          type: array
-          items:
-            $ref: "#/components/schemas/BootstrapCredentialInputRequest"
-        bindingSelections:
-          type: array
-          items:
-            $ref: "#/components/schemas/BootstrapBindingSelectionRequest"
+        baseUrl:
+          oneOf:
+            - type: string
+            - type: "null"
     BootstrapSetupRequest:
       type: object
       additionalProperties: false
@@ -3305,6 +3286,10 @@ components:
         document: *genericObject
         fileName:
           type: string
+        sourceAccess:
+          oneOf:
+            - $ref: "#/components/schemas/ContentSourceAccess"
+            - type: "null"
         head:
           oneOf:
             - *genericObject
@@ -3339,6 +3324,16 @@ components:
             - type: "null"
         pipeline: *genericObject
     ContentMutationDetailResponse: *genericObject
+    ContentSourceAccess:
+      type: object
+      additionalProperties: false
+      required: [kind, href]
+      properties:
+        kind:
+          type: string
+          enum: [stored_document, external_url]
+        href:
+          type: string
     ContentRevision: *genericObject
     CreateCatalogLibraryRequest: *genericObject
     CreateCatalogWorkspaceRequest: *genericObject
@@ -3347,11 +3342,45 @@ components:
     CreateContentMutationRequest: *genericObject
     CreateGrantRequest: *genericObject
     CreateLibraryBindingRequest: *genericObject
-    CreateProviderCredentialRequest: *genericObject
+    CreateProviderCredentialRequest:
+      type: object
+      additionalProperties: false
+      required: [workspaceId, providerCatalogId, label]
+      properties:
+        workspaceId:
+          type: string
+          format: uuid
+        providerCatalogId:
+          type: string
+          format: uuid
+        label:
+          type: string
+        apiKey:
+          oneOf:
+            - type: string
+            - type: "null"
+        baseUrl:
+          oneOf:
+            - type: string
+            - type: "null"
     CreateQueryConversationRequest: *genericObject
     CreateQueryTurnRequest: *genericObject
     GrantResponse: *genericObject
-    HealthResponse: *genericObject
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [status, service, environment, role]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        service:
+          type: string
+        environment:
+          type: string
+        role:
+          type: string
+          enum: [api, worker, startup]
     IngestAttempt: *genericObject
     IngestJob: *genericObject
     IngestStageEvent: *genericObject
@@ -3876,8 +3905,60 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/PreparedSegmentDetail"
-    ProviderCatalogEntryResponse: *genericObject
-    ProviderCredentialResponse: *genericObject
+    ProviderCatalogEntryResponse:
+      type: object
+      additionalProperties: false
+      required: [id, providerKind, displayName, apiStyle, lifecycleState, apiKeyRequired, baseUrlRequired]
+      properties:
+        id:
+          type: string
+          format: uuid
+        providerKind:
+          type: string
+        displayName:
+          type: string
+        apiStyle:
+          type: string
+        lifecycleState:
+          type: string
+        defaultBaseUrl:
+          oneOf:
+            - type: string
+            - type: "null"
+        apiKeyRequired:
+          type: boolean
+        baseUrlRequired:
+          type: boolean
+    ProviderCredentialResponse:
+      type: object
+      additionalProperties: false
+      required: [id, workspaceId, providerCatalogId, label, apiKeySummary, credentialState, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspaceId:
+          type: string
+          format: uuid
+        providerCatalogId:
+          type: string
+          format: uuid
+        label:
+          type: string
+        baseUrl:
+          oneOf:
+            - type: string
+            - type: "null"
+        apiKeySummary:
+          type: string
+        credentialState:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
     RuntimeLifecycleState:
       type: string
       enum: [accepted, running, completed, recovered, failed, canceled]
@@ -4355,6 +4436,23 @@ components:
           type: array
           items:
             type: string
+        documentId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        documentTitle:
+          oneOf:
+            - type: string
+            - type: "null"
+        sourceUri:
+          oneOf:
+            - type: string
+            - type: "null"
+        sourceAccess:
+          oneOf:
+            - $ref: "#/components/schemas/ContentSourceAccess"
+            - type: "null"
     QueryTechnicalFactReference:
       type: object
       additionalProperties: true
@@ -4448,7 +4546,116 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/QueryVerificationWarning"
-    ReadinessResponse: *genericObject
+    DependencyStatus:
+      type: object
+      additionalProperties: false
+      required: [mode, status]
+      properties:
+        mode:
+          type: string
+          enum: [bundled, external, disabled, misconfigured]
+        status:
+          type: string
+          enum: [ok, down, misconfigured]
+        message:
+          oneOf:
+            - type: string
+            - type: "null"
+    DependencyStatusSet:
+      type: object
+      additionalProperties: false
+      required: [postgres, redis, arangodb]
+      properties:
+        postgres:
+          $ref: "#/components/schemas/DependencyStatus"
+        redis:
+          $ref: "#/components/schemas/DependencyStatus"
+        arangodb:
+          $ref: "#/components/schemas/DependencyStatus"
+    StartupAuthorityStatus:
+      type: object
+      additionalProperties: false
+      required: [mode, state]
+      properties:
+        mode:
+          type: string
+          enum: [not_required, startup_job, compose_one_shot]
+        state:
+          type: string
+          enum: [not_required, pending, running, succeeded]
+        message:
+          oneOf:
+            - type: string
+            - type: "null"
+    StorageStatus:
+      type: object
+      additionalProperties: false
+      required: [provider, status, topology]
+      properties:
+        provider:
+          type: string
+          enum: [filesystem, s3]
+        status:
+          type: string
+          enum: [ok, down, unsupported, misconfigured]
+        topology:
+          type: string
+          enum: [single_node, shared_cluster]
+        bucket:
+          oneOf:
+            - type: string
+            - type: "null"
+        rootPath:
+          oneOf:
+            - type: string
+            - type: "null"
+        endpoint:
+          oneOf:
+            - type: string
+            - type: "null"
+        message:
+          oneOf:
+            - type: string
+            - type: "null"
+    TopologyStatus:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [supported, unsupported]
+        message:
+          oneOf:
+            - type: string
+            - type: "null"
+    ReadinessResponse:
+      type: object
+      additionalProperties: false
+      required:
+        [status, role, startupAuthority, dependencies, storage, topology, checkedAt]
+      properties:
+        status:
+          type: string
+          enum: [ready, degraded, blocked]
+        role:
+          type: string
+          enum: [api, worker, startup]
+        startupAuthority:
+          $ref: "#/components/schemas/StartupAuthorityStatus"
+        dependencies:
+          $ref: "#/components/schemas/DependencyStatusSet"
+        storage:
+          $ref: "#/components/schemas/StorageStatus"
+        topology:
+          $ref: "#/components/schemas/TopologyStatus"
+        message:
+          oneOf:
+            - type: string
+            - type: "null"
+        checkedAt:
+          type: string
+          format: date-time
     ReplaceContentDocumentRequest: *genericObject
     DocumentReadinessSummary:
       type: object
@@ -4646,4 +4853,41 @@ components:
     Unauthorized: *genericObject
     UpdateLibraryBindingRequest: *genericObject
     UploadContentDocumentRequest: *genericObject
-    VersionResponse: *genericObject
+    VersionResponse:
+      type: object
+      additionalProperties: false
+      required: [service, version, environment, role]
+      properties:
+        service:
+          type: string
+        version:
+          type: string
+        environment:
+          type: string
+        role:
+          type: string
+          enum: [api, worker, startup]
+    ReleaseUpdateResponse:
+      type: object
+      additionalProperties: false
+      required: [status, currentVersion, repositoryUrl, checkedAt]
+      properties:
+        status:
+          type: string
+        currentVersion:
+          type: string
+        latestVersion:
+          oneOf:
+            - type: string
+            - type: "null"
+        releaseUrl:
+          oneOf:
+            - type: string
+              format: uri
+            - type: "null"
+        repositoryUrl:
+          type: string
+          format: uri
+        checkedAt:
+          type: string
+          format: date-time

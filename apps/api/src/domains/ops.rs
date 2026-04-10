@@ -12,6 +12,7 @@ pub enum HealthState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OpsAsyncOperation {
     pub id: Uuid,
     pub workspace_id: Uuid,

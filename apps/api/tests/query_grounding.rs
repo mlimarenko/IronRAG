@@ -34,7 +34,7 @@ use rustrag_backend::{
         graph_store::{ArangoGraphStore, NewKnowledgeEntity},
     },
     infra::repositories::{self, query_repository, runtime_repository},
-    services::query_service::QueryService,
+    services::query::service::QueryService,
 };
 
 struct TempArangoDatabase {
@@ -208,6 +208,7 @@ impl QueryGroundingFixture {
                 workspace_id,
                 library_id,
                 external_key: format!("grounding-{document_id}"),
+                file_name: None,
                 title: Some("Grounding Document".to_string()),
                 document_state: "active".to_string(),
                 active_revision_id: Some(revision_id),
@@ -555,6 +556,7 @@ impl QueryGroundingAppFixture {
                     workspace_id: self.workspace_id,
                     library_id: self.library_id,
                     external_key: format!("grounding-detail-{document_id}"),
+                    file_name: None,
                     title: Some("Grounding Detail Document".to_string()),
                     document_state: "active".to_string(),
                     active_revision_id: Some(active_revision_id),

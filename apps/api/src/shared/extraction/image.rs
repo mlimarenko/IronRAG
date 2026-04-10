@@ -65,6 +65,7 @@ pub async fn extract_image_with_provider(
         }),
         provider_kind: Some(response.provider_kind),
         model_name: Some(response.model_name),
+        extracted_images: Vec::new(),
     })
 }
 

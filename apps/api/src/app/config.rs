@@ -2,6 +2,11 @@
 
 use serde::Deserialize;
 
+use crate::domains::deployment::{
+    ContentStorageProvider, DependencyKind, DependencyMode, DeploymentTopology, ServiceRole,
+    StartupAuthorityMode,
+};
+
 const DEFAULT_UI_BOOTSTRAP_ADMIN_EMAIL_DOMAIN: &str = "rustrag.local";
 const DEFAULT_UI_BOOTSTRAP_ADMIN_NAME: &str = "Admin";
 const BOOTSTRAP_PROVIDER_ENV_OPENAI: &str = "RUSTRAG_OPENAI_API_KEY";
@@ -45,11 +50,7 @@ pub struct UiBootstrapAiBindingDefault {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BootstrapSettings {
-    pub bootstrap_token: Option<String>,
-    pub bootstrap_claim_enabled: bool,
-    pub legacy_ui_bootstrap_enabled: bool,
-    pub legacy_bootstrap_token_endpoint_enabled: bool,
-    pub legacy_ui_bootstrap_admin: Option<UiBootstrapAdmin>,
+    pub ui_bootstrap_admin: Option<UiBootstrapAdmin>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,7 +79,6 @@ pub struct ArangoSettings {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DestructiveFreshBootstrapSettings {
     pub required: bool,
-    pub allow_legacy_startup_side_effects: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -104,12 +104,7 @@ pub struct Settings {
     pub service_name: String,
     pub environment: String,
     pub log_filter: String,
-    pub bootstrap_token: Option<String>,
-    pub bootstrap_claim_enabled: bool,
-    pub legacy_ui_bootstrap_enabled: bool,
-    pub legacy_bootstrap_token_endpoint_enabled: bool,
     pub destructive_fresh_bootstrap_required: bool,
-    pub destructive_allow_legacy_startup_side_effects: bool,
     pub frontend_origin: String,
     /// When set, OpenAPI/Swagger uses this value as the only `servers` URL (API origin without a
     /// duplicate `/v1`; paths in the contract already start with `/v1/`). Env: `RUSTRAG_OPENAPI_PUBLIC_ORIGIN`.
@@ -131,13 +126,37 @@ pub struct Settings {
     pub ui_bootstrap_vision_model_name: Option<String>,
     pub ui_session_ttl_hours: u64,
     pub upload_max_size_mb: u64,
+    pub startup_authority_mode: String,
+    pub dependency_postgres_mode: String,
+    pub dependency_redis_mode: String,
+    pub dependency_arangodb_mode: String,
+    pub dependency_object_storage_mode: String,
+    pub content_storage_provider: String,
+    pub content_storage_topology: String,
+    pub content_storage_key_prefix: String,
     pub content_storage_root: String,
+    pub content_storage_s3_bucket: Option<String>,
+    pub content_storage_s3_endpoint: Option<String>,
+    pub content_storage_s3_region: Option<String>,
+    pub content_storage_s3_access_key_id: Option<String>,
+    pub content_storage_s3_secret_access_key: Option<String>,
+    pub content_storage_s3_session_token: Option<String>,
+    pub content_storage_s3_force_path_style: bool,
     pub ingestion_worker_concurrency: usize,
     pub ingestion_worker_lease_seconds: u64,
     pub ingestion_worker_heartbeat_interval_seconds: u64,
+    /// Max concurrent ingest jobs per library (0 = unlimited).
+    /// Prevents one library starving others when many docs are queued at once.
+    pub ingestion_max_jobs_per_library: usize,
+    /// Number of embedding batches sent in parallel within one job.
+    /// Each batch contains EMBEDDING_BATCH_SIZE inputs. Higher values speed up
+    /// long documents but may hit provider rate limits.
+    pub ingestion_embedding_parallelism: usize,
     pub web_ingest_http_timeout_seconds: u64,
     pub web_ingest_max_redirects: usize,
     pub web_ingest_user_agent: String,
+    /// Number of pages fetched in parallel during a web crawl run.
+    pub web_ingest_crawl_concurrency: usize,
     pub llm_http_timeout_seconds: u64,
     pub llm_transport_retry_attempts: usize,
     pub llm_transport_retry_base_delay_ms: u64,
@@ -149,6 +168,9 @@ pub struct Settings {
     pub runtime_policy_reject_target_kinds: Option<String>,
     pub query_intent_cache_ttl_hours: u64,
     pub query_intent_cache_max_entries_per_library: usize,
+    pub query_answer_source_links_enabled: bool,
+    pub release_check_repository: String,
+    pub release_check_interval_hours: u64,
     pub query_rerank_enabled: bool,
     pub query_rerank_candidate_limit: usize,
     pub query_balanced_context_enabled: bool,
@@ -190,11 +212,29 @@ impl Settings {
 
         let mut settings: Self = cfg.try_deserialize()?;
         settings.service_role = settings.service_role.trim().to_ascii_lowercase();
+        settings.startup_authority_mode =
+            settings.startup_authority_mode.trim().to_ascii_lowercase();
+        settings.dependency_postgres_mode =
+            settings.dependency_postgres_mode.trim().to_ascii_lowercase();
+        settings.dependency_redis_mode = settings.dependency_redis_mode.trim().to_ascii_lowercase();
+        settings.dependency_arangodb_mode =
+            settings.dependency_arangodb_mode.trim().to_ascii_lowercase();
+        settings.dependency_object_storage_mode =
+            settings.dependency_object_storage_mode.trim().to_ascii_lowercase();
+        settings.content_storage_provider =
+            settings.content_storage_provider.trim().to_ascii_lowercase();
+        settings.content_storage_topology =
+            settings.content_storage_topology.trim().to_ascii_lowercase();
         settings.service_name = settings.service_name.trim().to_string();
+        settings.release_check_repository = settings.release_check_repository.trim().to_string();
         validate_service_role(&settings).map_err(config::ConfigError::Message)?;
+        validate_startup_authority_mode(&settings).map_err(config::ConfigError::Message)?;
+        validate_dependency_modes(&settings).map_err(config::ConfigError::Message)?;
+        validate_content_storage_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_service_name(&settings).map_err(config::ConfigError::Message)?;
         validate_arangodb_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_runtime_agent_settings(&settings).map_err(config::ConfigError::Message)?;
+        validate_release_monitor_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_mcp_memory_settings(&settings).map_err(config::ConfigError::Message)?;
 
         Ok(settings)
@@ -211,29 +251,8 @@ impl Settings {
     }
 
     #[must_use]
-    pub fn resolved_bootstrap_token(&self) -> Option<String> {
-        self.bootstrap_token
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(std::string::ToString::to_string)
-            .or_else(|| {
-                std::env::var("RUSTRAG_BOOTSTRAP_TOKEN")
-                    .ok()
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty())
-            })
-    }
-
-    #[must_use]
     pub fn bootstrap_settings(&self) -> BootstrapSettings {
-        BootstrapSettings {
-            bootstrap_token: self.resolved_bootstrap_token(),
-            bootstrap_claim_enabled: self.bootstrap_claim_enabled,
-            legacy_ui_bootstrap_enabled: self.legacy_ui_bootstrap_enabled,
-            legacy_bootstrap_token_endpoint_enabled: self.legacy_bootstrap_token_endpoint_enabled,
-            legacy_ui_bootstrap_admin: self.resolved_ui_bootstrap_admin(),
-        }
+        BootstrapSettings { ui_bootstrap_admin: self.resolved_ui_bootstrap_admin() }
     }
 
     #[must_use]
@@ -271,10 +290,7 @@ impl Settings {
 
     #[must_use]
     pub fn destructive_fresh_bootstrap_settings(&self) -> DestructiveFreshBootstrapSettings {
-        DestructiveFreshBootstrapSettings {
-            required: self.destructive_fresh_bootstrap_required,
-            allow_legacy_startup_side_effects: self.destructive_allow_legacy_startup_side_effects,
-        }
+        DestructiveFreshBootstrapSettings { required: self.destructive_fresh_bootstrap_required }
     }
 
     #[must_use]
@@ -375,12 +391,47 @@ impl Settings {
 
     #[must_use]
     pub fn runs_http_api(&self) -> bool {
-        matches!(self.service_role.as_str(), "all" | "api")
+        matches!(self.service_role.as_str(), "api")
+    }
+
+    #[must_use]
+    pub fn runs_probe_http_api(&self) -> bool {
+        matches!(self.service_role.as_str(), "worker")
     }
 
     #[must_use]
     pub fn runs_ingestion_workers(&self) -> bool {
-        matches!(self.service_role.as_str(), "all" | "worker")
+        matches!(self.service_role.as_str(), "worker")
+    }
+
+    #[must_use]
+    pub fn runs_startup_authority(&self) -> bool {
+        matches!(self.service_role.as_str(), "startup")
+    }
+
+    pub fn service_role_kind(&self) -> Result<ServiceRole, String> {
+        self.service_role.parse()
+    }
+
+    pub fn startup_authority_mode_kind(&self) -> Result<StartupAuthorityMode, String> {
+        self.startup_authority_mode.parse()
+    }
+
+    pub fn content_storage_provider_kind(&self) -> Result<ContentStorageProvider, String> {
+        self.content_storage_provider.parse()
+    }
+
+    pub fn content_storage_topology_kind(&self) -> Result<DeploymentTopology, String> {
+        self.content_storage_topology.parse()
+    }
+
+    pub fn dependency_mode(&self, kind: DependencyKind) -> Result<DependencyMode, String> {
+        match kind {
+            DependencyKind::Postgres => self.dependency_postgres_mode.parse(),
+            DependencyKind::Redis => self.dependency_redis_mode.parse(),
+            DependencyKind::ArangoDb => self.dependency_arangodb_mode.parse(),
+            DependencyKind::ObjectStorage => self.dependency_object_storage_mode.parse(),
+        }
     }
 }
 
@@ -388,7 +439,7 @@ fn settings_config_builder()
 -> Result<config::ConfigBuilder<config::builder::DefaultState>, config::ConfigError> {
     config::Config::builder()
         .set_default("bind_addr", "0.0.0.0:8080")?
-        .set_default("service_role", "all")?
+        .set_default("service_role", "api")?
         .set_default("service_name", "rustrag-backend")?
         .set_default("environment", "local")?
         .set_default("database_url", "postgres://postgres:postgres@127.0.0.1:5432/rustrag")?
@@ -408,23 +459,32 @@ fn settings_config_builder()
         .set_default("arangodb_vector_index_default_n_probe", 8)?
         .set_default("arangodb_vector_index_training_iterations", 25)?
         .set_default("log_filter", "info")?
-        .set_default("bootstrap_claim_enabled", true)?
-        .set_default("legacy_ui_bootstrap_enabled", true)?
-        .set_default("legacy_bootstrap_token_endpoint_enabled", true)?
         .set_default("destructive_fresh_bootstrap_required", false)?
-        .set_default("destructive_allow_legacy_startup_side_effects", true)?
         .set_default("frontend_origin", "http://127.0.0.1:19000,http://localhost:19000")?
         .set_default("ui_session_secret", "local-ui-session-secret")?
         .set_default("ui_default_locale", "ru")?
         .set_default("ui_session_ttl_hours", 720)?
         .set_default("upload_max_size_mb", 50)?
+        .set_default("startup_authority_mode", "not_required")?
+        .set_default("dependency_postgres_mode", "external")?
+        .set_default("dependency_redis_mode", "external")?
+        .set_default("dependency_arangodb_mode", "external")?
+        .set_default("dependency_object_storage_mode", "disabled")?
+        .set_default("content_storage_provider", "filesystem")?
+        .set_default("content_storage_topology", "single_node")?
+        .set_default("content_storage_key_prefix", "")?
         .set_default("content_storage_root", "/var/lib/rustrag/content-storage")?
+        .set_default("content_storage_s3_region", "us-east-1")?
+        .set_default("content_storage_s3_force_path_style", true)?
         .set_default("ingestion_worker_concurrency", 4)?
         .set_default("ingestion_worker_lease_seconds", 300)?
         .set_default("ingestion_worker_heartbeat_interval_seconds", 15)?
+        .set_default("ingestion_max_jobs_per_library", 0)?
+        .set_default("ingestion_embedding_parallelism", 4)?
         .set_default("web_ingest_http_timeout_seconds", 20)?
         .set_default("web_ingest_max_redirects", 10)?
         .set_default("web_ingest_user_agent", "RustRAG-WebIngest/0.1")?
+        .set_default("web_ingest_crawl_concurrency", 4)?
         .set_default("llm_http_timeout_seconds", 120)?
         .set_default("llm_transport_retry_attempts", 3)?
         .set_default("llm_transport_retry_base_delay_ms", 250)?
@@ -440,6 +500,9 @@ fn settings_config_builder()
         )?
         .set_default("query_intent_cache_ttl_hours", 24)?
         .set_default("query_intent_cache_max_entries_per_library", 500)?
+        .set_default("query_answer_source_links_enabled", false)?
+        .set_default("release_check_repository", "mlimarenko/RustRAG")?
+        .set_default("release_check_interval_hours", 12)?
         .set_default("query_rerank_enabled", true)?
         .set_default("query_rerank_candidate_limit", 24)?
         .set_default("query_balanced_context_enabled", true)?
@@ -466,10 +529,92 @@ fn settings_config_builder()
 }
 
 fn validate_service_role(settings: &Settings) -> Result<(), String> {
-    match settings.service_role.as_str() {
-        "all" | "api" | "worker" => Ok(()),
-        value => Err(format!("service_role must be one of all, api, worker; got {value}")),
+    settings.service_role.parse::<ServiceRole>().map(|_| ())
+}
+
+fn validate_startup_authority_mode(settings: &Settings) -> Result<(), String> {
+    settings.startup_authority_mode.parse::<StartupAuthorityMode>().map(|_| ())
+}
+
+fn validate_dependency_modes(settings: &Settings) -> Result<(), String> {
+    for kind in [
+        DependencyKind::Postgres,
+        DependencyKind::Redis,
+        DependencyKind::ArangoDb,
+        DependencyKind::ObjectStorage,
+    ] {
+        let mode = settings.dependency_mode(kind)?;
+        if matches!(
+            kind,
+            DependencyKind::Postgres | DependencyKind::Redis | DependencyKind::ArangoDb
+        ) && matches!(mode, DependencyMode::Disabled)
+        {
+            return Err(format!("{} must not use disabled mode", kind.as_str()));
+        }
     }
+    Ok(())
+}
+
+fn validate_content_storage_settings(settings: &Settings) -> Result<(), String> {
+    let provider = settings.content_storage_provider_kind()?;
+    let topology = settings.content_storage_topology_kind()?;
+    if settings.content_storage_key_prefix.trim().contains("..") {
+        return Err("content_storage_key_prefix must not contain '..'".into());
+    }
+
+    match provider {
+        ContentStorageProvider::Filesystem => {
+            if settings.content_storage_root.trim().is_empty() {
+                return Err("content_storage_root must not be empty".into());
+            }
+            if !matches!(topology, DeploymentTopology::SingleNode) {
+                return Err(
+                    "filesystem storage is supported only with content_storage_topology=single_node"
+                        .into(),
+                );
+            }
+            if !matches!(
+                settings.dependency_mode(DependencyKind::ObjectStorage)?,
+                DependencyMode::Disabled
+            ) {
+                return Err(
+                    "dependency_object_storage_mode must be disabled when content_storage_provider=filesystem"
+                        .into(),
+                );
+            }
+        }
+        ContentStorageProvider::S3 => {
+            if matches!(
+                settings.dependency_mode(DependencyKind::ObjectStorage)?,
+                DependencyMode::Disabled
+            ) {
+                return Err(
+                    "dependency_object_storage_mode must be bundled or external when content_storage_provider=s3"
+                        .into(),
+                );
+            }
+            for (field, value) in [
+                ("content_storage_s3_bucket", settings.content_storage_s3_bucket.as_deref()),
+                ("content_storage_s3_endpoint", settings.content_storage_s3_endpoint.as_deref()),
+                (
+                    "content_storage_s3_access_key_id",
+                    settings.content_storage_s3_access_key_id.as_deref(),
+                ),
+                (
+                    "content_storage_s3_secret_access_key",
+                    settings.content_storage_s3_secret_access_key.as_deref(),
+                ),
+            ] {
+                if value.map(str::trim).filter(|item| !item.is_empty()).is_none() {
+                    return Err(format!(
+                        "{field} must not be empty when content_storage_provider=s3"
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn validate_service_name(settings: &Settings) -> Result<(), String> {
@@ -570,6 +715,31 @@ fn validate_runtime_agent_settings(settings: &Settings) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_release_monitor_settings(settings: &Settings) -> Result<(), String> {
+    let repository = settings.release_check_repository.trim();
+    let mut components = repository.split('/');
+    let owner = components.next().unwrap_or_default();
+    let repo = components.next().unwrap_or_default();
+    let has_exactly_two_components = components.next().is_none();
+    let is_valid_component = |value: &str| {
+        !value.is_empty()
+            && value.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+            })
+    };
+
+    if !(has_exactly_two_components && is_valid_component(owner) && is_valid_component(repo)) {
+        return Err(
+            "release_check_repository must be a GitHub repository slug like owner/repo".into()
+        );
+    }
+    if settings.release_check_interval_hours == 0 {
+        return Err("release_check_interval_hours must be greater than zero".into());
+    }
+
+    Ok(())
+}
+
 fn parse_runtime_policy_csv(value: Option<&String>) -> Vec<&str> {
     value
         .map(std::string::String::as_str)
@@ -618,7 +788,7 @@ mod tests {
     fn sample_settings() -> Settings {
         Settings {
             bind_addr: "0.0.0.0:8080".into(),
-            service_role: "all".into(),
+            service_role: "api".into(),
             database_url: "postgres://postgres:postgres@127.0.0.1:5432/rustrag".into(),
             database_max_connections: 20,
             redis_url: "redis://127.0.0.1:6379".into(),
@@ -638,12 +808,7 @@ mod tests {
             service_name: "rustrag-backend".into(),
             environment: "local".into(),
             log_filter: "info".into(),
-            bootstrap_token: None,
-            bootstrap_claim_enabled: true,
-            legacy_ui_bootstrap_enabled: true,
-            legacy_bootstrap_token_endpoint_enabled: true,
             destructive_fresh_bootstrap_required: false,
-            destructive_allow_legacy_startup_side_effects: true,
             frontend_origin: "http://127.0.0.1:19000,http://localhost:19000".into(),
             openapi_public_origin: None,
             ui_session_secret: "local-ui-session-secret".into(),
@@ -663,13 +828,31 @@ mod tests {
             ui_bootstrap_vision_model_name: None,
             ui_session_ttl_hours: 720,
             upload_max_size_mb: 50,
+            startup_authority_mode: "not_required".into(),
+            dependency_postgres_mode: "external".into(),
+            dependency_redis_mode: "external".into(),
+            dependency_arangodb_mode: "external".into(),
+            dependency_object_storage_mode: "disabled".into(),
+            content_storage_provider: "filesystem".into(),
+            content_storage_topology: "single_node".into(),
+            content_storage_key_prefix: "".into(),
             content_storage_root: "/var/lib/rustrag/content-storage".into(),
+            content_storage_s3_bucket: None,
+            content_storage_s3_endpoint: None,
+            content_storage_s3_region: Some("us-east-1".into()),
+            content_storage_s3_access_key_id: None,
+            content_storage_s3_secret_access_key: None,
+            content_storage_s3_session_token: None,
+            content_storage_s3_force_path_style: true,
             web_ingest_http_timeout_seconds: 20,
             web_ingest_max_redirects: 10,
             web_ingest_user_agent: "RustRAG-WebIngest/0.1".into(),
+            web_ingest_crawl_concurrency: 4,
             ingestion_worker_concurrency: 4,
             ingestion_worker_lease_seconds: 300,
             ingestion_worker_heartbeat_interval_seconds: 15,
+            ingestion_max_jobs_per_library: 0,
+            ingestion_embedding_parallelism: 4,
             llm_http_timeout_seconds: 120,
             llm_transport_retry_attempts: 3,
             llm_transport_retry_base_delay_ms: 250,
@@ -681,6 +864,9 @@ mod tests {
             runtime_policy_reject_target_kinds: None,
             query_intent_cache_ttl_hours: 24,
             query_intent_cache_max_entries_per_library: 500,
+            query_answer_source_links_enabled: false,
+            release_check_repository: "mlimarenko/RustRAG".into(),
+            release_check_interval_hours: 12,
             query_rerank_enabled: true,
             query_rerank_candidate_limit: 24,
             query_balanced_context_enabled: true,
@@ -728,6 +914,8 @@ mod tests {
         validate_service_name(&settings).expect("service name should validate");
         validate_arangodb_settings(&settings).expect("arangodb settings should validate");
         validate_runtime_agent_settings(&settings).expect("runtime settings should validate");
+        validate_release_monitor_settings(&settings)
+            .expect("release monitor settings should validate");
         validate_mcp_memory_settings(&settings).expect("mcp settings should validate");
         settings
     }
@@ -737,7 +925,7 @@ mod tests {
         let settings = Settings::from_env().expect("settings should load with defaults");
 
         assert_eq!(settings.bind_addr, "0.0.0.0:8080");
-        assert_eq!(settings.service_role, "all");
+        assert_eq!(settings.service_role, "api");
         assert_eq!(settings.service_name, "rustrag-backend");
         assert_eq!(settings.environment, "local");
         assert_eq!(settings.database_max_connections, 20);
@@ -747,6 +935,8 @@ mod tests {
         assert_eq!(settings.log_filter, "info");
         assert_eq!(settings.ingestion_worker_concurrency, 4);
         assert_eq!(settings.runtime_agent_max_turns, 4);
+        assert_eq!(settings.release_check_repository, "mlimarenko/RustRAG");
+        assert_eq!(settings.release_check_interval_hours, 12);
         assert_eq!(settings.runtime_agent_max_parallel_actions, 4);
         assert_eq!(
             settings.runtime_trace_payload_budget_bytes,
@@ -791,14 +981,6 @@ mod tests {
         assert_eq!(settings.database_url, "postgres://postgres:postgres@postgres:5432/rustrag");
         assert_eq!(settings.service_role, "api");
         assert_eq!(settings.log_filter, "debug");
-    }
-
-    #[test]
-    fn resolved_bootstrap_token_uses_configured_value() {
-        let mut settings = sample_settings();
-        settings.bootstrap_token = Some(" bootstrap-secret ".into());
-
-        assert_eq!(settings.resolved_bootstrap_token().as_deref(), Some("bootstrap-secret"));
     }
 
     #[test]
@@ -899,28 +1081,23 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_settings_expose_legacy_bootstrap_boundary() {
+    fn bootstrap_settings_expose_canonical_boundary() {
         let settings = sample_settings();
         let bootstrap = settings.bootstrap_settings();
 
-        assert!(bootstrap.bootstrap_claim_enabled);
-        assert!(bootstrap.legacy_ui_bootstrap_enabled);
-        assert!(bootstrap.legacy_bootstrap_token_endpoint_enabled);
-        assert_eq!(bootstrap.legacy_ui_bootstrap_admin, None);
+        assert_eq!(bootstrap.ui_bootstrap_admin, None);
     }
 
     #[test]
-    fn bootstrap_settings_keep_explicit_admin_even_when_legacy_ui_bootstrap_is_disabled() {
+    fn bootstrap_settings_resolve_explicit_admin_credentials() {
         let mut settings = sample_settings();
-        settings.legacy_ui_bootstrap_enabled = false;
         settings.ui_bootstrap_admin_login = Some(" root ".into());
         settings.ui_bootstrap_admin_password = Some(" secret ".into());
 
         let bootstrap = settings.bootstrap_settings();
 
-        assert!(!bootstrap.legacy_ui_bootstrap_enabled);
         assert_eq!(
-            bootstrap.legacy_ui_bootstrap_admin,
+            bootstrap.ui_bootstrap_admin,
             Some(UiBootstrapAdmin {
                 login: "root".into(),
                 email: "root@rustrag.local".into(),
@@ -963,12 +1140,11 @@ mod tests {
     }
 
     #[test]
-    fn destructive_fresh_bootstrap_settings_preserve_legacy_boundary_flags() {
+    fn destructive_fresh_bootstrap_settings_default_to_disabled() {
         let settings = sample_settings();
         let destructive = settings.destructive_fresh_bootstrap_settings();
 
         assert!(!destructive.required);
-        assert!(destructive.allow_legacy_startup_side_effects);
     }
 
     #[test]
@@ -997,11 +1173,21 @@ mod tests {
 
         settings.service_role = "api".into();
         assert!(settings.runs_http_api());
+        assert!(!settings.runs_probe_http_api());
         assert!(!settings.runs_ingestion_workers());
+        assert!(!settings.runs_startup_authority());
 
         settings.service_role = "worker".into();
         assert!(!settings.runs_http_api());
+        assert!(settings.runs_probe_http_api());
         assert!(settings.runs_ingestion_workers());
+        assert!(!settings.runs_startup_authority());
+
+        settings.service_role = "startup".into();
+        assert!(!settings.runs_http_api());
+        assert!(!settings.runs_probe_http_api());
+        assert!(!settings.runs_ingestion_workers());
+        assert!(settings.runs_startup_authority());
     }
 
     #[test]
@@ -1011,6 +1197,27 @@ mod tests {
 
         let error = validate_service_role(&settings).expect_err("invalid role should fail");
         assert!(error.contains("service_role"));
+    }
+
+    #[test]
+    fn rejects_filesystem_cluster_topology() {
+        let mut settings = sample_settings();
+        settings.content_storage_topology = "shared_cluster".into();
+
+        let error =
+            validate_content_storage_settings(&settings).expect_err("shared cluster must fail");
+        assert!(error.contains("content_storage_topology"));
+    }
+
+    #[test]
+    fn rejects_s3_provider_without_credentials() {
+        let mut settings = sample_settings();
+        settings.content_storage_provider = "s3".into();
+        settings.dependency_object_storage_mode = "bundled".into();
+
+        let error =
+            validate_content_storage_settings(&settings).expect_err("s3 settings must fail");
+        assert!(error.contains("content_storage_s3_bucket"));
     }
 
     #[test]
@@ -1028,5 +1235,25 @@ mod tests {
 
         let error = validate_service_name(&settings).expect_err("invalid service name should fail");
         assert!(error.contains("service_name"));
+    }
+
+    #[test]
+    fn rejects_invalid_release_check_repository_slug() {
+        let mut settings = sample_settings();
+        settings.release_check_repository = "https://github.com/mlimarenko/RustRAG".into();
+
+        let error = validate_release_monitor_settings(&settings)
+            .expect_err("full urls should fail release repository validation");
+        assert!(error.contains("release_check_repository"));
+    }
+
+    #[test]
+    fn rejects_zero_release_check_interval() {
+        let mut settings = sample_settings();
+        settings.release_check_interval_hours = 0;
+
+        let error = validate_release_monitor_settings(&settings)
+            .expect_err("zero interval should fail release monitor validation");
+        assert!(error.contains("release_check_interval_hours"));
     }
 }

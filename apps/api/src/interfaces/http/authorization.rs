@@ -3,7 +3,7 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     infra::repositories::{
-        ai_repository::{self, AiLibraryModelBindingRow, AiProviderCredentialRow},
+        ai_repository::{self, AiBindingAssignmentRow, AiProviderCredentialRow},
         catalog_repository::{
             self, CatalogLibraryConnectorRow, CatalogLibraryRow, CatalogWorkspaceRow,
         },
@@ -345,12 +345,16 @@ pub async fn load_provider_credential_and_authorize(
             .await
             .map_err(|_| ApiError::Internal)?
             .ok_or_else(|| ApiError::resource_not_found("provider_credential", credential_id))?;
-    authorize_provider_credential_permission(
-        auth,
-        credential.workspace_id,
-        credential.id,
-        accepted_permissions,
-    )?;
+    if let Some(workspace_id) = credential.workspace_id {
+        authorize_provider_credential_permission(
+            auth,
+            workspace_id,
+            credential.id,
+            accepted_permissions,
+        )?;
+    } else if !auth.is_system_admin {
+        return Err(ApiError::Unauthorized);
+    }
     Ok(credential)
 }
 
@@ -359,18 +363,23 @@ pub async fn load_library_binding_and_authorize(
     state: &AppState,
     binding_id: Uuid,
     accepted_permissions: &[&str],
-) -> Result<AiLibraryModelBindingRow, ApiError> {
-    let binding = ai_repository::get_library_binding_by_id(&state.persistence.postgres, binding_id)
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::resource_not_found("library_binding", binding_id))?;
-    authorize_library_binding_permission(
-        auth,
-        binding.workspace_id,
-        binding.library_id,
-        binding.id,
-        accepted_permissions,
-    )?;
+) -> Result<AiBindingAssignmentRow, ApiError> {
+    let binding =
+        ai_repository::get_binding_assignment_by_id(&state.persistence.postgres, binding_id)
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .ok_or_else(|| ApiError::resource_not_found("library_binding", binding_id))?;
+    match (binding.workspace_id, binding.library_id) {
+        (Some(workspace_id), Some(library_id)) => authorize_library_binding_permission(
+            auth,
+            workspace_id,
+            library_id,
+            binding.id,
+            accepted_permissions,
+        )?,
+        _ if auth.is_system_admin => {}
+        _ => return Err(ApiError::Unauthorized),
+    }
     Ok(binding)
 }
 

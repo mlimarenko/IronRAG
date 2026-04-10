@@ -965,6 +965,9 @@ pub async fn list_runtime_graph_document_links_by_library(
                 'supports'::text as relation_type,
                 count(*)::bigint as support_count
             from runtime_graph_evidence as evidence
+            inner join content_document as document
+                on document.id = evidence.document_id
+               and document.deleted_at is null
             inner join runtime_graph_node as node
                 on node.library_id = evidence.library_id
                and node.id = evidence.target_id
@@ -983,6 +986,9 @@ pub async fn list_runtime_graph_document_links_by_library(
                 'supports'::text as relation_type,
                 count(*)::bigint as support_count
             from runtime_graph_evidence as evidence
+            inner join content_document as document
+                on document.id = evidence.document_id
+               and document.deleted_at is null
             inner join runtime_graph_edge as edge
                 on edge.library_id = evidence.library_id
                and edge.id = evidence.target_id
@@ -1201,7 +1207,7 @@ pub async fn recalculate_runtime_graph_support_counts(
     Ok(())
 }
 
-/// Deletes canonical graph edges with zero surviving active evidence.
+/// Deletes canonical graph edges with zero surviving active evidence and returns their canonical keys.
 ///
 /// # Errors
 /// Returns any `SQLx` error raised while pruning unsupported graph edges.
@@ -1209,21 +1215,21 @@ pub async fn delete_runtime_graph_edges_without_support(
     pool: &PgPool,
     library_id: Uuid,
     projection_version: i64,
-) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query(
+) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar::<_, String>(
         "delete from runtime_graph_edge
          where library_id = $1
            and projection_version = $2
-           and support_count <= 0",
+           and support_count <= 0
+         returning canonical_key",
     )
     .bind(library_id)
     .bind(projection_version)
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected())
+    .fetch_all(pool)
+    .await
 }
 
-/// Deletes canonical graph nodes with zero surviving active evidence.
+/// Deletes canonical graph nodes with zero surviving active evidence and returns their canonical keys.
 ///
 /// # Errors
 /// Returns any `SQLx` error raised while pruning unsupported graph nodes.
@@ -1231,18 +1237,18 @@ pub async fn delete_runtime_graph_nodes_without_support(
     pool: &PgPool,
     library_id: Uuid,
     projection_version: i64,
-) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query(
+) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar::<_, String>(
         "delete from runtime_graph_node
          where library_id = $1
            and projection_version = $2
-           and support_count <= 0",
+           and support_count <= 0
+         returning canonical_key",
     )
     .bind(library_id)
     .bind(projection_version)
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected())
+    .fetch_all(pool)
+    .await
 }
 
 /// Counts graph contributions that are still linked to one document.

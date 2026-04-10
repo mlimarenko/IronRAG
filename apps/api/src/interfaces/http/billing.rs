@@ -13,7 +13,7 @@ use crate::{
         authorization::{POLICY_USAGE_READ, load_library_and_authorize},
         router_support::ApiError,
     },
-    services::billing_service::{DocumentCostSummary, LibraryCostSummary},
+    services::ops::billing::{DocumentCostSummary, LibraryCostSummary},
 };
 
 #[derive(Deserialize)]

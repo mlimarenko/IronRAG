@@ -437,11 +437,8 @@ fn map_graph_surface(
     first_warning: Option<&OperatorWarning>,
 ) -> GraphSurface {
     let total_documents = summary.document_counts_by_readiness.values().copied().sum::<i64>();
-    let readable_without_graph_count = summary
-        .document_counts_by_readiness
-        .get("readable")
-        .copied()
-        .unwrap_or(0);
+    let readable_without_graph_count =
+        summary.document_counts_by_readiness.get("readable").copied().unwrap_or(0);
     let status = if total_documents == 0 {
         GraphStatus::Empty
     } else if ops_state.degraded_state == "rebuilding" || ops_state.running_attempts > 0 {
@@ -529,11 +526,7 @@ fn map_document_summary(summary: &ContentDocumentSummary) -> DocumentSummary {
         id: summary.document.id,
         workspace_id: Some(summary.document.workspace_id),
         library_id: Some(summary.document.library_id),
-        file_name: summary
-            .active_revision
-            .as_ref()
-            .and_then(|revision| revision.title.clone())
-            .unwrap_or_else(|| summary.document.external_key.clone()),
+        file_name: summary.file_name.clone(),
         file_type: summary
             .active_revision
             .as_ref()
@@ -716,15 +709,6 @@ fn map_document_readiness(
         if readiness.graph_state == "failed" {
             return DocumentReadiness::Failed;
         }
-        if matches!(readiness.text_state.as_str(), "readable" | "ready" | "text_readable") {
-            return DocumentReadiness::Readable;
-        }
-        if matches!(readiness.text_state.as_str(), "queued" | "processing") {
-            return DocumentReadiness::Processing;
-        }
-        if readiness.text_state == "failed" {
-            return DocumentReadiness::Failed;
-        }
     }
 
     if let Some(summary) = readiness_summary {
@@ -740,8 +724,27 @@ fn map_document_readiness(
     }
 
     match status {
+        DocumentStatus::ReadyNoGraph => return DocumentReadiness::Readable,
+        DocumentStatus::Ready => return DocumentReadiness::GraphReady,
+        DocumentStatus::Failed => return DocumentReadiness::Failed,
+        DocumentStatus::Queued | DocumentStatus::Processing => {}
+    }
+
+    if let Some(readiness) = readiness {
+        if matches!(readiness.text_state.as_str(), "readable" | "ready" | "text_readable") {
+            return DocumentReadiness::Readable;
+        }
+        if matches!(readiness.text_state.as_str(), "queued" | "processing") {
+            return DocumentReadiness::Processing;
+        }
+        if readiness.text_state == "failed" {
+            return DocumentReadiness::Failed;
+        }
+    }
+
+    match status {
         DocumentStatus::Ready => DocumentReadiness::GraphReady,
-        DocumentStatus::ReadyNoGraph => DocumentReadiness::GraphSparse,
+        DocumentStatus::ReadyNoGraph => DocumentReadiness::Readable,
         DocumentStatus::Queued | DocumentStatus::Processing => DocumentReadiness::Processing,
         DocumentStatus::Failed => DocumentReadiness::Failed,
     }
@@ -752,6 +755,115 @@ fn severity_level(value: &str) -> MessageLevel {
         "error" => MessageLevel::Error,
         "warning" => MessageLevel::Warning,
         _ => MessageLevel::Info,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{map_document_readiness, map_document_summary};
+    use crate::domains::{
+        content::{
+            ContentDocument, ContentDocumentPipelineState, ContentDocumentSummary,
+            ContentRevisionReadiness, DocumentReadinessSummary,
+        },
+        ops::OpsAsyncOperation,
+        runtime_ingestion::RuntimeDocumentActivityStatus,
+    };
+    use chrono::Utc;
+    use rustrag_contracts::documents::{DocumentReadiness, DocumentStatus};
+    use serde_json::json;
+    use uuid::Uuid;
+
+    fn sample_summary() -> ContentDocumentSummary {
+        ContentDocumentSummary {
+            document: ContentDocument {
+                id: Uuid::now_v7(),
+                workspace_id: Uuid::now_v7(),
+                library_id: Uuid::now_v7(),
+                external_key: "legacy-external-key".to_string(),
+                document_state: "active".to_string(),
+                created_at: Utc::now(),
+            },
+            file_name: "canonical-file-name.txt".to_string(),
+            head: None,
+            active_revision: None,
+            source_access: None,
+            readiness: None,
+            readiness_summary: None,
+            prepared_revision: None,
+            web_page_provenance: None,
+            pipeline: ContentDocumentPipelineState { latest_mutation: None, latest_job: None },
+        }
+    }
+
+    #[test]
+    fn ready_no_graph_status_without_sparse_coverage_maps_to_readable() {
+        let readiness = ContentRevisionReadiness {
+            revision_id: Uuid::now_v7(),
+            text_state: "ready".to_string(),
+            vector_state: "ready".to_string(),
+            graph_state: "accepted".to_string(),
+            text_readable_at: Some(Utc::now()),
+            vector_ready_at: Some(Utc::now()),
+            graph_ready_at: None,
+        };
+
+        let mapped = map_document_readiness(Some(&readiness), None, DocumentStatus::ReadyNoGraph);
+        assert_eq!(mapped, DocumentReadiness::Readable);
+    }
+
+    #[test]
+    fn sparse_coverage_summary_still_maps_to_graph_sparse() {
+        let summary = DocumentReadinessSummary {
+            document_id: Uuid::now_v7(),
+            active_revision_id: Some(Uuid::now_v7()),
+            readiness_kind: "readable".to_string(),
+            activity_status: RuntimeDocumentActivityStatus::Ready,
+            stalled_reason: None,
+            preparation_state: "ready".to_string(),
+            graph_coverage_kind: "graph_sparse".to_string(),
+            typed_fact_coverage: Some(1.0),
+            last_mutation_id: None,
+            last_job_stage: None,
+            updated_at: Utc::now(),
+        };
+
+        let mapped = map_document_readiness(None, Some(&summary), DocumentStatus::ReadyNoGraph);
+        assert_eq!(mapped, DocumentReadiness::GraphSparse);
+    }
+
+    #[test]
+    fn document_summary_uses_canonical_summary_file_name() {
+        let mut summary = sample_summary();
+        summary.document.external_key = "stale-fallback".to_string();
+
+        let mapped = map_document_summary(&summary);
+
+        assert_eq!(mapped.file_name, "canonical-file-name.txt");
+    }
+
+    #[test]
+    fn async_operation_serializes_using_canonical_camel_case_fields() {
+        let operation = OpsAsyncOperation {
+            id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            library_id: Some(Uuid::now_v7()),
+            operation_kind: "content_mutation".to_string(),
+            status: "ready".to_string(),
+            surface_kind: Some("rest".to_string()),
+            subject_kind: Some("content_mutation".to_string()),
+            subject_id: Some(Uuid::now_v7()),
+            failure_code: None,
+            created_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+        };
+
+        let serialized =
+            serde_json::to_value(&operation).expect("ops async operation to serialize");
+
+        assert!(serialized.get("completedAt").is_some());
+        assert!(serialized.get("completed_at").is_none());
+        assert_eq!(serialized.get("status"), Some(&json!("ready")));
     }
 }
 

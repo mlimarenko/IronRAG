@@ -29,13 +29,32 @@ interface AppContextValue extends AppState {
   setIsBootstrapRequired: (b: boolean) => void;
   login: (login: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
-  bootstrapSetup: (data: { login: string; password: string; displayName: string; aiSetup?: { credentials: Array<{ providerKind: string; apiKey?: string }>; bindingSelections: Array<{ bindingPurpose: string; providerKind: string; modelCatalogId: string }> } }) => Promise<void>;
+  bootstrapSetup: (data: { login: string; password: string; displayName: string; aiSetup?: { providerKind: string; apiKey?: string; baseUrl?: string } }) => Promise<void>;
   refreshSession: () => Promise<void>;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
 
-function mapSessionToState(session: SessionResolveResponse) {
+function preferredLocale(sessionLocale: Locale): Locale {
+  const savedLocale = localStorage.getItem('rustrag_locale');
+  return savedLocale || sessionLocale;
+}
+
+function localizedShellName(
+  slug: string,
+  fallbackName: string,
+  locale: Locale,
+): string {
+  if (slug === 'default') {
+    return i18n.t('shell.defaultWorkspaceLabel', { lng: locale });
+  }
+  if (slug === 'default-library') {
+    return i18n.t('shell.defaultLibraryLabel', { lng: locale });
+  }
+  return fallbackName;
+}
+
+function mapSessionToState(session: SessionResolveResponse, locale: Locale) {
   let user: User | null = null;
   if (session.me) {
     user = {
@@ -49,14 +68,14 @@ function mapSessionToState(session: SessionResolveResponse) {
 
   const workspaces: Workspace[] = (session.shellBootstrap?.workspaces ?? []).map(ws => ({
     id: ws.id,
-    name: ws.name,
+    name: localizedShellName(ws.slug, ws.name, locale),
     createdAt: '',
   }));
 
   const libraries: Library[] = (session.shellBootstrap?.libraries ?? []).map(lib => ({
     id: lib.id,
     workspaceId: lib.workspaceId,
-    name: lib.name,
+    name: localizedShellName(lib.slug, lib.name, locale),
     createdAt: '',
     ingestionReady: lib.ingestionReady,
     queryReady: lib.missingBindingPurposes.length === 0 && lib.ingestionReady,
@@ -66,7 +85,7 @@ function mapSessionToState(session: SessionResolveResponse) {
   const isBootstrapRequired = session.mode === 'bootstrap' ||
     (session.bootstrapStatus?.setupRequired ?? false);
 
-  return { user, workspaces, libraries, isBootstrapRequired, locale: session.locale || 'en' };
+  return { user, workspaces, libraries, isBootstrapRequired, locale };
 }
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
@@ -87,7 +106,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [sessionError, setSessionError] = useState<string | null>(null);
 
   const applySession = useCallback((session: SessionResolveResponse) => {
-    const state = mapSessionToState(session);
+    const resolvedLocale = preferredLocale(session.locale || 'en');
+    const state = mapSessionToState(session, resolvedLocale);
     setUser(state.user);
     setWorkspaces(state.workspaces);
     setLibraries(state.libraries);
@@ -166,7 +186,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setIsBootstrapRequired(false);
   }, []);
 
-  const bootstrapSetup = useCallback(async (data: { login: string; password: string; displayName: string; aiSetup?: { credentials: Array<{ providerKind: string; apiKey?: string }>; bindingSelections: Array<{ bindingPurpose: string; providerKind: string; modelCatalogId: string }> } }) => {
+  const bootstrapSetup = useCallback(async (data: { login: string; password: string; displayName: string; aiSetup?: { providerKind: string; apiKey?: string; baseUrl?: string } }) => {
     await authApi.bootstrapSetup(data);
     const session = await authApi.resolveSession();
     applySession(session);

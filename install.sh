@@ -127,13 +127,13 @@ fi
 
 RAW_BASE_URL="https://raw.githubusercontent.com/${REPOSITORY}/${VERSION}"
 
-mkdir -p "$INSTALL_DIR/docker/nginx"
+mkdir -p "$INSTALL_DIR"
 
 echo "Installing RustRAG ${VERSION} into ${INSTALL_DIR}"
 
 download "${RAW_BASE_URL}/docker-compose.yml" "${INSTALL_DIR}/docker-compose.yml"
+download "${RAW_BASE_URL}/docker-compose-s4.yml" "${INSTALL_DIR}/docker-compose-s4.yml"
 download "${RAW_BASE_URL}/.env.example" "${INSTALL_DIR}/.env.example"
-download "${RAW_BASE_URL}/docker/nginx/default.conf" "${INSTALL_DIR}/docker/nginx/default.conf"
 
 RUSTRAG_NEW_ENV_SECRETS=0
 if [ ! -f "${INSTALL_DIR}/.env" ]; then

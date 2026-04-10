@@ -7,7 +7,7 @@ use crate::{
         },
         ai::AiBindingPurpose,
     },
-    services::query_support::{QueryRerankFailure, QueryRerankTaskInput, RerankOutcome},
+    services::query::support::{QueryRerankFailure, QueryRerankTaskInput, RerankOutcome},
 };
 
 const QUERY_RERANK_STAGE_CATALOG: &[RuntimeStageKind] = &[RuntimeStageKind::Rerank];

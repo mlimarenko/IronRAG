@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use sqlx::{FromRow, PgPool};
+use sqlx::{Executor, FromRow, PgPool, Postgres};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, FromRow)]
@@ -1692,17 +1692,30 @@ pub async fn list_ingest_stage_events_by_job(
 /// Atomically claim the next available canonical `ingest_job` by transitioning
 /// its `queue_state` from `queued` → `leased`.  Uses `FOR UPDATE SKIP LOCKED`
 /// so concurrent workers never claim the same row.
+///
+/// When `max_jobs_per_library > 0`, libraries that already have that many jobs
+/// in `leased` state are skipped, providing per-library fairness so a single
+/// busy library cannot starve the queue. `0` disables the per-library cap.
 pub async fn claim_next_queued_ingest_job(
     postgres: &PgPool,
+    max_jobs_per_library: i64,
 ) -> Result<Option<IngestJobRow>, sqlx::Error> {
     sqlx::query_as::<_, IngestJobRow>(
         "update ingest_job
          set queue_state = 'leased'::ingest_queue_state
          where id = (
-             select id from ingest_job
-             where queue_state = 'queued'
-               and available_at <= now()
-             order by priority asc, available_at asc, queued_at asc, id asc
+             select id from ingest_job j
+             where j.queue_state = 'queued'
+               and j.available_at <= now()
+               and (
+                   $1::bigint <= 0
+                   or (
+                       select count(*) from ingest_job leased
+                       where leased.queue_state = 'leased'
+                         and leased.library_id = j.library_id
+                   ) < $1::bigint
+               )
+             order by j.priority asc, j.available_at asc, j.queued_at asc, j.id asc
              limit 1
              for update skip locked
          )
@@ -1723,6 +1736,7 @@ pub async fn claim_next_queued_ingest_job(
             available_at,
             completed_at",
     )
+    .bind(max_jobs_per_library)
     .fetch_optional(postgres)
     .await
 }
@@ -1769,19 +1783,29 @@ pub async fn cancel_queued_jobs_for_document(
     postgres: &PgPool,
     document_id: Uuid,
 ) -> Result<u64, sqlx::Error> {
+    cancel_queued_jobs_for_document_with_executor(postgres, document_id).await
+}
+
+pub async fn cancel_queued_jobs_for_document_with_executor<'e, E>(
+    executor: E,
+    document_id: Uuid,
+) -> Result<u64, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     let result = sqlx::query(
         "UPDATE ingest_job
-         SET queue_state = 'cancelled', completed_at = now()
+         SET queue_state = 'canceled', completed_at = now()
          WHERE mutation_id IN (
              SELECT m.id FROM content_mutation m
              JOIN content_mutation_item mi ON mi.mutation_id = m.id
              WHERE mi.document_id = $1
          )
-         AND queue_state IN ('queued', 'available')
+         AND queue_state = 'queued'
          AND completed_at IS NULL",
     )
     .bind(document_id)
-    .execute(postgres)
+    .execute(executor)
     .await?;
     Ok(result.rows_affected())
 }

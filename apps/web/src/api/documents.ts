@@ -1,65 +1,160 @@
 import { apiFetch } from "./client";
 
+interface BatchMutationErrorResult {
+  documentId: string;
+  success: boolean;
+  error: string | null;
+}
+
+export interface BatchDeleteResponse {
+  deletedCount: number;
+  failedCount: number;
+  results: Array<BatchMutationErrorResult & { deleted: boolean }>;
+}
+
+export interface BatchCancelResponse {
+  cancelledCount: number;
+  failedCount: number;
+  results: Array<BatchMutationErrorResult & { jobsCancelled: number }>;
+}
+
+export interface BatchReprocessResponse {
+  reprocessedCount: number;
+  failedCount: number;
+  results: Array<BatchMutationErrorResult>;
+}
+
+/**
+ * Raw document list/detail payload returned by `/v1/content/documents`.
+ *
+ * The shape is intentionally permissive: callers run it through
+ * `mapApiDocument` to project into the canonical `DocumentItem` view model,
+ * and a few code paths read additional snake_case aliases that the backend
+ * still emits during normalization.
+ */
+export interface RawDocumentResponse {
+  id?: string;
+  fileName?: string;
+  readinessSummary?: {
+    readinessKind?: string;
+    activityStatus?: string;
+    graphCoverageKind?: string;
+    [key: string]: unknown;
+  };
+  activeRevision?: Record<string, unknown>;
+  active_revision?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface RawPreparedSegmentItem {
+  text?: string;
+  content?: string;
+  [key: string]: unknown;
+}
+
+export interface RawTechnicalFactItem {
+  [key: string]: unknown;
+}
+
+export interface RawDocumentRevisionItem {
+  [key: string]: unknown;
+}
+
+export interface RawWebIngestRunResponse {
+  id?: string;
+  state?: string;
+  [key: string]: unknown;
+}
+
+export interface DocumentUploadResponse {
+  documentId?: string;
+  [key: string]: unknown;
+}
+
+export interface DocumentReprocessResponse {
+  documentId?: string;
+  [key: string]: unknown;
+}
+
+export interface DocumentMutationResponse {
+  documentId?: string;
+  [key: string]: unknown;
+}
+
+export interface CreateWebIngestRunRequest {
+  libraryId: string;
+  seedUrl: string;
+  mode: string;
+  boundaryPolicy?: string;
+  maxDepth?: number;
+  maxPages?: number;
+}
+
 export const documentsApi = {
   list: (libraryId: string, params?: { search?: string; status?: string }) => {
     const qs = new URLSearchParams();
     qs.set("libraryId", libraryId);
     if (params?.search) qs.set("search", params.search);
     if (params?.status) qs.set("status", params.status);
-    return apiFetch<any>(`/content/documents?${qs}`);
+    return apiFetch<RawDocumentResponse[]>(`/content/documents?${qs}`);
   },
-  get: (documentId: string) => apiFetch<any>(`/content/documents/${documentId}`),
-  upload: (libraryId: string, file: File, title?: string) => {
+  get: (documentId: string) =>
+    apiFetch<RawDocumentResponse>(`/content/documents/${documentId}`),
+  upload: (libraryId: string, file: File, title?: string): Promise<DocumentUploadResponse> => {
     const form = new FormData();
     form.append("library_id", libraryId);
     form.append("file", file);
     if (title) form.append("title", title);
-    return fetch(`/v1/content/documents/upload`, {
+    return apiFetch<DocumentUploadResponse>("/content/documents/upload", {
       method: "POST",
-      credentials: "include",
       body: form,
-    }).then(r => r.json());
+    });
   },
-  delete: (documentId: string) => apiFetch<void>(`/content/documents/${documentId}`, { method: "DELETE" }),
-  reprocess: (documentId: string) => apiFetch<any>(`/content/documents/${documentId}/reprocess`, { method: "POST" }),
-  createWebIngestRun: (data: { libraryId: string; seedUrl: string; mode: string; boundaryPolicy?: string; maxDepth?: number; maxPages?: number }) =>
-    apiFetch<any>("/content/web-runs", {
+  delete: (documentId: string) =>
+    apiFetch<void>(`/content/documents/${documentId}`, { method: "DELETE" }),
+  reprocess: (documentId: string) =>
+    apiFetch<DocumentReprocessResponse>(`/content/documents/${documentId}/reprocess`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  createWebIngestRun: (data: CreateWebIngestRunRequest) =>
+    apiFetch<RawWebIngestRunResponse>("/content/web-runs", {
       method: "POST",
       body: JSON.stringify(data),
     }),
   append: (documentId: string, text: string) =>
-    apiFetch<any>(`/content/documents/${documentId}/append`, {
+    apiFetch<DocumentMutationResponse>(`/content/documents/${documentId}/append`, {
       method: "POST",
       body: JSON.stringify({ appendedText: text }),
     }),
-  replace: (documentId: string, file: File) => {
+  replace: (documentId: string, file: File): Promise<DocumentMutationResponse> => {
     const form = new FormData();
     form.append("file", file);
-    return fetch(`/v1/content/documents/${documentId}/replace`, {
+    return apiFetch<DocumentMutationResponse>(`/content/documents/${documentId}/replace`, {
       method: "POST",
-      credentials: "include",
       body: form,
-    }).then(r => {
-      if (!r.ok) return r.json().then(b => { throw new Error(b?.error || `API error ${r.status}`); });
-      return r.json();
     });
   },
-  getHead: (documentId: string) => apiFetch<any>(`/content/documents/${documentId}/head`),
-  getPreparedSegments: (documentId: string) => apiFetch<any>(`/content/documents/${documentId}/prepared-segments`),
-  getTechnicalFacts: (documentId: string) => apiFetch<any>(`/content/documents/${documentId}/technical-facts`),
-  getRevisions: (documentId: string) => apiFetch<any>(`/content/documents/${documentId}/revisions`),
+  getHead: (documentId: string) =>
+    apiFetch<RawDocumentResponse>(`/content/documents/${documentId}/head`),
+  getPreparedSegments: (documentId: string) =>
+    apiFetch<RawPreparedSegmentItem[]>(`/content/documents/${documentId}/prepared-segments`),
+  getTechnicalFacts: (documentId: string) =>
+    apiFetch<RawTechnicalFactItem[]>(`/content/documents/${documentId}/technical-facts`),
+  getRevisions: (documentId: string) =>
+    apiFetch<RawDocumentRevisionItem[]>(`/content/documents/${documentId}/revisions`),
   batchDelete: (documentIds: string[]) =>
-    apiFetch<any>(`/content/documents/batch-delete`, {
+    apiFetch<BatchDeleteResponse>(`/content/documents/batch-delete`, {
       method: 'POST',
       body: JSON.stringify({ documentIds }),
     }),
   batchCancel: (documentIds: string[]) =>
-    apiFetch<any>(`/content/documents/batch-cancel`, {
+    apiFetch<BatchCancelResponse>(`/content/documents/batch-cancel`, {
       method: 'POST',
       body: JSON.stringify({ documentIds }),
     }),
   batchReprocess: (documentIds: string[]) =>
-    apiFetch<any>(`/content/documents/batch-reprocess`, {
+    apiFetch<BatchReprocessResponse>(`/content/documents/batch-reprocess`, {
       method: 'POST',
       body: JSON.stringify({ documentIds }),
     }),

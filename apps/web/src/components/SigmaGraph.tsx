@@ -36,6 +36,8 @@ interface SigmaGraphProps {
   hiddenTypes: Set<string>;
 }
 
+const LAYOUT_ANIMATION_DURATION_MS = 280;
+
 // --- Layout helpers ---
 
 function groupByType(graph: Graph): Map<string, string[]> {
@@ -58,8 +60,8 @@ function layoutCircle(graph: Graph): void {
   if (n > 100) {
     const s = Math.sqrt(n) * 0.15;
     graph.forEachNode((node, attrs) => {
-      graph.setNodeAttribute(node, 'x', (attrs.x as number) * s);
-      graph.setNodeAttribute(node, 'y', (attrs.y as number) * s);
+      graph.setNodeAttribute(node, 'x', ((attrs.x as number) ?? 0) * s);
+      graph.setNodeAttribute(node, 'y', ((attrs.y as number) ?? 0) * s);
     });
   }
 }
@@ -73,8 +75,8 @@ function layoutCloud(graph: Graph): void {
   circular.assign(graph);
   const jitter = Math.sqrt(n) * 1.5;
   graph.forEachNode((node, attrs) => {
-    graph.setNodeAttribute(node, 'x', (attrs.x as number) * jitter + (Math.random() - 0.5) * jitter * 0.8);
-    graph.setNodeAttribute(node, 'y', (attrs.y as number) * jitter + (Math.random() - 0.5) * jitter * 0.8);
+    graph.setNodeAttribute(node, 'x', ((attrs.x as number) ?? 0) * jitter + (Math.random() - 0.5) * jitter * 0.8);
+    graph.setNodeAttribute(node, 'y', ((attrs.y as number) ?? 0) * jitter + (Math.random() - 0.5) * jitter * 0.8);
   });
 }
 
@@ -257,6 +259,20 @@ function applyLayout(graph: Graph, layout: string): void {
   }
 }
 
+function cloneGraphStructure(source: Graph): Graph {
+  const cloned = new Graph();
+
+  source.forEachNode((node, attrs) => {
+    cloned.addNode(node, { ...attrs });
+  });
+
+  source.forEachEdge((edge, attrs, sourceId, targetId) => {
+    cloned.addEdgeWithKey(edge, sourceId, targetId, { ...attrs });
+  });
+
+  return cloned;
+}
+
 // --- Component ---
 
 export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout, hiddenTypes }: SigmaGraphProps) {
@@ -267,12 +283,24 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
   const selectedIdRef = useRef<string | null>(selectedId);
   const selectedEdgesRef = useRef<EdgeData[]>([]);
   const selectionOverlayRenderRef = useRef<(() => void) | null>(null);
+  const layoutRef = useRef(layout);
+  const layoutAnimationFrameRef = useRef<number | null>(null);
+  const layoutAnimationTokenRef = useRef(0);
 
   selectedIdRef.current = selectedId;
+
+  const stopLayoutAnimation = () => {
+    layoutAnimationTokenRef.current += 1;
+    if (layoutAnimationFrameRef.current != null) {
+      cancelAnimationFrame(layoutAnimationFrameRef.current);
+      layoutAnimationFrameRef.current = null;
+    }
+  };
 
   useEffect(() => {
     if (!containerRef.current || nodes.length === 0) return;
 
+    stopLayoutAnimation();
     const graph = new Graph();
 
     const visibleNodes = hiddenTypes.size > 0
@@ -311,6 +339,7 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
     }
 
     applyLayout(graph, layout);
+    layoutRef.current = layout;
 
     graphRef.current = graph;
     if (sigmaRef.current) sigmaRef.current.kill();
@@ -499,6 +528,7 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
     sigmaRef.current = sigma;
 
     return () => {
+      stopLayoutAnimation();
       container.removeEventListener('wheel', wheelHandler);
       sigma.off('afterRender', renderSelectionOverlay);
       selectionOverlayRenderRef.current = null;
@@ -506,7 +536,82 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
       sigma.kill();
       sigmaRef.current = null;
     };
-  }, [nodes, edges, layout, onSelect, hiddenTypes]);
+  }, [nodes, edges, onSelect, hiddenTypes]);
+
+  useEffect(() => {
+    const sigma = sigmaRef.current;
+    const graph = graphRef.current;
+    if (!sigma || !graph || nodes.length === 0) return;
+    if (layoutRef.current === layout) return;
+
+    stopLayoutAnimation();
+    layoutRef.current = layout;
+
+    const targetGraph = cloneGraphStructure(graph);
+    applyLayout(targetGraph, layout);
+
+    const transitionNodes = graph.nodes().map(node => ({
+      node,
+      fromX: (graph.getNodeAttribute(node, 'x') as number) ?? 0,
+      fromY: (graph.getNodeAttribute(node, 'y') as number) ?? 0,
+      toX: (targetGraph.getNodeAttribute(node, 'x') as number) ?? 0,
+      toY: (targetGraph.getNodeAttribute(node, 'y') as number) ?? 0,
+    }));
+
+    const reduceMotion =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    if (reduceMotion || transitionNodes.length === 0) {
+      for (const transition of transitionNodes) {
+        graph.setNodeAttribute(transition.node, 'x', transition.toX);
+        graph.setNodeAttribute(transition.node, 'y', transition.toY);
+      }
+      sigma.refresh();
+      selectionOverlayRenderRef.current?.();
+      return;
+    }
+
+    const animationToken = layoutAnimationTokenRef.current + 1;
+    layoutAnimationTokenRef.current = animationToken;
+    const startedAt = performance.now();
+
+    const renderFrame = (now: number) => {
+      if (layoutAnimationTokenRef.current !== animationToken) return;
+
+      const progress = Math.min(1, (now - startedAt) / LAYOUT_ANIMATION_DURATION_MS);
+      const eased = 1 - Math.pow(1 - progress, 3);
+
+      for (const transition of transitionNodes) {
+        graph.setNodeAttribute(
+          transition.node,
+          'x',
+          transition.fromX + (transition.toX - transition.fromX) * eased,
+        );
+        graph.setNodeAttribute(
+          transition.node,
+          'y',
+          transition.fromY + (transition.toY - transition.fromY) * eased,
+        );
+      }
+
+      sigma.refresh();
+      selectionOverlayRenderRef.current?.();
+
+      if (progress < 1) {
+        layoutAnimationFrameRef.current = requestAnimationFrame(renderFrame);
+      } else {
+        layoutAnimationFrameRef.current = null;
+      }
+    };
+
+    layoutAnimationFrameRef.current = requestAnimationFrame(renderFrame);
+
+    return () => {
+      stopLayoutAnimation();
+    };
+  }, [layout, nodes]);
 
   // Selection highlighting via reducers + dedicated top overlay for active edges.
   useEffect(() => {
@@ -563,7 +668,7 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
 
     sigma.refresh();
     selectionOverlayRenderRef.current?.();
-  }, [selectedId, edges, nodes, layout, hiddenTypes]);
+  }, [selectedId, edges, nodes, hiddenTypes]);
 
   return (
     <div ref={containerRef} className="w-full h-full" style={{ minHeight: '400px' }} />

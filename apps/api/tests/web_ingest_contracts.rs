@@ -12,7 +12,7 @@ use rustrag_backend::{
         McpCancelWebIngestRunRequest, McpGetWebIngestRunRequest, McpListWebIngestRunPagesRequest,
         McpSubmitWebIngestRunRequest,
     },
-    shared::web_ingest::{
+    shared::web::ingest::{
         DEFAULT_WEB_CRAWL_DEPTH, DEFAULT_WEB_CRAWL_MAX_PAGES, WebClassificationReason,
         WebRunCounts, WebRunFailureCode, derive_terminal_run_state, validate_web_run_settings,
     },
