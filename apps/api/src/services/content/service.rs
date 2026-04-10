@@ -1247,79 +1247,25 @@ impl ContentService {
         let accept_command = Self::accept_mutation_command_from_admit(&command);
 
         if command.operation_kind == "delete" {
-            let current_document = content_repository::get_document_by_id(
+            let document_lock = content_repository::acquire_content_document_lock(
                 &state.persistence.postgres,
                 command.document_id,
             )
             .await
-            .map_err(|_| ApiError::Internal)?
-            .ok_or_else(|| ApiError::resource_not_found("document", command.document_id))?;
-            let current_head = self.get_document_head(state, command.document_id).await?;
-            let base_revision_id = current_head.as_ref().and_then(|row| row.latest_revision_id());
-            let superseded_mutation_id =
-                current_head.as_ref().and_then(|head| head.latest_mutation_id);
-
-            if let Some(existing_mutation) =
-                self.find_existing_mutation_for_request(state, &accept_command).await?
-            {
-                let existing_mutation_id = existing_mutation.id;
-                return self
-                    .finalize_delete_mutation_admission(
-                        state,
-                        &command,
-                        existing_mutation,
-                        base_revision_id,
-                        superseded_mutation_id
-                            .filter(|mutation_id| *mutation_id != existing_mutation_id),
-                    )
-                    .await;
-            }
-
-            if current_document.document_state == "deleted" || current_document.deleted_at.is_some()
-            {
-                let canonical_delete_mutation = match superseded_mutation_id {
-                    Some(latest_mutation_id) => match content_repository::get_mutation_by_id(
-                        &state.persistence.postgres,
-                        latest_mutation_id,
-                    )
-                    .await
-                    .map_err(|_| ApiError::Internal)?
-                    {
-                        Some(existing_row) if existing_row.operation_kind == "delete" => {
-                            map_mutation_row(existing_row)
-                        }
-                        _ => self.accept_mutation(state, accept_command).await?,
-                    },
-                    None => self.accept_mutation(state, accept_command).await?,
-                };
-                return self
-                    .finalize_delete_mutation_admission(
-                        state,
-                        &command,
-                        canonical_delete_mutation.clone(),
-                        base_revision_id,
-                        superseded_mutation_id
-                            .filter(|mutation_id| *mutation_id != canonical_delete_mutation.id),
-                    )
-                    .await;
-            }
-
-            self.ensure_document_accepts_new_mutation(
-                state,
+            .map_err(|_| ApiError::Internal)?;
+            let result = self.admit_delete_mutation(state, &command, &accept_command).await;
+            let release_result = content_repository::release_content_document_lock(
+                document_lock,
                 command.document_id,
-                &command.operation_kind,
             )
-            .await?;
-            let mutation = self.accept_mutation(state, accept_command).await?;
-            return self
-                .finalize_delete_mutation_admission(
-                    state,
-                    &command,
-                    mutation,
-                    base_revision_id,
-                    superseded_mutation_id,
-                )
-                .await;
+            .await
+            .map_err(|_| ApiError::Internal);
+            return match (result, release_result) {
+                (Ok(admission), Ok(())) => Ok(admission),
+                (Err(error), Ok(())) => Err(error),
+                (Ok(_), Err(error)) => Err(error),
+                (Err(_), Err(error)) => Err(error),
+            };
         }
 
         if let Some(existing_admission) =
@@ -1583,6 +1529,12 @@ impl ContentService {
         .await
         .map_err(|_| ApiError::Internal)?
         .ok_or_else(|| ApiError::resource_not_found("document", document_id))?;
+        let _ = ingest_repository::cancel_queued_jobs_for_document(
+            &state.persistence.postgres,
+            document_id,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?;
 
         let head = self.get_document_head(state, document_id).await?;
         let readable_revision_id = head.as_ref().and_then(|row| row.readable_revision_id);
@@ -1814,6 +1766,84 @@ impl ContentService {
             idempotency_key: command.idempotency_key.clone(),
             source_identity: command.source_identity.clone(),
         }
+    }
+
+    async fn admit_delete_mutation(
+        &self,
+        state: &AppState,
+        command: &AdmitMutationCommand,
+        accept_command: &AcceptMutationCommand,
+    ) -> Result<ContentMutationAdmission, ApiError> {
+        let current_document = content_repository::get_document_by_id(
+            &state.persistence.postgres,
+            command.document_id,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .ok_or_else(|| ApiError::resource_not_found("document", command.document_id))?;
+        let current_head = self.get_document_head(state, command.document_id).await?;
+        let base_revision_id = current_head.as_ref().and_then(|row| row.latest_revision_id());
+        let superseded_mutation_id = current_head.as_ref().and_then(|head| head.latest_mutation_id);
+
+        if let Some(existing_mutation) =
+            self.find_existing_mutation_for_request(state, accept_command).await?
+        {
+            let existing_mutation_id = existing_mutation.id;
+            return self
+                .finalize_delete_mutation_admission(
+                    state,
+                    command,
+                    existing_mutation,
+                    base_revision_id,
+                    superseded_mutation_id
+                        .filter(|mutation_id| *mutation_id != existing_mutation_id),
+                )
+                .await;
+        }
+
+        if current_document.document_state == "deleted" || current_document.deleted_at.is_some() {
+            let canonical_delete_mutation = match superseded_mutation_id {
+                Some(latest_mutation_id) => match content_repository::get_mutation_by_id(
+                    &state.persistence.postgres,
+                    latest_mutation_id,
+                )
+                .await
+                .map_err(|_| ApiError::Internal)?
+                {
+                    Some(existing_row) if existing_row.operation_kind == "delete" => {
+                        map_mutation_row(existing_row)
+                    }
+                    _ => self.accept_mutation(state, accept_command.clone()).await?,
+                },
+                None => self.accept_mutation(state, accept_command.clone()).await?,
+            };
+            return self
+                .finalize_delete_mutation_admission(
+                    state,
+                    command,
+                    canonical_delete_mutation.clone(),
+                    base_revision_id,
+                    superseded_mutation_id
+                        .filter(|mutation_id| *mutation_id != canonical_delete_mutation.id),
+                )
+                .await;
+        }
+
+        self.ensure_document_accepts_new_mutation(
+            state,
+            command.document_id,
+            &command.operation_kind,
+        )
+        .await?;
+        let mutation = self.accept_mutation(state, accept_command.clone()).await?;
+        self.finalize_delete_mutation_admission(
+            state,
+            command,
+            mutation,
+            base_revision_id,
+            superseded_mutation_id,
+        )
+        .await
     }
 
     async fn find_existing_mutation_for_request(
@@ -2709,6 +2739,62 @@ impl ContentService {
         )
         .await
         .map_err(|_| ApiError::Internal)?;
+
+        // Clean up ArangoDB artifacts for all revisions of the deleted document.
+        let revisions = state
+            .arango_document_store
+            .list_revisions_by_document(document_id)
+            .await
+            .unwrap_or_default();
+        for revision in &revisions {
+            if let Err(e) =
+                state.arango_document_store.delete_chunks_by_revision(revision.revision_id).await
+            {
+                tracing::warn!(
+                    %document_id,
+                    revision_id = %revision.revision_id,
+                    ?e,
+                    "failed to delete ArangoDB chunks for deleted document"
+                );
+            }
+            if let Err(e) = state
+                .arango_document_store
+                .delete_structured_blocks_by_revision(revision.revision_id)
+                .await
+            {
+                tracing::warn!(
+                    %document_id,
+                    revision_id = %revision.revision_id,
+                    ?e,
+                    "failed to delete ArangoDB blocks for deleted document"
+                );
+            }
+            if let Err(e) = state
+                .arango_graph_store
+                .delete_entity_candidates_by_revision(revision.revision_id)
+                .await
+            {
+                tracing::warn!(
+                    %document_id,
+                    revision_id = %revision.revision_id,
+                    ?e,
+                    "failed to delete ArangoDB entity candidates for deleted document"
+                );
+            }
+            if let Err(e) = state
+                .arango_graph_store
+                .delete_relation_candidates_by_revision(revision.revision_id)
+                .await
+            {
+                tracing::warn!(
+                    %document_id,
+                    revision_id = %revision.revision_id,
+                    ?e,
+                    "failed to delete ArangoDB relation candidates for deleted document"
+                );
+            }
+        }
+
         let projection_scope = crate::services::graph::projection::resolve_projection_scope(
             state, library_id,
         )

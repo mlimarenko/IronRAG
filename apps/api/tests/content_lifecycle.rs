@@ -1004,6 +1004,18 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
             .context("failed to reload superseded replace async operation")?;
         assert_eq!(replace_async_operation.status, "failed");
         assert_eq!(replace_async_operation.failure_code.as_deref(), Some("document_deleted"));
+        let replace_job_handle_after_delete = fixture
+            .state
+            .canonical_services
+            .ingest
+            .get_job_handle_by_mutation_id(&fixture.state, replace_mutation_id)
+            .await
+            .context("failed to reload superseded replace ingest job after delete")?
+            .context("superseded replace mutation must retain its ingest job handle")?;
+        assert_eq!(
+            replace_job_handle_after_delete.job.queue_state, "canceled",
+            "delete must retire queued superseded ingest work immediately"
+        );
 
         let knowledge_document = fixture
             .state

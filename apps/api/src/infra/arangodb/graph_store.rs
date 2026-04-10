@@ -1405,6 +1405,60 @@ impl ArangoGraphStore {
         decode_many_results(cursor)
     }
 
+    pub async fn delete_entities_by_canonical_keys(
+        &self,
+        library_id: Uuid,
+        keys: &[String],
+    ) -> anyhow::Result<u64> {
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        let cursor = self
+            .client
+            .query_json(
+                "FOR doc IN @@collection
+                 FILTER doc.library_id == @library_id AND doc.canonical_key IN @keys
+                 REMOVE doc IN @@collection
+                 RETURN OLD._key",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_ENTITY_COLLECTION,
+                    "library_id": library_id,
+                    "keys": keys,
+                }),
+            )
+            .await
+            .context("failed to delete ArangoDB entities by canonical keys")?;
+        let deleted: Vec<String> = decode_many_results(cursor)?;
+        Ok(deleted.len() as u64)
+    }
+
+    pub async fn delete_relations_by_canonical_keys(
+        &self,
+        library_id: Uuid,
+        keys: &[String],
+    ) -> anyhow::Result<u64> {
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        let cursor = self
+            .client
+            .query_json(
+                "FOR doc IN @@collection
+                 FILTER doc.library_id == @library_id AND doc.canonical_key IN @keys
+                 REMOVE doc IN @@collection
+                 RETURN OLD._key",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_RELATION_COLLECTION,
+                    "library_id": library_id,
+                    "keys": keys,
+                }),
+            )
+            .await
+            .context("failed to delete ArangoDB relations by canonical keys")?;
+        let deleted: Vec<String> = decode_many_results(cursor)?;
+        Ok(deleted.len() as u64)
+    }
+
     pub async fn upsert_evidence(
         &self,
         input: &NewKnowledgeEvidence,

@@ -9,6 +9,7 @@ use std::{
 use anyhow::Context;
 use chrono::Utc;
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 use tokio::{sync::broadcast, task::JoinHandle, time};
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -60,6 +61,12 @@ struct CanonicalExtractContentError {
     failure_code: String,
     retryable: bool,
     message: String,
+}
+
+#[derive(Debug, Error)]
+#[error("document {document_id} was deleted before ingest could run")]
+struct DeletedDocumentJobSkipped {
+    document_id: Uuid,
 }
 
 impl CanonicalExtractContentError {
@@ -484,12 +491,12 @@ async fn execute_canonical_ingest_job(
         }
     });
 
-    // Check if the job was cancelled while queued
+    // Check if the job was canceled while queued
     let current_job = ingest_repository::get_ingest_job_by_id(&state.persistence.postgres, job.id)
         .await
         .context("failed to reload ingest job for cancellation check")?;
-    if current_job.as_ref().is_some_and(|j| j.queue_state == "cancelled") {
-        info!(job_id = %job.id, "skipping cancelled ingest job");
+    if current_job.as_ref().is_some_and(|j| j.queue_state == "canceled") {
+        info!(job_id = %job.id, "skipping canceled ingest job");
         return Ok(());
     }
 
@@ -520,8 +527,8 @@ async fn execute_canonical_ingest_job(
                             )
                         })?;
                 }
-                info!(document_id = %document_id, "skipping deleted document");
-                return Ok(());
+                info!(document_id = %document_id, "canceling leased ingest for deleted document");
+                return Err(anyhow::Error::new(DeletedDocumentJobSkipped { document_id }));
             }
 
             run_canonical_ingest_pipeline(
@@ -576,6 +583,29 @@ async fn execute_canonical_ingest_job(
             Ok(())
         }
         Err(error) => {
+            if error.downcast_ref::<DeletedDocumentJobSkipped>().is_some() {
+                if let Err(e) = state
+                    .canonical_services
+                    .ingest
+                    .finalize_attempt(
+                        &state,
+                        FinalizeAttemptCommand {
+                            attempt_id,
+                            knowledge_generation_id: None,
+                            attempt_state: "canceled".to_string(),
+                            current_stage: Some(initial_stage.clone()),
+                            failure_class: Some("content_mutation".to_string()),
+                            failure_code: Some("document_deleted".to_string()),
+                            retryable: false,
+                        },
+                    )
+                    .await
+                {
+                    tracing::warn!(%attempt_id, ?e, "failed to finalize deleted-document attempt as canceled");
+                }
+                info!(%worker_id, %job_id, %attempt_id, "canonical ingest job canceled because document was deleted");
+                return Ok(());
+            }
             let message = format!("{error:#}");
             let extract_error = error.downcast_ref::<CanonicalExtractContentError>();
             if let Err(e) = state

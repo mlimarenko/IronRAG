@@ -259,20 +259,50 @@ async fn synchronize_projection_support_counts(
     )
     .await
     .context("failed to recalculate canonical graph support counts before projection")?;
-    repositories::delete_runtime_graph_edges_without_support(
+
+    let deleted_edge_keys = repositories::delete_runtime_graph_edges_without_support(
         &state.persistence.postgres,
         scope.library_id,
         scope.projection_version,
     )
     .await
     .context("failed to prune zero-support graph edges before projection")?;
-    repositories::delete_runtime_graph_nodes_without_support(
+
+    let deleted_node_keys = repositories::delete_runtime_graph_nodes_without_support(
         &state.persistence.postgres,
         scope.library_id,
         scope.projection_version,
     )
     .await
     .context("failed to prune zero-support graph nodes before projection")?;
+
+    if !deleted_node_keys.is_empty() {
+        let arango_deleted = state
+            .arango_graph_store
+            .delete_entities_by_canonical_keys(scope.library_id, &deleted_node_keys)
+            .await
+            .unwrap_or(0);
+        tracing::info!(
+            library_id = %scope.library_id,
+            pg_deleted = deleted_node_keys.len(),
+            arango_deleted = arango_deleted,
+            "synced orphaned entity deletions to ArangoDB"
+        );
+    }
+
+    if !deleted_edge_keys.is_empty() {
+        let arango_deleted = state
+            .arango_graph_store
+            .delete_relations_by_canonical_keys(scope.library_id, &deleted_edge_keys)
+            .await
+            .unwrap_or(0);
+        tracing::info!(
+            library_id = %scope.library_id,
+            pg_deleted = deleted_edge_keys.len(),
+            arango_deleted = arango_deleted,
+            "synced orphaned relation deletions to ArangoDB"
+        );
+    }
 
     Ok(())
 }

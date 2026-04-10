@@ -969,12 +969,35 @@ pub async fn acquire_content_mutation_lock(
     Ok(connection)
 }
 
+pub async fn acquire_content_document_lock(
+    postgres: &PgPool,
+    document_id: Uuid,
+) -> Result<PoolConnection<Postgres>, sqlx::Error> {
+    let mut connection = postgres.acquire().await?;
+    sqlx::query("select pg_advisory_lock(hashtextextended($1::text, 0))")
+        .bind(format!("content.document:{document_id}"))
+        .execute(&mut *connection)
+        .await?;
+    Ok(connection)
+}
+
 pub async fn release_content_mutation_lock(
     mut connection: PoolConnection<Postgres>,
     mutation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     sqlx::query("select pg_advisory_unlock(hashtextextended($1::text, 0))")
         .bind(format!("content.mutation:{mutation_id}"))
+        .execute(&mut *connection)
+        .await?;
+    Ok(())
+}
+
+pub async fn release_content_document_lock(
+    mut connection: PoolConnection<Postgres>,
+    document_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("select pg_advisory_unlock(hashtextextended($1::text, 0))")
+        .bind(format!("content.document:{document_id}"))
         .execute(&mut *connection)
         .await?;
     Ok(())

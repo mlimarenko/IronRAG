@@ -526,11 +526,7 @@ fn map_document_summary(summary: &ContentDocumentSummary) -> DocumentSummary {
         id: summary.document.id,
         workspace_id: Some(summary.document.workspace_id),
         library_id: Some(summary.document.library_id),
-        file_name: summary
-            .active_revision
-            .as_ref()
-            .and_then(|revision| revision.title.clone())
-            .unwrap_or_else(|| summary.document.external_key.clone()),
+        file_name: summary.file_name.clone(),
         file_type: summary
             .active_revision
             .as_ref()
@@ -728,7 +724,7 @@ fn map_document_readiness(
     }
 
     match status {
-        DocumentStatus::ReadyNoGraph => return DocumentReadiness::GraphSparse,
+        DocumentStatus::ReadyNoGraph => return DocumentReadiness::Readable,
         DocumentStatus::Ready => return DocumentReadiness::GraphReady,
         DocumentStatus::Failed => return DocumentReadiness::Failed,
         DocumentStatus::Queued | DocumentStatus::Processing => {}
@@ -748,7 +744,7 @@ fn map_document_readiness(
 
     match status {
         DocumentStatus::Ready => DocumentReadiness::GraphReady,
-        DocumentStatus::ReadyNoGraph => DocumentReadiness::GraphSparse,
+        DocumentStatus::ReadyNoGraph => DocumentReadiness::Readable,
         DocumentStatus::Queued | DocumentStatus::Processing => DocumentReadiness::Processing,
         DocumentStatus::Failed => DocumentReadiness::Failed,
     }
@@ -759,6 +755,89 @@ fn severity_level(value: &str) -> MessageLevel {
         "error" => MessageLevel::Error,
         "warning" => MessageLevel::Warning,
         _ => MessageLevel::Info,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{map_document_readiness, map_document_summary};
+    use crate::domains::{
+        content::{
+            ContentDocument, ContentDocumentPipelineState, ContentDocumentSummary,
+            ContentRevisionReadiness, DocumentReadinessSummary,
+        },
+        runtime_ingestion::RuntimeDocumentActivityStatus,
+    };
+    use chrono::Utc;
+    use rustrag_contracts::documents::{DocumentReadiness, DocumentStatus};
+    use uuid::Uuid;
+
+    fn sample_summary() -> ContentDocumentSummary {
+        ContentDocumentSummary {
+            document: ContentDocument {
+                id: Uuid::now_v7(),
+                workspace_id: Uuid::now_v7(),
+                library_id: Uuid::now_v7(),
+                external_key: "legacy-external-key".to_string(),
+                document_state: "active".to_string(),
+                created_at: Utc::now(),
+            },
+            file_name: "canonical-file-name.txt".to_string(),
+            head: None,
+            active_revision: None,
+            source_access: None,
+            readiness: None,
+            readiness_summary: None,
+            prepared_revision: None,
+            web_page_provenance: None,
+            pipeline: ContentDocumentPipelineState { latest_mutation: None, latest_job: None },
+        }
+    }
+
+    #[test]
+    fn ready_no_graph_status_without_sparse_coverage_maps_to_readable() {
+        let readiness = ContentRevisionReadiness {
+            revision_id: Uuid::now_v7(),
+            text_state: "ready".to_string(),
+            vector_state: "ready".to_string(),
+            graph_state: "accepted".to_string(),
+            text_readable_at: Some(Utc::now()),
+            vector_ready_at: Some(Utc::now()),
+            graph_ready_at: None,
+        };
+
+        let mapped = map_document_readiness(Some(&readiness), None, DocumentStatus::ReadyNoGraph);
+        assert_eq!(mapped, DocumentReadiness::Readable);
+    }
+
+    #[test]
+    fn sparse_coverage_summary_still_maps_to_graph_sparse() {
+        let summary = DocumentReadinessSummary {
+            document_id: Uuid::now_v7(),
+            active_revision_id: Some(Uuid::now_v7()),
+            readiness_kind: "readable".to_string(),
+            activity_status: RuntimeDocumentActivityStatus::Ready,
+            stalled_reason: None,
+            preparation_state: "ready".to_string(),
+            graph_coverage_kind: "graph_sparse".to_string(),
+            typed_fact_coverage: Some(1.0),
+            last_mutation_id: None,
+            last_job_stage: None,
+            updated_at: Utc::now(),
+        };
+
+        let mapped = map_document_readiness(None, Some(&summary), DocumentStatus::ReadyNoGraph);
+        assert_eq!(mapped, DocumentReadiness::GraphSparse);
+    }
+
+    #[test]
+    fn document_summary_uses_canonical_summary_file_name() {
+        let mut summary = sample_summary();
+        summary.document.external_key = "stale-fallback".to_string();
+
+        let mapped = map_document_summary(&summary);
+
+        assert_eq!(mapped.file_name, "canonical-file-name.txt");
     }
 }
 
