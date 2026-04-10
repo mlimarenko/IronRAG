@@ -17,7 +17,7 @@ use rustrag_backend::{
     },
     services::{
         catalog_service::{CreateLibraryCommand, CreateWorkspaceCommand},
-        knowledge_service::{
+        knowledge::service::{
             CreateKnowledgeChunkCommand, CreateKnowledgeDocumentCommand,
             CreateKnowledgeRevisionCommand, PromoteKnowledgeDocumentCommand,
         },
@@ -180,7 +180,7 @@ impl KnowledgeLifecycleFixture {
             settings,
             Persistence { postgres: postgres_pool, redis },
             arango_client,
-        );
+        )?;
 
         let suffix = Uuid::now_v7().simple().to_string();
         let workspace = state

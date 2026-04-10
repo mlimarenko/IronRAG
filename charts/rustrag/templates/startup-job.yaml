@@ -1,0 +1,68 @@
+{{- if eq .Values.startup.mode "startup_job" }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "rustrag.startupJobName" . }}
+  labels:
+    {{- include "rustrag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: startup
+spec:
+  backoffLimit: {{ .Values.startup.backoffLimit }}
+  ttlSecondsAfterFinished: {{ .Values.startup.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        {{- include "rustrag.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: startup
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "rustrag.serviceAccountName" . }}
+      restartPolicy: OnFailure
+      initContainers:
+        {{- include "rustrag.startupDependencyWaitInitContainer" . | nindent 8 }}
+      containers:
+        - name: startup
+          image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: {{ .Values.security.runAsUser | default 1000 }}
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+          envFrom:
+            - configMapRef:
+                name: {{ include "rustrag.fullname" . }}-runtime
+            - secretRef:
+                name: {{ include "rustrag.runtimeSecretName" . }}
+          env:
+            - name: RUSTRAG_SERVICE_ROLE
+              value: startup
+            - name: RUSTRAG_SERVICE_NAME
+              value: rustrag-startup
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if eq .Values.storage.provider "filesystem" }}
+            - name: content-storage
+              mountPath: {{ .Values.storage.rootPath }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.startup.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+        {{- if eq .Values.storage.provider "filesystem" }}
+        - name: content-storage
+          persistentVolumeClaim:
+            claimName: {{ include "rustrag.fullname" . }}-content-storage
+        {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

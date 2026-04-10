@@ -4,8 +4,8 @@
 mod structured_document_fixtures;
 
 use rustrag_backend::{
-    services::structured_preparation_service::StructuredPreparationService,
-    shared::structured_document::StructuredBlockKind,
+    services::ingest::structured_preparation::StructuredPreparationService,
+    shared::extraction::structured_document::StructuredBlockKind,
 };
 
 #[test]

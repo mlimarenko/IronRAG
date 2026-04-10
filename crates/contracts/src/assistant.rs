@@ -79,6 +79,13 @@ pub struct AssistantChunkReference {
     pub score: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantContentSourceAccess {
+    pub kind: String,
+    pub href: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantPreparedSegmentReference {
@@ -93,6 +100,7 @@ pub struct AssistantPreparedSegmentReference {
     pub document_id: Option<Uuid>,
     pub document_title: Option<String>,
     pub source_uri: Option<String>,
+    pub source_access: Option<AssistantContentSourceAccess>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

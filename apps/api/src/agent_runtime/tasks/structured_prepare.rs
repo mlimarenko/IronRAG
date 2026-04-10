@@ -4,7 +4,7 @@ use crate::{
         RuntimeOutputMode, RuntimeRecoveryPolicy, RuntimeStageKind, RuntimeSurfaceKind,
         RuntimeTaskKind,
     },
-    services::structured_preparation_service::{
+    services::ingest::structured_preparation::{
         PrepareStructuredRevisionCommand, PreparedStructuredRevision, StructuredPreparationFailure,
     },
 };

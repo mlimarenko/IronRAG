@@ -965,6 +965,9 @@ pub async fn list_runtime_graph_document_links_by_library(
                 'supports'::text as relation_type,
                 count(*)::bigint as support_count
             from runtime_graph_evidence as evidence
+            inner join content_document as document
+                on document.id = evidence.document_id
+               and document.deleted_at is null
             inner join runtime_graph_node as node
                 on node.library_id = evidence.library_id
                and node.id = evidence.target_id
@@ -983,6 +986,9 @@ pub async fn list_runtime_graph_document_links_by_library(
                 'supports'::text as relation_type,
                 count(*)::bigint as support_count
             from runtime_graph_evidence as evidence
+            inner join content_document as document
+                on document.id = evidence.document_id
+               and document.deleted_at is null
             inner join runtime_graph_edge as edge
                 on edge.library_id = evidence.library_id
                and edge.id = evidence.target_id

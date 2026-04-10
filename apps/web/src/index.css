@@ -278,6 +278,20 @@
     letter-spacing: -0.025em;
     font-feature-settings: 'ss01', 'ss02', 'cv01';
   }
+  /* Make every interactive element show the hand cursor by default. */
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  a[href],
+  label[for],
+  summary,
+  select:not(:disabled),
+  [data-clickable] {
+    cursor: pointer;
+  }
+  button:disabled,
+  [role="button"][aria-disabled="true"] {
+    cursor: not-allowed;
+  }
 }
 
 @layer components {

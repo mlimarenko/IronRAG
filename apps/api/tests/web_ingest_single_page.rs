@@ -20,8 +20,8 @@ use rustrag_backend::{
     },
     services::{
         catalog_service::{CreateLibraryCommand, CreateWorkspaceCommand},
-        ingestion_worker,
-        web_ingest_service::CreateWebIngestRunCommand,
+        ingest::web::CreateWebIngestRunCommand,
+        ingest::worker,
     },
 };
 
@@ -187,7 +187,7 @@ impl WebIngestSinglePageFixture {
             redis: redis::Client::open(settings.redis_url.clone())
                 .context("failed to build redis client for web_ingest_single_page")?,
         };
-        let state = AppState::from_dependencies(settings, persistence, arango_client);
+        let state = AppState::from_dependencies(settings, persistence, arango_client)?;
         let workspace = state
             .canonical_services
             .catalog
@@ -579,8 +579,10 @@ async fn single_page_worker_runs_web_capture_through_canonical_pipeline() -> Res
         );
 
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
-        let worker_handle =
-            ingestion_worker::spawn_ingestion_worker(fixture.state.clone(), shutdown_rx);
+        let worker_handle = rustrag_backend::services::ingest::worker::spawn_ingestion_worker(
+            fixture.state.clone(),
+            shutdown_rx,
+        );
 
         let ready_summary =
             fixture.wait_for_document_ready(document_id, Duration::from_secs(15)).await?;

@@ -321,16 +321,6 @@ impl CatalogService {
         )
         .await
         .map_err(|error| map_library_create_error(error, command.workspace_id, &slug))?;
-        state
-            .canonical_services
-            .ai_catalog
-            .ensure_library_runtime_profile(
-                state,
-                command.workspace_id,
-                row.id,
-                command.created_by_principal_id,
-            )
-            .await?;
         let readiness = self.get_library_ingestion_readiness(state, row.id).await?;
         map_library_row(row, readiness)
     }
@@ -449,7 +439,7 @@ impl CatalogService {
             return Ok(HashMap::new());
         }
 
-        let rows = ai_repository::list_active_binding_purposes_for_libraries(
+        let rows = ai_repository::list_effective_binding_purposes_for_libraries(
             &state.persistence.postgres,
             library_ids,
         )
@@ -681,7 +671,7 @@ fn map_connector_write_error(error: sqlx::Error) -> ApiError {
 
 async fn restore_stashed_directory(
     state: &AppState,
-    stashed_directory: Option<&crate::services::content_storage::StashedContentDirectory>,
+    stashed_directory: Option<&crate::services::content::storage::StashedContentDirectory>,
 ) {
     if let Some(stashed_directory) = stashed_directory
         && let Err(restore_error) =
@@ -698,7 +688,7 @@ async fn restore_stashed_directory(
 
 async fn purge_stashed_directory(
     state: &AppState,
-    stashed_directory: Option<&crate::services::content_storage::StashedContentDirectory>,
+    stashed_directory: Option<&crate::services::content::storage::StashedContentDirectory>,
 ) {
     if let Some(stashed_directory) = stashed_directory
         && let Err(purge_error) =

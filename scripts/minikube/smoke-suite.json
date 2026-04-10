@@ -1,0 +1,35 @@
+{
+  "suiteId": "k8s_ha_smoke",
+  "strictBlocking": true,
+  "documents": [
+    "fixtures/smoke-doc.txt"
+  ],
+  "cases": [
+    {
+      "id": "bundled_object_storage",
+      "question": "Which object storage is bundled for clustered Kubernetes deployments?",
+      "searchQuery": "bundled clustered object storage kubernetes deployment",
+      "expectedDocumentsContains": [
+        "smoke-doc"
+      ],
+      "searchRequiredAll": [
+        "s4core"
+      ],
+      "answerRequiredAll": [
+        "s4core"
+      ],
+      "answerForbiddenAny": [
+        "minio"
+      ],
+      "minChunkReferenceCount": 1,
+      "minPreparedSegmentReferenceCount": 1,
+      "minTechnicalFactReferenceCount": 0,
+      "minEntityReferenceCount": 0,
+      "minRelationReferenceCount": 0,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    }
+  ]
+}

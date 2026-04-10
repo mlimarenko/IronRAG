@@ -19,16 +19,16 @@ use rustrag_backend::{
     },
     services::{
         catalog_service::{CreateLibraryCommand, CreateWorkspaceCommand},
-        ingest_service::{
+        ingest::service::{
             AdmitIngestJobCommand, FinalizeAttemptCommand, LeaseAttemptCommand,
             RecordStageEventCommand,
         },
-        knowledge_service::{
+        ingest::web::CreateWebIngestRunCommand,
+        knowledge::service::{
             CreateKnowledgeDocumentCommand, CreateKnowledgeRevisionCommand,
             PromoteKnowledgeDocumentCommand, RefreshKnowledgeLibraryGenerationCommand,
         },
-        ops_service::CreateAsyncOperationCommand,
-        web_ingest_service::CreateWebIngestRunCommand,
+        ops::service::CreateAsyncOperationCommand,
     },
 };
 
@@ -196,7 +196,7 @@ impl IngestAttemptsFixture {
             redis: redis::Client::open(settings.redis_url.clone())
                 .context("failed to create redis client for ingest_attempts test state")?,
         };
-        let state = AppState::from_dependencies(settings, persistence, arango_client);
+        let state = AppState::from_dependencies(settings, persistence, arango_client)?;
         let workspace = state
             .canonical_services
             .catalog
@@ -484,7 +484,7 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
         let _ = ingest
             .heartbeat_attempt(
                 &fixture.state,
-                rustrag_backend::services::ingest_service::HeartbeatAttemptCommand {
+                rustrag_backend::services::ingest::service::HeartbeatAttemptCommand {
                     attempt_id: first_attempt.id,
                     knowledge_generation_id: Some(fixture.generation_id),
                     current_stage: Some("extracting".to_string()),

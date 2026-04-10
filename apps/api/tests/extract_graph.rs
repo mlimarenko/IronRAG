@@ -15,11 +15,11 @@ use rustrag_backend::{
         repositories::{ai_repository, catalog_repository, content_repository},
     },
     services::{
-        extract_service::{
+        ingest::extract::{
             CheckpointResumeCursorCommand, ExtractService, MaterializeChunkResultCommand,
             NewEdgeCandidate, NewNodeCandidate,
         },
-        search_service::{ChunkEmbeddingWrite, GraphNodeEmbeddingWrite, SearchService},
+        query::search::{ChunkEmbeddingWrite, GraphNodeEmbeddingWrite, SearchService},
     },
 };
 
@@ -361,7 +361,7 @@ async fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppSta
     .await
     .context("failed to bootstrap Arango knowledge plane for extract_graph test state")?;
 
-    Ok(AppState::from_dependencies(settings, persistence, arango_client))
+    AppState::from_dependencies(settings, persistence, arango_client)
 }
 
 fn replace_database_name(database_url: &str, new_database: &str) -> Result<String> {

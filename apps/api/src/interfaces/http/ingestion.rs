@@ -169,7 +169,7 @@ async fn list_stage_events(
 
 async fn map_job_handle(
     state: &AppState,
-    handle: crate::services::ingest_service::IngestJobHandle,
+    handle: crate::services::ingest::service::IngestJobHandle,
 ) -> Result<IngestJobResponse, ApiError> {
     let readiness = build_readiness_response(
         state,
@@ -187,7 +187,7 @@ async fn map_job_handle(
 
 async fn map_attempt_handle(
     state: &AppState,
-    handle: crate::services::ingest_service::IngestAttemptHandle,
+    handle: crate::services::ingest::service::IngestAttemptHandle,
 ) -> Result<IngestAttemptResponse, ApiError> {
     let readiness = build_readiness_response(
         state,

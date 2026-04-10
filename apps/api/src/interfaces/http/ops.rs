@@ -437,11 +437,8 @@ fn map_graph_surface(
     first_warning: Option<&OperatorWarning>,
 ) -> GraphSurface {
     let total_documents = summary.document_counts_by_readiness.values().copied().sum::<i64>();
-    let readable_without_graph_count = summary
-        .document_counts_by_readiness
-        .get("readable")
-        .copied()
-        .unwrap_or(0);
+    let readable_without_graph_count =
+        summary.document_counts_by_readiness.get("readable").copied().unwrap_or(0);
     let status = if total_documents == 0 {
         GraphStatus::Empty
     } else if ops_state.degraded_state == "rebuilding" || ops_state.running_attempts > 0 {
@@ -716,15 +713,6 @@ fn map_document_readiness(
         if readiness.graph_state == "failed" {
             return DocumentReadiness::Failed;
         }
-        if matches!(readiness.text_state.as_str(), "readable" | "ready" | "text_readable") {
-            return DocumentReadiness::Readable;
-        }
-        if matches!(readiness.text_state.as_str(), "queued" | "processing") {
-            return DocumentReadiness::Processing;
-        }
-        if readiness.text_state == "failed" {
-            return DocumentReadiness::Failed;
-        }
     }
 
     if let Some(summary) = readiness_summary {
@@ -735,6 +723,25 @@ fn map_document_readiness(
             return DocumentReadiness::GraphSparse;
         }
         if summary.readiness_kind.contains("failed") {
+            return DocumentReadiness::Failed;
+        }
+    }
+
+    match status {
+        DocumentStatus::ReadyNoGraph => return DocumentReadiness::GraphSparse,
+        DocumentStatus::Ready => return DocumentReadiness::GraphReady,
+        DocumentStatus::Failed => return DocumentReadiness::Failed,
+        DocumentStatus::Queued | DocumentStatus::Processing => {}
+    }
+
+    if let Some(readiness) = readiness {
+        if matches!(readiness.text_state.as_str(), "readable" | "ready" | "text_readable") {
+            return DocumentReadiness::Readable;
+        }
+        if matches!(readiness.text_state.as_str(), "queued" | "processing") {
+            return DocumentReadiness::Processing;
+        }
+        if readiness.text_state == "failed" {
             return DocumentReadiness::Failed;
         }
     }

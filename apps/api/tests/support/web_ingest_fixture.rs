@@ -17,7 +17,7 @@ use rustrag_backend::{
     },
     services::{
         catalog_service::{CreateLibraryCommand, CreateWorkspaceCommand},
-        web_ingest_service::CreateWebIngestRunCommand,
+        ingest::web::CreateWebIngestRunCommand,
     },
 };
 
@@ -181,7 +181,7 @@ impl WebIngestFixture {
             redis: redis::Client::open(settings.redis_url.clone())
                 .context("failed to build redis client")?,
         };
-        let state = AppState::from_dependencies(settings, persistence, arango_client);
+        let state = AppState::from_dependencies(settings, persistence, arango_client)?;
         let workspace = state
             .canonical_services
             .catalog

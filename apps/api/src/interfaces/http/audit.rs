@@ -16,7 +16,7 @@ use crate::{
         },
         router_support::ApiError,
     },
-    services::audit_service::{AuditEventPage, ListAuditEventSubjectFilter, ListAuditEventsQuery},
+    services::iam::audit::{AuditEventPage, ListAuditEventSubjectFilter, ListAuditEventsQuery},
 };
 
 const DEFAULT_AUDIT_LIMIT: u32 = 50;
@@ -147,11 +147,8 @@ async fn list_audit_events(
 
     let mut response_items = Vec::new();
     let total = if internal {
-        let events = state
-            .canonical_services
-            .audit
-            .list_internal_events(&state, &list_query)
-            .await?;
+        let events =
+            state.canonical_services.audit.list_internal_events(&state, &list_query).await?;
         let total = events.total;
         push_internal_response_items(
             &state,
@@ -164,11 +161,8 @@ async fn list_audit_events(
         .await?;
         total
     } else {
-        let events = state
-            .canonical_services
-            .audit
-            .list_redacted_events(&state, &list_query)
-            .await?;
+        let events =
+            state.canonical_services.audit.list_redacted_events(&state, &list_query).await?;
         let total = events.total;
         push_redacted_response_items(
             &state,

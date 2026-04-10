@@ -1,4 +1,25 @@
 import { apiFetch } from "./client";
+import type { AIScopeKind } from "@/types";
+import type {
+  RawProviderCatalogEntry,
+  RawModelCatalogEntry,
+  RawProviderCredentialResponse,
+  RawModelPresetResponse,
+  RawBindingAssignmentResponse,
+  RawTokenResponse,
+  RawTokenMintResponse,
+  RawPricingResponse,
+  RawAuditPageResponse,
+} from "@/types/api-responses";
+import type {
+  CreateCredentialRequest,
+  UpdateCredentialRequest,
+  CreateBindingRequest,
+  UpdateBindingRequest,
+  CreateModelPresetRequest,
+  UpdateModelPresetRequest,
+  CreatePriceOverrideRequest,
+} from "@/types/api-requests";
 
 type ListAuditEventsParams = {
   workspaceId?: string;
@@ -10,6 +31,45 @@ type ListAuditEventsParams = {
   offset?: number;
   internal?: boolean;
 };
+
+type AiScopeParams = {
+  scopeKind?: AIScopeKind;
+  workspaceId?: string;
+  libraryId?: string;
+};
+
+type ListModelsParams = {
+  providerCatalogId?: string;
+  workspaceId?: string;
+  libraryId?: string;
+  credentialId?: string;
+};
+
+export interface AdminSurfaceResponse {
+  workspaces?: unknown[];
+  libraries?: unknown[];
+  [key: string]: unknown;
+}
+
+export interface CatalogWorkspaceResponse {
+  id: string;
+  displayName?: string;
+  createdAt?: string;
+}
+
+export interface CatalogLibraryResponse {
+  id: string;
+  workspaceId: string;
+  displayName?: string;
+  createdAt?: string;
+}
+
+export interface BindingValidationResponse {
+  state?: string;
+  checkedAt?: string;
+  failureCode?: string;
+  message?: string;
+}
 
 function buildQuery(params: Record<string, string | number | boolean | undefined>) {
   const searchParams = new URLSearchParams();
@@ -25,30 +85,66 @@ function buildQuery(params: Record<string, string | number | boolean | undefined
 }
 
 export const adminApi = {
-  // Tokens
-  listTokens: () => apiFetch<any>("/iam/tokens"),
-  mintToken: (label: string) => apiFetch<any>("/iam/tokens", { method: "POST", body: JSON.stringify({ label }) }),
-  revokeToken: (principalId: string) => apiFetch<void>(`/iam/tokens/${principalId}/revoke`, { method: "POST" }),
+  listTokens: () => apiFetch<RawTokenResponse[]>("/iam/tokens"),
+  mintToken: (label: string) =>
+    apiFetch<RawTokenMintResponse>("/iam/tokens", { method: "POST", body: JSON.stringify({ label }) }),
+  revokeToken: (principalId: string) =>
+    apiFetch<void>(`/iam/tokens/${principalId}/revoke`, { method: "POST" }),
 
-  // AI
-  listProviders: () => apiFetch<any>("/ai/providers"),
-  listModels: () => apiFetch<any>("/ai/models"),
-  listCredentials: () => apiFetch<any>("/ai/credentials"),
-  createCredential: (data: any) => apiFetch<any>("/ai/credentials", { method: "POST", body: JSON.stringify(data) }),
-  listLibraryBindings: (libraryId: string) => apiFetch<any>(`/ai/libraries/${libraryId}/bindings`),
-  createLibraryBinding: (data: any) => apiFetch<any>("/ai/library-bindings", { method: "POST", body: JSON.stringify(data) }),
-  updateLibraryBinding: (bindingId: string, data: any) => apiFetch<any>(`/ai/library-bindings/${bindingId}`, { method: "PUT", body: JSON.stringify(data) }),
-  listModelPresets: () => apiFetch<any>("/ai/model-presets"),
-  createModelPreset: (data: any) => apiFetch<any>("/ai/model-presets", { method: "POST", body: JSON.stringify(data) }),
-  listPrices: () => apiFetch<any>("/ai/prices"),
-  createPriceOverride: (data: any) => apiFetch<any>("/ai/prices", { method: "POST", body: JSON.stringify(data) }),
+  listProviders: () => apiFetch<RawProviderCatalogEntry[]>("/ai/providers"),
+  listModels: (params: ListModelsParams = {}) =>
+    apiFetch<RawModelCatalogEntry[]>(`/ai/models${buildQuery(params)}`),
+  listCredentials: (params: AiScopeParams = {}) =>
+    apiFetch<RawProviderCredentialResponse[]>(`/ai/credentials${buildQuery(params)}`),
+  createCredential: (data: CreateCredentialRequest) =>
+    apiFetch<RawProviderCredentialResponse>("/ai/credentials", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  updateCredential: (credentialId: string, data: UpdateCredentialRequest) =>
+    apiFetch<RawProviderCredentialResponse>(`/ai/credentials/${credentialId}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+  listBindings: (params: Required<Pick<AiScopeParams, 'scopeKind'>> & AiScopeParams) =>
+    apiFetch<RawBindingAssignmentResponse[]>(`/ai/bindings${buildQuery(params)}`),
+  createBinding: (data: CreateBindingRequest) =>
+    apiFetch<RawBindingAssignmentResponse>("/ai/bindings", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  updateBinding: (bindingId: string, data: UpdateBindingRequest) =>
+    apiFetch<RawBindingAssignmentResponse>(`/ai/bindings/${bindingId}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+  deleteBinding: (bindingId: string) =>
+    apiFetch<void>(`/ai/bindings/${bindingId}`, { method: "DELETE" }),
+  validateBinding: (bindingId: string) =>
+    apiFetch<BindingValidationResponse>(`/ai/bindings/${bindingId}/validate`, { method: "POST" }),
+  listModelPresets: (params: AiScopeParams = {}) =>
+    apiFetch<RawModelPresetResponse[]>(`/ai/model-presets${buildQuery(params)}`),
+  createModelPreset: (data: CreateModelPresetRequest) =>
+    apiFetch<RawModelPresetResponse>("/ai/model-presets", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  updateModelPreset: (presetId: string, data: UpdateModelPresetRequest) =>
+    apiFetch<RawModelPresetResponse>(`/ai/model-presets/${presetId}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+  listPrices: () => apiFetch<RawPricingResponse[]>("/ai/prices"),
+  createPriceOverride: (data: CreatePriceOverrideRequest) =>
+    apiFetch<RawPricingResponse>("/ai/prices", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
 
-  // Ops
-  getAdminSurface: () => apiFetch<any>("/admin/surface"),
+  getAdminSurface: () => apiFetch<AdminSurfaceResponse>("/admin/surface"),
 
-  // Audit
   listAuditEvents: (params: ListAuditEventsParams = {}) =>
-    apiFetch<any>(
+    apiFetch<RawAuditPageResponse>(
       `/audit/events${buildQuery({
         workspaceId: params.workspaceId,
         libraryId: params.libraryId,
@@ -61,9 +157,15 @@ export const adminApi = {
       })}`,
     ),
 
-  // Catalog
-  listWorkspaces: () => apiFetch<any>("/catalog/workspaces"),
-  createWorkspace: (name: string) => apiFetch<any>("/catalog/workspaces", { method: "POST", body: JSON.stringify({ displayName: name }) }),
+  listWorkspaces: () => apiFetch<CatalogWorkspaceResponse[]>("/catalog/workspaces"),
+  createWorkspace: (name: string) =>
+    apiFetch<CatalogWorkspaceResponse>("/catalog/workspaces", {
+      method: "POST",
+      body: JSON.stringify({ displayName: name }),
+    }),
   createLibrary: (workspaceId: string, name: string) =>
-    apiFetch<any>(`/catalog/workspaces/${workspaceId}/libraries`, { method: "POST", body: JSON.stringify({ displayName: name }) }),
+    apiFetch<CatalogLibraryResponse>(`/catalog/workspaces/${workspaceId}/libraries`, {
+      method: "POST",
+      body: JSON.stringify({ displayName: name }),
+    }),
 };

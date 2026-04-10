@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Loader2, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -16,7 +16,7 @@ export default function SwaggerPage() {
         {state === 'error' && (
           <div className="flex flex-col items-center justify-center h-full">
             <AlertCircle className="h-8 w-8 text-destructive mb-3" />
-            <h2 className="text-base font-bold">Failed to load API spec</h2>
+            <h2 className="text-base font-bold">{t('swagger.failedToLoadSpec')}</h2>
             <Button variant="outline" size="sm" className="mt-3" onClick={() => window.location.reload()}>
               {t('documents.retry')}
             </Button>

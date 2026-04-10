@@ -27,48 +27,39 @@ pub enum BootstrapCredentialSource {
     Env,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BootstrapProviderDescriptor {
+pub struct BootstrapProviderPreset {
+    pub binding_purpose: BootstrapBindingPurpose,
+    pub model_catalog_id: Uuid,
+    pub model_name: String,
+    pub preset_name: String,
+    pub system_prompt: Option<String>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub max_output_tokens_override: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapProviderPresetBundle {
     pub provider_catalog_id: Uuid,
     pub provider_kind: String,
     pub display_name: String,
-    pub api_style: String,
-    pub lifecycle_state: String,
     pub credential_source: BootstrapCredentialSource,
+    pub default_base_url: Option<String>,
+    pub api_key_required: bool,
+    pub base_url_required: bool,
+    pub presets: Vec<BootstrapProviderPreset>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BootstrapModelDescriptor {
-    pub id: Uuid,
-    pub provider_catalog_id: Uuid,
-    pub model_name: String,
-    pub capability_kind: String,
-    pub modality_kind: String,
-    pub allowed_binding_purposes: Vec<BootstrapBindingPurpose>,
-    pub context_window: Option<i32>,
-    pub max_output_tokens: Option<i32>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BootstrapBindingSelection {
-    pub binding_purpose: BootstrapBindingPurpose,
-    pub provider_kind: Option<String>,
-    pub model_catalog_id: Option<Uuid>,
-    pub configured: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BootstrapAiSetup {
-    pub providers: Vec<BootstrapProviderDescriptor>,
-    pub models: Vec<BootstrapModelDescriptor>,
-    pub binding_selections: Vec<BootstrapBindingSelection>,
+    pub preset_bundles: Vec<BootstrapProviderPresetBundle>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BootstrapStatus {
     pub setup_required: bool,
@@ -93,24 +84,10 @@ pub struct LoginRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BootstrapCredentialInput {
+pub struct BootstrapSetupAi {
     pub provider_kind: String,
     pub api_key: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BootstrapBindingInput {
-    pub binding_purpose: BootstrapBindingPurpose,
-    pub provider_kind: String,
-    pub model_catalog_id: Uuid,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BootstrapSetupAi {
-    pub credentials: Vec<BootstrapCredentialInput>,
-    pub binding_selections: Vec<BootstrapBindingInput>,
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,7 +130,7 @@ pub struct LogoutResponse {
     pub signed_out_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionResolveResponse {
     pub mode: SessionMode,

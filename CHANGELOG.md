@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.1.3 — unreleased
+
+### Performance — Ingestion Parallelism
+- **Parallel embedding batches** (`ingest/runtime.rs`): node and edge embedding now sends batches in parallel via `futures::stream::buffer_unordered`. New env var `RUSTRAG_INGESTION_EMBEDDING_PARALLELISM=4` (default) controls how many embed batches run concurrently per job. For a 200-chunk document this is ~4x faster end-to-end.
+- **Per-library job isolation** (`ingest_repository::claim_next_queued_ingest_job`): SQL claim now optionally caps the number of `leased` jobs per library. New env var `RUSTRAG_INGESTION_MAX_JOBS_PER_LIBRARY=0` (0 = unlimited) prevents one busy library from starving others when many docs are queued at once.
+- **Parallel web crawl fetches** (`ingest/web::discover_recursive_scope`): the BFS frontier is now drained in waves of N candidates and HTTP fetches run in parallel via `buffer_unordered`, while DB writes stay sequential per result for canonical/seen-set determinism. New env var `RUSTRAG_WEB_INGEST_CRAWL_CONCURRENCY=4`.
+- All three knobs are independent and tunable per deployment via env vars. Defaults are conservative (4) and tested against the local stack.
+
+### Refactor — Bootstrap Flow Cleanup
+- **Removed legacy `/iam/bootstrap/claim` endpoint** entirely: route, handler, `BootstrapClaimRequest/Response`, `BootstrapClaimCommand/Outcome`, service method, OpenAPI paths and schemas, integration test, and the `bootstrap_token` / `bootstrap_claim_enabled` config fields with their `RUSTRAG_BOOTSTRAP_TOKEN` env var. Single canonical bootstrap surface is now `/iam/bootstrap/setup` only.
+- **Display name optional** in bootstrap setup: backend already accepted `Option<String>` and falls back to login; frontend no longer validates it as required and passes `undefined` when empty.
+- **Required field markers** in `LoginPage`: red `*` next to required labels (Admin login, Password) plus `(optional)` hint next to Display name; matching `login.optional` i18n key in en/ru locales.
+- **Cursor pointer everywhere**: added `cursor: pointer` to all `button:not(:disabled)`, `[role="button"]`, `a[href]`, `label[for]`, `summary`, `select` via `@layer base` global rule in `index.css`, plus baked into the `Button` cva so the shadcn variant gets it explicitly. Disabled controls get `cursor: not-allowed`.
+
+### Refactor — Code Quality + Hierarchy
+- **`shared/` restructure**: 7 files moved into `shared/extraction/` (chunking, file_extract, structured_document, text_render, technical_facts) and `shared/web/` (ingest, url_identity). Root keeps only canonical primitives.
+- **`services/` restructure**: 43 flat files reorganized into 8 domain folders — `graph/`, `query/`, `content/`, `ingest/`, `mcp/`, `ops/`, `iam/`, `knowledge/`. ~80 import sites updated.
+- **`query/execution.rs` split started**: 7909-line megafile reduced to 6346 in `mod.rs` plus 5 extracted submodules — `embed`, `hyde_crag`, `technical_literals`, `verification`, `port_answer` (-20%, 1631 lines moved out).
+- **Dead `legacy_*` bootstrap flags removed**: `legacy_ui_bootstrap_enabled`, `legacy_bootstrap_token_endpoint_enabled`, `allow_legacy_startup_side_effects` deleted from config and 5 integration tests. `legacy_ui_bootstrap_admin` renamed to `ui_bootstrap_admin`.
+- **Silent error swallowing fixed**: 14 `let _ = state...` audit/append sites converted to explicit `if let Err(e) = ... { warn!(stage=..., error=%e, ...); }` with structured logging. 31 cosmetic `let _ = HashSet::insert()` cleaned up.
+- **Frontend `any` elimination**: 52 `any` removed from `pages/{Documents,Graph,Assistant,Admin}.tsx`, all `apiFetch<any>` calls in `api/*.ts` typed against `Raw*` interfaces, `ApiError.body` typed as `ApiErrorBody`. Added 11 new typed interfaces.
+- **Observability**: HyDE/CRAG/multimodal extraction stages emit structured `stage=` tracing per the constitution severity convention.
+
+### Deploy
+- Added the canonical Helm chart for `web`, `api`, `worker`, and one `startup` job.
+- Added `docker-compose-s4.yml` for the bundled stack with [s4core](https://github.com/s4core/s4core) and S3 storage.
+- Kept `docker-compose.yml` as the classic bundled stack with filesystem storage.
+
+### Changed
+- Split runtime into `api`, `worker`, and `startup`.
+- Moved migrations and bootstrap out of serving pods into the startup authority.
+- Added the canonical storage contract: `filesystem` or S3-compatible object storage.
+- Added real source links for documents and grounded answers.
+- Made `/v1/ready` report actual deployment, dependency, storage, and topology state.
+- Fixed first-run OpenAI bootstrap validation for the current chat-completions API.
+- Fixed Swagger/OpenAPI rendering by removing a duplicate YAML key and adding a duplicate-key test.
+- Split the documents page into smaller modules and added a staged 1000-line file limit in pre-commit.
+
+### Validation
+- `docker compose config` for filesystem and `s4core` profiles — pass
+- `helm lint` and `helm template` — pass
+- live upload, query, source-download, and Swagger/OpenAPI checks on the Minikube Helm release — pass
+
 ## 0.1.2 — 2026-04-08
 
 ### Highlights

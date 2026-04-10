@@ -37,7 +37,7 @@ use rustrag_backend::{
     infra::repositories::{self, ai_repository, iam_repository},
     integrations::llm::{EmbeddingRequest, EmbeddingResponse, LlmGateway},
     interfaces::http::{auth::hash_token, authorization::PERMISSION_LIBRARY_READ, router},
-    services::search_service::SearchService,
+    services::query::search::SearchService,
 };
 
 const SEARCH_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -405,17 +405,22 @@ impl KnowledgeSearchHttpFixture {
         .context("expected seeded embedding model catalog row")?;
         let credential = ai_repository::create_provider_credential(
             &state.persistence.postgres,
-            workspace.id,
+            "workspace",
+            Some(workspace.id),
+            None,
             provider_catalog.id,
             "knowledge-search-provider-credential",
-            "secret://knowledge-search/provider",
+            Some("secret://knowledge-search/provider"),
+            None,
             None,
         )
         .await
         .context("failed to create knowledge search provider credential")?;
         let preset = ai_repository::create_model_preset(
             &state.persistence.postgres,
-            workspace.id,
+            "workspace",
+            Some(workspace.id),
+            None,
             model_catalog.id,
             "knowledge-search-model-preset",
             None,
@@ -427,10 +432,11 @@ impl KnowledgeSearchHttpFixture {
         )
         .await
         .context("failed to create knowledge search model preset")?;
-        ai_repository::create_library_binding(
+        ai_repository::create_binding_assignment(
             &state.persistence.postgres,
-            workspace.id,
-            library.id,
+            "library",
+            Some(workspace.id),
+            Some(library.id),
             "embed_chunk",
             credential.id,
             preset.id,
@@ -790,7 +796,7 @@ impl KnowledgeSearchHttpFixture {
         &self,
         query: &str,
         expected_fact_id: Uuid,
-    ) -> Result<rustrag_backend::services::search_service::QueryEvidenceSearchResult> {
+    ) -> Result<rustrag_backend::services::query::search::QueryEvidenceSearchResult> {
         let deadline = Instant::now() + SEARCH_WAIT_TIMEOUT;
         loop {
             let result = SearchService::new()

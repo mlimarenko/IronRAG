@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useApp } from '@/contexts/AppContext';
 import { adminApi, dashboardApi } from '@/api';
 import { AVAILABLE_LOCALES } from '@/types';
@@ -11,21 +11,30 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Checkbox } from '@/components/ui/checkbox';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from '@/components/ui/dialog';
+import AiConfigurationPanel from '@/components/admin/AiConfigurationPanel';
+import { mapProvider } from '@/lib/ai-mappers';
+import type {
+  RawModelCatalogEntry,
+  RawTokenResponse,
+  RawPricingResponse,
+  RawOpsResponse,
+  RawAuditEventResponse,
+  RawAuditPageResponse,
+} from '@/types/api-responses';
 import {
-  Key, Search, Plus, Copy, Eye, EyeOff, Shield, Trash2,
-  Settings, Server, Brain, DollarSign, Clock, CheckCircle2,
+  Key, Search, Plus, Copy, Trash2,
+  Settings, Brain, DollarSign, CheckCircle2,
   AlertTriangle, XCircle, Loader2, Terminal, Code2, ExternalLink,
-  Activity, Users, RefreshCw
+  Activity, RefreshCw
 } from 'lucide-react';
 import type {
-  APIToken, AIProvider, AICredential, ModelPreset, LibraryBinding,
-  PricingRule, OperationsSnapshot, OperationsWarning, AuditEvent, AuditEventPage, AIPurpose
+  APIToken, AIProvider, PricingRule, OperationsSnapshot,
+  OperationsWarning, AuditEvent, AuditEventPage,
 } from '@/types';
 
 const AUDIT_PAGE_SIZE_OPTIONS = [50, 100, 250, 1000] as const;
@@ -51,11 +60,20 @@ type OperationsStatusMeta = {
   description: string;
 };
 
+function errorMessage(err: unknown, fallback: string): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'object' && err !== null && 'message' in err) {
+    const msg = (err as { message?: unknown }).message;
+    if (typeof msg === 'string') return msg;
+  }
+  return fallback;
+}
+
 // ── Response mappers ──
 
-function mapToken(raw: any): APIToken {
+function mapToken(raw: RawTokenResponse): APIToken {
   return {
-    id: raw.principalId ?? raw.id,
+    id: raw.principalId ?? raw.id ?? '',
     label: raw.label ?? '',
     tokenPrefix: raw.tokenPrefix ?? '',
     status: raw.status === 'active' ? 'active' : raw.status === 'expired' ? 'expired' : 'revoked',
@@ -69,66 +87,15 @@ function mapToken(raw: any): APIToken {
   };
 }
 
-function mapProvider(raw: any): AIProvider {
-  return {
-    id: raw.id,
-    displayName: raw.displayName ?? raw.providerKind ?? '',
-    kind: raw.providerKind ?? 'llm',
-    apiStyle: raw.apiStyle ?? '',
-    lifecycleState: raw.lifecycleState === 'active' ? 'active' : raw.lifecycleState === 'deprecated' ? 'deprecated' : 'preview',
-    modelCount: 0,
-    credentialCount: 0,
-  };
-}
-
-function mapCredential(raw: any, providers: AIProvider[]): AICredential {
-  const provider = providers.find(p => p.id === raw.providerCatalogId);
-  return {
-    id: raw.id,
-    providerId: raw.providerCatalogId ?? '',
-    providerName: provider?.displayName ?? '',
-    label: raw.label ?? '',
-    state: raw.credentialState === 'valid' ? 'valid' : raw.credentialState === 'invalid' ? 'invalid' : 'unchecked',
-    createdAt: raw.createdAt ?? '',
-    updatedAt: raw.updatedAt ?? '',
-    apiKeySummary: raw.apiKeySummary ?? '',
-  };
-}
-
-function mapPreset(raw: any): ModelPreset {
-  return {
-    id: raw.id,
-    providerId: raw.modelCatalogId ?? '',
-    model: raw.presetName ?? '',
-    presetName: raw.presetName ?? '',
-    systemPrompt: raw.systemPrompt ?? undefined,
-    temperature: raw.temperature ?? 0,
-    topP: raw.topP ?? 1,
-    maxOutputTokens: raw.maxOutputTokensOverride ?? undefined,
-    createdAt: raw.createdAt ?? '',
-    updatedAt: raw.updatedAt ?? '',
-  };
-}
-
-function mapBinding(raw: any): LibraryBinding {
-  return {
-    id: raw.id ?? undefined,
-    purpose: raw.bindingPurpose as AIPurpose,
-    credentialId: raw.providerCredentialId ?? undefined,
-    presetId: raw.modelPresetId ?? undefined,
-    state: (raw.bindingState === 'configured' || raw.bindingState === 'active') ? 'configured' : raw.bindingState === 'invalid' ? 'invalid' : 'unconfigured',
-  };
-}
-
-function mapPricing(raw: any, providers: AIProvider[], models: any[]): PricingRule {
-  const model = models.find((m: any) => m.id === raw.modelCatalogId);
+function mapPricing(raw: RawPricingResponse, providers: AIProvider[], models: RawModelCatalogEntry[]): PricingRule {
+  const model = models.find(m => m.id === raw.modelCatalogId);
   const provider = model ? providers.find(p => p.id === model.providerCatalogId) : undefined;
   return {
     id: raw.id,
     provider: provider?.displayName ?? '',
     model: model?.modelName ?? raw.modelCatalogId ?? '',
     billingUnit: raw.billingUnit ?? '',
-    unitPrice: parseFloat(raw.unitPrice) || 0,
+    unitPrice: parseFloat(raw.unitPrice ?? '') || 0,
     currency: raw.currencyCode ?? 'USD',
     effectiveFrom: raw.effectiveFrom ? new Date(raw.effectiveFrom).toISOString().slice(0, 10) : '',
     effectiveTo: raw.effectiveTo ? new Date(raw.effectiveTo).toISOString().slice(0, 10) : undefined,
@@ -136,7 +103,7 @@ function mapPricing(raw: any, providers: AIProvider[], models: any[]): PricingRu
   };
 }
 
-function mapOps(raw: any): OperationsSnapshot {
+function mapOps(raw: RawOpsResponse): OperationsSnapshot {
   const state = raw.state ?? {};
   const degradedState =
     state.degradedState === 'processing' ||
@@ -153,7 +120,7 @@ function mapOps(raw: any): OperationsSnapshot {
     status: degradedState,
     knowledgeGenerationState: state.knowledgeGenerationState ?? 'unknown',
     lastRecomputedAt: state.lastRecomputedAt ?? '',
-    warnings: (raw.warnings ?? []).map((warning: any): OperationsWarning => ({
+    warnings: (raw.warnings ?? []).map((warning): OperationsWarning => ({
       id: warning.id ?? crypto.randomUUID(),
       warningKind: warning.warningKind ?? 'unknown',
       severity: warning.severity ?? 'warning',
@@ -163,22 +130,22 @@ function mapOps(raw: any): OperationsSnapshot {
   };
 }
 
-function mapAudit(raw: any): AuditEvent {
+function mapAudit(raw: RawAuditEventResponse): AuditEvent {
   const resultKind =
     raw.resultKind === 'rejected' || raw.resultKind === 'failed' ? raw.resultKind : 'succeeded';
   return {
     id: raw.id,
     action: raw.actionKind ?? '',
     resultKind,
-    surfaceKind: raw.surfaceKind ?? 'rest',
+    surfaceKind: (raw.surfaceKind ?? 'rest') as AuditEvent['surfaceKind'],
     timestamp: raw.createdAt ?? '',
     message: raw.redactedMessage ?? raw.actionKind ?? '',
-    subjectSummary: (raw.subjects ?? []).map((s: any) => `${s.subjectKind}:${s.subjectId}`).join(', ') || '',
+    subjectSummary: (raw.subjects ?? []).map(s => `${s.subjectKind}:${s.subjectId}`).join(', ') || '',
     actor: raw.actorPrincipalId ?? 'system',
   };
 }
 
-function mapAuditPage(raw: any): AuditEventPage {
+function mapAuditPage(raw: RawAuditPageResponse): AuditEventPage {
   return {
     items: Array.isArray(raw.items) ? raw.items.map(mapAudit) : [],
     total: typeof raw.total === 'number' ? raw.total : 0,
@@ -351,6 +318,19 @@ function getAuditResultIcon(resultKind: AuditEvent['resultKind']) {
   return CheckCircle2;
 }
 
+function humanizeTokenStatus(status: APIToken['status'], t: TFunction) {
+  switch (status) {
+    case 'active':
+      return t('admin.active');
+    case 'expired':
+      return t('admin.expired');
+    case 'revoked':
+      return t('admin.revoked');
+    default:
+      return status;
+  }
+}
+
 function humanizeGenerationState(state: string, t: TFunction) {
   switch (state) {
     case 'graph_ready':
@@ -404,8 +384,14 @@ function getMcpConfigs(origin: string) {
 export default function AdminPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { activeWorkspace, activeLibrary, locale, setLocale } = useApp();
-  const [activeTab, setActiveTab] = useState('access');
+  const [activeTab, setActiveTab] = useState(() => {
+    const requestedTab = searchParams.get('tab');
+    return requestedTab && ['access', 'mcp', 'operations', 'ai', 'pricing', 'settings'].includes(requestedTab)
+      ? requestedTab
+      : 'access';
+  });
 
   // Access tab state
   const [tokens, setTokens] = useState<APIToken[]>([]);
@@ -423,27 +409,8 @@ export default function AdminPage() {
   const [selectedPermissions, setSelectedPermissions] = useState<string[]>([]);
   const [mintingToken, setMintingToken] = useState(false);
 
-  // AI tab state
+  // Shared admin catalog state
   const [providers, setProviders] = useState<AIProvider[]>([]);
-  const [credentials, setCredentials] = useState<AICredential[]>([]);
-  const [presets, setPresets] = useState<ModelPreset[]>([]);
-  const [bindings, setBindings] = useState<LibraryBinding[]>([]);
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiError, setAiError] = useState<string | null>(null);
-
-  const [createCredOpen, setCreateCredOpen] = useState(false);
-  const [credProvider, setCredProvider] = useState('');
-  const [credLabel, setCredLabel] = useState('');
-  const [credApiKey, setCredApiKey] = useState('');
-
-  const [createPresetOpen, setCreatePresetOpen] = useState(false);
-  const [presetName, setPresetName] = useState('');
-  const [presetModelId, setPresetModelId] = useState('');
-  const [presetSystemPrompt, setPresetSystemPrompt] = useState('');
-  const [presetTemperature, setPresetTemperature] = useState('0.3');
-  const [presetTopP, setPresetTopP] = useState('0.9');
-  const [presetMaxTokens, setPresetMaxTokens] = useState('');
-  const [presetSaving, setPresetSaving] = useState(false);
 
   const [createPricingOpen, setCreatePricingOpen] = useState(false);
   const [pricingModelId, setPricingModelId] = useState('');
@@ -453,12 +420,6 @@ export default function AdminPage() {
   const [pricingFrom, setPricingFrom] = useState('');
   const [pricingTo, setPricingTo] = useState('');
   const [pricingSaving, setPricingSaving] = useState(false);
-
-  // Binding editor state
-  const [editingBinding, setEditingBinding] = useState<string | null>(null);
-  const [bindingCredId, setBindingCredId] = useState('');
-  const [bindingPresetId, setBindingPresetId] = useState('');
-  const [bindingSaving, setBindingSaving] = useState(false);
 
   // Pricing tab state
   const [pricing, setPricing] = useState<PricingRule[]>([]);
@@ -488,7 +449,7 @@ export default function AdminPage() {
   const [auditPage, setAuditPage] = useState(1);
 
   // Raw model catalog for pricing resolution
-  const [rawModels, setRawModels] = useState<any[]>([]);
+  const [rawModels, setRawModels] = useState<RawModelCatalogEntry[]>([]);
 
   // ── Data fetchers ──
 
@@ -496,46 +457,24 @@ export default function AdminPage() {
     setTokensLoading(true);
     setTokensError(null);
     adminApi.listTokens()
-      .then((data: any) => {
+      .then((data) => {
         const list = Array.isArray(data) ? data : [];
         setTokens(list.map(mapToken));
       })
-      .catch(err => setTokensError(err?.message ?? 'Failed to load tokens'))
+      .catch((err: unknown) => setTokensError(errorMessage(err, t('admin.loadTokensFailed'))))
       .finally(() => setTokensLoading(false));
-  }, []);
-
-  const loadAiData = useCallback(() => {
-    setAiLoading(true);
-    setAiError(null);
-    Promise.all([
-      adminApi.listProviders(),
-      adminApi.listCredentials(),
-      adminApi.listModelPresets(),
-      adminApi.listModels(),
-      activeLibrary ? adminApi.listLibraryBindings(activeLibrary.id) : Promise.resolve([]),
-    ])
-      .then(([provRaw, credRaw, presetRaw, modelRaw, bindRaw]) => {
-        const provList = (Array.isArray(provRaw) ? provRaw : []).map(mapProvider);
-        setProviders(provList);
-        setCredentials((Array.isArray(credRaw) ? credRaw : []).map((c: any) => mapCredential(c, provList)));
-        setPresets((Array.isArray(presetRaw) ? presetRaw : []).map(mapPreset));
-        setRawModels(Array.isArray(modelRaw) ? modelRaw : []);
-        setBindings((Array.isArray(bindRaw) ? bindRaw : []).map(mapBinding));
-      })
-      .catch(err => setAiError(err?.message ?? 'Failed to load AI configuration'))
-      .finally(() => setAiLoading(false));
-  }, [activeLibrary]);
+  }, [t]);
 
   const loadPricing = useCallback(() => {
     setPricingLoading(true);
     adminApi.listPrices()
-      .then((data: any) => {
+      .then((data) => {
         const list = Array.isArray(data) ? data : [];
-        setPricing(list.map((p: any) => mapPricing(p, providers, rawModels)));
+        setPricing(list.map((p) => mapPricing(p, providers, rawModels)));
       })
-      .catch((err: any) => toast.error(err?.message || "Failed to load pricing"))
+      .catch((err: unknown) => toast.error(errorMessage(err, t('admin.loadPricingFailed'))))
       .finally(() => setPricingLoading(false));
-  }, [providers, rawModels]);
+  }, [providers, rawModels, t]);
 
   const loadOps = useCallback(() => {
     if (!activeLibrary) {
@@ -545,10 +484,10 @@ export default function AdminPage() {
     setOpsLoading(true);
     setOpsError(null);
     dashboardApi.getLibraryState(activeLibrary.id)
-      .then((data: any) => setOps(mapOps(data)))
-      .catch(err => setOpsError(err?.message ?? 'Failed to load operations'))
+      .then(data => setOps(mapOps(data)))
+      .catch((err: unknown) => setOpsError(errorMessage(err, t('admin.loadOperationsFailed'))))
       .finally(() => setOpsLoading(false));
-  }, [activeLibrary]);
+  }, [activeLibrary, t]);
 
   const loadAudit = useCallback(() => {
     if (!activeWorkspace && !activeLibrary) {
@@ -571,7 +510,7 @@ export default function AdminPage() {
       limit: auditPageSize,
       offset: (auditPage - 1) * auditPageSize,
     })
-      .then((data: any) => {
+      .then((data) => {
         const pageData = mapAuditPage(data);
         const totalPages = Math.max(1, Math.ceil(pageData.total / auditPageSize));
         if (pageData.total > 0 && auditPage > totalPages) {
@@ -580,7 +519,7 @@ export default function AdminPage() {
         }
         setAudit(pageData);
       })
-      .catch((err: any) => toast.error(err?.message || "Failed to load audit events"))
+      .catch((err: unknown) => toast.error(errorMessage(err, t('admin.loadAuditEventsFailed'))))
       .finally(() => setAuditLoading(false));
   }, [
     activeLibrary,
@@ -590,6 +529,7 @@ export default function AdminPage() {
     auditResultFilter,
     auditSearch,
     auditSurfaceFilter,
+    t,
   ]);
 
   // ── Load data per tab ──
@@ -597,10 +537,6 @@ export default function AdminPage() {
   useEffect(() => {
     if (activeTab === 'access') loadTokens();
   }, [activeTab, loadTokens]);
-
-  useEffect(() => {
-    if (activeTab === 'ai') loadAiData();
-  }, [activeTab, loadAiData]);
 
   useEffect(() => {
     if (activeTab === 'pricing') {
@@ -628,6 +564,24 @@ export default function AdminPage() {
   }, [activeTab, loadOps, loadAudit]);
 
   useEffect(() => {
+    const requestedTab = searchParams.get('tab');
+    if (
+      requestedTab
+      && ['access', 'mcp', 'operations', 'ai', 'pricing', 'settings'].includes(requestedTab)
+      && requestedTab !== activeTab
+    ) {
+      setActiveTab(requestedTab);
+    }
+  }, [activeTab, searchParams]);
+
+  const handleTabChange = useCallback((nextTab: string) => {
+    setActiveTab(nextTab);
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set('tab', nextTab);
+    setSearchParams(nextParams, { replace: true });
+  }, [searchParams, setSearchParams]);
+
+  useEffect(() => {
     setAuditPage(1);
   }, [activeLibrary?.id, activeWorkspace?.id]);
 
@@ -636,13 +590,13 @@ export default function AdminPage() {
   const handleCreateToken = () => {
     setMintingToken(true);
     adminApi.mintToken(tokenLabel)
-      .then((data: any) => {
+      .then((data) => {
         setCreatedToken(data.token ?? '');
         setCreateTokenOpen(false);
         setShowToken(true);
         loadTokens();
       })
-      .catch((err: any) => toast.error(err?.message || "Failed to create token"))
+      .catch((err: unknown) => toast.error(errorMessage(err, t('admin.createTokenFailed'))))
       .finally(() => setMintingToken(false));
   };
 
@@ -652,72 +606,9 @@ export default function AdminPage() {
         loadTokens();
         setSelectedToken(null);
       })
-      .catch((err: any) => toast.error(err?.message || "Failed to revoke token"));
+      .catch((err: unknown) => toast.error(errorMessage(err, t('admin.revokeTokenFailed'))));
   };
 
-  const handleCreateCredential = () => {
-    adminApi.createCredential({ workspaceId: activeWorkspace?.id, providerCatalogId: credProvider, label: credLabel, apiKey: credApiKey })
-      .then(() => {
-        setCreateCredOpen(false);
-        setCredProvider('');
-        setCredLabel('');
-        setCredApiKey('');
-        loadAiData();
-      })
-      .catch((err: any) => toast.error(err?.message || "Failed to create credential"));
-  };
-
-  const handleSaveBinding = (binding: LibraryBinding) => {
-    if (!activeWorkspace || !activeLibrary || !bindingCredId || !bindingPresetId) return;
-    setBindingSaving(true);
-    const isUpdate = binding.id && binding.state !== 'unconfigured';
-    const request = isUpdate
-      ? adminApi.updateLibraryBinding(binding.id!, {
-          providerCredentialId: bindingCredId,
-          modelPresetId: bindingPresetId,
-          bindingState: 'active',
-        })
-      : adminApi.createLibraryBinding({
-          workspaceId: activeWorkspace.id,
-          libraryId: activeLibrary.id,
-          bindingPurpose: binding.purpose,
-          providerCredentialId: bindingCredId,
-          modelPresetId: bindingPresetId,
-        });
-    request
-      .then(() => {
-        setEditingBinding(null);
-        setBindingCredId('');
-        setBindingPresetId('');
-        loadAiData();
-      })
-      .catch((err: any) => toast.error(err?.message || "Failed to save binding"))
-      .finally(() => setBindingSaving(false));
-  };
-
-  const handleCreatePreset = () => {
-    if (!activeWorkspace || !presetName.trim() || !presetModelId) return;
-    setPresetSaving(true);
-    adminApi.createModelPreset({
-      workspaceId: activeWorkspace.id,
-      modelCatalogId: presetModelId,
-      presetName: presetName.trim(),
-      systemPrompt: presetSystemPrompt.trim() || null,
-      temperature: parseFloat(presetTemperature) || null,
-      topP: parseFloat(presetTopP) || null,
-      maxOutputTokensOverride: presetMaxTokens ? parseInt(presetMaxTokens, 10) : null,
-      extraParametersJson: {},
-    })
-      .then(() => {
-        toast.success("Model preset created");
-        setCreatePresetOpen(false);
-        setPresetName(''); setPresetModelId(''); setPresetSystemPrompt('');
-        setPresetTemperature('0.3'); setPresetTopP('0.9'); setPresetMaxTokens('');
-        loadAiData();
-      })
-      .catch((err: any) => toast.error(err?.message || "Failed to create model preset"))
-      .finally(() => setPresetSaving(false));
-  };
 
   const handleCreatePricing = () => {
     if (!activeWorkspace || !pricingModelId || !pricingBillingUnit || !pricingUnitPrice || !pricingFrom) return;
@@ -732,13 +623,13 @@ export default function AdminPage() {
       effectiveTo: pricingTo ? new Date(pricingTo).toISOString() : null,
     })
       .then(() => {
-        toast.success("Pricing override created");
+        toast.success(t('admin.pricingOverrideCreated'));
         setCreatePricingOpen(false);
         setPricingModelId(''); setPricingBillingUnit(''); setPricingUnitPrice('');
         setPricingCurrency('USD'); setPricingFrom(''); setPricingTo('');
         loadPricing();
       })
-      .catch((err: any) => toast.error(err?.message || "Failed to create pricing override"))
+      .catch((err: unknown) => toast.error(errorMessage(err, t('admin.createPricingFailed'))))
       .finally(() => setPricingSaving(false));
   };
 
@@ -767,7 +658,7 @@ export default function AdminPage() {
         </p>
       </div>
 
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col overflow-hidden">
+      <Tabs value={activeTab} onValueChange={handleTabChange} className="flex-1 flex flex-col overflow-hidden">
         <div className="border-b px-6" style={{
           background: 'linear-gradient(180deg, hsl(var(--card) / 0.8), transparent)',
         }}>
@@ -793,13 +684,13 @@ export default function AdminPage() {
             <div className="flex items-center justify-between mb-5">
               <div className="flex gap-4 text-xs font-semibold">
                 {tokensLoading ? (
-                  <span className="text-muted-foreground flex items-center gap-1.5"><Loader2 className="h-3 w-3 animate-spin" /> Loading...</span>
+                  <span className="text-muted-foreground flex items-center gap-1.5"><Loader2 className="h-3 w-3 animate-spin" /> {t('admin.loading')}</span>
                 ) : tokensError ? (
                   <span className="text-status-failed">{tokensError}</span>
                 ) : (
                   <>
-                    <span className="text-muted-foreground">{tokens.length} total</span>
-                    <span className="text-status-ready">{tokens.filter(t => t.status === 'active').length} active</span>
+                    <span className="text-muted-foreground">{tokens.length} {t('admin.total')}</span>
+                    <span className="text-status-ready">{tokens.filter(t => t.status === 'active').length} {t('admin.active')}</span>
                   </>
                 )}
               </div>
@@ -827,7 +718,7 @@ export default function AdminPage() {
                       <div className="text-sm font-bold truncate">{token.label}</div>
                       <div className="text-xs text-muted-foreground mt-0.5 font-medium">{token.tokenPrefix}... · {token.scopeSummary}</div>
                     </div>
-                    <span className={`status-badge ${tokenStatusCls(token.status)}`}>{token.status}</span>
+                    <span className={`status-badge ${tokenStatusCls(token.status)}`}>{humanizeTokenStatus(token.status, t)}</span>
                   </button>
                 ))}
                 {!tokensLoading && !tokensError && filteredTokens.length === 0 && (
@@ -839,16 +730,16 @@ export default function AdminPage() {
                 <div className="w-80 shrink-0 workbench-surface p-5 space-y-4 animate-slide-in-right">
                   <div className="flex items-center justify-between">
                     <h3 className="text-sm font-bold">{selectedToken.label}</h3>
-                    <span className={`status-badge ${tokenStatusCls(selectedToken.status)}`}>{selectedToken.status}</span>
+                    <span className={`status-badge ${tokenStatusCls(selectedToken.status)}`}>{humanizeTokenStatus(selectedToken.status, t)}</span>
                   </div>
                   <div className="space-y-2.5 text-sm">
                     {[
-                      ['Prefix', selectedToken.tokenPrefix + '...'],
-                      ['Scope', selectedToken.scopeSummary],
-                      ['Principal', selectedToken.principalLabel],
-                      ['Issued by', selectedToken.issuedBy],
-                      ['Expires', selectedToken.expiresAt ? new Date(selectedToken.expiresAt).toLocaleDateString() : 'Never'],
-                      ['Last used', selectedToken.lastUsedAt ? new Date(selectedToken.lastUsedAt).toLocaleDateString() : 'Never'],
+                      [t('admin.prefix'), selectedToken.tokenPrefix + '...'],
+                      [t('admin.scope'), selectedToken.scopeSummary],
+                      [t('admin.principal'), selectedToken.principalLabel],
+                      [t('admin.issuedBy'), selectedToken.issuedBy],
+                      [t('admin.expires'), selectedToken.expiresAt ? new Date(selectedToken.expiresAt).toLocaleDateString() : t('admin.never')],
+                      [t('admin.lastUsed'), selectedToken.lastUsedAt ? new Date(selectedToken.lastUsedAt).toLocaleDateString() : t('admin.never')],
                     ].map(([k, v]) => (
                       <div key={k} className="flex justify-between">
                         <span className="text-muted-foreground">{k}</span>
@@ -1159,186 +1050,8 @@ export default function AdminPage() {
           </TabsContent>
 
           {/* AI TAB */}
-          <TabsContent value="ai" className="mt-0 p-6 space-y-6 animate-fade-in">
-            {aiLoading ? (
-              <div className="flex items-center gap-2 text-sm text-muted-foreground p-4"><Loader2 className="h-4 w-4 animate-spin" /> Loading AI configuration...</div>
-            ) : aiError ? (
-              <div className="text-sm text-status-failed p-4">{aiError}</div>
-            ) : (
-              <>
-                <div>
-                  <h2 className="text-sm font-bold tracking-tight mb-3">{t('admin.providers')}</h2>
-                  <div className="grid md:grid-cols-3 gap-3">
-                    {providers.map(p => (
-                      <div key={p.id} className="workbench-surface p-5 transition-shadow duration-200 hover:shadow-lifted">
-                        <div className="flex items-center justify-between mb-3">
-                          <span className="text-sm font-bold">{p.displayName}</span>
-                          <span className={`status-badge ${p.lifecycleState === 'active' ? 'status-ready' : 'status-processing'}`}>{p.lifecycleState}</span>
-                        </div>
-                        <div className="text-xs text-muted-foreground space-y-0.5 font-medium">
-                          <div>{p.kind} · {p.apiStyle}</div>
-                          <div>{p.modelCount} models · {p.credentialCount} credentials</div>
-                        </div>
-                      </div>
-                    ))}
-                    {providers.length === 0 && (
-                      <div className="text-sm text-muted-foreground col-span-3 text-center p-8 border rounded-xl bg-surface-sunken">No providers found.</div>
-                    )}
-                  </div>
-                </div>
-
-                <div>
-                  <div className="flex items-center justify-between mb-3">
-                    <h2 className="text-sm font-bold tracking-tight">{t('admin.credentials')}</h2>
-                    <Button size="sm" variant="outline" onClick={() => setCreateCredOpen(true)}><Plus className="h-3.5 w-3.5 mr-1.5" /> {t('admin.add')}</Button>
-                  </div>
-                  <div className="space-y-1.5">
-                    {credentials.map(c => (
-                      <div key={c.id} className="workbench-surface p-4 flex items-center gap-3 transition-shadow duration-200 hover:shadow-lifted">
-                        <div className="w-9 h-9 rounded-xl bg-surface-sunken flex items-center justify-center shrink-0">
-                          <Shield className="h-4 w-4 text-muted-foreground" />
-                        </div>
-                        <div className="flex-1">
-                          <div className="text-sm font-bold">{c.label}</div>
-                          <div className="text-xs text-muted-foreground mt-0.5 font-medium">{c.providerName} · <span className="font-mono">{c.apiKeySummary}</span></div>
-                        </div>
-                        <span className={`status-badge ${c.state === 'valid' ? 'status-ready' : c.state === 'invalid' ? 'status-failed' : 'status-warning'}`}>{c.state}</span>
-                      </div>
-                    ))}
-                    {credentials.length === 0 && (
-                      <div className="text-sm text-muted-foreground text-center p-8 border rounded-xl bg-surface-sunken">No credentials configured.</div>
-                    )}
-                  </div>
-                </div>
-
-                <div>
-                  <div className="flex items-center justify-between mb-3">
-                    <h2 className="text-sm font-bold tracking-tight">{t('admin.modelPresets')}</h2>
-                    <Button size="sm" variant="outline" onClick={() => setCreatePresetOpen(true)}><Plus className="h-3.5 w-3.5 mr-1.5" /> {t('admin.add')}</Button>
-                  </div>
-                  <div className="space-y-1.5">
-                    {presets.map(p => (
-                      <div key={p.id} className="workbench-surface p-4 flex items-center gap-3 transition-shadow duration-200 hover:shadow-lifted">
-                        <div className="w-9 h-9 rounded-xl bg-surface-sunken flex items-center justify-center shrink-0">
-                          <Brain className="h-4 w-4 text-muted-foreground" />
-                        </div>
-                        <div className="flex-1">
-                          <div className="text-sm font-bold">{p.presetName}</div>
-                          <div className="text-xs text-muted-foreground mt-0.5 font-medium"><span className="font-mono">{p.model}</span> · temp={p.temperature} · topP={p.topP}</div>
-                        </div>
-                      </div>
-                    ))}
-                    {presets.length === 0 && (
-                      <div className="text-sm text-muted-foreground text-center p-8 border rounded-xl bg-surface-sunken">No presets configured.</div>
-                    )}
-                  </div>
-                </div>
-
-                <div>
-                  <h2 className="text-sm font-bold tracking-tight mb-3">{t('admin.libraryBindings')}</h2>
-                  {!activeLibrary ? (
-                    <div className="text-sm text-muted-foreground p-5 border rounded-xl bg-surface-sunken text-center font-medium">Select a library to configure bindings.</div>
-                  ) : (
-                    <div className="space-y-2">
-                      {bindings.map(b => {
-                        const isEditing = editingBinding === b.purpose;
-                        return (
-                          <div key={b.purpose} className="workbench-surface p-5 transition-shadow duration-200 hover:shadow-lifted">
-                            <div className="flex items-center justify-between mb-2">
-                              <div className="flex items-center gap-2.5">
-                                <span className="text-sm font-bold font-mono">{b.purpose}</span>
-                                <span className={`status-badge ${b.state === 'configured' ? 'status-ready' : b.state === 'unconfigured' ? 'status-warning' : 'status-failed'}`}>{b.state}</span>
-                              </div>
-                              {!isEditing && (
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  onClick={() => {
-                                    setEditingBinding(b.purpose);
-                                    setBindingCredId(b.credentialId ?? '');
-                                    setBindingPresetId(b.presetId ?? '');
-                                  }}
-                                >
-                                  <Settings className="h-3 w-3 mr-1.5" /> {b.state === 'configured' ? t('admin.edit') : t('admin.configure')}
-                                </Button>
-                              )}
-                            </div>
-                            {!isEditing && b.state === 'configured' && (
-                              <div className="text-xs text-muted-foreground font-medium">
-                                Credential: <span className="font-bold text-foreground">{credentials.find(c => c.id === b.credentialId)?.label ?? '...'}</span> ·
-                                Preset: <span className="font-bold text-foreground">{presets.find(p => p.id === b.presetId)?.presetName ?? '...'}</span>
-                              </div>
-                            )}
-                            {!isEditing && b.state === 'unconfigured' && (
-                              <div className="text-xs flex items-center gap-1.5 font-bold" style={{ color: 'hsl(var(--status-warning))' }}>
-                                <AlertTriangle className="h-3 w-3" /> Not configured — click Configure to select a credential and model preset
-                              </div>
-                            )}
-                            {isEditing && (
-                              <div className="mt-3 space-y-3 p-4 rounded-xl bg-surface-sunken border border-border/50">
-                                <div>
-                                  <Label className="text-xs font-semibold">{t('admin.credential')}</Label>
-                                  <Select value={bindingCredId} onValueChange={setBindingCredId}>
-                                    <SelectTrigger className="mt-1.5 h-9 text-sm">
-                                      <SelectValue placeholder={t('admin.selectCredential')} />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                      {credentials.map(c => (
-                                        <SelectItem key={c.id} value={c.id}>
-                                          {c.label} ({c.providerName})
-                                        </SelectItem>
-                                      ))}
-                                    </SelectContent>
-                                  </Select>
-                                </div>
-                                <div>
-                                  <Label className="text-xs font-semibold">{t('admin.modelPreset')}</Label>
-                                  <Select value={bindingPresetId} onValueChange={setBindingPresetId}>
-                                    <SelectTrigger className="mt-1.5 h-9 text-sm">
-                                      <SelectValue placeholder={t('admin.selectPreset')} />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                      {presets.map(p => (
-                                        <SelectItem key={p.id} value={p.id}>
-                                          {p.presetName}
-                                        </SelectItem>
-                                      ))}
-                                    </SelectContent>
-                                  </Select>
-                                </div>
-                                <div className="flex gap-2 pt-1">
-                                  <Button
-                                    size="sm"
-                                    disabled={!bindingCredId || !bindingPresetId || bindingSaving}
-                                    onClick={() => handleSaveBinding(b)}
-                                  >
-                                    {bindingSaving ? <><Loader2 className="h-3 w-3 animate-spin mr-1.5" /> {t('admin.saving')}</> : t('admin.save')}
-                                  </Button>
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    onClick={() => {
-                                      setEditingBinding(null);
-                                      setBindingCredId('');
-                                      setBindingPresetId('');
-                                    }}
-                                  >
-                                    Cancel
-                                  </Button>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                      {bindings.length === 0 && (
-                        <div className="text-sm text-muted-foreground text-center p-8 border rounded-xl bg-surface-sunken">No bindings found for this library.</div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </>
-            )}
+          <TabsContent value="ai" className="mt-0 p-6 animate-fade-in">
+            <AiConfigurationPanel />
           </TabsContent>
 
           {/* PRICING TAB */}
@@ -1347,34 +1060,34 @@ export default function AdminPage() {
               <h2 className="text-base font-bold tracking-tight">{t('admin.pricing')}</h2>
               <div className="flex gap-2">
                 <Select value={pricingProvider} onValueChange={setPricingProvider}>
-                  <SelectTrigger className="h-9 w-36 text-sm"><SelectValue placeholder="Provider" /></SelectTrigger>
+                  <SelectTrigger className="h-9 w-36 text-sm"><SelectValue placeholder={t('admin.provider')} /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="all">All Providers</SelectItem>
+                    <SelectItem value="all">{t('admin.allProviders')}</SelectItem>
                     {providers.map(p => <SelectItem key={p.id} value={p.displayName}>{p.displayName}</SelectItem>)}
                   </SelectContent>
                 </Select>
                 <div className="relative">
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-                  <Input className="h-9 pl-9 w-48 text-sm" placeholder="Search models..." value={pricingSearch} onChange={e => setPricingSearch(e.target.value)} />
+                  <Input className="h-9 pl-9 w-48 text-sm" placeholder={t('admin.searchModels')} value={pricingSearch} onChange={e => setPricingSearch(e.target.value)} />
                 </div>
                 <Button size="sm" variant="outline" onClick={() => setCreatePricingOpen(true)}>
-                  <Plus className="h-3.5 w-3.5 mr-1.5" /> Override
+                  <Plus className="h-3.5 w-3.5 mr-1.5" /> {t('admin.override')}
                 </Button>
               </div>
             </div>
             {pricingLoading ? (
-              <div className="flex items-center gap-2 text-sm text-muted-foreground p-4"><Loader2 className="h-4 w-4 animate-spin" /> Loading pricing...</div>
+              <div className="flex items-center gap-2 text-sm text-muted-foreground p-4"><Loader2 className="h-4 w-4 animate-spin" /> {t('admin.loadingPricing')}</div>
             ) : (
               <div className="workbench-surface overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b text-left">
-                      <th className="px-4 py-3 section-label">Provider</th>
-                      <th className="px-4 py-3 section-label">Model</th>
-                      <th className="px-4 py-3 section-label">Billing Unit</th>
-                      <th className="px-4 py-3 section-label">Price</th>
-                      <th className="px-4 py-3 section-label">Effective From</th>
-                      <th className="px-4 py-3 section-label">Source</th>
+                      <th className="px-4 py-3 section-label">{t('admin.provider')}</th>
+                      <th className="px-4 py-3 section-label">{t('admin.model')}</th>
+                      <th className="px-4 py-3 section-label">{t('admin.billingUnit')}</th>
+                      <th className="px-4 py-3 section-label">{t('admin.price')}</th>
+                      <th className="px-4 py-3 section-label">{t('admin.effectiveFrom')}</th>
+                      <th className="px-4 py-3 section-label">{t('admin.source')}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1389,7 +1102,7 @@ export default function AdminPage() {
                       </tr>
                     ))}
                     {filteredPricing.length === 0 && (
-                      <tr><td colSpan={6} className="text-center p-8 text-sm text-muted-foreground">No pricing data found.</td></tr>
+                      <tr><td colSpan={6} className="text-center p-8 text-sm text-muted-foreground">{t('admin.noPricingData')}</td></tr>
                     )}
                   </tbody>
                 </table>
@@ -1427,11 +1140,11 @@ export default function AdminPage() {
         <DialogContent className="max-w-md">
           <DialogHeader><DialogTitle>{t('admin.createTokenTitle')}</DialogTitle><DialogDescription>{t('admin.createTokenDesc')}</DialogDescription></DialogHeader>
           <div className="space-y-4">
-            <div><Label>Label</Label><Input value={tokenLabel} onChange={e => setTokenLabel(e.target.value)} placeholder="Production API" className="mt-2" /></div>
-            <div><Label>Expiry</Label><Select value={tokenExpiry} onValueChange={setTokenExpiry}><SelectTrigger className="mt-2"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="30">30 days</SelectItem><SelectItem value="90">90 days</SelectItem><SelectItem value="365">365 days</SelectItem><SelectItem value="never">Never</SelectItem></SelectContent></Select></div>
-            <div><Label>Scope</Label><Select value={tokenScope} onValueChange={v => { setTokenScope(v as typeof tokenScope); setSelectedPermissions([]); }}><SelectTrigger className="mt-2"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="workspace">Workspace</SelectItem><SelectItem value="library">Library</SelectItem></SelectContent></Select></div>
+            <div><Label>{t('admin.tokenLabel')}</Label><Input value={tokenLabel} onChange={e => setTokenLabel(e.target.value)} placeholder={t('admin.tokenLabelPlaceholder')} className="mt-2" /></div>
+            <div><Label>{t('admin.tokenExpiry')}</Label><Select value={tokenExpiry} onValueChange={setTokenExpiry}><SelectTrigger className="mt-2"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="30">{t('admin.tokenExpiry30')}</SelectItem><SelectItem value="90">{t('admin.tokenExpiry90')}</SelectItem><SelectItem value="365">{t('admin.tokenExpiry365')}</SelectItem><SelectItem value="never">{t('admin.never')}</SelectItem></SelectContent></Select></div>
+            <div><Label>{t('admin.tokenScope')}</Label><Select value={tokenScope} onValueChange={v => { setTokenScope(v as typeof tokenScope); setSelectedPermissions([]); }}><SelectTrigger className="mt-2"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="workspace">{t('admin.workspace')}</SelectItem><SelectItem value="library">{t('admin.library')}</SelectItem></SelectContent></Select></div>
             <div>
-              <Label>Permissions</Label>
+              <Label>{t('admin.tokenPermissions')}</Label>
               <div className="mt-2 space-y-1.5 max-h-40 overflow-y-auto p-3 border rounded-xl bg-surface-sunken">
                 {(tokenScope === 'workspace' ? WS_PERMISSIONS : LIB_PERMISSIONS).map(p => (
                   <div key={p} className="flex items-center gap-2.5">
@@ -1442,7 +1155,7 @@ export default function AdminPage() {
               </div>
             </div>
           </div>
-          <DialogFooter><Button variant="outline" onClick={() => setCreateTokenOpen(false)}>Cancel</Button><Button onClick={handleCreateToken} disabled={!tokenLabel.trim() || mintingToken}>{mintingToken ? 'Creating...' : 'Create'}</Button></DialogFooter>
+          <DialogFooter><Button variant="outline" onClick={() => setCreateTokenOpen(false)}>{t('admin.cancel')}</Button><Button onClick={handleCreateToken} disabled={!tokenLabel.trim() || mintingToken}>{mintingToken ? t('admin.creating') : t('admin.create')}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
 
@@ -1457,51 +1170,22 @@ export default function AdminPage() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={createCredOpen} onOpenChange={setCreateCredOpen}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>{t('admin.addCredential')}</DialogTitle><DialogDescription>{t('admin.addCredentialDesc')}</DialogDescription></DialogHeader>
-          <div className="space-y-4">
-            <div><Label>Provider</Label><Select value={credProvider} onValueChange={setCredProvider}><SelectTrigger className="mt-2"><SelectValue placeholder="Select provider" /></SelectTrigger><SelectContent>{providers.map(p => <SelectItem key={p.id} value={p.id}>{p.displayName}</SelectItem>)}</SelectContent></Select></div>
-            <div><Label>Label</Label><Input value={credLabel} onChange={e => setCredLabel(e.target.value)} placeholder="My API Key" className="mt-2" /></div>
-            <div><Label>API Key</Label><Input type="password" value={credApiKey} onChange={e => setCredApiKey(e.target.value)} placeholder="sk-..." className="mt-2" /></div>
-          </div>
-          <DialogFooter><Button variant="outline" onClick={() => setCreateCredOpen(false)}>Cancel</Button><Button disabled={!credProvider || !credLabel.trim() || !credApiKey.trim()} onClick={handleCreateCredential}>Save</Button></DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={createPresetOpen} onOpenChange={v => { setCreatePresetOpen(v); if (!v) { setPresetName(''); setPresetModelId(''); setPresetSystemPrompt(''); setPresetTemperature('0.3'); setPresetTopP('0.9'); setPresetMaxTokens(''); } }}>
-        <DialogContent className="max-w-md">
-          <DialogHeader><DialogTitle>{t('admin.addPreset')}</DialogTitle></DialogHeader>
-          <div className="space-y-4">
-            <div><Label>Preset Name</Label><Input placeholder="My Preset" className="mt-2" value={presetName} onChange={e => setPresetName(e.target.value)} /></div>
-            <div><Label>Model</Label><Select value={presetModelId} onValueChange={setPresetModelId}><SelectTrigger className="mt-2"><SelectValue placeholder="Select model" /></SelectTrigger><SelectContent>{rawModels.map((m: any) => <SelectItem key={m.id} value={m.id}>{m.modelName ?? m.id}</SelectItem>)}</SelectContent></Select></div>
-            <div><Label>System Prompt</Label><Textarea placeholder="Optional system prompt..." rows={3} className="mt-2" value={presetSystemPrompt} onChange={e => setPresetSystemPrompt(e.target.value)} /></div>
-            <div className="grid grid-cols-2 gap-3">
-              <div><Label>Temperature</Label><Input type="number" step="0.1" min="0" max="2" className="mt-2" value={presetTemperature} onChange={e => setPresetTemperature(e.target.value)} /></div>
-              <div><Label>Top P</Label><Input type="number" step="0.1" min="0" max="1" className="mt-2" value={presetTopP} onChange={e => setPresetTopP(e.target.value)} /></div>
-            </div>
-            <div><Label>Max Output Tokens</Label><Input type="number" placeholder="Optional" className="mt-2" value={presetMaxTokens} onChange={e => setPresetMaxTokens(e.target.value)} /></div>
-          </div>
-          <DialogFooter><Button variant="outline" onClick={() => setCreatePresetOpen(false)}>Cancel</Button><Button disabled={!presetName.trim() || !presetModelId || presetSaving} onClick={handleCreatePreset}>{presetSaving ? 'Saving...' : 'Save'}</Button></DialogFooter>
-        </DialogContent>
-      </Dialog>
-
       <Dialog open={createPricingOpen} onOpenChange={v => { setCreatePricingOpen(v); if (!v) { setPricingModelId(''); setPricingBillingUnit(''); setPricingUnitPrice(''); setPricingCurrency('USD'); setPricingFrom(''); setPricingTo(''); } }}>
         <DialogContent className="max-w-md">
           <DialogHeader><DialogTitle>{t('admin.addPricingOverride')}</DialogTitle></DialogHeader>
           <div className="space-y-4">
-            <div><Label>Model</Label><Select value={pricingModelId} onValueChange={setPricingModelId}><SelectTrigger className="mt-2"><SelectValue placeholder="Select model" /></SelectTrigger><SelectContent>{rawModels.map((m: any) => <SelectItem key={m.id} value={m.id}>{m.modelName ?? m.id}</SelectItem>)}</SelectContent></Select></div>
-            <div><Label>Billing Unit</Label><Select value={pricingBillingUnit} onValueChange={setPricingBillingUnit}><SelectTrigger className="mt-2"><SelectValue placeholder="Select unit" /></SelectTrigger><SelectContent><SelectItem value="per_1m_input_tokens">Per 1M Input Tokens</SelectItem><SelectItem value="per_1m_cached_input_tokens">Per 1M Cached Input Tokens</SelectItem><SelectItem value="per_1m_output_tokens">Per 1M Output Tokens</SelectItem></SelectContent></Select></div>
+            <div><Label>{t('admin.model')}</Label><Select value={pricingModelId} onValueChange={setPricingModelId}><SelectTrigger className="mt-2"><SelectValue placeholder={t('admin.selectModel')} /></SelectTrigger><SelectContent>{rawModels.map((m) => <SelectItem key={m.id} value={m.id}>{m.modelName ?? m.id}</SelectItem>)}</SelectContent></Select></div>
+            <div><Label>{t('admin.billingUnit')}</Label><Select value={pricingBillingUnit} onValueChange={setPricingBillingUnit}><SelectTrigger className="mt-2"><SelectValue placeholder={t('admin.selectBillingUnit')} /></SelectTrigger><SelectContent><SelectItem value="per_1m_input_tokens">{t('admin.per1mInputTokens')}</SelectItem><SelectItem value="per_1m_cached_input_tokens">{t('admin.per1mCachedInputTokens')}</SelectItem><SelectItem value="per_1m_output_tokens">{t('admin.per1mOutputTokens')}</SelectItem></SelectContent></Select></div>
             <div className="grid grid-cols-2 gap-3">
-              <div><Label>Unit Price</Label><Input type="number" step="0.01" placeholder="0.00" className="mt-2" value={pricingUnitPrice} onChange={e => setPricingUnitPrice(e.target.value)} /></div>
-              <div><Label>Currency</Label><Input className="mt-2" value={pricingCurrency} onChange={e => setPricingCurrency(e.target.value)} /></div>
+              <div><Label>{t('admin.unitPrice')}</Label><Input type="number" step="0.01" placeholder="0.00" className="mt-2" value={pricingUnitPrice} onChange={e => setPricingUnitPrice(e.target.value)} /></div>
+              <div><Label>{t('admin.currency')}</Label><Input className="mt-2" value={pricingCurrency} onChange={e => setPricingCurrency(e.target.value)} /></div>
             </div>
             <div className="grid grid-cols-2 gap-3">
-              <div><Label>Effective From</Label><Input type="date" className="mt-2" value={pricingFrom} onChange={e => setPricingFrom(e.target.value)} /></div>
-              <div><Label>Effective To</Label><Input type="date" className="mt-2" value={pricingTo} onChange={e => setPricingTo(e.target.value)} /></div>
+              <div><Label>{t('admin.effectiveFrom')}</Label><Input type="date" className="mt-2" value={pricingFrom} onChange={e => setPricingFrom(e.target.value)} /></div>
+              <div><Label>{t('admin.effectiveTo')}</Label><Input type="date" className="mt-2" value={pricingTo} onChange={e => setPricingTo(e.target.value)} /></div>
             </div>
           </div>
-          <DialogFooter><Button variant="outline" onClick={() => setCreatePricingOpen(false)}>Cancel</Button><Button disabled={!pricingModelId || !pricingBillingUnit || !pricingUnitPrice || !pricingFrom || pricingSaving} onClick={handleCreatePricing}>{pricingSaving ? 'Saving...' : 'Save'}</Button></DialogFooter>
+          <DialogFooter><Button variant="outline" onClick={() => setCreatePricingOpen(false)}>{t('admin.cancel')}</Button><Button disabled={!pricingModelId || !pricingBillingUnit || !pricingUnitPrice || !pricingFrom || pricingSaving} onClick={handleCreatePricing}>{pricingSaving ? t('admin.saving') : t('admin.save')}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

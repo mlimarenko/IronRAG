@@ -47,10 +47,13 @@ pub struct AiPriceCatalogRow {
 #[derive(Debug, Clone, FromRow)]
 pub struct AiProviderCredentialRow {
     pub id: Uuid,
-    pub workspace_id: Uuid,
+    pub scope_kind: String,
+    pub workspace_id: Option<Uuid>,
+    pub library_id: Option<Uuid>,
     pub provider_catalog_id: Uuid,
     pub label: String,
-    pub api_key: String,
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
     pub credential_state: String,
     pub created_by_principal_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
@@ -60,7 +63,9 @@ pub struct AiProviderCredentialRow {
 #[derive(Debug, Clone, FromRow)]
 pub struct AiModelPresetRow {
     pub id: Uuid,
-    pub workspace_id: Uuid,
+    pub scope_kind: String,
+    pub workspace_id: Option<Uuid>,
+    pub library_id: Option<Uuid>,
     pub model_catalog_id: Uuid,
     pub preset_name: String,
     pub system_prompt: Option<String>,
@@ -74,10 +79,11 @@ pub struct AiModelPresetRow {
 }
 
 #[derive(Debug, Clone, FromRow)]
-pub struct AiLibraryModelBindingRow {
+pub struct AiBindingAssignmentRow {
     pub id: Uuid,
-    pub workspace_id: Uuid,
-    pub library_id: Uuid,
+    pub scope_kind: String,
+    pub workspace_id: Option<Uuid>,
+    pub library_id: Option<Uuid>,
     pub binding_purpose: String,
     pub provider_credential_id: Uuid,
     pub model_preset_id: Uuid,
@@ -371,6 +377,62 @@ pub async fn get_model_catalog_by_provider_and_name(
     .await
 }
 
+pub async fn upsert_model_catalog(
+    postgres: &PgPool,
+    provider_catalog_id: Uuid,
+    model_name: &str,
+    capability_kind: &str,
+    modality_kind: &str,
+    metadata_json: Value,
+) -> Result<AiModelCatalogRow, sqlx::Error> {
+    sqlx::query_as::<_, AiModelCatalogRow>(
+        "insert into ai_model_catalog (
+            id,
+            provider_catalog_id,
+            model_name,
+            capability_kind,
+            modality_kind,
+            context_window,
+            max_output_tokens,
+            lifecycle_state,
+            metadata_json
+         )
+         values (
+            uuidv7(),
+            $1,
+            $2,
+            $3::ai_model_capability_kind,
+            $4::ai_model_modality_kind,
+            null,
+            null,
+            'active'::ai_model_lifecycle_state,
+            $5
+         )
+         on conflict (provider_catalog_id, model_name, capability_kind) do update
+         set
+            modality_kind = excluded.modality_kind,
+            lifecycle_state = 'active'::ai_model_lifecycle_state,
+            metadata_json = excluded.metadata_json
+         returning
+            id,
+            provider_catalog_id,
+            model_name,
+            capability_kind::text as capability_kind,
+            modality_kind::text as modality_kind,
+            context_window,
+            max_output_tokens,
+            lifecycle_state::text as lifecycle_state,
+            metadata_json",
+    )
+    .bind(provider_catalog_id)
+    .bind(model_name)
+    .bind(capability_kind)
+    .bind(modality_kind)
+    .bind(metadata_json)
+    .fetch_one(postgres)
+    .await
+}
+
 pub async fn get_effective_price_catalog_entry(
     postgres: &PgPool,
     model_catalog_id: Uuid,
@@ -497,28 +559,144 @@ fn effective_price_sort_key(
     (catalog_scope_rank, variant_rank, tier_rank, tier_floor, row.effective_from, row.id)
 }
 
-pub async fn list_provider_credentials(
+pub async fn list_provider_credentials_exact(
     postgres: &PgPool,
-    workspace_id: Uuid,
+    scope_kind: &str,
+    workspace_id: Option<Uuid>,
+    library_id: Option<Uuid>,
 ) -> Result<Vec<AiProviderCredentialRow>, sqlx::Error> {
     sqlx::query_as::<_, AiProviderCredentialRow>(
         "select
             id,
+            scope_kind::text as scope_kind,
             workspace_id,
+            library_id,
             provider_catalog_id,
             label,
             api_key,
+            base_url,
             credential_state::text as credential_state,
             created_by_principal_id,
             created_at,
             updated_at
          from ai_provider_credential
-         where workspace_id = $1
-         order by created_at desc",
+         where scope_kind = $1::ai_scope_kind
+           and workspace_id is not distinct from $2
+           and library_id is not distinct from $3
+         order by created_at desc, id desc",
     )
+    .bind(scope_kind)
     .bind(workspace_id)
+    .bind(library_id)
     .fetch_all(postgres)
     .await
+}
+
+pub async fn list_visible_provider_credentials(
+    postgres: &PgPool,
+    workspace_id: Option<Uuid>,
+    library_id: Option<Uuid>,
+) -> Result<Vec<AiProviderCredentialRow>, sqlx::Error> {
+    match (workspace_id, library_id) {
+        (Some(workspace_id), Some(library_id)) => {
+            sqlx::query_as::<_, AiProviderCredentialRow>(
+                "select
+                    id,
+                    scope_kind::text as scope_kind,
+                    workspace_id,
+                    library_id,
+                    provider_catalog_id,
+                    label,
+                    api_key,
+                    base_url,
+                    credential_state::text as credential_state,
+                    created_by_principal_id,
+                    created_at,
+                    updated_at
+                 from ai_provider_credential
+                 where scope_kind = 'instance'
+                    or (scope_kind = 'workspace' and workspace_id = $1)
+                    or (scope_kind = 'library' and library_id = $2)
+                 order by created_at desc, id desc",
+            )
+            .bind(workspace_id)
+            .bind(library_id)
+            .fetch_all(postgres)
+            .await
+        }
+        (Some(workspace_id), None) => {
+            sqlx::query_as::<_, AiProviderCredentialRow>(
+                "select
+                    id,
+                    scope_kind::text as scope_kind,
+                    workspace_id,
+                    library_id,
+                    provider_catalog_id,
+                    label,
+                    api_key,
+                    base_url,
+                    credential_state::text as credential_state,
+                    created_by_principal_id,
+                    created_at,
+                    updated_at
+                 from ai_provider_credential
+                 where scope_kind = 'instance'
+                    or (scope_kind = 'workspace' and workspace_id = $1)
+                 order by created_at desc, id desc",
+            )
+            .bind(workspace_id)
+            .fetch_all(postgres)
+            .await
+        }
+        (None, None) => {
+            sqlx::query_as::<_, AiProviderCredentialRow>(
+                "select
+                    id,
+                    scope_kind::text as scope_kind,
+                    workspace_id,
+                    library_id,
+                    provider_catalog_id,
+                    label,
+                    api_key,
+                    base_url,
+                    credential_state::text as credential_state,
+                    created_by_principal_id,
+                    created_at,
+                    updated_at
+                 from ai_provider_credential
+                 where scope_kind = 'instance'
+                 order by created_at desc, id desc",
+            )
+            .fetch_all(postgres)
+            .await
+        }
+        (None, Some(library_id)) => {
+            sqlx::query_as::<_, AiProviderCredentialRow>(
+                "select
+                    credential.id,
+                    credential.scope_kind::text as scope_kind,
+                    credential.workspace_id,
+                    credential.library_id,
+                    credential.provider_catalog_id,
+                    credential.label,
+                    credential.api_key,
+                    credential.base_url,
+                    credential.credential_state::text as credential_state,
+                    credential.created_by_principal_id,
+                    credential.created_at,
+                    credential.updated_at
+                 from ai_provider_credential credential
+                 join catalog_library library on library.id = $1
+                 where credential.scope_kind = 'instance'
+                    or (credential.scope_kind = 'workspace' and credential.workspace_id = library.workspace_id)
+                    or (credential.scope_kind = 'library' and credential.library_id = library.id)
+                 order by credential.created_at desc, credential.id desc",
+            )
+            .bind(library_id)
+            .fetch_all(postgres)
+            .await
+        }
+    }
 }
 
 pub async fn get_provider_credential_by_id(
@@ -528,10 +706,13 @@ pub async fn get_provider_credential_by_id(
     sqlx::query_as::<_, AiProviderCredentialRow>(
         "select
             id,
+            scope_kind::text as scope_kind,
             workspace_id,
+            library_id,
             provider_catalog_id,
             label,
             api_key,
+            base_url,
             credential_state::text as credential_state,
             created_by_principal_id,
             created_at,
@@ -546,41 +727,53 @@ pub async fn get_provider_credential_by_id(
 
 pub async fn create_provider_credential(
     postgres: &PgPool,
-    workspace_id: Uuid,
+    scope_kind: &str,
+    workspace_id: Option<Uuid>,
+    library_id: Option<Uuid>,
     provider_catalog_id: Uuid,
     label: &str,
-    api_key: &str,
+    api_key: Option<&str>,
+    base_url: Option<&str>,
     created_by_principal_id: Option<Uuid>,
 ) -> Result<AiProviderCredentialRow, sqlx::Error> {
     sqlx::query_as::<_, AiProviderCredentialRow>(
         "insert into ai_provider_credential (
             id,
+            scope_kind,
             workspace_id,
+            library_id,
             provider_catalog_id,
             label,
             api_key,
+            base_url,
             credential_state,
             created_by_principal_id,
             created_at,
             updated_at
         )
-        values ($1, $2, $3, $4, $5, 'active', $6, now(), now())
+        values ($1, $2::ai_scope_kind, $3, $4, $5, $6, $7, $8, 'active', $9, now(), now())
         returning
             id,
+            scope_kind::text as scope_kind,
             workspace_id,
+            library_id,
             provider_catalog_id,
             label,
             api_key,
+            base_url,
             credential_state::text as credential_state,
             created_by_principal_id,
             created_at,
             updated_at",
     )
     .bind(Uuid::now_v7())
+    .bind(scope_kind)
     .bind(workspace_id)
+    .bind(library_id)
     .bind(provider_catalog_id)
     .bind(label)
     .bind(api_key)
+    .bind(base_url)
     .bind(created_by_principal_id)
     .fetch_one(postgres)
     .await
@@ -591,21 +784,26 @@ pub async fn update_provider_credential(
     credential_id: Uuid,
     label: &str,
     api_key: Option<&str>,
+    base_url: Option<&str>,
     credential_state: &str,
 ) -> Result<Option<AiProviderCredentialRow>, sqlx::Error> {
     sqlx::query_as::<_, AiProviderCredentialRow>(
         "update ai_provider_credential
          set label = $2,
              api_key = coalesce($3, api_key),
-             credential_state = $4::ai_credential_state,
+             base_url = coalesce($4, base_url),
+             credential_state = $5::ai_credential_state,
              updated_at = now()
          where id = $1
          returning
             id,
+            scope_kind::text as scope_kind,
             workspace_id,
+            library_id,
             provider_catalog_id,
             label,
             api_key,
+            base_url,
             credential_state::text as credential_state,
             created_by_principal_id,
             created_at,
@@ -614,6 +812,7 @@ pub async fn update_provider_credential(
     .bind(credential_id)
     .bind(label)
     .bind(api_key)
+    .bind(base_url)
     .bind(credential_state)
     .fetch_optional(postgres)
     .await
@@ -719,14 +918,18 @@ pub async fn update_workspace_price_override(
     .await
 }
 
-pub async fn list_model_presets(
+pub async fn list_model_presets_exact(
     postgres: &PgPool,
-    workspace_id: Uuid,
+    scope_kind: &str,
+    workspace_id: Option<Uuid>,
+    library_id: Option<Uuid>,
 ) -> Result<Vec<AiModelPresetRow>, sqlx::Error> {
     sqlx::query_as::<_, AiModelPresetRow>(
         "select
             id,
+            scope_kind::text as scope_kind,
             workspace_id,
+            library_id,
             model_catalog_id,
             preset_name,
             system_prompt,
@@ -738,12 +941,131 @@ pub async fn list_model_presets(
             created_at,
             updated_at
          from ai_model_preset
-         where workspace_id = $1
-         order by created_at desc",
+         where scope_kind = $1::ai_scope_kind
+           and workspace_id is not distinct from $2
+           and library_id is not distinct from $3
+         order by created_at desc, id desc",
     )
+    .bind(scope_kind)
     .bind(workspace_id)
+    .bind(library_id)
     .fetch_all(postgres)
     .await
+}
+
+pub async fn list_visible_model_presets(
+    postgres: &PgPool,
+    workspace_id: Option<Uuid>,
+    library_id: Option<Uuid>,
+) -> Result<Vec<AiModelPresetRow>, sqlx::Error> {
+    match (workspace_id, library_id) {
+        (Some(workspace_id), Some(library_id)) => {
+            sqlx::query_as::<_, AiModelPresetRow>(
+                "select
+                    id,
+                    scope_kind::text as scope_kind,
+                    workspace_id,
+                    library_id,
+                    model_catalog_id,
+                    preset_name,
+                    system_prompt,
+                    temperature,
+                    top_p,
+                    max_output_tokens_override,
+                    extra_parameters_json,
+                    created_by_principal_id,
+                    created_at,
+                    updated_at
+                 from ai_model_preset
+                 where scope_kind = 'instance'
+                    or (scope_kind = 'workspace' and workspace_id = $1)
+                    or (scope_kind = 'library' and library_id = $2)
+                 order by created_at desc, id desc",
+            )
+            .bind(workspace_id)
+            .bind(library_id)
+            .fetch_all(postgres)
+            .await
+        }
+        (Some(workspace_id), None) => {
+            sqlx::query_as::<_, AiModelPresetRow>(
+                "select
+                    id,
+                    scope_kind::text as scope_kind,
+                    workspace_id,
+                    library_id,
+                    model_catalog_id,
+                    preset_name,
+                    system_prompt,
+                    temperature,
+                    top_p,
+                    max_output_tokens_override,
+                    extra_parameters_json,
+                    created_by_principal_id,
+                    created_at,
+                    updated_at
+                 from ai_model_preset
+                 where scope_kind = 'instance'
+                    or (scope_kind = 'workspace' and workspace_id = $1)
+                 order by created_at desc, id desc",
+            )
+            .bind(workspace_id)
+            .fetch_all(postgres)
+            .await
+        }
+        (None, None) => {
+            sqlx::query_as::<_, AiModelPresetRow>(
+                "select
+                    id,
+                    scope_kind::text as scope_kind,
+                    workspace_id,
+                    library_id,
+                    model_catalog_id,
+                    preset_name,
+                    system_prompt,
+                    temperature,
+                    top_p,
+                    max_output_tokens_override,
+                    extra_parameters_json,
+                    created_by_principal_id,
+                    created_at,
+                    updated_at
+                 from ai_model_preset
+                 where scope_kind = 'instance'
+                 order by created_at desc, id desc",
+            )
+            .fetch_all(postgres)
+            .await
+        }
+        (None, Some(library_id)) => {
+            sqlx::query_as::<_, AiModelPresetRow>(
+                "select
+                    preset.id,
+                    preset.scope_kind::text as scope_kind,
+                    preset.workspace_id,
+                    preset.library_id,
+                    preset.model_catalog_id,
+                    preset.preset_name,
+                    preset.system_prompt,
+                    preset.temperature,
+                    preset.top_p,
+                    preset.max_output_tokens_override,
+                    preset.extra_parameters_json,
+                    preset.created_by_principal_id,
+                    preset.created_at,
+                    preset.updated_at
+                 from ai_model_preset preset
+                 join catalog_library library on library.id = $1
+                 where preset.scope_kind = 'instance'
+                    or (preset.scope_kind = 'workspace' and preset.workspace_id = library.workspace_id)
+                    or (preset.scope_kind = 'library' and preset.library_id = library.id)
+                 order by preset.created_at desc, preset.id desc",
+            )
+            .bind(library_id)
+            .fetch_all(postgres)
+            .await
+        }
+    }
 }
 
 pub async fn get_model_preset_by_id(
@@ -753,7 +1075,9 @@ pub async fn get_model_preset_by_id(
     sqlx::query_as::<_, AiModelPresetRow>(
         "select
             id,
+            scope_kind::text as scope_kind,
             workspace_id,
+            library_id,
             model_catalog_id,
             preset_name,
             system_prompt,
@@ -774,7 +1098,9 @@ pub async fn get_model_preset_by_id(
 
 pub async fn create_model_preset(
     postgres: &PgPool,
-    workspace_id: Uuid,
+    scope_kind: &str,
+    workspace_id: Option<Uuid>,
+    library_id: Option<Uuid>,
     model_catalog_id: Uuid,
     preset_name: &str,
     system_prompt: Option<&str>,
@@ -787,7 +1113,9 @@ pub async fn create_model_preset(
     sqlx::query_as::<_, AiModelPresetRow>(
         "insert into ai_model_preset (
             id,
+            scope_kind,
             workspace_id,
+            library_id,
             model_catalog_id,
             preset_name,
             system_prompt,
@@ -799,10 +1127,12 @@ pub async fn create_model_preset(
             created_at,
             updated_at
         )
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now(), now())
+        values ($1, $2::ai_scope_kind, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), now())
         returning
             id,
+            scope_kind::text as scope_kind,
             workspace_id,
+            library_id,
             model_catalog_id,
             preset_name,
             system_prompt,
@@ -815,7 +1145,9 @@ pub async fn create_model_preset(
             updated_at",
     )
     .bind(Uuid::now_v7())
+    .bind(scope_kind)
     .bind(workspace_id)
+    .bind(library_id)
     .bind(model_catalog_id)
     .bind(preset_name)
     .bind(system_prompt)
@@ -850,7 +1182,9 @@ pub async fn update_model_preset(
          where id = $1
          returning
             id,
+            scope_kind::text as scope_kind,
             workspace_id,
+            library_id,
             model_catalog_id,
             preset_name,
             system_prompt,
@@ -873,13 +1207,16 @@ pub async fn update_model_preset(
     .await
 }
 
-pub async fn list_library_bindings(
+pub async fn list_binding_assignments_exact(
     postgres: &PgPool,
-    library_id: Uuid,
-) -> Result<Vec<AiLibraryModelBindingRow>, sqlx::Error> {
-    sqlx::query_as::<_, AiLibraryModelBindingRow>(
+    scope_kind: &str,
+    workspace_id: Option<Uuid>,
+    library_id: Option<Uuid>,
+) -> Result<Vec<AiBindingAssignmentRow>, sqlx::Error> {
+    sqlx::query_as::<_, AiBindingAssignmentRow>(
         "select
             id,
+            scope_kind::text as scope_kind,
             workspace_id,
             library_id,
             binding_purpose::text as binding_purpose,
@@ -889,16 +1226,20 @@ pub async fn list_library_bindings(
             updated_by_principal_id,
             created_at,
             updated_at
-         from ai_library_model_binding
-         where library_id = $1
-         order by created_at desc",
+         from ai_binding_assignment
+         where scope_kind = $1::ai_scope_kind
+           and workspace_id is not distinct from $2
+           and library_id is not distinct from $3
+         order by created_at desc, id desc",
     )
+    .bind(scope_kind)
+    .bind(workspace_id)
     .bind(library_id)
     .fetch_all(postgres)
     .await
 }
 
-pub async fn list_active_binding_purposes_for_libraries(
+pub async fn list_effective_binding_purposes_for_libraries(
     postgres: &PgPool,
     library_ids: &[Uuid],
 ) -> Result<Vec<ActiveLibraryBindingPurposeRow>, sqlx::Error> {
@@ -907,25 +1248,51 @@ pub async fn list_active_binding_purposes_for_libraries(
     }
 
     sqlx::query_as::<_, ActiveLibraryBindingPurposeRow>(
-        "select
-            library_id,
-            binding_purpose::text as binding_purpose
-         from ai_library_model_binding
-         where library_id = any($1)
-           and binding_state = 'active'",
+        "with requested_libraries as (
+            select unnest($1::uuid[]) as library_id
+         )
+         select
+            requested_libraries.library_id,
+            effective.binding_purpose
+         from requested_libraries
+         join catalog_library library on library.id = requested_libraries.library_id
+         join lateral (
+            select distinct on (candidate.binding_purpose)
+                candidate.binding_purpose
+            from (
+                select binding_purpose::text as binding_purpose, 3 as precedence
+                from ai_binding_assignment
+                where scope_kind = 'library'
+                  and library_id = requested_libraries.library_id
+                  and binding_state = 'active'
+                union all
+                select binding_purpose::text as binding_purpose, 2 as precedence
+                from ai_binding_assignment
+                where scope_kind = 'workspace'
+                  and workspace_id = library.workspace_id
+                  and binding_state = 'active'
+                union all
+                select binding_purpose::text as binding_purpose, 1 as precedence
+                from ai_binding_assignment
+                where scope_kind = 'instance'
+                  and binding_state = 'active'
+            ) candidate
+            order by candidate.binding_purpose, candidate.precedence desc
+         ) effective on true",
     )
     .bind(library_ids)
     .fetch_all(postgres)
     .await
 }
 
-pub async fn get_library_binding_by_id(
+pub async fn get_binding_assignment_by_id(
     postgres: &PgPool,
     binding_id: Uuid,
-) -> Result<Option<AiLibraryModelBindingRow>, sqlx::Error> {
-    sqlx::query_as::<_, AiLibraryModelBindingRow>(
+) -> Result<Option<AiBindingAssignmentRow>, sqlx::Error> {
+    sqlx::query_as::<_, AiBindingAssignmentRow>(
         "select
             id,
+            scope_kind::text as scope_kind,
             workspace_id,
             library_id,
             binding_purpose::text as binding_purpose,
@@ -935,7 +1302,7 @@ pub async fn get_library_binding_by_id(
             updated_by_principal_id,
             created_at,
             updated_at
-         from ai_library_model_binding
+         from ai_binding_assignment
          where id = $1",
     )
     .bind(binding_id)
@@ -943,29 +1310,85 @@ pub async fn get_library_binding_by_id(
     .await
 }
 
-pub async fn get_active_library_binding_by_purpose(
+pub async fn get_effective_binding_assignment_by_purpose(
     postgres: &PgPool,
     library_id: Uuid,
     binding_purpose: &str,
-) -> Result<Option<AiLibraryModelBindingRow>, sqlx::Error> {
-    sqlx::query_as::<_, AiLibraryModelBindingRow>(
+) -> Result<Option<AiBindingAssignmentRow>, sqlx::Error> {
+    sqlx::query_as::<_, AiBindingAssignmentRow>(
         "select
-            id,
-            workspace_id,
-            library_id,
-            binding_purpose::text as binding_purpose,
-            provider_credential_id,
-            model_preset_id,
-            binding_state::text as binding_state,
-            updated_by_principal_id,
-            created_at,
-            updated_at
-         from ai_library_model_binding
-         where library_id = $1
-           and binding_purpose = $2::ai_binding_purpose
-           and binding_state = 'active'
-         order by updated_at desc, id desc
-         limit 1",
+            candidate.id,
+            candidate.scope_kind,
+            candidate.workspace_id,
+            candidate.library_id,
+            candidate.binding_purpose,
+            candidate.provider_credential_id,
+            candidate.model_preset_id,
+            candidate.binding_state,
+            candidate.updated_by_principal_id,
+            candidate.created_at,
+            candidate.updated_at
+         from catalog_library library
+         join lateral (
+            select
+                binding.id,
+                binding.scope_kind::text as scope_kind,
+                binding.workspace_id,
+                binding.library_id,
+                binding.binding_purpose::text as binding_purpose,
+                binding.provider_credential_id,
+                binding.model_preset_id,
+                binding.binding_state::text as binding_state,
+                binding.updated_by_principal_id,
+                binding.created_at,
+                binding.updated_at,
+                3 as precedence
+            from ai_binding_assignment binding
+            where binding.scope_kind = 'library'
+              and binding.library_id = library.id
+              and binding.binding_purpose = $2::ai_binding_purpose
+              and binding.binding_state = 'active'
+            union all
+            select
+                binding.id,
+                binding.scope_kind::text as scope_kind,
+                binding.workspace_id,
+                binding.library_id,
+                binding.binding_purpose::text as binding_purpose,
+                binding.provider_credential_id,
+                binding.model_preset_id,
+                binding.binding_state::text as binding_state,
+                binding.updated_by_principal_id,
+                binding.created_at,
+                binding.updated_at,
+                2 as precedence
+            from ai_binding_assignment binding
+            where binding.scope_kind = 'workspace'
+              and binding.workspace_id = library.workspace_id
+              and binding.binding_purpose = $2::ai_binding_purpose
+              and binding.binding_state = 'active'
+            union all
+            select
+                binding.id,
+                binding.scope_kind::text as scope_kind,
+                binding.workspace_id,
+                binding.library_id,
+                binding.binding_purpose::text as binding_purpose,
+                binding.provider_credential_id,
+                binding.model_preset_id,
+                binding.binding_state::text as binding_state,
+                binding.updated_by_principal_id,
+                binding.created_at,
+                binding.updated_at,
+                1 as precedence
+            from ai_binding_assignment binding
+            where binding.scope_kind = 'instance'
+              and binding.binding_purpose = $2::ai_binding_purpose
+              and binding.binding_state = 'active'
+            order by precedence desc, updated_at desc, id desc
+            limit 1
+         ) candidate on true
+         where library.id = $1",
     )
     .bind(library_id)
     .bind(binding_purpose)
@@ -973,18 +1396,20 @@ pub async fn get_active_library_binding_by_purpose(
     .await
 }
 
-pub async fn create_library_binding(
+pub async fn create_binding_assignment(
     postgres: &PgPool,
-    workspace_id: Uuid,
-    library_id: Uuid,
+    scope_kind: &str,
+    workspace_id: Option<Uuid>,
+    library_id: Option<Uuid>,
     binding_purpose: &str,
     provider_credential_id: Uuid,
     model_preset_id: Uuid,
     updated_by_principal_id: Option<Uuid>,
-) -> Result<AiLibraryModelBindingRow, sqlx::Error> {
-    sqlx::query_as::<_, AiLibraryModelBindingRow>(
-        "insert into ai_library_model_binding (
+) -> Result<AiBindingAssignmentRow, sqlx::Error> {
+    sqlx::query_as::<_, AiBindingAssignmentRow>(
+        "insert into ai_binding_assignment (
             id,
+            scope_kind,
             workspace_id,
             library_id,
             binding_purpose,
@@ -995,9 +1420,10 @@ pub async fn create_library_binding(
             created_at,
             updated_at
         )
-        values ($1, $2, $3, $4::ai_binding_purpose, $5, $6, 'active', $7, now(), now())
+        values ($1, $2::ai_scope_kind, $3, $4, $5::ai_binding_purpose, $6, $7, 'active', $8, now(), now())
         returning
             id,
+            scope_kind::text as scope_kind,
             workspace_id,
             library_id,
             binding_purpose::text as binding_purpose,
@@ -1009,6 +1435,7 @@ pub async fn create_library_binding(
             updated_at",
     )
     .bind(Uuid::now_v7())
+    .bind(scope_kind)
     .bind(workspace_id)
     .bind(library_id)
     .bind(binding_purpose)
@@ -1019,16 +1446,16 @@ pub async fn create_library_binding(
     .await
 }
 
-pub async fn update_library_binding(
+pub async fn update_binding_assignment(
     postgres: &PgPool,
     binding_id: Uuid,
     provider_credential_id: Uuid,
     model_preset_id: Uuid,
     binding_state: &str,
     updated_by_principal_id: Option<Uuid>,
-) -> Result<Option<AiLibraryModelBindingRow>, sqlx::Error> {
-    sqlx::query_as::<_, AiLibraryModelBindingRow>(
-        "update ai_library_model_binding
+) -> Result<Option<AiBindingAssignmentRow>, sqlx::Error> {
+    sqlx::query_as::<_, AiBindingAssignmentRow>(
+        "update ai_binding_assignment
          set provider_credential_id = $2,
              model_preset_id = $3,
              binding_state = $4::ai_binding_state,
@@ -1037,6 +1464,7 @@ pub async fn update_library_binding(
          where id = $1
          returning
             id,
+            scope_kind::text as scope_kind,
             workspace_id,
             library_id,
             binding_purpose::text as binding_purpose,
@@ -1054,6 +1482,17 @@ pub async fn update_library_binding(
     .bind(updated_by_principal_id)
     .fetch_optional(postgres)
     .await
+}
+
+pub async fn delete_binding_assignment(
+    postgres: &PgPool,
+    binding_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query("delete from ai_binding_assignment where id = $1")
+        .bind(binding_id)
+        .execute(postgres)
+        .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn create_binding_validation(

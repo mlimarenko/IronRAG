@@ -385,7 +385,8 @@ create table ai_provider_credential (
     workspace_id uuid not null references catalog_workspace(id) on delete cascade,
     provider_catalog_id uuid not null references ai_provider_catalog(id) on delete restrict,
     label text not null,
-    api_key text not null,
+    api_key text,
+    base_url text,
     credential_state ai_credential_state not null default 'active',
     created_by_principal_id uuid references iam_principal(id) on delete set null,
     created_at timestamptz not null default now(),
@@ -1580,6 +1581,15 @@ values
         'active',
         'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
         '{"chat": true, "embedding": true, "vision": true}'::jsonb
+    ),
+    (
+        '00000000-0000-0000-0000-000000000104',
+        'ollama',
+        'Ollama',
+        'openai_compatible',
+        'active',
+        'http://localhost:11434/v1',
+        '{"chat": true, "embedding": true, "vision": true}'::jsonb
     );
 
 insert into ai_model_catalog (
@@ -1601,7 +1611,7 @@ values
     ('00000000-0000-0000-0000-000000000205', '00000000-0000-0000-0000-000000000103', 'qwen3-max', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
     ('00000000-0000-0000-0000-000000000206', '00000000-0000-0000-0000-000000000103', 'text-embedding-v4', 'embedding', 'text', null, null, 'active', '{"defaultRoles": ["embed_chunk"], "seedSource": "provider_catalog"}'::jsonb),
     ('00000000-0000-0000-0000-000000000207', '00000000-0000-0000-0000-000000000103', 'qwen3.5-plus', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000208', '00000000-0000-0000-0000-000000000101', 'gpt-5.4-nano', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000208', '00000000-0000-0000-0000-000000000101', 'gpt-5.4-nano', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
     ('00000000-0000-0000-0000-000000000209', '00000000-0000-0000-0000-000000000101', 'gpt-5.4-pro', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
     ('00000000-0000-0000-0000-000000000210', '00000000-0000-0000-0000-000000000101', 'gpt-5.3-chat-latest', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
     ('00000000-0000-0000-0000-000000000211', '00000000-0000-0000-0000-000000000101', 'gpt-5.3-codex', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
@@ -1633,7 +1643,10 @@ values
     ('00000000-0000-0000-0000-000000000237', '00000000-0000-0000-0000-000000000103', 'text-embedding-v3', 'embedding', 'text', null, null, 'active', '{"defaultRoles": ["embed_chunk"], "seedSource": "provider_catalog"}'::jsonb),
     ('00000000-0000-0000-0000-000000000238', '00000000-0000-0000-0000-000000000103', 'qwen-turbo', 'chat', 'text', null, null, 'deprecated', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
     ('00000000-0000-0000-0000-000000000239', '00000000-0000-0000-0000-000000000103', 'qwen-turbo-latest', 'chat', 'text', null, null, 'deprecated', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000240', '00000000-0000-0000-0000-000000000103', 'qwen3.5-flash', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb);
+    ('00000000-0000-0000-0000-000000000240', '00000000-0000-0000-0000-000000000103', 'qwen3.5-flash', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000241', '00000000-0000-0000-0000-000000000104', 'qwen3:0.6b', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000242', '00000000-0000-0000-0000-000000000104', 'qwen3-embedding:0.6b', 'embedding', 'text', null, null, 'active', '{"defaultRoles": ["embed_chunk"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000243', '00000000-0000-0000-0000-000000000104', 'qwen3-vl:2b', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["vision"], "seedSource": "provider_catalog"}'::jsonb);
 
 insert into ai_price_catalog (
     id,

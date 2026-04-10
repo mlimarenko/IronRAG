@@ -34,7 +34,7 @@ use rustrag_backend::{
         graph_store::{ArangoGraphStore, NewKnowledgeEntity},
     },
     infra::repositories::{self, query_repository, runtime_repository},
-    services::query_service::QueryService,
+    services::query::service::QueryService,
 };
 
 struct TempArangoDatabase {

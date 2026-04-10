@@ -27,11 +27,11 @@ use rustrag_backend::{
     },
     services::{
         catalog_service::{CreateLibraryCommand, CreateWorkspaceCommand},
-        knowledge_service::{
+        knowledge::service::{
             CreateKnowledgeDocumentCommand, CreateKnowledgeRevisionCommand,
             PromoteKnowledgeDocumentCommand, RefreshKnowledgeLibraryGenerationCommand,
         },
-        ops_service::OpsService,
+        ops::service::OpsService,
     },
 };
 
@@ -201,7 +201,7 @@ impl OpsStateFixture {
             settings,
             Persistence { postgres, redis },
             Arc::clone(&arango_client),
-        );
+        )?;
 
         let suffix = Uuid::now_v7().simple().to_string();
         let workspace = state
@@ -860,6 +860,7 @@ fn sample_document_summary(
             document_state: "active".to_string(),
             created_at: Utc::now(),
         },
+        file_name: "Ops Summary".to_string(),
         head: None,
         active_revision: Some(ContentRevision {
             id: revision_id,
@@ -879,6 +880,7 @@ fn sample_document_summary(
             created_by_principal_id: None,
             created_at: Utc::now(),
         }),
+        source_access: None,
         readiness: Some(ContentRevisionReadiness {
             revision_id,
             text_state: "text_readable".to_string(),

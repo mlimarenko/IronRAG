@@ -14,10 +14,15 @@ INSERT INTO ai_provider_catalog (
 VALUES (
     '00000000-0000-0000-0000-000000000104',
     'ollama',
-    'Ollama (Local)',
+    'Ollama',
     'openai_compatible',
     'active',
     'http://localhost:11434/v1',
-    '{"chat": true, "embedding": true, "vision": false}'::jsonb
+    '{"chat": true, "embedding": true, "vision": true}'::jsonb
 )
-ON CONFLICT (provider_kind) DO NOTHING;
+ON CONFLICT (provider_kind) DO UPDATE
+SET
+    display_name = EXCLUDED.display_name,
+    lifecycle_state = EXCLUDED.lifecycle_state::ai_provider_lifecycle_state,
+    default_base_url = EXCLUDED.default_base_url,
+    capability_flags_json = EXCLUDED.capability_flags_json;

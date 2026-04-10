@@ -337,6 +337,7 @@ impl ArangoDocumentStore {
         &self,
         workspace_id: Uuid,
         library_id: Uuid,
+        include_deleted: bool,
     ) -> anyhow::Result<Vec<KnowledgeDocumentRow>> {
         let cursor = self
             .client
@@ -344,12 +345,14 @@ impl ArangoDocumentStore {
                 "FOR doc IN @@collection
                  FILTER doc.workspace_id == @workspace_id
                    AND doc.library_id == @library_id
+                   AND (@include_deleted OR doc.document_state != 'deleted')
                  SORT doc.updated_at DESC, doc.document_id DESC
                  RETURN doc",
                 serde_json::json!({
                     "@collection": KNOWLEDGE_DOCUMENT_COLLECTION,
                     "workspace_id": workspace_id,
                     "library_id": library_id,
+                    "include_deleted": include_deleted,
                 }),
             )
             .await
@@ -369,6 +372,7 @@ impl ArangoDocumentStore {
             .query_json(
                 "FOR doc IN @@collection
                  FILTER doc.document_id IN @document_ids
+                   AND doc.document_state != 'deleted'
                  SORT doc.updated_at DESC, doc.document_id DESC
                  RETURN doc",
                 serde_json::json!({

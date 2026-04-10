@@ -35,11 +35,10 @@ use crate::{
         McpUpdateDocumentRequest, McpUploadDocumentsRequest,
     },
     services::{
-        audit_service::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
-        mcp_access, mcp_mutations,
-        mcp_support::{describe_runtime_execution_summary, describe_runtime_trace_summary},
+        iam::audit::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
+        mcp::support::{describe_runtime_execution_summary, describe_runtime_trace_summary},
     },
-    shared::file_extract::UploadAdmissionError,
+    shared::extraction::file_extract::UploadAdmissionError,
 };
 
 pub const MCP_JSONRPC_ROUTE: &str = "/mcp";
@@ -221,8 +220,8 @@ async fn capability_snapshot(
     auth: &AuthContext,
     state: &AppState,
 ) -> Result<McpCapabilitySnapshot, ApiError> {
-    let workspaces = mcp_access::visible_workspaces(auth, state).await?;
-    let libraries = mcp_access::visible_libraries(auth, state, None).await?;
+    let workspaces = crate::services::mcp::access::visible_workspaces(auth, state).await?;
+    let libraries = crate::services::mcp::access::visible_libraries(auth, state, None).await?;
     Ok(McpCapabilitySnapshot {
         token_id: auth.token_id,
         token_kind: auth.token_kind().to_string(),
@@ -1096,71 +1095,73 @@ async fn handle_tools_call(
     let result = match parsed.name.as_str() {
         "create_workspace" => {
             match parse_tool_args::<McpCreateWorkspaceRequest>(parsed.arguments) {
-                Ok(args) => match mcp_access::create_workspace(auth, state, args).await {
-                    Ok(payload) => {
-                        record_canonical_mcp_audit(
-                            state,
-                            auth,
-                            request_id,
-                            "catalog.workspace.create",
-                            "succeeded",
-                            Some(format!("workspace {} created", payload.name)),
-                            Some(format!(
-                                "principal {} created workspace {} via MCP",
-                                auth.principal_id, payload.workspace_id
-                            )),
-                            vec![AppendAuditEventSubjectCommand {
-                                subject_kind: "workspace".to_string(),
-                                subject_id: payload.workspace_id,
-                                workspace_id: Some(payload.workspace_id),
-                                library_id: None,
-                                document_id: None,
-                            }],
-                        )
-                        .await;
-                        record_success_audit(
-                            auth,
-                            state,
-                            request_id,
-                            McpAuditActionKind::CreateWorkspace,
-                            McpAuditScope {
-                                workspace_id: Some(payload.workspace_id),
-                                library_id: None,
-                                document_id: None,
-                            },
-                            json!({ "tool": "create_workspace" }),
-                        )
-                        .await;
-                        ok_tool_result("Workspace created.", json!({ "workspace": payload }))
+                Ok(args) => {
+                    match crate::services::mcp::access::create_workspace(auth, state, args).await {
+                        Ok(payload) => {
+                            record_canonical_mcp_audit(
+                                state,
+                                auth,
+                                request_id,
+                                "catalog.workspace.create",
+                                "succeeded",
+                                Some(format!("workspace {} created", payload.name)),
+                                Some(format!(
+                                    "principal {} created workspace {} via MCP",
+                                    auth.principal_id, payload.workspace_id
+                                )),
+                                vec![AppendAuditEventSubjectCommand {
+                                    subject_kind: "workspace".to_string(),
+                                    subject_id: payload.workspace_id,
+                                    workspace_id: Some(payload.workspace_id),
+                                    library_id: None,
+                                    document_id: None,
+                                }],
+                            )
+                            .await;
+                            record_success_audit(
+                                auth,
+                                state,
+                                request_id,
+                                McpAuditActionKind::CreateWorkspace,
+                                McpAuditScope {
+                                    workspace_id: Some(payload.workspace_id),
+                                    library_id: None,
+                                    document_id: None,
+                                },
+                                json!({ "tool": "create_workspace" }),
+                            )
+                            .await;
+                            ok_tool_result("Workspace created.", json!({ "workspace": payload }))
+                        }
+                        Err(error) => {
+                            record_canonical_mcp_audit(
+                                state,
+                                auth,
+                                request_id,
+                                "catalog.workspace.create",
+                                "rejected",
+                                Some("workspace create denied".to_string()),
+                                Some(format!(
+                                    "principal {} was denied workspace create via MCP",
+                                    auth.principal_id
+                                )),
+                                Vec::new(),
+                            )
+                            .await;
+                            record_error_audit(
+                                auth,
+                                state,
+                                request_id,
+                                McpAuditActionKind::CreateWorkspace,
+                                McpAuditScope::default(),
+                                &error,
+                                json!({ "tool": "create_workspace" }),
+                            )
+                            .await;
+                            tool_error_result(error)
+                        }
                     }
-                    Err(error) => {
-                        record_canonical_mcp_audit(
-                            state,
-                            auth,
-                            request_id,
-                            "catalog.workspace.create",
-                            "rejected",
-                            Some("workspace create denied".to_string()),
-                            Some(format!(
-                                "principal {} was denied workspace create via MCP",
-                                auth.principal_id
-                            )),
-                            Vec::new(),
-                        )
-                        .await;
-                        record_error_audit(
-                            auth,
-                            state,
-                            request_id,
-                            McpAuditActionKind::CreateWorkspace,
-                            McpAuditScope::default(),
-                            &error,
-                            json!({ "tool": "create_workspace" }),
-                        )
-                        .await;
-                        tool_error_result(error)
-                    }
-                },
+                }
                 Err(error) => {
                     record_canonical_mcp_audit(
                         state,
@@ -1191,81 +1192,84 @@ async fn handle_tools_call(
             }
         }
         "create_library" => match parse_tool_args::<McpCreateLibraryRequest>(parsed.arguments) {
-            Ok(args) => match mcp_access::create_library(auth, state, args.clone()).await {
-                Ok(payload) => {
-                    record_canonical_mcp_audit(
-                        state,
-                        auth,
-                        request_id,
-                        "catalog.library.create",
-                        "succeeded",
-                        Some(format!("library {} created", payload.name)),
-                        Some(format!(
-                            "principal {} created library {} via MCP",
-                            auth.principal_id, payload.library_id
-                        )),
-                        vec![AppendAuditEventSubjectCommand {
-                            subject_kind: "library".to_string(),
-                            subject_id: payload.library_id,
-                            workspace_id: Some(payload.workspace_id),
-                            library_id: Some(payload.library_id),
-                            document_id: None,
-                        }],
-                    )
-                    .await;
-                    record_success_audit(
-                        auth,
-                        state,
-                        request_id,
-                        McpAuditActionKind::CreateLibrary,
-                        McpAuditScope {
-                            workspace_id: Some(payload.workspace_id),
-                            library_id: Some(payload.library_id),
-                            document_id: None,
-                        },
-                        json!({ "tool": "create_library" }),
-                    )
-                    .await;
-                    ok_tool_result("Library created.", json!({ "library": payload }))
+            Ok(args) => {
+                match crate::services::mcp::access::create_library(auth, state, args.clone()).await
+                {
+                    Ok(payload) => {
+                        record_canonical_mcp_audit(
+                            state,
+                            auth,
+                            request_id,
+                            "catalog.library.create",
+                            "succeeded",
+                            Some(format!("library {} created", payload.name)),
+                            Some(format!(
+                                "principal {} created library {} via MCP",
+                                auth.principal_id, payload.library_id
+                            )),
+                            vec![AppendAuditEventSubjectCommand {
+                                subject_kind: "library".to_string(),
+                                subject_id: payload.library_id,
+                                workspace_id: Some(payload.workspace_id),
+                                library_id: Some(payload.library_id),
+                                document_id: None,
+                            }],
+                        )
+                        .await;
+                        record_success_audit(
+                            auth,
+                            state,
+                            request_id,
+                            McpAuditActionKind::CreateLibrary,
+                            McpAuditScope {
+                                workspace_id: Some(payload.workspace_id),
+                                library_id: Some(payload.library_id),
+                                document_id: None,
+                            },
+                            json!({ "tool": "create_library" }),
+                        )
+                        .await;
+                        ok_tool_result("Library created.", json!({ "library": payload }))
+                    }
+                    Err(error) => {
+                        record_canonical_mcp_audit(
+                            state,
+                            auth,
+                            request_id,
+                            "catalog.library.create",
+                            "rejected",
+                            Some("library create denied".to_string()),
+                            Some(format!(
+                                "principal {} was denied library create for workspace {} via MCP",
+                                auth.principal_id, args.workspace_id
+                            )),
+                            vec![AppendAuditEventSubjectCommand {
+                                subject_kind: "workspace".to_string(),
+                                subject_id: args.workspace_id,
+                                workspace_id: Some(args.workspace_id),
+                                library_id: None,
+                                document_id: None,
+                            }],
+                        )
+                        .await;
+                        record_error_audit(
+                            auth,
+                            state,
+                            request_id,
+                            McpAuditActionKind::CreateLibrary,
+                            McpAuditScope {
+                                workspace_id: Some(args.workspace_id),
+                                library_id: None,
+                                document_id: None,
+                            },
+                            &error,
+                            json!({ "tool": "create_library" }),
+                        )
+                        .await;
+                        tool_error_result(error)
+                    }
                 }
-                Err(error) => {
-                    record_canonical_mcp_audit(
-                        state,
-                        auth,
-                        request_id,
-                        "catalog.library.create",
-                        "rejected",
-                        Some("library create denied".to_string()),
-                        Some(format!(
-                            "principal {} was denied library create for workspace {} via MCP",
-                            auth.principal_id, args.workspace_id
-                        )),
-                        vec![AppendAuditEventSubjectCommand {
-                            subject_kind: "workspace".to_string(),
-                            subject_id: args.workspace_id,
-                            workspace_id: Some(args.workspace_id),
-                            library_id: None,
-                            document_id: None,
-                        }],
-                    )
-                    .await;
-                    record_error_audit(
-                        auth,
-                        state,
-                        request_id,
-                        McpAuditActionKind::CreateLibrary,
-                        McpAuditScope {
-                            workspace_id: Some(args.workspace_id),
-                            library_id: None,
-                            document_id: None,
-                        },
-                        &error,
-                        json!({ "tool": "create_library" }),
-                    )
-                    .await;
-                    tool_error_result(error)
-                }
-            },
+            }
             Err(error) => {
                 record_canonical_mcp_audit(
                     state,
@@ -1294,46 +1298,54 @@ async fn handle_tools_call(
                 tool_error_result(error)
             }
         },
-        "list_workspaces" => match mcp_access::visible_workspaces(auth, state).await {
-            Ok(payload) => {
-                record_success_audit(
-                    auth,
-                    state,
-                    request_id,
-                    McpAuditActionKind::ListWorkspaces,
-                    McpAuditScope {
-                        workspace_id: auth.workspace_id,
-                        library_id: None,
-                        document_id: None,
-                    },
-                    json!({
-                        "tool": "list_workspaces",
-                        "workspaceCount": payload.len(),
-                    }),
-                )
-                .await;
-                ok_tool_result("Visible workspaces loaded.", json!({ "workspaces": payload }))
+        "list_workspaces" => {
+            match crate::services::mcp::access::visible_workspaces(auth, state).await {
+                Ok(payload) => {
+                    record_success_audit(
+                        auth,
+                        state,
+                        request_id,
+                        McpAuditActionKind::ListWorkspaces,
+                        McpAuditScope {
+                            workspace_id: auth.workspace_id,
+                            library_id: None,
+                            document_id: None,
+                        },
+                        json!({
+                            "tool": "list_workspaces",
+                            "workspaceCount": payload.len(),
+                        }),
+                    )
+                    .await;
+                    ok_tool_result("Visible workspaces loaded.", json!({ "workspaces": payload }))
+                }
+                Err(error) => {
+                    record_error_audit(
+                        auth,
+                        state,
+                        request_id,
+                        McpAuditActionKind::ListWorkspaces,
+                        McpAuditScope {
+                            workspace_id: auth.workspace_id,
+                            library_id: None,
+                            document_id: None,
+                        },
+                        &error,
+                        json!({ "tool": "list_workspaces" }),
+                    )
+                    .await;
+                    tool_error_result(error)
+                }
             }
-            Err(error) => {
-                record_error_audit(
-                    auth,
-                    state,
-                    request_id,
-                    McpAuditActionKind::ListWorkspaces,
-                    McpAuditScope {
-                        workspace_id: auth.workspace_id,
-                        library_id: None,
-                        document_id: None,
-                    },
-                    &error,
-                    json!({ "tool": "list_workspaces" }),
-                )
-                .await;
-                tool_error_result(error)
-            }
-        },
+        }
         "list_libraries" => match parse_tool_args::<McpListLibrariesRequest>(parsed.arguments) {
-            Ok(args) => match mcp_access::visible_libraries(auth, state, args.workspace_id).await {
+            Ok(args) => match crate::services::mcp::access::visible_libraries(
+                auth,
+                state,
+                args.workspace_id,
+            )
+            .await
+            {
                 Ok(payload) => {
                     record_success_audit(
                         auth,
@@ -1391,9 +1403,12 @@ async fn handle_tools_call(
         },
         "search_documents" => {
             match parse_tool_args::<McpSearchDocumentsRequest>(parsed.arguments) {
-                Ok(args) => match mcp_access::search_documents(auth, state, args.clone()).await {
-                    Ok(payload) => {
-                        record_canonical_mcp_audit(
+                Ok(args) => {
+                    match crate::services::mcp::access::search_documents(auth, state, args.clone())
+                        .await
+                    {
+                        Ok(payload) => {
+                            record_canonical_mcp_audit(
                         state,
                         auth,
                         request_id,
@@ -1408,38 +1423,39 @@ async fn handle_tools_call(
                         build_mcp_search_subjects(state, &payload),
                     )
                     .await;
-                        record_success_audit(
-                            auth,
-                            state,
-                            request_id,
-                            McpAuditActionKind::SearchDocuments,
-                            search_scope_from_response(auth, &payload),
-                            json!({
-                                "tool": "search_documents",
-                                "query": payload.query,
-                                "hitCount": payload.hits.len(),
-                            }),
-                        )
-                        .await;
-                        ok_tool_result("Document memory search completed.", json!(payload))
+                            record_success_audit(
+                                auth,
+                                state,
+                                request_id,
+                                McpAuditActionKind::SearchDocuments,
+                                search_scope_from_response(auth, &payload),
+                                json!({
+                                    "tool": "search_documents",
+                                    "query": payload.query,
+                                    "hitCount": payload.hits.len(),
+                                }),
+                            )
+                            .await;
+                            ok_tool_result("Document memory search completed.", json!(payload))
+                        }
+                        Err(error) => {
+                            record_error_audit(
+                                auth,
+                                state,
+                                request_id,
+                                McpAuditActionKind::SearchDocuments,
+                                search_scope_from_request(auth, args.library_ids.as_deref()),
+                                &error,
+                                json!({
+                                    "tool": "search_documents",
+                                    "query": args.query,
+                                }),
+                            )
+                            .await;
+                            tool_error_result(error)
+                        }
                     }
-                    Err(error) => {
-                        record_error_audit(
-                            auth,
-                            state,
-                            request_id,
-                            McpAuditActionKind::SearchDocuments,
-                            search_scope_from_request(auth, args.library_ids.as_deref()),
-                            &error,
-                            json!({
-                                "tool": "search_documents",
-                                "query": args.query,
-                            }),
-                        )
-                        .await;
-                        tool_error_result(error)
-                    }
-                },
+                }
                 Err(error) => {
                     record_error_audit(
                         auth,
@@ -1460,64 +1476,66 @@ async fn handle_tools_call(
             }
         }
         "read_document" => match parse_tool_args::<McpReadDocumentRequest>(parsed.arguments) {
-            Ok(args) => match mcp_access::read_document(auth, state, args.clone()).await {
-                Ok(payload) => {
-                    record_canonical_mcp_audit(
-                        state,
-                        auth,
-                        request_id,
-                        "agent.memory.read",
-                        "succeeded",
-                        Some("MCP document read completed".to_string()),
-                        Some(format!(
-                            "principal {} read knowledge document {} via MCP",
-                            auth.principal_id, payload.document_id
-                        )),
-                        vec![state.canonical_services.audit.knowledge_document_subject(
-                            payload.document_id,
-                            payload.workspace_id,
-                            payload.library_id,
-                        )],
-                    )
-                    .await;
-                    record_success_audit(
-                        auth,
-                        state,
-                        request_id,
-                        McpAuditActionKind::ReadDocument,
-                        McpAuditScope {
-                            workspace_id: Some(payload.workspace_id),
-                            library_id: Some(payload.library_id),
-                            document_id: Some(payload.document_id),
-                        },
-                        json!({
-                            "tool": "read_document",
-                            "readMode": payload.read_mode,
-                            "readabilityState": payload.readability_state,
-                            "hasMore": payload.has_more,
-                        }),
-                    )
-                    .await;
-                    ok_tool_result("Document read completed.", json!(payload))
+            Ok(args) => {
+                match crate::services::mcp::access::read_document(auth, state, args.clone()).await {
+                    Ok(payload) => {
+                        record_canonical_mcp_audit(
+                            state,
+                            auth,
+                            request_id,
+                            "agent.memory.read",
+                            "succeeded",
+                            Some("MCP document read completed".to_string()),
+                            Some(format!(
+                                "principal {} read knowledge document {} via MCP",
+                                auth.principal_id, payload.document_id
+                            )),
+                            vec![state.canonical_services.audit.knowledge_document_subject(
+                                payload.document_id,
+                                payload.workspace_id,
+                                payload.library_id,
+                            )],
+                        )
+                        .await;
+                        record_success_audit(
+                            auth,
+                            state,
+                            request_id,
+                            McpAuditActionKind::ReadDocument,
+                            McpAuditScope {
+                                workspace_id: Some(payload.workspace_id),
+                                library_id: Some(payload.library_id),
+                                document_id: Some(payload.document_id),
+                            },
+                            json!({
+                                "tool": "read_document",
+                                "readMode": payload.read_mode,
+                                "readabilityState": payload.readability_state,
+                                "hasMore": payload.has_more,
+                            }),
+                        )
+                        .await;
+                        ok_tool_result("Document read completed.", json!(payload))
+                    }
+                    Err(error) => {
+                        record_error_audit(
+                            auth,
+                            state,
+                            request_id,
+                            McpAuditActionKind::ReadDocument,
+                            McpAuditScope {
+                                workspace_id: auth.workspace_id,
+                                library_id: None,
+                                document_id: args.document_id,
+                            },
+                            &error,
+                            json!({ "tool": "read_document" }),
+                        )
+                        .await;
+                        tool_error_result(error)
+                    }
                 }
-                Err(error) => {
-                    record_error_audit(
-                        auth,
-                        state,
-                        request_id,
-                        McpAuditActionKind::ReadDocument,
-                        McpAuditScope {
-                            workspace_id: auth.workspace_id,
-                            library_id: None,
-                            document_id: args.document_id,
-                        },
-                        &error,
-                        json!({ "tool": "read_document" }),
-                    )
-                    .await;
-                    tool_error_result(error)
-                }
-            },
+            }
             Err(error) => {
                 record_error_audit(
                     auth,
@@ -1540,7 +1558,7 @@ async fn handle_tools_call(
             Ok(args) => {
                 let library_id = args.library_id;
                 let question = args.question.clone();
-                match mcp_access::ask_library_question(
+                match crate::services::mcp::access::ask_library_question(
                     auth,
                     state,
                     library_id,
@@ -1629,7 +1647,7 @@ async fn handle_tools_call(
             Ok(args) => {
                 let library_id = args.library_id;
                 let limit = args.limit.unwrap_or(50).clamp(1, 200);
-                match mcp_access::list_documents(
+                match crate::services::mcp::access::list_documents(
                     auth,
                     state,
                     library_id,
@@ -1708,7 +1726,13 @@ async fn handle_tools_call(
         "upload_documents" => {
             match parse_tool_args::<McpUploadDocumentsRequest>(parsed.arguments) {
                 Ok(args) => {
-                    match mcp_mutations::upload_documents(auth, state, args.clone()).await {
+                    match crate::services::mcp::mutations::upload_documents(
+                        auth,
+                        state,
+                        args.clone(),
+                    )
+                    .await
+                    {
                         Ok(payload) => {
                             let canonical_subjects =
                                 build_mcp_mutation_subjects(state, &payload).await;
@@ -1788,63 +1812,68 @@ async fn handle_tools_call(
             }
         }
         "update_document" => match parse_tool_args::<McpUpdateDocumentRequest>(parsed.arguments) {
-            Ok(args) => match mcp_mutations::update_document(auth, state, args.clone()).await {
-                Ok(payload) => {
-                    let canonical_subjects =
-                        build_mcp_mutation_subjects(state, std::slice::from_ref(&payload)).await;
-                    record_canonical_mcp_audit(
-                        state,
-                        auth,
-                        request_id,
-                        "agent.memory.update",
-                        "succeeded",
-                        Some(format!(
-                            "accepted MCP document {:?} mutation",
-                            payload.operation_kind
-                        )),
-                        Some(format!(
-                            "principal {} accepted MCP mutation {} for document {:?}",
-                            auth.principal_id, payload.receipt_id, payload.document_id
-                        )),
-                        canonical_subjects,
-                    )
-                    .await;
-                    record_success_audit(
-                        auth,
-                        state,
-                        request_id,
-                        McpAuditActionKind::UpdateDocument,
-                        McpAuditScope {
-                            workspace_id: Some(payload.workspace_id),
-                            library_id: Some(payload.library_id),
-                            document_id: payload.document_id,
-                        },
-                        json!({
-                            "tool": "update_document",
-                            "operationKind": payload.operation_kind,
-                        }),
-                    )
-                    .await;
-                    ok_tool_result("Document mutation accepted.", json!(payload))
+            Ok(args) => {
+                match crate::services::mcp::mutations::update_document(auth, state, args.clone())
+                    .await
+                {
+                    Ok(payload) => {
+                        let canonical_subjects =
+                            build_mcp_mutation_subjects(state, std::slice::from_ref(&payload))
+                                .await;
+                        record_canonical_mcp_audit(
+                            state,
+                            auth,
+                            request_id,
+                            "agent.memory.update",
+                            "succeeded",
+                            Some(format!(
+                                "accepted MCP document {:?} mutation",
+                                payload.operation_kind
+                            )),
+                            Some(format!(
+                                "principal {} accepted MCP mutation {} for document {:?}",
+                                auth.principal_id, payload.receipt_id, payload.document_id
+                            )),
+                            canonical_subjects,
+                        )
+                        .await;
+                        record_success_audit(
+                            auth,
+                            state,
+                            request_id,
+                            McpAuditActionKind::UpdateDocument,
+                            McpAuditScope {
+                                workspace_id: Some(payload.workspace_id),
+                                library_id: Some(payload.library_id),
+                                document_id: payload.document_id,
+                            },
+                            json!({
+                                "tool": "update_document",
+                                "operationKind": payload.operation_kind,
+                            }),
+                        )
+                        .await;
+                        ok_tool_result("Document mutation accepted.", json!(payload))
+                    }
+                    Err(error) => {
+                        record_error_audit(
+                            auth,
+                            state,
+                            request_id,
+                            McpAuditActionKind::UpdateDocument,
+                            McpAuditScope {
+                                workspace_id: auth.workspace_id,
+                                library_id: Some(args.library_id),
+                                document_id: Some(args.document_id),
+                            },
+                            &error,
+                            json!({ "tool": "update_document" }),
+                        )
+                        .await;
+                        tool_error_result(error)
+                    }
                 }
-                Err(error) => {
-                    record_error_audit(
-                        auth,
-                        state,
-                        request_id,
-                        McpAuditActionKind::UpdateDocument,
-                        McpAuditScope {
-                            workspace_id: auth.workspace_id,
-                            library_id: Some(args.library_id),
-                            document_id: Some(args.document_id),
-                        },
-                        &error,
-                        json!({ "tool": "update_document" }),
-                    )
-                    .await;
-                    tool_error_result(error)
-                }
-            },
+            }
             Err(error) => {
                 record_error_audit(
                     auth,
@@ -1866,7 +1895,8 @@ async fn handle_tools_call(
         "delete_document" => match parse_tool_args::<McpDeleteDocumentRequest>(parsed.arguments) {
             Ok(args) => {
                 let document_id = args.document_id;
-                match mcp_access::delete_document(auth, state, document_id).await {
+                match crate::services::mcp::access::delete_document(auth, state, document_id).await
+                {
                     Ok(payload) => {
                         record_canonical_mcp_audit(
                             state,
@@ -1936,44 +1966,48 @@ async fn handle_tools_call(
         },
         "get_mutation_status" => {
             match parse_tool_args::<McpGetMutationStatusRequest>(parsed.arguments) {
-                Ok(args) => match mcp_mutations::get_mutation_status(auth, state, args).await {
-                    Ok(payload) => {
-                        record_success_audit(
-                            auth,
-                            state,
-                            request_id,
-                            McpAuditActionKind::GetMutationStatus,
-                            McpAuditScope {
-                                workspace_id: Some(payload.workspace_id),
-                                library_id: Some(payload.library_id),
-                                document_id: payload.document_id,
-                            },
-                            json!({
-                                "tool": "get_mutation_status",
-                                "status": payload.status,
-                            }),
-                        )
-                        .await;
-                        ok_tool_result("Mutation status loaded.", json!(payload))
+                Ok(args) => {
+                    match crate::services::mcp::mutations::get_mutation_status(auth, state, args)
+                        .await
+                    {
+                        Ok(payload) => {
+                            record_success_audit(
+                                auth,
+                                state,
+                                request_id,
+                                McpAuditActionKind::GetMutationStatus,
+                                McpAuditScope {
+                                    workspace_id: Some(payload.workspace_id),
+                                    library_id: Some(payload.library_id),
+                                    document_id: payload.document_id,
+                                },
+                                json!({
+                                    "tool": "get_mutation_status",
+                                    "status": payload.status,
+                                }),
+                            )
+                            .await;
+                            ok_tool_result("Mutation status loaded.", json!(payload))
+                        }
+                        Err(error) => {
+                            record_error_audit(
+                                auth,
+                                state,
+                                request_id,
+                                McpAuditActionKind::GetMutationStatus,
+                                McpAuditScope {
+                                    workspace_id: auth.workspace_id,
+                                    library_id: None,
+                                    document_id: None,
+                                },
+                                &error,
+                                json!({ "tool": "get_mutation_status" }),
+                            )
+                            .await;
+                            tool_error_result(error)
+                        }
                     }
-                    Err(error) => {
-                        record_error_audit(
-                            auth,
-                            state,
-                            request_id,
-                            McpAuditActionKind::GetMutationStatus,
-                            McpAuditScope {
-                                workspace_id: auth.workspace_id,
-                                library_id: None,
-                                document_id: None,
-                            },
-                            &error,
-                            json!({ "tool": "get_mutation_status" }),
-                        )
-                        .await;
-                        tool_error_result(error)
-                    }
-                },
+                }
                 Err(error) => {
                     record_error_audit(
                         auth,
@@ -1996,7 +2030,13 @@ async fn handle_tools_call(
         "get_runtime_execution" => {
             match parse_tool_args::<McpGetRuntimeExecutionRequest>(parsed.arguments) {
                 Ok(args) => {
-                    match mcp_access::get_runtime_execution(auth, state, args.execution_id).await {
+                    match crate::services::mcp::access::get_runtime_execution(
+                        auth,
+                        state,
+                        args.execution_id,
+                    )
+                    .await
+                    {
                         Ok(payload) => {
                             record_success_audit(
                                 auth,
@@ -2068,8 +2108,12 @@ async fn handle_tools_call(
         "get_runtime_execution_trace" => {
             match parse_tool_args::<McpGetRuntimeExecutionTraceRequest>(parsed.arguments) {
                 Ok(args) => {
-                    match mcp_access::get_runtime_execution_trace(auth, state, args.execution_id)
-                        .await
+                    match crate::services::mcp::access::get_runtime_execution_trace(
+                        auth,
+                        state,
+                        args.execution_id,
+                    )
+                    .await
                     {
                         Ok(payload) => {
                             record_success_audit(
@@ -2144,8 +2188,12 @@ async fn handle_tools_call(
         }
         "submit_web_ingest_run" => {
             match parse_tool_args::<McpSubmitWebIngestRunRequest>(parsed.arguments) {
-                Ok(args) => match mcp_mutations::submit_web_ingest_run(auth, state, args.clone())
-                    .await
+                Ok(args) => match crate::services::mcp::mutations::submit_web_ingest_run(
+                    auth,
+                    state,
+                    args.clone(),
+                )
+                .await
                 {
                     Ok(payload) => {
                         let canonical_subjects =
@@ -2225,7 +2273,13 @@ async fn handle_tools_call(
         "get_web_ingest_run" => {
             match parse_tool_args::<McpGetWebIngestRunRequest>(parsed.arguments) {
                 Ok(args) => {
-                    match mcp_mutations::get_web_ingest_run(auth, state, args.clone()).await {
+                    match crate::services::mcp::mutations::get_web_ingest_run(
+                        auth,
+                        state,
+                        args.clone(),
+                    )
+                    .await
+                    {
                         Ok(payload) => {
                             record_success_audit(
                                 auth,
@@ -2287,7 +2341,12 @@ async fn handle_tools_call(
         "list_web_ingest_run_pages" => {
             match parse_tool_args::<McpListWebIngestRunPagesRequest>(parsed.arguments) {
                 Ok(args) => {
-                    match mcp_mutations::list_web_ingest_run_pages(auth, state, args.clone()).await
+                    match crate::services::mcp::mutations::list_web_ingest_run_pages(
+                        auth,
+                        state,
+                        args.clone(),
+                    )
+                    .await
                     {
                         Ok(payload) => {
                             let scope = payload.first().map_or(
@@ -2360,8 +2419,12 @@ async fn handle_tools_call(
         }
         "cancel_web_ingest_run" => {
             match parse_tool_args::<McpCancelWebIngestRunRequest>(parsed.arguments) {
-                Ok(args) => match mcp_mutations::cancel_web_ingest_run(auth, state, args.clone())
-                    .await
+                Ok(args) => match crate::services::mcp::mutations::cancel_web_ingest_run(
+                    auth,
+                    state,
+                    args.clone(),
+                )
+                .await
                 {
                     Ok(payload) => {
                         let canonical_subjects =
@@ -2444,7 +2507,11 @@ async fn handle_tools_call(
             Ok(args) => {
                 let library_id = args.library_id;
                 let limit = args.limit.unwrap_or(20).clamp(1, 200);
-                match mcp_access::authorize_library_for_mcp(auth, state, library_id).await {
+                match crate::services::mcp::access::authorize_library_for_mcp(
+                    auth, state, library_id,
+                )
+                .await
+                {
                     Ok(()) => {
                         match state
                             .arango_search_store
@@ -2546,10 +2613,16 @@ async fn handle_tools_call(
             match parse_tool_args::<McpGetGraphTopologyRequest>(parsed.arguments) {
                 Ok(args) => {
                     let library_id = args.library_id;
-                    match mcp_access::authorize_library_for_mcp(auth, state, library_id).await {
+                    match crate::services::mcp::access::authorize_library_for_mcp(
+                        auth, state, library_id,
+                    )
+                    .await
+                    {
                         Ok(()) => {
-                            match mcp_access::get_graph_topology(state, library_id, args.limit)
-                                .await
+                            match crate::services::mcp::access::get_graph_topology(
+                                state, library_id, args.limit,
+                            )
+                            .await
                             {
                                 Ok(payload) => {
                                     record_canonical_mcp_audit(
@@ -2642,59 +2715,67 @@ async fn handle_tools_call(
             Ok(args) => {
                 let library_id = args.library_id;
                 let limit = args.limit.unwrap_or(100).clamp(1, 500);
-                match mcp_access::authorize_library_for_mcp(auth, state, library_id).await {
-                    Ok(()) => match mcp_access::list_relations(state, library_id, limit).await {
-                        Ok(payload) => {
-                            record_canonical_mcp_audit(
-                                state,
-                                auth,
-                                request_id,
-                                "agent.graph.list_relations",
-                                "succeeded",
-                                Some(format!("listed {} relation(s)", payload.len())),
-                                Some(format!(
-                                    "principal {} listed relations for library {}",
-                                    auth.principal_id, library_id
-                                )),
-                                Vec::new(),
-                            )
-                            .await;
-                            record_success_audit(
-                                auth,
-                                state,
-                                request_id,
-                                McpAuditActionKind::ListRelations,
-                                McpAuditScope {
-                                    workspace_id: auth.workspace_id,
-                                    library_id: Some(library_id),
-                                    document_id: None,
-                                },
-                                json!({
-                                    "tool": "list_relations",
-                                    "relationCount": payload.len(),
-                                }),
-                            )
-                            .await;
-                            ok_tool_result("Relations loaded.", json!({ "relations": payload }))
+                match crate::services::mcp::access::authorize_library_for_mcp(
+                    auth, state, library_id,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        match crate::services::mcp::access::list_relations(state, library_id, limit)
+                            .await
+                        {
+                            Ok(payload) => {
+                                record_canonical_mcp_audit(
+                                    state,
+                                    auth,
+                                    request_id,
+                                    "agent.graph.list_relations",
+                                    "succeeded",
+                                    Some(format!("listed {} relation(s)", payload.len())),
+                                    Some(format!(
+                                        "principal {} listed relations for library {}",
+                                        auth.principal_id, library_id
+                                    )),
+                                    Vec::new(),
+                                )
+                                .await;
+                                record_success_audit(
+                                    auth,
+                                    state,
+                                    request_id,
+                                    McpAuditActionKind::ListRelations,
+                                    McpAuditScope {
+                                        workspace_id: auth.workspace_id,
+                                        library_id: Some(library_id),
+                                        document_id: None,
+                                    },
+                                    json!({
+                                        "tool": "list_relations",
+                                        "relationCount": payload.len(),
+                                    }),
+                                )
+                                .await;
+                                ok_tool_result("Relations loaded.", json!({ "relations": payload }))
+                            }
+                            Err(error) => {
+                                record_error_audit(
+                                    auth,
+                                    state,
+                                    request_id,
+                                    McpAuditActionKind::ListRelations,
+                                    McpAuditScope {
+                                        workspace_id: auth.workspace_id,
+                                        library_id: Some(library_id),
+                                        document_id: None,
+                                    },
+                                    &error,
+                                    json!({ "tool": "list_relations" }),
+                                )
+                                .await;
+                                tool_error_result(error)
+                            }
                         }
-                        Err(error) => {
-                            record_error_audit(
-                                auth,
-                                state,
-                                request_id,
-                                McpAuditActionKind::ListRelations,
-                                McpAuditScope {
-                                    workspace_id: auth.workspace_id,
-                                    library_id: Some(library_id),
-                                    document_id: None,
-                                },
-                                &error,
-                                json!({ "tool": "list_relations" }),
-                            )
-                            .await;
-                            tool_error_result(error)
-                        }
-                    },
+                    }
                     Err(error) => {
                         record_error_audit(
                             auth,
@@ -2736,8 +2817,16 @@ async fn handle_tools_call(
             Ok(args) => {
                 let library_id = args.library_id;
                 let limit = args.limit.unwrap_or(50).clamp(1, 500);
-                match mcp_access::authorize_library_for_mcp(auth, state, library_id).await {
-                    Ok(()) => match mcp_access::get_communities(state, library_id, limit).await {
+                match crate::services::mcp::access::authorize_library_for_mcp(
+                    auth, state, library_id,
+                )
+                .await
+                {
+                    Ok(()) => match crate::services::mcp::access::get_communities(
+                        state, library_id, limit,
+                    )
+                    .await
+                    {
                         Ok(payload) => {
                             record_success_audit(
                                 auth,
@@ -2831,7 +2920,7 @@ async fn record_canonical_mcp_audit(
     internal_message: Option<String>,
     subjects: Vec<AppendAuditEventSubjectCommand>,
 ) {
-    let _ = state
+    if let Err(error) = state
         .canonical_services
         .audit
         .append_event(
@@ -2848,7 +2937,10 @@ async fn record_canonical_mcp_audit(
                 subjects,
             },
         )
-        .await;
+        .await
+    {
+        tracing::warn!(stage = "audit", error = %error, "audit append failed");
+    }
 }
 
 #[allow(clippy::unused_async)]

@@ -33,3 +33,7 @@ __pycache__/
 
 # SQLx
 .sqlx
+
+# Local tool cache
+.tools/bin/**
+.tools/tmp/**

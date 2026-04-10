@@ -264,10 +264,6 @@ impl BootstrapStackFixture {
         settings.database_url = temp_database.database_url.clone();
         settings.arangodb_database = temp_arango.name.clone();
         settings.destructive_fresh_bootstrap_required = true;
-        settings.destructive_allow_legacy_startup_side_effects = false;
-        settings.legacy_ui_bootstrap_enabled = false;
-        settings.legacy_bootstrap_token_endpoint_enabled = false;
-        settings.bootstrap_claim_enabled = true;
 
         let state = AppState::new(settings).await?;
         Ok(Self { state, temp_database, temp_arango })

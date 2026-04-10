@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./docs/assets/ironrag-logo.svg" alt="IronRAG logo" width="180">
+</p>
+
 # RustRAG
 
 ### Система знаний для документов, внутренних ботов и AI-агентов
@@ -8,11 +12,11 @@
 
 ## Архитектура
 
-Снаружи один порт на **nginx**. `/` — SPA (**React + Vite**); `/v1/*` — **Rust/Axum** backend (**REST + MCP**). **Worker** — тот же образ, роль потребителя очереди.
+Снаружи один порт на **web**. Фронтенд-контейнер отдает SPA (**React + Vite**) и проксирует `/v1/*` в **Rust/Axum** API. Тот же backend-образ используется как **worker** и как отдельная one-shot роль **startup**, которая выполняет миграции, Arango bootstrap и инициализацию storage. `s4core` опционален и используется только в S3 compose/Helm профилях.
 
 ```text
                          ┌─────────────────────────┐
-                         │   nginx (edge proxy)    │
+                         │    web (SPA + /v1)      │
                          └───────────┬─────────────┘
                ┌─────────────────────┴─────────────────────┐
         GET /* (SPA)                                 /v1/* (API + MCP)
@@ -25,9 +29,11 @@
                   │  ArangoDB   │                  │   Postgres    │    │    Redis      │
                   │ graph+vector│                  │ IAM + control │    │ worker queue  │
                   └─────────────┘                  └───────────────┘    └───────┬───────┘
-                                                                        ┌───────▼───────┐
-                                                                        │    worker     │
-                                                                        └───────────────┘
+                                           ┌────────────────────────────┴───────┬───────────────┐
+                                           │                                    │               │
+                                     ┌─────▼─────┐                        ┌─────▼─────┐   ┌────▼────┐
+                                     │  startup  │                        │  worker   │   │ s4core  │
+                                     └───────────┘                        └───────────┘   └─────────┘
 ```
 
 ## Пайплайн
@@ -40,9 +46,9 @@
   → scoring качества → гибридный индекс (BM25 + vector) → UI + MCP + API
 ```
 
-## Быстрый старт
+## Деплой
 
-Нужен Docker с Compose v2.
+Нужен Docker с Compose v2 или Kubernetes с Helm.
 
 ```bash
 # Установка без клона репозитория
@@ -50,13 +56,58 @@ curl -fsSL https://raw.githubusercontent.com/mlimarenko/RustRAG/master/install.s
 
 # Или из клонированного репозитория
 cp .env.example .env
-docker compose up -d          # готовые образы
-# docker compose -f docker-compose-local.yml up --build -d  # сборка из исходников
+docker compose up -d
 ```
 
-После старта: [http://127.0.0.1:19000](http://127.0.0.1:19000). При первом входе — bootstrap: логин и пароль задаёте вы.
+Compose-профили:
 
-Другой порт: `RUSTRAG_PORT=8080 docker compose up -d`
+- `docker-compose.yml` — bundled Postgres/Redis/ArangoDB + filesystem storage
+- `docker-compose-s4.yml` — bundled Postgres/Redis/ArangoDB + bundled `s4core` + S3 storage
+- `docker-compose-local.yml` — локальная сборка из исходников
+
+Примеры:
+
+```bash
+docker compose up -d
+docker compose -f docker-compose-s4.yml up -d
+docker compose -f docker-compose-local.yml up --build -d
+```
+
+UI по умолчанию: [http://127.0.0.1:19000](http://127.0.0.1:19000)
+
+Helm:
+
+```bash
+OPENAI_API_KEY=... \
+helm upgrade --install rustrag charts/rustrag \
+  --namespace rustrag \
+  --create-namespace \
+  --values charts/rustrag/values/examples/bundled-s3.yaml \
+  --set-string app.frontendOrigin=https://rustrag.example.com \
+  --set-string app.providerSecrets.openaiApiKey="${OPENAI_API_KEY}" \
+  --wait \
+  --wait-for-jobs \
+  --timeout 20m
+```
+
+Внешние зависимости:
+
+```bash
+helm upgrade --install rustrag charts/rustrag \
+  --namespace rustrag \
+  --create-namespace \
+  --values charts/rustrag/values/examples/external-services.yaml
+```
+
+Профили chart:
+
+- `bundled-s3.yaml` — bundled Postgres/Redis/ArangoDB + bundled `s4core`
+- `external-services.yaml` — внешние Postgres/Redis/ArangoDB/S3
+- `filesystem-single-node.yaml` — только single-node режим с filesystem
+
+Minikube используется только для локальной проверки chart, а не как профиль деплоя.
+
+Полный справочник runtime-конфигурации: [apps/api/.env.example](./apps/api/.env.example)
 
 ## Возможности
 
@@ -93,8 +144,8 @@ docker compose up -d          # готовые образы
 | Граф и векторы | ArangoDB 3.12 |
 | Control plane | PostgreSQL 18 |
 | Очередь | Redis 8 |
-| Прокси | nginx 1.28 |
-| Деплой | Docker Compose, Ansible |
+| Edge / SPA | nginx 1.28 внутри `web` |
+| Деплой | Helm, Docker Compose, Ansible |
 
 ## Конфигурация
 
@@ -133,7 +184,8 @@ make benchmark-golden          # golden dataset
 - [ ] Контекст диалога в многоходовых запросах
 - [ ] Инкрементальная переобработка (diff-aware ingest)
 - [ ] Экспорт и импорт библиотек
-- [ ] Ollama и локальные модели
+- [x] Ollama и локальные модели
+  Проверено на живом Ollama с моделью `qwen3:4b`; отдельно проверен сценарий недоступной модели `qwen3:0.6b`.
 - [ ] Коннекторы Confluence, Notion, Google Drive
 
 ## Contributing

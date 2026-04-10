@@ -819,7 +819,7 @@ pub async fn list_resolved_grants_by_principal(
          left join ai_provider_credential credential
            on grant_row.resource_kind = 'provider_credential'
           and credential.id = grant_row.resource_id
-         left join ai_library_model_binding binding
+         left join ai_binding_assignment binding
            on grant_row.resource_kind = 'library_binding'
           and binding.id = grant_row.resource_id
          where grant_row.principal_id = $1

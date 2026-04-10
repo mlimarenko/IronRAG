@@ -4,7 +4,7 @@ use crate::{
         RuntimeOutputMode, RuntimeRecoveryPolicy, RuntimeStageKind, RuntimeSurfaceKind,
         RuntimeTaskKind,
     },
-    services::technical_fact_service::{
+    services::ingest::technical_facts::{
         ExtractTechnicalFactsCommand, ExtractTechnicalFactsResult, TechnicalFactExtractionFailure,
     },
 };

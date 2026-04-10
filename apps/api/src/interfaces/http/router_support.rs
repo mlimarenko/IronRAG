@@ -16,7 +16,7 @@ use crate::{
         RuntimeActionRecord, RuntimeExecution, RuntimePolicyDecision, RuntimeStageRecord,
     },
     infra::repositories::runtime_repository,
-    shared::file_extract::{UploadAdmissionError, UploadRejectionDetails},
+    shared::extraction::file_extract::{UploadAdmissionError, UploadRejectionDetails},
 };
 
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
@@ -560,7 +560,7 @@ mod tests {
         map_runtime_lifecycle_error_message, map_runtime_upload_error, map_workspace_create_error,
         query_intent_degradation_warning, rerank_failure_warning,
     };
-    use crate::shared::file_extract::UploadAdmissionError;
+    use crate::shared::extraction::file_extract::UploadAdmissionError;
 
     #[derive(Debug)]
     struct FakeDatabaseError {

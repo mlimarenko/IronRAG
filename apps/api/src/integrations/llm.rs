@@ -6,7 +6,7 @@ use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-use crate::app::config::Settings;
+use crate::{app::config::Settings, shared::provider_base_url::resolve_runtime_provider_base_url};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatRequest {
@@ -202,7 +202,9 @@ struct OpenAiCompatibleChatCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     top_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    max_output_tokens: Option<i32>,
+    max_completion_tokens: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -215,7 +217,7 @@ struct OpenAiCompatibleChatCompletionRequest {
 
 struct OpenAiCompatibleRequest<'a> {
     provider_kind: &'a str,
-    api_key: &'a str,
+    api_key: Option<&'a str>,
     base_url: &'a str,
     model_name: &'a str,
     messages: Vec<OpenAiCompatibleMessage>,
@@ -241,12 +243,15 @@ impl OpenAiCompatibleRequest<'_> {
             });
         }
         request_messages.extend(self.messages.clone());
+        let (max_completion_tokens, max_tokens) =
+            openai_compatible_token_limit_fields(self.provider_kind, self.max_output_tokens);
         let payload = OpenAiCompatibleChatCompletionRequest {
             model: self.model_name.to_string(),
             messages: request_messages,
             temperature: self.temperature,
             top_p: self.top_p,
-            max_output_tokens: self.max_output_tokens,
+            max_completion_tokens,
+            max_tokens,
             response_format: self.response_format.cloned(),
             stream: self.stream.then_some(true),
             stream_options: self.stream.then(|| serde_json::json!({ "include_usage": true })),
@@ -257,6 +262,16 @@ impl OpenAiCompatibleRequest<'_> {
         serde_json::from_slice::<serde_json::Value>(&body)
             .context("serialized provider request body was not valid json")?;
         Ok(body)
+    }
+}
+
+fn openai_compatible_token_limit_fields(
+    provider_kind: &str,
+    max_output_tokens: Option<i32>,
+) -> (Option<i32>, Option<i32>) {
+    match provider_kind {
+        "openai" => (max_output_tokens, None),
+        _ => (None, max_output_tokens),
     }
 }
 
@@ -286,16 +301,17 @@ impl UnifiedGateway {
 
         let mut last_error = None;
         for attempt in 1..=max_attempts {
-            let response = match self
+            let request_builder = self
                 .client
                 .post(format!("{}/chat/completions", request.base_url))
-                .bearer_auth(request.api_key)
                 .header(CONTENT_TYPE, "application/json")
-                .header(ACCEPT, "application/json")
-                .body(request_body.clone())
-                .send()
-                .await
-            {
+                .header(ACCEPT, "application/json");
+            let request_builder = if let Some(api_key) = request.api_key {
+                request_builder.bearer_auth(api_key)
+            } else {
+                request_builder
+            };
+            let response = match request_builder.body(request_body.clone()).send().await {
                 Ok(response) => response,
                 Err(error) => {
                     if attempt < max_attempts && is_retryable_transport_error(&error) {
@@ -383,16 +399,17 @@ impl UnifiedGateway {
 
         let mut last_error = None;
         for attempt in 1..=max_attempts {
-            let response = match self
+            let request_builder = self
                 .client
                 .post(format!("{}/chat/completions", request.base_url))
-                .bearer_auth(request.api_key)
                 .header(CONTENT_TYPE, "application/json")
-                .header(ACCEPT, "text/event-stream")
-                .body(request_body.clone())
-                .send()
-                .await
-            {
+                .header(ACCEPT, "text/event-stream");
+            let request_builder = if let Some(api_key) = request.api_key {
+                request_builder.bearer_auth(api_key)
+            } else {
+                request_builder
+            };
+            let response = match request_builder.body(request_body.clone()).send().await {
                 Ok(response) => response,
                 Err(error) => {
                     if attempt < max_attempts && is_retryable_transport_error(&error) {
@@ -535,29 +552,51 @@ impl UnifiedGateway {
         provider_kind: &str,
         api_key_override: Option<&str>,
         base_url_override: Option<&str>,
-    ) -> Result<(String, String)> {
+    ) -> Result<(Option<String>, String)> {
         let api_key = api_key_override
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| anyhow!("missing provider API key"))?
-            .to_string();
+            .map(std::string::ToString::to_string);
         match provider_kind {
+            "ollama" => Ok((
+                api_key,
+                resolve_runtime_provider_base_url(
+                    provider_kind,
+                    base_url_override.ok_or_else(|| anyhow!("missing provider base URL"))?,
+                ),
+            )),
             "openai" => {
-                Ok((api_key, base_url_override.unwrap_or("https://api.openai.com/v1").to_string()))
+                let api_key = api_key.ok_or_else(|| anyhow!("missing provider API key"))?;
+                Ok((
+                    Some(api_key),
+                    resolve_runtime_provider_base_url(
+                        provider_kind,
+                        base_url_override.unwrap_or("https://api.openai.com/v1"),
+                    ),
+                ))
             }
             "deepseek" => {
-                Ok((api_key, base_url_override.unwrap_or("https://api.deepseek.com").to_string()))
+                let api_key = api_key.ok_or_else(|| anyhow!("missing provider API key"))?;
+                Ok((
+                    Some(api_key),
+                    resolve_runtime_provider_base_url(
+                        provider_kind,
+                        base_url_override.unwrap_or("https://api.deepseek.com"),
+                    ),
+                ))
             }
             "qwen" => Ok((
-                api_key,
-                base_url_override
-                    .unwrap_or("https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
-                    .to_string(),
+                Some(api_key.ok_or_else(|| anyhow!("missing provider API key"))?),
+                resolve_runtime_provider_base_url(
+                    provider_kind,
+                    base_url_override
+                        .unwrap_or("https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
+                ),
             )),
             // Any OpenAI-compatible provider (Ollama, vLLM, llama.cpp, LM Studio, etc.)
             // works when a custom base URL is configured.
             _ => match base_url_override {
-                Some(url) => Ok((api_key, url.to_string())),
+                Some(url) => Ok((api_key, resolve_runtime_provider_base_url(provider_kind, url))),
                 None => Err(anyhow!(
                     "unsupported provider kind without base_url_override: {provider_kind}"
                 )),
@@ -577,7 +616,7 @@ impl LlmGateway for UnifiedGateway {
         let (output_text, usage_json) = self
             .call_openai_compatible(OpenAiCompatibleRequest {
                 provider_kind: &request.provider_kind,
-                api_key: api_key.as_str(),
+                api_key: api_key.as_deref(),
                 base_url: base_url.as_str(),
                 model_name: &request.model_name,
                 messages: vec![OpenAiCompatibleMessage {
@@ -615,7 +654,7 @@ impl LlmGateway for UnifiedGateway {
             .call_openai_compatible_stream(
                 OpenAiCompatibleRequest {
                     provider_kind: &request.provider_kind,
-                    api_key: api_key.as_str(),
+                    api_key: api_key.as_deref(),
                     base_url: base_url.as_str(),
                     model_name: &request.model_name,
                     messages: vec![OpenAiCompatibleMessage {
@@ -648,10 +687,13 @@ impl LlmGateway for UnifiedGateway {
             request.base_url_override.as_deref(),
         )?;
 
-        let response = self
-            .client
-            .post(format!("{base_url}/embeddings"))
-            .bearer_auth(api_key)
+        let request_builder = self.client.post(format!("{base_url}/embeddings"));
+        let request_builder = if let Some(api_key) = api_key.as_deref() {
+            request_builder.bearer_auth(api_key)
+        } else {
+            request_builder
+        };
+        let response = request_builder
             .json(&serde_json::json!({
                 "model": request.model_name,
                 "input": request.input,
@@ -723,10 +765,13 @@ impl LlmGateway for UnifiedGateway {
             request.api_key_override.as_deref(),
             request.base_url_override.as_deref(),
         )?;
-        let response = self
-            .client
-            .post(format!("{base_url}/embeddings"))
-            .bearer_auth(api_key)
+        let request_builder = self.client.post(format!("{base_url}/embeddings"));
+        let request_builder = if let Some(api_key) = api_key.as_deref() {
+            request_builder.bearer_auth(api_key)
+        } else {
+            request_builder
+        };
+        let response = request_builder
             .json(&serde_json::json!({
                 "model": request.model_name,
                 "input": request.inputs,
@@ -784,7 +829,7 @@ impl LlmGateway for UnifiedGateway {
         let (output_text, usage_json) = self
             .call_openai_compatible(OpenAiCompatibleRequest {
                 provider_kind: &request.provider_kind,
-                api_key: api_key.as_str(),
+                api_key: api_key.as_deref(),
                 base_url: base_url.as_str(),
                 model_name: &request.model_name,
                 messages: vec![OpenAiCompatibleMessage {
@@ -1023,7 +1068,7 @@ fn retryable_openai_parse_failure_error(
 mod tests {
     use super::{
         OpenAiCompatibleMessage, OpenAiCompatibleMessageContent, OpenAiCompatibleRequest,
-        consume_openai_compatible_stream_frame, extract_message_content_text,
+        UnifiedGateway, consume_openai_compatible_stream_frame, extract_message_content_text,
         is_retryable_transport_error_text, is_retryable_upstream_json_parse_failure,
         is_retryable_upstream_status, transport_retry_delay,
     };
@@ -1048,7 +1093,7 @@ mod tests {
     fn serializes_openai_compatible_chat_request_as_valid_json() {
         let body = OpenAiCompatibleRequest {
             provider_kind: "openai",
-            api_key: "test",
+            api_key: Some("test"),
             base_url: "https://api.openai.com/v1",
             model_name: "gpt-5.4-mini",
             messages: vec![OpenAiCompatibleMessage {
@@ -1083,7 +1128,7 @@ mod tests {
     fn serializes_response_format_when_schema_is_requested() {
         let body = OpenAiCompatibleRequest {
             provider_kind: "openai",
-            api_key: "test",
+            api_key: Some("test"),
             base_url: "https://api.openai.com/v1",
             model_name: "gpt-5.4-mini",
             messages: vec![OpenAiCompatibleMessage {
@@ -1116,6 +1161,72 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("json_schema"),
         );
+    }
+
+    #[test]
+    fn serializes_openai_token_limit_as_max_completion_tokens() {
+        let body = OpenAiCompatibleRequest {
+            provider_kind: "openai",
+            api_key: Some("test"),
+            base_url: "https://api.openai.com/v1",
+            model_name: "gpt-5.4-mini",
+            messages: vec![OpenAiCompatibleMessage {
+                role: "user".to_string(),
+                content: OpenAiCompatibleMessageContent::Text("hello".to_string()),
+            }],
+            system_prompt: None,
+            temperature: None,
+            top_p: None,
+            max_output_tokens: Some(16),
+            response_format: None,
+            extra_parameters_json: &serde_json::json!({}),
+            stream: false,
+        }
+        .body()
+        .expect("request body should serialize");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("serialized body should stay valid json");
+        assert_eq!(
+            value.get("max_completion_tokens").and_then(serde_json::Value::as_i64),
+            Some(16),
+        );
+        assert!(value.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn serializes_non_openai_token_limit_as_max_tokens() {
+        let body = OpenAiCompatibleRequest {
+            provider_kind: "deepseek",
+            api_key: Some("test"),
+            base_url: "https://example.invalid/v1",
+            model_name: "deepseek-chat",
+            messages: vec![OpenAiCompatibleMessage {
+                role: "user".to_string(),
+                content: OpenAiCompatibleMessageContent::Text("hello".to_string()),
+            }],
+            system_prompt: None,
+            temperature: None,
+            top_p: None,
+            max_output_tokens: Some(16),
+            response_format: None,
+            extra_parameters_json: &serde_json::json!({}),
+            stream: false,
+        }
+        .body()
+        .expect("request body should serialize");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("serialized body should stay valid json");
+        assert_eq!(value.get("max_tokens").and_then(serde_json::Value::as_i64), Some(16),);
+        assert!(value.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn allows_ollama_provider_without_api_key() {
+        let (api_key, base_url) =
+            UnifiedGateway::resolve_provider("ollama", None, Some("http://localhost:11434/v1"))
+                .expect("ollama should resolve without token");
+        assert!(api_key.is_none());
+        assert_eq!(base_url, "http://localhost:11434/v1");
     }
 
     #[test]

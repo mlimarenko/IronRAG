@@ -5,6 +5,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppProvider, useApp } from "@/contexts/AppContext";
 import { AppShell } from "@/components/AppShell";
+import { useTranslation } from "react-i18next";
 import LoginPage from "@/pages/LoginPage";
 import DashboardPage from "@/pages/DashboardPage";
 import DocumentsPage from "@/pages/DocumentsPage";
@@ -17,8 +18,11 @@ import NotFoundPage from "@/pages/NotFoundPage";
 const queryClient = new QueryClient();
 
 function AuthenticatedRoutes() {
+  const { t } = useTranslation();
   const { isAuthenticated, isLoading } = useApp();
-  if (isLoading) return <div className="flex items-center justify-center h-screen">Loading...</div>;
+  if (isLoading) {
+    return <div className="flex items-center justify-center h-screen">{t("common.loading")}</div>;
+  }
   if (!isAuthenticated) return <Navigate to="/login" replace />;
   return (
     <AppShell>

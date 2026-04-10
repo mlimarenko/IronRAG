@@ -2,7 +2,8 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
+use async_trait::async_trait;
 use axum::{
     Router,
     body::Body,
@@ -26,13 +27,16 @@ use rustrag_backend::{
         persistence::{Persistence, canonical_ai_catalog_seeded, canonical_baseline_present},
         repositories::catalog_repository,
     },
+    integrations::llm::{
+        ChatRequest, ChatResponse, EmbeddingBatchRequest, EmbeddingBatchResponse, EmbeddingRequest,
+        EmbeddingResponse, LlmGateway, VisionRequest, VisionResponse,
+    },
     interfaces::http::router,
 };
 
 const SEEDED_PROVIDER_COUNT: i64 = 3;
 const SEEDED_MODEL_COUNT: i64 = 40;
 const SEEDED_PRICE_COUNT: i64 = 118;
-const TEST_BOOTSTRAP_SECRET: &str = "greenfield-bootstrap-secret";
 
 struct TempDatabase {
     name: String,
@@ -89,6 +93,36 @@ struct GreenfieldBootstrapFixture {
     temp_database: TempDatabase,
 }
 
+#[derive(Clone, Default)]
+struct FakeBootstrapGateway;
+
+#[async_trait]
+impl LlmGateway for FakeBootstrapGateway {
+    async fn generate(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        Ok(ChatResponse {
+            provider_kind: request.provider_kind,
+            model_name: request.model_name,
+            output_text: "OK".to_string(),
+            usage_json: json!({}),
+        })
+    }
+
+    async fn embed(&self, request: EmbeddingRequest) -> anyhow::Result<EmbeddingResponse> {
+        Err(anyhow!("embed not used in bootstrap test: {}", request.provider_kind))
+    }
+
+    async fn embed_many(
+        &self,
+        request: EmbeddingBatchRequest,
+    ) -> anyhow::Result<EmbeddingBatchResponse> {
+        Err(anyhow!("embed_many not used in bootstrap test: {}", request.provider_kind))
+    }
+
+    async fn vision_extract(&self, request: VisionRequest) -> anyhow::Result<VisionResponse> {
+        Err(anyhow!("vision_extract not used in bootstrap test: {}", request.provider_kind))
+    }
+}
+
 impl GreenfieldBootstrapFixture {
     async fn create() -> Result<Self> {
         Self::create_with_ui_bootstrap_ai_setup(None).await
@@ -101,12 +135,7 @@ impl GreenfieldBootstrapFixture {
             .context("failed to load settings for greenfield bootstrap test")?;
         let temp_database = TempDatabase::create(&settings.database_url).await?;
         settings.database_url = temp_database.database_url.clone();
-        settings.bootstrap_token = Some(TEST_BOOTSTRAP_SECRET.to_string());
-        settings.bootstrap_claim_enabled = true;
-        settings.legacy_ui_bootstrap_enabled = false;
-        settings.legacy_bootstrap_token_endpoint_enabled = false;
         settings.destructive_fresh_bootstrap_required = true;
-        settings.destructive_allow_legacy_startup_side_effects = false;
 
         let postgres = PgPoolOptions::new()
             .max_connections(4)
@@ -152,26 +181,27 @@ fn build_test_state(
     let mut state = AppState::from_dependencies(
         Settings {
             ui_bootstrap_admin_login: bootstrap_settings
-                .legacy_ui_bootstrap_admin
+                .ui_bootstrap_admin
                 .as_ref()
                 .map(|admin| admin.login.clone()),
             ui_bootstrap_admin_email: bootstrap_settings
-                .legacy_ui_bootstrap_admin
+                .ui_bootstrap_admin
                 .as_ref()
                 .map(|admin| admin.email.clone()),
             ui_bootstrap_admin_name: bootstrap_settings
-                .legacy_ui_bootstrap_admin
+                .ui_bootstrap_admin
                 .as_ref()
                 .map(|admin| admin.display_name.clone()),
             ui_bootstrap_admin_password: bootstrap_settings
-                .legacy_ui_bootstrap_admin
+                .ui_bootstrap_admin
                 .as_ref()
                 .map(|admin| admin.password.clone()),
             ..settings
         },
         persistence,
         arango_client,
-    );
+    )?;
+    state.llm_gateway = Arc::new(FakeBootstrapGateway);
     state.ui_bootstrap_ai_setup = ui_bootstrap_ai_setup;
     Ok(state)
 }
@@ -312,72 +342,6 @@ async fn fresh_bootstrap_migration_creates_canonical_schema_and_seeded_catalog()
         assert!(!table_exists(fixture.pool(), "workspace").await?);
         assert!(!table_exists(fixture.pool(), "project").await?);
         assert!(!table_exists(fixture.pool(), "mcp_audit_event").await?);
-        Ok(())
-    }
-    .await;
-
-    fixture.cleanup().await?;
-    result
-}
-
-#[tokio::test]
-#[ignore = "requires local postgres service"]
-async fn bootstrap_claim_route_succeeds_once_and_records_audit_event() -> Result<()> {
-    let fixture = GreenfieldBootstrapFixture::create().await?;
-
-    let result = async {
-        let payload = json!({
-            "bootstrapSecret": TEST_BOOTSTRAP_SECRET,
-            "email": "founder@example.local",
-            "displayName": "Founder",
-            "password": "super-secret-password",
-        });
-
-        let first_response = fixture
-            .app()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/iam/bootstrap/claim")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(payload.to_string()))
-                    .expect("build first bootstrap claim request"),
-            )
-            .await
-            .context("first bootstrap claim route failed")?;
-        assert_eq!(first_response.status(), StatusCode::OK);
-        let first_body = response_json(first_response).await?;
-        assert_eq!(first_body["email"], "founder@example.local");
-        assert_eq!(first_body["displayName"], "Founder");
-
-        let second_response = fixture
-            .app()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/iam/bootstrap/claim")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(payload.to_string()))
-                    .expect("build second bootstrap claim request"),
-            )
-            .await
-            .context("second bootstrap claim route failed")?;
-        assert_eq!(second_response.status(), StatusCode::CONFLICT);
-        let second_body = response_json(second_response).await?;
-        assert_eq!(second_body["errorKind"], "bootstrap_already_claimed");
-
-        assert_eq!(scalar_count(fixture.pool(), "iam_principal").await?, 1);
-        assert_eq!(scalar_count(fixture.pool(), "iam_user").await?, 1);
-        assert_eq!(scalar_count(fixture.pool(), "audit_event").await?, 1);
-        assert_eq!(scalar_count(fixture.pool(), "audit_event_subject").await?, 1);
-
-        let action_kind =
-            sqlx::query_scalar::<_, String>("select action_kind from audit_event limit 1")
-                .fetch_one(fixture.pool())
-                .await
-                .context("failed to read bootstrap audit action")?;
-        assert_eq!(action_kind, "iam.bootstrap.claim");
-
         Ok(())
     }
     .await;
@@ -532,74 +496,62 @@ async fn bootstrap_setup_route_uses_env_backed_openai_defaults() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires local postgres service"]
-async fn bootstrap_setup_route_accepts_interactive_ai_payload_with_env_backed_defaults()
--> Result<()> {
-    let fixture =
-        GreenfieldBootstrapFixture::create_with_ui_bootstrap_ai_setup(Some(UiBootstrapAiSetup {
-            provider_secrets: vec![
-                UiBootstrapAiProviderSecret {
-                    provider_kind: "deepseek".to_string(),
-                    api_key: "test-deepseek-bootstrap-token".to_string(),
-                },
-                UiBootstrapAiProviderSecret {
-                    provider_kind: "openai".to_string(),
-                    api_key: "test-openai-bootstrap-token".to_string(),
-                },
-            ],
-            binding_defaults: vec![
-                rustrag_backend::app::config::UiBootstrapAiBindingDefault {
-                    binding_purpose: "extract_graph".to_string(),
-                    provider_kind: Some("deepseek".to_string()),
-                    model_name: Some("deepseek-chat".to_string()),
-                },
-                rustrag_backend::app::config::UiBootstrapAiBindingDefault {
-                    binding_purpose: "embed_chunk".to_string(),
-                    provider_kind: Some("openai".to_string()),
-                    model_name: Some("text-embedding-3-large".to_string()),
-                },
-                rustrag_backend::app::config::UiBootstrapAiBindingDefault {
-                    binding_purpose: "query_answer".to_string(),
-                    provider_kind: Some("openai".to_string()),
-                    model_name: Some("gpt-5.4".to_string()),
-                },
-                rustrag_backend::app::config::UiBootstrapAiBindingDefault {
-                    binding_purpose: "vision".to_string(),
-                    provider_kind: Some("openai".to_string()),
-                    model_name: Some("gpt-5.4-mini".to_string()),
-                },
-            ],
-        }))
-        .await?;
+async fn bootstrap_setup_route_accepts_provider_bundle_payload() -> Result<()> {
+    let fixture = GreenfieldBootstrapFixture::create().await?;
 
     let result = async {
+        let status_response = fixture
+            .app()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/iam/bootstrap/status")
+                    .body(Body::empty())
+                    .expect("build bootstrap status request"),
+            )
+            .await
+            .context("bootstrap status request failed")?;
+        assert_eq!(status_response.status(), StatusCode::OK);
+        let status_body = response_json(status_response).await?;
+        assert_eq!(status_body["setupRequired"], true);
+        assert!(status_body["aiSetup"]["presetBundles"].is_array());
+        assert!(
+            status_body["aiSetup"]["presetBundles"]
+                .as_array()
+                .expect("preset bundles array")
+                .iter()
+                .any(|bundle| {
+                    bundle["providerKind"] == "openai"
+                        && bundle["apiKeyRequired"] == true
+                        && bundle["baseUrlRequired"] == false
+                        && bundle["presets"].as_array().expect("provider presets array").iter().any(
+                            |preset| {
+                                preset["bindingPurpose"] == "extract_graph"
+                                    && preset["modelName"] == "gpt-5.4-nano"
+                            },
+                        )
+                })
+        );
+        assert!(
+            status_body["aiSetup"]["presetBundles"]
+                .as_array()
+                .expect("preset bundles array")
+                .iter()
+                .any(|bundle| {
+                    bundle["providerKind"] == "ollama"
+                        && bundle["apiKeyRequired"] == false
+                        && bundle["baseUrlRequired"] == true
+                        && bundle["defaultBaseUrl"] == "http://localhost:11434/v1"
+                })
+        );
+
         let payload = json!({
             "login": "admin",
             "displayName": "Admin",
             "password": "super-secret-password",
             "aiSetup": {
-                "credentials": [],
-                "bindingSelections": [
-                    {
-                        "bindingPurpose": "extract_graph",
-                        "providerKind": "deepseek",
-                        "modelCatalogId": "00000000-0000-0000-0000-000000000204"
-                    },
-                    {
-                        "bindingPurpose": "embed_chunk",
-                        "providerKind": "openai",
-                        "modelCatalogId": "00000000-0000-0000-0000-000000000202"
-                    },
-                    {
-                        "bindingPurpose": "query_answer",
-                        "providerKind": "openai",
-                        "modelCatalogId": "00000000-0000-0000-0000-000000000203"
-                    },
-                    {
-                        "bindingPurpose": "vision",
-                        "providerKind": "openai",
-                        "modelCatalogId": "00000000-0000-0000-0000-000000000201"
-                    }
-                ]
+                "providerKind": "openai",
+                "apiKey": "test-openai-bootstrap-token"
             }
         });
 
@@ -614,7 +566,7 @@ async fn bootstrap_setup_route_accepts_interactive_ai_payload_with_env_backed_de
                     .expect("build interactive env-backed bootstrap setup request"),
             )
             .await
-            .context("interactive env-backed bootstrap setup request failed")?;
+            .context("provider bundle bootstrap setup request failed")?;
         assert_eq!(response.status(), StatusCode::OK);
         assert!(response.headers().contains_key(header::SET_COOKIE));
 
@@ -633,9 +585,22 @@ async fn bootstrap_setup_route_accepts_interactive_ai_payload_with_env_backed_de
         assert_eq!(status_body["setupRequired"], false);
 
         assert_eq!(scalar_count(fixture.pool(), "iam_user").await?, 1);
-        assert_eq!(scalar_count(fixture.pool(), "ai_provider_credential").await?, 2);
+        assert_eq!(scalar_count(fixture.pool(), "ai_provider_credential").await?, 1);
         assert_eq!(scalar_count(fixture.pool(), "ai_model_preset").await?, 4);
         assert_eq!(scalar_count(fixture.pool(), "ai_library_model_binding").await?, 4);
+
+        let binding_models = sqlx::query_scalar::<_, String>(
+            "select amc.model_name
+             from ai_library_model_binding almb
+             join ai_model_preset amp on amp.id = almb.model_preset_id
+             join ai_model_catalog amc on amc.id = amp.model_catalog_id
+             where almb.binding_purpose = 'extract_graph'",
+        )
+        .fetch_one(fixture.pool())
+        .await
+        .context("failed to load extract_graph bootstrap model")?;
+        assert_eq!(binding_models, "gpt-5.4-nano");
+
         Ok(())
     }
     .await;

@@ -36,18 +36,15 @@ pub struct Persistence {
 }
 
 impl Persistence {
-    /// Connects to Postgres and Redis, verifies Redis responsiveness, and runs migrations.
+    /// Connects to Postgres and Redis and verifies Redis responsiveness.
     ///
     /// # Errors
-    /// Returns any database, migration, Redis client, or Redis ping initialization error.
+    /// Returns any database, Redis client, or Redis ping initialization error.
     pub async fn connect(settings: &Settings) -> anyhow::Result<Self> {
         let postgres = PgPoolOptions::new()
             .max_connections(settings.database_max_connections)
             .connect(&settings.database_url)
             .await?;
-
-        sqlx::migrate!("./migrations").run(&postgres).await?;
-        validate_canonical_bootstrap_state(&postgres, settings).await?;
 
         let redis = RedisClient::open(settings.redis_url.clone())?;
         let mut conn = redis.get_multiplexed_async_connection().await?;
@@ -57,7 +54,12 @@ impl Persistence {
     }
 }
 
-async fn validate_canonical_bootstrap_state(
+pub async fn run_postgres_migrations(postgres: &PgPool) -> anyhow::Result<()> {
+    sqlx::migrate!("./migrations").run(postgres).await?;
+    Ok(())
+}
+
+pub async fn validate_canonical_bootstrap_state(
     postgres: &PgPool,
     settings: &Settings,
 ) -> anyhow::Result<()> {

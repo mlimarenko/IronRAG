@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rustrag.fullname" . }}-runtime
+  labels:
+    {{- include "rustrag.labels" . | nindent 4 }}
+data:
+  RUSTRAG_BIND_ADDR: {{ .Values.app.bindAddr | quote }}
+  RUSTRAG_ENVIRONMENT: {{ .Values.app.environment | quote }}
+  RUSTRAG_DATABASE_MAX_CONNECTIONS: {{ .Values.app.databaseMaxConnections | quote }}
+  RUSTRAG_QUERY_ANSWER_SOURCE_LINKS_ENABLED: {{ .Values.app.queryAnswerSourceLinksEnabled | quote }}
+  RUSTRAG_ARANGODB_URL: {{ include "rustrag.arangodbUrl" . | quote }}
+  RUSTRAG_ARANGODB_DATABASE: {{ .Values.dependencies.arangodb.database | quote }}
+  RUSTRAG_ARANGODB_USERNAME: {{ .Values.dependencies.arangodb.username | quote }}
+  RUSTRAG_LOG_FILTER: {{ .Values.app.logFilter | quote }}
+  RUSTRAG_FRONTEND_ORIGIN: {{ .Values.app.frontendOrigin | quote }}
+  RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN: {{ .Values.app.bootstrapAdmin.login | quote }}
+  RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_PROVIDER_KIND: {{ .Values.app.modelDefaults.extractGraphProviderKind | quote }}
+  RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_MODEL_NAME: {{ .Values.app.modelDefaults.extractGraphModelName | quote }}
+  RUSTRAG_UI_BOOTSTRAP_EMBED_CHUNK_PROVIDER_KIND: {{ .Values.app.modelDefaults.embedChunkProviderKind | quote }}
+  RUSTRAG_UI_BOOTSTRAP_EMBED_CHUNK_MODEL_NAME: {{ .Values.app.modelDefaults.embedChunkModelName | quote }}
+  RUSTRAG_UI_BOOTSTRAP_QUERY_ANSWER_PROVIDER_KIND: {{ .Values.app.modelDefaults.queryAnswerProviderKind | quote }}
+  RUSTRAG_UI_BOOTSTRAP_QUERY_ANSWER_MODEL_NAME: {{ .Values.app.modelDefaults.queryAnswerModelName | quote }}
+  RUSTRAG_UI_BOOTSTRAP_VISION_PROVIDER_KIND: {{ .Values.app.modelDefaults.visionProviderKind | quote }}
+  RUSTRAG_UI_BOOTSTRAP_VISION_MODEL_NAME: {{ .Values.app.modelDefaults.visionModelName | quote }}
+  RUSTRAG_RUNTIME_POLICY_REJECT_TASK_KINDS: {{ .Values.app.runtimePolicy.rejectTaskKinds | quote }}
+  RUSTRAG_RUNTIME_POLICY_REJECT_TARGET_KINDS: {{ .Values.app.runtimePolicy.rejectTargetKinds | quote }}
+  RUSTRAG_UI_DEFAULT_LOCALE: {{ .Values.app.uiDefaultLocale | quote }}
+  RUSTRAG_STARTUP_AUTHORITY_MODE: {{ .Values.startup.mode | quote }}
+  RUSTRAG_DEPENDENCY_POSTGRES_MODE: {{ .Values.dependencies.postgres.mode | quote }}
+  RUSTRAG_DEPENDENCY_REDIS_MODE: {{ .Values.dependencies.redis.mode | quote }}
+  RUSTRAG_DEPENDENCY_ARANGODB_MODE: {{ .Values.dependencies.arangodb.mode | quote }}
+  RUSTRAG_DEPENDENCY_OBJECT_STORAGE_MODE: {{ include "rustrag.objectStorageMode" . | quote }}
+  RUSTRAG_CONTENT_STORAGE_PROVIDER: {{ .Values.storage.provider | quote }}
+  RUSTRAG_CONTENT_STORAGE_TOPOLOGY: {{ .Values.storage.topology | quote }}
+  RUSTRAG_CONTENT_STORAGE_KEY_PREFIX: {{ .Values.storage.keyPrefix | quote }}
+  RUSTRAG_CONTENT_STORAGE_ROOT: {{ .Values.storage.rootPath | quote }}
+  RUSTRAG_CONTENT_STORAGE_S3_BUCKET: {{ .Values.storage.s3.bucket | quote }}
+  RUSTRAG_CONTENT_STORAGE_S3_ENDPOINT: {{ include "rustrag.s3Endpoint" . | quote }}
+  RUSTRAG_CONTENT_STORAGE_S3_REGION: {{ .Values.storage.s3.region | quote }}
+  RUSTRAG_CONTENT_STORAGE_S3_FORCE_PATH_STYLE: {{ .Values.storage.s3.forcePathStyle | quote }}
+  RUSTRAG_ARANGODB_BOOTSTRAP_COLLECTIONS: {{ .Values.app.arangodbBootstrap.collections | quote }}
+  RUSTRAG_ARANGODB_BOOTSTRAP_VIEWS: {{ .Values.app.arangodbBootstrap.views | quote }}
+  RUSTRAG_ARANGODB_BOOTSTRAP_GRAPH: {{ .Values.app.arangodbBootstrap.graph | quote }}
+  RUSTRAG_ARANGODB_BOOTSTRAP_VECTOR_INDEXES: {{ .Values.app.arangodbBootstrap.vectorIndexes | quote }}
+{{- if not .Values.runtimeSecret.existingSecret }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "rustrag.runtimeSecretName" . }}
+  labels:
+    {{- include "rustrag.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  RUSTRAG_DATABASE_URL: {{ include "rustrag.databaseUrl" . | quote }}
+  RUSTRAG_REDIS_URL: {{ include "rustrag.redisUrl" . | quote }}
+  RUSTRAG_BOOTSTRAP_TOKEN: {{ .Values.app.bootstrapToken | quote }}
+  RUSTRAG_ARANGODB_PASSWORD: {{ .Values.dependencies.arangodb.password | quote }}
+  RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD: {{ .Values.app.bootstrapAdmin.password | quote }}
+  RUSTRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN: {{ .Values.app.bootstrapAdmin.apiToken | quote }}
+  RUSTRAG_OPENAI_API_KEY: {{ .Values.app.providerSecrets.openaiApiKey | quote }}
+  RUSTRAG_DEEPSEEK_API_KEY: {{ .Values.app.providerSecrets.deepseekApiKey | quote }}
+  RUSTRAG_QWEN_API_KEY: {{ .Values.app.providerSecrets.qwenApiKey | quote }}
+  RUSTRAG_CONTENT_STORAGE_S3_ACCESS_KEY_ID: {{ .Values.storage.s3.accessKeyId | quote }}
+  RUSTRAG_CONTENT_STORAGE_S3_SECRET_ACCESS_KEY: {{ .Values.storage.s3.secretAccessKey | quote }}
+  RUSTRAG_CONTENT_STORAGE_S3_SESSION_TOKEN: {{ .Values.storage.s3.sessionToken | quote }}
+{{- end }}

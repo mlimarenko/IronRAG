@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::ai::{AiBindingPurpose, ModelCatalogEntry},
+    domains::ai::AiBindingPurpose,
     domains::iam::{Grant, GrantResourceKind, WorkspaceMembership},
     infra::repositories::{
         ai_repository, catalog_repository, iam_repository, ops_repository, query_repository,
@@ -23,14 +23,11 @@ use crate::{
         ui_support::{build_cleared_session_cookie, build_session_cookie},
     },
     interfaces::shell::{build_shell_bootstrap, parse_ui_locale, to_bootstrap_contract},
-    services::ai_catalog_service::{
-        BootstrapAiBindingInput, BootstrapAiCredentialInput, BootstrapAiCredentialSource,
-        BootstrapAiProviderDescriptor, BootstrapAiSetupDescriptor,
-    },
-    services::audit_service::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
-    services::iam_service::{
-        AuthenticateSessionCommand, BootstrapClaimCommand, BootstrapSetupAiCommand,
-        BootstrapSetupCommand, CreateGrantCommand,
+    services::ai_catalog_service::{BootstrapAiCredentialSource, BootstrapAiSetupDescriptor},
+    services::iam::audit::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
+    services::iam::service::{
+        AuthenticateSessionCommand, BootstrapSetupAiCommand, BootstrapSetupCommand,
+        CreateGrantCommand,
     },
 };
 
@@ -173,28 +170,9 @@ pub struct MeResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BootstrapClaimResponse {
-    pub principal_id: uuid::Uuid,
-    pub login: String,
-    pub email: String,
-    pub display_name: String,
-    pub claimed_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct BootstrapStatusResponse {
     pub setup_required: bool,
     pub ai_setup: Option<BootstrapAiSetupResponse>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BootstrapClaimRequest {
-    pub bootstrap_secret: String,
-    pub email: String,
-    pub display_name: String,
-    pub password: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -216,65 +194,42 @@ pub struct BootstrapSetupRequest {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BootstrapProviderCatalogEntryResponse {
-    pub id: Uuid,
-    pub provider_kind: String,
-    pub display_name: String,
-    pub api_style: String,
-    pub lifecycle_state: String,
-    pub credential_source: String,
+pub struct BootstrapProviderPresetResponse {
+    pub binding_purpose: AiBindingPurpose,
+    pub model_catalog_id: Uuid,
+    pub model_name: String,
+    pub preset_name: String,
+    pub system_prompt: Option<String>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub max_output_tokens_override: Option<i32>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BootstrapModelCatalogEntryResponse {
+pub struct BootstrapProviderPresetBundleResponse {
     pub id: Uuid,
-    pub provider_catalog_id: Uuid,
-    pub model_name: String,
-    pub capability_kind: String,
-    pub modality_kind: String,
-    pub allowed_binding_purposes: Vec<AiBindingPurpose>,
-    pub context_window: Option<i32>,
-    pub max_output_tokens: Option<i32>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BootstrapBindingSelectionResponse {
-    pub binding_purpose: AiBindingPurpose,
-    pub provider_kind: Option<String>,
-    pub model_catalog_id: Option<Uuid>,
-    pub configured: bool,
+    pub provider_kind: String,
+    pub display_name: String,
+    pub credential_source: String,
+    pub default_base_url: Option<String>,
+    pub api_key_required: bool,
+    pub base_url_required: bool,
+    pub presets: Vec<BootstrapProviderPresetResponse>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BootstrapAiSetupResponse {
-    pub providers: Vec<BootstrapProviderCatalogEntryResponse>,
-    pub models: Vec<BootstrapModelCatalogEntryResponse>,
-    pub binding_selections: Vec<BootstrapBindingSelectionResponse>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BootstrapBindingSelectionRequest {
-    pub binding_purpose: AiBindingPurpose,
-    pub provider_kind: String,
-    pub model_catalog_id: Uuid,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BootstrapCredentialInputRequest {
-    pub provider_kind: String,
-    pub api_key: Option<String>,
+    pub preset_bundles: Vec<BootstrapProviderPresetBundleResponse>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BootstrapSetupAiRequest {
-    pub credentials: Vec<BootstrapCredentialInputRequest>,
-    pub binding_selections: Vec<BootstrapBindingSelectionRequest>,
+    pub provider_kind: String,
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -298,7 +253,6 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/iam/bootstrap/status", get(get_bootstrap_status))
         .route("/iam/bootstrap/setup", post(setup_bootstrap_admin))
-        .route("/iam/bootstrap/claim", post(claim_bootstrap_admin))
         .route("/iam/session/login", post(login_session))
         .route("/iam/session/resolve", get(resolve_session))
         .route("/iam/session", get(get_session))
@@ -403,23 +357,9 @@ async fn setup_bootstrap_admin(
                 display_name: payload.display_name,
                 password: payload.password,
                 ai_setup: payload.ai_setup.map(|ai_setup| BootstrapSetupAiCommand {
-                    credentials: ai_setup
-                        .credentials
-                        .into_iter()
-                        .map(|credential| BootstrapAiCredentialInput {
-                            provider_kind: credential.provider_kind,
-                            api_key: credential.api_key,
-                        })
-                        .collect(),
-                    binding_selections: ai_setup
-                        .binding_selections
-                        .into_iter()
-                        .map(|selection| BootstrapAiBindingInput {
-                            binding_purpose: selection.binding_purpose,
-                            provider_kind: selection.provider_kind,
-                            model_catalog_id: selection.model_catalog_id,
-                        })
-                        .collect(),
+                    provider_kind: ai_setup.provider_kind,
+                    api_key: ai_setup.api_key,
+                    base_url: ai_setup.base_url,
                 }),
                 ttl_hours: state.ui_session_cookie.ttl_hours,
                 request_id: request_id.clone(),
@@ -435,7 +375,7 @@ async fn setup_bootstrap_admin(
     );
     headers.insert(header::SET_COOKIE, cookie.parse().map_err(|_| ApiError::Internal)?);
 
-    let _ = state
+    if let Err(error) = state
         .canonical_services
         .audit
         .append_event(
@@ -470,7 +410,10 @@ async fn setup_bootstrap_admin(
                 ],
             },
         )
-        .await;
+        .await
+    {
+        tracing::warn!(stage = "audit", error = %error, "audit append failed");
+    }
 
     Ok((
         headers,
@@ -485,36 +428,6 @@ async fn setup_bootstrap_admin(
             },
         }),
     ))
-}
-
-async fn claim_bootstrap_admin(
-    State(state): State<AppState>,
-    request_id: Option<axum::Extension<RequestId>>,
-    Json(payload): Json<BootstrapClaimRequest>,
-) -> Result<Json<BootstrapClaimResponse>, ApiError> {
-    let request_id = request_id.map_or_else(|| uuid::Uuid::now_v7().to_string(), |value| value.0.0);
-    let outcome = state
-        .canonical_services
-        .iam
-        .claim_bootstrap_admin(
-            &state,
-            BootstrapClaimCommand {
-                bootstrap_secret: payload.bootstrap_secret,
-                email: payload.email,
-                display_name: payload.display_name,
-                password: payload.password,
-                request_id,
-            },
-        )
-        .await?;
-
-    Ok(Json(BootstrapClaimResponse {
-        principal_id: outcome.principal_id,
-        login: outcome.login,
-        email: outcome.email,
-        display_name: outcome.display_name,
-        claimed_at: outcome.claimed_at,
-    }))
 }
 
 async fn login_session(
@@ -545,33 +458,47 @@ async fn login_session(
     );
     headers.insert(header::SET_COOKIE, cookie.parse().map_err(|_| ApiError::Internal)?);
 
-    let _ = state
-        .canonical_services
-        .audit
-        .append_event(
-            &state,
-            AppendAuditEventCommand {
-                actor_principal_id: Some(outcome.principal_id),
-                surface_kind: "rest".to_string(),
-                action_kind: "iam.session.login".to_string(),
-                request_id: request_id.map(|value| value.0.0),
-                trace_id: None,
-                result_kind: "succeeded".to_string(),
-                redacted_message: Some("session login succeeded".to_string()),
-                internal_message: Some(format!(
-                    "principal {} created session {}",
-                    outcome.principal_id, outcome.session_id
-                )),
-                subjects: vec![AppendAuditEventSubjectCommand {
-                    subject_kind: "session".to_string(),
-                    subject_id: outcome.session_id,
-                    workspace_id: None,
-                    library_id: None,
-                    document_id: None,
-                }],
-            },
-        )
-        .await;
+    let audit_state = state.clone();
+    let audit_request_id = request_id.map(|value| value.0.0);
+    let audit_principal_id = outcome.principal_id;
+    let audit_session_id = outcome.session_id;
+    tokio::spawn(async move {
+        if let Err(error) = audit_state
+            .canonical_services
+            .audit
+            .append_event(
+                &audit_state,
+                AppendAuditEventCommand {
+                    actor_principal_id: Some(audit_principal_id),
+                    surface_kind: "rest".to_string(),
+                    action_kind: "iam.session.login".to_string(),
+                    request_id: audit_request_id,
+                    trace_id: None,
+                    result_kind: "succeeded".to_string(),
+                    redacted_message: Some("session login succeeded".to_string()),
+                    internal_message: Some(format!(
+                        "principal {} created session {}",
+                        audit_principal_id, audit_session_id
+                    )),
+                    subjects: vec![AppendAuditEventSubjectCommand {
+                        subject_kind: "session".to_string(),
+                        subject_id: audit_session_id,
+                        workspace_id: None,
+                        library_id: None,
+                        document_id: None,
+                    }],
+                },
+            )
+            .await
+        {
+            warn!(
+                principal_id = %audit_principal_id,
+                session_id = %audit_session_id,
+                ?error,
+                "failed to append iam session login audit event",
+            );
+        }
+    });
 
     Ok((
         headers,
@@ -613,7 +540,7 @@ async fn logout_session(
             .map_err(|_| ApiError::Internal)?,
     );
 
-    let _ = state
+    if let Err(error) = state
         .canonical_services
         .audit
         .append_event(
@@ -639,7 +566,10 @@ async fn logout_session(
                 }],
             },
         )
-        .await;
+        .await
+    {
+        tracing::warn!(stage = "audit", error = %error, "audit append failed");
+    }
 
     Ok((headers, StatusCode::NO_CONTENT))
 }
@@ -740,7 +670,7 @@ async fn mint_token(
         .iam
         .mint_api_token(
             &state,
-            crate::services::iam_service::MintApiTokenCommand {
+            crate::services::iam::service::MintApiTokenCommand {
                 workspace_id,
                 label: payload.label,
                 expires_at: payload.expires_at,
@@ -1031,7 +961,7 @@ async fn record_iam_audit_event(
     internal_message: Option<String>,
     subjects: Vec<AppendAuditEventSubjectCommand>,
 ) {
-    let _ = state
+    if let Err(error) = state
         .canonical_services
         .audit
         .append_event(
@@ -1048,7 +978,10 @@ async fn record_iam_audit_event(
                 subjects,
             },
         )
-        .await;
+        .await
+    {
+        tracing::warn!(stage = "audit", error = %error, "audit append failed");
+    }
 }
 
 fn resolve_mint_workspace(
@@ -1145,17 +1078,17 @@ async fn resolve_grant_workspace_id(
                     ApiError::Internal
                 })?
                 .ok_or_else(|| ApiError::resource_not_found("provider_credential", resource_id))
-                .map(|row| row.workspace_id)
+                .and_then(|row| row.workspace_id.ok_or_else(|| ApiError::BadRequest("provider credential is not scoped to a workspace".to_string())))
         }
         IamGrantResourceKind::LibraryBinding => {
-            ai_repository::get_library_binding_by_id(&state.persistence.postgres, resource_id)
+            ai_repository::get_binding_assignment_by_id(&state.persistence.postgres, resource_id)
                 .await
                 .map_err(|error| {
                     error!(resource_id = %resource_id, ?error, "failed to load library binding for grant");
                     ApiError::Internal
                 })?
                 .ok_or_else(|| ApiError::resource_not_found("library_binding", resource_id))
-                .map(|row| row.workspace_id)
+                .and_then(|row| row.workspace_id.ok_or_else(|| ApiError::BadRequest("binding assignment is not scoped to a workspace".to_string())))
         }
     }
 }
@@ -1285,47 +1218,36 @@ fn validate_permission_kind_for_resource(
 
 fn map_bootstrap_ai_setup(descriptor: BootstrapAiSetupDescriptor) -> BootstrapAiSetupResponse {
     BootstrapAiSetupResponse {
-        providers: descriptor.providers.into_iter().map(map_bootstrap_provider).collect(),
-        models: descriptor.models.into_iter().map(map_bootstrap_model).collect(),
-        binding_selections: descriptor
-            .binding_selections
+        preset_bundles: descriptor
+            .preset_bundles
             .into_iter()
-            .map(|selection| BootstrapBindingSelectionResponse {
-                binding_purpose: selection.binding_purpose,
-                provider_kind: selection.provider_kind,
-                model_catalog_id: selection.model_catalog_id,
-                configured: selection.configured,
+            .map(|bundle| BootstrapProviderPresetBundleResponse {
+                id: bundle.provider_catalog_id,
+                provider_kind: bundle.provider_kind,
+                display_name: bundle.display_name,
+                credential_source: match bundle.credential_source {
+                    BootstrapAiCredentialSource::Missing => "missing".to_string(),
+                    BootstrapAiCredentialSource::Env => "env".to_string(),
+                },
+                default_base_url: bundle.default_base_url,
+                api_key_required: bundle.api_key_required,
+                base_url_required: bundle.base_url_required,
+                presets: bundle
+                    .presets
+                    .into_iter()
+                    .map(|preset| BootstrapProviderPresetResponse {
+                        binding_purpose: preset.binding_purpose,
+                        model_catalog_id: preset.model_catalog_id,
+                        model_name: preset.model_name,
+                        preset_name: preset.preset_name,
+                        system_prompt: preset.system_prompt,
+                        temperature: preset.temperature,
+                        top_p: preset.top_p,
+                        max_output_tokens_override: preset.max_output_tokens_override,
+                    })
+                    .collect(),
             })
             .collect(),
-    }
-}
-
-fn map_bootstrap_provider(
-    entry: BootstrapAiProviderDescriptor,
-) -> BootstrapProviderCatalogEntryResponse {
-    BootstrapProviderCatalogEntryResponse {
-        id: entry.provider_catalog_id,
-        provider_kind: entry.provider_kind,
-        display_name: entry.display_name,
-        api_style: entry.api_style,
-        lifecycle_state: entry.lifecycle_state,
-        credential_source: match entry.credential_source {
-            BootstrapAiCredentialSource::Missing => "missing".to_string(),
-            BootstrapAiCredentialSource::Env => "env".to_string(),
-        },
-    }
-}
-
-fn map_bootstrap_model(entry: ModelCatalogEntry) -> BootstrapModelCatalogEntryResponse {
-    BootstrapModelCatalogEntryResponse {
-        id: entry.id,
-        provider_catalog_id: entry.provider_catalog_id,
-        model_name: entry.model_name,
-        capability_kind: entry.capability_kind,
-        modality_kind: entry.modality_kind,
-        allowed_binding_purposes: entry.allowed_binding_purposes,
-        context_window: entry.context_window,
-        max_output_tokens: entry.max_output_tokens,
     }
 }
 

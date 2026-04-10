@@ -3,16 +3,32 @@ import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { useApp } from '@/contexts/AppContext';
 import { useNavigate } from 'react-router-dom';
-import { knowledgeApi } from '@/api';
+import { documentsApi, knowledgeApi } from '@/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import {
   Search, X, Loader2,
   FileText, Share2, AlertTriangle,
   Eye, EyeOff, RotateCcw, Layers,
 } from 'lucide-react';
 import type { GraphNode, GraphNodeType, GraphMetadata, GraphStatus } from '@/types';
+import type {
+  RawKnowledgeEntity,
+  RawKnowledgeRelation,
+  RawKnowledgeDocument,
+  RawKnowledgeEntityDetail,
+  RawGraphDocumentLink,
+} from '@/types/api-responses';
+
+function errorMessage(err: unknown, fallback: string): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'object' && err !== null && 'message' in err) {
+    const msg = (err as { message?: unknown }).message;
+    if (typeof msg === 'string') return msg;
+  }
+  return fallback;
+}
+
 
 const SigmaGraph = lazy(() => import('@/components/SigmaGraph'));
 
@@ -32,31 +48,6 @@ const NODE_COLORS: Record<string, string> = {
   attribute: '#0ea5e9',     // sky
   entity: '#78716c',        // stone
 };
-
-/** Map backend GraphWorkbenchSurface to frontend GraphNode[] + GraphMetadata */
-function mapWorkbenchToUI(workbench: any): { nodes: GraphNode[]; meta: GraphMetadata; recommendedLayout?: string; selectedDetail: any | null } {
-  const graph = workbench.graph ?? {};
-  const nodes: GraphNode[] = (graph.nodes ?? []).map((n: any) => ({
-    id: n.id,
-    label: n.label,
-    type: mapNodeType(n.nodeType),
-    summary: n.summary ?? n.secondaryLabel ?? undefined,
-    edgeCount: n.supportCount ?? 0,
-    properties: {},
-    sourceDocumentIds: [],
-  }));
-
-  const meta: GraphMetadata = {
-    nodeCount: graph.nodeCount ?? nodes.length,
-    edgeCount: graph.edgeCount ?? 0,
-    hiddenDisconnectedCount: 0,
-    status: mapStatus(graph.status),
-    convergenceStatus: graph.convergenceStatus ?? 'current',
-    recommendedLayout: undefined,
-  };
-
-  return { nodes, meta, selectedDetail: workbench.selectedNode ?? null };
-}
 
 function mapNodeType(t: string | undefined): GraphNodeType {
   if (t === 'document') return 'document';
@@ -81,31 +72,6 @@ function mapNodeType(t: string | undefined): GraphNodeType {
   return 'entity';
 }
 
-function mapStatus(s: string | undefined): GraphStatus {
-  if (s === 'empty' || s === 'building' || s === 'rebuilding' || s === 'ready' || s === 'partial' || s === 'failed' || s === 'stale') return s as GraphStatus;
-  return 'ready';
-}
-
-/** Map backend entity detail to enriched GraphNode for the inspector */
-function mapEntityDetailToNode(detail: any): GraphNode {
-  const props: Record<string, string> = {};
-  if (detail.properties) {
-    for (const [k, v] of detail.properties) {
-      props[k] = String(v);
-    }
-  }
-  return {
-    id: detail.id,
-    label: detail.label,
-    type: mapNodeType(detail.nodeType),
-    summary: detail.summary,
-    edgeCount: detail.relatedNodes?.length ?? 0,
-    properties: props,
-    sourceDocumentIds: (detail.supportingDocuments ?? []).map((d: any) => d.documentId),
-  };
-}
-
-interface EdgeData { id: string; sourceId: string; targetId: string; label: string; weight: number }
 
 export default function GraphPage() {
   const { t } = useTranslation();
@@ -149,29 +115,39 @@ export default function GraphPage() {
       knowledgeApi.listEntities(activeLibrary.id),
       knowledgeApi.listRelations(activeLibrary.id),
       knowledgeApi.listDocuments(activeLibrary.id),
-      knowledgeApi.getGraphTopology(activeLibrary.id).catch(() => null),
+      knowledgeApi.getGraphTopology(activeLibrary.id).catch((err) => {
+        console.warn('failed to load graph topology', err);
+        return null;
+      }),
     ]).then(([entitiesRes, relationsRes, documentsRes, topologyRes]) => {
           if (cancelled) return;
 
-          const entities: any[] = Array.isArray(entitiesRes) ? entitiesRes : (entitiesRes.items ?? []);
-          const relations: any[] = Array.isArray(relationsRes) ? relationsRes : (relationsRes.items ?? []);
-          const documents: any[] = Array.isArray(documentsRes) ? documentsRes : (documentsRes.items ?? documentsRes.documents ?? []);
-          const documentLinks: any[] = topologyRes?.documentLinks ?? [];
+          const entities: RawKnowledgeEntity[] = Array.isArray(entitiesRes)
+            ? (entitiesRes as RawKnowledgeEntity[])
+            : ((entitiesRes.items ?? []) as RawKnowledgeEntity[]);
+          const relations: RawKnowledgeRelation[] = Array.isArray(relationsRes)
+            ? (relationsRes as RawKnowledgeRelation[])
+            : ((relationsRes.items ?? []) as RawKnowledgeRelation[]);
+          const documents: RawKnowledgeDocument[] = Array.isArray(documentsRes)
+            ? (documentsRes as RawKnowledgeDocument[])
+            : ((documentsRes.items ?? documentsRes.documents ?? []) as RawKnowledgeDocument[]);
+          const documentLinks: RawGraphDocumentLink[] =
+            (topologyRes?.documentLinks as RawGraphDocumentLink[] | undefined) ?? [];
 
           // Pre-compute per-document edge counts from topology links
           const docEdgeCounts = new Map<string, number>();
-          documentLinks.forEach((link: any) => {
+          documentLinks.forEach((link) => {
             docEdgeCounts.set(link.documentId, (docEdgeCounts.get(link.documentId) ?? 0) + 1);
           });
 
-          const entityNodes: GraphNode[] = entities.map((e: any) => {
+          const entityNodes: GraphNode[] = entities.map((e) => {
             const canonical = mapNodeType(e.entityType);
-            const raw = (e.entityType ?? '').toLowerCase();
+            const rawType = (e.entityType ?? '').toLowerCase();
             return {
-              id: e.entityId ?? e.id,
+              id: e.entityId ?? e.id ?? '',
               label: e.canonicalLabel ?? e.label ?? e.key ?? 'unknown',
               type: canonical,
-              subType: e.entitySubType ?? (raw !== canonical ? raw : undefined),
+              subType: e.entitySubType ?? (rawType !== canonical ? rawType : undefined),
               summary: e.summary ?? undefined,
               edgeCount: e.supportCount ?? 0,
               properties: {},
@@ -179,8 +155,8 @@ export default function GraphPage() {
             };
           });
 
-          const documentNodes: GraphNode[] = documents.map((d: any) => {
-            const docId = d.document_id ?? d.documentId ?? d.id;
+          const documentNodes: GraphNode[] = documents.map((d) => {
+            const docId = d.document_id ?? d.documentId ?? d.id ?? '';
             return {
               id: docId,
               label: d.title ?? d.fileName ?? d.external_key ?? 'untitled',
@@ -194,15 +170,15 @@ export default function GraphPage() {
 
           const fallbackNodes: GraphNode[] = [...entityNodes, ...documentNodes];
 
-          const relationEdges = relations.map((r: any) => ({
-            id: r.relationId ?? r.id,
+          const relationEdges = relations.map((r) => ({
+            id: r.relationId ?? r.id ?? '',
             sourceId: r.subjectEntityId,
             targetId: r.objectEntityId,
             label: r.predicate ?? '',
             weight: r.supportCount ?? 1,
           }));
 
-          const documentEdges = documentLinks.map((link: any) => ({
+          const documentEdges = documentLinks.map((link) => ({
             id: `dl-${link.documentId}-${link.targetNodeId}`,
             sourceId: link.documentId,
             targetId: link.targetNodeId,
@@ -228,9 +204,9 @@ export default function GraphPage() {
           setGraphMeta(fallbackMeta);
           setGraphStatus(fallbackMeta.status);
       })
-      .catch(err => {
+      .catch((err: unknown) => {
         if (cancelled) return;
-        setLoadError(err?.message ?? 'Failed to load graph');
+        setLoadError(errorMessage(err, 'Failed to load graph'));
         setGraphStatus('failed');
       });
 
@@ -251,39 +227,43 @@ export default function GraphPage() {
 
     if (basic?.type === 'document') {
       // For documents, fetch document detail from content API
-      import('@/api').then(({ documentsApi }) => {
-        documentsApi.get(selectedNode)
-          .then(doc => {
-            if (cancelled) return;
-            const enriched: GraphNode = {
-              id: selectedNode,
-              label: doc.fileName ?? basic.label,
-              type: 'document',
-              summary: doc.readinessSummary?.readinessKind ?? basic.summary,
-              edgeCount: basic.edgeCount,
-              properties: {},
-              sourceDocumentIds: [],
-            };
-            const rev = doc.activeRevision ?? doc.active_revision;
-            if (rev?.mime_type) enriched.properties['format'] = rev.mime_type;
-            if (rev?.byte_size) enriched.properties['size'] = `${(rev.byte_size / 1024).toFixed(1)} KB`;
-            if (rev?.revision_number) enriched.properties['revision'] = String(rev.revision_number);
-            enriched.properties['state'] = doc.readinessSummary?.readinessKind ?? 'unknown';
-            enriched.properties['activity'] = doc.readinessSummary?.activityStatus ?? 'unknown';
-            if (doc.readinessSummary?.graphCoverageKind) enriched.properties['graph coverage'] = doc.readinessSummary.graphCoverageKind;
-            setSelectedDetail(enriched);
-          })
-          .catch(() => { if (!cancelled) setSelectedDetail(basic); })
-          .finally(() => { if (!cancelled) setDetailLoading(false); });
-      });
+      documentsApi.get(selectedNode)
+        .then((doc) => {
+          if (cancelled) return;
+          const enriched: GraphNode = {
+            id: selectedNode,
+            label: (typeof doc.fileName === 'string' ? doc.fileName : undefined) ?? basic.label,
+            type: 'document',
+            summary: doc.readinessSummary?.readinessKind ?? basic.summary,
+            edgeCount: basic.edgeCount,
+            properties: {},
+            sourceDocumentIds: [],
+          };
+          const rev = (doc.activeRevision ?? doc.active_revision) as
+            | { mime_type?: string; byte_size?: number; revision_number?: number }
+            | undefined;
+          if (rev?.mime_type) enriched.properties['format'] = rev.mime_type;
+          if (rev?.byte_size != null) enriched.properties['size'] = `${(rev.byte_size / 1024).toFixed(1)} KB`;
+          if (rev?.revision_number != null) enriched.properties['revision'] = String(rev.revision_number);
+          enriched.properties['state'] = doc.readinessSummary?.readinessKind ?? 'unknown';
+          enriched.properties['activity'] = doc.readinessSummary?.activityStatus ?? 'unknown';
+          if (doc.readinessSummary?.graphCoverageKind) enriched.properties['graph coverage'] = doc.readinessSummary.graphCoverageKind;
+          setSelectedDetail(enriched);
+        })
+        .catch((err) => {
+          console.warn('failed to load entity detail, falling back to basic', err);
+          if (!cancelled) setSelectedDetail(basic);
+        })
+        .finally(() => { if (!cancelled) setDetailLoading(false); });
       return () => { cancelled = true; };
     }
 
     // For entities/topics, use the knowledge entity API
     knowledgeApi.getEntity(activeLibrary.id, selectedNode)
-      .then(detail => {
+      .then((rawDetail) => {
         if (cancelled) return;
-        const entity = detail.entity ?? detail;
+        const detail = rawDetail as RawKnowledgeEntityDetail;
+        const entity: RawKnowledgeEntity = detail.entity ?? (detail as RawKnowledgeEntity);
         const canonicalType = mapNodeType(entity.entityType ?? entity.nodeType);
         const rawType = (entity.entityType ?? '').toLowerCase();
         const enriched: GraphNode = {
@@ -291,7 +271,7 @@ export default function GraphPage() {
           label: entity.canonicalLabel ?? entity.label ?? basic?.label ?? '',
           type: canonicalType,
           subType: rawType !== canonicalType ? rawType : undefined,
-          summary: entity.summary ?? basic?.summary,
+          summary: entity.summary ?? basic?.summary ?? undefined,
           edgeCount: entity.supportCount ?? basic?.edgeCount ?? 0,
           properties: {},
           sourceDocumentIds: [],
@@ -302,13 +282,13 @@ export default function GraphPage() {
         if (entity.entityState) enriched.properties['state'] = entity.entityState;
         if (entity.aliases?.length) enriched.properties['aliases'] = entity.aliases.join(', ');
         if (detail.selectedNode?.relatedNodes) {
-          enriched.sourceDocumentIds = (detail.selectedNode.supportingDocuments ?? []).map((d: any) => d.documentId);
+          enriched.sourceDocumentIds = (detail.selectedNode.supportingDocuments ?? []).map((d) => d.documentId);
         }
         setSelectedDetail(enriched);
       })
-      .catch((err) => {
+      .catch((err: unknown) => {
         console.error("Entity detail failed:", err);
-        toast.error(err?.message || "Failed to load entity details");
+        toast.error(errorMessage(err, 'Failed to load entity details'));
       })
       .finally(() => {
         if (!cancelled) setDetailLoading(false);
@@ -589,7 +569,7 @@ export default function GraphPage() {
                 <h3 className="text-sm font-bold truncate tracking-tight">{selected.label}</h3>
                 <div className="flex items-center gap-1">
                   {detailLoading && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
-                  <button onClick={() => setSelectedNode(null)} className="p-1.5 rounded-lg hover:bg-muted transition-colors" aria-label="Close"><X className="h-4 w-4" /></button>
+                  <button onClick={() => setSelectedNode(null)} className="p-1.5 rounded-lg hover:bg-muted transition-colors" aria-label={t('common.close')}><X className="h-4 w-4" /></button>
                 </div>
               </div>
               <div className="p-4 space-y-4">

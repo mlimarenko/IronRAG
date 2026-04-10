@@ -289,7 +289,7 @@ export default function DashboardPage() {
   const fetchDashboard = useCallback(async (libraryId: string) => {
     try {
       const result = await dashboardApi.getLibraryDashboard(libraryId);
-      setData(result);
+      setData(result as DashboardData);
       setState('loaded');
       setErrorMessage('');
     } catch (err: unknown) {
@@ -314,7 +314,7 @@ export default function DashboardPage() {
     setRefreshing(true);
     try {
       const result = await dashboardApi.getLibraryDashboard(activeLibrary.id);
-      setData(result);
+      setData(result as DashboardData);
       setState('loaded');
       setErrorMessage('');
     } catch (err: unknown) {

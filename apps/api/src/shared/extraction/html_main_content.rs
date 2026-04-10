@@ -8,7 +8,7 @@ use scraper::{ElementRef, Html, Selector};
 use crate::shared::extraction::{
     ExtractionOutput, ExtractionSourceMetadata, build_text_layout_from_content,
 };
-use crate::shared::url_identity::normalize_absolute_url;
+use crate::shared::web::url_identity::normalize_absolute_url;
 
 const HTML_LINK_LIMIT: usize = 512;
 const HTML_CHARSET_SCAN_BYTES: usize = 4_096;
@@ -65,6 +65,7 @@ pub fn extract_html_main_content(
         }),
         provider_kind: None,
         model_name: None,
+        extracted_images: Vec::new(),
     })
 }
 

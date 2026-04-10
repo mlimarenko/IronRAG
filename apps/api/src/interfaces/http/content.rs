@@ -1,11 +1,12 @@
 use axum::{
     Json, Router,
+    body::Body,
     extract::{
         Path, Query, State,
         multipart::{Field, Multipart},
     },
     http::{StatusCode, header},
-    response::IntoResponse,
+    response::{IntoResponse, Redirect, Response},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -17,7 +18,7 @@ use crate::{
     domains::content::{
         ContentDocument, ContentDocumentHead, ContentDocumentPipelineState, ContentDocumentSummary,
         ContentMutation, ContentMutationItem, ContentRevision, ContentRevisionReadiness,
-        DocumentReadinessSummary, WebPageProvenance,
+        ContentSourceAccess, DocumentReadinessSummary, WebPageProvenance,
     },
     domains::ingest::{WebDiscoveredPage, WebIngestRun, WebIngestRunReceipt, WebIngestRunSummary},
     domains::knowledge::{PreparedSegmentDetail, StructuredDocumentRevision, TypedTechnicalFact},
@@ -30,13 +31,14 @@ use crate::{
         },
         router_support::ApiError,
     },
-    services::content_service::{
+    services::content::service::{
         AdmitDocumentCommand, AdmitMutationCommand, AppendInlineMutationCommand,
         ContentMutationAdmission, CreateDocumentAdmission, ReplaceInlineMutationCommand,
         RevisionAdmissionMetadata, UploadInlineDocumentCommand,
     },
-    services::web_ingest_service::CreateWebIngestRunCommand,
-    shared::file_extract::{UploadAdmissionError, classify_multipart_file_body_error},
+    services::content::source_access::describe_content_source,
+    services::ingest::web::CreateWebIngestRunCommand,
+    shared::extraction::file_extract::{UploadAdmissionError, classify_multipart_file_body_error},
 };
 
 #[derive(Debug, Deserialize)]
@@ -63,6 +65,12 @@ pub struct ChunksQuery {
 pub struct PreparedDataQuery {
     pub offset: Option<usize>,
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceDownloadQuery {
+    pub revision_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,6 +144,8 @@ pub struct CreateWebIngestRunRequest {
 pub struct ContentDocumentDetailResponse {
     pub document: ContentDocument,
     pub file_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_access: Option<ContentSourceAccess>,
     pub head: Option<ContentDocumentHead>,
     pub active_revision: Option<ContentRevision>,
     pub readiness: Option<ContentRevisionReadiness>,
@@ -288,6 +298,7 @@ pub fn router() -> Router<AppState> {
         .route("/content/documents", get(list_documents).post(create_document))
         .route("/content/documents/upload", axum::routing::post(upload_document))
         .route("/content/documents/{document_id}", get(get_document).delete(delete_document))
+        .route("/content/documents/{document_id}/source", get(download_document_source))
         .route("/content/documents/{document_id}/append", axum::routing::post(append_document))
         .route("/content/documents/{document_id}/replace", axum::routing::post(replace_document))
         .route("/content/documents/{document_id}/head", get(get_document_head))
@@ -409,15 +420,12 @@ async fn list_documents(
         load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_READ).await?;
     let include_deleted = query.include_deleted.unwrap_or(false);
 
-    let items = state
+    let summaries = state
         .canonical_services
         .content
-        .list_documents(&state, library.id)
-        .await?
-        .into_iter()
-        .filter(|summary| include_deleted || summary.document.document_state != "deleted")
-        .map(map_document_summary)
-        .collect();
+        .list_documents_with_deleted(&state, library.id, include_deleted)
+        .await?;
+    let items = summaries.into_iter().map(map_document_summary).collect();
     Ok(Json(items))
 }
 
@@ -798,14 +806,10 @@ fn map_document_summary(summary: ContentDocumentSummary) -> ContentDocumentDetai
         summary.prepared_revision.as_ref().map(|revision| revision.block_count);
     let technical_fact_count =
         summary.prepared_revision.as_ref().map(|revision| revision.typed_fact_count);
-    let file_name = summary
-        .active_revision
-        .as_ref()
-        .and_then(|revision| revision.title.clone())
-        .unwrap_or_else(|| summary.document.external_key.clone());
     ContentDocumentDetailResponse {
         document: summary.document,
-        file_name,
+        file_name: summary.file_name,
+        source_access: summary.source_access,
         head: summary.head,
         active_revision: summary.active_revision,
         readiness: summary.readiness,
@@ -1097,18 +1101,26 @@ fn normalize_optional_text(value: String) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-const BATCH_MAX_DOCUMENTS: usize = 100;
+// The documents workspace allows selecting and operating on up to 1000 rows at once.
+// Keep the canonical REST batch limit aligned with that surface.
+const BATCH_MAX_DOCUMENTS: usize = 1000;
+
+fn ensure_batch_document_limit(document_count: usize) -> Result<(), ApiError> {
+    if document_count > BATCH_MAX_DOCUMENTS {
+        return Err(ApiError::BadRequest(format!(
+            "batch size exceeds maximum of {BATCH_MAX_DOCUMENTS} documents"
+        )));
+    }
+
+    Ok(())
+}
 
 async fn batch_delete_documents(
     auth: AuthContext,
     State(state): State<AppState>,
     Json(request): Json<BatchDeleteRequest>,
 ) -> Result<Json<BatchDeleteResponse>, ApiError> {
-    if request.document_ids.len() > BATCH_MAX_DOCUMENTS {
-        return Err(ApiError::BadRequest(format!(
-            "batch size exceeds maximum of {BATCH_MAX_DOCUMENTS} documents"
-        )));
-    }
+    ensure_batch_document_limit(request.document_ids.len())?;
 
     let mut results = Vec::with_capacity(request.document_ids.len());
     let mut deleted_count = 0usize;
@@ -1180,11 +1192,7 @@ async fn batch_cancel_documents(
     State(state): State<AppState>,
     Json(request): Json<BatchCancelRequest>,
 ) -> Result<Json<BatchCancelResponse>, ApiError> {
-    if request.document_ids.len() > BATCH_MAX_DOCUMENTS {
-        return Err(ApiError::BadRequest(format!(
-            "batch size exceeds maximum of {BATCH_MAX_DOCUMENTS} documents"
-        )));
-    }
+    ensure_batch_document_limit(request.document_ids.len())?;
 
     let mut results = Vec::with_capacity(request.document_ids.len());
     let mut cancelled_count = 0usize;
@@ -1246,11 +1254,7 @@ async fn batch_reprocess_documents(
     State(state): State<AppState>,
     Json(request): Json<BatchReprocessRequest>,
 ) -> Result<Json<BatchReprocessResponse>, ApiError> {
-    if request.document_ids.len() > BATCH_MAX_DOCUMENTS {
-        return Err(ApiError::BadRequest(format!(
-            "batch size exceeds maximum of {BATCH_MAX_DOCUMENTS} documents"
-        )));
-    }
+    ensure_batch_document_limit(request.document_ids.len())?;
 
     let mut results = Vec::with_capacity(request.document_ids.len());
     let mut reprocessed_count = 0usize;
@@ -1464,6 +1468,105 @@ async fn resolve_readable_revision_id(
     Ok(head.and_then(|row| row.effective_revision_id()))
 }
 
+async fn download_document_source(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(document_id): Path<Uuid>,
+    Query(query): Query<SourceDownloadQuery>,
+) -> Result<Response, ApiError> {
+    let _ = load_content_document_and_authorize(&auth, &state, document_id, POLICY_DOCUMENTS_READ)
+        .await?;
+    let summary = state.canonical_services.content.get_document(&state, document_id).await?;
+    let revision =
+        resolve_source_download_revision(&state, document_id, &summary, query.revision_id).await?;
+    let descriptor = describe_content_source(
+        revision.document_id,
+        Some(revision.id),
+        &revision.content_source_kind,
+        revision.source_uri.as_deref(),
+        revision.storage_key.as_deref(),
+        revision.title.as_deref(),
+        &summary.document.external_key,
+    );
+
+    if let Some(ContentSourceAccess {
+        kind: crate::domains::content::ContentSourceAccessKind::ExternalUrl,
+        href,
+    }) = descriptor.access.as_ref()
+    {
+        return Ok(Redirect::temporary(href).into_response());
+    }
+
+    if descriptor.access.is_none() {
+        return Err(ApiError::BadRequest("document has no downloadable source".to_string()));
+    }
+
+    let storage_key = revision
+        .storage_key
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .or(state
+            .canonical_services
+            .content
+            .resolve_revision_storage_key(&state, revision.id)
+            .await?)
+        .ok_or_else(|| {
+            ApiError::BadRequest("document has no stored source to download".to_string())
+        })?;
+    let disposition = format!("attachment; filename=\"{}\"", descriptor.file_name);
+
+    if let Some(href) = state
+        .content_storage
+        .resolve_download_redirect_url(&storage_key, &disposition, &revision.mime_type)
+        .await
+        .map_err(|_| ApiError::Internal)?
+    {
+        return Ok(Redirect::temporary(&href).into_response());
+    }
+
+    let bytes = state
+        .content_storage
+        .read_revision_source(&storage_key)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok((
+        [(header::CONTENT_TYPE, revision.mime_type), (header::CONTENT_DISPOSITION, disposition)],
+        Body::from(bytes),
+    )
+        .into_response())
+}
+
+async fn resolve_source_download_revision(
+    state: &AppState,
+    document_id: Uuid,
+    summary: &ContentDocumentSummary,
+    requested_revision_id: Option<Uuid>,
+) -> Result<ContentRevision, ApiError> {
+    let revision_id = requested_revision_id
+        .or_else(|| summary.head.as_ref().and_then(ContentDocumentHead::effective_revision_id))
+        .or_else(|| summary.active_revision.as_ref().map(|revision| revision.id))
+        .ok_or_else(|| {
+            ApiError::BadRequest(
+                "document has no available revision source to download".to_string(),
+            )
+        })?;
+
+    if let Some(active_revision) = summary.active_revision.as_ref() {
+        if active_revision.id == revision_id {
+            return Ok(active_revision.clone());
+        }
+    }
+
+    state
+        .canonical_services
+        .content
+        .list_revisions(state, document_id)
+        .await?
+        .into_iter()
+        .find(|revision| revision.id == revision_id)
+        .ok_or_else(|| ApiError::resource_not_found("revision", revision_id))
+}
+
 fn normalize_page_window(offset: Option<usize>, limit: Option<usize>) -> (usize, usize) {
     let offset = offset.unwrap_or(0);
     let limit = limit.unwrap_or(100).clamp(1, 500);
@@ -1476,8 +1579,14 @@ fn paginate_items<T>(items: Vec<T>, offset: usize, limit: usize) -> Vec<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::build_reprocess_revision_metadata;
-    use crate::domains::content::ContentRevision;
+    use super::{
+        BATCH_MAX_DOCUMENTS, build_reprocess_revision_metadata, ensure_batch_document_limit,
+        map_document_summary,
+    };
+    use crate::domains::content::{
+        ContentDocument, ContentDocumentPipelineState, ContentDocumentSummary, ContentRevision,
+    };
+    use crate::interfaces::http::router_support::ApiError;
     use chrono::Utc;
     use uuid::Uuid;
 
@@ -1512,5 +1621,68 @@ mod tests {
         assert_eq!(metadata.language_code, revision.language_code);
         assert_eq!(metadata.source_uri, revision.source_uri);
         assert_eq!(metadata.storage_key, revision.storage_key);
+    }
+
+    #[test]
+    fn batch_limit_allows_documents_surface_capacity() {
+        assert_eq!(BATCH_MAX_DOCUMENTS, 1000);
+        assert!(ensure_batch_document_limit(BATCH_MAX_DOCUMENTS).is_ok());
+    }
+
+    #[test]
+    fn batch_limit_rejects_more_than_documents_surface_capacity() {
+        let error = ensure_batch_document_limit(BATCH_MAX_DOCUMENTS + 1)
+            .expect_err("requests above the canonical documents surface limit must fail");
+        match error {
+            ApiError::BadRequest(message) => {
+                assert!(message.contains("batch size exceeds maximum"));
+            }
+            other => panic!("expected bad request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_document_summary_uses_canonical_summary_file_name() {
+        let document_id = Uuid::now_v7();
+        let summary = ContentDocumentSummary {
+            document: ContentDocument {
+                id: document_id,
+                workspace_id: Uuid::now_v7(),
+                library_id: Uuid::now_v7(),
+                external_key: "external-key".to_string(),
+                document_state: "active".to_string(),
+                created_at: Utc::now(),
+            },
+            file_name: "readable-revision.pdf".to_string(),
+            head: None,
+            active_revision: Some(ContentRevision {
+                id: Uuid::now_v7(),
+                document_id,
+                workspace_id: Uuid::now_v7(),
+                library_id: Uuid::now_v7(),
+                revision_number: 2,
+                parent_revision_id: None,
+                content_source_kind: "replace".to_string(),
+                checksum: "checksum".to_string(),
+                mime_type: "application/pdf".to_string(),
+                byte_size: 128,
+                title: Some("processing-replacement.pdf".to_string()),
+                language_code: None,
+                source_uri: Some("upload://processing-replacement.pdf".to_string()),
+                storage_key: Some("content/demo".to_string()),
+                created_by_principal_id: None,
+                created_at: Utc::now(),
+            }),
+            source_access: None,
+            readiness: None,
+            readiness_summary: None,
+            prepared_revision: None,
+            web_page_provenance: None,
+            pipeline: ContentDocumentPipelineState { latest_mutation: None, latest_job: None },
+        };
+
+        let response = map_document_summary(summary);
+
+        assert_eq!(response.file_name, "readable-revision.pdf");
     }
 }

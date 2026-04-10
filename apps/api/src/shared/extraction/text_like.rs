@@ -22,6 +22,7 @@ pub fn extract_text_like(file_bytes: &[u8]) -> Result<ExtractionOutput> {
         source_map: serde_json::json!({}),
         provider_kind: None,
         model_name: None,
+        extracted_images: Vec::new(),
     })
 }
 
