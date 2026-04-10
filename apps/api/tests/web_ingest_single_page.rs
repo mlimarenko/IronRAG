@@ -579,10 +579,7 @@ async fn single_page_worker_runs_web_capture_through_canonical_pipeline() -> Res
         );
 
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
-        let worker_handle = rustrag_backend::services::ingest::worker::spawn_ingestion_worker(
-            fixture.state.clone(),
-            shutdown_rx,
-        );
+        let worker_handle = worker::spawn_ingestion_worker(fixture.state.clone(), shutdown_rx);
 
         let ready_summary =
             fixture.wait_for_document_ready(document_id, Duration::from_secs(15)).await?;

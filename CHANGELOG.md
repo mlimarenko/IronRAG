@@ -22,6 +22,7 @@
 - **Silent error swallowing fixed**: 14 `let _ = state...` audit/append sites converted to explicit `if let Err(e) = ... { warn!(stage=..., error=%e, ...); }` with structured logging. 31 cosmetic `let _ = HashSet::insert()` cleaned up.
 - **Frontend `any` elimination**: 52 `any` removed from `pages/{Documents,Graph,Assistant,Admin}.tsx`, all `apiFetch<any>` calls in `api/*.ts` typed against `Raw*` interfaces, `ApiError.body` typed as `ApiErrorBody`. Added 11 new typed interfaces.
 - **Observability**: HyDE/CRAG/multimodal extraction stages emit structured `stage=` tracing per the constitution severity convention.
+- **Backend test debt cleanup**: split `content_lifecycle.rs` into a reusable `tests/support/content_lifecycle_support.rs` fixture plus a dedicated lineage test file, bringing the main lifecycle test back under the 1000-line cap; removed stale unused worker imports in web-ingest integration tests.
 
 ### Deploy
 - Added the canonical Helm chart for `web`, `api`, `worker`, and one `startup` job.
@@ -33,6 +34,8 @@
 - Moved migrations and bootstrap out of serving pods into the startup authority.
 - Added the canonical storage contract: `filesystem` or S3-compatible object storage.
 - Added real source links for documents and grounded answers.
+- Fixed replace/delete cleanup so query-chunk references from superseded or deleted revisions are removed instead of leaving stale graph/query state behind.
+- Fixed deleted document detail responses to stop exposing stale readiness, prepared counts, and source download links after terminal deletion.
 - Made `/v1/ready` report actual deployment, dependency, storage, and topology state.
 - Fixed first-run OpenAI bootstrap validation for the current chat-completions API.
 - Fixed Swagger/OpenAPI rendering by removing a duplicate YAML key and adding a duplicate-key test.

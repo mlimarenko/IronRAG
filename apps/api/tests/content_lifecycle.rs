@@ -1,430 +1,24 @@
+#[path = "support/content_lifecycle_support.rs"]
+mod content_lifecycle_support;
 #[path = "support/web_ingest_support.rs"]
 mod web_ingest_support;
 
-use std::{sync::Arc, time::Duration};
-
 use anyhow::{Context, Result};
-use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
 use rustrag_backend::{
-    app::{config::Settings, state::AppState},
-    infra::{
-        arangodb::{
-            bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
-            client::ArangoClient,
-        },
-        persistence::Persistence,
-        repositories::iam_repository,
-    },
+    infra::repositories::iam_repository,
     services::{
-        catalog_service::{CreateLibraryCommand, CreateWorkspaceCommand},
         content::service::{
             AcceptMutationCommand, AdmitMutationCommand, AppendInlineMutationCommand,
-            CreateDocumentCommand, CreateRevisionCommand, PromoteHeadCommand,
-            ReplaceInlineMutationCommand, UploadInlineDocumentCommand,
+            CreateDocumentCommand, PromoteHeadCommand, ReplaceInlineMutationCommand,
+            UploadInlineDocumentCommand,
         },
         ingest::web::CreateWebIngestRunCommand,
     },
 };
 
-struct TempDatabase {
-    name: String,
-    admin_url: String,
-    database_url: String,
-}
-
-impl TempDatabase {
-    async fn create(base_database_url: &str) -> Result<Self> {
-        let admin_url = replace_database_name(base_database_url, "postgres")?;
-        let database_name = format!("content_lifecycle_{}", Uuid::now_v7().simple());
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&admin_url)
-            .await
-            .context("failed to connect admin postgres for content lifecycle test")?;
-
-        terminate_database_connections(&admin_pool, &database_name).await?;
-        sqlx::query(&format!("drop database if exists \"{database_name}\""))
-            .execute(&admin_pool)
-            .await
-            .with_context(|| format!("failed to drop stale test database {database_name}"))?;
-        sqlx::query(&format!("create database \"{database_name}\""))
-            .execute(&admin_pool)
-            .await
-            .with_context(|| format!("failed to create test database {database_name}"))?;
-        admin_pool.close().await;
-
-        Ok(Self {
-            name: database_name.clone(),
-            admin_url,
-            database_url: replace_database_name(base_database_url, &database_name)?,
-        })
-    }
-
-    async fn drop(self) -> Result<()> {
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&self.admin_url)
-            .await
-            .context("failed to reconnect admin postgres for content lifecycle cleanup")?;
-        terminate_database_connections(&admin_pool, &self.name).await?;
-        sqlx::query(&format!("drop database if exists \"{}\"", self.name))
-            .execute(&admin_pool)
-            .await
-            .with_context(|| format!("failed to drop test database {}", self.name))?;
-        admin_pool.close().await;
-        Ok(())
-    }
-}
-
-struct TempArangoDatabase {
-    base_url: String,
-    username: String,
-    password: String,
-    name: String,
-    http: reqwest::Client,
-}
-
-impl TempArangoDatabase {
-    async fn create(settings: &Settings) -> Result<Self> {
-        let base_url = settings.arangodb_url.trim().trim_end_matches('/').to_string();
-        let name = format!("content_lifecycle_{}", Uuid::now_v7().simple());
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(settings.arangodb_request_timeout_seconds.max(1)))
-            .build()
-            .context("failed to build ArangoDB admin http client")?;
-        let response = http
-            .post(format!("{base_url}/_api/database"))
-            .basic_auth(&settings.arangodb_username, Some(&settings.arangodb_password))
-            .json(&serde_json::json!({ "name": name }))
-            .send()
-            .await
-            .context("failed to create temp ArangoDB database for content_lifecycle")?;
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "failed to create temp ArangoDB database {}: status {}",
-                name,
-                response.status()
-            ));
-        }
-
-        Ok(Self {
-            base_url,
-            username: settings.arangodb_username.clone(),
-            password: settings.arangodb_password.clone(),
-            name,
-            http,
-        })
-    }
-
-    async fn drop(self) -> Result<()> {
-        let response = self
-            .http
-            .delete(format!("{}/_api/database/{}", self.base_url, self.name))
-            .basic_auth(&self.username, Some(&self.password))
-            .send()
-            .await
-            .context("failed to drop temp ArangoDB database for content_lifecycle")?;
-        if response.status() != reqwest::StatusCode::NOT_FOUND && !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "failed to drop temp ArangoDB database {}: status {}",
-                self.name,
-                response.status()
-            ));
-        }
-        Ok(())
-    }
-}
-
-struct ContentLifecycleFixture {
-    state: AppState,
-    temp_database: TempDatabase,
-    temp_arango: TempArangoDatabase,
-    workspace_id: Uuid,
-    library_id: Uuid,
-}
-
-impl ContentLifecycleFixture {
-    async fn create() -> Result<Self> {
-        let mut settings =
-            Settings::from_env().context("failed to load settings for content lifecycle test")?;
-        let temp_database = TempDatabase::create(&settings.database_url).await?;
-        let temp_arango = TempArangoDatabase::create(&settings).await?;
-        settings.database_url = temp_database.database_url.clone();
-        settings.arangodb_database = temp_arango.name.clone();
-        let postgres = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&settings.database_url)
-            .await
-            .context("failed to connect content lifecycle postgres")?;
-
-        sqlx::raw_sql(include_str!("../migrations/0001_init.sql"))
-            .execute(&postgres)
-            .await
-            .context("failed to apply canonical 0001_init.sql for content lifecycle test")?;
-
-        let arango_client = Arc::new(
-            ArangoClient::from_settings(&settings).context("failed to build Arango client")?,
-        );
-        arango_client.ping().await.context("failed to ping temp ArangoDB for content lifecycle")?;
-        bootstrap_knowledge_plane(
-            &arango_client,
-            &ArangoBootstrapOptions {
-                collections: true,
-                views: false,
-                graph: true,
-                vector_indexes: false,
-                vector_dimensions: 3072,
-                vector_index_n_lists: 100,
-                vector_index_default_n_probe: 8,
-                vector_index_training_iterations: 25,
-            },
-        )
-        .await
-        .context("failed to bootstrap Arango knowledge plane for content lifecycle")?;
-
-        let persistence = Persistence {
-            postgres,
-            redis: redis::Client::open(settings.redis_url.clone())
-                .context("failed to create redis client for content lifecycle test state")?,
-        };
-        let state = AppState::from_dependencies(settings, persistence, arango_client)?;
-        let workspace = state
-            .canonical_services
-            .catalog
-            .create_workspace(
-                &state,
-                CreateWorkspaceCommand {
-                    slug: Some(format!("content-workspace-{}", Uuid::now_v7().simple())),
-                    display_name: "Content Lifecycle Workspace".to_string(),
-                    created_by_principal_id: None,
-                },
-            )
-            .await
-            .context("failed to create content lifecycle workspace")?;
-        let library = state
-            .canonical_services
-            .catalog
-            .create_library(
-                &state,
-                CreateLibraryCommand {
-                    workspace_id: workspace.id,
-                    slug: Some(format!("content-library-{}", Uuid::now_v7().simple())),
-                    display_name: "Content Lifecycle Library".to_string(),
-                    description: Some("canonical content lifecycle test fixture".to_string()),
-                    created_by_principal_id: None,
-                },
-            )
-            .await
-            .context("failed to create content lifecycle library")?;
-
-        Ok(Self {
-            state,
-            temp_database,
-            temp_arango,
-            workspace_id: workspace.id,
-            library_id: library.id,
-        })
-    }
-
-    async fn cleanup(self) -> Result<()> {
-        self.state.persistence.postgres.close().await;
-        self.temp_arango.drop().await?;
-        self.temp_database.drop().await
-    }
-}
-
-fn replace_database_name(database_url: &str, new_database: &str) -> Result<String> {
-    let (without_query, query_suffix) = database_url
-        .split_once('?')
-        .map_or((database_url, None), |(prefix, suffix)| (prefix, Some(suffix)));
-    let slash_index = without_query
-        .rfind('/')
-        .with_context(|| format!("database url is missing database name: {database_url}"))?;
-    let mut rebuilt = format!("{}{new_database}", &without_query[..=slash_index]);
-    if let Some(query) = query_suffix {
-        rebuilt.push('?');
-        rebuilt.push_str(query);
-    }
-    Ok(rebuilt)
-}
-
-async fn terminate_database_connections(postgres: &PgPool, database_name: &str) -> Result<()> {
-    sqlx::query(
-        "select pg_terminate_backend(pid)
-         from pg_stat_activity
-         where datname = $1
-           and pid <> pg_backend_pid()",
-    )
-    .bind(database_name)
-    .execute(postgres)
-    .await
-    .with_context(|| format!("failed to terminate connections for {database_name}"))?;
-    Ok(())
-}
-
-fn revision_command(
-    document_id: Uuid,
-    source_kind: &str,
-    checksum: &str,
-    title: &str,
-    source_uri: Option<&str>,
-) -> CreateRevisionCommand {
-    CreateRevisionCommand {
-        document_id,
-        content_source_kind: source_kind.to_string(),
-        checksum: checksum.to_string(),
-        mime_type: "text/plain".to_string(),
-        byte_size: 128,
-        title: Some(title.to_string()),
-        language_code: Some("en".to_string()),
-        source_uri: source_uri.map(ToString::to_string),
-        storage_key: Some(format!("storage/{checksum}")),
-        created_by_principal_id: None,
-    }
-}
-
-#[tokio::test]
-#[ignore = "requires local postgres with canonical extensions"]
-async fn canonical_content_lifecycle_preserves_logical_document_identity_and_revision_lineage()
--> Result<()> {
-    let fixture = ContentLifecycleFixture::create().await?;
-
-    let result = async {
-        let external_key = format!("logical-doc-{}", Uuid::now_v7());
-        let document = fixture
-            .state
-            .canonical_services
-            .content
-            .create_document(
-                &fixture.state,
-                CreateDocumentCommand {
-                    workspace_id: fixture.workspace_id,
-                    library_id: fixture.library_id,
-                    external_key: Some(external_key.clone()),
-                    created_by_principal_id: None,
-                },
-            )
-            .await
-            .context("failed to create canonical content document")?;
-        assert_eq!(document.workspace_id, fixture.workspace_id);
-        assert_eq!(document.library_id, fixture.library_id);
-        assert_eq!(document.external_key, external_key);
-        assert_eq!(document.document_state, "active");
-
-        let knowledge_document = fixture
-            .state
-            .arango_document_store
-            .get_document(document.id)
-            .await
-            .context("failed to load knowledge document shell for content lifecycle")?
-            .context("knowledge document shell missing from arango")?;
-        assert_eq!(knowledge_document.external_key, external_key);
-        assert_eq!(knowledge_document.document_state, "active");
-
-        let first_revision = fixture
-            .state
-            .canonical_services
-            .content
-            .create_revision(
-                &fixture.state,
-                revision_command(
-                    document.id,
-                    "upload",
-                    "sha256:lifecycle-upload",
-                    "Initial Upload",
-                    Some("file:///initial.txt"),
-                ),
-            )
-            .await
-            .context("failed to create initial revision")?;
-        let appended_revision = fixture
-            .state
-            .canonical_services
-            .content
-            .append_revision(
-                &fixture.state,
-                revision_command(
-                    document.id,
-                    "append",
-                    "sha256:lifecycle-append",
-                    "Appended Revision",
-                    None,
-                ),
-            )
-            .await
-            .context("failed to append revision")?;
-        let replaced_revision = fixture
-            .state
-            .canonical_services
-            .content
-            .replace_revision(
-                &fixture.state,
-                revision_command(
-                    document.id,
-                    "replace",
-                    "sha256:lifecycle-replace",
-                    "Replacement Revision",
-                    Some("file:///replacement.txt"),
-                ),
-            )
-            .await
-            .context("failed to replace revision")?;
-
-        assert_eq!(first_revision.revision_number, 1);
-        assert_eq!(appended_revision.revision_number, 2);
-        assert_eq!(replaced_revision.revision_number, 3);
-        assert_eq!(appended_revision.parent_revision_id, Some(first_revision.id));
-        assert_eq!(replaced_revision.parent_revision_id, Some(appended_revision.id));
-        assert_eq!(appended_revision.document_id, document.id);
-        assert_eq!(replaced_revision.document_id, document.id);
-
-        let revisions = fixture
-            .state
-            .canonical_services
-            .content
-            .list_revisions(&fixture.state, document.id)
-            .await
-            .context("failed to list canonical revisions")?;
-        assert_eq!(revisions.len(), 3);
-        assert_eq!(
-            revisions.iter().map(|revision| revision.id).collect::<Vec<_>>(),
-            vec![replaced_revision.id, appended_revision.id, first_revision.id]
-        );
-
-        let knowledge_revisions = fixture
-            .state
-            .arango_document_store
-            .list_revisions_by_document(document.id)
-            .await
-            .context("failed to list knowledge revisions for content lifecycle")?;
-        assert_eq!(
-            knowledge_revisions.iter().map(|revision| revision.revision_id).collect::<Vec<_>>(),
-            vec![replaced_revision.id, appended_revision.id, first_revision.id]
-        );
-        assert_eq!(knowledge_revisions[0].revision_kind, "replace");
-        assert_eq!(knowledge_revisions[1].revision_kind, "append");
-        assert_eq!(knowledge_revisions[2].revision_kind, "upload");
-
-        let summaries = fixture
-            .state
-            .canonical_services
-            .content
-            .list_documents(&fixture.state, fixture.library_id)
-            .await
-            .context("failed to list canonical document summaries")?;
-        assert_eq!(summaries.len(), 1);
-        assert_eq!(summaries[0].document.id, document.id);
-        assert_eq!(summaries[0].document.external_key, external_key);
-
-        Ok(())
-    }
-    .await;
-
-    fixture.cleanup().await?;
-    result
-}
+use content_lifecycle_support::{ContentLifecycleFixture, revision_command};
 
 #[tokio::test]
 #[ignore = "requires local postgres with canonical extensions"]
@@ -1117,6 +711,31 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
                 summary.document.id == document.id && summary.document.document_state == "deleted"
             }),
             "explicit include_deleted listing must retain deleted documents"
+        );
+        let deleted_summary = fixture
+            .state
+            .canonical_services
+            .content
+            .get_document(&fixture.state, document.id)
+            .await
+            .context("failed to load deleted document summary")?;
+        assert_eq!(deleted_summary.document.document_state, "deleted");
+        assert!(deleted_summary.active_revision.is_none());
+        assert!(
+            deleted_summary.readiness.is_none(),
+            "deleted document detail must not expose stale readiness state"
+        );
+        assert!(
+            deleted_summary.readiness_summary.is_none(),
+            "deleted document detail must not expose stale readiness summary"
+        );
+        assert!(
+            deleted_summary.prepared_revision.is_none(),
+            "deleted document detail must not expose stale prepared revision"
+        );
+        assert!(
+            deleted_summary.source_access.is_none(),
+            "deleted document detail must not expose source download access"
         );
         let ops_snapshot = fixture
             .state

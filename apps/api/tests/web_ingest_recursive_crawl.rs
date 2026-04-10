@@ -22,10 +22,7 @@ async fn recursive_crawl_same_host_respects_depth_and_excludes_external_links() 
             .submit_recursive_run(server.url("/recursive/seed"), "same_host", Some(1), Some(20))
             .await?;
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
-        let worker_handle = rustrag_backend::services::ingest::worker::spawn_ingestion_worker(
-            fixture.state.clone(),
-            shutdown_rx,
-        );
+        let worker_handle = worker::spawn_ingestion_worker(fixture.state.clone(), shutdown_rx);
         let run =
             fixture.wait_for_run_terminal(submitted_run.run_id, Duration::from_secs(20)).await?;
         let pages = fixture
@@ -99,10 +96,7 @@ async fn recursive_crawl_allow_external_materializes_reachable_external_pages() 
             .submit_recursive_run(seed_url.to_string(), "allow_external", Some(1), Some(20))
             .await?;
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
-        let worker_handle = rustrag_backend::services::ingest::worker::spawn_ingestion_worker(
-            fixture.state.clone(),
-            shutdown_rx,
-        );
+        let worker_handle = worker::spawn_ingestion_worker(fixture.state.clone(), shutdown_rx);
         let run =
             fixture.wait_for_run_terminal(submitted_run.run_id, Duration::from_secs(20)).await?;
         let pages = fixture
@@ -152,10 +146,7 @@ async fn recursive_crawl_marks_cycle_revisits_as_duplicates() -> Result<()> {
             .submit_recursive_run(server.url("/recursive/seed"), "same_host", Some(3), Some(20))
             .await?;
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
-        let worker_handle = rustrag_backend::services::ingest::worker::spawn_ingestion_worker(
-            fixture.state.clone(),
-            shutdown_rx,
-        );
+        let worker_handle = worker::spawn_ingestion_worker(fixture.state.clone(), shutdown_rx);
         let run =
             fixture.wait_for_run_terminal(submitted_run.run_id, Duration::from_secs(20)).await?;
         let pages = fixture
@@ -201,10 +192,7 @@ async fn recursive_crawl_keeps_redirect_alias_duplicates_without_failing_run() -
             )
             .await?;
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
-        let worker_handle = rustrag_backend::services::ingest::worker::spawn_ingestion_worker(
-            fixture.state.clone(),
-            shutdown_rx,
-        );
+        let worker_handle = worker::spawn_ingestion_worker(fixture.state.clone(), shutdown_rx);
         let run =
             fixture.wait_for_run_terminal(submitted_run.run_id, Duration::from_secs(20)).await?;
         let pages = fixture

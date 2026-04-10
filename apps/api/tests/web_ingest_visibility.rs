@@ -26,10 +26,7 @@ async fn recursive_run_surfaces_mixed_page_outcomes_with_truthful_partial_counts
             .submit_recursive_run(seed_url.to_string(), "same_host", Some(1), Some(20))
             .await?;
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
-        let worker_handle = rustrag_backend::services::ingest::worker::spawn_ingestion_worker(
-            fixture.state.clone(),
-            shutdown_rx,
-        );
+        let worker_handle = worker::spawn_ingestion_worker(fixture.state.clone(), shutdown_rx);
 
         let run =
             fixture.wait_for_run_terminal(submitted_run.run_id, Duration::from_secs(20)).await?;
@@ -107,10 +104,7 @@ async fn cancel_requested_during_discovery_stops_new_admission_and_marks_seed_ca
             .submit_recursive_run(seed_url.to_string(), "same_host", Some(1), Some(20))
             .await?;
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
-        let worker_handle = rustrag_backend::services::ingest::worker::spawn_ingestion_worker(
-            fixture.state.clone(),
-            shutdown_rx,
-        );
+        let worker_handle = worker::spawn_ingestion_worker(fixture.state.clone(), shutdown_rx);
 
         time::sleep(Duration::from_millis(100)).await;
         let _ = fixture

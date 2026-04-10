@@ -1633,12 +1633,12 @@ mod tests {
     fn batch_limit_rejects_more_than_documents_surface_capacity() {
         let error = ensure_batch_document_limit(BATCH_MAX_DOCUMENTS + 1)
             .expect_err("requests above the canonical documents surface limit must fail");
-        match error {
-            ApiError::BadRequest(message) => {
-                assert!(message.contains("batch size exceeds maximum"));
-            }
-            other => panic!("expected bad request, got {other:?}"),
-        }
+        let ApiError::BadRequest(message) = error else {
+            unreachable!(
+                "ensure_batch_document_limit must return bad_request for capacity violations"
+            );
+        };
+        assert!(message.contains("batch size exceeds maximum"));
     }
 
     #[test]
