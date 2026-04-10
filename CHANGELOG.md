@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.3 — unreleased
+## 0.1.3 — 2026-04-10
 
 ### Performance — Ingestion Parallelism
 - **Parallel embedding batches** (`ingest/runtime.rs`): node and edge embedding now sends batches in parallel via `futures::stream::buffer_unordered`. New env var `RUSTRAG_INGESTION_EMBEDDING_PARALLELISM=4` (default) controls how many embed batches run concurrently per job. For a 200-chunk document this is ~4x faster end-to-end.
