@@ -37,6 +37,7 @@ async fn canonical_content_lifecycle_promotes_head_and_separates_readable_from_a
                     workspace_id: fixture.workspace_id,
                     library_id: fixture.library_id,
                     external_key: Some(format!("head-doc-{}", Uuid::now_v7())),
+                    file_name: None,
                     created_by_principal_id: None,
                 },
             )
@@ -367,6 +368,7 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
                     workspace_id: fixture.workspace_id,
                     library_id: fixture.library_id,
                     external_key: Some(format!("mutation-doc-{}", Uuid::now_v7())),
+                    file_name: None,
                     created_by_principal_id: None,
                 },
             )

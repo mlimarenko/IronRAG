@@ -73,6 +73,7 @@ pub struct CreateDocumentCommand {
     pub workspace_id: Uuid,
     pub library_id: Uuid,
     pub external_key: Option<String>,
+    pub file_name: Option<String>,
     pub created_by_principal_id: Option<Uuid>,
 }
 
@@ -173,6 +174,7 @@ pub struct AdmitDocumentCommand {
     pub workspace_id: Uuid,
     pub library_id: Uuid,
     pub external_key: Option<String>,
+    pub file_name: Option<String>,
     pub idempotency_key: Option<String>,
     pub created_by_principal_id: Option<Uuid>,
     pub request_surface: String,
@@ -336,9 +338,6 @@ struct PrefetchedDocumentSummaryData {
     revisions_by_id: HashMap<Uuid, KnowledgeRevisionRow>,
     structured_revisions_by_revision_id: HashMap<Uuid, KnowledgeStructuredRevisionRow>,
     web_pages_by_result_revision_id: HashMap<Uuid, ingest_repository::WebDiscoveredPageRow>,
-    /// PostgreSQL revision titles — always available even during processing,
-    /// unlike ArangoDB revisions which may not exist yet.
-    pg_revision_titles: Option<HashMap<Uuid, String>>,
 }
 
 impl ContentService {
@@ -778,6 +777,7 @@ impl ContentService {
                     workspace_id: document.workspace_id,
                     library_id: document.library_id,
                     external_key: document.external_key.clone(),
+                    file_name: command.file_name,
                     title: None,
                     document_state: document.document_state.clone(),
                 },
@@ -828,6 +828,7 @@ impl ContentService {
                         workspace_id: command.workspace_id,
                         library_id: command.library_id,
                         external_key: command.external_key,
+                        file_name: command.file_name,
                         created_by_principal_id: command.created_by_principal_id,
                     },
                 )
@@ -1015,6 +1016,7 @@ impl ContentService {
                 workspace_id: command.workspace_id,
                 library_id: command.library_id,
                 external_key: command.external_key,
+                file_name: Some(file_name.clone()),
                 idempotency_key: command.idempotency_key,
                 created_by_principal_id: command.requested_by_principal_id,
                 request_surface: command.request_surface.clone(),
@@ -1059,6 +1061,7 @@ impl ContentService {
                         workspace_id: command.workspace_id,
                         library_id: command.library_id,
                         external_key: Some(command.final_url.clone()),
+                        file_name: None,
                         created_by_principal_id: command.requested_by_principal_id,
                     },
                 )
@@ -3722,7 +3725,6 @@ impl ContentService {
                 revisions_by_id,
                 structured_revisions_by_revision_id,
                 web_pages_by_result_revision_id,
-                pg_revision_titles: None, // single-doc path — ArangoDB revision used directly
             },
         ))
     }
@@ -3788,50 +3790,10 @@ impl ContentService {
             .filter_map(|row| row.result_revision_id.map(|revision_id| (revision_id, row)))
             .collect::<HashMap<_, _>>();
 
-        // Load revision titles from PostgreSQL as fallback for docs still in processing
-        // (ArangoDB revision may not exist yet).
-        // Load PG revision titles as fallback for docs still in processing
-        // (ArangoDB revision may not exist yet, and ArangoDB document.active_revision_id
-        // may be NULL before head promotion).
-        // Use PG content_document_head which always has active_revision_id from upload.
-        let pg_revision_titles = {
-            let document_ids: Vec<Uuid> = documents.iter().map(|d| d.document_id).collect();
-            let pg_heads = content_repository::list_document_heads_by_document_ids(
-                &state.persistence.postgres,
-                &document_ids,
-            )
-            .await
-            .unwrap_or_default();
-            let pg_rev_ids: Vec<Uuid> =
-                pg_heads.iter().filter_map(|h| h.active_revision_id).collect();
-            if pg_rev_ids.is_empty() {
-                None
-            } else {
-                let pg_revisions = content_repository::list_revisions_by_ids(
-                    &state.persistence.postgres,
-                    &pg_rev_ids,
-                )
-                .await
-                .unwrap_or_default();
-                let map: HashMap<Uuid, String> =
-                    pg_revisions.into_iter().filter_map(|r| r.title.map(|t| (r.id, t))).collect();
-                // Also index by document_id for easier lookup
-                let doc_map: HashMap<Uuid, String> = pg_heads
-                    .iter()
-                    .filter_map(|h| {
-                        let rev_id = h.active_revision_id?;
-                        map.get(&rev_id).map(|title| (h.document_id, title.clone()))
-                    })
-                    .collect();
-                if doc_map.is_empty() { None } else { Some(doc_map) }
-            }
-        };
-
         Ok(PrefetchedDocumentSummaryData {
             revisions_by_id,
             structured_revisions_by_revision_id,
             web_pages_by_result_revision_id,
-            pg_revision_titles,
         })
     }
 
@@ -3899,20 +3861,13 @@ impl ContentService {
                 &document_external_key,
             )
         });
-        let fallback_file_name = display_revision_row
-            .as_ref()
-            .map(|revision| {
-                derive_content_source_file_name(
-                    revision.source_uri.as_deref(),
-                    revision.title.as_deref(),
-                    &document_external_key,
-                )
-            })
-            .or_else(|| {
-                // ArangoDB revision may not exist yet during processing.
-                // Fall back to PostgreSQL revision title (indexed by document_id).
-                prefetched.pg_revision_titles.as_ref()?.get(&document_row.document_id).cloned()
-            });
+        let fallback_file_name = display_revision_row.as_ref().map(|revision| {
+            derive_content_source_file_name(
+                revision.source_uri.as_deref(),
+                revision.title.as_deref(),
+                &document_external_key,
+            )
+        });
         let web_page_provenance = effective_readiness_row
             .as_ref()
             .filter(|revision| revision.revision_kind == "web_page")
@@ -3933,9 +3888,12 @@ impl ContentService {
 
         ContentDocumentSummary {
             document: map_knowledge_document_row(&document_row),
-            file_name: source_descriptor
-                .as_ref()
-                .map(|descriptor| descriptor.file_name.clone())
+            file_name: document_row
+                .file_name
+                .clone()
+                .or_else(|| {
+                    source_descriptor.as_ref().map(|descriptor| descriptor.file_name.clone())
+                })
                 .or(fallback_file_name)
                 .or_else(|| active_revision.as_ref().and_then(|r| r.title.clone()))
                 .unwrap_or_else(|| document_external_key.clone()),

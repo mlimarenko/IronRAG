@@ -487,6 +487,7 @@ async fn create_document(
                 workspace_id: payload.workspace_id,
                 library_id: payload.library_id,
                 external_key: payload.external_key.clone(),
+                file_name: None,
                 idempotency_key: payload.idempotency_key.clone(),
                 created_by_principal_id: Some(auth.principal_id),
                 request_surface: "rest".to_string(),

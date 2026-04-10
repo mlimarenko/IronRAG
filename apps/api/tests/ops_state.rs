@@ -245,6 +245,7 @@ impl OpsStateFixture {
                     workspace_id: workspace.id,
                     library_id: library.id,
                     external_key: format!("ops-state-doc-{suffix}"),
+                    file_name: None,
                     title: Some("Ops State Fixture".to_string()),
                     document_state: "active".to_string(),
                 },

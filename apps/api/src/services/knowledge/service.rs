@@ -33,6 +33,7 @@ pub struct CreateKnowledgeDocumentCommand {
     pub workspace_id: Uuid,
     pub library_id: Uuid,
     pub external_key: String,
+    pub file_name: Option<String>,
     pub title: Option<String>,
     pub document_state: String,
 }
@@ -133,6 +134,7 @@ impl KnowledgeService {
                 workspace_id: command.workspace_id,
                 library_id: command.library_id,
                 external_key: command.external_key,
+                file_name: command.file_name,
                 title: command.title,
                 document_state: command.document_state,
                 active_revision_id: None,

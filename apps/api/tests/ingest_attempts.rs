@@ -238,6 +238,7 @@ impl IngestAttemptsFixture {
                     workspace_id: workspace.id,
                     library_id: library.id,
                     external_key: format!("ingest-attempts-doc-{}", Uuid::now_v7().simple()),
+                    file_name: None,
                     title: Some("Ingest Attempts Fixture".to_string()),
                     document_state: "active".to_string(),
                 },

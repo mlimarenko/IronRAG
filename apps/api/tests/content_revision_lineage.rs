@@ -26,6 +26,7 @@ async fn canonical_content_lifecycle_preserves_logical_document_identity_and_rev
                     workspace_id: fixture.workspace_id,
                     library_id: fixture.library_id,
                     external_key: Some(external_key.clone()),
+                    file_name: None,
                     created_by_principal_id: None,
                 },
             )
