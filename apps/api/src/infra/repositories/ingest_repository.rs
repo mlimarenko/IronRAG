@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use sqlx::{FromRow, PgPool};
+use sqlx::{Executor, FromRow, PgPool, Postgres};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, FromRow)]
@@ -1783,6 +1783,16 @@ pub async fn cancel_queued_jobs_for_document(
     postgres: &PgPool,
     document_id: Uuid,
 ) -> Result<u64, sqlx::Error> {
+    cancel_queued_jobs_for_document_with_executor(postgres, document_id).await
+}
+
+pub async fn cancel_queued_jobs_for_document_with_executor<'e, E>(
+    executor: E,
+    document_id: Uuid,
+) -> Result<u64, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     let result = sqlx::query(
         "UPDATE ingest_job
          SET queue_state = 'canceled', completed_at = now()
@@ -1795,7 +1805,7 @@ pub async fn cancel_queued_jobs_for_document(
          AND completed_at IS NULL",
     )
     .bind(document_id)
-    .execute(postgres)
+    .execute(executor)
     .await?;
     Ok(result.rows_affected())
 }

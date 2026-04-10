@@ -336,6 +336,9 @@ struct PrefetchedDocumentSummaryData {
     revisions_by_id: HashMap<Uuid, KnowledgeRevisionRow>,
     structured_revisions_by_revision_id: HashMap<Uuid, KnowledgeStructuredRevisionRow>,
     web_pages_by_result_revision_id: HashMap<Uuid, ingest_repository::WebDiscoveredPageRow>,
+    /// PostgreSQL revision titles — always available even during processing,
+    /// unlike ArangoDB revisions which may not exist yet.
+    pg_revision_titles: Option<HashMap<Uuid, String>>,
 }
 
 impl ContentService {
@@ -1520,41 +1523,50 @@ impl ContentService {
         document_id: Uuid,
         latest_mutation_id: Option<Uuid>,
     ) -> Result<ContentDocument, ApiError> {
-        let document = content_repository::update_document_state(
-            &state.persistence.postgres,
-            document_id,
-            "deleted",
-            Some(Utc::now()),
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::resource_not_found("document", document_id))?;
-        let _ = ingest_repository::cancel_queued_jobs_for_document(
-            &state.persistence.postgres,
-            document_id,
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?;
-
+        let current_document =
+            content_repository::get_document_by_id(&state.persistence.postgres, document_id)
+                .await
+                .map_err(|_| ApiError::Internal)?
+                .ok_or_else(|| ApiError::resource_not_found("document", document_id))?;
         let head = self.get_document_head(state, document_id).await?;
         let readable_revision_id = head.as_ref().and_then(|row| row.readable_revision_id);
-        let latest_mutation_id =
+        let resolved_latest_mutation_id =
             latest_mutation_id.or_else(|| head.as_ref().and_then(|row| row.latest_mutation_id));
         let latest_successful_attempt_id =
             head.as_ref().and_then(|row| row.latest_successful_attempt_id);
         let latest_revision_no = self.load_document_latest_revision_no(state, document_id).await?;
-        let _ = content_repository::upsert_document_head(
-            &state.persistence.postgres,
+        let deleted_at = current_document.deleted_at.or_else(|| Some(Utc::now()));
+
+        let mut transaction =
+            state.persistence.postgres.begin().await.map_err(|_| ApiError::Internal)?;
+        let _ = ingest_repository::cancel_queued_jobs_for_document_with_executor(
+            &mut *transaction,
+            document_id,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?;
+        let document = content_repository::update_document_state_with_executor(
+            &mut *transaction,
+            document_id,
+            "deleted",
+            deleted_at,
+        )
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .ok_or_else(|| ApiError::resource_not_found("document", document_id))?;
+        let _ = content_repository::upsert_document_head_with_executor(
+            &mut *transaction,
             &NewContentDocumentHead {
                 document_id,
                 active_revision_id: None,
                 readable_revision_id,
-                latest_mutation_id,
+                latest_mutation_id: resolved_latest_mutation_id,
                 latest_successful_attempt_id,
             },
         )
         .await
         .map_err(|_| ApiError::Internal)?;
+        transaction.commit().await.map_err(|_| ApiError::Internal)?;
         let _ = state
             .canonical_services
             .knowledge
@@ -2704,11 +2716,18 @@ impl ContentService {
             if Some(revision.revision_id) == retained_revision_id {
                 continue;
             }
-            let _ = state
+            if let Err(error) = state
                 .arango_document_store
                 .delete_technical_facts_by_revision(revision.revision_id)
                 .await
-                .map_err(|_| ApiError::Internal)?;
+            {
+                tracing::warn!(
+                    %document_id,
+                    revision_id = %revision.revision_id,
+                    ?error,
+                    "failed to delete ArangoDB technical facts for document revision"
+                );
+            }
         }
         Ok(())
     }
@@ -3703,6 +3722,7 @@ impl ContentService {
                 revisions_by_id,
                 structured_revisions_by_revision_id,
                 web_pages_by_result_revision_id,
+                pg_revision_titles: None, // single-doc path — ArangoDB revision used directly
             },
         ))
     }
@@ -3768,10 +3788,27 @@ impl ContentService {
             .filter_map(|row| row.result_revision_id.map(|revision_id| (revision_id, row)))
             .collect::<HashMap<_, _>>();
 
+        // Load revision titles from PostgreSQL as fallback for docs still in processing
+        // (ArangoDB revision may not exist yet).
+        let pg_revision_titles = {
+            let all_revision_ids: Vec<Uuid> =
+                documents.iter().filter_map(|d| d.active_revision_id).collect();
+            let pg_revisions = content_repository::list_revisions_by_ids(
+                &state.persistence.postgres,
+                &all_revision_ids,
+            )
+            .await
+            .unwrap_or_default();
+            let map: HashMap<Uuid, String> =
+                pg_revisions.into_iter().filter_map(|r| r.title.map(|t| (r.id, t))).collect();
+            if map.is_empty() { None } else { Some(map) }
+        };
+
         Ok(PrefetchedDocumentSummaryData {
             revisions_by_id,
             structured_revisions_by_revision_id,
             web_pages_by_result_revision_id,
+            pg_revision_titles,
         })
     }
 
@@ -3834,13 +3871,22 @@ impl ContentService {
                 &document_external_key,
             )
         });
-        let fallback_file_name = active_revision_row.as_ref().map(|revision| {
-            derive_content_source_file_name(
-                revision.source_uri.as_deref(),
-                revision.title.as_deref(),
-                &document_external_key,
-            )
-        });
+        let fallback_file_name = active_revision_row
+            .as_ref()
+            .map(|revision| {
+                derive_content_source_file_name(
+                    revision.source_uri.as_deref(),
+                    revision.title.as_deref(),
+                    &document_external_key,
+                )
+            })
+            .or_else(|| {
+                // ArangoDB revision may not exist yet during processing.
+                // Fall back to PostgreSQL revision title which is always set at upload time.
+                document_row.active_revision_id.and_then(|rev_id| {
+                    prefetched.pg_revision_titles.as_ref()?.get(&rev_id).cloned()
+                })
+            });
         let web_page_provenance = effective_readiness_row
             .as_ref()
             .filter(|revision| revision.revision_kind == "web_page")
@@ -3865,6 +3911,7 @@ impl ContentService {
                 .as_ref()
                 .map(|descriptor| descriptor.file_name.clone())
                 .or(fallback_file_name)
+                .or_else(|| active_revision.as_ref().and_then(|r| r.title.clone()))
                 .unwrap_or_else(|| document_external_key.clone()),
             head,
             active_revision,

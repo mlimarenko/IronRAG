@@ -922,6 +922,70 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
                 .and_then(|revision| revision.source_uri.as_deref()),
             Some("file:///base.txt")
         );
+        let referenced_chunk_id = Uuid::now_v7();
+        let query_conversation_id = Uuid::now_v7();
+        let query_execution_id = Uuid::now_v7();
+        sqlx::query(
+            "insert into content_chunk (
+                id, revision_id, chunk_index, start_offset, end_offset, token_count,
+                normalized_text, text_checksum
+             ) values ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(referenced_chunk_id)
+        .bind(base_revision.id)
+        .bind(0_i32)
+        .bind(0_i32)
+        .bind(32_i32)
+        .bind(8_i32)
+        .bind("base revision content for query ref")
+        .bind("sha256:content-lifecycle-query-ref")
+        .execute(&fixture.state.persistence.postgres)
+        .await
+        .context("failed to insert base chunk referenced by query history")?;
+        sqlx::query(
+            "insert into query_conversation (id, workspace_id, library_id, title)
+             values ($1, $2, $3, $4)",
+        )
+        .bind(query_conversation_id)
+        .bind(fixture.workspace_id)
+        .bind(fixture.library_id)
+        .bind("Delete cleanup regression conversation")
+        .execute(&fixture.state.persistence.postgres)
+        .await
+        .context("failed to insert query conversation for delete cleanup regression")?;
+        sqlx::query(
+            "insert into query_execution (
+                id, workspace_id, library_id, conversation_id, context_bundle_id, query_text
+             ) values ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(query_execution_id)
+        .bind(fixture.workspace_id)
+        .bind(fixture.library_id)
+        .bind(query_conversation_id)
+        .bind(Uuid::now_v7())
+        .bind("Which facts came from the base revision?")
+        .execute(&fixture.state.persistence.postgres)
+        .await
+        .context("failed to insert query execution for delete cleanup regression")?;
+        sqlx::query(
+            "insert into query_chunk_reference (execution_id, chunk_id, rank, score)
+             values ($1, $2, $3, $4)",
+        )
+        .bind(query_execution_id)
+        .bind(referenced_chunk_id)
+        .bind(1_i32)
+        .bind(0.91_f64)
+        .execute(&fixture.state.persistence.postgres)
+        .await
+        .context("failed to insert query chunk reference for delete cleanup regression")?;
+        let query_reference_count_before_delete = sqlx::query_scalar::<_, i64>(
+            "select count(*)::bigint from query_chunk_reference where chunk_id = $1",
+        )
+        .bind(referenced_chunk_id)
+        .fetch_one(&fixture.state.persistence.postgres)
+        .await
+        .context("failed to count query chunk references before delete")?;
+        assert_eq!(query_reference_count_before_delete, 1);
 
         let delete_admission = fixture
             .state
@@ -1075,6 +1139,45 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
             knowledge_summary.document_counts_by_readiness.is_empty(),
             "deleted documents must not contribute to knowledge summary readiness counts"
         );
+        let query_reference_count_after_delete = sqlx::query_scalar::<_, i64>(
+            "select count(*)::bigint from query_chunk_reference where chunk_id = $1",
+        )
+        .bind(referenced_chunk_id)
+        .fetch_one(&fixture.state.persistence.postgres)
+        .await
+        .context("failed to count query chunk references after delete")?;
+        assert_eq!(
+            query_reference_count_after_delete, 0,
+            "delete must clear query chunk references contributed by the deleted document"
+        );
+
+        let repaired_projection = fixture
+            .state
+            .arango_document_store
+            .update_document_pointers(
+                document.id,
+                "active",
+                Some(base_revision.id),
+                Some(base_revision.id),
+                Some(i64::from(base_revision.revision_number)),
+                Some("base.txt"),
+                None,
+            )
+            .await
+            .context("failed to force stale active Arango projection before repeated delete")?
+            .context("forced stale active Arango projection missing")?;
+        assert_eq!(repaired_projection.document_state, "active");
+        let leaked_documents = fixture
+            .state
+            .canonical_services
+            .content
+            .list_documents(&fixture.state, fixture.library_id)
+            .await
+            .context("failed to list documents after forcing stale active Arango projection")?;
+        assert!(
+            leaked_documents.iter().any(|summary| summary.document.id == document.id),
+            "stale active Arango projection must reproduce the leaked deleted document before repair"
+        );
 
         let repeated_delete = fixture
             .state
@@ -1099,6 +1202,30 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
             repeated_delete.context("failed to replay canonical delete mutation")?;
         assert_eq!(repeated_delete.mutation.id, delete_mutation_id);
         assert_eq!(repeated_delete.mutation.mutation_state, "applied");
+        let healed_knowledge_document = fixture
+            .state
+            .arango_document_store
+            .get_document(document.id)
+            .await
+            .context("failed to reload healed knowledge document after repeated delete")?
+            .context("healed knowledge document missing from arango")?;
+        assert_eq!(healed_knowledge_document.document_state, "deleted");
+        assert_eq!(healed_knowledge_document.active_revision_id, None);
+        assert_eq!(healed_knowledge_document.readable_revision_id, Some(base_revision.id));
+        assert!(healed_knowledge_document.deleted_at.is_some());
+        let active_documents_after_repeated_delete = fixture
+            .state
+            .canonical_services
+            .content
+            .list_documents(&fixture.state, fixture.library_id)
+            .await
+            .context("failed to list active documents after repeated delete repair")?;
+        assert!(
+            active_documents_after_repeated_delete
+                .iter()
+                .all(|summary| summary.document.id != document.id),
+            "repeated delete must heal stale Arango projections and hide the deleted document again"
+        );
 
         let library_mutations = fixture
             .state
